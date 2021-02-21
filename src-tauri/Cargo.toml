@@ -1,5 +1,5 @@
 [package]
-name = "factorio-bot-tauri"
+name = "factorio-bot"
 version = "0.1.0"
 description = "factorio-bot"
 authors = [ "you" ]

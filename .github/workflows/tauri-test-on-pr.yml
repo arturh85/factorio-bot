@@ -50,8 +50,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: app-v${{ env.PACKAGE_VERSION }}
-          releaseName: "Desktop app v${{ env.PACKAGE_VERSION }}"
+          tagName: factorio-bot-tauri-v${{ env.PACKAGE_VERSION }}
+          releaseName: "Factorio Bot Tauri v${{ env.PACKAGE_VERSION }}"
           releaseBody: "See the assets to download this version and install."
           releaseDraft: true
           prerelease: false

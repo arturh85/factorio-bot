@@ -158,7 +158,7 @@ impl OutputParser {
                             let pos = rest.find(' ').unwrap();
                             &rest[pos + 1..]
                         }
-                        _ => panic!(format!("unexpected action_completed: {}", action_status)),
+                        _ => panic!("unexpected action_completed {}",  action_status),
                     };
                     self.world.actions.insert(action_id, String::from(result));
                 }

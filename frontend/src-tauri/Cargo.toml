@@ -2,8 +2,8 @@
 name = "factorio-bot"
 version = "0.1.0"
 description = "factorio-bot"
-authors = [ "you" ]
-license = ""
+authors = [ "Artur Hallmann <arturh@arturh.de>" ]
+license = "MIT"
 repository = ""
 default-run = "factorio-bot"
 edition = "2018"
@@ -11,6 +11,7 @@ build = "src/build.rs"
 
 [dependencies]
 serde_json = "1.0"
+factorio-bot-backend = { path = "../../backend/" }
 serde = { version = "1.0", features = [ "derive" ] }
 tauri = { version = "0.11", features = [ "all-api" ] }
 

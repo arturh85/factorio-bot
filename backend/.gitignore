@@ -1,0 +1,4 @@
+/target
+/workspace
+.idea/
+*-log.txt

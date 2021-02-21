@@ -1,24 +1,10 @@
-# my-tauri-app
+# factorio-bot-tauri
+
+[Tauri](https://tauri.studio/) based Frontend for Factorio Bot.
 
 ## Project setup
-```
-npm install
-```
 
-### Compiles and hot-reloads for development
-```
-npm run serve
-```
+- [Linux](https://tauri.studio/en/docs/getting-started/setup-linux) Setup Instructions
+- [macOS](https://tauri.studio/en/docs/getting-started/setup-macos) Setup Instructions
+- [Windows](https://tauri.studio/en/docs/getting-started/setup-windows) Setup Instructions
 
-### Compiles and minifies for production
-```
-npm run build
-```
-
-### Lints and fixes files
-```
-npm run lint
-```
-
-### Customize configuration
-See [Configuration Reference](https://cli.vuejs.org/config/).

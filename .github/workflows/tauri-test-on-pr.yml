@@ -55,7 +55,7 @@ jobs:
           releaseBody: "See the assets to download this version and install."
           releaseDraft: true
           prerelease: false
-          distPath: ../dist
+          #distPath: ../dist
           iconPath: ../public/logo.png
           configPath: tauri.conf.json
           projectPath: .
@@ -92,5 +92,5 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           releaseId: ${{ needs.create-release.outputs.RELEASE_UPLOAD_ID }}
-          distPath: ../dist
+          #distPath: ../dist
           iconPath: ../public/logo.png

@@ -52,8 +52,8 @@ jobs:
         with:
           tag_name: app-v${{ env.PACKAGE_VERSION }}
           release_name: "Desktop app v${{ env.PACKAGE_VERSION }}"
-          body: "See the assets to download this version and install."
-          draft: true
+          releaseBody: "See the assets to download this version and install."
+          releaseDraft: true
           prerelease: false
   build-tauri:
     needs: create-release

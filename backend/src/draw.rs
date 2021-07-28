@@ -8,6 +8,8 @@ use crate::types::{Position, Rect};
 use dashmap::lock::RwLockReadGuard;
 use std::collections::HashMap;
 
+//Hallo Welt!
+
 #[allow(clippy::clone_on_copy)]
 pub fn draw_arrow_mut<C>(
     canvas: &mut C,

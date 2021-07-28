@@ -32,7 +32,7 @@ jobs:
       - name: install app dependencies and build it
         # If using the Vue CLI plugin, tauri:build will be run automatically by tauri-action
         run: cd frontend; yarn
-      - uses: arturh85/tauri-action@master
+      - uses: arturh85/tauri-action@dev
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:

@@ -1,7 +1,7 @@
 [package]
 name = "factorio-bot"
 version = "0.1.0"
-description = "factorio-bot"
+description = "a cross-platform factorio bot"
 authors = [ "Artur Hallmann <arturh@arturh.de>" ]
 license = "MIT"
 repository = ""
@@ -13,14 +13,14 @@ build = "src/build.rs"
 serde_json = "1.0"
 factorio-bot-backend = { path = "../../backend/" }
 serde = { version = "1.0", features = [ "derive" ] }
-tauri = { version = "0.11", features = [ "all-api" ] }
+tauri = { version = "1.0.0-beta.5", features = ["api-all"] }
 
-[target."cfg(windows)".build-dependencies]
-winres = "0.1"
+[build-dependencies]
+tauri-build = { version = "1.0.0-beta.3" }
 
 [features]
-embedded-server = [ "tauri/embedded-server" ]
-no-server = [ "tauri/no-server" ]
+custom-protocol = [ "tauri/custom-protocol" ]
+default = [ "custom-protocol" ]
 
 [[bin]]
 name = "factorio-bot"

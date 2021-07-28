@@ -1,4 +1,14 @@
 {
+  "package": {
+    "productName": "factorio-bot",
+    "version": "0.1.0"
+  },
+  "build": {
+    "distDir": "Set automatically by Vue CLI plugin",
+    "devPath": "Set automatically by Vue CLI plugin",
+    "beforeDevCommand": "",
+    "beforeBuildCommand": ""
+  },
   "tauri": {
     "bundle": {
       "active": true,
@@ -35,12 +45,15 @@
         "timestampUrl": ""
       }
     },
+    "updater": {
+      "active": false
+    },
     "allowlist": {
       "all": true
     },
     "windows": [
       {
-        "title": "factorio-bot",
+        "title": "FactorioBot",
         "width": 800,
         "height": 600,
         "resizable": true,
@@ -48,7 +61,7 @@
       }
     ],
     "security": {
-      "csp": "default-src blob: data: filesystem: ws: http: https: 'unsafe-eval' 'unsafe-inline'"
+      "csp": "default-src blob: data: filesystem: ws: wss: http: https: tauri: 'unsafe-eval' 'unsafe-inline' 'self' img-src: 'self'"
     }
   }
 }

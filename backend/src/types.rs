@@ -172,9 +172,15 @@ impl Pos {
     }
 }
 
-impl Into<TypedPoint2D<f32, Rect>> for Position {
-    fn into(self) -> TypedPoint2D<f32, Rect> {
-        TypedPoint2D::new(self.x() as f32, self.y() as f32)
+impl From<TypedPoint2D<f32, Rect>> for Position {
+    fn from(typed: TypedPoint2D<f32, Rect>) -> Position {
+        Position::new(typed.x as f64, typed.y as f64)
+    }
+}
+
+impl From<Position> for TypedPoint2D<f32, Rect> {
+    fn from(typed: Position) -> TypedPoint2D<f32, Rect> {
+        TypedPoint2D::new(typed.x() as f32, typed.y() as f32)
     }
 }
 

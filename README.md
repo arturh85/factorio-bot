@@ -1,6 +1,10 @@
 Factorio Bot
 ============
 
+!!! REWRITE IN PROCESS !!!
+----------------
+
+
 This project tries to be a bot platform for the game
 [Factorio](https://www.factorio.com) (version 1.0) inspired by [factorio-bot](https://github.com/Windfisch/factorio-bot/)
 

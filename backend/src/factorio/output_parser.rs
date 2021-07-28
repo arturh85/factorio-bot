@@ -58,7 +58,7 @@ impl OutputParser {
                             None => &name,
                         };
                         FactorioTile {
-                            color: match &color_name[..] {
+                            color: match color_name {
                                 "water" => Some([0u8, 162u8, 232u8, 255u8]),
                                 "deepwater" => Some([18u8, 16u8, 254u8, 255u8]),
                                 _ => None, // "out" => [0u8, 0u8, 0u8, 255u8],

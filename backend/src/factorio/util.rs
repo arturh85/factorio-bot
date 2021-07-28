@@ -14,7 +14,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
 pub fn hashmap_to_lua(map: HashMap<String, String>) -> String {
@@ -100,12 +100,12 @@ pub fn move_pos(pos: &Pos, direction: Direction, offset: i32) -> Pos {
     }
 }
 
-pub fn read_to_value(path: &PathBuf) -> anyhow::Result<Value> {
+pub fn read_to_value(path: &Path) -> anyhow::Result<Value> {
     let content = std::fs::read_to_string(path)?;
     Ok(serde_json::from_str(content.as_str())?)
 }
 
-pub fn write_value_to(value: &Value, path: &PathBuf) -> anyhow::Result<()> {
+pub fn write_value_to(value: &Value, path: &Path) -> anyhow::Result<()> {
     let mut outfile = fs::File::create(&path)?;
     let bytes = serde_json::to_string(value).unwrap();
     outfile.write_all(bytes.as_ref())?;

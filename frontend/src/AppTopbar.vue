@@ -4,7 +4,13 @@
 			<span class="pi pi-bars"></span>
 		</button>
 
-<!--		<div class="layout-topbar-icons">-->
+    <div class="layout-topbar-actions">
+      <span>Factorio 1.1</span> with <strong>2 Clients</strong> and <strong>1 Mod</strong>
+      &nbsp;
+      <ProcessControl />
+    </div>
+
+
 <!--			<span class="layout-topbar-search">-->
 <!--				<InputText type="text" placeholder="Search" />-->
 <!--				<span class="layout-topbar-search-icon pi pi-search"></span>-->
@@ -27,11 +33,16 @@
 </template>
 
 <script>
+import ProcessControl from '@/components/ProcessControl'
+
 export default {
     methods: {
         onMenuToggle(event) {
             this.$emit('menu-toggle', event);
         }
-    }
+    },
+  components: {
+    'ProcessControl': ProcessControl
+  }
 }
 </script>

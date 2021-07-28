@@ -8,6 +8,11 @@ const routes = [
         component: Dashboard,
     },
     {
+        path: '/settings',
+        name: 'settings',
+        component: () => import('./pages/Settings.vue'),
+    },
+    {
         path: '/empty',
         name: 'empty',
         component: () => import('./pages/EmptyPage.vue'),

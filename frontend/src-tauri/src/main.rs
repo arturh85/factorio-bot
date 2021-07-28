@@ -20,10 +20,18 @@ fn main() {
         }
         Ok(command) => {
           match command {
-            // definitions for your custom commands from Cmd here
-            MyCustomCommand { argument } => {
-              //  your command code
-              println!("{}", argument);
+            Start { } => {
+              println!("Start");
+            },
+            Stop { } => {
+              println!("Stop");
+            },
+            LoadConfiguration { } => {
+              println!("LoadConfiguration");
+            },
+            #[allow(unused_variables)]
+            UpdateConfiguration { key, value } => {
+              println!("UpdateConfiguration");
             }
           }
           Ok(())

@@ -76,6 +76,7 @@ import 'primeicons/primeicons.css';
 import 'prismjs/themes/prism-coy.css';
 import './assets/layout/layout.scss';
 import './assets/layout/flags/flags.css';
+import store from './store'
 
 router.beforeEach(function(to, from, next) {
     window.scrollTo(0, 0);
@@ -86,8 +87,10 @@ const app = createApp(App);
 
 app.config.globalProperties.$appState = reactive({ inputStyle: 'outlined' });
 app.config.globalProperties.$primevue = reactive({ ripple: true });
+app.config.devtools = true;
 
 app.use(ToastService);
+app.use(store);
 app.use(router);
 
 app.directive('tooltip', Tooltip);

@@ -21,10 +21,10 @@
       <router-view/>
     </div>
 
-    <AppConfig :layoutMode="layoutMode"
-               :layoutColorMode="layoutColorMode"
-               @layout-change="onLayoutChange"
-               @layout-color-change="onLayoutColorChange"/>
+<!--    <AppConfig :layoutMode="layoutMode"-->
+<!--               :layoutColorMode="layoutColorMode"-->
+<!--               @layout-change="onLayoutChange"-->
+<!--               @layout-color-change="onLayoutColorChange"/>-->
 
     <AppFooter/>
   </div>
@@ -33,7 +33,6 @@
 <script>
 import AppTopBar from './AppTopbar.vue'
 import AppMenu from './AppMenu.vue'
-import AppConfig from './AppConfig.vue'
 import AppFooter from './AppFooter.vue'
 
 export default {
@@ -46,7 +45,14 @@ export default {
       mobileMenuActive: false,
       menu: [
         {label: 'Dashboard', icon: 'pi pi-fw pi-home', to: '/'},
+        {label: 'Settings', icon: 'pi pi-fw pi-cog', to: '/settings'},
+        {label: 'Mods', icon: 'pi pi-fw pi-th-large', to: '/factorioMods'},
+        {label: 'Tasks', icon: 'pi pi-fw pi-sitemap', to: '/workspace'},
+        {label: 'Entities', icon: 'pi pi-fw pi-sitemap', to: '/workspace'},
+        {label: 'Map', icon: 'pi pi-fw pi-map-marker', to: '/workspace'},
         {label: 'Instances', icon: 'pi pi-fw pi-circle-off', to: '/instances'},
+        {label: 'REST API Docs', icon: 'pi pi-fw pi-question-circle', to: '/restApiDocss'},
+        {label: 'LUA API Docs', icon: 'pi pi-fw pi-question-circle', to: '/luaApiDocss'},
       ],
     }
   },
@@ -160,7 +166,6 @@ export default {
   components: {
     'AppTopBar': AppTopBar,
     'AppMenu': AppMenu,
-    'AppConfig': AppConfig,
     'AppFooter': AppFooter,
   },
 }

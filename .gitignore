@@ -3,3 +3,4 @@ target/
 workspace/
 mods/*/
 backend/tests/world.png
+/Cargo.*

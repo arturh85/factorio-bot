@@ -1,7 +1,0 @@
-[workspace]
-members = [
-    "frontend/src-tauri",
-    "backend"
-]
-exclude = [
-]

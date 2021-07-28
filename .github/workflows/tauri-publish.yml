@@ -44,4 +44,4 @@ jobs:
           iconPath: ../public/logo.png
           configPath: tauri.conf.json
           projectPath: ./frontend
-          npmScript: tauri:build
+          npmScript: "tauri:build"

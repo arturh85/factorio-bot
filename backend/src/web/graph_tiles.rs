@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use actix_web::{web, HttpResponse};
+// use actix_web::{web, HttpResponse};
 use image::{DynamicImage, ImageFormat, RgbaImage};
 use imageproc::drawing::{draw_filled_rect_mut, draw_hollow_rect_mut};
 use petgraph::visit::EdgeRef;

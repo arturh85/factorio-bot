@@ -299,7 +299,7 @@ pub async fn setup_factorio_instance(
                     instance_name,
                     factorio_port,
                     rcon_settings,
-                    &map_exchange_string,
+                    map_exchange_string,
                     silent,
                 )
                 .await?;
@@ -470,7 +470,7 @@ pub async fn update_map_gen_settings(
         "--rcon-password",
         &rcon_settings.pass,
         "--server-settings",
-        &server_settings_path.to_str().unwrap(),
+        server_settings_path.to_str().unwrap(),
     ];
     let mut child = Command::new(&factorio_binary_path)
         .args(args)
@@ -483,12 +483,12 @@ pub async fn update_map_gen_settings(
 
     let stdout = child.stdout.take().unwrap();
     let reader = BufReader::new(stdout);
-    let log_path = workspace_path.join(PathBuf::from_str(&"server-log.txt").unwrap());
+    let log_path = workspace_path.join(PathBuf::from_str("server-log.txt").unwrap());
     let (_, rcon) = read_output(
         reader,
-        &rcon_settings,
+        rcon_settings,
         log_path,
-        None,
+        // None,
         false,
         true,
         FactorioStartCondition::Initialized,
@@ -500,12 +500,12 @@ pub async fn update_map_gen_settings(
         .await?;
     child.kill()?;
     let target_map_gen_settings_path =
-        instance_path.join(PathBuf::from_str(&map_gen_settings_filename).unwrap());
+        instance_path.join(PathBuf::from_str(map_gen_settings_filename).unwrap());
     let target_map_settings_path =
-        instance_path.join(PathBuf::from_str(&map_settings_filename).unwrap());
+        instance_path.join(PathBuf::from_str(map_settings_filename).unwrap());
     let script_output_path = instance_path.join(PathBuf::from_str("script-output").unwrap());
     let source_map_gen_settings_path =
-        script_output_path.join(PathBuf::from_str(&map_gen_settings_filename).unwrap());
+        script_output_path.join(PathBuf::from_str(map_gen_settings_filename).unwrap());
     let value: Value = read_to_value(&source_map_gen_settings_path)?;
     write_value_to(&value["map_settings"], &target_map_settings_path)?;
     write_value_to(&value["map_gen_settings"], &target_map_gen_settings_path)?;

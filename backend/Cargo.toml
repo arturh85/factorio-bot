@@ -1,21 +1,13 @@
 [package]
 name = "factorio-bot-backend"
-version = "0.1.2"
+version = "0.2.0-alpha"
 authors = ["Artur Hallmann <arturh@arturh.de>"]
 edition = "2018"
 
 [dependencies]
-rand = "*"
-rcon = "0.3.0"
-bb8 = "0.4.2"
-actix = "0.10.0"
-actix-web = "3.0.1"
-actix-rt = "1.1.1"
-actix-files = "0.3.0"
-actix-cors = "0.3.0"
-actix-broker = "0.3.0"
-actix-web-actors = "3.0.0"
-#actix-taskqueue = "0.1.0"
+rand = "^0.8.4"
+rcon = "^0.3.1"
+bb8 = "^0.7.0"
 serde = "^1.0"
 serde_derive = "^1.0"
 serde_json = "^1.0"
@@ -36,7 +28,7 @@ factorio-blueprint = "0.1.1"
 anyhow = "1.0"
 num-traits = "^0.2"
 async-trait = "0.1.36"
-async-std = { version = "1.6.2", features = ["unstable"] }
+async-std = { version = "1.9.0", features=["attributes"] }
 noisy_float = { version = "0.1.12", features = ["serde-1"] }
 typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"]}
 enum-primitive-derive = "0.2.1"
@@ -54,7 +46,6 @@ ptree = "0.3.0"
 rlua-async = "0.4.0"
 itertools = "0.9.0"
 human-sort = "0.2.2"
-tokio = { version = "0.2.22", features = ["full"] }
 flate2 = "1.0"
 tar = "0.4"
 xz2 = "0.1"

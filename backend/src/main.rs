@@ -1,17 +1,17 @@
 #![warn(clippy::all, clippy::pedantic)]
 
-use actix::Actor;
 use clap::{App, Arg};
 
 use factorio_bot_backend::factorio::planner::start_factorio_and_plan_graph;
 use factorio_bot_backend::factorio::process_control::start_factorio;
 use factorio_bot_backend::factorio::rcon::{FactorioRcon, RconSettings};
 use factorio_bot_backend::factorio::roll_best_seed::{roll_seed, RollSeedLimit};
-use factorio_bot_backend::factorio::ws::FactorioWebSocketServer;
-use factorio_bot_backend::web::server::start_webserver;
+// use factorio_bot_backend::factorio::ws::FactorioWebSocketServer;
+// use factorio_bot_backend::web::server::start_webserver;
 
-#[tokio::main(core_threads = 4, max_threads = 8)]
+// #[tokio::main(core_threads = 4, max_threads = 8)]
 // #[actix_rt::main]
+#[async_std::main]
 async fn main() -> anyhow::Result<()> {
     color_eyre::install().unwrap();
     let matches = App::new("factorio-bot-rs")
@@ -177,25 +177,25 @@ async fn main() -> anyhow::Result<()> {
         let seed = matches.value_of("seed").map(|s| s.to_string());
         let map_exchange_string = matches.value_of("map").map(|s| s.to_string());
         let recreate = matches.is_present("new");
-        let open_browser = matches.is_present("open");
+        let _open_browser = matches.is_present("open");
         let server_host = matches.value_of("server");
-        let websocket_server = FactorioWebSocketServer { listeners: vec![] }.start();
-        let (world, rcon) = start_factorio(
+        // let websocket_server = FactorioWebSocketServer { listeners: vec![] }.start();
+        let (world, _rcon) = start_factorio(
             &settings,
             server_host,
             clients,
             recreate,
             map_exchange_string,
             seed,
-            Some(websocket_server.clone()),
+            // Some(websocket_server.clone()),
             write_logs,
             false,
         )
         .await
         .expect("failed to start factorio");
 
-        if let Some(world) = world {
-            start_webserver(rcon, websocket_server, open_browser, world).await;
+        if let Some(_world) = world {
+            // start_webserver(rcon, websocket_server, open_browser, world).await;
         }
     } else if let Some(matches) = matches.subcommand_matches("rcon") {
         let command = matches.value_of("command").unwrap();
@@ -226,17 +226,14 @@ async fn main() -> anyhow::Result<()> {
         let name = matches.value_of("name").unwrap().to_string();
         let map_exchange_string = matches.value_of("map").map(|s| s.to_string());
         let bot_count = matches.value_of("clients").unwrap().parse().unwrap();
-        tokio::spawn(async move {
-            let _graph = start_factorio_and_plan_graph(
-                settings,
-                map_exchange_string,
-                seed,
-                &name,
-                bot_count,
-            )
-            .await;
-        })
-        .await?;
+        let _graph = start_factorio_and_plan_graph(
+            settings,
+            map_exchange_string,
+            seed,
+            &name,
+            bot_count,
+        )
+        .await;
     } else {
         eprintln!("Missing required Sub Command!");
         std::process::exit(1);

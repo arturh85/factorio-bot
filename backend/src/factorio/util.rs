@@ -30,11 +30,11 @@ pub fn value_to_lua(value: &Value) -> String {
         Value::Null => "nil".into(),
         Value::Bool(bool) => bool.to_string(),
         Value::Number(number) => number.to_string(),
-        Value::String(string) => str_to_lua(&string),
+        Value::String(string) => str_to_lua(string),
         Value::Array(vec) => format!(
             "{{ {} }}",
             vec.iter()
-                .map(|value| value_to_lua(&value))
+                .map(|value| value_to_lua(value))
                 .collect::<Vec<String>>()
                 .join(", ")
         ),
@@ -200,7 +200,7 @@ pub fn blueprint_build_area(
     entity_prototypes: Arc<DashMap<String, FactorioEntityPrototype>>,
     blueprint: &str,
 ) -> Rect {
-    let decoded = BlueprintCodec::decode_string(&blueprint).expect("failed to decode blueprint");
+    let decoded = BlueprintCodec::decode_string(blueprint).expect("failed to decode blueprint");
     let mut build_area = Rect::new(&Position::new(999.0, 999.0), &Position::new(-999.0, -999.0));
     match decoded {
         BlueprintBook(_blueprint_book) => {

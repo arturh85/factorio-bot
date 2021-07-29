@@ -195,7 +195,7 @@ impl FlowGraph {
 
                                 let mut output: FlowRates = vec![];
                                 for (name, _rate) in &incoming {
-                                    if let Ok(name) = EntityName::from_str(&name) {
+                                    if let Ok(name) = EntityName::from_str(name) {
                                         match name {
                                             EntityName::IronOre => output.push((
                                                 EntityName::IronPlate.to_string(),

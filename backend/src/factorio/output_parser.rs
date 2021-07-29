@@ -1,12 +1,10 @@
 use std::sync::Arc;
 
-use actix::Addr;
-
 use crate::factorio::world::FactorioWorld;
-use crate::factorio::ws::{
-    FactorioWebSocketServer, PlayerChangedMainInventoryMessage, PlayerChangedPositionMessage,
-    PlayerDistanceChangedMessage, PlayerLeftMessage, ResearchCompletedMessage,
-};
+// use crate::factorio::ws::{
+//     FactorioWebSocketServer, PlayerChangedMainInventoryMessage, PlayerChangedPositionMessage,
+//     PlayerDistanceChangedMessage, PlayerLeftMessage, ResearchCompletedMessage,
+// };
 use crate::types::{
     ChunkPosition, FactorioEntity, FactorioEntityPrototype, FactorioForce, FactorioGraphic,
     FactorioItemPrototype, FactorioRecipe, FactorioTile, PlayerChangedDistanceEvent,
@@ -15,7 +13,7 @@ use crate::types::{
 
 pub struct OutputParser {
     world: Arc<FactorioWorld>,
-    websocket_server: Option<Addr<FactorioWebSocketServer>>,
+    // websocket_server: Option<Addr<FactorioWebSocketServer>>,
 }
 
 impl OutputParser {
@@ -174,16 +172,16 @@ impl OutputParser {
             "on_player_left_game" => {
                 let player_id: u32 = rest.parse()?;
                 self.world.remove_player(player_id)?;
-                if let Some(websocket_server) = self.websocket_server.as_ref() {
-                    websocket_server
-                        .send(PlayerLeftMessage { player_id })
-                        .await?;
-                }
+                // if let Some(websocket_server) = self.websocket_server.as_ref() {
+                //     websocket_server
+                //         .send(PlayerLeftMessage { player_id })
+                //         .await?;
+                // }
             }
             "on_research_finished" => {
-                if let Some(websocket_server) = self.websocket_server.as_ref() {
-                    websocket_server.send(ResearchCompletedMessage {}).await?;
-                }
+                // if let Some(websocket_server) = self.websocket_server.as_ref() {
+                //     websocket_server.send(ResearchCompletedMessage {}).await?;
+                // }
             }
             "force" => {
                 let force: FactorioForce = serde_json::from_str(rest).unwrap_or_else(|err| {
@@ -211,39 +209,39 @@ impl OutputParser {
             }
             "on_player_main_inventory_changed" => {
                 let event: PlayerChangedMainInventoryEvent = serde_json::from_str(rest)?;
-                let player_id = event.player_id;
+                let _player_id = event.player_id;
                 self.world.player_changed_main_inventory(event)?;
-                if let Some(websocket_server) = self.websocket_server.as_ref() {
-                    websocket_server
-                        .send(PlayerChangedMainInventoryMessage {
-                            player: self.world.players.get(&player_id).unwrap().clone(),
-                        })
-                        .await?;
-                }
+                // if let Some(websocket_server) = self.websocket_server.as_ref() {
+                //     websocket_server
+                //         .send(PlayerChangedMainInventoryMessage {
+                //             player: self.world.players.get(&player_id).unwrap().clone(),
+                //         })
+                //         .await?;
+                // }
             }
             "on_player_changed_position" => {
                 let event: PlayerChangedPositionEvent = serde_json::from_str(rest)?;
-                let player_id = event.player_id;
+                let _player_id = event.player_id;
                 self.world.player_changed_position(event)?;
-                if let Some(websocket_server) = self.websocket_server.as_ref() {
-                    websocket_server
-                        .send(PlayerChangedPositionMessage {
-                            player: self.world.players.get(&player_id).unwrap().clone(),
-                        })
-                        .await?;
-                }
+                // if let Some(websocket_server) = self.websocket_server.as_ref() {
+                //     websocket_server
+                //         .send(PlayerChangedPositionMessage {
+                //             player: self.world.players.get(&player_id).unwrap().clone(),
+                //         })
+                //         .await?;
+                // }
             }
             "on_player_changed_distance" => {
                 let event: PlayerChangedDistanceEvent = serde_json::from_str(rest)?;
-                let player_id = event.player_id;
+                let _player_id = event.player_id;
                 self.world.player_changed_distance(event)?;
-                if let Some(websocket_server) = self.websocket_server.as_ref() {
-                    websocket_server
-                        .send(PlayerDistanceChangedMessage {
-                            player: self.world.players.get(&player_id).unwrap().clone(),
-                        })
-                        .await?;
-                }
+                // if let Some(websocket_server) = self.websocket_server.as_ref() {
+                //     websocket_server
+                //         .send(PlayerDistanceChangedMessage {
+                //             player: self.world.players.get(&player_id).unwrap().clone(),
+                //         })
+                //         .await?;
+                // }
             }
             "mined_item" => {
                 // info!("tick!");
@@ -265,9 +263,9 @@ impl OutputParser {
     }
 
     #[allow(clippy::new_without_default)]
-    pub fn new(websocket_server: Option<Addr<FactorioWebSocketServer>>) -> Self {
+    pub fn new() -> Self {
         OutputParser {
-            websocket_server,
+            // websocket_server,
             world: Arc::new(FactorioWorld::new()),
         }
     }

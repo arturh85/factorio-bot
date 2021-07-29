@@ -698,7 +698,7 @@ impl EntityGraph {
                                 node.position.add(&Position::new(-1., 2.)),
                             ],
                         } {
-                            if let Some(next_index) = self.node_at(&position) {
+                            if let Some(next_index) = self.node_at(position) {
                                 let next = inner.node_weight(next_index).unwrap();
                                 if next.entity_type.is_fluid_input() {
                                     if !inner.contains_edge(node_index, next_index) {

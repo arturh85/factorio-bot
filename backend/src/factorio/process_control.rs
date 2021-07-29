@@ -5,20 +5,19 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
-use std::thread::{sleep, JoinHandle};
-use std::time::Instant;
+use std::thread::{JoinHandle, sleep};
+use std::time::{Duration, Instant};
 
-use actix::clock::Duration;
-use actix::Addr;
+use async_std::task;
 use config::Config;
 use paris::Logger;
+// use crate::factorio::ws::FactorioWebSocketServer;
 
 use crate::factorio::instance_setup::setup_factorio_instance;
 use crate::factorio::output_reader::read_output;
 use crate::factorio::rcon::{FactorioRcon, RconSettings};
 use crate::factorio::world::FactorioWorld;
-use crate::factorio::ws::FactorioWebSocketServer;
-use tokio::sync::mpsc::channel;
+use std::sync::mpsc::channel;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn start_factorio(
@@ -28,12 +27,12 @@ pub async fn start_factorio(
     recreate: bool,
     map_exchange_string: Option<String>,
     seed: Option<String>,
-    websocket_server: Option<Addr<FactorioWebSocketServer>>,
+    // websocket_server: Option<Addr<FactorioWebSocketServer>>,
     write_logs: bool,
     silent: bool,
 ) -> anyhow::Result<(Option<Arc<FactorioWorld>>, Arc<FactorioRcon>)> {
     let mut world: Option<Arc<FactorioWorld>> = None;
-    let rcon_settings = RconSettings::new(&settings, server_host);
+    let rcon_settings = RconSettings::new(settings, server_host);
     let workspace_path: String = settings.get("workspace_path")?;
     if server_host.is_none() {
         setup_factorio_instance(
@@ -78,7 +77,7 @@ pub async fn start_factorio(
                 &rcon_settings,
                 None,
                 "server",
-                websocket_server,
+                // websocket_server,
                 write_logs,
                 silent,
                 FactorioStartCondition::Initialized,
@@ -173,7 +172,7 @@ pub async fn start_factorio_server(
     rcon_settings: &RconSettings,
     factorio_port: Option<u16>,
     instance_name: &str,
-    websocket_server: Option<Addr<FactorioWebSocketServer>>,
+    // websocket_server: Option<Addr<FactorioWebSocketServer>>,
     write_logs: bool,
     silent: bool,
     wait_until: FactorioStartCondition,
@@ -241,7 +240,7 @@ pub async fn start_factorio_server(
         "--rcon-password",
         &rcon_settings.pass,
         "--server-settings",
-        &server_settings_path.to_str().unwrap(),
+        server_settings_path.to_str().unwrap(),
     ];
     if !silent {
         info!(
@@ -260,12 +259,12 @@ pub async fn start_factorio_server(
 
     let stdout = child.stdout.take().unwrap();
     let reader = BufReader::new(stdout);
-    let log_path = workspace_path.join(PathBuf::from_str(&"server-log.txt").unwrap());
+    let log_path = workspace_path.join(PathBuf::from_str("server-log.txt").unwrap());
     let (world, rcon) = read_output(
         reader,
         rcon_settings,
         log_path,
-        websocket_server,
+        // websocket_server,
         write_logs,
         silent,
         wait_until,
@@ -348,7 +347,7 @@ pub async fn start_factorio_client(
         .stderr(Stdio::piped())
         .spawn()
         .expect("failed to start client");
-    let instance_name = instance_name.clone();
+    let instance_name = instance_name;
     let log_instance_name = instance_name.clone();
     let stdout = child.stdout.take().unwrap();
     let reader = BufReader::new(stdout);
@@ -374,18 +373,18 @@ pub async fn start_factorio_client(
         exit_code
     });
     let is_client = server_host.is_some();
-    let (mut tx, mut rx) = channel(1);
-    tx.send(()).await?;
+    let (tx, rx) = channel();
+    tx.send(())?;
     std::thread::spawn(move || {
-        actix::run(async move {
+        task::spawn(async move {
             let mut initialized = false;
             for line in reader.lines() {
                 if let Ok(line) = line {
                     // wait for factorio init before sending confirmation
                     if !initialized && line.contains("my_client_id") {
                         initialized = true;
-                        rx.recv().await.unwrap();
-                        rx.recv().await.unwrap();
+                        rx.recv().unwrap();
+                        rx.recv().unwrap();
                     }
                     log_file.iter_mut().for_each(|log_file| {
                         // filter out 6.6 million lines like 6664601 / 6665150...
@@ -404,9 +403,8 @@ pub async fn start_factorio_client(
                     break;
                 }
             }
-        })
-        .unwrap();
+        });
     });
-    tx.send(()).await?;
+    tx.send(())?;
     Ok(handle)
 }

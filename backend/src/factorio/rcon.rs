@@ -60,8 +60,11 @@ impl bb8::ManageConnection for ConnectionManager {
             .await
     }
 
-    async fn is_valid(&self, conn: Self::Connection) -> Result<Self::Connection, Self::Error> {
-        Ok(conn)
+    async fn is_valid(
+        &self,
+        _conn: &mut bb8::PooledConnection<'_, Self>,
+    ) -> Result<(), Self::Error> {
+        Ok(())
     }
 
     fn has_broken(&self, _conn: &mut Self::Connection) -> bool {
@@ -228,7 +231,7 @@ impl FactorioRcon {
             return Err(anyhow!("player not found"));
         }
         let player = player.unwrap();
-        let distance = calculate_distance(&player.position, &position);
+        let distance = calculate_distance(&player.position, position);
         let build_distance = player.build_distance as f64;
         drop(player); // wow, without this factorio (?) freezes (!)
         if distance > build_distance {
@@ -311,7 +314,7 @@ impl FactorioRcon {
         }
         let player = player.unwrap();
         let build_distance = player.build_distance as f64;
-        let distance = calculate_distance(&player.position, &position);
+        let distance = calculate_distance(&player.position, position);
         drop(player); // wow, without this factorio (?) freezes (!)
         if distance > build_distance {
             warn!("too far away, moving first!");
@@ -323,7 +326,7 @@ impl FactorioRcon {
                 "revive_ghost",
                 vec![
                     &player_id.to_string(),
-                    &str_to_lua(&name),
+                    &str_to_lua(name),
                     &position.x().to_string(),
                     &position.y().to_string(),
                 ],
@@ -453,7 +456,7 @@ impl FactorioRcon {
         *next_action_id = (*next_action_id + 1) % 1000;
         drop(next_action_id);
 
-        let waypoints = self.player_path(&world, player_id, &goal, radius).await?;
+        let waypoints = self.player_path(world, player_id, goal, radius).await?;
 
         self.action_start_walk_waypoints(action_id, player_id, waypoints)
             .await?;
@@ -478,7 +481,7 @@ impl FactorioRcon {
         *next_action_id = (*next_action_id + 1) % 1000;
         drop(next_action_id);
         let resource_reach_distance = player.resource_reach_distance as f64;
-        let distance = calculate_distance(&player.position, &position);
+        let distance = calculate_distance(&player.position, position);
         drop(player); // wow, without this factorio (?) freezes (!)
         if distance > resource_reach_distance {
             warn!("too far away, moving first!");
@@ -590,7 +593,7 @@ impl FactorioRcon {
                 let chars =
                     UnicodeSegmentation::graphemes(line.as_str(), true).collect::<Vec<&str>>();
                 if chars[0] == "{" {
-                    Ok(serde_json::from_str(&line).unwrap())
+                    Ok(serde_json::from_str(line).unwrap())
                 } else if &line[..] == "§player_blocks_placement§" {
                     for test_direction in 0..8u8 {
                         let test_position = move_position(
@@ -626,7 +629,7 @@ impl FactorioRcon {
                                 let chars = UnicodeSegmentation::graphemes(line.as_str(), true)
                                     .collect::<Vec<&str>>();
                                 if chars[0] == "{" {
-                                    Ok(serde_json::from_str(&line).unwrap())
+                                    Ok(serde_json::from_str(line).unwrap())
                                 } else if &line[..] == "§player_blocks_placement§" {
                                     Err(anyhow!("player still blocks placement"))
                                 } else {
@@ -786,7 +789,7 @@ impl FactorioRcon {
                 args.insert(String::from("area"), rect_to_lua(area));
             }
             AreaFilter::PositionRadius((position, radius)) => {
-                args.insert(String::from("position"), position_to_lua(&position));
+                args.insert(String::from("position"), position_to_lua(position));
                 if let Some(radius) = radius {
                     if radius > &3000.0 {
                         return Err(anyhow!("max radius: 3000"));
@@ -842,10 +845,10 @@ impl FactorioRcon {
         let mut args: HashMap<String, String> = HashMap::new();
         match area_filter {
             AreaFilter::Rect(area) => {
-                args.insert(String::from("area"), rect_to_lua(&area));
+                args.insert(String::from("area"), rect_to_lua(area));
             }
             AreaFilter::PositionRadius((position, radius)) => {
-                args.insert(String::from("position"), position_to_lua(&position));
+                args.insert(String::from("position"), position_to_lua(position));
                 if let Some(radius) = radius {
                     if radius > &3000.0 {
                         return Err(anyhow!("max radius: 3000"));
@@ -884,7 +887,7 @@ impl FactorioRcon {
         let result = self
             .remote_call(
                 "async_request_player_path",
-                vec![&player_id.to_string(), &position_to_lua(&goal), &radius],
+                vec![&player_id.to_string(), &position_to_lua(goal), &radius],
             )
             .await?;
         if result.is_none() {
@@ -910,7 +913,7 @@ impl FactorioRcon {
         let result = self
             .remote_call(
                 "async_request_path",
-                vec![&position_to_lua(&start), &position_to_lua(&goal), &radius],
+                vec![&position_to_lua(start), &position_to_lua(goal), &radius],
             )
             .await?;
         if result.is_none() {
@@ -957,13 +960,13 @@ impl FactorioRcon {
                     err.to_string()
                 );
                 let player = world.players.get(&player_id).unwrap();
-                let mut direction = vector_normalize(&vector_substract(&player.position, &goal));
+                let mut direction = vector_normalize(&vector_substract(&player.position, goal));
                 drop(player);
                 for _ in 0..4 {
                     // direction = goal - player.position
                     // newGoal = goal + direciton.normalize() * radius
                     let new_goal =
-                        vector_add(&goal, &vector_multiply(&direction, radius.unwrap_or(10.0)));
+                        vector_add(goal, &vector_multiply(&direction, radius.unwrap_or(10.0)));
 
                     let id = self
                         .async_request_player_path(player_id, &new_goal, radius)
@@ -997,14 +1000,14 @@ impl FactorioRcon {
                     goal.y(),
                     err.to_string()
                 );
-                let mut direction = vector_normalize(&vector_substract(&start, &goal));
+                let mut direction = vector_normalize(&vector_substract(start, goal));
                 for _ in 0..4 {
                     // direction = goal - player.position
                     // newGoal = goal + direciton.normalize() * radius
                     let new_goal =
-                        vector_add(&goal, &vector_multiply(&direction, radius.unwrap_or(10.0)));
+                        vector_add(goal, &vector_multiply(&direction, radius.unwrap_or(10.0)));
 
-                    let id = self.async_request_path(&start, &new_goal, radius).await?;
+                    let id = self.async_request_path(start, &new_goal, radius).await?;
                     if let Ok(result) = self.sleep_for_path_request_result(world, id).await {
                         return Ok(result);
                     }
@@ -1058,7 +1061,7 @@ impl FactorioRcon {
                     &action_id,
                     &player_id,
                     &str_to_lua(name),
-                    &position_to_lua(&position),
+                    &position_to_lua(position),
                     &count.to_string(),
                 ],
             )

@@ -343,6 +343,7 @@ impl Rect {
     }
 }
 
+#[allow(clippy::from_over_into)]
 impl Into<QuadTreeRect> for Rect {
     fn into(self) -> QuadTreeRect {
         QuadTreeRect::new(
@@ -593,7 +594,7 @@ impl FactorioEntity {
             name: EntityName::TransportBelt.to_string(),
             entity_type: EntityType::TransportBelt.to_string(),
             position: position.clone(),
-            bounding_box: add_to_rect_turned(&Rect::from_wh(0.8, 0.8), &position, direction),
+            bounding_box: add_to_rect_turned(&Rect::from_wh(0.8, 0.8), position, direction),
             direction: direction.to_u8().unwrap(),
             ..Default::default()
         }
@@ -603,7 +604,7 @@ impl FactorioEntity {
             name: EntityName::Splitter.to_string(),
             entity_type: EntityType::Splitter.to_string(),
             position: position.clone(),
-            bounding_box: add_to_rect_turned(&Rect::from_wh(1.78, 0.78), &position, direction),
+            bounding_box: add_to_rect_turned(&Rect::from_wh(1.78, 0.78), position, direction),
             direction: direction.to_u8().unwrap(),
             ..Default::default()
         }
@@ -613,7 +614,7 @@ impl FactorioEntity {
             name: EntityName::Inserter.to_string(),
             entity_type: EntityType::Inserter.to_string(),
             position: position.clone(),
-            bounding_box: add_to_rect_turned(&Rect::from_wh(0.78, 0.78), &position, direction),
+            bounding_box: add_to_rect_turned(&Rect::from_wh(0.78, 0.78), position, direction),
             direction: direction.to_u8().unwrap(),
             drop_position: Some(position.add(&Position::new(0., 1.).turn(direction))),
             pickup_position: Some(position.add(&Position::new(0., -1.).turn(direction))),
@@ -625,7 +626,7 @@ impl FactorioEntity {
             name: EntityName::BurnerMiningDrill.to_string(),
             entity_type: EntityType::MiningDrill.to_string(),
             position: position.clone(),
-            bounding_box: add_to_rect_turned(&Rect::from_wh(1.8, 1.8), &position, direction),
+            bounding_box: add_to_rect_turned(&Rect::from_wh(1.8, 1.8), position, direction),
             direction: direction.to_u8().unwrap(),
             drop_position: Some(position.add(&Position::new(-0.5, -1.296875).turn(direction))),
             ..Default::default()
@@ -636,7 +637,7 @@ impl FactorioEntity {
             name: EntityName::ElectricMiningDrill.to_string(),
             entity_type: EntityType::MiningDrill.to_string(),
             position: position.clone(),
-            bounding_box: add_to_rect_turned(&Rect::from_wh(1.8, 1.8), &position, direction),
+            bounding_box: add_to_rect_turned(&Rect::from_wh(1.8, 1.8), position, direction),
             direction: direction.to_u8().unwrap(),
             drop_position: Some(position.add(&Position::new(0., -2.).turn(direction))),
             ..Default::default()
@@ -647,7 +648,7 @@ impl FactorioEntity {
             name: name.into(),
             entity_type: EntityType::Resource.to_string(),
             position: position.clone(),
-            bounding_box: add_to_rect_turned(&Rect::from_wh(0.8, 0.8), &position, direction),
+            bounding_box: add_to_rect_turned(&Rect::from_wh(0.8, 0.8), position, direction),
             direction: direction.to_u8().unwrap(),
             ..Default::default()
         }
@@ -657,7 +658,7 @@ impl FactorioEntity {
             name: "tree-42".into(),
             entity_type: EntityType::Tree.to_string(),
             position: position.clone(),
-            bounding_box: add_to_rect(&Rect::from_wh(0.8, 0.8), &position),
+            bounding_box: add_to_rect(&Rect::from_wh(0.8, 0.8), position),
             ..Default::default()
         }
     }
@@ -666,7 +667,7 @@ impl FactorioEntity {
             name: EntityName::Coal.to_string(),
             entity_type: EntityType::Resource.to_string(),
             position: position.clone(),
-            bounding_box: add_to_rect_turned(&Rect::from_wh(0.8, 0.8), &position, direction),
+            bounding_box: add_to_rect_turned(&Rect::from_wh(0.8, 0.8), position, direction),
             direction: direction.to_u8().unwrap(),
             ..Default::default()
         }
@@ -676,7 +677,7 @@ impl FactorioEntity {
             name: EntityName::StoneFurnace.to_string(),
             entity_type: EntityType::Furnace.to_string(),
             position: position.clone(),
-            bounding_box: add_to_rect_turned(&Rect::from_wh(1.8, 1.8), &position, direction),
+            bounding_box: add_to_rect_turned(&Rect::from_wh(1.8, 1.8), position, direction),
             direction: direction.to_u8().unwrap(),
             ..Default::default()
         }
@@ -784,8 +785,7 @@ pub struct ResourcePatch {
 
 impl ResourcePatch {
     pub fn contains(&self, pos: Pos) -> bool {
-        let field: Vec<Pos> = self.elements.iter().map(|e| e.into()).collect();
-        field.contains(&pos)
+        self.elements.iter().map(|e| e.into()).any(|x: Pos| x == pos)
     }
     pub fn find_free_rect(
         &self,
@@ -796,8 +796,8 @@ impl ResourcePatch {
     ) -> Option<Rect> {
         let mut elements = self.elements.clone();
         elements.sort_by(|a, b| {
-            let da = r64(calculate_distance(&a, &near));
-            let db = r64(calculate_distance(&b, &near));
+            let da = r64(calculate_distance(a, near));
+            let db = r64(calculate_distance(b, near));
             da.cmp(&db)
         });
 

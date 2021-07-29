@@ -10,8 +10,8 @@ use std::collections::HashMap;
 
 //Hallo Welt!
 
-#[allow(clippy::clone_on_copy)]
-pub fn draw_arrow_mut<C>(
+#[allow(clippy::clone_on_copy,clippy::cast_lossless)]
+pub fn arrow_mut<C>(
     canvas: &mut C,
     start: (f32, f32),
     end: (f32, f32),
@@ -24,7 +24,7 @@ pub fn draw_arrow_mut<C>(
     draw_line_segment_mut(canvas, start, end, color.clone());
     // from: https://stackoverflow.com/questions/10316180/how-to-calculate-the-coordinates-of-a-arrowhead-based-on-the-arrow
     if size > 1. {
-        let h = size * 3.0f64.sqrt();
+        let h = size * 3.0_f64.sqrt();
         let w = size.clone();
         let start_position = Position::new(start.0.clone() as f64, start.1.clone() as f64);
         let end_position = Position::new(end.0.clone() as f64, end.1.clone() as f64);
@@ -44,7 +44,7 @@ pub fn draw_arrow_mut<C>(
     }
 }
 
-#[allow(clippy::clone_on_copy)]
+#[allow(clippy::clone_on_copy,clippy::cast_lossless)]
 pub fn draw_blocked_rects_mut<C>(
     canvas: &mut C,
     blocked: RwLockReadGuard<BlockedQuadTree>,

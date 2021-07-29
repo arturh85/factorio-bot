@@ -1,19 +1,20 @@
 use std::cmp::Ordering;
+use std::fs::read_to_string;
+use std::path::Path;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
+use async_std::task;
 use async_std::sync::{Arc, Mutex};
 use config::Config;
 
 use crate::factorio::instance_setup::setup_factorio_instance;
 use crate::factorio::planner::Planner;
-use crate::factorio::process_control::{start_factorio_server, FactorioStartCondition};
+use crate::factorio::process_control::{FactorioStartCondition, start_factorio_server};
 use crate::factorio::rcon::{FactorioRcon, RconSettings};
 use crate::factorio::util::calculate_distance;
 use crate::factorio::world::FactorioWorld;
 use crate::types::{AreaFilter, FactorioEntity, Position};
-use std::fs::read_to_string;
-use std::path::Path;
 
 #[derive(Debug, Copy, Clone)]
 pub enum RollSeedLimit {
@@ -81,7 +82,7 @@ pub async fn roll_seed(
         }
         let lua_code = read_to_string(lua_path)?;
         join_handles.push(std::thread::spawn(move || {
-            actix::run(async move {
+            task::spawn(async move {
                 while match limit {
                     RollSeedLimit::Rolls(max_rolls) => *roll.lock().await < max_rolls,
                     RollSeedLimit::Seconds(max_seconds) => {
@@ -113,7 +114,7 @@ pub async fn roll_seed(
                         &rcon_settings,
                         Some(factorio_port),
                         &instance_name,
-                        None,
+                        // None,
                         false,
                         true,
                         FactorioStartCondition::DiscoveryComplete,
@@ -154,8 +155,7 @@ pub async fn roll_seed(
                     }
                     child.kill().expect("failed to kill child");
                 }
-            })
-            .unwrap();
+            });
         }));
     }
     for join_handle in join_handles {
@@ -244,8 +244,8 @@ pub async fn find_nearest_entities(
         )
         .await?;
     entities.sort_by(|a, b| {
-        let da = calculate_distance(&a.position, &search_center);
-        let db = calculate_distance(&b.position, &search_center);
+        let da = calculate_distance(&a.position, search_center);
+        let db = calculate_distance(&b.position, search_center);
         if da < db {
             Ordering::Less
         } else if da > db {

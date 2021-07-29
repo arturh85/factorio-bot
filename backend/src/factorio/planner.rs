@@ -1,23 +1,24 @@
-use crate::factorio::instance_setup::setup_factorio_instance;
-use crate::factorio::plan_builder::create_lua_plan_builder;
-use crate::factorio::process_control::{start_factorio_server, FactorioStartCondition};
-use crate::factorio::rcon::{create_lua_rcon, FactorioRcon, RconSettings};
-use crate::factorio::task_graph::TaskGraph;
-use crate::factorio::world::{create_lua_world, FactorioWorld};
-use crate::factorio::ws::FactorioWebSocketServer;
-use crate::types::{EntityName, PlayerChangedMainInventoryEvent};
-use actix::Addr;
-use async_std::sync::Arc;
-use dashmap::lock::RwLock;
-use rlua::Lua;
-use rlua_async::ChunkExt;
 use std::collections::BTreeMap;
 use std::fs::read_to_string;
-use std::io::{stdout, Read, Write};
+use std::io::{Read, stdout, Write};
 use std::path::Path;
 use std::time::Instant;
 
+use async_std::sync::Arc;
+use dashmap::lock::RwLock;
+use rlua::Lua;
+
+use crate::factorio::instance_setup::setup_factorio_instance;
+// use crate::factorio::plan_builder::create_lua_plan_builder;
+use crate::factorio::process_control::{FactorioStartCondition, start_factorio_server};
+use crate::factorio::rcon::{FactorioRcon, RconSettings};
+use crate::factorio::task_graph::TaskGraph;
+use crate::factorio::world::FactorioWorld;
+// use crate::factorio::ws::FactorioWebSocketServer;
+use crate::types::{EntityName, PlayerChangedMainInventoryEvent};
+
 pub struct Planner {
+    #[allow(dead_code)]
     rcon: Option<Arc<FactorioRcon>>,
     real_world: Arc<FactorioWorld>,
     plan_world: Arc<FactorioWorld>,
@@ -41,29 +42,29 @@ impl Planner {
         self.graph = Arc::new(RwLock::new(TaskGraph::new()));
     }
 
-    pub fn plan(&mut self, lua_code: String, bot_count: u32) -> anyhow::Result<()> {
-        let all_bots = self.initiate_missing_players_with_default_inventory(bot_count);
+    pub fn plan(&mut self, _lua_code: String, bot_count: u32) -> anyhow::Result<()> {
+        let _all_bots = self.initiate_missing_players_with_default_inventory(bot_count);
         self.plan_world = Arc::new((*self.real_world).clone());
-        let lua = Lua::new();
-        lua.context::<_, rlua::Result<()>>(|ctx| {
-            let world = create_lua_world(ctx, self.plan_world.clone())?;
-            let plan = create_lua_plan_builder(ctx, self.graph.clone(), self.plan_world.clone())?;
-            let globals = ctx.globals();
-            globals.set("all_bots", all_bots)?;
-            globals.set("world", world)?;
-            globals.set("plan", plan)?;
-            if let Some(rcon) = self.rcon.as_ref() {
-                let rcon = create_lua_rcon(ctx, rcon.clone(), self.real_world.clone())?;
-                globals.set("rcon", rcon)?;
-            }
-            let chunk = ctx.load(&lua_code);
-            tokio::runtime::Builder::new()
-                .threaded_scheduler()
-                .core_threads(4)
-                .build()
-                .unwrap()
-                .block_on(chunk.exec_async(ctx))
-        })?;
+        let _lua = Lua::new();
+        // lua.context::<_, rlua::Result<()>>(|ctx| {
+        //     let world = create_lua_world(ctx, self.plan_world.clone())?;
+        //     let plan = create_lua_plan_builder(ctx, self.graph.clone(), self.plan_world.clone())?;
+        //     let globals = ctx.globals();
+        //     globals.set("all_bots", all_bots)?;
+        //     globals.set("world", world)?;
+        //     globals.set("plan", plan)?;
+        //     if let Some(rcon) = self.rcon.as_ref() {
+        //         let rcon = create_lua_rcon(ctx, rcon.clone(), self.real_world.clone())?;
+        //         globals.set("rcon", rcon)?;
+        //     }
+        //     let chunk = ctx.load(&lua_code);
+        //     // tokio::runtime::Builder::new()
+        //     //     .threaded_scheduler()
+        //     //     .core_threads(4)
+        //     //     .build()
+        //     //     .unwrap()
+        //     //     .block_on(chunk.exec_async(ctx))
+        // })?;
         Ok(())
     }
 
@@ -126,7 +127,7 @@ pub async fn start_factorio_and_plan_graph(
         &rcon_settings,
         None,
         instance_name,
-        None,
+        // None,
         false,
         true,
         FactorioStartCondition::DiscoveryComplete,
@@ -242,7 +243,7 @@ pub async fn start_factorio_and_plan_graph(
 pub fn execute_plan(
     _world: Arc<FactorioWorld>,
     _rcon: Arc<FactorioRcon>,
-    _websocket_server: Option<Addr<FactorioWebSocketServer>>,
+    // _websocket_server: Option<Addr<FactorioWebSocketServer>>,
     plan: TaskGraph,
 ) {
     // let queue = TaskQueue::<NodeIndex>::from_registry();

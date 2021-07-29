@@ -1,7 +1,7 @@
 [package]
 name = "factorio-bot"
 version = "0.1.0"
-description = "a cross-platform factorio bot"
+description = "a cross-platform factorio bot platform"
 authors = [ "Artur Hallmann <arturh@arturh.de>" ]
 license = "MIT"
 repository = ""
@@ -9,14 +9,22 @@ default-run = "factorio-bot"
 edition = "2018"
 build = "src/build.rs"
 
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+incremental = false
+opt-level = "s"
+
 [dependencies]
-serde_json = "1.0"
+serde_json = "^1.0"
+async-std = { version = "^1.9", features= ["attributes"] }
 factorio-bot-backend = { path = "../../backend/" }
-serde = { version = "1.0", features = [ "derive" ] }
-tauri = { version = "1.0.0-beta.5", features = ["api-all"] }
+serde = { version = "^1.0", features = [ "derive" ] }
+tauri = { version = "^1.0.0-beta.5", features = ["cli", "fs-read-binary-file", "fs-read-text-file", "fs-write-file", "shell-execute", "shell-open"] }
 
 [build-dependencies]
-tauri-build = { version = "1.0.0-beta.3" }
+tauri-build = { version = "^1.0.0-beta.3" }
 
 [features]
 custom-protocol = [ "tauri/custom-protocol" ]

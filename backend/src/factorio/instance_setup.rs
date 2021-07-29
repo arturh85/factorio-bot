@@ -93,7 +93,7 @@ pub async fn setup_factorio_instance(
             );
             for file in files {
                 let message = format!("extracting {}", &file);
-                bar.set_message(&message);
+                bar.set_message(message);
                 bar.tick();
                 // output_path is like Factorio_0.18.36\bin\x64\factorio.exe
                 let output_path = PathBuf::from(&file);

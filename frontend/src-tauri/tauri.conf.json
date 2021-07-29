@@ -35,7 +35,6 @@
         "frameworks": [],
         "minimumSystemVersion": "",
         "useBootstrapper": false,
-        "exceptionDomain": "",
         "signingIdentity": null,
         "entitlements": null
       },
@@ -49,7 +48,36 @@
       "active": false
     },
     "allowlist": {
-      "all": true
+      "all": false,
+      "shell": {
+        "execute": true,
+        "open": true
+      },
+      "fs": {
+        "readBinaryFile": true,
+        "readTextFile": true,
+        "writeFile": true
+      }
+    },
+    "cli": {
+      "description": "desc",
+      "longDescription": "long desc",
+      "beforeHelp": "before help",
+      "afterHelp": "after help",
+      "args": [
+        {
+          "name": "type",
+          "short": "t",
+          "takesValue": true,
+          "multiple": true,
+          "possibleValues": ["foo", "bar"]
+        }
+      ],
+      "subcommands": {
+        "subcommand-name": {
+
+        }
+      }
     },
     "windows": [
       {

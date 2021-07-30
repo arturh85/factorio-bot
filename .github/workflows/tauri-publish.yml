@@ -1,8 +1,8 @@
 name: "publish"
 on:
   push:
-    tags:
-      - v*
+    branches:
+      - 'releases/**'
 
 jobs:
   publish-tauri:
@@ -10,20 +10,11 @@ jobs:
       fail-fast: false
       matrix:
         platform: [macos-latest, ubuntu-latest, windows-latest]
-
     runs-on: ${{ matrix.platform }}
     steps:
-      - name: Extract tag name
-        id: tag
-        uses: actions/github-script@0.2.0
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            return context.payload.ref.replace(/\/refs\/tags\//, '');
-
-      - name: Checkout
+      - name: checkout code
         uses: actions/checkout@v2
-      - name: setup node
+      - name: setup NodeJS 12
         uses: actions/setup-node@v1
         with:
           node-version: 12
@@ -49,11 +40,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          tagName: factorio-bot-v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version
           releaseName: "Factorio Bot v__VERSION__"
           releaseBody: "See the assets to download this version and install."
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           iconPath: ../public/logo.png
           configPath: tauri.conf.json
           projectPath: ./frontend
-          npmScript: "tauri:build"

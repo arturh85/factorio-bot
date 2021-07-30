@@ -17,8 +17,8 @@ impl AppSettings {
     }
   }
 
-  pub fn save(app_settings: AppSettings) -> anyhow::Result<()> {
-    let file_contents = ::toml::to_string(&app_settings)?;
+  pub fn save(app_settings: &AppSettings) -> anyhow::Result<()> {
+    let file_contents = ::toml::to_string(app_settings)?;
     let filepath = app_settings_path();
     ::std::fs::write(filepath, file_contents)?;
     Ok(())

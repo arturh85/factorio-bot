@@ -79,12 +79,19 @@ pub struct RconSettings {
 }
 
 impl RconSettings {
-    pub fn new(settings: &Config, server_host: Option<&str>) -> RconSettings {
+    pub fn new_from_config(settings: &Config, server_host: Option<&str>) -> RconSettings {
         let rcon_port: u16 = settings.get("rcon_port").unwrap();
         let rcon_pass: String = settings.get("rcon_pass").unwrap();
         RconSettings {
             port: rcon_port,
             pass: rcon_pass,
+            host: server_host.map(|s| s.into()),
+        }
+    }
+    pub fn new(rcon_port: u16, rcon_pass: &str, server_host: Option<&str>) -> RconSettings {
+        RconSettings {
+            port: rcon_port,
+            pass: rcon_pass.into(),
             host: server_host.map(|s| s.into()),
         }
     }

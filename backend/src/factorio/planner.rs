@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs::read_to_string;
-use std::io::{Read, stdout, Write};
+use std::io::{stdout, Read, Write};
 use std::path::Path;
 use std::time::Instant;
 
@@ -10,7 +10,7 @@ use rlua::Lua;
 
 use crate::factorio::instance_setup::setup_factorio_instance;
 // use crate::factorio::plan_builder::create_lua_plan_builder;
-use crate::factorio::process_control::{FactorioStartCondition, start_factorio_server};
+use crate::factorio::process_control::{start_factorio_server, FactorioStartCondition};
 use crate::factorio::rcon::{FactorioRcon, RconSettings};
 use crate::factorio::task_graph::TaskGraph;
 use crate::factorio::world::FactorioWorld;
@@ -107,7 +107,7 @@ pub async fn start_factorio_and_plan_graph(
     let started = Instant::now();
     let instance_name = "plan";
     let workspace_path: String = settings.get("workspace_path")?;
-    let rcon_settings = RconSettings::new(&settings, None);
+    let rcon_settings = RconSettings::new_from_config(&settings, None);
     setup_factorio_instance(
         &workspace_path,
         &rcon_settings,

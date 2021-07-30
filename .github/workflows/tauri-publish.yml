@@ -1,8 +1,8 @@
 name: "publish"
 on:
   push:
-    branches:
-      - master
+    tags:
+      - v*
 
 jobs:
   publish-tauri:
@@ -13,11 +13,20 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v2
+      - name: Extract tag name
+        id: tag
+        uses: actions/github-script@0.2.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            return context.payload.ref.replace(/\/refs\/tags\//, '');
+
+      - name: Checkout
+        uses: actions/checkout@v2
       - name: setup node
         uses: actions/setup-node@v1
         with:
-          node-version: 12
+          node-version: 16
       - name: install Rust stable
         uses: actions-rs/toolchain@v1
         with:
@@ -36,7 +45,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: factorio-bot-v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version
           releaseName: "Factorio Bot v__VERSION__"
           releaseBody: "See the assets to download this version and install."
           releaseDraft: true

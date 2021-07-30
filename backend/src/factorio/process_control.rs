@@ -5,7 +5,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
-use std::thread::{JoinHandle, sleep};
+use std::thread::{sleep, JoinHandle};
 use std::time::{Duration, Instant};
 
 use async_std::task;
@@ -32,7 +32,7 @@ pub async fn start_factorio(
     silent: bool,
 ) -> anyhow::Result<(Option<Arc<FactorioWorld>>, Arc<FactorioRcon>)> {
     let mut world: Option<Arc<FactorioWorld>> = None;
-    let rcon_settings = RconSettings::new(settings, server_host);
+    let rcon_settings = RconSettings::new_from_config(settings, server_host);
     let workspace_path: String = settings.get("workspace_path")?;
     if server_host.is_none() {
         setup_factorio_instance(

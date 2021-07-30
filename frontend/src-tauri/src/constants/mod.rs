@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 pub const APP_SETTINGS_FILENAME: &str = "AppSettings.toml";
-// pub const WORKSPACE_FOLDERNAME: &str = "workspace";
+pub const WORKSPACE_FOLDERNAME: &str = "workspace";
 
 pub fn default_app_dir() -> PathBuf {
   tauri::api::path::local_data_dir()
@@ -11,4 +11,8 @@ pub fn default_app_dir() -> PathBuf {
 
 pub fn app_settings_path() -> PathBuf {
   default_app_dir().join(APP_SETTINGS_FILENAME)
+}
+
+pub fn app_workspace_path() -> PathBuf {
+  default_app_dir().join(WORKSPACE_FOLDERNAME)
 }

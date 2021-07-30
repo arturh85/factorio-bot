@@ -200,7 +200,7 @@ async fn main() -> anyhow::Result<()> {
     } else if let Some(matches) = matches.subcommand_matches("rcon") {
         let command = matches.value_of("command").unwrap();
         let server_host = matches.value_of("server");
-        let rcon_settings = RconSettings::new(&settings, server_host);
+        let rcon_settings = RconSettings::new_from_config(&settings, server_host);
         let rcon = FactorioRcon::new(&rcon_settings, false).await.unwrap();
         rcon.send(command).await.unwrap();
     } else if let Some(matches) = matches.subcommand_matches("roll-seed") {
@@ -226,14 +226,9 @@ async fn main() -> anyhow::Result<()> {
         let name = matches.value_of("name").unwrap().to_string();
         let map_exchange_string = matches.value_of("map").map(|s| s.to_string());
         let bot_count = matches.value_of("clients").unwrap().parse().unwrap();
-        let _graph = start_factorio_and_plan_graph(
-            settings,
-            map_exchange_string,
-            seed,
-            &name,
-            bot_count,
-        )
-        .await;
+        let _graph =
+            start_factorio_and_plan_graph(settings, map_exchange_string, seed, &name, bot_count)
+                .await;
     } else {
         eprintln!("Missing required Sub Command!");
         std::process::exit(1);

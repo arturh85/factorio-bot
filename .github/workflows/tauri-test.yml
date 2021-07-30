@@ -26,5 +26,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y webkit2gtk-4.0
-      - name: install app dependencies, run tests and build it
-        run: cd frontend; yarn && yarn test:ci && yarn tauri:build
+      - name: install app dependencies
+        run: cd frontend; yarn
+      - name: run linting & tests
+        run: cd frontend; yarn test:ci
+      - name: build setup
+        run: cd frontend; yarn tauri:build

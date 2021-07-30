@@ -38,10 +38,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y webkit2gtk-4.0
-      - name: install app dependencies and build it
-        # If using the Vue CLI plugin, tauri:build will be run automatically by tauri-action
-        run: cd frontend; yarn; yarn tauri:build; ls -l src-tauri/target; mv src-tauri/target deleteme; mv ../target src-tauri/
-      - uses: tauri-apps/tauri-action@v0
+      - name: install app dependencies
+        run: cd frontend; yarn
+      - name: build setup
+        run: cd frontend; yarn tauri:build
+      - name: move setup to correct folder
+        run: cd frontend; mv src-tauri/target deleteme; mv ../target src-tauri/
+      - name: create release & publish it
+        uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:

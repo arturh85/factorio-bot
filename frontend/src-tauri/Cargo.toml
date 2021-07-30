@@ -9,22 +9,20 @@ default-run = "factorio-bot"
 edition = "2018"
 build = "src/build.rs"
 
-[profile.release]
-panic = "abort"
-codegen-units = 1
-lto = true
-incremental = false
-opt-level = "s"
-
 [dependencies]
 serde_json = "^1.0"
+config = "^0.11"
 async-std = { version = "^1.9", features= ["attributes"] }
 factorio-bot-backend = { path = "../../backend/" }
 serde = { version = "^1.0", features = [ "derive" ] }
 tauri = { version = "^1.0.0-beta.5", features = ["cli", "fs-read-binary-file", "fs-read-text-file", "fs-write-file", "shell-execute", "shell-open"] }
+toml = "*"
+anyhow = "^1.0"
 
 [build-dependencies]
 tauri-build = { version = "^1.0.0-beta.3" }
+config_struct = "^0.5.0"
+serde = { version = "^1.0", features = [ "derive" ] }
 
 [features]
 custom-protocol = [ "tauri/custom-protocol" ]

@@ -42,6 +42,10 @@ export default defineComponent({
           // event.payload is the payload object
         })
         await invoke('my_custom_command')
+
+        const config = await invoke('load_config')
+        console.log('config:', config)
+        await invoke('save_config')
         /*
         // listen to the `click` event and get a function to remove the event listener
         // there's also a `once` function that subscribes to an event and automatically unsubscribes the listener on the first event

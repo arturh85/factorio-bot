@@ -1,0 +1,14 @@
+[workspace]
+members = [
+    "frontend/src-tauri",
+    "backend"
+]
+exclude = [
+]
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+incremental = false
+opt-level = "s"

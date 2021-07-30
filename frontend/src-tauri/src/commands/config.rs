@@ -1,12 +1,14 @@
 use crate::app_settings::AppSettings;
+// use tauri::State;
 
 #[tauri::command]
-pub async fn load_config() -> AppSettings {
-  // app_settings.inner().clone()
-  AppSettings::load().expect("aa")
+pub async fn load_config() -> Result<AppSettings, String> {
+  AppSettings::load().map_err(|e| String::from("failed to load config: ") + &e.to_string())
 }
+
 #[tauri::command]
-pub async fn save_config(_app_handle: tauri::AppHandle<tauri::Wry>) {
-  AppSettings::save(AppSettings::load().expect("config failed to load"))
-    .expect("config failed to save");
+pub async fn save_config(_app_handle: tauri::AppHandle<tauri::Wry>) -> Result<(), String> {
+  let settings =
+    AppSettings::load().map_err(|e| String::from("failed to load config: ") + &e.to_string())?;
+  AppSettings::save(settings).map_err(|e| String::from("failed to save config: ") + &e.to_string())
 }

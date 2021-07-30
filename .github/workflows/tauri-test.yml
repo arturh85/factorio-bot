@@ -12,10 +12,10 @@ jobs:
     steps:
       - name: checkout code
         uses: actions/checkout@v2
-      - name: setup NodeJS 13
+      - name: setup NodeJS 15
         uses: actions/setup-node@v1
         with:
-          node-version: 13
+          node-version: 15
       - name: install Rust stable
         uses: actions-rs/toolchain@v1
         with:

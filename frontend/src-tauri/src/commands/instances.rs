@@ -1,6 +1,6 @@
-use crate::app_settings::AppSettings;
 use crate::commands::ERR_TO_STRING;
 use crate::constants::app_workspace_path;
+use crate::settings::AppSettings;
 use async_std::sync::Mutex;
 use factorio_bot_backend::factorio::instance_setup::setup_factorio_instance;
 use factorio_bot_backend::factorio::rcon::RconSettings;

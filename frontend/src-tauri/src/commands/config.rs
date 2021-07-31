@@ -1,5 +1,5 @@
-use crate::app_settings::AppSettings;
 use crate::commands::ERR_TO_STRING;
+use crate::settings::AppSettings;
 use async_std::sync::Mutex;
 use tauri::State;
 

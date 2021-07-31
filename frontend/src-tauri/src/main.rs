@@ -2,12 +2,12 @@
   all(not(debug_assertions), target_os = "windows"),
   windows_subsystem = "windows"
 )]
-mod app_settings;
 mod commands;
 mod constants;
+mod settings;
 
-use crate::app_settings::AppSettings;
 use crate::constants::default_app_dir;
+use crate::settings::AppSettings;
 use async_std::sync::Mutex;
 
 #[async_std::main]

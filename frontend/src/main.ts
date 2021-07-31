@@ -1,7 +1,7 @@
 import { createApp } from 'vue';
 import { reactive } from 'vue';
 import router from './router';
-import App from './App.vue';
+import {createPinia} from "pinia";
 import AutoComplete from 'primevue/autocomplete';
 import Accordion from 'primevue/accordion';
 import AccordionTab from 'primevue/accordiontab';
@@ -74,7 +74,8 @@ import 'primeicons/primeicons.css';
 import 'prismjs/themes/prism-coy.css';
 import './assets/layout/layout.scss';
 import './assets/layout/flags/flags.css';
-// import store from './store'
+
+import App from './App.vue';
 
 router.beforeEach(function(to, from, next) {
     window.scrollTo(0, 0);
@@ -82,12 +83,13 @@ router.beforeEach(function(to, from, next) {
 });
 
 const app = createApp(App);
+const store = createPinia()
 
 app.config.globalProperties.$appState = reactive({ inputStyle: 'outlined' });
 app.config.globalProperties.$primevue = reactive({ ripple: true });
 
 app.use(ToastService);
-// app.use(store);
+app.use(store);
 app.use(router);
 
 app.directive('tooltip', Tooltip);

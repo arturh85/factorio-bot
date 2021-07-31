@@ -34,6 +34,7 @@
 import AppTopBar from './AppTopbar.vue'
 import AppMenu from './AppMenu.vue'
 import AppFooter from './AppFooter.vue'
+// import {invoke} from "@tauri-apps/api/tauri";
 
 export default {
   data() {
@@ -156,6 +157,10 @@ export default {
       // return (this.layoutColorMode === 'dark') ? "assets/layout/images/logo-white.svg" : "assets/layout/images/logo.svg";
       return 'logo.png'
     },
+  },
+  async created() {
+    // const config = await invoke('load_config')
+
   },
   beforeUpdate() {
     if (this.mobileMenuActive)

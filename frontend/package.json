@@ -7,12 +7,12 @@
     "build": "vue-cli-service build",
     "test:unit": "vue-cli-service test:unit",
     "lint": "vue-cli-service lint",
-    "cargo:clippy": "cd .. && cargo clippy",
     "cargo:test": "cd .. && cargo test",
+    "cargo:clippy": "cd .. && cargo clippy",
     "cargo:update": "cd .. && cargo update",
     "tauri:build": "vue-cli-service tauri:build",
     "tauri:serve": "vue-cli-service tauri:serve",
-    "test:ci": "npm run lint && npm run test:unit && cd .. && cargo test"
+    "test:ci": "npm run lint && npm run test:unit"
   },
   "dependencies": {
     "@tauri-apps/api": "^1.0.0-beta.5",

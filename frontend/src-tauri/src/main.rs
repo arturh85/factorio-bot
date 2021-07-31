@@ -8,6 +8,16 @@ mod constants;
 use crate::constants::default_app_dir;
 use async_std::sync::Mutex;
 use factorio_bot_backend::settings::AppSettings;
+use std::borrow::Cow;
+
+fn app_settings() -> anyhow::Result<AppSettings> {
+  let mut app_settings = AppSettings::load(constants::app_settings_path())?;
+  if app_settings.workspace_path == "" {
+    let s: String = constants::app_workspace_path().to_str().unwrap().into();
+    app_settings.workspace_path = Cow::from(s);
+  }
+  Ok(app_settings)
+}
 
 #[async_std::main]
 async fn main() -> anyhow::Result<()> {
@@ -20,9 +30,7 @@ async fn main() -> anyhow::Result<()> {
       crate::commands::save_settings,
       crate::commands::start_instances,
     ])
-    .manage(Mutex::new(AppSettings::load(
-      constants::app_settings_path(),
-    )?))
+    .manage(Mutex::new(app_settings()?))
     .run(tauri::generate_context!())
     .expect("failed to run app");
   Ok(())

@@ -1,5 +1,5 @@
 <template>
-	<div class="p-grid">
+	<div class="p-grid" v-if="settings">
 		<div class="p-col-12">
 			<div class="card">
 				<h5>Settings</h5>
@@ -11,7 +11,7 @@
         <div class="p-formgrid p-grid">
           <div class="p-field p-col">
             <div class="p-inputgroup">
-              <InputText placeholder="Workspace Folder" :value="workspacePath"/>
+              <InputText v-model="workspacePath"/>
               <Button label="Select"/>
             </div>
           </div>
@@ -30,7 +30,7 @@
         <h5>Number of Factorio Client Instances</h5>
         <div class="p-formgrid p-grid">
           <div class="p-field p-col">
-            <label for="client_count">Client Instances: {{ settings.client }}</label>
+            <label for="client_count">Client Instances: {{ settings.client_count }}</label>
             <Slider id="client_count" v-model="clientCount" :min="0" :max="16" />
           </div>
         </div>
@@ -40,19 +40,47 @@
 </template>
 
 <script>
-import {computed, defineComponent, ref} from "vue";
-import {useAppStore} from "@/store/appStore";
-import {useFactorioVersionsStore} from "@/store/factorioVersionsStore";
+import {computed, defineComponent, ref} from 'vue';
+import {useAppStore} from '@/store/appStore';
+import {useFactorioVersionsStore} from '@/store/factorioVersionsStore';
 
 export default defineComponent({
   setup(props, {emit}) {
     const appStore = useAppStore();
     const factorioVersionsStore = useFactorioVersionsStore();
     factorioVersionsStore.loadFactorioVersions()
-    const workspacePath = ref(appStore.settings)
-    const factorioVersion = ref('')
+
+    const workspacePath = computed({
+      get() {
+        return appStore.settings.workspace_path
+      },
+      set(val) {
+        appStore.updateWorkspacePath(val)
+      }
+    })
+
+    const factorioVersion = computed({
+      get() {
+        const v = appStore.settings.factorio_version
+        return {code: v, name: v}
+      },
+      set(val) {
+        appStore.updateFactorioVersion(val.code)
+      }
+    })
+    const clientCount = computed({
+      get() {
+        return appStore.settings.client_count
+      },
+      set(val) {
+        appStore.updateClientCount(val)
+      }
+    })
+
     return {
       factorioVersion,
+      workspacePath,
+      clientCount,
       settings: computed(() => appStore.getSettings),
       availableFactorioVersions: computed(() => factorioVersionsStore.getFactorioVersions.map(version => ({
         name: version, code: version

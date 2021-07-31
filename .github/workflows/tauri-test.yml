@@ -33,6 +33,8 @@ jobs:
         run: cd frontend; yarn lint
       - name: run javascript tests
         run: cd frontend; yarn test:unit
+      - name: build javascript
+        run: cd frontend; yarn build:web
       - name: run rust tests
         run: cd frontend; yarn cargo:test
       - name: build setup

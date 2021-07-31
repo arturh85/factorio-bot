@@ -16,6 +16,7 @@ export const useFactorioVersionsStore = defineStore({
     actions: {
         async loadFactorioVersions() {
             this.factorioVersions = await fetchFactorioVersions()
+            console.log('factorio versions', this.factorioVersions)
             return this.factorioVersions
         },
     }

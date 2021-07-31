@@ -33,7 +33,7 @@
 </template>
 
 <script>
-import ProcessControl from '@/components/ProcessControl'
+import ProcessControl from '@/components/ProcessControl.vue'
 import {computed, defineComponent} from "vue";
 import {useAppStore} from "@/store/appStore";
 

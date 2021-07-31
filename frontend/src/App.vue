@@ -35,7 +35,7 @@ import AppTopBar from './AppTopbar.vue'
 import AppMenu from './AppMenu.vue'
 import AppFooter from './AppFooter.vue'
 import {useAppStore} from "@/store/appStore";
-import AppConfig from "@/AppConfig";
+import AppConfig from "@/AppConfig.vue";
 
 export default {
   data() {

@@ -11,7 +11,7 @@
         <div class="p-formgrid p-grid">
           <div class="p-field p-col">
             <div class="p-inputgroup">
-              <InputText placeholder="Workspace Folder" :value="settings.asdf"/>
+              <InputText placeholder="Workspace Folder" :value="workspacePath"/>
               <Button label="Select"/>
             </div>
           </div>
@@ -22,7 +22,7 @@
         <div class="p-formgrid p-grid">
           <div class="p-field p-col">
             <label for="factorio_version">Version</label>
-            <Dropdown id="factorio_version" v-model="factorioVersion" :options="availableFactorioVersion" optionLabel="name" placeholder="Select One"></Dropdown>
+            <Dropdown id="factorio_version" v-model="factorioVersion" :options="availableFactorioVersions" optionLabel="name" placeholder="Select One"></Dropdown>
           </div>
         </div>
       </div>
@@ -40,7 +40,7 @@
 </template>
 
 <script>
-import {computed, defineComponent} from "vue";
+import {computed, defineComponent, ref} from "vue";
 import {useAppStore} from "@/store/appStore";
 import {useFactorioVersionsStore} from "@/store/factorioVersionsStore";
 
@@ -49,14 +49,14 @@ export default defineComponent({
     const appStore = useAppStore();
     const factorioVersionsStore = useFactorioVersionsStore();
     factorioVersionsStore.loadFactorioVersions()
+    const workspacePath = ref(appStore.settings)
+    const factorioVersion = ref('')
     return {
-      availableFactorioVersion: [
-        {name: 'Option 1', code: 'Option 1'},
-        {name: 'Option 2', code: 'Option 2'},
-        {name: 'Option 3', code: 'Option 3'}
-      ],
+      factorioVersion,
       settings: computed(() => appStore.getSettings),
-      factorioVersions: computed(() => factorioVersionsStore.getFactorioVersions),
+      availableFactorioVersions: computed(() => factorioVersionsStore.getFactorioVersions.map(version => ({
+        name: version, code: version
+      }))),
       onMenuToggle: function(event) {
         emit('menu-toggle', event);
       }

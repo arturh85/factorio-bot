@@ -87,7 +87,7 @@ const store = createPinia()
 
 
 app.config.globalProperties.$appState = reactive({ inputStyle: 'outlined' });
-app.config.globalProperties.$primevue = reactive({ ripple: true });
+app.config.globalProperties.$primevue = reactive({ ripple: true, config: {zIndex: {}} });
 
 app.use(ToastService);
 app.use(store);

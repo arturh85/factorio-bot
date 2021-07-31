@@ -5,14 +5,14 @@
   "scripts": {
     "serve": "vue-cli-service serve",
     "build": "vue-cli-service build",
-    "test:ci": "npm run lint && npm run test:unit && cd .. && cargo test",
     "test:unit": "vue-cli-service test:unit",
     "lint": "vue-cli-service lint",
+    "cargo:clippy": "cd .. && cargo clippy",
+    "cargo:test": "cd .. && cargo test",
+    "cargo:update": "cd .. && cargo update",
     "tauri:build": "vue-cli-service tauri:build",
     "tauri:serve": "vue-cli-service tauri:serve",
-    "cargo:test": "cd .. && cargo test",
-    "cargo:clippy": "cd .. && cargo clippy",
-    "cargo:update": "cd .. && cargo update"
+    "test:ci": "npm run lint && npm run test:unit && cd .. && cargo test"
   },
   "dependencies": {
     "@tauri-apps/api": "^1.0.0-beta.5",
@@ -21,13 +21,18 @@
     "vuex": "^4.0.0-0"
   },
   "devDependencies": {
+    "@types/jest": "^24.0.19",
+    "@typescript-eslint/eslint-plugin": "^4.18.0",
+    "@typescript-eslint/parser": "^4.18.0",
     "@vue/cli-plugin-babel": "~4.5.13",
     "@vue/cli-plugin-eslint": "~4.5.13",
     "@vue/cli-plugin-router": "~4.5.13",
+    "@vue/cli-plugin-typescript": "~4.5.0",
     "@vue/cli-plugin-unit-jest": "^4.5.13",
     "@vue/cli-plugin-vuex": "^4.5.13",
     "@vue/cli-service": "~4.5.13",
     "@vue/compiler-sfc": "^3.1.5",
+    "@vue/eslint-config-typescript": "^7.0.0",
     "@vue/test-utils": "1.2.2",
     "axios": "^0.21.1",
     "babel-core": "7.0.0-bridge.0",
@@ -42,6 +47,7 @@
     "primevue": "^3.6.0",
     "prismjs": "^1.24.1",
     "sass-loader": "^10",
+    "typescript": "~4.1.5",
     "vue": "3.0.2",
     "vue-cli-plugin-tauri": "~1.0.0-beta.3",
     "vue-router": "^4.0.0-0"
@@ -53,10 +59,11 @@
     },
     "extends": [
       "plugin:vue/vue3-essential",
-      "eslint:recommended"
+      "eslint:recommended",
+      "@vue/typescript"
     ],
     "parserOptions": {
-      "parser": "babel-eslint"
+      "parser": "@typescript-eslint/parser"
     },
     "rules": {}
   },

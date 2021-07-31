@@ -67,8 +67,6 @@ import Tree from 'primevue/tree';
 import TreeTable from 'primevue/treetable';
 import TriStateCheckbox from 'primevue/tristatecheckbox';
 
-import CodeHighlight from './AppCodeHighlight';
-
 import 'primevue/resources/themes/saga-blue/theme.css';
 import 'primevue/resources/primevue.min.css';
 import 'primeflex/primeflex.css';
@@ -87,7 +85,6 @@ const app = createApp(App);
 
 app.config.globalProperties.$appState = reactive({ inputStyle: 'outlined' });
 app.config.globalProperties.$primevue = reactive({ ripple: true });
-app.config.devtools = true;
 
 app.use(ToastService);
 app.use(store);
@@ -95,7 +92,6 @@ app.use(router);
 
 app.directive('tooltip', Tooltip);
 app.directive('ripple', Ripple);
-app.directive('code', CodeHighlight);
 
 app.component('Accordion', Accordion);
 app.component('AccordionTab', AccordionTab);

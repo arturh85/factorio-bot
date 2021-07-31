@@ -16,9 +16,9 @@ async fn main() -> anyhow::Result<()> {
   tauri::Builder::default()
     .invoke_handler(tauri::generate_handler![
       crate::commands::my_custom_command,
-      crate::commands::update_config,
-      crate::commands::load_config,
-      crate::commands::save_config,
+      crate::commands::update_settings,
+      crate::commands::load_settings,
+      crate::commands::save_settings,
       crate::commands::start_instances,
     ])
     .manage(Mutex::new(AppSettings::load()?))

@@ -11,7 +11,7 @@
         <div class="p-formgrid p-grid">
           <div class="p-field p-col">
             <div class="p-inputgroup">
-              <InputText placeholder="Workspace Folder"/>
+              <InputText placeholder="Workspace Folder" :value="settings.asdf"/>
               <Button label="Select"/>
             </div>
           </div>
@@ -30,34 +30,39 @@
         <h5>Number of Factorio Client Instances</h5>
         <div class="p-formgrid p-grid">
           <div class="p-field p-col">
-            <label for="client_count">Client Instances: {{ clientCount }}</label>
+            <label for="client_count">Client Instances: {{ settings.client }}</label>
             <Slider id="client_count" v-model="clientCount" :min="0" :max="16" />
           </div>
         </div>
       </div>
-
-
-
-
     </div>
 	</div>
 </template>
 
 <script>
-export default {
+import {computed, defineComponent} from "vue";
+import {useAppStore} from "@/store/appStore";
+import {useFactorioVersionsStore} from "@/store/factorioVersionsStore";
 
-  data() {
+export default defineComponent({
+  setup(props, {emit}) {
+    const appStore = useAppStore();
+    const factorioVersionsStore = useFactorioVersionsStore();
+    factorioVersionsStore.loadFactorioVersions()
     return {
       availableFactorioVersion: [
         {name: 'Option 1', code: 'Option 1'},
         {name: 'Option 2', code: 'Option 2'},
         {name: 'Option 3', code: 'Option 3'}
       ],
-      factorioVersion: null,
-      clientCount: 2,
+      settings: computed(() => appStore.getSettings),
+      factorioVersions: computed(() => factorioVersionsStore.getFactorioVersions),
+      onMenuToggle: function(event) {
+        emit('menu-toggle', event);
+      }
     }
   }
-}
+});
 </script>
 
 <style scoped>

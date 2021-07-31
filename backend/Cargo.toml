@@ -50,7 +50,14 @@ flate2 = "^1.0"
 tar = "^0.4"
 xz2 = "^0.1"
 zip = "^0.5"
+toml = "*"
+
 #
 #[target.'cfg(unix)'.dependencies]
 #
 #[target.'cfg(windows)'.dependencies]
+
+[build-dependencies]
+serde = { version = "^1.0", features = [ "derive" ] }
+config_struct = "^0.5.0"
+toml = "*"

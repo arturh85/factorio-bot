@@ -1,5 +1,5 @@
-mod config;
-pub use self::config::*;
+mod settings;
+pub use self::settings::*;
 
 mod instances;
 pub use instances::*;

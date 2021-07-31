@@ -21,10 +21,10 @@
       <router-view/>
     </div>
 
-<!--    <AppConfig :layoutMode="layoutMode"-->
-<!--               :layoutColorMode="layoutColorMode"-->
-<!--               @layout-change="onLayoutChange"-->
-<!--               @layout-color-change="onLayoutColorChange"/>-->
+    <!--    <AppConfig :layoutMode="layoutMode"-->
+    <!--               :layoutColorMode="layoutColorMode"-->
+    <!--               @layout-change="onLayoutChange"-->
+    <!--               @layout-color-change="onLayoutColorChange"/>-->
 
     <AppFooter/>
   </div>
@@ -34,7 +34,7 @@
 import AppTopBar from './AppTopbar.vue'
 import AppMenu from './AppMenu.vue'
 import AppFooter from './AppFooter.vue'
-// import {invoke} from "@tauri-apps/api/tauri";
+import {useAppStore} from "@/store/appStore";
 
 export default {
   data() {
@@ -159,8 +159,8 @@ export default {
     },
   },
   async created() {
-    // const config = await invoke('load_config')
-
+    const appStore = useAppStore()
+    await appStore.loadSettings()
   },
   beforeUpdate() {
     if (this.mobileMenuActive)

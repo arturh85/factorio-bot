@@ -4,8 +4,8 @@
 			<span class="pi pi-bars"></span>
 		</button>
 
-    <div class="layout-topbar-actions">
-      <span>Factorio 1.1</span> with <strong>2 Clients</strong> and <strong>1 Mod</strong>
+    <div class="layout-topbar-actions" v-if="settings">
+      <span>Factorio {{ settings.factorio_version }}</span> with <strong>{{settings.client_count}} Clients</strong>
       &nbsp;
       <ProcessControl />
     </div>
@@ -34,15 +34,21 @@
 
 <script>
 import ProcessControl from '@/components/ProcessControl'
+import {computed, defineComponent} from "vue";
+import {useAppStore} from "@/store/appStore";
 
-export default {
-    methods: {
-        onMenuToggle(event) {
-            this.$emit('menu-toggle', event);
-        }
-    },
+export default defineComponent({
   components: {
     'ProcessControl': ProcessControl
+  },
+  setup(props, {emit}) {
+    const appStore = useAppStore();
+    return {
+      settings: computed(() => appStore.getSettings),
+      onMenuToggle: function(event) {
+        emit('menu-toggle', event);
+      }
+    }
   }
-}
+});
 </script>

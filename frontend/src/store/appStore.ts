@@ -1,13 +1,24 @@
 import { defineStore } from 'pinia'
+import {AppSettings} from "@/models/types";
+import {invoke} from "@tauri-apps/api/tauri";
 
 export const useAppStore = defineStore({
   id: 'app',
   state: () => ({
-    foo: 1,
+    settings: null,
+
   }),
   getters: {
-    getFoo(): number {
-      return this.foo
+    getSettings(): AppSettings | null {
+      return this.settings
     },
   },
+  actions: {
+    async loadSettings() {
+      this.settings = await invoke('load_settings')
+    },
+    async saveSettings() {
+      await invoke('save_config', {settings: this.settings})
+    }
+  }
 })

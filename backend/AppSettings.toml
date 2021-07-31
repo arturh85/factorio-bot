@@ -1,0 +1,5 @@
+workspace_path = "" # defaults to local_data_dir/cargo_pkg_name
+factorio_version = "1.1.36" # defaults to latest
+client_count = 2
+rcon_port = 4321
+rcon_pass = "foobar"

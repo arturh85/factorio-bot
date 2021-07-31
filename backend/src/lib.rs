@@ -18,4 +18,5 @@ extern crate strum_macros;
 
 pub mod draw;
 pub mod factorio;
+pub mod settings;
 pub mod types;

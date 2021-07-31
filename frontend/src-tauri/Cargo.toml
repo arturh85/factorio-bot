@@ -7,7 +7,6 @@ license = "MIT"
 repository = ""
 default-run = "factorio-bot"
 edition = "2018"
-build = "src/build.rs"
 
 [dependencies]
 serde_json = "^1.0"

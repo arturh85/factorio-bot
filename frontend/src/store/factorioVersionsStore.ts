@@ -2,7 +2,7 @@ import {defineStore} from 'pinia'
 import {fetchFactorioVersions} from "@/services/factorio-versions";
 
 export const useFactorioVersionsStore = defineStore({
-    id: 'app',
+    id: 'factorioVersions',
     state: () => ({
         loading: false,
         factorioVersions: [""],

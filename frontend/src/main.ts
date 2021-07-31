@@ -85,6 +85,7 @@ router.beforeEach(function(to, from, next) {
 const app = createApp(App);
 const store = createPinia()
 
+
 app.config.globalProperties.$appState = reactive({ inputStyle: 'outlined' });
 app.config.globalProperties.$primevue = reactive({ ripple: true });
 

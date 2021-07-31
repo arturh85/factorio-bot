@@ -10,7 +10,11 @@ fn main() {
         serde_support: SerdeSupport::Yes,
         use_serde_derive_crate: false,
         generate_load_fns: false,
-        derived_traits: vec!["typescript_definitions::TypeScriptify".into()],
+        derived_traits: vec![
+            "Debug".into(),
+            "Clone".into(),
+            "typescript_definitions::TypeScriptify".into(),
+        ],
         ..StructOptions::default()
     };
     create_struct("AppSettings.toml", RUST_SETTINGS_PATH, &options)

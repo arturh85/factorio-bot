@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 
-#[derive(typescript_definitions::TypeScriptify, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, typescript_definitions::TypeScriptify, serde::Serialize, serde::Deserialize)]
 #[allow(non_camel_case_types)]
 pub struct AppSettings {
     pub client_count: i64,

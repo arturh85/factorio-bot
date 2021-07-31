@@ -4,11 +4,10 @@
 )]
 mod commands;
 mod constants;
-mod settings;
 
 use crate::constants::default_app_dir;
-use crate::settings::AppSettings;
 use async_std::sync::Mutex;
+use factorio_bot_backend::settings::AppSettings;
 
 #[async_std::main]
 async fn main() -> anyhow::Result<()> {
@@ -21,7 +20,9 @@ async fn main() -> anyhow::Result<()> {
       crate::commands::save_settings,
       crate::commands::start_instances,
     ])
-    .manage(Mutex::new(AppSettings::load()?))
+    .manage(Mutex::new(AppSettings::load(
+      constants::app_settings_path(),
+    )?))
     .run(tauri::generate_context!())
     .expect("failed to run app");
   Ok(())

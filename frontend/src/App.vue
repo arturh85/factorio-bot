@@ -21,10 +21,10 @@
       <router-view/>
     </div>
 
-    <!--    <AppConfig :layoutMode="layoutMode"-->
-    <!--               :layoutColorMode="layoutColorMode"-->
-    <!--               @layout-change="onLayoutChange"-->
-    <!--               @layout-color-change="onLayoutColorChange"/>-->
+        <AppConfig :layoutMode="layoutMode"
+                   :layoutColorMode="layoutColorMode"
+                   @layout-change="onLayoutChange"
+                   @layout-color-change="onLayoutColorChange"/>
 
     <AppFooter/>
   </div>
@@ -35,6 +35,7 @@ import AppTopBar from './AppTopbar.vue'
 import AppMenu from './AppMenu.vue'
 import AppFooter from './AppFooter.vue'
 import {useAppStore} from "@/store/appStore";
+import AppConfig from "@/AppConfig";
 
 export default {
   data() {
@@ -172,6 +173,7 @@ export default {
     'AppTopBar': AppTopBar,
     'AppMenu': AppMenu,
     'AppFooter': AppFooter,
+    'AppConfig': AppConfig,
   },
 }
 </script>

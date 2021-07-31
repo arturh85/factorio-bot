@@ -1,7 +1,7 @@
 import {defineConfig} from 'vite';
 import vue from '@vitejs/plugin-vue';
 import visualizer from 'rollup-plugin-visualizer'
-import * as path from "path";
+import * as path from 'path';
 
 export default defineConfig({
     plugins: [
@@ -15,18 +15,11 @@ export default defineConfig({
     ],
     resolve: {
         alias: {
-            '@': path.resolve(__dirname, './src'),
+            '@': path.resolve(__dirname, './src')
             // 'vue-i18n': 'vue-i18n/dist/vue-i18n.cjs.js'
-        },
+        }
     },
     define: {
         'process.env': {}
-    },
-    build: {
-        rollupOptions: {
-            output: {
-                inlineDynamicImports: true
-            }
-        }
     }
 });

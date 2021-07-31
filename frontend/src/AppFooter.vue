@@ -1,7 +1,7 @@
 <template>
 	<div class="layout-footer">
     <span class="footer-text" style="margin-right: 5px"><a target="_blank" href="https://github.com/arturh85/factorio-bot-tauri/">Factorio Bot</a></span>
-		<img src="logo.png" alt="factorio-bot" width="20"/>
+		<img src="./assets/logo.png" alt="factorio-bot" width="20"/>
     <span class="footer-text" style="margin-left: 5px">
       Build with
       <a target="_blank" href="https://tauri.studio/">Tauri</a>,
@@ -14,7 +14,7 @@
 
 <script>
 	export default {
-		name: "AppFooter"
+		name: 'AppFooter'
 	}
 </script>
 

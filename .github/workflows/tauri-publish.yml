@@ -12,30 +12,40 @@ jobs:
         platform: [macos-latest, ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.platform }}
     steps:
-      - name: checkout code
+      - name: 🔥 checkout code
         uses: actions/checkout@v2
-      - name: setup NodeJS 15
+      - name: ⚡ install NodeJS 15
         uses: actions/setup-node@v1
         with:
           node-version: 15
-      - name: install Rust stable
+      - name: ⚡ install Rust stable
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
-      - name: install tauri bundler
+      - name: ⚡ install tauri bundler
         run: cargo install tauri-bundler --force
-      - name: install webkit2gtk (ubuntu only)
+      - name: ⚡ install webkit2gtk (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y webkit2gtk-4.0
-      - name: install app dependencies
+
+      - name: ⚡ install app dependencies
         run: cd frontend; yarn
-      - name: build setup
+      - name: ✅ lint javascript code
+        run: cd frontend; yarn lint
+      - name: ✅ run javascript tests
+        run: cd frontend; yarn test:unit
+      - name: 🚧 build javascript
+        run: cd frontend; yarn build
+      - name: ✅ run rust tests
+        run: cd frontend; yarn cargo:test
+      - name: 🚧 build setup
         run: cd frontend; yarn tauri:build
-      - name: move setup to correct folder
-        run: cd frontend; mv src-tauri/target deleteme; mv ../target src-tauri/
-      - name: create release & publish it
+
+      - name: 🚚 move build output to correct folder
+        run: cd frontend; mv ../target src-tauri/
+      - name: 📦️ create release & publish it
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

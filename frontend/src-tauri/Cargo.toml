@@ -15,7 +15,7 @@ typescript-definitions = { git = "https://github.com/ufoscout/typescript-definit
 async-std = { version = "^1.9", features= ["attributes"] }
 factorio-bot-backend = { path = "../../backend/" }
 serde = { version = "^1.0", features = [ "derive" ] }
-tauri = { version = "^1.0.0-beta.5", features = ["cli", "fs-read-binary-file", "fs-read-text-file", "fs-write-file", "shell-execute", "shell-open"] }
+tauri = { version = "^1.0.0-beta.5", features = ["cli", "dialog-all", "fs-read-binary-file", "fs-read-dir", "fs-read-text-file", "fs-write-file", "shell-execute", "shell-open"] }
 toml = "*"
 anyhow = "^1.0"
 

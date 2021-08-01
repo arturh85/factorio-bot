@@ -25,6 +25,13 @@ export const useAppStore = defineStore({
       } else {
         return null;
       }
+    },
+    getClientCount(): string | null {
+      if (this.settings) {
+        return this.settings.client_count
+      } else {
+        return null;
+      }
     }
   },
   actions: {

@@ -4175,6 +4175,7 @@ dependencies = [
  "os_pipe",
  "percent-encoding",
  "rand 0.8.4",
+ "raw-window-handle",
  "rfd",
  "semver 1.0.4",
  "serde 1.0.127",

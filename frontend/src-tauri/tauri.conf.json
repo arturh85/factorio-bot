@@ -56,7 +56,13 @@
       "fs": {
         "readBinaryFile": true,
         "readTextFile": true,
-        "writeFile": true
+        "writeFile": true,
+        "readDir": true
+      },
+      "dialog": {
+        "all": true,
+        "open": true,
+        "save": true
       }
     },
     "cli": {

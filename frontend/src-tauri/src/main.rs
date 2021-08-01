@@ -5,7 +5,6 @@
 mod commands;
 mod constants;
 
-use crate::constants::default_app_dir;
 use async_std::sync::Mutex;
 use factorio_bot_backend::settings::AppSettings;
 use std::borrow::Cow;
@@ -21,7 +20,8 @@ fn app_settings() -> anyhow::Result<AppSettings> {
 
 #[async_std::main]
 async fn main() -> anyhow::Result<()> {
-  std::fs::create_dir_all(default_app_dir())?;
+  std::fs::create_dir_all(constants::default_app_dir())?;
+  std::fs::create_dir_all(constants::app_workspace_path())?;
   tauri::Builder::default()
     .invoke_handler(tauri::generate_handler![
       crate::commands::my_custom_command,

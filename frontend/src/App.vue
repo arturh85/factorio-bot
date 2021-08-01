@@ -7,7 +7,7 @@
            v-show="isSidebarVisible()">
         <div class="layout-logo">
           <router-link to="/">
-            <img alt="Logo" :src="logo" :width="100"/>
+            <img alt="Logo" src="./assets/logo.png" :width="100"/>
             <h2>Factorio Bot Platform</h2>
           </router-link>
         </div>
@@ -34,8 +34,8 @@
 import AppTopBar from './AppTopbar.vue'
 import AppMenu from './AppMenu.vue'
 import AppFooter from './AppFooter.vue'
-import {useAppStore} from "@/store/appStore";
-import AppConfig from "@/AppConfig.vue";
+import {useAppStore} from '@/store/appStore';
+import AppConfig from '@/AppConfig.vue';
 
 export default {
   data() {
@@ -54,15 +54,15 @@ export default {
         {label: 'Map', icon: 'pi pi-fw pi-map-marker', to: '/workspace'},
         {label: 'Instances', icon: 'pi pi-fw pi-circle-off', to: '/instances'},
         {label: 'REST API Docs', icon: 'pi pi-fw pi-question-circle', to: '/restApiDocss'},
-        {label: 'LUA API Docs', icon: 'pi pi-fw pi-question-circle', to: '/luaApiDocss'},
-      ],
+        {label: 'LUA API Docs', icon: 'pi pi-fw pi-question-circle', to: '/luaApiDocss'}
+      ]
     }
   },
   watch: {
     $route() {
       this.menuActive = false
       this.$toast.removeAllGroups()
-    },
+    }
   },
   methods: {
     onWrapperClick() {
@@ -134,7 +134,7 @@ export default {
       } else {
         return true
       }
-    },
+    }
   },
   computed: {
     containerClass() {
@@ -145,22 +145,23 @@ export default {
         'layout-overlay-sidebar-active': this.overlayMenuActive && this.layoutMode === 'overlay',
         'layout-mobile-sidebar-active': this.mobileMenuActive,
         'p-input-filled': this.$appState.inputStyle === 'filled',
-        'p-ripple-disabled': this.$primevue.ripple === false,
+        'p-ripple-disabled': this.$primevue.ripple === false
       }]
     },
     sidebarClass() {
       return ['layout-sidebar', {
         'layout-sidebar-dark': this.layoutColorMode === 'dark',
-        'layout-sidebar-light': this.layoutColorMode === 'light',
+        'layout-sidebar-light': this.layoutColorMode === 'light'
       }]
     },
     logo() {
       // return (this.layoutColorMode === 'dark') ? "assets/layout/images/logo-white.svg" : "assets/layout/images/logo.svg";
-      return 'logo.png'
-    },
+      return 'assets/logo.png'
+    }
   },
   async created() {
     const appStore = useAppStore()
+    await appStore.maximizeWindow()
     await appStore.loadSettings()
   },
   beforeUpdate() {
@@ -173,8 +174,8 @@ export default {
     'AppTopBar': AppTopBar,
     'AppMenu': AppMenu,
     'AppFooter': AppFooter,
-    'AppConfig': AppConfig,
-  },
+    'AppConfig': AppConfig
+  }
 }
 </script>
 

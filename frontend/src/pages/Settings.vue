@@ -1,46 +1,4 @@
-<template>
-  <div class="p-grid" v-if="settings">
-    <div class="p-col-12">
-      <div class="card">
-        <h5>Settings</h5>
-        <p>Use this page to start from scratch and place your custom content.</p>
-      </div>
-
-      <div class="card p-fluid">
-        <h5>Workspace Folder</h5>
-        <div class="p-formgrid p-grid">
-          <div class="p-field p-col">
-            <div class="p-inputgroup">
-              <InputText v-model="workspacePath" :class="isWorkspacePathValid ? '' : 'p-invalid'" />
-              <Button label="Select" @click="selectWorkspacePath()"/>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div class="card p-fluid">
-        <h5>Factorio Version</h5>
-        <div class="p-formgrid p-grid">
-          <div class="p-field p-col">
-            <label for="factorio_version">Version</label>
-            <Dropdown id="factorio_version" v-model="factorioVersion" :options="availableFactorioVersions"
-                      optionLabel="name" placeholder="Select One"></Dropdown>
-          </div>
-        </div>
-      </div>
-      <div class="card p-fluid">
-        <h5>Number of Factorio Client Instances</h5>
-        <div class="p-formgrid p-grid">
-          <div class="p-field p-col">
-            <label for="client_count">Client Instances: {{ clientCount }}</label>
-            <Slider id="client_count" v-model="clientCount" :min="0" :max="16"/>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-</template>
-
-<script lang="ts">
+<script>
 import {computed, defineComponent, watch, ref} from 'vue';
 import {useAppStore} from '@/store/appStore';
 import {useFactorioVersionsStore} from '@/store/factorioVersionsStore';
@@ -79,26 +37,39 @@ export default defineComponent({
         appStore.updateClientCount(val)
       }
     })
+    const mapExchangeString = computed({
+      get() {
+        return appStore.getMapExchangeString
+      },
+      set(val) {
+        appStore.updateMapExchangeString(val)
+      }
+    })
+    const seed = computed({
+      get() {
+        return appStore.getSeed
+      },
+      set(val) {
+        appStore.updateSeed(val)
+      }
+    })
 
     async function selectWorkspacePath() {
-      const new_path = await open({
+      const newPath = await open({
         defaultPath: isWorkspacePathValid.value ? appStore.settings.workspace_path : null,
         directory: true,
         multiple: false
       })
-      if (new_path) {
-        await appStore.updateWorkspacePath(new_path)
+      if (newPath) {
+        await appStore.updateWorkspacePath(newPath)
       }
     }
 
     async function testIsWorkspacePathValid(path) {
-      console.log('isWorkspacePathValid', path)
       try {
-        const result = await readDir(path);
-        console.log('RESULT', result)
+        await readDir(path);
         return true
       } catch(err) {
-        console.log('err', err)
         return false
       }
     }
@@ -107,13 +78,14 @@ export default defineComponent({
 
     if (appStore.settings) {
       watch(() => appStore.getWorkspacePath, async () => {
-        console.log('watch called')
         isWorkspacePathValid.value = await testIsWorkspacePathValid(appStore.settings.workspace_path)
       })
       testIsWorkspacePathValid(appStore.settings.workspace_path).then(valid => isWorkspacePathValid.value = valid)
     }
 
     return {
+      mapExchangeString,
+      seed,
       selectWorkspacePath,
       isWorkspacePathValid,
       factorioVersion,
@@ -130,6 +102,69 @@ export default defineComponent({
   }
 });
 </script>
+
+<template>
+  <div class="p-grid" v-if="settings">
+    <div class="p-col-12">
+      <div class="card">
+        <h5>Settings</h5>
+        <p>Use this page to start from scratch and place your custom content.</p>
+      </div>
+
+      <div class="card p-fluid">
+        <h5>Map Exchange String</h5>
+        <div class="p-formgrid p-grid">
+          <div class="p-field p-col">
+            <div class="p-inputgroup">
+              <InputText v-model="mapExchangeString" />
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="card p-fluid">
+        <h5>Seed</h5>
+        <div class="p-formgrid p-grid">
+          <div class="p-field p-col">
+            <div class="p-inputgroup">
+              <InputText v-model="seed" />
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="card p-fluid">
+        <h5>Number of Factorio Client Instances</h5>
+        <div class="p-formgrid p-grid">
+          <div class="p-field p-col">
+            <label for="client_count">Client Instances: {{ clientCount }}</label>
+            <Slider id="client_count" v-model="clientCount" :min="0" :max="16"/>
+          </div>
+        </div>
+      </div>
+      <div class="card p-fluid">
+        <h5>Factorio Version</h5>
+        <div class="p-formgrid p-grid">
+          <div class="p-field p-col">
+            <label for="factorio_version">Version</label>
+            <Dropdown id="factorio_version" v-model="factorioVersion" :options="availableFactorioVersions"
+                      optionLabel="name" placeholder="Select One"></Dropdown>
+          </div>
+        </div>
+      </div>
+
+      <div class="card p-fluid">
+        <h5>Workspace Folder</h5>
+        <div class="p-formgrid p-grid">
+          <div class="p-field p-col">
+            <div class="p-inputgroup">
+              <InputText v-model="workspacePath" :class="isWorkspacePathValid ? '' : 'p-invalid'" />
+              <Button label="Select" @click="selectWorkspacePath()"/>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
 
 <style scoped>
 

@@ -9,7 +9,6 @@ use std::thread::{sleep, JoinHandle};
 use std::time::{Duration, Instant};
 
 use async_std::task;
-use config::Config;
 use paris::Logger;
 // use crate::factorio::ws::FactorioWebSocketServer;
 
@@ -17,11 +16,12 @@ use crate::factorio::instance_setup::setup_factorio_instance;
 use crate::factorio::output_reader::read_output;
 use crate::factorio::rcon::{FactorioRcon, RconSettings};
 use crate::factorio::world::FactorioWorld;
+use crate::settings::AppSettings;
 use std::sync::mpsc::channel;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn start_factorio(
-    settings: &Config,
+    settings: &AppSettings,
     server_host: Option<&str>,
     client_count: u8,
     recreate: bool,
@@ -32,11 +32,11 @@ pub async fn start_factorio(
     silent: bool,
 ) -> anyhow::Result<(Option<Arc<FactorioWorld>>, Arc<FactorioRcon>)> {
     let mut world: Option<Arc<FactorioWorld>> = None;
-    let rcon_settings = RconSettings::new_from_config(settings, server_host);
-    let workspace_path: String = settings.get("workspace_path")?;
+    let rcon_settings =
+        RconSettings::new(settings.rcon_port as u16, &settings.rcon_pass, server_host);
     if server_host.is_none() {
         setup_factorio_instance(
-            &workspace_path,
+            &settings.workspace_path,
             &rcon_settings,
             None,
             "server",
@@ -52,7 +52,7 @@ pub async fn start_factorio(
     for instance_number in 0..client_count {
         let instance_name = format!("client{}", instance_number + 1);
         if let Err(err) = setup_factorio_instance(
-            &workspace_path,
+            &settings.workspace_path,
             &rcon_settings,
             None,
             &instance_name,
@@ -73,7 +73,7 @@ pub async fn start_factorio(
         None => {
             let started = Instant::now();
             let (_world, rcon, child) = start_factorio_server(
-                &workspace_path,
+                &settings.workspace_path,
                 &rcon_settings,
                 None,
                 "server",
@@ -287,13 +287,13 @@ pub fn report_child_death(mut child: Child) {
 }
 
 pub async fn start_factorio_client(
-    settings: &Config,
+    settings: &AppSettings,
     instance_name: String,
     server_host: Option<&str>,
     write_logs: bool,
     silent: bool,
 ) -> anyhow::Result<JoinHandle<ExitStatus>> {
-    let workspace_path: String = settings.get("workspace_path")?;
+    let workspace_path: String = settings.workspace_path.to_string();
     let workspace_path = Path::new(&workspace_path);
     if !workspace_path.exists() {
         error!(

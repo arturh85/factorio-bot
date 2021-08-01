@@ -26,9 +26,23 @@ export const useAppStore = defineStore({
         return null;
       }
     },
-    getClientCount(): string | null {
+    getClientCount(): number | null {
       if (this.settings) {
         return this.settings.client_count
+      } else {
+        return null;
+      }
+    },
+    getMapExchangeString(): string | null {
+      if (this.settings) {
+        return this.settings.map_exchange_string
+      } else {
+        return null;
+      }
+    },
+    getSeed(): string | null {
+      if (this.settings) {
+        return this.settings.seed
       } else {
         return null;
       }
@@ -37,6 +51,9 @@ export const useAppStore = defineStore({
   actions: {
     async loadSettings() {
       this.settings = await invoke('load_settings')
+    },
+    async maximizeWindow() {
+      this.settings = await invoke('maximize_window')
     },
     async _updateSettings() {
       await invoke('update_settings', {settings: this.settings})
@@ -56,6 +73,18 @@ export const useAppStore = defineStore({
     async updateClientCount(clientCount: number) {
       if (this.settings !== null) {
         this.settings.client_count = clientCount
+        await this._updateSettings()
+      }
+    },
+    async updateMapExchangeString(maxExchangeString: string) {
+      if (this.settings !== null) {
+        this.settings.map_exchange_string = maxExchangeString
+        await this._updateSettings()
+      }
+    },
+    async updateSeed(seed: string) {
+      if (this.settings !== null) {
+        this.settings.seed = seed
         await this._updateSettings()
       }
     }

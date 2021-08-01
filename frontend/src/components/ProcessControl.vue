@@ -1,12 +1,19 @@
 <template>
-  <SplitButton label="Start" icon="pi pi-check" :model="items" class="p-button-success p-mr-2 p-mb-2"></SplitButton>
+  <SplitButton label="Start" icon="pi pi-check" :model="items" class="p-button-success p-mr-2 p-mb-2" @click="startInstances()"></SplitButton>
 </template>
 
 <script>
-export default {
+import {defineComponent} from 'vue';
+import {useInstanceStore} from '@/store/instanceStore';
 
-  data() {
+export default defineComponent({
+  setup() {
+    const instanceStore = useInstanceStore()
+
     return {
+      startInstances: () => {
+        instanceStore.startInstances()
+      },
       items: [
         {
           label: 'Update',
@@ -22,11 +29,11 @@ export default {
         {
           label: 'Home',
           icon: 'pi pi-home'
-        },
+        }
       ]
     }
   }
-}
+});
 </script>
 
 <style scoped>

@@ -4,6 +4,9 @@ pub use self::settings::*;
 mod instances;
 pub use instances::*;
 
+mod window;
+pub use window::*;
+
 mod test;
 pub use test::*;
 

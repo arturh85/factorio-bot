@@ -45,6 +45,8 @@ jobs:
 
       - name: 🚚 move build output to correct folder
         run: cd frontend; mv ../target src-tauri/
+      - name: 🚚 move version number from Cargo.toml to package.json
+        run: cd frontend; yarn version:update-from-cargo
       - name: 📦️ create release & publish it
         uses: tauri-apps/tauri-action@v0
         env:

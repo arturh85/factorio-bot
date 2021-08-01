@@ -1,38 +1,28 @@
-<template>
-  <div class="p-grid p-fluid dashboard">
-    <div class="p-col-12 p-lg-4">
-      <div class="card summary">
-        <span class="title">Instances</span>
-        <span class="detail">Number of configured instances</span>
-        <span class="count visitors" @click="sendTestMessage()">2</span>
-      </div>
-    </div>
-    <div class="p-col-12 p-lg-4">
-      <div class="card summary">
-        <span class="title">Sales</span>
-        <span class="detail">Number of purchases</span>
-        <span class="count purchases">534</span>
-      </div>
-    </div>
-    <div class="p-col-12 p-lg-4">
-      <div class="card summary">
-        <span class="title">Revenue</span>
-        <span class="detail">Income for today</span>
-        <span class="count revenue">$3,200</span>
-      </div>
-    </div>
-  </div>
-</template>
-
 <script>
-import { defineComponent } from 'vue';
-import { listen } from '@tauri-apps/api/event';
+import {defineComponent, ref, watch} from 'vue';
+import {listen} from '@tauri-apps/api/event';
+import {invoke} from '@tauri-apps/api/tauri';
+import {useAppStore} from '@/store/appStore';
 
-import { invoke } from '@tauri-apps/api/tauri';
 export default defineComponent({
   components: {},
   setup() {
+    const appStore = useAppStore()
+    const clients = ref([]);
+    watch(appStore.getClientCount, () => {
+      console.log('client count changed');
+      console.log(appStore.settings.client_count, typeof appStore.settings.client_count)
+      let newClients = [];
+      for (let i=0; i<appStore.settings.client_count; i++) {
+        newClients.push({
+          name: 'client' + (i+1),
+          status: 'not_initialized'
+        })
+      }
+      clients.value = newClients
+    })
     return {
+      clients,
       sendTestMessage: async () => {
         console.log('listen to the_event');
         await listen('the_event', (event) => {
@@ -57,6 +47,25 @@ export default defineComponent({
          */
       }
     };
-  },
+  }
 });
 </script>
+
+<template>
+  <div class="p-grid p-fluid dashboard">
+    <div class="p-col-12 p-lg-4">
+      <div class="card summary">
+        <span class="title">Instances</span>
+        <span class="detail">Number of configured instances</span>
+        <span class="count visitors" @click="sendTestMessage()">2</span>
+      </div>
+    </div>
+    <div class="p-col-12 p-lg-4" v-for="client in clients" :key="client.name">
+      <div class="card summary">
+        <span class="title">{{ client.name }}</span>
+        <span class="detail">{{client.status }}</span>
+      </div>
+    </div>
+  </div>
+</template>
+

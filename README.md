@@ -6,59 +6,69 @@ Factorio Bot
 
 
 This project tries to be a bot platform for the game
-[Factorio](https://www.factorio.com) (version 1.0) inspired by [factorio-bot](https://github.com/Windfisch/factorio-bot/)
+[Factorio](https://www.factorio.com) inspired by [factorio-bot](https://github.com/Windfisch/factorio-bot/)
 
-Features:
-- extract factorio .zip/tar.xz and symlink bridge mod
-- start Factorio server and/or one or multiple clients (unrestricted) 
-- read factorio recipes/entity prototypes/item prototypes/graphics
-- read map contents by chunk for leaflet based Map View
+Rewrite Milestones:
+- [x] allow settings to be configured via GUI
+- [ ] download selected factorio version for current platform
+- [ ] extract factorio archive for server and clients
+- [ ] start factorio instances concurrently
+- [ ] lua editor with syntax highlighting
+- [ ] lua script execution
+
+Planned Features:
+- [ ] extract factorio .zip/tar.xz and symlink bridge mod
+- [ ] start Factorio server and/or one or multiple clients (unrestricted) 
+- [ ] read factorio recipes/entity prototypes/item prototypes/graphics
+- [ ] read map contents by chunk for leaflet based Map View
 - Build Graphs of:
-  - Entity Connections with distance based weights
-  - Flow Connections with flow rate per second for each belt side/resource
-  - Bot Task Dependencies with time estimate based weights 
-- Use whatever mods you want
+  - [ ] Entity Connections with distance based weights
+  - [ ] Flow Connections with flow rate per second for each belt side/resource
+  - [ ] Bot Task Dependencies with time estimate based weights 
+- [ ] Use whatever mods you want
 - REST Interface with:
-  - retrieve all recipes/technologies/prototypes
-  - read bot inventories
-  - use bot to:
-    - walk somewhere
-    - mine something
-    - craft something
-    - place entities
-    - place blueprints (even partly)
-    - revive ghost entities
-  - find valid placement options for:
-    - offshore pumps
-    - miners with specific ore below
-    - blueprints (todo)
-  - A* based belt/pipe routing from point a to b with automatic underground usage
-  - parse blueprint strings into width/height + entity list
-  - transfer items between bots
-  - read entity inventories
-  - start research
-  - find entities/tiles in circle / rect
-  - insert to inventory / remove from inventory
-  - cheating variants of above methods for quick tests
+  - [ ] retrieve all recipes/technologies/prototypes
+  - [ ] read bot inventories
+  - [ ] use bot to:
+    - [ ] walk somewhere
+    - [ ] mine something
+    - [ ] craft something
+    - [ ] place entities
+    - [ ] place blueprints (even partly)
+    - [ ] revive ghost entities
+  - [ ] find valid placement options for:
+    - [ ] offshore pumps
+    - [ ] miners with specific ore below
+    - [ ] blueprints (todo)
+  - [ ] A* based belt/pipe routing from point a to b with automatic underground usage
+  - [ ] parse blueprint strings into width/height + entity list
+  - [ ] transfer items between bots
+  - [ ] read entity inventories
+  - [ ] start research
+  - [ ] find entities/tiles in circle / rect
+  - [ ] insert to inventory / remove from inventory
+  - [ ] cheating variants of above methods for quick tests
 - WebSocket based Events when:
-  - bot changed position
-  - bot changed inventory
-  - research finished
-  - entity attacked by biters (only an idea)
+  - [ ] bot changed position
+  - [ ] bot changed inventory
+  - [ ] research finished
+  - [ ] entity attacked by biters (only an idea)
 - Typescript based Bot Manager which can:
-  - Build starter base with iron/copper/stone/coal burner-mining-drills and stone-furnaces
-  - Start automation research & manually craft 10 `automation-science` to insert into `lab`
-  - Start logistics research & build assembler to automatically craft the rest
-- should work on Win/Mac/Linux, not tested on Mac
-- MIT licenced
+  - [ ] Build starter base with iron/copper/stone/coal burner-mining-drills and stone-furnaces
+  - [ ] Start automation research & manually craft 10 `automation-science` to insert into `lab`
+  - [ ] Start logistics research & build assembler to automatically craft the rest
+- [x] should work on Win/Mac/Linux, not tested on Mac
+- [x] MIT licenced
 
 ## Youtube Videos
 
-- [Any% World Record gets automation in 7:33](https://www.youtube.com/watch?v=rHvaZMdjnLE&t=455) 
+- Reference: [Any% World Record gets automation in 7:33](https://www.youtube.com/watch?v=rHvaZMdjnLE&t=455) 
 
 - [Factorio Bot 0.1.2: Research logistics with 4 Bots in 15:51](https://youtu.be/iFhcyjfcjx8) 
 - [Factorio Bot 0.1.1: Research automation with 1 Bot in 8:57](https://youtu.be/1vbWWiSV6Sw) 
 - [Factorio Bot 0.1.0: Research automation with 1 Bot in 12:33](https://youtu.be/6KXYuVDRZ-I) 
+
+# Technologies used
 
 ## Vite.js
 [Vite.js](https://vitejs.dev/) is a new modern bundler for javascript which is blazing fast and includes many sensible defaults.
@@ -69,8 +79,8 @@ Features:
 ## Vue 3
 [Vue.js](https://vuejs.org/) is an incremental frontend framework which is an absolute joy to work with. It has seen very impressive improvements in version 3 including Composition Api, script setup, dynamic css binding and ... .
 
-## Vuetify 3
-[Vuetify](https://vuetifyjs.com/) is arguably the best component library for Vue 3 and is currently in alpha stage but will soon be ready for production. Lots of premade components will make your job as application developer easier and more fun.
+## PrimeVue
+[PrimeVue](https://www.primefaces.org/primevue/) is the a component library for Vue 3. Lots of premade components will make your job as application developer easier and more fun.
 
 ### Bonus: Vue Global Api
 [Vue Global Api](https://github.com/antfu/vue-global-api) globally registers commonly used composition api functions such as `ref`, `reactive` and ... . makes your `script setup` sections cleaner.

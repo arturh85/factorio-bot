@@ -7,7 +7,8 @@
     "distDir": "../dist",
     "devPath": "http://localhost:8080",
     "beforeDevCommand": "",
-    "beforeBuildCommand": ""
+    "beforeBuildCommand": "",
+    "withGlobalTauri": false
   },
   "tauri": {
     "bundle": {
@@ -65,33 +66,14 @@
         "save": true
       }
     },
-    "cli": {
-      "description": "desc",
-      "longDescription": "long desc",
-      "beforeHelp": "before help",
-      "afterHelp": "after help",
-      "args": [
-        {
-          "name": "type",
-          "short": "t",
-          "takesValue": true,
-          "multiple": true,
-          "possibleValues": ["foo", "bar"]
-        }
-      ],
-      "subcommands": {
-        "subcommand-name": {
-
-        }
-      }
-    },
     "windows": [
       {
         "title": "FactorioBot",
         "width": 800,
         "height": 600,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "maximized": true
       }
     ],
     "security": {

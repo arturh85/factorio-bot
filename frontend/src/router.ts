@@ -5,28 +5,48 @@ const routes = [
     {
         path: '/',
         name: 'dashboard',
-        component: Dashboard,
+        component: Dashboard
     },
     {
         path: '/settings',
         name: 'settings',
-        component: () => import('./pages/Settings.vue'),
+        component: () => import('./pages/Settings.vue')
     },
     {
         path: '/empty',
         name: 'empty',
-        component: () => import('./pages/EmptyPage.vue'),
+        component: () => import('./pages/EmptyPage.vue')
+    },
+    {
+        path: '/factorioMods',
+        name: 'factorioMods',
+        component: () => import('./pages/EmptyPage.vue')
+    },
+    {
+        path: '/restApiDocss',
+        name: 'restApiDocss',
+        component: () => import('./pages/EmptyPage.vue')
+    },
+    {
+        path: '/luaApiDocss',
+        name: 'luaApiDocss',
+        component: () => import('./pages/EmptyPage.vue')
+    },
+    {
+        path: '/workspace',
+        name: 'workspace',
+        component: () => import('./pages/EmptyPage.vue')
     },
     {
         path: '/instances',
         name: 'instances',
-        component: () => import('./pages/GameInstances.vue'),
-    },
+        component: () => import('./pages/GameInstances.vue')
+    }
 ];
 
 const router = createRouter({
     history: createWebHashHistory(),
-    routes,
+    routes
 });
 
 export default router;

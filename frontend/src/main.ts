@@ -1,7 +1,7 @@
 import { createApp } from 'vue';
 import { reactive } from 'vue';
 import router from './router';
-import {createPinia} from "pinia";
+import {createPinia} from 'pinia';
 import AutoComplete from 'primevue/autocomplete';
 import Accordion from 'primevue/accordion';
 import AccordionTab from 'primevue/accordiontab';
@@ -85,7 +85,6 @@ router.beforeEach(function(to, from, next) {
 
 const app = createApp(App);
 const store = createPinia()
-
 
 app.config.globalProperties.$appState = reactive({ inputStyle: 'outlined' });
 app.config.globalProperties.$primevue = reactive({ ripple: true, config: {zIndex: {}} });

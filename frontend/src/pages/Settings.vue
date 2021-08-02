@@ -1,16 +1,20 @@
 <script>
 import {computed, defineComponent, watch, ref} from 'vue';
 import {useAppStore} from '@/store/appStore';
-import {useFactorioVersionsStore} from '@/store/factorioVersionsStore';
 import {open} from '@tauri-apps/api/dialog'
 import {readDir} from '@tauri-apps/api/fs'
+import InputText from 'primevue/inputtext';
+import Slider from 'primevue/slider';
+import Button from 'primevue/button';
 
 export default defineComponent({
+  components: {
+    InputText,
+    Slider,
+    Button
+  },
   setup(props, {emit}) {
     const appStore = useAppStore();
-    const factorioVersionsStore = useFactorioVersionsStore();
-    factorioVersionsStore.loadFactorioVersions()
-
     const workspacePath = computed({
       get() {
         return appStore.getWorkspacePath
@@ -20,15 +24,6 @@ export default defineComponent({
       }
     })
 
-    const factorioVersion = computed({
-      get() {
-        const v = appStore.getFactorioVersion
-        return {code: v, name: v}
-      },
-      set(val) {
-        appStore.updateFactorioVersion(val.code)
-      }
-    })
     const clientCount = computed({
       get() {
         return appStore.getClientCount
@@ -69,7 +64,7 @@ export default defineComponent({
       try {
         await readDir(path);
         return true
-      } catch(err) {
+      } catch (err) {
         return false
       }
     }
@@ -88,7 +83,6 @@ export default defineComponent({
       seed,
       selectWorkspacePath,
       isWorkspacePathValid,
-      factorioVersion,
       workspacePath,
       clientCount,
       settings: computed(() => appStore.getSettings),
@@ -116,7 +110,7 @@ export default defineComponent({
         <div class="p-formgrid p-grid">
           <div class="p-field p-col">
             <div class="p-inputgroup">
-              <InputText v-model="mapExchangeString" />
+              <InputText v-model="mapExchangeString"/>
             </div>
           </div>
         </div>
@@ -126,7 +120,7 @@ export default defineComponent({
         <div class="p-formgrid p-grid">
           <div class="p-field p-col">
             <div class="p-inputgroup">
-              <InputText v-model="seed" />
+              <InputText v-model="seed"/>
             </div>
           </div>
         </div>
@@ -140,23 +134,13 @@ export default defineComponent({
           </div>
         </div>
       </div>
-      <div class="card p-fluid">
-        <h5>Factorio Version</h5>
-        <div class="p-formgrid p-grid">
-          <div class="p-field p-col">
-            <label for="factorio_version">Version</label>
-            <Dropdown id="factorio_version" v-model="factorioVersion" :options="availableFactorioVersions"
-                      optionLabel="name" placeholder="Select One"></Dropdown>
-          </div>
-        </div>
-      </div>
 
       <div class="card p-fluid">
         <h5>Workspace Folder</h5>
         <div class="p-formgrid p-grid">
           <div class="p-field p-col">
             <div class="p-inputgroup">
-              <InputText v-model="workspacePath" :class="isWorkspacePathValid ? '' : 'p-invalid'" />
+              <InputText v-model="workspacePath" :class="isWorkspacePathValid ? '' : 'p-invalid'"/>
               <Button label="Select" @click="selectWorkspacePath()"/>
             </div>
           </div>

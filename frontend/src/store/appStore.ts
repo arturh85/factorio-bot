@@ -6,7 +6,6 @@ export const useAppStore = defineStore({
   id: 'app',
   state: () => ({
     settings: null as AppSettings | null
-
   }),
   getters: {
     getSettings(): AppSettings | null {
@@ -15,13 +14,6 @@ export const useAppStore = defineStore({
     getWorkspacePath(): string | null {
       if (this.settings) {
         return this.settings.workspace_path
-      } else {
-        return null;
-      }
-    },
-    getFactorioVersion(): string | null {
-      if (this.settings) {
-        return this.settings.factorio_version
       } else {
         return null;
       }
@@ -61,12 +53,6 @@ export const useAppStore = defineStore({
     async updateWorkspacePath(workspacePath: string) {
       if (this.settings !== null) {
         this.settings.workspace_path = workspacePath
-        await this._updateSettings()
-      }
-    },
-    async updateFactorioVersion(factorioVersion: string) {
-      if (this.settings !== null) {
-        this.settings.factorio_version = factorioVersion
         await this._updateSettings()
       }
     },

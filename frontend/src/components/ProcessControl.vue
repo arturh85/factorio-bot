@@ -5,8 +5,12 @@
 <script>
 import {defineComponent} from 'vue';
 import {useInstanceStore} from '@/store/instanceStore';
+import SplitButton from 'primevue/splitbutton';
 
 export default defineComponent({
+  components: {
+    SplitButton
+  },
   setup() {
     const instanceStore = useInstanceStore()
 

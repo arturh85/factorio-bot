@@ -39,7 +39,7 @@ import {useAppStore} from '@/store/appStore';
 
 export default defineComponent({
   components: {
-    'ProcessControl': ProcessControl
+    ProcessControl
   },
   setup(props, {emit}) {
     const appStore = useAppStore();

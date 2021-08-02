@@ -127,7 +127,7 @@ pub async fn start_factorio(
     Ok((world, rcon))
 }
 
-pub fn await_lock(lock_path: PathBuf, silent: bool) {
+pub fn await_lock(lock_path: PathBuf, silent: bool) -> anyhow::Result<()> {
     if lock_path.exists() {
         match std::fs::remove_file(&lock_path) {
             Ok(_) => {}
@@ -153,11 +153,12 @@ pub fn await_lock(lock_path: PathBuf, silent: bool) {
                 } else {
                     logger.done();
                     error!("Factorio instance already running!");
-                    std::process::exit(1);
+                    return Err(anyhow!("Factorio instance already running!"));
                 }
             }
         }
     }
+    Ok(())
 }
 
 #[derive(PartialEq, Clone)]
@@ -183,7 +184,7 @@ pub async fn start_factorio_server(
             "Failed to find workspace at <bright-blue>{:?}</>",
             workspace_path
         );
-        std::process::exit(1);
+        return Err(anyhow!("failed to find workspace"));
     }
     let instance_path = workspace_path.join(PathBuf::from(instance_name));
     let instance_path = Path::new(&instance_path);
@@ -192,7 +193,7 @@ pub async fn start_factorio_server(
             "Failed to find instance at <bright-blue>{:?}</>",
             instance_path
         );
-        std::process::exit(1);
+        return Err(anyhow!("failed to find instance"));
     }
     let binary = if cfg!(windows) {
         "bin/x64/factorio.exe"
@@ -200,19 +201,19 @@ pub async fn start_factorio_server(
         "bin/x64/factorio"
     };
     let factorio_binary_path = instance_path.join(PathBuf::from(binary));
-    await_lock(instance_path.join(PathBuf::from(".lock")), silent);
+    await_lock(instance_path.join(PathBuf::from(".lock")), silent)?;
 
     if !factorio_binary_path.exists() {
         error!(
             "factorio binary missing at <bright-blue>{:?}</>",
             factorio_binary_path
         );
-        std::process::exit(1);
+        return Err(anyhow!("failed to find factorio binary"));
     }
     let saves_path = instance_path.join(PathBuf::from("saves"));
     if !saves_path.exists() {
         error!("saves missing at <bright-blue>{:?}</>", saves_path);
-        std::process::exit(1);
+        return Err(anyhow!("failed to find factorio saves"));
     }
     let saves_level_path = saves_path.join(PathBuf::from("level.zip"));
     if !saves_level_path.exists() {
@@ -220,7 +221,7 @@ pub async fn start_factorio_server(
             "save file missing at <bright-blue>{:?}</>",
             saves_level_path
         );
-        std::process::exit(1);
+        return Err(anyhow!("failed to find factorio saves/level.zip"));
     }
     let server_settings_path = instance_path.join(PathBuf::from("server-settings.json"));
     if !server_settings_path.exists() {
@@ -228,7 +229,7 @@ pub async fn start_factorio_server(
             "server settings missing at <bright-blue>{:?}</>",
             server_settings_path
         );
-        std::process::exit(1);
+        return Err(anyhow!("server settings missing"));
     }
     let args = &[
         "--start-server",
@@ -300,7 +301,7 @@ pub async fn start_factorio_client(
             "Failed to find workspace at <bright-blue>{:?}</>",
             workspace_path
         );
-        std::process::exit(1);
+        return Err(anyhow!("failed to find workspace"));
     }
     let instance_path = workspace_path.join(PathBuf::from(&instance_name));
     let instance_path = Path::new(&instance_path);
@@ -309,7 +310,7 @@ pub async fn start_factorio_client(
             "Failed to find instance at <bright-blue>{:?}</>",
             instance_path
         );
-        std::process::exit(1);
+        return Err(anyhow!("failed to find instance"));
     }
     let binary = if cfg!(windows) {
         "bin/x64/factorio.exe"
@@ -322,9 +323,9 @@ pub async fn start_factorio_client(
             "factorio binary missing at <bright-blue>{:?}</>",
             factorio_binary_path
         );
-        std::process::exit(1);
+        return Err(anyhow!("failed to find factorio binary"));
     }
-    await_lock(instance_path.join(PathBuf::from(".lock")), silent);
+    await_lock(instance_path.join(PathBuf::from(".lock")), silent)?;
     let args = &[
         "--mp-connect",
         server_host.unwrap_or("localhost"),

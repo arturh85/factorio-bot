@@ -36,7 +36,7 @@ pub async fn setup_factorio_instance(
             "Failed to find workspace at <bright-blue>{:?}</>",
             workspace_path
         );
-        std::process::exit(1);
+        return Err(anyhow!("failed to find workspace"));
     }
     let workspace_data_path = workspace_path.join(PathBuf::from("data"));
     let instance_path = workspace_path.join(PathBuf::from(instance_name));
@@ -64,7 +64,7 @@ pub async fn setup_factorio_instance(
                     "Failed to find factorio zip file at <bright-blue>{:?}</>",
                     workspace_path
                 );
-                std::process::exit(1);
+                return Err(anyhow!("failed to find factorio zip"));
             }
             let archive_path = archive.unwrap().unwrap().path();
             info!(
@@ -136,7 +136,7 @@ pub async fn setup_factorio_instance(
                     "Failed to find factorio tar.xz file at <bright-blue>{:?}</>",
                     workspace_path
                 );
-                std::process::exit(1);
+                return Err(anyhow!("failed to find factorio tar.xz"));
             }
             let archive_path = archive.unwrap().unwrap().path();
             let tar_path = archive_path.with_extension("");
@@ -192,7 +192,7 @@ pub async fn setup_factorio_instance(
     }
     let data_mods_path = PathBuf::from("mods");
     if !data_mods_path.exists() {
-        panic!("missing mods/ folder from working directory");
+        return Err(anyhow!("missing mods/ folder from working directory"));
     }
     let data_mods_path = std::fs::canonicalize(data_mods_path)?;
     let mods_path = instance_path.join(PathBuf::from("mods"));
@@ -274,7 +274,7 @@ pub async fn setup_factorio_instance(
                             "factorio binary missing at <bright-blue>{:?}</>",
                             factorio_binary_path
                         );
-                        std::process::exit(1);
+                        return Err(anyhow!("failed to find factorio binary"));
                     }
                     let mut args = vec!["--create", saves_level_path.to_str().unwrap()];
                     if let Some(seed) = seed.as_ref() {
@@ -291,7 +291,7 @@ pub async fn setup_factorio_instance(
                             std::str::from_utf8(&output.stdout).unwrap(),
                             std::str::from_utf8(&output.stderr).unwrap()
                         );
-                        std::process::exit(1);
+                        return Err(anyhow!("failed to create factorio level"));
                     }
                 }
                 update_map_gen_settings(
@@ -326,7 +326,7 @@ pub async fn setup_factorio_instance(
                     "factorio binary missing at <bright-blue>{:?}</>",
                     factorio_binary_path
                 );
-                std::process::exit(1);
+                return Err(anyhow!("failed to find factorio binary"));
             }
             let mut args = vec!["--create", saves_level_path.to_str().unwrap()];
             if let Some(seed) = &seed {
@@ -343,7 +343,7 @@ pub async fn setup_factorio_instance(
                 args.push("--map-settings");
                 args.push(&map_settings_path);
             }
-            await_lock(instance_path.join(PathBuf::from(".lock")), silent);
+            await_lock(instance_path.join(PathBuf::from(".lock")), silent)?;
             if !silent {
                 logger.loading(format!(
                     "Creating Level at <bright-blue>{:?}</>...",
@@ -362,7 +362,7 @@ pub async fn setup_factorio_instance(
                     std::str::from_utf8(&output.stdout).unwrap(),
                     std::str::from_utf8(&output.stderr).unwrap()
                 );
-                std::process::exit(1);
+                return Err(anyhow!("failed to create factorio level"));
             }
             if !silent {
                 logger.success(format!(
@@ -415,7 +415,7 @@ pub async fn update_map_gen_settings(
             "Failed to find workspace at <bright-blue>{:?}</>",
             workspace_path
         );
-        std::process::exit(1);
+        return Err(anyhow!("failed to find workspace"));
     }
     let instance_path = workspace_path.join(PathBuf::from(instance_name));
     let instance_path = Path::new(&instance_path);
@@ -424,7 +424,7 @@ pub async fn update_map_gen_settings(
             "Failed to find instance at <bright-blue>{:?}</>",
             instance_path
         );
-        std::process::exit(1);
+        return Err(anyhow!("failed to find instance"));
     }
     let binary = if cfg!(windows) {
         "bin/x64/factorio.exe"
@@ -437,12 +437,12 @@ pub async fn update_map_gen_settings(
             "factorio binary missing at <bright-blue>{:?}</>",
             factorio_binary_path
         );
-        std::process::exit(1);
+        return Err(anyhow!("failed to find factorio binary"));
     }
     let saves_path = instance_path.join(PathBuf::from("saves"));
     if !saves_path.exists() {
         error!("saves missing at <bright-blue>{:?}</>", saves_path);
-        std::process::exit(1);
+        return Err(anyhow!("failed to find factorio saves folder"));
     }
     let saves_level_path = saves_path.join(PathBuf::from("level.zip"));
     let server_settings_path = instance_path.join(PathBuf::from("server-settings.json"));
@@ -451,9 +451,9 @@ pub async fn update_map_gen_settings(
             "server settings missing at <bright-blue>{:?}</>",
             server_settings_path
         );
-        std::process::exit(1);
+        return Err(anyhow!("failed to find factorio server settings"));
     }
-    await_lock(instance_path.join(PathBuf::from(".lock")), silent);
+    await_lock(instance_path.join(PathBuf::from(".lock")), silent)?;
     let mut logger = Logger::new();
     if !silent {
         logger.loading(

@@ -3,13 +3,14 @@ import {defineComponent, ref, watch} from 'vue';
 import {listen} from '@tauri-apps/api/event';
 import {invoke} from '@tauri-apps/api/tauri';
 import {useAppStore} from '@/store/appStore';
+import {app} from '@tauri-apps/api';
 
 export default defineComponent({
   components: {},
   setup() {
     const appStore = useAppStore()
     const clients = ref([]);
-    watch(appStore.getClientCount, () => {
+    const updateClients = () => {
       console.log('client count changed');
       console.log(appStore.settings.client_count, typeof appStore.settings.client_count)
       let newClients = [];
@@ -20,9 +21,15 @@ export default defineComponent({
         })
       }
       clients.value = newClients
-    })
+    }
+
+    watch(() => appStore.getClientCount, updateClients)
+    if (appStore.settings) {
+      updateClients()
+    }
     return {
       clients,
+      clientCount: appStore.getClientCount,
       sendTestMessage: async () => {
         console.log('listen to the_event');
         await listen('the_event', (event) => {
@@ -57,7 +64,7 @@ export default defineComponent({
       <div class="card summary">
         <span class="title">Instances</span>
         <span class="detail">Number of configured instances</span>
-        <span class="count visitors" @click="sendTestMessage()">2</span>
+        <span class="count visitors" @click="sendTestMessage()">{{  clientCount }}</span>
       </div>
     </div>
     <div class="p-col-12 p-lg-4" v-for="client in clients" :key="client.name">

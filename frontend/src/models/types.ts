@@ -146,4 +146,4 @@ export type FactorioEntity = { name: string; entityType: string; position: Posit
 export type FactorioEntityPrototype = { name: string; entityType: string; collisionMask: string [] | null; collisionBox: Rect; mineResult: { [key: string]: number } | null; miningTime: number | null; miningSpeed: number | null; craftingSpeed: number | null; maxUndergroundDistance: number | null; fluidboxPrototypes: FactorioFluidBoxPrototype [] | null };
 export type FactorioItemPrototype = { name: string; itemType: string; stackSize: number; fuelValue: number; placeResult: string; group: string; subgroup: string };
 export type FactorioResult = { success: boolean; output: string [] };
-export type AppSettings = { client_count: number; factorio_version: string; map_exchange_string: string; rcon_pass: string; rcon_port: number; recreate: boolean; seed: string; workspace_path: string };
+export type AppSettings = { client_count: number; map_exchange_string: string; rcon_pass: string; rcon_port: number; recreate: boolean; seed: string; workspace_path: string };

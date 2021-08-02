@@ -689,7 +689,7 @@ pub async fn run_plan(
     let lua_path = Path::new(&lua_path_str);
     let lua_path = std::fs::canonicalize(lua_path).unwrap();
     if !lua_path.exists() {
-        panic!("plan {} not found at {}", info.name, lua_path_str);
+        return Err(anyhow!("plan {} not found at {}", info.name, lua_path_str));
     }
     let lua_code = read_to_string(lua_path).unwrap();
     let graph = std::thread::spawn(move || {
@@ -698,8 +698,7 @@ pub async fn run_plan(
         planner.plan(lua_code, info.bot_count).unwrap();
         planner.graph()
     })
-    .join()
-    .unwrap();
+    .join()?;
     Ok(graph.graphviz_dot())
 }
 

@@ -10,9 +10,12 @@ use clap::{App, Arg};
 
 use async_std::sync::RwLock;
 use factorio_bot_backend::factorio::process_control::start_factorio;
+use factorio_bot_backend::factorio::rcon::FactorioRcon;
+use factorio_bot_backend::factorio::world::FactorioWorld;
 use factorio_bot_backend::settings::AppSettings;
 use factorio_bot_backend::settings::APP_SETTINGS_DEFAULT;
 use std::borrow::Cow;
+use std::sync::Arc;
 
 fn app_settings() -> anyhow::Result<AppSettings> {
   let mut app_settings = AppSettings::load(constants::app_settings_path())?;
@@ -163,12 +166,6 @@ async fn main() -> anyhow::Result<()> {
             .help("recreate level by deleting server map if exists"),
         )
         .arg(
-          Arg::with_name("open")
-            .long("open")
-            .short("o")
-            .help("open web interface with default browser"),
-        )
-        .arg(
           Arg::with_name("logs")
             .short("l")
             .long("logs")
@@ -185,7 +182,6 @@ async fn main() -> anyhow::Result<()> {
     let seed = matches.value_of("seed").map(|s| s.to_string());
     let map_exchange_string = matches.value_of("map").map(|s| s.to_string());
     let recreate = matches.is_present("new");
-    let _open_browser = matches.is_present("open");
     let server_host = matches.value_of("server");
     // let websocket_server = FactorioWebSocketServer { listeners: vec![] }.start();
 
@@ -238,6 +234,8 @@ async fn main() -> anyhow::Result<()> {
     // let _graph =
     //   start_factorio_and_plan_graph(settings, map_exchange_string, seed, &name, bot_count).await;
   }
+  let world: Option<Arc<FactorioWorld>> = None;
+  let rcon: Option<Arc<FactorioRcon>> = None;
   tauri::Builder::default()
     .invoke_handler(tauri::generate_handler![
       crate::commands::my_custom_command,
@@ -248,6 +246,8 @@ async fn main() -> anyhow::Result<()> {
       crate::commands::maximize_window,
     ])
     .manage(RwLock::new(app_settings()?))
+    .manage(RwLock::new(world))
+    .manage(RwLock::new(rcon))
     .run(tauri::generate_context!())
     .expect("failed to run app");
   Ok(())

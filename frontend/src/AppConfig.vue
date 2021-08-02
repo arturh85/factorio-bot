@@ -52,7 +52,13 @@
 </template>
 
 <script>
+import RadioButton from 'primevue/radiobutton';
+import InputSwitch from 'primevue/inputswitch';
 	export default {
+	  components: {
+	    RadioButton,
+      InputSwitch
+    },
 		props: {
 			layoutMode: {
 				type: String,
@@ -67,7 +73,7 @@
 			return {
 				active: false,
 				d_layoutMode: this.layoutMode,
-				d_layoutColorMode: this.layoutColorMode,
+				d_layoutColorMode: this.layoutColorMode
 			}
 		},
 		watch: {

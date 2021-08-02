@@ -10,9 +10,10 @@ This project tries to be a bot platform for the game
 
 Rewrite Milestones:
 - [x] allow settings to be configured via GUI
-- [ ] download selected factorio version for current platform
-- [ ] extract factorio archive for server and clients
+- [ ] remove unused primevue components from bundle to minimize download size
+- [x] extract factorio archive for server and clients
 - [ ] start factorio instances concurrently
+- [ ] 
 - [ ] lua editor with syntax highlighting
 - [ ] lua script execution
 

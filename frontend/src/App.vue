@@ -171,10 +171,10 @@ export default {
       this.removeClass(document.body, 'body-overflow-hidden')
   },
   components: {
-    'AppTopBar': AppTopBar,
-    'AppMenu': AppMenu,
-    'AppFooter': AppFooter,
-    'AppConfig': AppConfig
+    AppTopBar,
+    AppMenu,
+    AppFooter,
+    AppConfig
   }
 }
 </script>

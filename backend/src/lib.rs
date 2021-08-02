@@ -16,6 +16,7 @@ extern crate strum;
 #[macro_use]
 extern crate strum_macros;
 
+pub mod constants;
 pub mod draw;
 pub mod factorio;
 pub mod settings;

@@ -4,13 +4,13 @@ use std::path::Path;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-use async_std::task;
 use async_std::sync::{Arc, Mutex};
+use async_std::task;
 use config::Config;
 
 use crate::factorio::instance_setup::setup_factorio_instance;
 use crate::factorio::planner::Planner;
-use crate::factorio::process_control::{FactorioStartCondition, start_factorio_server};
+use crate::factorio::process_control::{start_factorio_server, FactorioStartCondition};
 use crate::factorio::rcon::{FactorioRcon, RconSettings};
 use crate::factorio::util::calculate_distance;
 use crate::factorio::world::FactorioWorld;

@@ -1,21 +1,16 @@
-use crate::commands::ERR_TO_STRING;
 use crate::constants;
 use async_std::sync::RwLock;
-use factorio_bot_backend::factorio::process_control::start_factorio;
-use factorio_bot_backend::factorio::rcon::FactorioRcon;
-use factorio_bot_backend::factorio::world::FactorioWorld;
+use factorio_bot_backend::factorio::process_control::{start_factorio, InstanceState};
 use factorio_bot_backend::settings::AppSettings;
-use std::sync::Arc;
-use tauri::State;
+use tauri::{Manager, State};
 
 #[tauri::command]
 pub async fn start_instances(
-  _app_handle: tauri::AppHandle<tauri::Wry>,
+  app_handle: tauri::AppHandle<tauri::Wry>,
   app_settings: State<'_, RwLock<AppSettings>>,
-  world: State<'_, RwLock<Option<Arc<FactorioWorld>>>>,
-  rcon: State<'_, RwLock<Option<Arc<FactorioRcon>>>>,
+  instance_state: State<'_, RwLock<Option<InstanceState>>>,
 ) -> Result<(), String> {
-  if world.read().await.is_some() || rcon.read().await.is_some() {
+  if instance_state.read().await.is_some() {
     return Result::Err("already started".into());
   }
 
@@ -26,27 +21,65 @@ pub async fn start_instances(
   let map_exchange_string = app_settings.map_exchange_string.to_string();
   let seed = app_settings.seed.to_string();
 
-  let (started_world, started_rcon) = start_factorio(
+  let started_instance_state = start_factorio(
     &app_settings,
     None,
     app_settings.client_count as u8,
     app_settings.recreate,
-    if map_exchange_string.len() > 0 {
-      Some(map_exchange_string)
-    } else {
+    if map_exchange_string.is_empty() {
       None
+    } else {
+      Some(map_exchange_string)
     },
-    if seed.len() > 0 { Some(seed) } else { None },
+    if seed.is_empty() { None } else { Some(seed) },
     false,
     false,
   )
-  .await
-  .map_err(ERR_TO_STRING)?;
+  .await;
 
-  let mut world = world.write().await;
-  *world = Some(started_world.unwrap());
-  let mut rcon = rcon.write().await;
-  *rcon = Some(started_rcon);
+  match started_instance_state {
+    Ok(started_instance_state) => {
+      let mut instance_state = instance_state.write().await;
+      *instance_state = Some(started_instance_state);
+      app_handle
+        .emit_all("instances_started", true)
+        .map_err(|e| String::from("error: ") + &e.to_string())?;
+      Ok(())
+    }
+    Err(err) => {
+      error!("failed to start instances: {:?}", err);
+      Err(err.to_string())
+    }
+  }
+}
 
+#[tauri::command]
+pub async fn stop_instances(
+  app_handle: tauri::AppHandle<tauri::Wry>,
+  _app_settings: State<'_, RwLock<AppSettings>>,
+  instance_state: State<'_, RwLock<Option<InstanceState>>>,
+) -> Result<(), String> {
+  let mut instance_state = instance_state.write().await;
+  let result: Result<(), String> = match instance_state.as_mut() {
+    None => Result::Err("not started".into()),
+    Some(instance_state) => {
+      for child in &mut instance_state.client_processes {
+        if child.kill().is_err() {
+          error!("failed to kill client");
+        }
+      }
+      if let Some(server) = instance_state.server_process.as_mut() {
+        if server.kill().is_err() {
+          error!("failed to kill server");
+        }
+      }
+      app_handle
+        .emit_all("instances_stopped", true)
+        .map_err(|e| String::from("error: ") + &e.to_string())?;
+      Ok(())
+    }
+  };
+  result?;
+  *instance_state = None;
   Ok(())
 }

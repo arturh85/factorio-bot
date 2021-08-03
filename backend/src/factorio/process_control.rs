@@ -19,6 +19,13 @@ use crate::factorio::world::FactorioWorld;
 use crate::settings::AppSettings;
 use std::sync::mpsc::channel;
 
+pub struct InstanceState {
+    pub world: Option<Arc<FactorioWorld>>,
+    pub rcon: Arc<FactorioRcon>,
+    pub server_process: Option<Child>,
+    pub client_processes: Vec<Child>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn start_factorio(
     settings: &AppSettings,
@@ -30,7 +37,7 @@ pub async fn start_factorio(
     // websocket_server: Option<Addr<FactorioWebSocketServer>>,
     write_logs: bool,
     silent: bool,
-) -> anyhow::Result<(Option<Arc<FactorioWorld>>, Arc<FactorioRcon>)> {
+) -> anyhow::Result<InstanceState> {
     let mut world: Option<Arc<FactorioWorld>> = None;
     let rcon_settings =
         RconSettings::new(settings.rcon_port as u16, &settings.rcon_pass, server_host);
@@ -68,6 +75,8 @@ pub async fn start_factorio(
             break;
         }
     }
+    let mut server_child = None;
+    let mut client_children = vec![];
 
     let rcon = match server_host {
         None => {
@@ -84,7 +93,8 @@ pub async fn start_factorio(
             )
             .await?;
             world = Some(_world);
-            report_child_death(child);
+            // report_child_death(child);
+            server_child = Some(child);
             if !silent {
                 success!(
                     "Started <bright-blue>server</> in <yellow>{:?}</>",
@@ -102,18 +112,16 @@ pub async fn start_factorio(
     for instance_number in 0..client_count {
         let instance_name = format!("client{}", instance_number + 1);
         let started = Instant::now();
-        if let Err(err) = start_factorio_client(
+        let child = start_factorio_client(
             &settings,
             instance_name.clone(),
             server_host,
             write_logs,
             silent,
         )
-        .await
-        {
-            error!("Failed to start Factorio <red>{}</>", err);
-            break;
-        }
+        .await?;
+        // report_child_death(child);
+        client_children.push(child);
         success!(
             "Started <bright-blue>{}</> in <yellow>{:?}</>",
             &instance_name,
@@ -124,7 +132,12 @@ pub async fn start_factorio(
         // disable achievements". If we don't do this, the first command will be lost
         rcon.silent_print("").await.unwrap();
     }
-    Ok((world, rcon))
+    Ok(InstanceState {
+        client_processes: client_children,
+        server_process: server_child,
+        world,
+        rcon,
+    })
 }
 
 pub fn await_lock(lock_path: PathBuf, silent: bool) -> anyhow::Result<()> {
@@ -275,16 +288,29 @@ pub async fn start_factorio_server(
 
     Ok((world, rcon, child))
 }
+// let handle = thread::spawn(move || {
+//     let exit_code = child.wait().expect("failed to wait for client");
+//     if let Some(code) = exit_code.code() {
+//         error!(
+//             "<red>{} stopped</> with exit code <yellow>{}</>",
+//             &instance_name, code
+//         );
+//     } else {
+//         error!("<red>{} stopped</> without exit code", &instance_name);
+//     }
+//     exit_code
+// });
 
-pub fn report_child_death(mut child: Child) {
+pub fn report_child_death(mut child: Child) -> JoinHandle<ExitStatus> {
     thread::spawn(move || {
-        let exit_code = child.wait().expect("failed to wait for server");
+        let exit_code = child.wait().expect("failed to wait for child to end");
         if let Some(code) = exit_code.code() {
             error!("<red>server stopped</> with exit code <yellow>{}</>", code);
         } else {
             error!("<red>server stopped</> without exit code");
         }
-    });
+        exit_code
+    })
 }
 
 pub async fn start_factorio_client(
@@ -293,7 +319,7 @@ pub async fn start_factorio_client(
     server_host: Option<&str>,
     write_logs: bool,
     silent: bool,
-) -> anyhow::Result<JoinHandle<ExitStatus>> {
+) -> anyhow::Result<Child> {
     let workspace_path: String = settings.workspace_path.to_string();
     let workspace_path = Path::new(&workspace_path);
     if !workspace_path.exists() {
@@ -361,18 +387,18 @@ pub async fn start_factorio_client(
         true => Some(File::create(log_filename)?),
         false => None,
     };
-    let handle = thread::spawn(move || {
-        let exit_code = child.wait().expect("failed to wait for client");
-        if let Some(code) = exit_code.code() {
-            error!(
-                "<red>{} stopped</> with exit code <yellow>{}</>",
-                &instance_name, code
-            );
-        } else {
-            error!("<red>{} stopped</> without exit code", &instance_name);
-        }
-        exit_code
-    });
+    // let handle = thread::spawn(move || {
+    //     let exit_code = child.wait().expect("failed to wait for client");
+    //     if let Some(code) = exit_code.code() {
+    //         error!(
+    //             "<red>{} stopped</> with exit code <yellow>{}</>",
+    //             &instance_name, code
+    //         );
+    //     } else {
+    //         error!("<red>{} stopped</> without exit code", &instance_name);
+    //     }
+    //     exit_code
+    // });
     let is_client = server_host.is_some();
     let (tx, rx) = channel();
     tx.send(())?;
@@ -407,5 +433,5 @@ pub async fn start_factorio_client(
         });
     });
     tx.send(())?;
-    Ok(handle)
+    Ok(child)
 }

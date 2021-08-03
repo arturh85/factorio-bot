@@ -15,6 +15,8 @@ extern crate serde_json;
 extern crate strum;
 #[macro_use]
 extern crate strum_macros;
+#[macro_use]
+extern crate include_dir;
 
 pub mod constants;
 pub mod draw;

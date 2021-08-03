@@ -17,6 +17,7 @@ use crate::factorio::output_reader::read_output;
 use crate::factorio::process_control::{await_lock, FactorioStartCondition};
 use crate::factorio::rcon::RconSettings;
 use crate::factorio::util::{read_to_value, write_value_to};
+use include_dir::Dir;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn setup_factorio_instance(
@@ -190,9 +191,30 @@ pub async fn setup_factorio_instance(
             HumanDuration(started.elapsed())
         );
     }
-    let data_mods_path = PathBuf::from("mods");
+    let mut data_mods_path = workspace_data_path.join(PathBuf::from("mods"));
     if !data_mods_path.exists() {
-        return Err(anyhow!("missing mods/ folder from working directory"));
+        if cfg!(debug_assertions) {
+            info!("DEBUG MODE");
+            data_mods_path = PathBuf::from("../../mods");
+            if !data_mods_path.exists() {
+                info!("NOOOOO");
+                return Err(anyhow!("missing mods/ folder from working directory"));
+            }
+        } else {
+            info!("RELEASE MODE");
+            const MODS_CONTENT: Dir = include_dir!("../mods");
+            if let Err(err) = MODS_CONTENT.extract(data_mods_path.clone()) {
+                error!("failed to extract static mods content: {:?}", err);
+                return Err(anyhow!("failed to extract mods content to workspace"));
+            }
+
+            // mods_content.
+            // data_mods_path =
+            if !data_mods_path.exists() {
+                info!("NOOOOO");
+                return Err(anyhow!("missing mods/ folder from working directory"));
+            }
+        }
     }
     let data_mods_path = std::fs::canonicalize(data_mods_path)?;
     let mods_path = instance_path.join(PathBuf::from("mods"));

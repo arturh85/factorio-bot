@@ -3,19 +3,18 @@
   all(not(debug_assertions), target_os = "windows"),
   windows_subsystem = "windows"
 )]
+#[macro_use]
+extern crate paris;
+
 mod commands;
 mod constants;
 
-use clap::{App, Arg};
-
 use async_std::sync::RwLock;
-use factorio_bot_backend::factorio::process_control::start_factorio;
-use factorio_bot_backend::factorio::rcon::FactorioRcon;
-use factorio_bot_backend::factorio::world::FactorioWorld;
+use clap::{App, Arg};
+use factorio_bot_backend::factorio::process_control::{start_factorio, InstanceState};
 use factorio_bot_backend::settings::AppSettings;
 use factorio_bot_backend::settings::APP_SETTINGS_DEFAULT;
 use std::borrow::Cow;
-use std::sync::Arc;
 
 fn app_settings() -> anyhow::Result<AppSettings> {
   let mut app_settings = AppSettings::load(constants::app_settings_path())?;
@@ -28,6 +27,8 @@ fn app_settings() -> anyhow::Result<AppSettings> {
 
 #[async_std::main]
 async fn main() -> anyhow::Result<()> {
+  color_eyre::install().unwrap();
+  info!("started");
   std::fs::create_dir_all(constants::default_app_dir())?;
   std::fs::create_dir_all(constants::app_workspace_path())?;
   let matches = App::new("factorio-bot")
@@ -185,7 +186,7 @@ async fn main() -> anyhow::Result<()> {
     let server_host = matches.value_of("server");
     // let websocket_server = FactorioWebSocketServer { listeners: vec![] }.start();
 
-    let (world, _rcon) = start_factorio(
+    let instance_state = start_factorio(
       &APP_SETTINGS_DEFAULT,
       server_host,
       clients,
@@ -199,7 +200,9 @@ async fn main() -> anyhow::Result<()> {
     .await
     .expect("failed to start factorio");
 
-    if let Some(_world) = world {
+    // FIXME: watch children die?
+
+    if let Some(_world) = &instance_state.world {
       // start_webserver(rcon, websocket_server, open_browser, world).await;
     }
   } else if let Some(_matches) = matches.subcommand_matches("rcon") {
@@ -234,8 +237,7 @@ async fn main() -> anyhow::Result<()> {
     // let _graph =
     //   start_factorio_and_plan_graph(settings, map_exchange_string, seed, &name, bot_count).await;
   }
-  let world: Option<Arc<FactorioWorld>> = None;
-  let rcon: Option<Arc<FactorioRcon>> = None;
+  let instance_state: Option<InstanceState> = None;
   tauri::Builder::default()
     .invoke_handler(tauri::generate_handler![
       crate::commands::my_custom_command,
@@ -243,11 +245,11 @@ async fn main() -> anyhow::Result<()> {
       crate::commands::load_settings,
       crate::commands::save_settings,
       crate::commands::start_instances,
+      crate::commands::stop_instances,
       crate::commands::maximize_window,
     ])
     .manage(RwLock::new(app_settings()?))
-    .manage(RwLock::new(world))
-    .manage(RwLock::new(rcon))
+    .manage(RwLock::new(instance_state))
     .run(tauri::generate_context!())
     .expect("failed to run app");
   Ok(())

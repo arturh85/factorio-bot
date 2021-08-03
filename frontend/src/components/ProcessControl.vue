@@ -15,6 +15,10 @@ export default defineComponent({
     const instanceStore = useInstanceStore()
 
     return {
+      isFailed: instanceStore.isFailed,
+      isStopping: instanceStore.isStopping,
+      isStarting: instanceStore.isStarting,
+      isStarted: instanceStore.isStarted,
       startInstances: () => {
         instanceStore.startInstances()
       },

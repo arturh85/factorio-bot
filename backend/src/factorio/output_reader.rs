@@ -23,23 +23,35 @@ pub async fn read_output(
     silent: bool,
     wait_until: FactorioStartCondition,
 ) -> anyhow::Result<(Arc<FactorioWorld>, Arc<FactorioRcon>)> {
+    info!("XXX read_output 1");
     let mut log_file = match write_logs {
         true => Some(File::create(log_path)?),
         false => None,
     };
     let mut parser = OutputParser::new();
-
+    info!("XXX read_output 2");
     let wait_until_thread = wait_until.clone();
+    info!("XXX read_output 3");
+
     let (tx1, rx1) = channel();
+    info!("XXX read_output 4");
     tx1.send(())?;
+    info!("XXX read_output 5");
     let (tx2, rx2) = channel();
+    info!("XXX read_output 6");
     tx2.send(())?;
+    info!("XXX read_output 7");
     let world = parser.world();
+    info!("XXX read_output 8");
     std::thread::spawn(move || {
-        task::spawn(async move {
+        info!("XXX read_output 9");
+        async_std::task::block_on(task::spawn(async move {
+            info!("XXX read_output 10");
             let lines = reader.lines();
             let mut initialized = false;
             for line in lines {
+                info!("XXX read_output 11   ");
+
                 match line {
                     Ok(line) => {
                         // after we receive this line we can connect via rcon
@@ -51,7 +63,10 @@ pub async fn read_output(
                             }
                         }
                         // wait for factorio init before sending confirmation
-                        if !initialized && (line.contains("initial discovery done") || line.contains("(100% done)")) {
+                        if !initialized
+                            && (line.contains("initial discovery done")
+                                || line.contains("(100% done)"))
+                        {
                             initialized = true;
                             parser.on_init().unwrap();
                             rx2.recv().unwrap();
@@ -85,8 +100,7 @@ pub async fn read_output(
                                                 | "graphics"
                                                 | "tiles"
                                                 | "STATIC_DATA_END"
-                                                | "entities"
-                                                 => {}
+                                                | "entities" => {}
                                                 _ => {
                                                     info!(
                                                         "<cyan>server</>⮞ §{}§<bright-blue>{}</>§<green>{}</>",
@@ -119,7 +133,7 @@ pub async fn read_output(
                     }
                 };
             }
-        });
+        }));
     });
     tx1.send(())?;
     let rcon = Arc::new(

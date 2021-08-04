@@ -32,7 +32,7 @@ pub async fn start_instances(
       Some(map_exchange_string)
     },
     if seed.is_empty() { None } else { Some(seed) },
-    false,
+    true,
     false,
   )
   .await;

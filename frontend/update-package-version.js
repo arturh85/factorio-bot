@@ -3,10 +3,16 @@ const cargoTomlPath = './src-tauri/Cargo.toml'
 const cargoToml = fs.readFileSync(cargoTomlPath, {encoding: 'utf8'})
 const matches = cargoToml.match(/version = "(.*?)"/)
 if (matches) {
+    const version = matches[1]
     const packageJsonPath = './package.json'
     const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, {encoding: 'utf8'}))
-    packageJson.version = matches[1]
+    packageJson.version = version
     fs.writeFileSync(packageJsonPath, JSON.stringify(packageJson, null, 2))
+
+    const tauriConfPath = './src-tauri/tauri.conf.json'
+    const tauriConf = JSON.parse(fs.readFileSync(tauriConfPath, {encoding: 'utf8'}))
+    tauriConf.package.version = version
+    fs.writeFileSync(tauriConfPath, JSON.stringify(tauriConf, null, 2))
 } else {
     console.error('failed to find version in ', cargoTomlPath)
     process.exit(1)

@@ -1,6 +1,6 @@
 target/
 .idea/
 workspace/
-mods/*/
 backend/tests/world.png
 /Cargo.*
+/frontend/yarn-error.log

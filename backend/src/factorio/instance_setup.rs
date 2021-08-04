@@ -194,24 +194,17 @@ pub async fn setup_factorio_instance(
     let mut data_mods_path = workspace_data_path.join(PathBuf::from("mods"));
     if !data_mods_path.exists() {
         if cfg!(debug_assertions) {
-            info!("DEBUG MODE");
             data_mods_path = PathBuf::from("../../mods");
             if !data_mods_path.exists() {
-                info!("NOOOOO");
                 return Err(anyhow!("missing mods/ folder from working directory"));
             }
         } else {
-            info!("RELEASE MODE");
             const MODS_CONTENT: Dir = include_dir!("../mods");
             if let Err(err) = MODS_CONTENT.extract(data_mods_path.clone()) {
                 error!("failed to extract static mods content: {:?}", err);
                 return Err(anyhow!("failed to extract mods content to workspace"));
             }
-
-            // mods_content.
-            // data_mods_path =
             if !data_mods_path.exists() {
-                info!("NOOOOO");
                 return Err(anyhow!("missing mods/ folder from working directory"));
             }
         }
@@ -502,7 +495,6 @@ pub async fn update_map_gen_settings(
         .stderr(Stdio::piped())
         .spawn()
         .expect("failed to start server");
-
     let stdout = child.stdout.take().unwrap();
     let reader = BufReader::new(stdout);
     let log_path = workspace_path.join(PathBuf::from_str("server-log.txt").unwrap());

@@ -1,0 +1,11 @@
+{
+	"name": "BotBridge",
+	"version": "0.0.1",
+	"title": "BotBridge",
+	"author": "Artur Hallmann",
+	"contact": "arturh@arturh.de",
+	"homepage": "TODO",
+	"description": "Bridge for Bots",
+	"factorio_version": "0.18",
+	"license": "GPL3"
+}

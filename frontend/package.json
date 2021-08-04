@@ -1,6 +1,6 @@
 {
   "name": "factorio-bot",
-  "version": "0.2.0-dev",
+  "version": "0.0.0",
   "private": true,
   "scripts": {
     "test:unit": "jest",
@@ -8,7 +8,7 @@
     "serve": "vite --port 8080",
     "native:serve": "cross-env VITE_HTTP_HANDLER=NATIVE vite --port 8080",
     "build:web": "vite build",
-    "tauri:serve": "concurrently -n \"rust,VITE\" -k \"tauri dev\" \"npm run native:serve\"",
+    "tauri:serve": "concurrently -n \"rust,VITE\" -k \"cross-env RUST_BACKTRACE=full tauri dev\" \"npm run native:serve\"",
     "tauri:build": "cross-env VITE_HTTP_HANDLER=NATIVE vite build && tauri build",
     "test:ci": "npm run lint && npm run test:unit",
     "cargo:clippy": "cd .. && cargo clippy",

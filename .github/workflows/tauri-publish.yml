@@ -39,7 +39,6 @@ jobs:
       - name: 🚧 build javascript
         run: cd frontend; yarn build:web
       - name: ✅ run rust tests
-        if: matrix.platform != 'ubuntu-latest'
         run: cd frontend; yarn cargo:test
       - name: 🚧 build setup
         run: cd frontend; yarn tauri:build

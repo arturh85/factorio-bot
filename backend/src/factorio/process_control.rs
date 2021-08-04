@@ -166,7 +166,8 @@ pub async fn await_lock(lock_path: PathBuf, silent: bool) -> anyhow::Result<()> 
                 } else {
                     logger.done();
                     error!("Factorio instance already running!");
-                    if cfg!(windows) {
+                    #[cfg(windows)]
+                    {
                         let mut kill_list: Vec<u32> = vec![];
                         process_list::for_each_process(|id, name| {
                             if let Some(name) = name.to_str() {
@@ -179,7 +180,9 @@ pub async fn await_lock(lock_path: PathBuf, silent: bool) -> anyhow::Result<()> 
                         for id in kill_list {
                             heim::process::get(id).await?.kill().await?;
                         }
-                    } else {
+                    }
+                    #[cfg(not(windows))]
+                    {
                         return Err(anyhow!("Factorio instance already running!"));
                     }
                 }

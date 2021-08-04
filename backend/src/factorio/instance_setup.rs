@@ -17,7 +17,6 @@ use crate::factorio::output_reader::read_output;
 use crate::factorio::process_control::{await_lock, FactorioStartCondition};
 use crate::factorio::rcon::RconSettings;
 use crate::factorio::util::{read_to_value, write_value_to};
-use include_dir::Dir;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn setup_factorio_instance(
@@ -52,7 +51,9 @@ pub async fn setup_factorio_instance(
     if readdir.count() == 0 {
         let mut workspace_readdir = workspace_path.read_dir()?;
         let started = Instant::now();
-        if cfg!(windows) {
+
+        #[cfg(windows)]
+        {
             let archive = workspace_readdir.find(|file| {
                 if let Ok(file) = file.as_ref() {
                     file.path().extension().unwrap_or_default() == "zip"
@@ -124,7 +125,10 @@ pub async fn setup_factorio_instance(
                 fs::rename(&instance_data_path, &workspace_data_path)?;
             }
             bar.finish();
-        } else {
+        }
+
+        #[cfg(not(windows))]
+        {
             let archive = workspace_readdir.find(|file| {
                 if let Ok(file) = file.as_ref() {
                     file.path().extension().unwrap_or_default() == "xz"
@@ -191,12 +195,16 @@ pub async fn setup_factorio_instance(
             HumanDuration(started.elapsed())
         );
     }
+    #[allow(unused_mut)]
     let mut data_mods_path = workspace_data_path.join(PathBuf::from("mods"));
     if !data_mods_path.exists() {
-        if cfg!(debug_assertions) {
+        #[cfg(debug_assertions)]
+        {
             data_mods_path = PathBuf::from("../../mods");
-        } else {
-            const MODS_CONTENT: Dir = include_dir!("../mods");
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            const MODS_CONTENT: include_dir::Dir = include_dir!("../mods");
             if let Err(err) = MODS_CONTENT.extract(data_mods_path.clone()) {
                 error!("failed to extract static mods content: {:?}", err);
                 return Err(anyhow!("failed to extract mods content to workspace"));

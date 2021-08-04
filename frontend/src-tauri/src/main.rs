@@ -238,6 +238,7 @@ async fn main() -> anyhow::Result<()> {
     //   start_factorio_and_plan_graph(settings, map_exchange_string, seed, &name, bot_count).await;
   }
   let instance_state: Option<InstanceState> = None;
+  #[allow(clippy::items_after_statements)]
   tauri::Builder::default()
     .invoke_handler(tauri::generate_handler![
       crate::commands::my_custom_command,

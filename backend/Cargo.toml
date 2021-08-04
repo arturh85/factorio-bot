@@ -55,7 +55,9 @@ toml = "*"
 #
 #[target.'cfg(unix)'.dependencies]
 #
-#[target.'cfg(windows)'.dependencies]
+[target.'cfg(windows)'.dependencies]
+process_list = "^0.2"
+heim = {version = "0.1.0-beta.3", default-features = false, features = ["process"]}
 
 [build-dependencies]
 serde = { version = "^1.0", features = [ "derive" ] }

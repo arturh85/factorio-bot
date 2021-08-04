@@ -15,28 +15,28 @@ export const useAppStore = defineStore({
       if (this.settings) {
         return this.settings.workspace_path
       } else {
-        return null;
+        return null
       }
     },
     getClientCount(): number | null {
       if (this.settings) {
         return this.settings.client_count
       } else {
-        return null;
+        return null
       }
     },
     getMapExchangeString(): string | null {
       if (this.settings) {
         return this.settings.map_exchange_string
       } else {
-        return null;
+        return null
       }
     },
     getSeed(): string | null {
       if (this.settings) {
         return this.settings.seed
       } else {
-        return null;
+        return null
       }
     }
   },

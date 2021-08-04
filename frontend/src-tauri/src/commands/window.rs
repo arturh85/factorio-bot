@@ -1,7 +1,10 @@
-use tauri::Manager;
+#![allow(clippy::module_name_repetitions)]
+
+use tauri::{AppHandle, Manager, Wry};
 
 #[tauri::command]
-pub fn maximize_window(app_handle: tauri::AppHandle<tauri::Wry>) -> Result<(), String> {
+#[allow(clippy::needless_pass_by_value)]
+pub fn maximize_window(app_handle: AppHandle<Wry>) -> Result<(), String> {
   app_handle
     .get_window("main")
     .unwrap()

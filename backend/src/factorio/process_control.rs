@@ -140,7 +140,7 @@ pub async fn start_factorio(
     })
 }
 
-pub fn await_lock(lock_path: PathBuf, silent: bool) -> anyhow::Result<()> {
+pub async fn await_lock(lock_path: PathBuf, silent: bool) -> anyhow::Result<()> {
     if lock_path.exists() {
         match std::fs::remove_file(&lock_path) {
             Ok(_) => {}
@@ -166,7 +166,22 @@ pub fn await_lock(lock_path: PathBuf, silent: bool) -> anyhow::Result<()> {
                 } else {
                     logger.done();
                     error!("Factorio instance already running!");
-                    return Err(anyhow!("Factorio instance already running!"));
+                    if cfg!(windows) {
+                        let mut kill_list: Vec<u32> = vec![];
+                        process_list::for_each_process(|id, name| {
+                            if let Some(name) = name.to_str() {
+                                if name.contains("factorio.exe") {
+                                    info!("killing process {}: \"{}\"", id, name);
+                                    kill_list.push(id);
+                                }
+                            }
+                        })?;
+                        for id in kill_list {
+                            heim::process::get(id).await?.kill().await?;
+                        }
+                    } else {
+                        return Err(anyhow!("Factorio instance already running!"));
+                    }
                 }
             }
         }
@@ -214,7 +229,7 @@ pub async fn start_factorio_server(
         "bin/x64/factorio"
     };
     let factorio_binary_path = instance_path.join(PathBuf::from(binary));
-    await_lock(instance_path.join(PathBuf::from(".lock")), silent)?;
+    await_lock(instance_path.join(PathBuf::from(".lock")), silent).await?;
 
     if !factorio_binary_path.exists() {
         error!(
@@ -351,7 +366,7 @@ pub async fn start_factorio_client(
         );
         return Err(anyhow!("failed to find factorio binary"));
     }
-    await_lock(instance_path.join(PathBuf::from(".lock")), silent)?;
+    await_lock(instance_path.join(PathBuf::from(".lock")), silent).await?;
     let args = &[
         "--mp-connect",
         server_host.unwrap_or("localhost"),

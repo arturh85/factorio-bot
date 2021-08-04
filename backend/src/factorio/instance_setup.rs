@@ -195,18 +195,15 @@ pub async fn setup_factorio_instance(
     if !data_mods_path.exists() {
         if cfg!(debug_assertions) {
             data_mods_path = PathBuf::from("../../mods");
-            if !data_mods_path.exists() {
-                return Err(anyhow!("missing mods/ folder from working directory"));
-            }
         } else {
             const MODS_CONTENT: Dir = include_dir!("../mods");
             if let Err(err) = MODS_CONTENT.extract(data_mods_path.clone()) {
                 error!("failed to extract static mods content: {:?}", err);
                 return Err(anyhow!("failed to extract mods content to workspace"));
             }
-            if !data_mods_path.exists() {
-                return Err(anyhow!("missing mods/ folder from working directory"));
-            }
+        }
+        if !data_mods_path.exists() {
+            return Err(anyhow!("missing mods/ folder from working directory"));
         }
     }
     let data_mods_path = std::fs::canonicalize(data_mods_path)?;
@@ -390,7 +387,7 @@ pub async fn setup_factorio_instance(
                 args.push("--map-settings");
                 args.push(&map_settings_path);
             }
-            await_lock(instance_path.join(PathBuf::from(".lock")), silent)?;
+            await_lock(instance_path.join(PathBuf::from(".lock")), silent).await?;
             if !silent {
                 logger.loading(format!(
                     "Creating Level at <bright-blue>{:?}</>...",
@@ -500,7 +497,7 @@ pub async fn update_map_gen_settings(
         );
         return Err(anyhow!("failed to find factorio server settings"));
     }
-    await_lock(instance_path.join(PathBuf::from(".lock")), silent)?;
+    await_lock(instance_path.join(PathBuf::from(".lock")), silent).await?;
     let mut logger = Logger::new();
     if !silent {
         logger.loading(

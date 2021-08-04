@@ -1,3 +1,4 @@
+#![allow(clippy::module_name_repetitions)]
 use crate::commands::ERR_TO_STRING;
 use crate::constants::app_settings_path;
 use async_std::sync::RwLock;
@@ -5,6 +6,7 @@ use factorio_bot_backend::settings::AppSettings;
 use tauri::State;
 
 #[tauri::command]
+
 pub async fn load_settings(
   app_settings: State<'_, RwLock<AppSettings>>,
 ) -> Result<AppSettings, String> {

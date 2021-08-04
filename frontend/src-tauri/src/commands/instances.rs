@@ -1,12 +1,17 @@
+#![allow(
+  clippy::module_name_repetitions,
+  clippy::cast_possible_truncation,
+  clippy::cast_sign_loss
+)]
 use crate::constants;
 use async_std::sync::RwLock;
 use factorio_bot_backend::factorio::process_control::{start_factorio, InstanceState};
 use factorio_bot_backend::settings::AppSettings;
-use tauri::{Manager, State};
+use tauri::{AppHandle, Manager, State, Wry};
 
 #[tauri::command]
 pub async fn start_instances(
-  app_handle: tauri::AppHandle<tauri::Wry>,
+  app_handle: AppHandle<Wry>,
   app_settings: State<'_, RwLock<AppSettings>>,
   instance_state: State<'_, RwLock<Option<InstanceState>>>,
 ) -> Result<(), String> {
@@ -55,8 +60,7 @@ pub async fn start_instances(
 
 #[tauri::command]
 pub async fn stop_instances(
-  app_handle: tauri::AppHandle<tauri::Wry>,
-  _app_settings: State<'_, RwLock<AppSettings>>,
+  app_handle: AppHandle<Wry>,
   instance_state: State<'_, RwLock<Option<InstanceState>>>,
 ) -> Result<(), String> {
   let mut instance_state = instance_state.write().await;

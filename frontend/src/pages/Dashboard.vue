@@ -1,9 +1,6 @@
 <script>
-import {defineComponent, ref, watch} from 'vue';
-import {listen} from '@tauri-apps/api/event';
-import {invoke} from '@tauri-apps/api/tauri';
+import {defineComponent, ref, watch, computed} from 'vue';
 import {useAppStore} from '@/store/appStore';
-import {app} from '@tauri-apps/api';
 
 export default defineComponent({
   components: {},
@@ -11,8 +8,6 @@ export default defineComponent({
     const appStore = useAppStore()
     const clients = ref([]);
     const updateClients = () => {
-      console.log('client count changed');
-      console.log(appStore.settings.client_count, typeof appStore.settings.client_count)
       let newClients = [];
       for (let i=0; i<appStore.settings.client_count; i++) {
         newClients.push({
@@ -29,19 +24,19 @@ export default defineComponent({
     }
     return {
       clients,
-      clientCount: appStore.getClientCount,
+      clientCount: computed(() => appStore.getClientCount),
       sendTestMessage: async () => {
-        console.log('listen to the_event');
-        await listen('the_event', (event) => {
-          console.log('event from rust', event);
-          // event.event is the event name (useful if you want to use a single callback fn for multiple event types)
-          // event.payload is the payload object
-        });
-        await invoke('my_custom_command');
-
-        const config = await invoke('load_config');
-        console.log('config:', config);
-        await invoke('save_config');
+        // console.log('listen to the_event');
+        // await listen('the_event', (event) => {
+        //   console.log('event from rust', event);
+        //   // event.event is the event name (useful if you want to use a single callback fn for multiple event types)
+        //   // event.payload is the payload object
+        // });
+        // await invoke('my_custom_command');
+        //
+        // const config = await invoke('load_config');
+        // console.log('config:', config);
+        // await invoke('save_config');
         /*
         // listen to the `click` event and get a function to remove the event listener
         // there's also a `once` function that subscribes to an event and automatically unsubscribes the listener on the first event

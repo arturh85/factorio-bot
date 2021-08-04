@@ -1,5 +1,10 @@
 <template>
-  <Button :label="buttonLabel" icon="pi pi-check" :model="items" class="p-button-success p-mr-2 p-mb-2" :disabled="isStopping || isStarting" @click="isStarted ? stopInstances() : startInstances()"></Button>
+  <Button icon="pi pi-check"
+          :label="buttonLabel"
+          :model="items"
+          :class="isStarted ? 'p-button-success' : 'p-button-error' + ' p-mr-2 p-mb-2'"
+          :disabled="isStopping || isStarting" @click="isStarted ? stopInstances() : startInstances()">
+  </Button>
 </template>
 
 <script>
@@ -28,16 +33,12 @@ export default defineComponent({
           return 'Start'
         }
       }),
-      isFailed: instanceStore.isFailed,
-      isStopping: instanceStore.isStopping,
-      isStarting: instanceStore.isStarting,
-      isStarted: instanceStore.isStarted,
-      startInstances: () => {
-        instanceStore.startInstances()
-      },
-      stopInstances: () => {
-        instanceStore.stopInstances()
-      },
+      isFailed: computed(() => instanceStore.isFailed),
+      isStopping: computed(() => instanceStore.isStopping),
+      isStarting: computed(() => instanceStore.isStarting),
+      isStarted: computed(() => instanceStore.isStarted),
+      startInstances: () => instanceStore.startInstances(),
+      stopInstances: () => instanceStore.stopInstances(),
       items: [
         {
           label: 'Update',

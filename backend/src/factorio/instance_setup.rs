@@ -221,7 +221,23 @@ pub async fn setup_factorio_instance(
         }
         #[cfg(windows)]
         {
-            std::os::windows::fs::symlink_dir(&data_mods_path, &mods_path)?;
+            let status = runas::Command::new("cmd.exe")
+                .arg("/C")
+                .arg("mklink")
+                .arg("/D")
+                .arg(&mods_path)
+                .arg(&data_mods_path)
+                .status()
+                .unwrap();
+            // std::os::windows::fs::symlink_dir(&data_mods_path, &mods_path)?;
+            if !status.success() {
+                return Err(anyhow!(
+                    "failed to create factorio mods symlink: {:?} -> {:?} ... {}",
+                    &mods_path,
+                    &data_mods_path,
+                    status.to_string()
+                ));
+            }
         }
     }
     let instance_data_path = instance_path.join(PathBuf::from("data"));
@@ -239,7 +255,23 @@ pub async fn setup_factorio_instance(
         }
         #[cfg(windows)]
         {
-            std::os::windows::fs::symlink_dir(&workspace_data_path, &instance_data_path)?;
+            let status = runas::Command::new("cmd.exe")
+                .arg("/C")
+                .arg("mklink")
+                .arg("/D")
+                .arg(&instance_data_path)
+                .arg(&workspace_data_path)
+                .status()
+                .unwrap();
+            // std::os::windows::fs::symlink_dir(&workspace_data_path, &instance_data_path)?;
+            if !status.success() {
+                return Err(anyhow!(
+                    "failed to create factorio data symlink: {:?} -> {:?} ... {}",
+                    &instance_data_path,
+                    &workspace_data_path,
+                    status.to_string()
+                ));
+            }
         }
     }
     // delete server/script-output/*

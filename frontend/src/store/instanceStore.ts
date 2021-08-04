@@ -31,9 +31,7 @@ export const useInstanceStore = defineStore({
             this.failed = false
             this.starting = true
             try {
-                console.log('invoke started');
                 await invoke('start_instances')
-                console.log('invoke done');
                 this.starting = false
                 this.started = true
             } catch(err) {
@@ -49,9 +47,7 @@ export const useInstanceStore = defineStore({
             this.failed = false
             this.stopping = true
             try {
-                console.log('invoke started');
                 await invoke('stop_instances')
-                console.log('invoke done');
                 this.stopping = false
                 this.started = false
             } catch(err) {

@@ -1,10 +1,9 @@
 import {defineStore} from 'pinia'
 import {invoke} from '@tauri-apps/api/tauri';
 
-export const useScriptStore = defineStore({
-    id: 'script',
+export const useRconStore = defineStore({
+    id: 'rcon',
     state: () => ({
-        code: '',
         executing: false,
         success: false,
         error: false
@@ -12,27 +11,21 @@ export const useScriptStore = defineStore({
     getters: {
         isExecuting(): boolean {
             return this.executing
-        },
-        getCode(): string {
-            return this.code
         }
     },
     actions: {
-        setCode(code: string) {
-            this.code = code
-        },
-        async execute() {
-            if(!this.code) {
-                throw new Error('no code to execute?')
+        async execute(command: string) {
+            if(!command) {
+                throw new Error('no command to execute?')
             }
             this.error = false
             this.executing = true
             try {
-                await invoke('execute_script', {code: this.code})
+                await invoke('execute_rcon', {command})
                 this.executing = false
                 this.success = true
             } catch(err) {
-                console.error('failed to execute script', err)
+                console.error('failed to execute rcon', err)
                 this.executing = false
                 this.success = true
                 this.error = true

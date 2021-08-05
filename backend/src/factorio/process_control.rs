@@ -181,7 +181,7 @@ pub async fn await_lock(lock_path: PathBuf, silent: bool) -> anyhow::Result<()> 
                             heim::process::get(id).await?.kill().await?;
                         }
                     }
-                    #[cfg(not(windows))]
+                    #[cfg(unix)]
                     {
                         return Err(anyhow!("Factorio instance already running!"));
                     }

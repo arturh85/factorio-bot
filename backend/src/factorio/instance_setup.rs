@@ -1,6 +1,5 @@
 use std::fs;
 use std::fs::{read_to_string, File};
-use std::io;
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -9,7 +8,6 @@ use std::time::Instant;
 
 use async_std::fs::create_dir;
 use indicatif::HumanDuration;
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use paris::Logger;
 use serde_json::Value;
 
@@ -54,6 +52,7 @@ pub async fn setup_factorio_instance(
 
         #[cfg(windows)]
         {
+            use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
             let archive = workspace_readdir.find(|file| {
                 if let Ok(file) = file.as_ref() {
                     file.path().extension().unwrap_or_default() == "zip"
@@ -116,7 +115,7 @@ pub async fn setup_factorio_instance(
 
                     let mut outfile = fs::File::create(&output_path).unwrap();
                     let mut file = archive.by_name(&file).unwrap();
-                    io::copy(&mut file, &mut outfile).unwrap();
+                    std::io::copy(&mut file, &mut outfile).unwrap();
                 }
                 bar.inc(1);
             }
@@ -127,7 +126,7 @@ pub async fn setup_factorio_instance(
             bar.finish();
         }
 
-        #[cfg(not(windows))]
+        #[cfg(unix)]
         {
             let archive = workspace_readdir.find(|file| {
                 if let Ok(file) = file.as_ref() {

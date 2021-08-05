@@ -11,11 +11,13 @@ use rlua::Lua;
 use crate::factorio::instance_setup::setup_factorio_instance;
 // use crate::factorio::plan_builder::create_lua_plan_builder;
 use crate::factorio::process_control::{start_factorio_server, FactorioStartCondition};
-use crate::factorio::rcon::{FactorioRcon, RconSettings};
+use crate::factorio::rcon::{create_lua_rcon, FactorioRcon, RconSettings};
 use crate::factorio::task_graph::TaskGraph;
-use crate::factorio::world::FactorioWorld;
+use crate::factorio::world::{create_lua_world, FactorioWorld};
 // use crate::factorio::ws::FactorioWebSocketServer;
+use crate::factorio::plan_builder::create_lua_plan_builder;
 use crate::types::{EntityName, PlayerChangedMainInventoryEvent};
+use rlua_async::ChunkExt;
 
 pub struct Planner {
     #[allow(dead_code)]
@@ -27,9 +29,13 @@ pub struct Planner {
 
 impl Planner {
     pub fn new(world: Arc<FactorioWorld>, rcon: Option<Arc<FactorioRcon>>) -> Planner {
+        info!("new 1");
         let plan_world = (*world).clone();
+        info!("new 2");
+        let graph = Arc::new(RwLock::new(TaskGraph::new()));
+        info!("new 3");
         Planner {
-            graph: Arc::new(RwLock::new(TaskGraph::new())),
+            graph,
             rcon,
             real_world: world,
             plan_world: Arc::new(plan_world),
@@ -42,29 +48,34 @@ impl Planner {
         self.graph = Arc::new(RwLock::new(TaskGraph::new()));
     }
 
-    pub fn plan(&mut self, _lua_code: String, bot_count: u32) -> anyhow::Result<()> {
-        let _all_bots = self.initiate_missing_players_with_default_inventory(bot_count);
+    pub fn plan(&mut self, lua_code: String, bot_count: u32) -> anyhow::Result<()> {
+        info!("XXX -1");
+        let all_bots = self.initiate_missing_players_with_default_inventory(bot_count);
+        info!("XXX 0");
         self.plan_world = Arc::new((*self.real_world).clone());
-        let _lua = Lua::new();
-        // lua.context::<_, rlua::Result<()>>(|ctx| {
-        //     let world = create_lua_world(ctx, self.plan_world.clone())?;
-        //     let plan = create_lua_plan_builder(ctx, self.graph.clone(), self.plan_world.clone())?;
-        //     let globals = ctx.globals();
-        //     globals.set("all_bots", all_bots)?;
-        //     globals.set("world", world)?;
-        //     globals.set("plan", plan)?;
-        //     if let Some(rcon) = self.rcon.as_ref() {
-        //         let rcon = create_lua_rcon(ctx, rcon.clone(), self.real_world.clone())?;
-        //         globals.set("rcon", rcon)?;
-        //     }
-        //     let chunk = ctx.load(&lua_code);
-        //     // tokio::runtime::Builder::new()
-        //     //     .threaded_scheduler()
-        //     //     .core_threads(4)
-        //     //     .build()
-        //     //     .unwrap()
-        //     //     .block_on(chunk.exec_async(ctx))
-        // })?;
+        info!("XXX 0.5");
+        let lua = Lua::new();
+        info!("XXX 1");
+        lua.context::<_, rlua::Result<()>>(|ctx| {
+            let world = create_lua_world(ctx, self.plan_world.clone())?;
+            let plan = create_lua_plan_builder(ctx, self.graph.clone(), self.plan_world.clone())?;
+            info!("XXX 2");
+            let globals = ctx.globals();
+            globals.set("all_bots", all_bots)?;
+            globals.set("world", world)?;
+            globals.set("plan", plan)?;
+            info!("XXX 3");
+            if let Some(rcon) = self.rcon.as_ref() {
+                let rcon = create_lua_rcon(ctx, rcon.clone(), self.real_world.clone())?;
+                globals.set("rcon", rcon)?;
+            }
+            info!("XXX 4");
+            let chunk = ctx.load(&lua_code);
+            info!("XXX 5");
+            async_std::task::block_on(chunk.exec_async(ctx))?;
+            info!("XXX 6");
+            Ok(())
+        })?;
         Ok(())
     }
 

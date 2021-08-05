@@ -1,16 +1,25 @@
 import { createRouter, createWebHashHistory } from 'vue-router';
-import Dashboard from './pages/Dashboard.vue';
 
 const routes = [
     {
         path: '/',
         name: 'dashboard',
-        component: Dashboard
+        component:  () => import('./pages/Dashboard.vue')
     },
     {
         path: '/settings',
         name: 'settings',
         component: () => import('./pages/Settings.vue')
+    },
+    {
+        path: '/script',
+        name: 'script',
+        component: () => import('./pages/ScriptPage.vue')
+    },
+    {
+        path: '/rcon',
+        name: 'rcon',
+        component: () => import('./pages/RconPage.vue')
     },
     {
         path: '/empty',

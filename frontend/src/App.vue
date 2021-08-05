@@ -48,6 +48,8 @@ export default {
       menu: [
         {label: 'Dashboard', icon: 'pi pi-fw pi-home', to: '/'},
         {label: 'Settings', icon: 'pi pi-fw pi-cog', to: '/settings'},
+        {label: 'RCON', icon: 'pi pi-fw pi-cog', to: '/rcon'},
+        {label: 'LUA Script', icon: 'pi pi-fw pi-cog', to: '/script'},
         {label: 'Mods', icon: 'pi pi-fw pi-th-large', to: '/factorioMods'},
         {label: 'Tasks', icon: 'pi pi-fw pi-sitemap', to: '/workspace'},
         {label: 'Entities', icon: 'pi pi-fw pi-sitemap', to: '/workspace'},

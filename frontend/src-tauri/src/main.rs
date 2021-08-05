@@ -242,6 +242,8 @@ async fn main() -> anyhow::Result<()> {
   tauri::Builder::default()
     .invoke_handler(tauri::generate_handler![
       crate::commands::my_custom_command,
+      crate::commands::execute_rcon,
+      crate::commands::execute_script,
       crate::commands::update_settings,
       crate::commands::load_settings,
       crate::commands::save_settings,

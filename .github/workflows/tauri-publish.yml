@@ -34,6 +34,8 @@ jobs:
         run: cd frontend; yarn
       - name: ✅ lint javascript code
         run: cd frontend; yarn lint
+      - name: 🚚 move version number from Cargo.toml to package.json and tauri.conf.json
+        run: cd frontend; yarn version:update-from-cargo
       - name: ✅ run javascript tests
         run: cd frontend; yarn test:unit
       - name: 🚧 build javascript
@@ -42,11 +44,8 @@ jobs:
         run: cd frontend; yarn cargo:test
       - name: 🚧 build setup
         run: cd frontend; yarn tauri:build
-
       - name: 🚚 move build output to correct folder
         run: cd frontend; mv ../target src-tauri/
-      - name: 🚚 move version number from Cargo.toml to package.json
-        run: cd frontend; yarn version:update-from-cargo
       - name: 📦️ create release & publish it
         uses: tauri-apps/tauri-action@v0
         env:

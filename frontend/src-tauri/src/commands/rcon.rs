@@ -2,7 +2,6 @@
 use crate::commands::ERR_TO_STRING;
 use async_std::sync::RwLock;
 use factorio_bot_backend::factorio::process_control::InstanceState;
-use factorio_bot_backend::settings::AppSettings;
 use tauri::State;
 
 #[tauri::command]

@@ -29,13 +29,9 @@ pub struct Planner {
 
 impl Planner {
     pub fn new(world: Arc<FactorioWorld>, rcon: Option<Arc<FactorioRcon>>) -> Planner {
-        info!("new 1");
         let plan_world = (*world).clone();
-        info!("new 2");
-        let graph = Arc::new(RwLock::new(TaskGraph::new()));
-        info!("new 3");
         Planner {
-            graph,
+            graph: Arc::new(RwLock::new(TaskGraph::new())),
             rcon,
             real_world: world,
             plan_world: Arc::new(plan_world),
@@ -313,7 +309,7 @@ mod tests {
     plan.groupEnd()
         "##
                 .into(),
-                4,
+                0,
             )
             .unwrap();
         let graph = planner.graph();
@@ -322,7 +318,11 @@ mod tests {
             r#"digraph {
     0 [ label = "Process Start" ]
     1 [ label = "Process End" ]
-    0 -> 1 [ label = "0" ]
+    2 [ label = "Start: Mine Stuff" ]
+    3 [ label = "End" ]
+    0 -> 2 [ label = "0" ]
+    2 -> 3 [ label = "0" ]
+    3 -> 1 [ label = "0" ]
 }
 "#,
         );

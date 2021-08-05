@@ -14,7 +14,8 @@
     "cargo:clippy": "cd .. && cargo clippy",
     "cargo:test": "cd .. && cargo test",
     "cargo:update": "cd .. && cargo update",
-    "version:update-from-cargo": "node update-package-version.js"
+    "version:update-from-cargo": "node update-package-version.js",
+    "dummy": "true"
   },
   "dependencies": {
     "@tauri-apps/api": "1.0.0-beta.5",

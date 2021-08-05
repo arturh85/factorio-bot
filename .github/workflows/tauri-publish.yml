@@ -60,4 +60,4 @@ jobs:
           iconPath: "../public/logo.png"
           configPath: "tauri.conf.json"
           projectPath: "./frontend"
-          npmScript: "lint" # dummy script because already build & moved
+          npmScript: "dummy" # dummy script because already build & moved

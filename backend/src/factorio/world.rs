@@ -29,19 +29,23 @@ pub struct FactorioWorld {
 
 impl Clone for FactorioWorld {
     fn clone(&self) -> Self {
+        let entity_prototypes = Arc::new((*self.entity_prototypes).clone());
+        let recipes = Arc::new((*self.recipes).clone());
+        let entity_graph = Arc::new(EntityGraph::new(entity_prototypes.clone(), recipes.clone()));
+
         FactorioWorld {
+            entity_graph: entity_graph.clone(),
+            recipes,
+            entity_prototypes,
             players: self.players.clone(),
             forces: self.forces.clone(),
             graphics: self.graphics.clone(),
-            recipes: Arc::new((*self.recipes).clone()),
-            entity_prototypes: Arc::new((*self.entity_prototypes).clone()),
             item_prototypes: self.item_prototypes.clone(),
             image_cache: self.image_cache.clone(),
             actions: self.actions.clone(),
             path_requests: self.path_requests.clone(),
             next_action_id: Mutex::new(0),
-            entity_graph: Arc::new((*self.entity_graph).clone()),
-            flow_graph: Arc::new((*self.flow_graph).clone()),
+            flow_graph: Arc::new(FlowGraph::new(entity_graph)),
         }
     }
 
@@ -317,4 +321,35 @@ pub fn create_lua_world(ctx: Context, _world: Arc<FactorioWorld>) -> rlua::Resul
     )?;
 
     Ok(map_table)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tile_boundaries_0() {
+        let world = FactorioWorld {
+            players: Default::default(),
+            forces: Default::default(),
+            graphics: Default::default(),
+            recipes: Arc::new(Default::default()),
+            entity_prototypes: Arc::new(Default::default()),
+            item_prototypes: Default::default(),
+            image_cache: Default::default(),
+            actions: Default::default(),
+            path_requests: Default::default(),
+            next_action_id: Default::default(),
+            entity_graph: Arc::new(EntityGraph::new(
+                Arc::new(DashMap::new()),
+                Arc::new(DashMap::new()),
+            )),
+            flow_graph: Arc::new(FlowGraph::new(Arc::new(EntityGraph::new(
+                Arc::new(DashMap::new()),
+                Arc::new(DashMap::new()),
+            )))),
+        };
+
+        let _cloned = world.clone();
+    }
 }

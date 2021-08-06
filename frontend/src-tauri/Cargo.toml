@@ -1,6 +1,6 @@
 [package]
 name = "factorio-bot"
-version = "0.2.0-dev"
+version = "0.2.0-preview"
 description = "a cross-platform factorio bot platform"
 authors = [ "Artur Hallmann <arturh@arturh.de>" ]
 license = "MIT"
@@ -24,7 +24,7 @@ color-eyre = "0.5.1"
 
 [build-dependencies]
 typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"] }
-factorio-bot-backend = { path = "../../backend/" }
+factorio-bot-backend = { path = "../../backend" }
 tauri-build = { version = "^1.0.0-beta.3" }
 serde = { version = "^1.0", features = [ "derive" ] }
 

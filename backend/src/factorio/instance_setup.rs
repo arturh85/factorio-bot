@@ -213,6 +213,16 @@ pub async fn setup_factorio_instance(
             return Err(anyhow!("missing mods/ folder from working directory"));
         }
     }
+    #[cfg(not(debug_assertions))]
+    {
+        let mut data_plans_path = workspace_data_path.join(PathBuf::from("plans"));
+        const PLANS_CONTENT: include_dir::Dir = include_dir!("../plans");
+        if let Err(err) = PLANS_CONTENT.extract(data_plans_path.clone()) {
+            error!("failed to extract static plans content: {:?}", err);
+            return Err(anyhow!("failed to extract plans content to workspace"));
+        }
+    }
+
     let data_mods_path = std::fs::canonicalize(data_mods_path)?;
     let mods_path = instance_path.join(PathBuf::from("mods"));
     if !mods_path.exists() {

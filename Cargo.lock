@@ -1245,7 +1245,7 @@ dependencies = [
 
 [[package]]
 name = "factorio-bot"
-version = "0.2.0-dev"
+version = "0.2.0-preview"
 dependencies = [
  "anyhow",
  "async-std",
@@ -1258,7 +1258,7 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
- "toml 0.5.8",
+ "toml 0.4.10",
  "typescript-definitions",
 ]
 

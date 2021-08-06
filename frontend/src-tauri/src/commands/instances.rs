@@ -45,6 +45,9 @@ pub async fn start_instances(
   match started_instance_state {
     Ok(started_instance_state) => {
       let mut instance_state = instance_state.write().await;
+      info!("start copy");
+      let _copy = (**started_instance_state.world.as_ref().unwrap()).clone();
+      info!("copy done");
       *instance_state = Some(started_instance_state);
       app_handle
         .emit_all("instances_started", true)

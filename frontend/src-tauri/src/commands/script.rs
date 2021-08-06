@@ -7,6 +7,7 @@ use factorio_bot_backend::settings::AppSettings;
 use tauri::State;
 
 #[tauri::command]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub async fn execute_script(
   app_settings: State<'_, RwLock<AppSettings>>,
   instance_state: State<'_, RwLock<Option<InstanceState>>>,
@@ -14,11 +15,8 @@ pub async fn execute_script(
 ) -> Result<(), String> {
   if let Some(instance_state) = &*instance_state.read().await {
     if let Some(world) = &instance_state.world {
-      info!("creating planner 1");
       let world = world.clone();
-      info!("creating planner 2");
       let rcon = instance_state.rcon.clone();
-      info!("creating planner 3");
       let mut planner = Planner::new(world, Some(rcon));
       info!("running {}", code);
       planner

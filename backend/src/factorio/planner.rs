@@ -45,31 +45,22 @@ impl Planner {
     }
 
     pub fn plan(&mut self, lua_code: String, bot_count: u32) -> anyhow::Result<()> {
-        info!("XXX -1");
         let all_bots = self.initiate_missing_players_with_default_inventory(bot_count);
-        info!("XXX 0");
         self.plan_world = Arc::new((*self.real_world).clone());
-        info!("XXX 0.5");
         let lua = Lua::new();
-        info!("XXX 1");
         lua.context::<_, rlua::Result<()>>(|ctx| {
             let world = create_lua_world(ctx, self.plan_world.clone())?;
             let plan = create_lua_plan_builder(ctx, self.graph.clone(), self.plan_world.clone())?;
-            info!("XXX 2");
             let globals = ctx.globals();
             globals.set("all_bots", all_bots)?;
             globals.set("world", world)?;
             globals.set("plan", plan)?;
-            info!("XXX 3");
             if let Some(rcon) = self.rcon.as_ref() {
                 let rcon = create_lua_rcon(ctx, rcon.clone(), self.real_world.clone())?;
                 globals.set("rcon", rcon)?;
             }
-            info!("XXX 4");
             let chunk = ctx.load(&lua_code);
-            info!("XXX 5");
             async_std::task::block_on(chunk.exec_async(ctx))?;
-            info!("XXX 6");
             Ok(())
         })?;
         Ok(())

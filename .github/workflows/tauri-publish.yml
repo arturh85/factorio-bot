@@ -60,3 +60,15 @@ jobs:
           configPath: "tauri.conf.json"
           projectPath: "./frontend"
           npmScript: "dummy" # dummy script because already build & moved
+      - name: 🚧 create nuget package for chocolatey
+        uses: crazy-max/ghaction-chocolatey@v1
+        with:
+          args: pack .github/chocolatey/factorio-bot.nuspec
+      - name: 🚧 setup chocolatey apikey
+        uses: crazy-max/ghaction-chocolatey@v1
+        with:
+          args: apikey --key $CHOCOLATEY_APIKEY --source https://push.chocolatey.org/
+      - name: 📦 publish chocolaey package
+        uses: crazy-max/ghaction-chocolatey@v1
+        with:
+          args: push factorio-bot.0.2.0.nupkg --source https://push.chocolatey.org/

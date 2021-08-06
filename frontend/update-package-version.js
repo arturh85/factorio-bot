@@ -13,6 +13,15 @@ if (matches) {
     const tauriConf = JSON.parse(fs.readFileSync(tauriConfPath, {encoding: 'utf8'}))
     tauriConf.package.version = version
     fs.writeFileSync(tauriConfPath, JSON.stringify(tauriConf, null, 2))
+
+    const filesToReplaceVersion = [
+        '../.github/chocolatey/factorio-bot.nuspec',
+        '../.github/chocolatey/tools/chocolateyinstall.ps1'
+    ]
+    for (let filePath of filesToReplaceVersion) {
+        let content = fs.readFileSync(filePath, {encoding: 'utf8'});
+        fs.writeFileSync(filePath, content.replaceAll('__REPLACE_VERSION__', version))
+    }
 } else {
     console.error('failed to find version in ', cargoTomlPath)
     process.exit(1)

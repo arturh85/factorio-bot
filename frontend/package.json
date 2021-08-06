@@ -9,7 +9,7 @@
     "native:serve": "cross-env VITE_HTTP_HANDLER=NATIVE vite --port 8080",
     "build:web": "vite build",
     "tauri:serve": "concurrently -n \"rust,VITE\" -k \"cross-env RUST_BACKTRACE=full tauri dev\" \"npm run native:serve\"",
-    "tauri:build": "cross-env VITE_HTTP_HANDLER=NATIVE vite build && tauri build",
+    "tauri:build": "cross-env VITE_HTTP_HANDLER=NATIVE vite build && tauri build --verbose",
     "test:ci": "npm run lint && npm run test:unit && npm run tauri:build && npm run cargo:test && npm run cargo:clippy",
     "cargo:clippy": "cd .. && cargo clippy",
     "cargo:test": "cd .. && cargo test",

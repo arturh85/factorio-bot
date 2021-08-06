@@ -14,7 +14,7 @@ Rewrite Milestones:
 - [x] extract factorio archive for server and clients
 - [x] start factorio instances concurrently
 - [ ] lua editor with syntax highlighting
-- [ ] lua script execution
+- [x] lua script execution
 
 Planned Features:
 - [ ] extract factorio .zip/tar.xz and symlink bridge mod

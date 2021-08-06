@@ -68,5 +68,7 @@ jobs:
       - name: 📦 publish chocolatey package (windows only)
         if: matrix.platform == 'windows-latest'
         uses: crazy-max/ghaction-chocolatey@v1
+        env:
+          CHOCOLATEY_APIKEY: ${{ secrets.CHOCOLATEY_APIKEY }}
         with:
-          args: push factorio-bot.0.2.0.nupkg --key ${{secret.CHOCOLATEY_APIKEY}} --source https://push.chocolatey.org/
+          args: push factorio-bot.0.2.0.nupkg --key ${{CHOCOLATEY_APIKEY}} --source https://push.chocolatey.org/

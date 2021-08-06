@@ -1258,7 +1258,7 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
- "toml 0.4.10",
+ "toml 0.5.8",
  "typescript-definitions",
 ]
 
@@ -3099,11 +3099,11 @@ dependencies = [
 
 [[package]]
 name = "phf"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2ac8b67553a7ca9457ce0e526948cad581819238f4a9d1ea74545851fa24f37"
+checksum = "b21b531851d1d86a90bd62dd79be87ce2d90b7bcb6afbae07813921d6156696a"
 dependencies = [
- "phf_macros 0.9.0",
+ "phf_macros 0.9.1",
  "phf_shared 0.9.0",
  "proc-macro-hack",
 ]
@@ -3130,9 +3130,9 @@ dependencies = [
 
 [[package]]
 name = "phf_generator"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fc1437ada0f3a97d538f0bb608137bf53c53969028cab74c89893e1e9a12f0e"
+checksum = "d43f3220d96e0080cc9ea234978ccd80d904eafb17be31bb0f76daaea6493082"
 dependencies = [
  "phf_shared 0.9.0",
  "rand 0.8.4",
@@ -3154,11 +3154,11 @@ dependencies = [
 
 [[package]]
 name = "phf_macros"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b706f5936eb50ed880ae3009395b43ed19db5bff2ebd459c95e7bf013a89ab86"
+checksum = "ef44ec4684c899a8ab0c2330beb2b6852842e60458cc83721c333b5dbc04ece6"
 dependencies = [
- "phf_generator 0.9.0",
+ "phf_generator 0.9.1",
  "phf_shared 0.9.0",
  "proc-macro-hack",
  "proc-macro2 1.0.28",
@@ -3668,9 +3668,9 @@ dependencies = [
 
 [[package]]
 name = "redox_syscall"
-version = "0.2.9"
+version = "0.2.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ab49abadf3f9e1c4bc499e8845e152ad87d2ad2d30371841171169e9d75feee"
+checksum = "8383f39639269cde97d255a32bdb68c047337295414940c68bdd30c2e13203ff"
 dependencies = [
  "bitflags",
 ]
@@ -4107,9 +4107,9 @@ checksum = "729a25c17d72b06c68cb47955d44fda88ad2d3e7d77e025663fdd69b93dd71a1"
 
 [[package]]
 name = "slab"
-version = "0.4.3"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f173ac3d1a7e3b28003f40de0b5ce7fe2710f9b9dc3fc38664cebee46b3b6527"
+checksum = "c307a32c1c5c437f38c7fd45d753050587732ba8628319fbdf12a7e289ccc590"
 
 [[package]]
 name = "smallvec"
@@ -4534,7 +4534,7 @@ dependencies = [
  "heck",
  "html5ever",
  "kuchiki",
- "phf 0.9.0",
+ "phf 0.9.1",
  "proc-macro2 1.0.28",
  "quote 1.0.9",
  "serde 1.0.127",

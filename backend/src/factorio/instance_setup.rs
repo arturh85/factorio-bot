@@ -215,7 +215,7 @@ pub async fn setup_factorio_instance(
     }
     #[cfg(not(debug_assertions))]
     {
-        let mut data_plans_path = workspace_data_path.join(PathBuf::from("plans"));
+        let data_plans_path = workspace_data_path.join(PathBuf::from("plans"));
         const PLANS_CONTENT: include_dir::Dir = include_dir!("../plans");
         if let Err(err) = PLANS_CONTENT.extract(data_plans_path.clone()) {
             error!("failed to extract static plans content: {:?}", err);

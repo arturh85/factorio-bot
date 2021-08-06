@@ -14,6 +14,7 @@
     "cargo:clippy": "cd .. && cargo clippy",
     "cargo:test": "cd .. && cargo test",
     "cargo:update": "cd .. && cargo update",
+    "deps:update": "npm-check-updates -u && yarn && npm run cargo:update",
     "version:update-from-cargo": "node update-package-version.js",
     "dummy": "true"
   },
@@ -24,7 +25,7 @@
     "prettier": "^2.3.2",
     "primeflex": "3.0.1",
     "primeicons": "4.1.0",
-    "primevue": "^3.6.0",
+    "primevue": "^3.6.2",
     "prismjs": "^1.24.1",
     "vue": "^3.2.0-beta.7",
     "vue-global-api": "0.4.1",

@@ -71,4 +71,4 @@ jobs:
         env:
           APIKEY: ${{ secrets.CHOCOLATEY_APIKEY }}
         with:
-          args: push factorio-bot.0.2.0.nupkg --key "${APIKEY}" --source https://push.chocolatey.org/
+          args: push factorio-bot.0.2.0.nupkg --key "${{ env.APIKEY }}" --source https://push.chocolatey.org/

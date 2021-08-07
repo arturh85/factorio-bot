@@ -11,6 +11,8 @@ if (matches) {
         shasum.update(data)
     });
     s.on('end', function () {
+        console.info('hashing completed');
+
         const checksum = shasum.digest('hex')
         const filesToReplaceChecksum = [
             '../.github/chocolatey/tools/chocolateyinstall.ps1'
@@ -18,7 +20,10 @@ if (matches) {
         for (let filePath of filesToReplaceChecksum) {
             let content = fs.readFileSync(filePath, {encoding: 'utf8'});
             fs.writeFileSync(filePath, content.replaceAll('__REPLACE_CHECKSUM__', checksum))
+            console.info('replaced checksum in ', filePath);
         }
     })
+} else {
+    console.error('no version found');
 }
 

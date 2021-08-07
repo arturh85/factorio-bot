@@ -61,7 +61,7 @@ jobs:
           projectPath: "./frontend"
           npmScript: "dummy" # dummy script because already build & moved
       - name: 🚧 calculate checksum for chocolatey (windows only)
-        run: cd frontend; yarn tauri:build
+        run: cd frontend; yarn checksum:update
       - name: 🚧 create nuget package for chocolatey (windows only)
         if: matrix.platform == 'windows-latest'
         uses: crazy-max/ghaction-chocolatey@v1

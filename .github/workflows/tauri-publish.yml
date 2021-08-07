@@ -60,6 +60,9 @@ jobs:
           configPath: "tauri.conf.json"
           projectPath: "./frontend"
           npmScript: "dummy" # dummy script because already build & moved
+      - name: ✅ calculate checksums for chocolatey (windows only)
+        if: matrix.platform == 'windows-latest'
+        run: cd frontend; yarn checksum:update
       - name: 🚧 create nuget package for chocolatey (windows only)
         if: matrix.platform == 'windows-latest'
         uses: crazy-max/ghaction-chocolatey@v1
@@ -71,4 +74,4 @@ jobs:
         env:
           APIKEY: ${{ secrets.CHOCOLATEY_APIKEY }}
         with:
-          args: push factorio-bot.0.2.0.nupkg --key "${{ env.APIKEY }}" --source https://push.chocolatey.org/
+          args: push factorio-bot.*.nupkg --key "${{ env.APIKEY }}" --source https://push.chocolatey.org/

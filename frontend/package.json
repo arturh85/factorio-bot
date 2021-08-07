@@ -16,6 +16,7 @@
     "cargo:update": "cd .. && cargo update",
     "deps:update": "npm-check-updates -u && yarn && npm run cargo:update",
     "version:update-from-cargo": "node update-package-version.js",
+    "checksum:update": "node update-checksum.js",
     "dummy": "true"
   },
   "dependencies": {

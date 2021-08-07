@@ -134,7 +134,6 @@ dependencies = [
  "futures-lite 1.12.0",
  "num_cpus",
  "once_cell",
- "tokio 0.2.25",
 ]
 
 [[package]]
@@ -335,7 +334,7 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "parking_lot",
- "tokio 1.9.0",
+ "tokio",
 ]
 
 [[package]]
@@ -456,12 +455,6 @@ name = "byteorder"
 version = "1.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "14c189c53d098945499cdfa7ecc63567cf3886b3332b312a5b4585d8d3a6a610"
-
-[[package]]
-name = "bytes"
-version = "0.5.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e4cec68f03f32e44924783795810fa50a7035d8c8ebe78580ad7e6c703fba38"
 
 [[package]]
 name = "bytes"
@@ -2060,7 +2053,7 @@ version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "527e8c9ac747e28542699a951517aa9a6945af506cd1f2e1b53a576c17b6cc11"
 dependencies = [
- "bytes 1.0.1",
+ "bytes",
  "fnv",
  "itoa",
 ]
@@ -3653,7 +3646,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ff27421a323066d481019e115c87a0708d6628a4a8d930db6362165e3447508"
 dependencies = [
  "async-std",
- "bytes 1.0.1",
+ "bytes",
  "err-derive",
 ]
 
@@ -4443,7 +4436,7 @@ dependencies = [
  "tauri-utils",
  "tempfile",
  "thiserror",
- "tokio 1.9.0",
+ "tokio",
  "uuid",
  "zip",
 ]
@@ -4667,17 +4660,6 @@ name = "tinyvec_macros"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cda74da7e1a664f795bb1f8a87ec406fb89a02522cf6e50620d016add6dbbf5c"
-
-[[package]]
-name = "tokio"
-version = "0.2.25"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6703a273949a90131b290be1fe7b039d0fc884aa1935860dfcbe056f28cd8092"
-dependencies = [
- "bytes 0.5.6",
- "pin-project-lite 0.1.12",
- "slab",
-]
 
 [[package]]
 name = "tokio"

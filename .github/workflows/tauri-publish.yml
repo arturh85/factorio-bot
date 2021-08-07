@@ -60,12 +60,14 @@ jobs:
           configPath: "tauri.conf.json"
           projectPath: "./frontend"
           npmScript: "dummy" # dummy script because already build & moved
+      - name: 🚧 calculate checksum for chocolatey (windows only)
+        run: cd frontend; yarn tauri:build
       - name: 🚧 create nuget package for chocolatey (windows only)
         if: matrix.platform == 'windows-latest'
         uses: crazy-max/ghaction-chocolatey@v1
         with:
           args: pack .github/chocolatey/factorio-bot.nuspec
-      - name: 📦 publish chocolatey package (windows only)
+      - name: 📦 publish nuget package to chocolatey (windows only)
         if: matrix.platform == 'windows-latest'
         uses: crazy-max/ghaction-chocolatey@v1
         env:

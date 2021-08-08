@@ -10,6 +10,7 @@
 import {defineComponent, computed} from 'vue';
 import {useInstanceStore} from '@/store/instanceStore';
 import Button from 'primevue/button';
+import { useToast } from 'primevue/usetoast';
 
 export default defineComponent({
   components: {
@@ -17,6 +18,7 @@ export default defineComponent({
   },
   setup() {
     const instanceStore = useInstanceStore()
+    const toast = useToast();
 
     return {
       buttonLabel: computed(() => {
@@ -36,8 +38,23 @@ export default defineComponent({
       isStopping: computed(() => instanceStore.isStopping),
       isStarting: computed(() => instanceStore.isStarting),
       isStarted: computed(() => instanceStore.isStarted),
-      startInstances: () => instanceStore.startInstances(),
-      stopInstances: () => instanceStore.stopInstances()
+      startInstances: async() => {
+        try {
+          toast.add({severity:'success', summary: 'starting!', life: 1000});
+          await instanceStore.startInstances()
+          toast.add({severity:'success', summary: 'Started!', life: 1000});
+        } catch(err) {
+          toast.add({severity:'error', summary: 'Failed to start instances', detail:err.message, life: 10000});
+        }
+      },
+      stopInstances: async() => {
+        try {
+          await instanceStore.stopInstances()
+          toast.add({severity:'success', summary: 'Stopped!', life: 1000});
+        } catch(err) {
+          toast.add({severity:'error', summary: 'Failed to stop instances', detail:err.message, life: 10000});
+        }
+      }
     }
   }
 });

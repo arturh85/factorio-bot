@@ -1,160 +1,69 @@
-Factorio Bot
-============
+# Factorio Bot
 
-!!! REWRITE IN PROCESS !!!
-----------------
+- [Book](https://arturh85.github.io/factorio-bot-tauri/book/)
+- [API Docs](https://arturh85.github.io/factorio-bot-tauri/doc/)
+- [Frontend Build Statistics](https://arturh85.github.io/factorio-bot-tauri/stats.html)
 
+# What is it?
 
-This project tries to be a bot platform for the game
+Factorio Bot is a bot platform for the game
 [Factorio](https://www.factorio.com) inspired by [factorio-bot](https://github.com/Windfisch/factorio-bot/)
 
-Rewrite Milestones:
-- [x] allow settings to be configured via GUI
-- [x] remove unused primevue components from bundle to minimize download size
-- [x] extract factorio archive for server and clients
-- [x] start factorio instances concurrently
-- [ ] lua editor with syntax highlighting
-- [x] lua script execution
+Goals / Use Cases:
+- TAS (Tool Assisted Speedrun) to beat the world record with enough bots to share the workload efficiently
+- Learning Environment to train Machine Learning algorithms within Factorio
+- Playground for Factorio Experiments
 
-Planned Features:
-- [ ] extract factorio .zip/tar.xz and symlink bridge mod
-- [ ] start Factorio server and/or one or multiple clients (unrestricted) 
-- [ ] read factorio recipes/entity prototypes/item prototypes/graphics
+## Youtube Videos
+
+- Reference: [Any% World Record gets automation in 7:33](https://www.youtube.com/watch?v=rHvaZMdjnLE&t=455)
+
+- [Factorio Bot 0.1.2: Research logistics with 4 Bots in 15:51](https://youtu.be/iFhcyjfcjx8)
+- [Factorio Bot 0.1.1: Research automation with 1 Bot in 8:57](https://youtu.be/1vbWWiSV6Sw)
+- [Factorio Bot 0.1.0: Research automation with 1 Bot in 12:33](https://youtu.be/6KXYuVDRZ-I)
+
+## Features
+- [x] extract factorio .zip/tar.xz and symlink bridge mod
+- [x] start Factorio server and/or one or multiple clients (unrestricted) 
+- [x] read factorio recipes/entity prototypes/item prototypes/graphics
 - [ ] read map contents by chunk for leaflet based Map View
 - Build Graphs of:
   - [ ] Entity Connections with distance based weights
   - [ ] Flow Connections with flow rate per second for each belt side/resource
   - [ ] Bot Task Dependencies with time estimate based weights 
 - [ ] Use whatever mods you want
-- REST Interface with:
-  - [ ] retrieve all recipes/technologies/prototypes
-  - [ ] read bot inventories
-  - [ ] use bot to:
-    - [ ] walk somewhere
-    - [ ] mine something
-    - [ ] craft something
-    - [ ] place entities
-    - [ ] place blueprints (even partly)
-    - [ ] revive ghost entities
-  - [ ] find valid placement options for:
-    - [ ] offshore pumps
-    - [ ] miners with specific ore below
-    - [ ] blueprints (todo)
-  - [ ] A* based belt/pipe routing from point a to b with automatic underground usage
-  - [ ] parse blueprint strings into width/height + entity list
-  - [ ] transfer items between bots
-  - [ ] read entity inventories
-  - [ ] start research
-  - [ ] find entities/tiles in circle / rect
-  - [ ] insert to inventory / remove from inventory
-  - [ ] cheating variants of above methods for quick tests
-- WebSocket based Events when:
-  - [ ] bot changed position
-  - [ ] bot changed inventory
-  - [ ] research finished
-  - [ ] entity attacked by biters (only an idea)
-- Typescript based Bot Manager which can:
-  - [ ] Build starter base with iron/copper/stone/coal burner-mining-drills and stone-furnaces
-  - [ ] Start automation research & manually craft 10 `automation-science` to insert into `lab`
-  - [ ] Start logistics research & build assembler to automatically craft the rest
 - [x] should work on Win/Mac/Linux, not tested on Mac
 - [x] MIT licenced
 
-## Youtube Videos
+# Installation
 
-- Reference: [Any% World Record gets automation in 7:33](https://www.youtube.com/watch?v=rHvaZMdjnLE&t=455) 
-
-- [Factorio Bot 0.1.2: Research logistics with 4 Bots in 15:51](https://youtu.be/iFhcyjfcjx8) 
-- [Factorio Bot 0.1.1: Research automation with 1 Bot in 8:57](https://youtu.be/1vbWWiSV6Sw) 
-- [Factorio Bot 0.1.0: Research automation with 1 Bot in 12:33](https://youtu.be/6KXYuVDRZ-I) 
+- Download the [latest release](https://github.com/arturh85/factorio-bot-tauri/releases) for your Operating System
+  - on windows you can use the [chocolatey](https://chocolatey.org/) package manager: `choco install factorio-bot --version=0.2.0`
+- Download [Factorio](https://www.factorio.com) as .zip or .tar.xz (don't use the headless version!)
+- Start the application and select your downloaded factorio archive under `Settings`
+- Use the `Start` Button in the top right to start the given number of factorio instances with given seed/map exchange string
+- Select the Script you want to run and execute it
 
 # Technologies used
 
-## Vite.js
-[Vite.js](https://vitejs.dev/) is a new modern bundler for javascript which is blazing fast and includes many sensible defaults.
+## Frontend: Vite.js + PrimeVue
+- [Vite.js](https://vitejs.dev/) is a new modern bundler for javascript which is blazing fast and includes many sensible defaults.
+- [Vue.js](https://vuejs.org/) is an incremental frontend framework which is an absolute joy to work with. It has seen very impressive improvements in version 3 including Composition Api, script setup, dynamic css binding and ... .
+- [PrimeVue](https://www.primefaces.org/primevue/) is the a component library for Vue 3. Lots of premade components will make your job as application developer easier and more fun.
 
-## Tauri
-[Tauri](https://tauri.studio/) is a new modern technology to turn your web apps into a desktop app for multiple platforms (Windows, MacOS, Linux, android and ios soon). Tauri apps have very small file size and tiny memory consumption.
+## Backend: Rust + Tauri
+- [Tauri](https://tauri.studio/) is a new modern technology to turn your web apps into a desktop app for multiple platforms (Windows, MacOS, Linux, android and ios soon). Tauri apps have very small file size and tiny memory consumption.
 
-## Vue 3
-[Vue.js](https://vuejs.org/) is an incremental frontend framework which is an absolute joy to work with. It has seen very impressive improvements in version 3 including Composition Api, script setup, dynamic css binding and ... .
-
-## PrimeVue
-[PrimeVue](https://www.primefaces.org/primevue/) is the a component library for Vue 3. Lots of premade components will make your job as application developer easier and more fun.
-
-### Bonus: Vue Global Api
-[Vue Global Api](https://github.com/antfu/vue-global-api) globally registers commonly used composition api functions such as `ref`, `reactive` and ... . makes your `script setup` sections cleaner.
-
-## Installation
-- Ready your workspace according to tauri. [Tauri Getting Started](https://tauri.studio/en/docs/getting-started/intro/)
-
-  - **Note:** You only need to install global things such as rust and other os level packages. Any thing related to application itself is already installed and ready for you.
-
-- Clone repository `git clone https://github.com/yooneskh/vite-tauri-template app-name`
-
+## Setup Development Environment 
+- Ready your workspace according to [Tauri Getting Started](https://tauri.studio/en/docs/getting-started/intro/)
+- Clone repository `git clone git@github.com:arturh85/factorio-bot-tauri.git`
+- Change to frontend/
+- `cd frontend/`
 - `yarn` or `npm i`
 
-- Modify these files according to your app.
-  - `index.html`
-  - `package.json`
-  - `public/favicon.ico`
-  - `src/assets/logo.*`
-  - `src-tauri/tauri.conf.json`
+## Development Usage
 
-## Usage
-
-- `yarn serve` launches vite and you can test and develop your app in the browser at `http://localhost:8080`.
-
-- `yarn native:serve` launches vite and configures ynetwork to use tauri for api calls. Use this if you want to test your app in tauri dev mode.
-
-- `yarn tauri:serve` launches tauri in dev mode and you can see your app in tauri window.
-
-- `yarn build` builds web application and packages them with tauri in `src-tauri/target`
-
-- `yarn build:web` only builds the web application and puts it in `./dist` directory. You should not normally want this. Difference of this web app with the one build with normal `yarn build` is that this one uses axios for network calls.
-
-## Setup 
-
-- Install [rust/cargo](https://rustup.rs/) and [nodejs/npm](https://nodejs.org/)
-- Clone this repository
-- Download [Factorio](https://www.factorio.com) as .zip or .tar.xz into workspace/ directory (don't use the headless version!)
-- Start server & one client with good seed:
-
-```
-cargo run -- start -c 1 --new --seed 1785882545 
-```
-
-You can also use map-exchange-strings like this:
-
-```
-cargo run -- start -c 1 --new --seed 1759324908 --map ">>>eNpjZICDBnsQycGSnJ+YA+EdcABhruT8goLUIt38olRkYc7ko tKUVN38TFTFqXmpuZW6SYnFqTATQTRHZlF+HroJrMUl+XmoIiVFq anFDAwODqtXrbIDyXCXFiXmZZbmoutlYHyzT+hBQ4scAwj/r2dQ+ P8fhIGsB0AbQZiBsQGsgxEoBgUsEsn5eSVF+Tm6xaklJZl56VaJp RVWSZmJxZy6BnrGpgZAoIFNSVpRamFpal5ypVVuaU5JZkFOZmoRh 7GeARjIouvIzc8sLiktSgWbzGGgBzbXQBenMqymG+gZmgGBOWtyT mZaGgODgiMQO4H9xcBYLbLO/WHVFHtGiL/0HKCMD1CRA0kwEU8Yw 88Bp5QKjGGCZI4xGHxGYkAsLQFaAVXF4YBgQCRbQJKMjL1vty74f uyCHeOflR8v+SYl2DMauoq8+2C0zg4oyQ7yAhOcmDUTBHbCvMIAM /OBPVTqpj3j2TMg8MaekRWkQwREOFgAiQPezAyMAnxA1oIeIKEgw wBzmh3MGBEHxjQw+AbzyWMY47I9uj+AAWEDMlwORJwAEWAL4S5jh DAd+h0YHeRhspIIJUD9RgzIbkhB+PAkzNrDSPajOQQzIpD9gSai4 oAlGrhAFqbAiRfMcNcAw/MCO4znMN+BkRnEAKn6AhSD8EAyMKMgt IADM6KEACYLBvnZRmoATpjh0w==<<<"
-```
-
-See cargo run -- --help for other options.
-On Windows the first start needs Administrative Privileges to create the symlinks to the mod directory.
-
-## Docker 
-
-There is also a docker image which starts the bot and factorio server in headless mode:
-
-```
-docker run --rm -p 34197:34197 -p 34197:34197/udp -p 7123:7123 arturh85/factorio-bot-rs
-``` 
-
-You can then connect to this headless server from different hosts with 
-
-```
-cargo run -- start --server <server-ip>
-``` 
-
-
-## Roll Best Seed for Map Exchange String:
-
-```
-docker run --rm arturh85/factorio-bot-rs roll-seed -p 5 -r 50 --map ">>>eNpjZICDBnsQycGSnJ+YA+EdcABhruT8goLUIt38olRkYc7ko tKUVN38TFTFqXmpuZW6SYnFqTATQTRHZlF+HroJrMUl+XmoIiVFq anFDAwODqtXrbIDyXCXFiXmZZbmoutlYHyzT+hBQ4scAwj/r2dQ+ P8fhIGsB0AbQZiBsQGsgxEoBgUsEsn5eSVF+Tm6xaklJZl56VaJp RVWSZmJxZy6BnrGpgZAoIFNSVpRamFpal5ypVVuaU5JZkFOZmoRh 7GeARjIouvIzc8sLiktSgWbzGGgBzbXQBenMqymG+gZmgGBOWtyT mZaGgODgiMQO4H9xcBYLbLO/WHVFHtGiL/0HKCMD1CRA0kwEU8Yw 88Bp5QKjGGCZI4xGHxGYkAsLQFaAVXF4YBgQCRbQJKMjL1vty74f uyCHeOflR8v+SYl2DMauoq8+2C0zg4oyQ7yAhOcmDUTBHbCvMIAM /OBPVTqpj3j2TMg8MaekRWkQwREOFgAiQPezAyMAnxA1oIeIKEgw wBzmh3MGBEHxjQw+AbzyWMY47I9uj+AAWEDMlwORJwAEWAL4S5jh DAd+h0YHeRhspIIJUD9RgzIbkhB+PAkzNrDSPajOQQzIpD9gSai4 oAlGrhAFqbAiRfMcNcAw/MCO4znMN+BkRnEAKn6AhSD8EAyMKMgt IADM6KEACYLBvnZRmoATpjh0w==<<<"
-``` 
-
-Once I upload my factorio mod to official mod portal you should be able to connect with any factorio client and have the mods auto sync.
+- `npm start` starts the application while watching for changes 
 
 ## Contribute
 

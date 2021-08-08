@@ -79,13 +79,23 @@ jobs:
         with:
           args: push factorio-bot.nupkg --key "${{ env.APIKEY }}" --source https://push.chocolatey.org/
 
-      - name: Build rust doc for gh-pages (ubuntu only)
+      - name: 🚧 Build rust doc for gh-pages (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
-        run: cargo doc --all --no-deps && mv target/doc public
-      - name: Move Frotend stats.html to gh-pages (ubuntu only)
+        run: mkdir public && cargo doc --all --no-deps && mv target/doc public/doc
+
+      - name: ⚡ install cargo mdbook (ubuntu only)
+        if: matrix.platform == 'ubuntu-latest'
+        run: cargo install mdbook --force
+
+      - name: 🚧 Build mdBook (ubuntu only)
+        if: matrix.platform == 'ubuntu-latest'
+        run: mdbook build docs && mv docs/book public/book
+
+      - name: 🚚 Move Frontend stats.html to gh-pages (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
         run: mv frontend/dist/stats.html public/stats.html
-      - name: Deploy Docs (ubuntu only)
+
+      - name: 📦 deploy public to gh-pages (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
         uses: peaceiris/actions-gh-pages@364c31d33bb99327c77b3a5438a83a357a6729ad # v3.4.0
         with:

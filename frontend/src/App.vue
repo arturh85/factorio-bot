@@ -19,12 +19,13 @@
 
     <div class="layout-main">
       <router-view/>
+      <Toast position="bottom-right" />
     </div>
 
-        <AppConfig :layoutMode="layoutMode"
-                   :layoutColorMode="layoutColorMode"
-                   @layout-change="onLayoutChange"
-                   @layout-color-change="onLayoutColorChange"/>
+    <AppConfig :layoutMode="layoutMode"
+               :layoutColorMode="layoutColorMode"
+               @layout-change="onLayoutChange"
+               @layout-color-change="onLayoutColorChange"/>
 
     <AppFooter/>
   </div>
@@ -36,6 +37,7 @@ import AppMenu from './AppMenu.vue'
 import AppFooter from './AppFooter.vue'
 import {useAppStore} from '@/store/appStore';
 import AppConfig from '@/AppConfig.vue';
+import Toast from 'primevue/toast';
 
 export default {
   data() {
@@ -49,14 +51,14 @@ export default {
         {label: 'Dashboard', icon: 'pi pi-fw pi-home', to: '/'},
         {label: 'Settings', icon: 'pi pi-fw pi-cog', to: '/settings'},
         {label: 'RCON', icon: 'pi pi-fw pi-cog', to: '/rcon'},
-        {label: 'LUA Script', icon: 'pi pi-fw pi-cog', to: '/script'},
-        {label: 'Mods', icon: 'pi pi-fw pi-th-large', to: '/factorioMods'},
-        {label: 'Tasks', icon: 'pi pi-fw pi-sitemap', to: '/workspace'},
-        {label: 'Entities', icon: 'pi pi-fw pi-sitemap', to: '/workspace'},
-        {label: 'Map', icon: 'pi pi-fw pi-map-marker', to: '/workspace'},
-        {label: 'Instances', icon: 'pi pi-fw pi-circle-off', to: '/instances'},
-        {label: 'REST API Docs', icon: 'pi pi-fw pi-question-circle', to: '/restApiDocss'},
-        {label: 'LUA API Docs', icon: 'pi pi-fw pi-question-circle', to: '/luaApiDocss'}
+        {label: 'LUA Script', icon: 'pi pi-fw pi-cog', to: '/script'}
+        // {label: 'Mods', icon: 'pi pi-fw pi-th-large', to: '/factorioMods'},
+        // {label: 'Tasks', icon: 'pi pi-fw pi-sitemap', to: '/workspace'},
+        // {label: 'Entities', icon: 'pi pi-fw pi-sitemap', to: '/workspace'},
+        // {label: 'Map', icon: 'pi pi-fw pi-map-marker', to: '/workspace'},
+        // {label: 'Instances', icon: 'pi pi-fw pi-circle-off', to: '/instances'},
+        // {label: 'REST API Docs', icon: 'pi pi-fw pi-question-circle', to: '/restApiDocss'},
+        // {label: 'LUA API Docs', icon: 'pi pi-fw pi-question-circle', to: '/luaApiDocss'}
       ]
     }
   },
@@ -75,7 +77,7 @@ export default {
 
       this.menuClick = false
     },
-    onMenuToggle() {
+    onMenuToggle(event) {
       this.menuClick = true
 
       if (this.isDesktop()) {
@@ -155,10 +157,6 @@ export default {
         'layout-sidebar-dark': this.layoutColorMode === 'dark',
         'layout-sidebar-light': this.layoutColorMode === 'light'
       }]
-    },
-    logo() {
-      // return (this.layoutColorMode === 'dark') ? "assets/layout/images/logo-white.svg" : "assets/layout/images/logo.svg";
-      return 'assets/logo.png'
     }
   },
   async created() {
@@ -176,7 +174,8 @@ export default {
     AppTopBar,
     AppMenu,
     AppFooter,
-    AppConfig
+    AppConfig,
+    Toast
   }
 }
 </script>

@@ -1,10 +1,12 @@
 <script>
 import {defineComponent, ref, watch, computed} from 'vue';
 import {useAppStore} from '@/store/appStore';
+import {useToast} from 'primevue/usetoast';
 
 export default defineComponent({
   components: {},
   setup() {
+    const toast = useToast();
     const appStore = useAppStore()
     const clients = ref([]);
     const updateClients = () => {
@@ -26,6 +28,9 @@ export default defineComponent({
       clients,
       clientCount: computed(() => appStore.getClientCount),
       sendTestMessage: async () => {
+        console.log('TOAST?')
+        toast.add({severity:'info', summary: 'Info Message', detail:'Message Content', life: 3000});
+
         // console.log('listen to the_event');
         // await listen('the_event', (event) => {
         //   console.log('event from rust', event);

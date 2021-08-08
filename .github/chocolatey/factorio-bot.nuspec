@@ -3,19 +3,19 @@
   <metadata>
     <id>factorio-bot</id>
     <version>__REPLACE_VERSION__</version>
-    <packageSourceUrl>https://github.com/arturh85/factorio-bot-tauri</packageSourceUrl>
     <title>factorio-bot (Install)</title>
     <owners>Artur Hallmann</owners>
     <authors>Artur Hallmann</authors>
-    <projectUrl>https://github.com/arturh85/factorio-bot-tauri</projectUrl>
+    <projectUrl>https://arturh85.github.io/factorio-bot-tauri/book/</projectUrl>
     <iconUrl>https://raw.githubusercontent.com/arturh85/factorio-bot-tauri/master/frontend/src/assets/logo.png</iconUrl>
     <licenseUrl>https://raw.githubusercontent.com/arturh85/factorio-bot-tauri/master/LICENSE.txt</licenseUrl>
+    <packageSourceUrl>https://github.com/arturh85/factorio-bot-tauri</packageSourceUrl>
     <projectSourceUrl>https://github.com/arturh85/factorio-bot-tauri</projectSourceUrl>
     <bugTrackerUrl>https://github.com/arturh85/factorio-bot-tauri/issues</bugTrackerUrl>
-    <tags></tags>
+    <tags>tools</tags>
     <summary>Bot Platform for the game factorio</summary>
-    <description>Bot Platform for the game factorio</description>
-    <releaseNotes>Bot Platform for the game factorio</releaseNotes>
+    <description>Factorio Bot is a bot platform for the game</description>
+    <releaseNotes>pre-alpha preview releases - not really usable yet</releaseNotes>
   </metadata>
   <files>
     <file src="tools\**" target="tools" />

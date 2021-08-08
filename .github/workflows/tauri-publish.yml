@@ -89,7 +89,7 @@ jobs:
 
       - name: 🚧 Build mdBook (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
-        run: mdbook build docs && mv docs/book public/book
+        run: mdbook build docs && mv docs/book public/book && mv index.html public/
 
       - name: 🚚 Move Frontend stats.html to gh-pages (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'

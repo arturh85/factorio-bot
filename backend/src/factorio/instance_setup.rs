@@ -166,35 +166,39 @@ pub async fn setup_factorio_instance(
         );
     }
     #[allow(unused_mut)]
-    let mut data_mods_path = workspace_data_path.join(PathBuf::from("mods"));
-    if !data_mods_path.exists() {
+    let mut workspace_mods_path = workspace_path.join(PathBuf::from("mods"));
+    if !workspace_mods_path.exists() {
         #[cfg(debug_assertions)]
         {
-            data_mods_path = PathBuf::from("../../mods");
+            workspace_mods_path = PathBuf::from("../../mods");
         }
         #[cfg(not(debug_assertions))]
         {
             const MODS_CONTENT: include_dir::Dir = include_dir!("../mods");
-            if let Err(err) = MODS_CONTENT.extract(data_mods_path.clone()) {
+            std::fs::create_dir_all(&workspace_mods_path)?;
+            if let Err(err) = MODS_CONTENT.extract(workspace_mods_path.clone()) {
                 error!("failed to extract static mods content: {:?}", err);
                 return Err(anyhow!("failed to extract mods content to workspace"));
             }
         }
-        if !data_mods_path.exists() {
+        if !workspace_mods_path.exists() {
             return Err(anyhow!("missing mods/ folder from working directory"));
         }
     }
     #[cfg(not(debug_assertions))]
     {
-        let data_plans_path = workspace_data_path.join(PathBuf::from("plans"));
-        const PLANS_CONTENT: include_dir::Dir = include_dir!("../plans");
-        if let Err(err) = PLANS_CONTENT.extract(data_plans_path.clone()) {
-            error!("failed to extract static plans content: {:?}", err);
-            return Err(anyhow!("failed to extract plans content to workspace"));
+        let data_plans_path = workspace_path.join(PathBuf::from("plans"));
+        if !data_plans_path.exists() {
+            const PLANS_CONTENT: include_dir::Dir = include_dir!("../plans");
+            std::fs::create_dir_all(&data_plans_path)?;
+            if let Err(err) = PLANS_CONTENT.extract(data_plans_path.clone()) {
+                error!("failed to extract static plans content: {:?}", err);
+                return Err(anyhow!("failed to extract plans content to workspace"));
+            }
         }
     }
 
-    let data_mods_path = std::fs::canonicalize(data_mods_path)?;
+    let workspace_mods_path = std::fs::canonicalize(workspace_mods_path)?;
     let mods_path = instance_path.join(PathBuf::from("mods"));
     if !mods_path.exists() {
         if !silent {
@@ -202,7 +206,7 @@ pub async fn setup_factorio_instance(
         }
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(&data_mods_path, &mods_path)?;
+            std::os::unix::fs::symlink(&workspace_mods_path, &mods_path)?;
         }
         #[cfg(windows)]
         {
@@ -211,7 +215,7 @@ pub async fn setup_factorio_instance(
                 .arg("mklink")
                 .arg("/D")
                 .arg(&mods_path)
-                .arg(&data_mods_path)
+                .arg(&workspace_mods_path)
                 .status()
                 .unwrap();
             // std::os::windows::fs::symlink_dir(&data_mods_path, &mods_path)?;
@@ -219,7 +223,7 @@ pub async fn setup_factorio_instance(
                 return Err(anyhow!(
                     "failed to create factorio mods symlink: {:?} -> {:?} ... {}",
                     &mods_path,
-                    &data_mods_path,
+                    &workspace_mods_path,
                     status.to_string()
                 ));
             }

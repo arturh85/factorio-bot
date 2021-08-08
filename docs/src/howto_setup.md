@@ -1,3 +1,3 @@
-# Chapter 1
+# Howto setup 
 
 ***work in progress***

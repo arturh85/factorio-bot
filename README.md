@@ -1,7 +1,7 @@
 # Factorio Bot
 
-- [Book](https://arturh85.github.io/factorio-bot-tauri/book/)
-- [API Docs](https://arturh85.github.io/factorio-bot-tauri/doc/)
+- [User Guide](https://arturh85.github.io/factorio-bot-tauri/book/)
+- [API Docs](https://arturh85.github.io/factorio-bot-tauri/doc/factorio_bot/)
 - [Frontend Build Statistics](https://arturh85.github.io/factorio-bot-tauri/stats.html)
 
 # What is it?

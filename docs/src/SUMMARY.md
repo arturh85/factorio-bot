@@ -1,4 +1,5 @@
 # Summary
 
-- [Chapter 1](./chapter_1.md)
+- [README](../../README.md)
+- [Howto: Setup Factorio Bot](./howto_setup.md)
 - [Lua Globals](./LuaGlobals.md)

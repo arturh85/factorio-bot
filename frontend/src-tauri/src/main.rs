@@ -251,6 +251,7 @@ async fn main() -> anyhow::Result<()> {
       crate::commands::start_instances,
       crate::commands::stop_instances,
       crate::commands::maximize_window,
+      crate::commands::file_exists,
       crate::commands::open_in_browser,
     ])
     .manage(RwLock::new(app_settings()?))

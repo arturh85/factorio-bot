@@ -12,6 +12,7 @@ if (matches) {
     const tauriConfPath = './src-tauri/tauri.conf.json'
     const tauriConf = JSON.parse(fs.readFileSync(tauriConfPath, {encoding: 'utf8'}))
     tauriConf.package.version = version
+    tauriConf.tauri.windows[0].title += ` (v${version})`
     fs.writeFileSync(tauriConfPath, JSON.stringify(tauriConf, null, 2))
 
     const filesToReplaceVersion = [

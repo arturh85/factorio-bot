@@ -55,20 +55,20 @@
         "open": true
       },
       "fs": {
-        "readBinaryFile": true,
-        "readTextFile": true,
-        "writeFile": true,
+        "readBinaryFile": false,
+        "readTextFile": false,
+        "writeFile": false,
         "readDir": true
       },
       "dialog": {
-        "all": true,
+        "all": false,
         "open": true,
-        "save": true
+        "save": false
       }
     },
     "windows": [
       {
-        "title": "FactorioBot",
+        "title": "Factorio Bot",
         "width": 800,
         "height": 600,
         "resizable": true,

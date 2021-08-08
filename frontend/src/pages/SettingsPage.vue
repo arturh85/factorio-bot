@@ -79,21 +79,20 @@ export default defineComponent({
     }
 
     async function testIsWorkspacePathValid(path) {
-      try {
-        await readDir(path);
-        return true
-      } catch (err) {
+      if (await appStore.fileExists(path)) {
+        try {
+          await readDir(path);
+          return true
+        } catch (err) {
+          return false
+        }
+      } else {
         return false
       }
     }
 
-    async function testIsFactorioArchivePathValid(path) {
-      try {
-        await readBinaryFile(path);
-        return true
-      } catch (err) {
-        return false
-      }
+    async function testIsFactorioArchivePathValid(path){
+      return await appStore.fileExists(path)
     }
 
     const isWorkspacePathValid = ref(true)
@@ -104,7 +103,7 @@ export default defineComponent({
         isWorkspacePathValid.value = await testIsWorkspacePathValid(appStore.settings.workspace_path)
       })
       watch(() => appStore.getFactorioArchivePath, async () => {
-        isFactorioArchivePathValid.value = await testIsFactorioArchivePathValid(appStore.settings.factorioArchivePath)
+        isFactorioArchivePathValid.value = await testIsFactorioArchivePathValid(appStore.settings.factorio_archive_path)
       })
       testIsWorkspacePathValid(appStore.settings.workspace_path).then(valid => isWorkspacePathValid.value = valid)
       testIsFactorioArchivePathValid(appStore.settings.factorio_archive_path).then(valid => isFactorioArchivePathValid.value = valid)

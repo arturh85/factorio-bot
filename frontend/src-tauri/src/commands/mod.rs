@@ -10,6 +10,9 @@ pub use window::*;
 mod test;
 pub use test::*;
 
+mod io;
+pub use io::*;
+
 mod script;
 pub use script::*;
 

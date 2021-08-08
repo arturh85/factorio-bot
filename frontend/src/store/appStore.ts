@@ -48,6 +48,9 @@ export const useAppStore = defineStore({
     }
   },
   actions: {
+    async fileExists(path: string) {
+      return await invoke('file_exists', {path})
+    },
     async loadSettings() {
       this.settings = await invoke('load_settings')
     },

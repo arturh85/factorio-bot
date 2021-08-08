@@ -19,4 +19,11 @@ fn main() {
     };
     create_struct("AppSettings.toml", RUST_SETTINGS_PATH, &options)
         .expect("failed to generate app settings struct");
+
+    #[cfg(windows)]
+    {
+        windows::build! {
+            Windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowTextW, MoveWindow, GetSystemMetrics, SYSTEM_METRICS_INDEX},
+        };
+    }
 }

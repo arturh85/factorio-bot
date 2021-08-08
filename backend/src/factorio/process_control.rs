@@ -134,6 +134,53 @@ pub async fn start_factorio(
         // disable achievements". If we don't do this, the first command will be lost
         rcon.silent_print("").await.unwrap();
     }
+
+    #[cfg(windows)]
+    {
+        mod bindings {
+            windows::include_bindings!();
+        }
+        use bindings::Windows::Win32::{
+            Foundation::{BOOL, HWND, LPARAM, PWSTR},
+            UI::WindowsAndMessaging::{
+                EnumWindows, GetSystemMetrics, GetWindowTextW, MoveWindow, SM_CXMAXIMIZED,
+                SM_CYMAXIMIZED,
+            },
+        };
+
+        async_std::task::sleep(Duration::from_secs(client_count as u64)).await; // wait for window to be visible, hopefully
+
+        // let mut factorio_hwnds: Vec<HWND> = vec![];
+        extern "system" fn enum_window(window: HWND, _: LPARAM) -> BOOL {
+            unsafe {
+                let mut text: [u16; 512] = [0; 512];
+                let len = GetWindowTextW(window, PWSTR(text.as_mut_ptr()), text.len() as i32);
+                let text = String::from_utf16_lossy(&text[..len as usize]);
+                if !text.is_empty() && text.contains("Factorio ") && !text.contains("Factorio Bot")
+                {
+                    info!("window {:?} {}", window, text);
+                    let max_width = GetSystemMetrics(SM_CXMAXIMIZED);
+                    let max_height = GetSystemMetrics(SM_CYMAXIMIZED);
+                    MoveWindow(
+                        window,
+                        0,              // x
+                        0,              // y
+                        max_width / 2,  // w
+                        max_height / 2, // h
+                        BOOL(1),        // repaint
+                    )
+                    .unwrap();
+                }
+
+                return true.into();
+            }
+        }
+
+        unsafe {
+            EnumWindows(Some(enum_window), LPARAM(0)).ok()?;
+        }
+    }
+
     Ok(InstanceState {
         client_processes: client_children,
         server_process: server_child,
@@ -388,6 +435,7 @@ pub async fn start_factorio_client(
         "Starting <bright-blue>{}</> at {:?} with {:?}",
         &instance_name, &instance_path, &args
     );
+
     let mut child = Command::new(&factorio_binary_path)
         .args(args)
         .stdout(Stdio::piped())

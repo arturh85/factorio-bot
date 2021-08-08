@@ -68,10 +68,13 @@ jobs:
         uses: crazy-max/ghaction-chocolatey@v1
         with:
           args: pack .github/chocolatey/factorio-bot.nuspec
+      - name: 🚧 rename nupkg without version in filename
+        if: matrix.platform == 'windows-latest'
+        run: mv factorio-bot.*.nupkg factorio-bot.nupkg
       - name: 📦 publish nuget package to chocolatey (windows only)
         if: matrix.platform == 'windows-latest'
         uses: crazy-max/ghaction-chocolatey@v1
         env:
           APIKEY: ${{ secrets.CHOCOLATEY_APIKEY }}
         with:
-          args: push factorio-bot.0.2.0.nupkg --key "${{ env.APIKEY }}" --source https://push.chocolatey.org/
+          args: push factorio-bot.nupkg --key "${{ env.APIKEY }}" --source https://push.chocolatey.org/

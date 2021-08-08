@@ -1246,12 +1246,13 @@ dependencies = [
  "color-eyre",
  "config 0.11.0",
  "factorio-bot-backend",
+ "open 2.0.0",
  "paris",
  "serde 1.0.127",
  "serde_json",
  "tauri",
  "tauri-build",
- "toml 0.4.10",
+ "toml 0.5.8",
  "typescript-definitions",
 ]
 
@@ -2860,6 +2861,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "open"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "970d0e0b8f5f39e6090f3d612e3a17b8e02b91c860fe9eb33665d1aed1f6f37f"
+dependencies = [
+ "pathdiff",
+ "winapi",
+]
+
+[[package]]
 name = "openssl"
 version = "0.10.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4417,7 +4428,7 @@ dependencies = [
  "http",
  "ignore",
  "once_cell",
- "open",
+ "open 1.7.1",
  "os_pipe",
  "percent-encoding",
  "rand 0.8.4",

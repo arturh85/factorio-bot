@@ -6,7 +6,6 @@ use std::time::Instant;
 
 use async_std::sync::{Arc, Mutex};
 use async_std::task;
-use config::Config;
 
 use crate::factorio::instance_setup::setup_factorio_instance;
 use crate::factorio::planner::Planner;
@@ -14,6 +13,7 @@ use crate::factorio::process_control::{start_factorio_server, FactorioStartCondi
 use crate::factorio::rcon::{FactorioRcon, RconSettings};
 use crate::factorio::util::calculate_distance;
 use crate::factorio::world::FactorioWorld;
+use crate::settings::AppSettings;
 use crate::types::{AreaFilter, FactorioEntity, Position};
 
 #[derive(Debug, Copy, Clone)]
@@ -23,7 +23,7 @@ pub enum RollSeedLimit {
 }
 
 pub async fn roll_seed(
-    settings: Config,
+    settings: AppSettings,
     map_exchange_string: String,
     limit: RollSeedLimit,
     parallel: u8,
@@ -32,7 +32,8 @@ pub async fn roll_seed(
 ) -> anyhow::Result<Option<(u32, f64)>> {
     let roll: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
     let best_seed_with_score: Arc<Mutex<Option<(u32, f64)>>> = Arc::new(Mutex::new(None));
-    let workspace_path: Arc<String> = Arc::new(settings.get("workspace_path")?);
+    let workspace_path: Arc<String> = Arc::new(settings.workspace_path.into());
+    let factorio_archive_path: Arc<String> = Arc::new(settings.factorio_archive_path.into());
     let map_exchange_string = Arc::new(map_exchange_string);
 
     let mut join_handles: Vec<JoinHandle<()>> = vec![];
@@ -47,6 +48,7 @@ pub async fn roll_seed(
         let factorio_port: u16 = 2345 + p as u16;
         setup_factorio_instance(
             &workspace_path,
+            &factorio_archive_path,
             &rcon_settings,
             Some(factorio_port),
             &instance_name,
@@ -71,6 +73,7 @@ pub async fn roll_seed(
         let factorio_port: u16 = 2345 + p as u16;
         let best_seed_with_score = best_seed_with_score.clone();
         let workspace_path = workspace_path.clone();
+        let factorio_archive_path = factorio_archive_path.clone();
         let map_exchange_string = map_exchange_string.clone();
         let plan_name = plan_name.clone();
         let roll = roll.clone();
@@ -98,6 +101,7 @@ pub async fn roll_seed(
                     let seed: u32 = rand::random();
                     setup_factorio_instance(
                         &workspace_path,
+                       &factorio_archive_path,
                         &rcon_settings,
                         Some(factorio_port),
                         &instance_name,

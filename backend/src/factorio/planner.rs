@@ -16,6 +16,7 @@ use crate::factorio::task_graph::TaskGraph;
 use crate::factorio::world::{create_lua_world, FactorioWorld};
 // use crate::factorio::ws::FactorioWebSocketServer;
 use crate::factorio::plan_builder::create_lua_plan_builder;
+use crate::settings::AppSettings;
 use crate::types::{EntityName, PlayerChangedMainInventoryEvent};
 use rlua_async::ChunkExt;
 
@@ -96,7 +97,7 @@ impl Planner {
 }
 
 pub async fn start_factorio_and_plan_graph(
-    settings: config::Config,
+    settings: AppSettings,
     map_exchange_string: Option<String>,
     seed: Option<String>,
     plan_name: &str,
@@ -104,10 +105,10 @@ pub async fn start_factorio_and_plan_graph(
 ) -> anyhow::Result<TaskGraph> {
     let started = Instant::now();
     let instance_name = "plan";
-    let workspace_path: String = settings.get("workspace_path")?;
-    let rcon_settings = RconSettings::new_from_config(&settings, None);
+    let rcon_settings = RconSettings::new(settings.rcon_port as u16, &settings.rcon_pass, None);
     setup_factorio_instance(
-        &workspace_path,
+        &settings.workspace_path,
+        &settings.factorio_archive_path,
         &rcon_settings,
         None,
         instance_name,
@@ -121,7 +122,7 @@ pub async fn start_factorio_and_plan_graph(
     .expect("failed to initially setup instance");
 
     let (world, rcon, mut child) = start_factorio_server(
-        &workspace_path,
+        &settings.workspace_path,
         &rcon_settings,
         None,
         instance_name,

@@ -9,7 +9,7 @@ const routes = [
     {
         path: '/settings',
         name: 'settings',
-        component: () => import('./pages/Settings.vue')
+        component: () => import('./pages/SettingsPage.vue')
     },
     {
         path: '/script',

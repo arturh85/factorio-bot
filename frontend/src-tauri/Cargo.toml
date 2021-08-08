@@ -19,6 +19,7 @@ tauri = { version = "^1.0.0-beta.5", features = ["dialog-all", "fs-read-binary-f
 toml = "*"
 clap = "^2"
 anyhow = "^1.0"
+open = "^2.0"
 paris = { version = "1.5", features = ["timestamps", "macros"] }
 color-eyre = "0.5.1"
 

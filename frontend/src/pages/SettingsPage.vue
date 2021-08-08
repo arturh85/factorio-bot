@@ -2,7 +2,7 @@
 import {computed, defineComponent, watch, ref} from 'vue';
 import {useAppStore} from '@/store/appStore';
 import {open} from '@tauri-apps/api/dialog'
-import {readDir} from '@tauri-apps/api/fs'
+import {readBinaryFile, readDir} from '@tauri-apps/api/fs'
 import InputText from 'primevue/inputtext';
 import Slider from 'primevue/slider';
 import Button from 'primevue/button';
@@ -15,6 +15,14 @@ export default defineComponent({
   },
   setup(props, {emit}) {
     const appStore = useAppStore();
+    const factorioArchivePath = computed({
+      get() {
+        return appStore.getFactorioArchivePath
+      },
+      set(val) {
+        appStore.updateFactorioArchivePath(val)
+      }
+    })
     const workspacePath = computed({
       get() {
         return appStore.getWorkspacePath
@@ -59,6 +67,16 @@ export default defineComponent({
         await appStore.updateWorkspacePath(newPath)
       }
     }
+    async function selectFactorioArchivePath() {
+      const newPath = await open({
+        defaultPath: isFactorioArchivePathValid.value ? appStore.settings.factorio_archive_path : null,
+        directory: false,
+        multiple: false
+      })
+      if (newPath) {
+        await appStore.updateFactorioArchivePath(newPath)
+      }
+    }
 
     async function testIsWorkspacePathValid(path) {
       try {
@@ -69,26 +87,47 @@ export default defineComponent({
       }
     }
 
+    async function testIsFactorioArchivePathValid(path) {
+      try {
+        await readBinaryFile(path);
+        return true
+      } catch (err) {
+        return false
+      }
+    }
+
     const isWorkspacePathValid = ref(true)
+    const isFactorioArchivePathValid = ref(true)
 
     if (appStore.settings) {
       watch(() => appStore.getWorkspacePath, async () => {
         isWorkspacePathValid.value = await testIsWorkspacePathValid(appStore.settings.workspace_path)
       })
+      watch(() => appStore.getFactorioArchivePath, async () => {
+        isFactorioArchivePathValid.value = await testIsFactorioArchivePathValid(appStore.settings.factorioArchivePath)
+      })
       testIsWorkspacePathValid(appStore.settings.workspace_path).then(valid => isWorkspacePathValid.value = valid)
+      testIsFactorioArchivePathValid(appStore.settings.factorio_archive_path).then(valid => isFactorioArchivePathValid.value = valid)
     }
 
     return {
+      openInBrowser: (url, event) => {
+        appStore.openInBrowser(url);
+        if (event) {
+          event.preventDefault()
+        }
+        return false
+      },
       mapExchangeString,
       seed,
+      factorioArchivePath,
       selectWorkspacePath,
+      selectFactorioArchivePath,
       isWorkspacePathValid,
+      isFactorioArchivePathValid,
       workspacePath,
       clientCount,
       settings: computed(() => appStore.getSettings),
-      availableFactorioVersions: computed(() => factorioVersionsStore.getFactorioVersions.map(version => ({
-        name: version, code: version
-      }))),
       onMenuToggle: function (event) {
         emit('menu-toggle', event);
       }
@@ -105,6 +144,18 @@ export default defineComponent({
         <p>Use this page to start from scratch and place your custom content.</p>
       </div>
 
+
+      <div class="card p-fluid">
+        <h5>Factorio Archive - Download from <a href="https://factorio.com/download" @click="openInBrowser('https://factorio.com/download', $event)">https://factorio.com/download</a></h5>
+        <div class="p-formgrid p-grid">
+          <div class="p-field p-col">
+            <div class="p-inputgroup">
+              <InputText v-model="factorioArchivePath" :class="isFactorioArchivePathValid ? '' : 'p-invalid'"/>
+              <Button label="Select" @click="selectFactorioArchivePath()"/>
+            </div>
+          </div>
+        </div>
+      </div>
       <div class="card p-fluid">
         <h5>Map Exchange String</h5>
         <div class="p-formgrid p-grid">

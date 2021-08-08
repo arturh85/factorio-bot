@@ -44,6 +44,7 @@ pub async fn start_factorio(
     if server_host.is_none() {
         setup_factorio_instance(
             &settings.workspace_path,
+            &settings.factorio_archive_path,
             &rcon_settings,
             None,
             "server",
@@ -60,6 +61,7 @@ pub async fn start_factorio(
         let instance_name = format!("client{}", instance_number + 1);
         if let Err(err) = setup_factorio_instance(
             &settings.workspace_path,
+            &settings.factorio_archive_path,
             &rcon_settings,
             None,
             &instance_name,

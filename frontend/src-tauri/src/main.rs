@@ -28,9 +28,10 @@ fn app_settings() -> anyhow::Result<AppSettings> {
 #[async_std::main]
 async fn main() -> anyhow::Result<()> {
   color_eyre::install().unwrap();
-  info!("started");
   std::fs::create_dir_all(constants::default_app_dir())?;
   std::fs::create_dir_all(constants::app_workspace_path())?;
+  // FIXME: log file?
+  info!("factorio-bot started");
   let matches = App::new("factorio-bot")
     .version(env!("CARGO_PKG_VERSION"))
     .author("Artur Hallmann <arturh@arturh.de>")
@@ -250,6 +251,7 @@ async fn main() -> anyhow::Result<()> {
       crate::commands::start_instances,
       crate::commands::stop_instances,
       crate::commands::maximize_window,
+      crate::commands::open_in_browser,
     ])
     .manage(RwLock::new(app_settings()?))
     .manage(RwLock::new(instance_state))

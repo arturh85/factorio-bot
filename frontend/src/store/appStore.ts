@@ -18,6 +18,13 @@ export const useAppStore = defineStore({
         return null
       }
     },
+    getFactorioArchivePath(): string | null {
+      if (this.settings) {
+        return this.settings.factorio_archive_path
+      } else {
+        return null
+      }
+    },
     getClientCount(): number | null {
       if (this.settings) {
         return this.settings.client_count
@@ -55,6 +62,15 @@ export const useAppStore = defineStore({
         this.settings.workspace_path = workspacePath
         await this._updateSettings()
       }
+    },
+    async updateFactorioArchivePath(factorioArchivePath: string) {
+      if (this.settings !== null) {
+        this.settings.factorio_archive_path = factorioArchivePath
+        await this._updateSettings()
+      }
+    },
+    async openInBrowser(url: string) {
+      await invoke('open_in_browser', {url})
     },
     async updateClientCount(clientCount: number) {
       if (this.settings !== null) {

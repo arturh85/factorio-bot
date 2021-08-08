@@ -19,6 +19,7 @@ use crate::factorio::util::{read_to_value, write_value_to};
 #[allow(clippy::too_many_arguments)]
 pub async fn setup_factorio_instance(
     workspace_path_str: &str,
+    factorio_archive_path: &str,
     rcon_settings: &RconSettings,
     factorio_port: Option<u16>,
     instance_name: &str,
@@ -47,39 +48,23 @@ pub async fn setup_factorio_instance(
     }
     let readdir = instance_path.read_dir()?;
     if readdir.count() == 0 {
-        let mut workspace_readdir = workspace_path.read_dir()?;
         let started = Instant::now();
 
         #[cfg(windows)]
         {
             use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-            let archive = workspace_readdir.find(|file| {
-                if let Ok(file) = file.as_ref() {
-                    file.path().extension().unwrap_or_default() == "zip"
-                } else {
-                    false
-                }
-            });
-            if archive.is_none() {
-                error!(
-                    "Failed to find factorio zip file at <bright-blue>{:?}</>",
-                    workspace_path
-                );
-                return Err(anyhow!("failed to find factorio zip"));
-            }
-            let archive_path = archive.unwrap().unwrap().path();
+            let file = fs::File::open(factorio_archive_path)?;
             info!(
                 "Extracting <bright-blue>{}</> to <magenta>{}</>",
-                &archive_path.to_str().unwrap(),
+                &factorio_archive_path,
                 instance_path.to_str().unwrap()
             );
 
-            let file = fs::File::open(&archive_path).unwrap();
-            let mut archive = zip::ZipArchive::new(file).unwrap();
+            let mut archive = zip::ZipArchive::new(file)?;
 
             let mut files: Vec<String> = vec![];
             for i in 0..archive.len() {
-                files.push(archive.by_index(i).unwrap().name().into());
+                files.push(archive.by_index(i)?.name().into());
             }
             if workspace_data_path.exists() {
                 files = files
@@ -128,21 +113,7 @@ pub async fn setup_factorio_instance(
 
         #[cfg(unix)]
         {
-            let archive = workspace_readdir.find(|file| {
-                if let Ok(file) = file.as_ref() {
-                    file.path().extension().unwrap_or_default() == "xz"
-                } else {
-                    false
-                }
-            });
-            if archive.is_none() {
-                error!(
-                    "Failed to find factorio tar.xz file at <bright-blue>{:?}</>",
-                    workspace_path
-                );
-                return Err(anyhow!("failed to find factorio tar.xz"));
-            }
-            let archive_path = archive.unwrap().unwrap().path();
+            let archive_path = PathBuf::new(factorio_archive_path);
             let tar_path = archive_path.with_extension("");
             if !tar_path.exists() {
                 let mut logger = Logger::new();

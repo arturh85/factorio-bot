@@ -11,3 +11,8 @@ pub fn maximize_window(app_handle: AppHandle<Wry>) -> Result<(), String> {
     .maximize()
     .map_err(|e| String::from("error: ") + &e.to_string())
 }
+
+#[tauri::command]
+pub fn open_in_browser(url: String) -> Result<(), String> {
+  open::that(url).map_err(|e| String::from("error: ") + &e.to_string())
+}

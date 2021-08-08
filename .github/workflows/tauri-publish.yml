@@ -68,7 +68,7 @@ jobs:
         uses: crazy-max/ghaction-chocolatey@v1
         with:
           args: pack .github/chocolatey/factorio-bot.nuspec
-      - name: 🚧 rename nupkg without version in filename
+      - name: 🚧 rename nupkg without version in filename (windows only)
         if: matrix.platform == 'windows-latest'
         run: mv factorio-bot.*.nupkg factorio-bot.nupkg
       - name: 📦 publish nuget package to chocolatey (windows only)
@@ -78,3 +78,18 @@ jobs:
           APIKEY: ${{ secrets.CHOCOLATEY_APIKEY }}
         with:
           args: push factorio-bot.nupkg --key "${{ env.APIKEY }}" --source https://push.chocolatey.org/
+
+      - name: Build rust doc for gh-pages (ubuntu only)
+        if: matrix.platform == 'ubuntu-latest'
+        run: cargo doc --all --no-deps && mv target/doc public
+      - name: Move Frotend stats.html to gh-pages (ubuntu only)
+        if: matrix.platform == 'ubuntu-latest'
+        run: mv frontend/dist/stats.html public/stats.html
+      - name: Deploy Docs (ubuntu only)
+        if: matrix.platform == 'ubuntu-latest'
+        uses: peaceiris/actions-gh-pages@364c31d33bb99327c77b3a5438a83a357a6729ad # v3.4.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./public
+          force_orphan: true

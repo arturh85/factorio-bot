@@ -12,7 +12,7 @@
     <licenseUrl>https://raw.githubusercontent.com/arturh85/factorio-bot-tauri/master/LICENSE.txt</licenseUrl>
     <projectSourceUrl>https://github.com/arturh85/factorio-bot-tauri</projectSourceUrl>
     <bugTrackerUrl>https://github.com/arturh85/factorio-bot-tauri/issues</bugTrackerUrl>
-    <tags>factorio-bot</tags>
+    <tags></tags>
     <summary>Bot Platform for the game factorio</summary>
     <description>Bot Platform for the game factorio</description>
     <releaseNotes>Bot Platform for the game factorio</releaseNotes>

@@ -113,7 +113,7 @@ pub async fn setup_factorio_instance(
 
         #[cfg(unix)]
         {
-            let archive_path = PathBuf::new(factorio_archive_path);
+            let archive_path = PathBuf::from_str(factorio_archive_path)?;
             let tar_path = archive_path.with_extension("");
             if !tar_path.exists() {
                 let mut logger = Logger::new();

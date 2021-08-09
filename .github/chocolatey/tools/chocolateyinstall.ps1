@@ -10,7 +10,7 @@ $packageArgs = @{
   softwareName  = 'factorio-bot*'
   checksum      = '__REPLACE_CHECKSUM__'
   checksumType  = 'sha256'
-  silentArgs    = "/qn"
+  silentArgs    = "/qb"
   validExitCodes= @(0, 3010, 1641)
 }
 

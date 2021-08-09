@@ -8,6 +8,7 @@
                 :disabled="isExecuting">
         </Button>
 				<Textarea v-model="code"></Textarea>
+				<Textarea v-model="output"></Textarea>
 			</div>
 		</div>
 	</div>
@@ -36,10 +37,19 @@ export default defineComponent({
         scriptStore.setCode(val)
       }
     })
+    const output = computed({
+      get() {
+        return scriptStore.getCode
+      },
+      set(val) {
+        scriptStore.setCode(val)
+      }
+    })
     return {
       execute: () => scriptStore.execute(),
       isExecuting: computed(() => scriptStore.isExecuting),
-      code
+      code,
+      output
     }
   }
 })

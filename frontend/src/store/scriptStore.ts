@@ -28,7 +28,8 @@ export const useScriptStore = defineStore({
             this.error = false
             this.executing = true
             try {
-                await invoke('execute_script', {code: this.code})
+                const outputs = await invoke('execute_script', {code: this.code})
+                console.log('OUTPUTS', outputs);
                 this.executing = false
                 this.success = true
             } catch(err) {

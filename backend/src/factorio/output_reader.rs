@@ -111,7 +111,8 @@ pub async fn read_output(
                         } else if line.contains("Error") && !silent {
                             warn!("<cyan>server</>⮞ <red>{}</>", line);
                         } else if !silent {
-                            info!("<cyan>server</>⮞ <magenta>{}</>", line);
+                            // info!("<cyan>server</>⮞ <magenta>{}</>", line);
+                            println!("{}", line);
                         }
                     }
                 }

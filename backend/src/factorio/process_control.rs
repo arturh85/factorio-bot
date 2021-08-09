@@ -1,23 +1,20 @@
-use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::str::FromStr;
-use std::sync::Arc;
-use std::thread;
-use std::thread::{sleep, JoinHandle};
-use std::time::{Duration, Instant};
-
-use async_std::task;
-use paris::Logger;
-// use crate::factorio::ws::FactorioWebSocketServer;
-
 use crate::factorio::instance_setup::setup_factorio_instance;
 use crate::factorio::output_reader::read_output;
 use crate::factorio::rcon::{FactorioRcon, RconSettings};
 use crate::factorio::world::FactorioWorld;
 use crate::settings::AppSettings;
+use async_std::task;
+use paris::Logger;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::str::FromStr;
 use std::sync::mpsc::channel;
+use std::sync::Arc;
+use std::thread;
+use std::thread::{sleep, JoinHandle};
+use std::time::{Duration, Instant};
 
 pub struct InstanceState {
     pub world: Option<Arc<FactorioWorld>>,

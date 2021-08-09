@@ -4,11 +4,11 @@ use std::io::{stdout, Read, Write};
 use std::path::Path;
 use std::time::Instant;
 
+use crate::factorio::instance_setup::setup_factorio_instance;
 use async_std::sync::Arc;
 use dashmap::lock::RwLock;
+use gag::BufferRedirect;
 use rlua::Lua;
-
-use crate::factorio::instance_setup::setup_factorio_instance;
 // use crate::factorio::plan_builder::create_lua_plan_builder;
 use crate::factorio::process_control::{start_factorio_server, FactorioStartCondition};
 use crate::factorio::rcon::{create_lua_rcon, FactorioRcon, RconSettings};
@@ -45,7 +45,9 @@ impl Planner {
         self.graph = Arc::new(RwLock::new(TaskGraph::new()));
     }
 
-    pub fn plan(&mut self, lua_code: String, bot_count: u32) -> anyhow::Result<()> {
+    pub fn plan(&mut self, lua_code: String, bot_count: u32) -> anyhow::Result<(String, String)> {
+        let mut stdout = BufferRedirect::stdout()?;
+        let mut stderr = BufferRedirect::stderr()?;
         let all_bots = self.initiate_missing_players_with_default_inventory(bot_count);
         self.plan_world = Arc::new((*self.real_world).clone());
         let lua = Lua::new();
@@ -64,7 +66,11 @@ impl Planner {
             async_std::task::block_on(chunk.exec_async(ctx))?;
             Ok(())
         })?;
-        Ok(())
+        let mut stdout_str = String::new();
+        let mut stderr_str = String::new();
+        stdout.read_to_string(&mut stdout_str).unwrap();
+        stderr.read_to_string(&mut stderr_str).unwrap();
+        Ok((stdout_str, stderr_str))
     }
 
     pub fn world(&self) -> Arc<FactorioWorld> {

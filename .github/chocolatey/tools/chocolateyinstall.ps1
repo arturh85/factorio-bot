@@ -10,8 +10,8 @@ $packageArgs = @{
   softwareName  = 'factorio-bot*'
   checksum      = '__REPLACE_CHECKSUM__'
   checksumType  = 'sha256'
-  silentArgs    = "/qb"
+  silentArgs    = "/qn /norestart"
   validExitCodes= @(0, 3010, 1641)
 }
 
-Install-ChocolateyPackage @packageArgs
+Install-ChocolateyInstallPackage @packageArgs

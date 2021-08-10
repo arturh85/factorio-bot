@@ -10,7 +10,7 @@ $packageArgs = @{
   softwareName  = 'factorio-bot*'
   checksum      = '__REPLACE_CHECKSUM__'
   checksumType  = 'sha256'
-  silentArgs    = "/qn /norestart"
+  silentArgs     = '/qn /passive /norestart /l*v "{0}"' -f "$($env:TEMP)\$($env:ChocolateyPackageName).$($env:ChocolateyPackageVersion).MsiInstall.log"
   validExitCodes= @(0, 3010, 1641)
 }
 

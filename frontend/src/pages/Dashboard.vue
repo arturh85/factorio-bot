@@ -1,61 +1,30 @@
-<script>
-import {defineComponent, ref, watch, computed} from 'vue';
+<script setup>
+import {ref, watch, computed} from 'vue';
 import {useAppStore} from '@/store/appStore';
 import {useToast} from 'primevue/usetoast';
 
-export default defineComponent({
-  components: {},
-  setup() {
-    const toast = useToast();
-    const appStore = useAppStore()
-    const clients = ref([]);
-    const updateClients = () => {
-      let newClients = [];
-      for (let i=0; i<appStore.settings.client_count; i++) {
-        newClients.push({
-          name: 'client' + (i+1),
-          status: 'not_initialized'
-        })
-      }
-      clients.value = newClients
-    }
-
-    watch(() => appStore.getClientCount, updateClients)
-    if (appStore.settings) {
-      updateClients()
-    }
-    return {
-      clients,
-      clientCount: computed(() => appStore.getClientCount),
-      sendTestMessage: async () => {
-        console.log('TOAST?')
-        toast.add({severity:'info', summary: 'Info Message', detail:'Message Content', life: 3000});
-
-        // console.log('listen to the_event');
-        // await listen('the_event', (event) => {
-        //   console.log('event from rust', event);
-        //   // event.event is the event name (useful if you want to use a single callback fn for multiple event types)
-        //   // event.payload is the payload object
-        // });
-        // await invoke('my_custom_command');
-        //
-        // const config = await invoke('load_config');
-        // console.log('config:', config);
-        // await invoke('save_config');
-        /*
-        // listen to the `click` event and get a function to remove the event listener
-        // there's also a `once` function that subscribes to an event and automatically unsubscribes the listener on the first event
-
-
-        // emits the `click` event with the object payload
-        emit('click', {
-          theMessage: 'Tauri is awesome!'
-        })
-         */
-      }
-    };
+const toast = useToast();
+const appStore = useAppStore()
+const clients = ref([]);
+const updateClients = () => {
+  let newClients = [];
+  for (let i=0; i<appStore.settings.client_count; i++) {
+    newClients.push({
+      name: 'client' + (i+1),
+      status: 'not_initialized'
+    })
   }
-});
+  clients.value = newClients
+}
+watch(() => appStore.getClientCount, updateClients)
+if (appStore.settings) {
+  updateClients()
+}
+const clientCount = computed(() => appStore.getClientCount)
+const sendTestMessage = async () => {
+  console.log('TOAST?')
+  toast.add({severity:'info', summary: 'Info Message', detail:'Message Content', life: 3000});
+}
 </script>
 
 <template>

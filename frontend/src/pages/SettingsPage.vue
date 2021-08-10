@@ -1,138 +1,115 @@
-<script>
-import {computed, defineComponent, watch, ref} from 'vue';
+<script setup>
+import {computed, watch, ref} from 'vue';
 import {useAppStore} from '@/store/appStore';
 import {open} from '@tauri-apps/api/dialog'
-import {readBinaryFile, readDir} from '@tauri-apps/api/fs'
+import {readDir} from '@tauri-apps/api/fs'
 import InputText from 'primevue/inputtext';
 import Slider from 'primevue/slider';
 import Button from 'primevue/button';
 
-export default defineComponent({
-  components: {
-    InputText,
-    Slider,
-    Button
+const appStore = useAppStore();
+const factorioArchivePath = computed({
+  get() {
+    return appStore.getFactorioArchivePath
   },
-  setup(props, {emit}) {
-    const appStore = useAppStore();
-    const factorioArchivePath = computed({
-      get() {
-        return appStore.getFactorioArchivePath
-      },
-      set(val) {
-        appStore.updateFactorioArchivePath(val)
-      }
-    })
-    const workspacePath = computed({
-      get() {
-        return appStore.getWorkspacePath
-      },
-      set(val) {
-        appStore.updateWorkspacePath(val)
-      }
-    })
-
-    const clientCount = computed({
-      get() {
-        return appStore.getClientCount
-      },
-      set(val) {
-        appStore.updateClientCount(val)
-      }
-    })
-    const mapExchangeString = computed({
-      get() {
-        return appStore.getMapExchangeString
-      },
-      set(val) {
-        appStore.updateMapExchangeString(val)
-      }
-    })
-    const seed = computed({
-      get() {
-        return appStore.getSeed
-      },
-      set(val) {
-        appStore.updateSeed(val)
-      }
-    })
-
-    async function selectWorkspacePath() {
-      const newPath = await open({
-        defaultPath: isWorkspacePathValid.value ? appStore.settings.workspace_path : null,
-        directory: true,
-        multiple: false
-      })
-      if (newPath) {
-        await appStore.updateWorkspacePath(newPath)
-      }
-    }
-    async function selectFactorioArchivePath() {
-      const newPath = await open({
-        defaultPath: isFactorioArchivePathValid.value ? appStore.settings.factorio_archive_path : null,
-        directory: false,
-        multiple: false
-      })
-      if (newPath) {
-        await appStore.updateFactorioArchivePath(newPath)
-      }
-    }
-
-    async function testIsWorkspacePathValid(path) {
-      if (await appStore.fileExists(path)) {
-        try {
-          await readDir(path);
-          return true
-        } catch (err) {
-          return false
-        }
-      } else {
-        return false
-      }
-    }
-
-    async function testIsFactorioArchivePathValid(path){
-      return await appStore.fileExists(path)
-    }
-
-    const isWorkspacePathValid = ref(true)
-    const isFactorioArchivePathValid = ref(true)
-
-    if (appStore.settings) {
-      watch(() => appStore.getWorkspacePath, async () => {
-        isWorkspacePathValid.value = await testIsWorkspacePathValid(appStore.settings.workspace_path)
-      })
-      watch(() => appStore.getFactorioArchivePath, async () => {
-        isFactorioArchivePathValid.value = await testIsFactorioArchivePathValid(appStore.settings.factorio_archive_path)
-      })
-      testIsWorkspacePathValid(appStore.settings.workspace_path).then(valid => isWorkspacePathValid.value = valid)
-      testIsFactorioArchivePathValid(appStore.settings.factorio_archive_path).then(valid => isFactorioArchivePathValid.value = valid)
-    }
-
-    return {
-      openInBrowser: (url, event) => {
-        appStore.openInBrowser(url);
-        if (event) {
-          event.preventDefault()
-        }
-        return false
-      },
-      mapExchangeString,
-      seed,
-      factorioArchivePath,
-      selectWorkspacePath,
-      selectFactorioArchivePath,
-      isWorkspacePathValid,
-      isFactorioArchivePathValid,
-      workspacePath,
-      clientCount,
-      settings: computed(() => appStore.getSettings),
-      onMenuToggle: function (event) {
-        emit('menu-toggle', event);
-      }
-    }
+  set(val) {
+    appStore.updateFactorioArchivePath(val)
   }
-});
+})
+const workspacePath = computed({
+  get() {
+    return appStore.getWorkspacePath
+  },
+  set(val) {
+    appStore.updateWorkspacePath(val)
+  }
+})
+
+const clientCount = computed({
+  get() {
+    return appStore.getClientCount
+  },
+  set(val) {
+    appStore.updateClientCount(val)
+  }
+})
+const mapExchangeString = computed({
+  get() {
+    return appStore.getMapExchangeString
+  },
+  set(val) {
+    appStore.updateMapExchangeString(val)
+  }
+})
+const seed = computed({
+  get() {
+    return appStore.getSeed
+  },
+  set(val) {
+    appStore.updateSeed(val)
+  }
+})
+
+async function selectWorkspacePath() {
+  const newPath = await open({
+    defaultPath: isWorkspacePathValid.value ? appStore.settings.workspace_path : null,
+    directory: true,
+    multiple: false
+  })
+  if (newPath) {
+    await appStore.updateWorkspacePath(newPath)
+  }
+}
+async function selectFactorioArchivePath() {
+  const newPath = await open({
+    defaultPath: isFactorioArchivePathValid.value ? appStore.settings.factorio_archive_path : null,
+    directory: false,
+    multiple: false
+  })
+  if (newPath) {
+    await appStore.updateFactorioArchivePath(newPath)
+  }
+}
+
+async function testIsWorkspacePathValid(path) {
+  if (await appStore.fileExists(path)) {
+    try {
+      await readDir(path);
+      return true
+    } catch (err) {
+      return false
+    }
+  } else {
+    return false
+  }
+}
+
+async function testIsFactorioArchivePathValid(path){
+  return await appStore.fileExists(path)
+}
+
+const isWorkspacePathValid = ref(true)
+const isFactorioArchivePathValid = ref(true)
+
+if (appStore.settings) {
+  watch(() => appStore.getWorkspacePath, async () => {
+    isWorkspacePathValid.value = await testIsWorkspacePathValid(appStore.settings.workspace_path)
+  })
+  watch(() => appStore.getFactorioArchivePath, async () => {
+    isFactorioArchivePathValid.value = await testIsFactorioArchivePathValid(appStore.settings.factorio_archive_path)
+  })
+  testIsWorkspacePathValid(appStore.settings.workspace_path).then(valid => isWorkspacePathValid.value = valid)
+  testIsFactorioArchivePathValid(appStore.settings.factorio_archive_path).then(valid => isFactorioArchivePathValid.value = valid)
+}
+
+const openInBrowser = (url, event) => {
+  appStore.openInBrowser(url);
+  if (event) {
+    event.preventDefault()
+  }
+  return false
+}
+const settings = computed(() => appStore.getSettings)
 </script>
 
 <template>

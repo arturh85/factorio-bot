@@ -51,12 +51,19 @@ impl Planner {
         let all_bots = self.initiate_missing_players_with_default_inventory(bot_count);
         self.plan_world = Arc::new((*self.real_world).clone());
         let lua = Lua::new();
-        lua.context::<_, rlua::Result<()>>(|ctx| {
+        if let Err(err) = lua.context::<_, rlua::Result<()>>(|ctx| {
             let world = create_lua_world(ctx, self.plan_world.clone())?;
             let plan = create_lua_plan_builder(ctx, self.graph.clone(), self.plan_world.clone())?;
             let globals = ctx.globals();
             globals.set("all_bots", all_bots)?;
             globals.set("world", world)?;
+            globals.set(
+                "print",
+                ctx.create_function(move |ctx, s: String| {
+                    println!("{}", s);
+                    Ok(())
+                })?,
+            )?;
             globals.set("plan", plan)?;
             if let Some(rcon) = self.rcon.as_ref() {
                 let rcon = create_lua_rcon(ctx, rcon.clone(), self.real_world.clone())?;
@@ -65,11 +72,13 @@ impl Planner {
             let chunk = ctx.load(&lua_code);
             async_std::task::block_on(chunk.exec_async(ctx))?;
             Ok(())
-        })?;
+        }) {
+            eprintln!("{}", err)
+        }
         let mut stdout_str = String::new();
         let mut stderr_str = String::new();
-        stdout.read_to_string(&mut stdout_str).unwrap();
-        stderr.read_to_string(&mut stderr_str).unwrap();
+        stdout.read_to_string(&mut stdout_str)?;
+        stderr.read_to_string(&mut stderr_str)?;
         Ok((stdout_str, stderr_str))
     }
 

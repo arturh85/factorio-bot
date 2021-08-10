@@ -1,3 +1,6 @@
+<script setup>
+</script>
+
 <template>
 	<div class="p-grid">
 		<div class="p-col-12">
@@ -8,12 +11,6 @@
 		</div>
 	</div>
 </template>
-
-<script>
-export default {
-
-}
-</script>
 
 <style scoped>
 

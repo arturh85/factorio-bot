@@ -4,10 +4,12 @@ import {invoke} from '@tauri-apps/api/tauri';
 export const useScriptStore = defineStore({
     id: 'script',
     state: () => ({
-        code: '',
+        code: 'local example = 5 + 5\nexample = example + 2\nrcon.print(example)',
         executing: false,
         success: false,
-        error: false
+        error: false,
+        stdout: '',
+        stderr: ''
     }),
     getters: {
         isExecuting(): boolean {
@@ -15,6 +17,12 @@ export const useScriptStore = defineStore({
         },
         getCode(): string {
             return this.code
+        },
+        getStdout(): string {
+            return this.stdout
+        },
+        getStderr(): string {
+            return this.stderr
         }
     },
     actions: {
@@ -25,11 +33,14 @@ export const useScriptStore = defineStore({
             if(!this.code) {
                 throw new Error('no code to execute?')
             }
+            this.stdout = ''
+            this.stderr = ''
             this.error = false
             this.executing = true
             try {
-                const outputs = await invoke('execute_script', {code: this.code})
-                console.log('OUTPUTS', outputs);
+                const outputs = await invoke('execute_script', {code: this.code}) as any
+                this.stdout = outputs[0]
+                this.stderr = outputs[1]
                 this.executing = false
                 this.success = true
             } catch(err) {
@@ -37,6 +48,7 @@ export const useScriptStore = defineStore({
                 this.executing = false
                 this.success = true
                 this.error = true
+                throw new Error(err)
             }
         }
     }

@@ -45,6 +45,10 @@ jobs:
       - name: 🚧 build setup
         run: cd frontend; yarn tauri:build
 
+      - name: 🚚 Build again (windows only)
+        if: matrix.platform == 'windows-latest'
+        run: cargo build --release
+
       - name: 🚚 DEBUG (windows only)
         if: matrix.platform == 'windows-latest'
         run: Get-ChildItem -Recurse -Filter '*.exe'

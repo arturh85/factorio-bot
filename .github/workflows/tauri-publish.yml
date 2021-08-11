@@ -62,13 +62,13 @@ jobs:
           projectPath: "./frontend"
           npmScript: "dummy" # dummy script because already build & moved
 
-      - name: 📦️ Create NSIS installer (windows only)
+      - name: 🚧 build NSIS installer (windows only)
         if: matrix.platform == 'windows-latest'
         uses: joncloud/makensis-action@v3.6
         with:
           script-file: ".github/installer.nsi"
           arguments: "/V3"
-      - name: 📦️ Upload Windows Installer Release Asset  (windows only)
+      - name: 📦️ upload windows installer release asset  (windows only)
         if: matrix.platform == 'windows-latest'
         id: upload-release-asset
         uses: actions/upload-release-asset@v1
@@ -82,12 +82,12 @@ jobs:
       - name: 🚧 calculate checksum for chocolatey (windows only)
         if: matrix.platform == 'windows-latest'
         run: cd frontend; yarn checksum:update
-      - name: 🚧 create nuget package for chocolatey (windows only)
+      - name: 🚧 build nuget package for chocolatey (windows only)
         if: matrix.platform == 'windows-latest'
         uses: crazy-max/ghaction-chocolatey@v1
         with:
           args: pack .github/chocolatey/factorio-bot.nuspec
-      - name: 🚧 rename nupkg without version in filename (windows only)
+      - name: 🚚 rename nupkg without version in filename (windows only)
         if: matrix.platform == 'windows-latest'
         run: mv factorio-bot.*.nupkg factorio-bot.nupkg
       - name: 📦 publish nuget package to chocolatey (windows only)
@@ -98,7 +98,7 @@ jobs:
         with:
           args: push factorio-bot.nupkg --key "${{ env.APIKEY }}" --source https://push.chocolatey.org/
 
-      - name: 🚧 Build rust doc for gh-pages (ubuntu only)
+      - name: 🚧 build rust doc for gh-pages (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
         run: mkdir public && cargo doc --all --no-deps && mv target/doc public/doc
 
@@ -106,11 +106,11 @@ jobs:
         if: matrix.platform == 'ubuntu-latest'
         run: cargo install mdbook --force
 
-      - name: 🚧 Build mdBook (ubuntu only)
+      - name: 🚧 build mdBook (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
         run: mdbook build docs && mv docs/book public/book && mv index.html public/
 
-      - name: 🚚 Move Frontend stats.html to gh-pages (ubuntu only)
+      - name: 🚚 move Frontend stats.html to gh-pages (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
         run: mv frontend/dist/stats.html public/stats.html
 

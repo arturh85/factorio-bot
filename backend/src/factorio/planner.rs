@@ -8,7 +8,8 @@ use crate::factorio::instance_setup::setup_factorio_instance;
 use async_std::sync::Arc;
 use dashmap::lock::RwLock;
 use gag::BufferRedirect;
-use rlua::Lua;
+use itertools::Itertools;
+use rlua::{Lua, Variadic};
 // use crate::factorio::plan_builder::create_lua_plan_builder;
 use crate::factorio::process_control::{start_factorio_server, FactorioStartCondition};
 use crate::factorio::rcon::{create_lua_rcon, FactorioRcon, RconSettings};
@@ -59,8 +60,8 @@ impl Planner {
             globals.set("world", world)?;
             globals.set(
                 "print",
-                ctx.create_function(move |ctx, s: String| {
-                    println!("{}", s);
+                ctx.create_function(|_, strings: Variadic<String>| {
+                    println!("{}", strings.iter().join(" "));
                     Ok(())
                 })?,
             )?;

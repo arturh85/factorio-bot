@@ -3,8 +3,8 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref, onUnmounted, watch, toRefs, defineProps, defineEmits } from 'vue'
-import { useResizeObserver, useStorage, useDebounceFn } from '@vueuse/core'
+import {onMounted, onUnmounted, ref} from 'vue'
+import {useResizeObserver} from '@vueuse/core'
 
 // Import monaco
 // https://github.com/vitejs/vite/discussions/1791

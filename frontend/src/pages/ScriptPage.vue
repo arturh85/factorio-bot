@@ -1,9 +1,17 @@
 <script setup lang="ts">
-import Button from 'primevue/button';
 import {computed} from 'vue';
 import {useScriptStore} from '../store/scriptStore';
 import {useToast} from 'primevue/usetoast';
 import Editor from '@/components/Editor.vue'
+import ScriptTree from '@/components/ScriptTree.vue'
+import Splitter from 'primevue/splitter';
+import SplitterPanel from 'primevue/splitterpanel';
+import Button from 'primevue/button';
+
+const onResize = () => {
+
+}
+
 
 const scriptStore = useScriptStore()
 const toast = useToast();
@@ -36,10 +44,24 @@ const isExecuting = computed(() => scriptStore.isExecuting)
           </Button>
         </h5>
 
-        <Editor class="editor" :value="code" theme="vs-dark" @change="updateCode"></Editor>
-
-        <pre class="stderr">{{ stderr }}</pre>
-        <pre class="stdout">{{ stdout }}</pre>
+        <Splitter style="min-height: 400px;" stateKey="luaScriptSplitter" stateStorage="local">
+          <SplitterPanel :size="20">
+            <ScriptTree></ScriptTree>
+          </SplitterPanel>
+          <SplitterPanel :size="80">
+            <Splitter style="height: 100%" layout="vertical"  @resizeend="onResize()">
+              <SplitterPanel>
+                <Editor class="editor" :value="code" theme="vs-dark" @change="updateCode"></Editor>
+              </SplitterPanel>
+              <SplitterPanel>
+                <div class="outputs">
+                  <pre class="stderr">{{ stderr }}</pre>
+                  <pre class="stdout">{{ stdout }}</pre>
+                </div>
+              </SplitterPanel>
+            </Splitter>
+          </SplitterPanel>
+        </Splitter>
       </div>
     </div>
   </div>
@@ -51,7 +73,10 @@ const isExecuting = computed(() => scriptStore.isExecuting)
 }
 
 .editor {
-  width: 600px;
-  height: 800px;
+  width: 100%;
+  height: 100%;
+}
+.outputs {
+  width: 100%;
 }
 </style>

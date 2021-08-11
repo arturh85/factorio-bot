@@ -44,8 +44,20 @@ jobs:
         run: cd frontend; yarn cargo:test
       - name: 🚧 build setup
         run: cd frontend; yarn tauri:build
+
+      - name: 🚚 DEBUG (windows only)
+        if: matrix.platform == 'windows-latest'
+        run: Get-ChildItem -Recurse -Filter '*.exe'
+
+      - name: 🚧 build NSIS installer (windows only)
+        if: matrix.platform == 'windows-latest'
+        uses: joncloud/makensis-action@v3.6
+        with:
+          script-file: "installer.nsi"
+          arguments: "/V3"
+
       - name: 🚚 move build output to correct folder
-        run: cd frontend; mv ../target src-tauri/
+        run: mv target frontend/src-tauri/target/
       - name: 📦️ create release & publish it
         id: create_release
         uses: tauri-apps/tauri-action@v0
@@ -63,16 +75,6 @@ jobs:
           npmScript: "dummy" # dummy script because already build & moved
 
 
-      - name: 🚚 DEBUG (windows only)
-        if: matrix.platform == 'windows-latest'
-        run: Get-ChildItem -Recurse -Filter '*.exe'
-
-      - name: 🚧 build NSIS installer (windows only)
-        if: matrix.platform == 'windows-latest'
-        uses: joncloud/makensis-action@v3.6
-        with:
-          script-file: "installer.nsi"
-          arguments: "/V3"
       - name: 📦️ upload windows installer release asset  (windows only)
         if: matrix.platform == 'windows-latest'
         id: upload-release-asset

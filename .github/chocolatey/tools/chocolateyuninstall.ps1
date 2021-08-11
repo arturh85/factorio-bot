@@ -2,8 +2,8 @@
 $packageArgs = @{
   packageName   = $env:ChocolateyPackageName
   softwareName  = 'factorio-bot*'  #part or all of the Display Name as you see it in Programs and Features. It should be enough to be unique
-  fileType      = 'MSI' #only one of these: MSI or EXE (ignore MSU for now)
-  silentArgs    = "/qn /norestart"
+  fileType      = 'EXE' #only one of these: MSI or EXE (ignore MSU for now)
+  silentArgs    = "/S"
   validExitCodes= @(0, 3010, 1605, 1614, 1641) # https://msdn.microsoft.com/en-us/library/aa376931(v=vs.85).aspx
 }
 

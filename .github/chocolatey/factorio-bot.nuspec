@@ -16,10 +16,6 @@
     <summary>Bot Platform for the game factorio</summary>
     <description>Factorio Bot is a bot platform for the game</description>
     <releaseNotes>pre-alpha preview releases - not really usable yet</releaseNotes>
-    <dependencies>
-      <dependency id="chocolatey-core.extension" version="1.3.3" />
-      <dependency id="kb2919355" version="1.0.20160915" />
-    </dependencies>
   </metadata>
   <files>
     <file src="tools\**" target="tools" />

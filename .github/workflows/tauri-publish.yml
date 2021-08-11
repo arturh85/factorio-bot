@@ -47,6 +47,7 @@ jobs:
       - name: 🚚 move build output to correct folder
         run: cd frontend; mv ../target src-tauri/
       - name: 📦️ create release & publish it
+        id: create_release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -60,6 +61,24 @@ jobs:
           configPath: "tauri.conf.json"
           projectPath: "./frontend"
           npmScript: "dummy" # dummy script because already build & moved
+
+      - name: 📦️ Create NSIS installer
+        if: matrix.platform == 'windows-latest'
+        uses: joncloud/makensis-action@v3.6
+        with:
+          script-file: ".github/chocolatey/tauri.nsi"
+          arguments: "/V3"
+      - name: 📦️ Upload Windows Installer Release Asset
+        if: matrix.platform == 'windows-latest'
+        id: upload-release-asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./factorio-bot-installer.exe
+          asset_name: factorio-bot-installer.exe
+          asset_content_type: application/octet-stream
       - name: 🚧 calculate checksum for chocolatey (windows only)
         if: matrix.platform == 'windows-latest'
         run: cd frontend; yarn checksum:update

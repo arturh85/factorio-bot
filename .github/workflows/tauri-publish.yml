@@ -62,11 +62,16 @@ jobs:
           projectPath: "./frontend"
           npmScript: "dummy" # dummy script because already build & moved
 
+
+      - name: 🚚 DEBUG (windows only)
+        if: matrix.platform == 'windows-latest'
+        run: Get-ChildItem -Recurse -Filter '*.exe'
+
       - name: 🚧 build NSIS installer (windows only)
         if: matrix.platform == 'windows-latest'
         uses: joncloud/makensis-action@v3.6
         with:
-          script-file: ".github/installer.nsi"
+          script-file: "installer.nsi"
           arguments: "/V3"
       - name: 📦️ upload windows installer release asset  (windows only)
         if: matrix.platform == 'windows-latest'
@@ -76,7 +81,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./.github/factorio-bot-installer.exe
+          asset_path: ./factorio-bot-installer.exe
           asset_name: factorio-bot-installer.exe
           asset_content_type: application/octet-stream
       - name: 🚧 calculate checksum for chocolatey (windows only)

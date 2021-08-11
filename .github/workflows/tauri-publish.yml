@@ -62,9 +62,6 @@ jobs:
           projectPath: "./frontend"
           npmScript: "dummy" # dummy script because already build & moved
 
-      - name: 🚚 debug
-        run: find target
-
       - name: 📦️ Create NSIS installer (windows only)
         if: matrix.platform == 'windows-latest'
         uses: joncloud/makensis-action@v3.6

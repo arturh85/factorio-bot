@@ -3,7 +3,7 @@
   <metadata>
     <id>factorio-bot</id>
     <version>__REPLACE_VERSION__</version>
-    <title>factorio-bot (Install)</title>
+    <title>factorio-bot</title>
     <owners>Artur Hallmann</owners>
     <authors>Artur Hallmann</authors>
     <projectUrl>https://arturh85.github.io/factorio-bot-tauri/book/</projectUrl>

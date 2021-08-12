@@ -51,7 +51,7 @@ jobs:
         if: matrix.platform == 'windows-latest'
         uses: joncloud/makensis-action@v3.6
         with:
-          script-file: "installer.nsi"
+          script-file: ".github/chocolatey/installer.nsi"
           arguments: "/V3"
 
       - name: 🚚 move build output to correct folder
@@ -81,7 +81,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./factorio-bot-installer.exe
+          asset_path: ./.github/chocolatey/factorio-bot-installer.exe
           asset_name: factorio-bot-installer.exe
           asset_content_type: application/octet-stream
       - name: 🚧 calculate checksum for chocolatey (windows only)

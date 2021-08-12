@@ -1,7 +1,7 @@
 const fs = require('fs')
 const crypto = require('crypto')
 const algorithm = 'sha256', shasum = crypto.createHash(algorithm)
-const filename = '../.github/factorio-bot-installer.exe', s = fs.ReadStream(filename)
+const filename = '../.github/chocolatey/factorio-bot-installer.exe', s = fs.ReadStream(filename)
 s.on('data', function (data) {
     shasum.update(data)
 });

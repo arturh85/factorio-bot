@@ -49,6 +49,7 @@ fn typescriptify() {
   output += &FactorioEntityPrototype::type_script_ify();
   output += &FactorioItemPrototype::type_script_ify();
   output += &FactorioResult::type_script_ify();
+  output += &PrimeVueTreeNode::type_script_ify();
   output += &AppSettings::type_script_ify();
 
   output = output.replace("DateTime<Utc>", "String");

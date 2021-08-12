@@ -61,7 +61,21 @@ impl Planner {
             globals.set(
                 "print",
                 ctx.create_function(|_, strings: Variadic<String>| {
-                    println!("{}", strings.iter().join(" "));
+                    info!("<cyan>lua</>   ⮞ {}", strings.iter().join(" "));
+                    Ok(())
+                })?,
+            )?;
+            globals.set(
+                "print_err",
+                ctx.create_function(|_, strings: Variadic<String>| {
+                    error!("<cyan>lua</>   ⮞ {}", strings.iter().join(" "));
+                    Ok(())
+                })?,
+            )?;
+            globals.set(
+                "print_warn",
+                ctx.create_function(|_, strings: Variadic<String>| {
+                    warn!("<cyan>lua</>   ⮞ {}", strings.iter().join(" "));
                     Ok(())
                 })?,
             )?;
@@ -74,7 +88,7 @@ impl Planner {
             async_std::task::block_on(chunk.exec_async(ctx))?;
             Ok(())
         }) {
-            eprintln!("{}", err)
+            error!("{}", err)
         }
         let mut stdout_str = String::new();
         let mut stderr_str = String::new();

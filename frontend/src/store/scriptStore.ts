@@ -1,15 +1,18 @@
 import {defineStore} from 'pinia'
 import {invoke} from '@tauri-apps/api/tauri';
+import {PrimeVueTreeNode} from '@/models/types';
 
 export const useScriptStore = defineStore({
     id: 'script',
     state: () => ({
-        code: 'local example = 5 + 5\nexample = example + 2\nrcon.print(example)',
+        code: '',
         executing: false,
         success: false,
         error: false,
         stdout: '',
-        stderr: ''
+        stderr: '',
+
+        loadingScriptsInDirectory: false
     }),
     getters: {
         isExecuting(): boolean {
@@ -23,9 +26,33 @@ export const useScriptStore = defineStore({
         },
         getStderr(): string {
             return this.stderr
+        },
+        getLoadingScriptsInDirectory(): boolean {
+            return this.loadingScriptsInDirectory
         }
     },
     actions: {
+        async loadScriptsInDirectory(path: string): Promise<PrimeVueTreeNode[]> {
+            this.loadingScriptsInDirectory = true
+            try {
+                const result = await invoke('load_scripts_in_directory', {path}) as PrimeVueTreeNode[]
+                this.loadingScriptsInDirectory = false
+                return result
+            } catch(err) {
+                this.loadingScriptsInDirectory = false
+                throw err
+            }
+        },
+        async loadScriptFile(path: string): Promise<string> {
+            try {
+                const result = await invoke('load_script', {path}) as string
+                this.code = result
+                return result
+            } catch(err) {
+                console.error('failed', err)
+                throw err
+            }
+        },
         setCode(code: string) {
             this.code = code
         },

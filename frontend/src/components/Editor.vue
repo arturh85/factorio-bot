@@ -3,7 +3,7 @@
 </template>
 
 <script setup lang="ts">
-import {onMounted, onUnmounted, ref} from 'vue'
+import {onMounted, onUnmounted, ref, watch, toRefs} from 'vue'
 import {useResizeObserver} from '@vueuse/core'
 
 // Import monaco
@@ -61,6 +61,9 @@ const props = defineProps({
   }
 })
 
+const {value} = toRefs(props)
+
+
 const emit = defineEmits<(e: 'change', payload: string) => void>()
 
 onMounted(() => {
@@ -70,6 +73,10 @@ onMounted(() => {
     value: props.value
   })
   // emit('change', editorValue.value)
+
+  watch(value, (value) => {
+    editor.setValue(value)
+  })
 
 
   // @event `change`

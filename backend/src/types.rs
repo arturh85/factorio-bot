@@ -785,7 +785,10 @@ pub struct ResourcePatch {
 
 impl ResourcePatch {
     pub fn contains(&self, pos: Pos) -> bool {
-        self.elements.iter().map(|e| e.into()).any(|x: Pos| x == pos)
+        self.elements
+            .iter()
+            .map(|e| e.into())
+            .any(|x: Pos| x == pos)
     }
     pub fn find_free_rect(
         &self,
@@ -888,4 +891,13 @@ pub struct PlayerChangedMainInventoryEvent {
 #[serde(rename_all = "camelCase")]
 pub struct PlayerLeftEvent {
     pub player_id: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PrimeVueTreeNode {
+    pub key: String,
+    pub label: String,
+    pub leaf: bool,
+    pub children: Vec<PrimeVueTreeNode>,
 }

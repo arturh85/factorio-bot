@@ -16,6 +16,11 @@ use crate::factorio::process_control::{await_lock, FactorioStartCondition};
 use crate::factorio::rcon::RconSettings;
 use crate::factorio::util::{read_to_value, write_value_to};
 
+#[cfg(not(debug_assertions))]
+pub const MODS_CONTENT: include_dir::Dir = include_dir!("../mods");
+#[cfg(not(debug_assertions))]
+pub const PLANS_CONTENT: include_dir::Dir = include_dir!("../plans");
+
 #[allow(clippy::too_many_arguments)]
 pub async fn setup_factorio_instance(
     workspace_path_str: &str,
@@ -174,7 +179,6 @@ pub async fn setup_factorio_instance(
         }
         #[cfg(not(debug_assertions))]
         {
-            const MODS_CONTENT: include_dir::Dir = include_dir!("../mods");
             std::fs::create_dir_all(&workspace_mods_path)?;
             if let Err(err) = MODS_CONTENT.extract(workspace_mods_path.clone()) {
                 error!("failed to extract static mods content: {:?}", err);
@@ -189,7 +193,6 @@ pub async fn setup_factorio_instance(
     {
         let data_plans_path = workspace_path.join(PathBuf::from("plans"));
         if !data_plans_path.exists() {
-            const PLANS_CONTENT: include_dir::Dir = include_dir!("../plans");
             std::fs::create_dir_all(&data_plans_path)?;
             if let Err(err) = PLANS_CONTENT.extract(data_plans_path.clone()) {
                 error!("failed to extract static plans content: {:?}", err);

@@ -44,15 +44,9 @@ jobs:
         run: cd frontend; yarn cargo:test
       - name: 🚧 build setup
         run: cd frontend; yarn tauri:build
-
-      - name: 🚚 Build again (windows only)
+      - name: 🚧 rename binary for NSIS (windows only)
         if: matrix.platform == 'windows-latest'
-        run: cargo build --release
-
-      - name: 🚚 DEBUG (windows only)
-        if: matrix.platform == 'windows-latest'
-        run: Get-ChildItem -Recurse -Filter '*.exe'
-
+        run: mv target/release/deps/factorio_bot.exe target/release/factorio-bot.exe
       - name: 🚧 build NSIS installer (windows only)
         if: matrix.platform == 'windows-latest'
         uses: joncloud/makensis-action@v3.6

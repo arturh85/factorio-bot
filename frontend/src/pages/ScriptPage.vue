@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {computed} from 'vue';
+import * as ansiHTML from 'ansi-html';
 import {useScriptStore} from '../store/scriptStore';
 import {useToast} from 'primevue/usetoast';
 import Editor from '@/components/Editor.vue'
@@ -30,6 +31,9 @@ const execute = async () => {
   }
 }
 const isExecuting = computed(() => scriptStore.isExecuting)
+
+const loadScriptFile = (path: string) => scriptStore.loadScriptFile(path)
+
 </script>
 
 <template>
@@ -44,9 +48,9 @@ const isExecuting = computed(() => scriptStore.isExecuting)
           </Button>
         </h5>
 
-        <Splitter style="min-height: 400px;" stateKey="luaScriptSplitter" stateStorage="local">
+        <Splitter style="min-height: 800px;" stateKey="luaScriptSplitter" stateStorage="local">
           <SplitterPanel :size="20">
-            <ScriptTree></ScriptTree>
+            <ScriptTree @select="loadScriptFile($event)"></ScriptTree>
           </SplitterPanel>
           <SplitterPanel :size="80">
             <Splitter style="height: 100%" layout="vertical"  @resizeend="onResize()">
@@ -55,8 +59,8 @@ const isExecuting = computed(() => scriptStore.isExecuting)
               </SplitterPanel>
               <SplitterPanel>
                 <div class="outputs">
-                  <pre class="stderr">{{ stderr }}</pre>
-                  <pre class="stdout">{{ stdout }}</pre>
+                  <pre v-for="(line, idx) in stderr.split('\n')" :key="idx" class="stderr" :innerHTML="ansiHTML(line)"></pre>
+                  <pre v-for="(line, idx) in stdout.split('\n')" :key="idx" class="stdout" :innerHTML="ansiHTML(line)"></pre>
                 </div>
               </SplitterPanel>
             </Splitter>
@@ -69,7 +73,11 @@ const isExecuting = computed(() => scriptStore.isExecuting)
 
 <style scoped>
 .stderr {
-  color: red
+  color: red;
+  margin: 0;
+}
+.stdout {
+  margin: 0;
 }
 
 .editor {

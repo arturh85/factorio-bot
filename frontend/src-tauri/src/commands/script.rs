@@ -52,10 +52,13 @@ pub async fn load_scripts_in_directory(
     }
     #[cfg(not(debug_assertions))]
     {
-      std::fs::create_dir_all(&workspace_plans_path)?;
-      if let Err(err) = MODS_CONTENT.extract(workspace_plans_path.clone()) {
+      std::fs::create_dir_all(&workspace_plans_path)
+        .map_err(|e| String::from("error: ") + &e.to_string())?;
+      if let Err(err) = factorio_bot_backend::factorio::instance_setup::PLANS_CONTENT
+        .extract(workspace_plans_path.clone())
+      {
         error!("failed to extract static mods content: {:?}", err);
-        return Err(anyhow!("failed to extract mods content to workspace"));
+        return Err("failed to extract mods content to workspace".into());
       }
     }
     if !workspace_plans_path.exists() {
@@ -124,10 +127,13 @@ pub async fn load_script(
     }
     #[cfg(not(debug_assertions))]
     {
-      std::fs::create_dir_all(&workspace_plans_path)?;
-      if let Err(err) = MODS_CONTENT.extract(workspace_plans_path.clone()) {
+      std::fs::create_dir_all(&workspace_plans_path)
+        .map_err(|e| String::from("error: ") + &e.to_string())?;
+      if let Err(err) = factorio_bot_backend::factorio::instance_setup::PLANS_CONTENT
+        .extract(workspace_plans_path.clone())
+      {
         error!("failed to extract static mods content: {:?}", err);
-        return Err(anyhow!("failed to extract mods content to workspace"));
+        return Err("failed to extract mods content to workspace".into());
       }
     }
     if !workspace_plans_path.exists() {

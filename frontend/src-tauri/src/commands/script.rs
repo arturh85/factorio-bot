@@ -62,13 +62,10 @@ pub async fn load_scripts_in_directory(
       }
     }
     if !workspace_plans_path.exists() {
-      return Err(
-        format!(
-          "missing plans/ folder from working directory: {:?}",
-          workspace_plans_path
-        )
-        .into(),
-      );
+      return Err(format!(
+        "missing plans/ folder from working directory: {:?}",
+        workspace_plans_path
+      ));
     }
   }
 
@@ -137,13 +134,10 @@ pub async fn load_script(
       }
     }
     if !workspace_plans_path.exists() {
-      return Err(
-        format!(
-          "missing plans/ folder from working directory: {:?}",
-          workspace_plans_path
-        )
-        .into(),
-      );
+      return Err(format!(
+        "missing plans/ folder from working directory: {:?}",
+        workspace_plans_path
+      ));
     }
   }
 

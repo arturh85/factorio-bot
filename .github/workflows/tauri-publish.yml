@@ -56,21 +56,31 @@ jobs:
 
       - name: 🚚 move build output to correct folder
         run: mv target frontend/src-tauri/target/
-      - name: 📦️ create release & publish it
+
+      - name: get version
+        run: echo "PACKAGE_VERSION=$(node -p "require('./frontend/package.json').version")" >> $GITHUB_ENV
+      - name: create release
         id: create_release
+        uses: actions/create-release@v1.1.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: factorio-bot-v${{ env.PACKAGE_VERSION }}
+          release_name: "Factorio Bot v${{ env.PACKAGE_VERSION }}"
+          body: "See the assets to download this version and install."
+          draft: false
+          prerelease: false
+      - name: 📦️ create release & publish it
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: factorio-bot-v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version
-          releaseName: "Factorio Bot v__VERSION__"
-          releaseBody: "See the assets to download this version and install."
-          releaseDraft: false
-          prerelease: false
+          releaseId: ${{ needs.create-release.outputs.RELEASE_UPLOAD_ID }}
           iconPath: "../public/logo.png"
           configPath: "tauri.conf.json"
           projectPath: "./frontend"
           npmScript: "dummy" # dummy script because already build & moved
+
 
 
       - name: 📦️ upload windows installer release asset  (windows only)

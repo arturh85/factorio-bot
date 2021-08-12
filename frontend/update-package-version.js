@@ -23,6 +23,7 @@ if (matches) {
         let content = fs.readFileSync(filePath, {encoding: 'utf8'});
         fs.writeFileSync(filePath, content.replaceAll('__REPLACE_VERSION__', version))
     }
+    console.log('PACKAGE_VERSION=' + version)
 } else {
     console.error('failed to find version in ', cargoTomlPath)
     process.exit(1)

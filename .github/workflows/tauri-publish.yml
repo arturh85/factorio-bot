@@ -35,7 +35,7 @@ jobs:
       - name: ✅ lint javascript code
         run: cd frontend; yarn lint
       - name: 🚚 move version number from Cargo.toml to package.json and tauri.conf.json
-        run: cd frontend; yarn version:update-from-cargo
+        run: cd frontend; node update-package.version.js >> $GITHUB_ENV
       - name: ✅ run javascript tests
         run: cd frontend; yarn test:unit
       - name: 🚧 build javascript
@@ -57,9 +57,7 @@ jobs:
       - name: 🚚 move build output to correct folder
         run: mv target frontend/src-tauri/target/
 
-      - name: get version
-        run: echo "PACKAGE_VERSION=$(node -p "require('./frontend/package.json').version")" >> $GITHUB_ENV
-      - name: create release
+      - name: 📦 create release
         id: create_release
         uses: actions/create-release@v1.1.0
         env:
@@ -70,7 +68,7 @@ jobs:
           body: "See the assets to download this version and install."
           draft: false
           prerelease: false
-      - name: 📦️ create release & publish it
+      - name: 📦️ publish tauri artifacts
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -80,10 +78,7 @@ jobs:
           configPath: "tauri.conf.json"
           projectPath: "./frontend"
           npmScript: "dummy" # dummy script because already build & moved
-
-
-
-      - name: 📦️ upload windows installer release asset  (windows only)
+      - name: 📦️ upload NSIS installer release asset  (windows only)
         if: matrix.platform == 'windows-latest'
         id: upload-release-asset
         uses: actions/upload-release-asset@v1

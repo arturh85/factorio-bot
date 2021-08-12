@@ -22,26 +22,30 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
-      - name: ⚡ install tauri bundler
+      - name: ⚡ install cargo tauri-bundler
         run: cargo install tauri-bundler --force
-      - name: ⚡ install webkit2gtk (ubuntu only)
+      - name: ⚡ install apt webkit2gtk (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y webkit2gtk-4.0 libgtksourceview-3.0-dev
-
-      - name: ⚡ install app dependencies
+      - name: ⚡ install cargo mdbook (ubuntu only)
+        if: matrix.platform == 'ubuntu-latest'
+        run: cargo install mdbook --force
+      - name: ⚡ install NodeJS dependencies
         run: cd frontend; yarn
+
+      - name: 🚚 move version from frontend/src-tauri/Cargo.toml to package.json & tauri.conf.json
+        run: cd frontend; node update-package-version.js >> $GITHUB_ENV
+
       - name: ✅ lint javascript code
         run: cd frontend; yarn lint
-      - name: 🚚 move version number from Cargo.toml to package.json and tauri.conf.json
-        run: cd frontend; node update-package.version.js >> $GITHUB_ENV
       - name: ✅ run javascript tests
         run: cd frontend; yarn test:unit
-      - name: 🚧 build javascript
-        run: cd frontend; yarn build:web
       - name: ✅ run rust tests
         run: cd frontend; yarn cargo:test
+      - name: 🚧 build javascript
+        run: cd frontend; yarn build:web
       - name: 🚧 build setup
         run: cd frontend; yarn tauri:build
       - name: 🚧 rename binary for NSIS (windows only)
@@ -57,7 +61,7 @@ jobs:
       - name: 🚚 move build output to correct folder
         run: mv target frontend/src-tauri/target/
 
-      - name: 📦 create release
+      - name: 📦 create github release
         id: create_release
         uses: actions/create-release@v1.1.0
         env:
@@ -68,7 +72,7 @@ jobs:
           body: "See the assets to download this version and install."
           draft: false
           prerelease: false
-      - name: 📦️ publish tauri artifacts
+      - name: 📦️ upload tauri artifacts to release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -78,7 +82,7 @@ jobs:
           configPath: "tauri.conf.json"
           projectPath: "./frontend"
           npmScript: "dummy" # dummy script because already build & moved
-      - name: 📦️ upload NSIS installer release asset  (windows only)
+      - name: 📦️ upload NSIS installer to release  (windows only)
         if: matrix.platform == 'windows-latest'
         id: upload-release-asset
         uses: actions/upload-release-asset@v1
@@ -111,10 +115,6 @@ jobs:
       - name: 🚧 build rust doc for gh-pages (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
         run: mkdir public && cargo doc --all --no-deps && mv target/doc public/doc
-
-      - name: ⚡ install cargo mdbook (ubuntu only)
-        if: matrix.platform == 'ubuntu-latest'
-        run: cargo install mdbook --force
 
       - name: 🚧 build mdBook (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'

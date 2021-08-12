@@ -41,5 +41,5 @@ jobs:
         run: cd frontend; yarn build:web
       - name: ✅ run rust tests
         run: cd frontend; yarn cargo:test
-      - name: 🚧 build setup
+      - name: 🚧 build rust
         run: cd frontend; yarn tauri:build

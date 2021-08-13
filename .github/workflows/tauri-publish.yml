@@ -57,6 +57,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           allowUpdates: true
+          replacesArtifacts: false
           name: "Factorio Bot v${{ env.PACKAGE_VERSION }}"
           tag: v${{ env.PACKAGE_VERSION }}
           body: "See the assets to download this version and install."

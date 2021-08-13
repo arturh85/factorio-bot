@@ -58,7 +58,7 @@ jobs:
           tag_name: factorio-bot-v${{ env.PACKAGE_VERSION }}
           release_name: "Factorio Bot v${{ env.PACKAGE_VERSION }}"
           body: "See the assets to download this version and install."
-          draft: false
+          draft: true
           prerelease: false
       - name: 📦️ upload tauri artifacts to release
         uses: tauri-apps/tauri-action@v0

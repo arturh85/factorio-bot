@@ -6,7 +6,7 @@ Section
     WriteUninstaller $INSTDIR\uninstaller.exe
 
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\factorio-bot" "DisplayName" "factorio-bot"
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\factorio-bot" "UninstallString" "$INSTDIR\Uninstall.exe"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\factorio-bot" "UninstallString" "$INSTDIR\uninstaller.exe"
 
     CreateShortCut $SMPROGRAMS\factorio-bot.lnk $INSTDIR\factorio-bot.exe
 SectionEnd

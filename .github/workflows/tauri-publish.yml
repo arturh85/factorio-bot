@@ -49,23 +49,26 @@ jobs:
 
       - name: 🚚 move build output to correct folder
         run: mv target frontend/src-tauri/target/
+
       - name: 🔖 create github release
+        uses: ncipollo/release-action@v1
         id: create_release
-        uses: actions/create-release@v1.1.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: factorio-bot-v${{ env.PACKAGE_VERSION }}
-          release_name: "Factorio Bot v${{ env.PACKAGE_VERSION }}"
+          allowUpdates: true
+          name: "Factorio Bot v${{ env.PACKAGE_VERSION }}"
+          tag: v${{ env.PACKAGE_VERSION }}
           body: "See the assets to download this version and install."
-          draft: true
-          prerelease: false
+          draft: false
+          prerelease: true
+
       - name: 📦️ upload tauri artifacts to release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          releaseId: ${{ needs.create-release.outputs.RELEASE_UPLOAD_ID }}
+          releaseId: ${{ needs.create-release.outputs.id }}
           iconPath: "../public/logo.png"
           configPath: "tauri.conf.json"
           projectPath: "./frontend"

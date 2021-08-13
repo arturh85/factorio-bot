@@ -23,7 +23,12 @@ if (matches) {
         let content = fs.readFileSync(filePath, {encoding: 'utf8'});
         fs.writeFileSync(filePath, content.replaceAll('__REPLACE_VERSION__', version))
     }
-    console.log('PACKAGE_VERSION=' + version)
+    if (process.env.GITHUB_ENV) {
+        fs.appendFile(process.env.GITHUB_ENV, `PACKAGE_VERSION=${version}\n`, function (err) {
+            if (err) throw err;
+            console.log('Saved to Github ENV');
+        });
+    }
 } else {
     console.error('failed to find version in ', cargoTomlPath)
     process.exit(1)

@@ -1258,7 +1258,7 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
- "toml 0.4.10",
+ "toml 0.5.8",
  "typescript-definitions",
 ]
 

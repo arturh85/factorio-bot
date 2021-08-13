@@ -34,10 +34,8 @@ jobs:
         run: cargo install mdbook --force
       - name: ⚡ install NodeJS dependencies
         run: cd frontend; yarn
-
-      - name: 🚚 move version from frontend/src-tauri/Cargo.toml to package.json & tauri.conf.json
-        run: cd frontend; node update-package-version.js >> $GITHUB_ENV
-
+      - name: 🦠 extract version from frontend/src-tauri/Cargo.toml to package.json & tauri.conf.json & ENV
+        run: cd frontend; node update-package-version.js
       - name: ✅ lint javascript code
         run: cd frontend; yarn lint
       - name: ✅ run javascript tests
@@ -51,7 +49,7 @@ jobs:
 
       - name: 🚚 move build output to correct folder
         run: mv target frontend/src-tauri/target/
-      - name: 📦 create github release
+      - name: 🔖 create github release
         id: create_release
         uses: actions/create-release@v1.1.0
         env:

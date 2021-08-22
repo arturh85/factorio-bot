@@ -32,14 +32,14 @@ jobs:
           sudo apt-get install -y webkit2gtk-4.0 libgtksourceview-3.0-dev
 
       - name: ⚡ install app dependencies
-        run: cd frontend; yarn
+        run: cd app; yarn
       - name: ✅ lint javascript code
-        run: cd frontend; yarn lint
+        run: cd app; yarn lint
       - name: ✅ run javascript tests
-        run: cd frontend; yarn test:unit
+        run: cd app; yarn test:unit
       - name: 🚧 build javascript
-        run: cd frontend; yarn build:web
+        run: cd app; yarn build:web
       - name: ✅ run rust tests
-        run: cd frontend; yarn cargo:test
+        run: cd app; yarn cargo:test
       - name: 🚧 build rust
-        run: cd frontend; yarn tauri:build
+        run: cd app; yarn tauri:build

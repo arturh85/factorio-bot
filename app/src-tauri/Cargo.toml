@@ -1,0 +1,40 @@
+[package]
+name = "factorio-bot"
+version = "0.2.0-dev"
+description = "a cross-platform factorio bot platform"
+authors = [ "Artur Hallmann <arturh@arturh.de>" ]
+license = "MIT"
+repository = ""
+default-run = "factorio-bot"
+edition = "2018"
+
+
+[dependencies]
+serde_json = "^1.0"
+config = "^0.11"
+typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"] }
+async-std = { version = "^1.9", features= ["attributes", "tokio1"] }
+factorio-bot-core = { path = "../../crates/core" }
+factorio-bot-restapi = { path = "../../crates/restapi" }
+serde = { version = "^1.0", features = [ "derive" ] }
+tauri = { version = "^1.0.0-beta.5", features = ["dialog-all", "dialog-open", "fs-read-binary-file", "fs-read-dir", "fs-read-text-file", "fs-write-file", "menu", "shell-execute", "shell-open"] }
+toml = "^0.5"
+clap = "^2.33"
+anyhow = "^1.0"
+open = "^2.0"
+paris = { version = "^1.5", features = ["timestamps", "macros"] }
+color-eyre = "^0.5"
+
+[build-dependencies]
+typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"] }
+factorio-bot-core = { path = "../../crates/core" }
+tauri-build = { version = "^1.0.0-beta.3" }
+serde = { version = "^1.0", features = [ "derive" ] }
+
+[features]
+custom-protocol = [ "tauri/custom-protocol" ]
+default = [ "custom-protocol" ]
+
+[[bin]]
+name = "factorio-bot"
+path = "src/main.rs"

@@ -7,7 +7,7 @@
     <owners>Artur Hallmann</owners>
     <authors>Artur Hallmann</authors>
     <projectUrl>https://arturh85.github.io/factorio-bot-tauri/book/</projectUrl>
-    <iconUrl>https://raw.githubusercontent.com/arturh85/factorio-bot-tauri/master/frontend/src/assets/logo.png</iconUrl>
+    <iconUrl>https://raw.githubusercontent.com/arturh85/factorio-bot-tauri/master/app/src/assets/logo.png</iconUrl>
     <licenseUrl>https://raw.githubusercontent.com/arturh85/factorio-bot-tauri/master/LICENSE.txt</licenseUrl>
     <packageSourceUrl>https://github.com/arturh85/factorio-bot-tauri</packageSourceUrl>
     <projectSourceUrl>https://github.com/arturh85/factorio-bot-tauri</projectSourceUrl>

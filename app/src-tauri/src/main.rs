@@ -1,0 +1,59 @@
+#![warn(clippy::all, clippy::pedantic)]
+#![cfg_attr(
+  all(not(debug_assertions), target_os = "windows"),
+  windows_subsystem = "windows"
+)]
+#[macro_use]
+extern crate paris;
+
+mod commands;
+mod constants;
+
+use async_std::sync::RwLock;
+use factorio_bot::cli::handle_cli;
+use factorio_bot_core::factorio::process_control::InstanceState;
+use factorio_bot_core::settings::AppSettings;
+use std::borrow::Cow;
+
+fn app_settings() -> anyhow::Result<AppSettings> {
+  let mut app_settings = AppSettings::load(constants::app_settings_path())?;
+  if app_settings.workspace_path == "" {
+    let s: String = constants::app_workspace_path().to_str().unwrap().into();
+    app_settings.workspace_path = Cow::from(s);
+  }
+  Ok(app_settings)
+}
+
+#[async_std::main]
+async fn main() -> anyhow::Result<()> {
+  color_eyre::install().unwrap();
+  handle_cli().await;
+  std::fs::create_dir_all(constants::app_data_dir())?;
+  std::fs::create_dir_all(constants::app_workspace_path())?;
+  // FIXME: log file?
+  info!("factorio-bot started");
+  let instance_state: Option<InstanceState> = None;
+
+  #[allow(clippy::items_after_statements)]
+  tauri::Builder::default()
+    .invoke_handler(tauri::generate_handler![
+      crate::commands::my_custom_command,
+      crate::commands::load_script,
+      crate::commands::load_scripts_in_directory,
+      crate::commands::execute_rcon,
+      crate::commands::execute_script,
+      crate::commands::update_settings,
+      crate::commands::load_settings,
+      crate::commands::save_settings,
+      crate::commands::start_instances,
+      crate::commands::stop_instances,
+      crate::commands::maximize_window,
+      crate::commands::file_exists,
+      crate::commands::open_in_browser,
+    ])
+    .manage(RwLock::new(app_settings()?))
+    .manage(RwLock::new(instance_state))
+    .run(tauri::generate_context!())
+    .expect("failed to run app");
+  Ok(())
+}

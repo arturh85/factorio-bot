@@ -44,11 +44,11 @@ pub async fn load_scripts_in_directory(
   let workspace_path = app_settings.workspace_path.to_string();
   let workspace_path = Path::new(&workspace_path);
   #[allow(unused_mut)]
-  let mut workspace_plans_path = workspace_path.join(PathBuf::from("plans"));
+  let mut workspace_plans_path = workspace_path.join(PathBuf::from("scripts"));
   if !workspace_plans_path.exists() {
     #[cfg(debug_assertions)]
     {
-      workspace_plans_path = PathBuf::from("../../plans");
+      workspace_plans_path = PathBuf::from("../../scripts");
     }
     #[cfg(not(debug_assertions))]
     {
@@ -63,7 +63,7 @@ pub async fn load_scripts_in_directory(
     }
     if !workspace_plans_path.exists() {
       return Err(format!(
-        "missing plans/ folder from working directory: {:?}",
+        "missing scripts/ folder from working directory: {:?}",
         workspace_plans_path
       ));
     }
@@ -116,11 +116,11 @@ pub async fn load_script(
   let workspace_path = app_settings.workspace_path.to_string();
   let workspace_path = Path::new(&workspace_path);
   #[allow(unused_mut)]
-  let mut workspace_plans_path = workspace_path.join(PathBuf::from("plans"));
+  let mut workspace_plans_path = workspace_path.join(PathBuf::from("scripts"));
   if !workspace_plans_path.exists() {
     #[cfg(debug_assertions)]
     {
-      workspace_plans_path = PathBuf::from("../../plans");
+      workspace_plans_path = PathBuf::from("../../scripts");
     }
     #[cfg(not(debug_assertions))]
     {
@@ -135,7 +135,7 @@ pub async fn load_script(
     }
     if !workspace_plans_path.exists() {
       return Err(format!(
-        "missing plans/ folder from working directory: {:?}",
+        "missing scripts/ folder from working directory: {:?}",
         workspace_plans_path
       ));
     }

@@ -19,7 +19,7 @@ use crate::factorio::util::{read_to_value, write_value_to};
 #[cfg(not(debug_assertions))]
 pub const MODS_CONTENT: include_dir::Dir = include_dir!("../../mods");
 #[cfg(not(debug_assertions))]
-pub const PLANS_CONTENT: include_dir::Dir = include_dir!("../../plans");
+pub const PLANS_CONTENT: include_dir::Dir = include_dir!("../../scripts");
 
 #[allow(clippy::too_many_arguments)]
 pub async fn setup_factorio_instance(

@@ -19,4 +19,7 @@ pub use script::*;
 mod rcon;
 pub use rcon::*;
 
+mod rest_api;
+pub use rest_api::*;
+
 const ERR_TO_STRING: fn(anyhow::Error) -> String = |e| String::from("error: ") + &e.to_string();

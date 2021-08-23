@@ -5,8 +5,10 @@
 )]
 use crate::constants;
 use async_std::sync::RwLock;
+use async_std::task::JoinHandle;
 use factorio_bot_core::factorio::process_control::{start_factorio, InstanceState};
 use factorio_bot_core::settings::AppSettings;
+use std::time::Duration;
 use tauri::{AppHandle, Manager, State, Wry};
 
 #[tauri::command]
@@ -45,17 +47,6 @@ pub async fn start_instances(
   match started_instance_state {
     Ok(started_instance_state) => {
       let mut instance_state = instance_state.write().await;
-
-      // if let Some(_instance_state) = instance_state.as_ref() {
-      //   info!("start?");
-      //   factorio_bot_restapi::server::start_webserver(
-      //     // (instance_state.rcon).clone(),
-      //     // (instance_state.world.as_ref().unwrap()).clone(),
-      //   )
-      //   .await
-      //   .map_err(|e| String::from("error: ") + &e.to_string())?;
-      // }
-
       let _copy = (**started_instance_state.world.as_ref().unwrap()).clone();
       *instance_state = Some(started_instance_state);
       app_handle

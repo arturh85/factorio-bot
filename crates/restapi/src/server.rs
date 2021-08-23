@@ -1,14 +1,15 @@
 use rocket::data::{Limits, ToByteUnit};
 // use rocket_okapi::swagger_ui::*;
 
-pub async fn start_webserver() -> Result<(), rocket::Error> {
+pub async fn start_webserver() -> anyhow::Result<()> {
     let figment = rocket::Config::figment()
         .merge(("port", 1111))
         .merge(("limits", Limits::new().limit("json", 2.mebibytes())));
     rocket::custom(figment)
         // .mount("/", routes_with_openapi![find_entities])
         .launch()
-        .await?;
+        .await
+        .map_err(|err| anyhow::Error::from(err));
     // rocket::build()
     // .mount("/", routes_with_openapi![find_entities])
     // .mount(

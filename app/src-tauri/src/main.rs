@@ -10,6 +10,7 @@ mod commands;
 mod constants;
 
 use async_std::sync::RwLock;
+use async_std::task::JoinHandle;
 use factorio_bot::cli::handle_cli;
 use factorio_bot_core::factorio::process_control::InstanceState;
 use factorio_bot_core::settings::AppSettings;
@@ -33,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
   // FIXME: log file?
   info!("factorio-bot started");
   let instance_state: Option<InstanceState> = None;
+  let restapi_handle: Option<JoinHandle<()>> = None;
 
   #[allow(clippy::items_after_statements)]
   tauri::Builder::default()
@@ -47,12 +49,15 @@ async fn main() -> anyhow::Result<()> {
       crate::commands::save_settings,
       crate::commands::start_instances,
       crate::commands::stop_instances,
+      crate::commands::start_restapi,
+      crate::commands::stop_restapi,
       crate::commands::maximize_window,
       crate::commands::file_exists,
       crate::commands::open_in_browser,
     ])
     .manage(RwLock::new(app_settings()?))
     .manage(RwLock::new(instance_state))
+    .manage(RwLock::new(restapi_handle))
     .run(tauri::generate_context!())
     .expect("failed to run app");
   Ok(())

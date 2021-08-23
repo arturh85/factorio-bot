@@ -1475,6 +1475,7 @@ dependencies = [
 name = "factorio-bot-restapi"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "factorio-bot-core",
  "okapi",
  "rocket",

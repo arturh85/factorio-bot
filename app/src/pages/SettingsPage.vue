@@ -7,8 +7,10 @@ import InputText from 'primevue/inputtext';
 import Slider from 'primevue/slider';
 import Button from 'primevue/button';
 import Checkbox from 'primevue/checkbox';
+import {useRestApiStore} from '@/store/restapiStore';
 
 const appStore = useAppStore();
+const restApiStore = useRestApiStore();
 const factorioArchivePath = computed({
   get(): string {
     return appStore.getFactorioArchivePath as string
@@ -39,6 +41,22 @@ const recreateLevel = computed({
   },
   set(val: boolean) {
     appStore.updateRecreateLevel(val)
+  }
+})
+const enableRestapi = computed({
+  get(): boolean {
+    return appStore.getEnableRestapi as boolean
+  },
+  set(val: boolean) {
+    appStore.updateEnableRestApi(val)
+  }
+})
+const restapiPort = computed({
+  get(): string {
+    return appStore.getRestapiPort as any
+  },
+  set(val: string) {
+    appStore.updateRestapiPort(parseInt(val, 10))
   }
 })
 const mapExchangeString = computed({
@@ -105,6 +123,7 @@ async function testIsFactorioArchivePathValid(path: string): Promise<boolean> {
 
 const isWorkspacePathValid = ref(true)
 const isFactorioArchivePathValid = ref(true)
+const isPortAvaiable = ref(restApiStore.portAvailable)
 
 if (appStore.settings) {
   watch(() => appStore.getWorkspacePath, async () => {
@@ -116,6 +135,9 @@ if (appStore.settings) {
     if (appStore.settings) {
       isFactorioArchivePathValid.value = await testIsFactorioArchivePathValid(appStore.settings.factorio_archive_path)
     }
+  })
+  watch(() => restApiStore.isPortAvailable, async () => {
+    isPortAvaiable.value = restApiStore.portAvailable
   })
   testIsWorkspacePathValid(appStore.settings.workspace_path).then(valid => isWorkspacePathValid.value = valid)
   testIsFactorioArchivePathValid(appStore.settings.factorio_archive_path).then(valid => isFactorioArchivePathValid.value = valid)
@@ -159,6 +181,18 @@ const settings = computed(() => appStore.getSettings)
           <div class="p-field p-col">
             <div class="p-inputgroup">
               <Checkbox v-model="recreateLevel" :binary="true" label="Recreate Level"/>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="card p-fluid">
+        <h5>Enable REST API</h5>
+        <div class="p-formgrid p-grid">
+          <div class="p-field p-col">
+            <div class="p-inputgroup">
+              <Checkbox v-model="enableRestapi" :binary="true" label="Enable"/>
+              Port
+              <InputText v-model="restapiPort"  :class="isPortAvaiable ? '' : 'p-invalid'" type="number" min="1" max="65535" />
             </div>
           </div>
         </div>

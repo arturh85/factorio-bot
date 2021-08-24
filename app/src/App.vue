@@ -38,6 +38,7 @@ import AppFooter from './AppFooter.vue'
 import {useAppStore} from '@/store/appStore';
 import AppConfig from '@/AppConfig.vue';
 import Toast from 'primevue/toast';
+import {useRestApiStore} from '@/store/restapiStore';
 
 export default {
   data() {
@@ -162,7 +163,11 @@ export default {
   async created() {
     const appStore = useAppStore()
     await appStore.maximizeWindow()
-    await appStore.loadSettings()
+    const settings = await appStore.loadSettings()
+    if (settings.enable_restapi) {
+      const restApiStore = useRestApiStore()
+      await restApiStore.startRestApi()
+    }
   },
   beforeUpdate() {
     if (this.mobileMenuActive)

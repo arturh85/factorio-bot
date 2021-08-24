@@ -4,18 +4,16 @@
   clippy::cast_sign_loss
 )]
 use crate::constants;
-use async_std::sync::RwLock;
-use async_std::task::JoinHandle;
+use async_std::sync::{Arc, RwLock};
 use factorio_bot_core::factorio::process_control::{start_factorio, InstanceState};
 use factorio_bot_core::settings::AppSettings;
-use std::time::Duration;
 use tauri::{AppHandle, Manager, State, Wry};
 
 #[tauri::command]
 pub async fn start_instances(
   app_handle: AppHandle<Wry>,
   app_settings: State<'_, RwLock<AppSettings>>,
-  instance_state: State<'_, RwLock<Option<InstanceState>>>,
+  instance_state: State<'_, Arc<RwLock<Option<InstanceState>>>>,
 ) -> Result<(), String> {
   if instance_state.read().await.is_some() {
     return Result::Err("already started".into());
@@ -64,7 +62,7 @@ pub async fn start_instances(
 #[tauri::command]
 pub async fn stop_instances(
   app_handle: AppHandle<Wry>,
-  instance_state: State<'_, RwLock<Option<InstanceState>>>,
+  instance_state: State<'_, Arc<RwLock<Option<InstanceState>>>>,
 ) -> Result<(), String> {
   let mut instance_state = instance_state.write().await;
   let result: Result<(), String> = match instance_state.as_mut() {

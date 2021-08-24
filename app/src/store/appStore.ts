@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import {AppSettings} from '@/models/types';
 import {invoke} from '@tauri-apps/api/tauri';
+import {useRestApiStore} from '@/store/restapiStore';
 
 export const useAppStore = defineStore({
   id: 'app',
@@ -21,6 +22,20 @@ export const useAppStore = defineStore({
     getRecreateLevel(): boolean | null {
       if (this.settings) {
         return this.settings.recreate
+      } else {
+        return null
+      }
+    },
+    getEnableRestapi(): boolean | null {
+      if (this.settings) {
+        return this.settings.enable_restapi
+      } else {
+        return null
+      }
+    },
+    getRestapiPort(): number | null {
+      if (this.settings) {
+        return this.settings.restapi_port
       } else {
         return null
       }
@@ -60,6 +75,7 @@ export const useAppStore = defineStore({
     },
     async loadSettings() {
       this.settings = await invoke('load_settings')
+      return this.settings
     },
     async maximizeWindow() {
       this.settings = await invoke('maximize_window')
@@ -83,6 +99,32 @@ export const useAppStore = defineStore({
       if (this.settings !== null) {
         this.settings.recreate = recreateLevel
         await this._updateSettings()
+      }
+    },
+    async updateEnableRestApi(enableRestapi: boolean) {
+      if (this.settings !== null) {
+        const restApiStore = useRestApiStore()
+        if (this.settings.enable_restapi && !enableRestapi) {
+          await restApiStore.stopRestApi()
+        } else if (!this.settings.enable_restapi && enableRestapi) {
+          await restApiStore.startRestApi()
+        }
+        this.settings.enable_restapi = enableRestapi
+        await this._updateSettings()
+      }
+    },
+    async updateRestapiPort(restapiPort: number) {
+      if (this.settings !== null) {
+        const restApiStore = useRestApiStore()
+        const changed = this.settings.restapi_port != restapiPort
+        if (changed && (restApiStore.starting || restApiStore.started)) {
+          await restApiStore.stopRestApi()
+        }
+        this.settings.restapi_port = restapiPort
+        await this._updateSettings()
+        if (changed) {
+          await restApiStore.startRestApi()
+        }
       }
     },
     async openInBrowser(url: string) {

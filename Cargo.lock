@@ -1404,6 +1404,7 @@ dependencies = [
  "factorio-bot-restapi",
  "open 2.0.0",
  "paris",
+ "port_scanner",
  "serde 1.0.127",
  "serde_json",
  "tauri",
@@ -1457,11 +1458,10 @@ dependencies = [
  "serde 1.0.127",
  "serde_derive",
  "serde_json",
- "smallvec 0.6.14",
+ "smallvec 1.6.1",
  "strum 0.21.0",
  "strum_macros 0.21.1",
  "tar",
- "toml 0.4.10",
  "toml 0.5.8",
  "typescript-definitions",
  "unicode-segmentation",
@@ -3615,6 +3615,12 @@ dependencies = [
  "wepoll-ffi",
  "winapi",
 ]
+
+[[package]]
+name = "port_scanner"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "325a6d2ac5dee293c3b2612d4993b98aec1dff096b0a2dae70ed7d95784a05da"
 
 [[package]]
 name = "ppv-lite86"

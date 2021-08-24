@@ -1,6 +1,6 @@
 #![allow(clippy::module_name_repetitions)]
 use crate::commands::ERR_TO_STRING;
-use async_std::sync::RwLock;
+use async_std::sync::{Arc, RwLock};
 use factorio_bot_core::factorio::planner::Planner;
 use factorio_bot_core::factorio::process_control::InstanceState;
 use factorio_bot_core::settings::AppSettings;
@@ -12,7 +12,7 @@ use tauri::State;
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub async fn execute_script(
   app_settings: State<'_, RwLock<AppSettings>>,
-  instance_state: State<'_, RwLock<Option<InstanceState>>>,
+  instance_state: State<'_, Arc<RwLock<Option<InstanceState>>>>,
   code: String,
 ) -> Result<(String, String), String> {
   if let Some(instance_state) = &*instance_state.read().await {

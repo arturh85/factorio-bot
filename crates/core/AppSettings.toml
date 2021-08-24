@@ -8,3 +8,4 @@ map_exchange_string = ">>>eNpjZICDBnsQycGSnJ+YA+EdcABhruT8goLUIt38olRkYc7ko tKUV
 seed = ""
 enable_restapi = false
 enable_autostart = false
+restapi_port = 1234

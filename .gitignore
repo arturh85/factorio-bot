@@ -5,3 +5,4 @@ mods/*/
 backend/tests/world.png
 /Cargo.*
 /frontend/yarn-error.log
+/docs/index.html

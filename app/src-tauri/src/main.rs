@@ -9,7 +9,7 @@ extern crate paris;
 mod commands;
 mod constants;
 
-use async_std::sync::RwLock;
+use async_std::sync::{Arc, RwLock};
 use async_std::task::JoinHandle;
 use factorio_bot::cli::handle_cli;
 use factorio_bot_core::factorio::process_control::InstanceState;
@@ -34,12 +34,13 @@ async fn main() -> anyhow::Result<()> {
   // FIXME: log file?
   info!("factorio-bot started");
   let instance_state: Option<InstanceState> = None;
-  let restapi_handle: Option<JoinHandle<()>> = None;
+  let restapi_handle: Option<JoinHandle<anyhow::Result<()>>> = None;
 
   #[allow(clippy::items_after_statements)]
   tauri::Builder::default()
     .invoke_handler(tauri::generate_handler![
       crate::commands::my_custom_command,
+      crate::commands::is_port_available,
       crate::commands::load_script,
       crate::commands::load_scripts_in_directory,
       crate::commands::execute_rcon,
@@ -56,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
       crate::commands::open_in_browser,
     ])
     .manage(RwLock::new(app_settings()?))
-    .manage(RwLock::new(instance_state))
+    .manage(Arc::new(RwLock::new(instance_state)))
     .manage(RwLock::new(restapi_handle))
     .run(tauri::generate_context!())
     .expect("failed to run app");

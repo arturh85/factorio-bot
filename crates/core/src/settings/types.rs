@@ -14,6 +14,7 @@ pub struct AppSettings {
     pub rcon_pass: Cow<'static, str>,
     pub rcon_port: i64,
     pub recreate: bool,
+    pub restapi_port: i64,
     pub seed: Cow<'static, str>,
     pub workspace_path: Cow<'static, str>,
 }
@@ -27,6 +28,7 @@ pub const APP_SETTINGS_DEFAULT: AppSettings = AppSettings {
     rcon_pass: Cow::Borrowed("foobar"),
     rcon_port: 4321,
     recreate: false,
+    restapi_port: 1234,
     seed: Cow::Borrowed(""),
     workspace_path: Cow::Borrowed(""),
 };

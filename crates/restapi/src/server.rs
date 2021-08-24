@@ -1,15 +1,16 @@
+use factorio_bot_core::settings::AppSettings;
 use rocket::data::{Limits, ToByteUnit};
 // use rocket_okapi::swagger_ui::*;
 
-pub async fn start_webserver() -> anyhow::Result<()> {
+pub async fn start_webserver(app_settings: AppSettings) -> anyhow::Result<()> {
     let figment = rocket::Config::figment()
-        .merge(("port", 1111))
+        .merge(("port", app_settings.restapi_port))
         .merge(("limits", Limits::new().limit("json", 2.mebibytes())));
     rocket::custom(figment)
         // .mount("/", routes_with_openapi![find_entities])
         .launch()
         .await
-        .map_err(|err| anyhow::Error::from(err));
+        .map_err(|err| anyhow::Error::from(err))?;
     // rocket::build()
     // .mount("/", routes_with_openapi![find_entities])
     // .mount(

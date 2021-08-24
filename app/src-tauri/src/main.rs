@@ -31,7 +31,6 @@ async fn main() -> anyhow::Result<()> {
   handle_cli().await;
   std::fs::create_dir_all(constants::app_data_dir())?;
   std::fs::create_dir_all(constants::app_workspace_path())?;
-  // FIXME: log file?
   info!("factorio-bot started");
   let instance_state: Option<InstanceState> = None;
   let restapi_handle: Option<JoinHandle<anyhow::Result<()>>> = None;

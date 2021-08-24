@@ -186,7 +186,10 @@ const settings = computed(() => appStore.getSettings)
         </div>
       </div>
       <div class="card p-fluid">
-        <h5>Enable REST API</h5>
+        <h5>Enable REST API
+          <a v-if="enableRestapi" :href="'http://localhost:' + restapiPort + '/swagger-ui/'"
+             @click="openInBrowser('http://localhost:' + restapiPort + '/swagger-ui/', $event)">{{ 'http://localhost:' + restapiPort + '/swagger-ui/' }}</a>
+        </h5>
         <div class="p-formgrid p-grid">
           <div class="p-field p-col">
             <div class="p-inputgroup">

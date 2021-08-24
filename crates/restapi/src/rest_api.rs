@@ -1,60 +1,9 @@
-#[allow(unused_imports)]
-use crate::factorio::planner::Planner;
-use crate::factorio::rcon::FactorioRcon;
-// use crate::factorio::util::blueprint_build_area;
-// use crate::factorio::world::FactorioWorld;
-// use crate::num_traits::FromPrimitive;
-use crate::types::{AreaFilter, FactorioEntity, Position};
-// use dashmap::lock::RwLock;
-// use factorio_blueprint::BlueprintCodec;
-// use fs::read_dir;
-// use rocket::form::Form;
-use rocket::serde::{json::Json, Serialize};
-use rocket::{Request, Response, State};
-// use serde_json::Value;
-// use std::collections::HashMap;
-// use std::fs;
-// use std::fs::read_to_string;
-// use std::path::Path;
-use rocket::http::hyper::StatusCode;
-use rocket::http::{ContentType, Status};
-use rocket::response::{Debug, Responder};
-use std::fmt::{Display, Formatter};
-// use std::time::Duration;
+use factorio_bot_core::types::{AreaFilter, FactorioEntity, Position};
+use rocket::serde::json::Json;
+use rocket::State;
 
-use crate::factorio::world::FactorioWorld;
-use std::sync::Arc;
-
-use rocket::data::{Limits, ToByteUnit};
-use rocket_okapi::swagger_ui::*;
-
-pub async fn start_webserver(// rcon: Arc<FactorioRcon>,
-    // world: Arc<FactorioWorld>,
-) -> anyhow::Result<()> {
-    info!("build");
-
-    let figment = rocket::Config::figment()
-        .merge(("port", 1111))
-        .merge(("limits", Limits::new().limit("json", 2.mebibytes())));
-
-    rocket::custom(figment)
-        // .mount("/", routes_with_openapi![find_entities])
-        .launch()
-        .await?;
-    // rocket::build()
-    // .mount("/", routes_with_openapi![find_entities])
-    // .mount(
-    //     "/swagger-ui/",
-    //     make_swagger_ui(&SwaggerUIConfig {
-    //         url: "../openapi.json".to_owned(),
-    //         ..SwaggerUIConfig::default()
-    //     }),
-    // )
-    // .launch()
-    // .await?;
-    info!("build done");
-    Ok(())
-}
+use async_std::sync::{Arc, RwLock};
+use factorio_bot_core::factorio::process_control::InstanceState;
 
 #[derive(FromForm, JsonSchema)]
 pub struct FindEntitiesQueryParams {
@@ -77,7 +26,7 @@ pub struct FindEntitiesQueryParams {
 #[get("/findEntities?<info..>")]
 pub async fn find_entities(
     info: FindEntitiesQueryParams,
-    rcon: &State<Arc<FactorioRcon>>,
+    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
 ) -> Json<Vec<FactorioEntity>> {
     let area_filter = match &info.area {
         Some(area) => AreaFilter::Rect(area.parse().unwrap()),
@@ -93,11 +42,19 @@ pub async fn find_entities(
             }
         }
     };
-    Json(
-        rcon.find_entities_filtered(&area_filter, info.name.clone(), info.entity_type.clone())
-            .await
-            .unwrap(),
-    )
+
+    let instance_state = instance_state.read().await;
+    if let Some(instance_state) = &*instance_state {
+        Json(
+            instance_state
+                .rcon
+                .find_entities_filtered(&area_filter, info.name.clone(), info.entity_type.clone())
+                .await
+                .unwrap(),
+        )
+    } else {
+        Json(vec![])
+    }
 }
 
 //

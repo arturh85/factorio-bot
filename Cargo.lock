@@ -1476,10 +1476,12 @@ name = "factorio-bot-restapi"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "async-std",
  "factorio-bot-core",
  "okapi",
  "rocket",
  "rocket_okapi",
+ "schemars",
 ]
 
 [[package]]

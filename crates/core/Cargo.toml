@@ -28,7 +28,7 @@ anyhow = "^1.0"
 num-traits = "^0.2"
 runas = "^0.2"
 async-trait = "^0.1"
-async-std = { version = "^1.9", features=["attributes"] }
+async-std = { version = "^1.9", features = ["attributes", "tokio1"] }
 noisy_float = { version = "^0.1", features = ["serde-1"] } # could not upgrade to 0.2 due to factorio-blueprint
 typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"]}
 enum-primitive-derive = "^0.2"

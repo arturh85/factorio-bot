@@ -11,7 +11,7 @@ use tauri::State;
 #[tauri::command]
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub async fn execute_script(
-  app_settings: State<'_, RwLock<AppSettings>>,
+  app_settings: State<'_, Arc<RwLock<AppSettings>>>,
   instance_state: State<'_, Arc<RwLock<Option<InstanceState>>>>,
   code: String,
 ) -> Result<(String, String), String> {
@@ -37,7 +37,7 @@ pub async fn execute_script(
 
 #[tauri::command]
 pub async fn load_scripts_in_directory(
-  app_settings: State<'_, RwLock<AppSettings>>,
+  app_settings: State<'_, Arc<RwLock<AppSettings>>>,
   path: String,
 ) -> Result<Vec<PrimeVueTreeNode>, String> {
   let app_settings = &app_settings.read().await;
@@ -109,7 +109,7 @@ pub async fn load_scripts_in_directory(
 
 #[tauri::command]
 pub async fn load_script(
-  app_settings: State<'_, RwLock<AppSettings>>,
+  app_settings: State<'_, Arc<RwLock<AppSettings>>>,
   path: String,
 ) -> Result<String, String> {
   let app_settings = &app_settings.read().await;

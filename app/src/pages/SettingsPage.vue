@@ -123,7 +123,7 @@ async function testIsFactorioArchivePathValid(path: string): Promise<boolean> {
 
 const isWorkspacePathValid = ref(true)
 const isFactorioArchivePathValid = ref(true)
-const isPortAvaiable = ref(restApiStore.portAvailable)
+const isPortAvaiable = computed(() => restApiStore.isPortAvailable)
 
 if (appStore.settings) {
   watch(() => appStore.getWorkspacePath, async () => {
@@ -135,9 +135,6 @@ if (appStore.settings) {
     if (appStore.settings) {
       isFactorioArchivePathValid.value = await testIsFactorioArchivePathValid(appStore.settings.factorio_archive_path)
     }
-  })
-  watch(() => restApiStore.isPortAvailable, async () => {
-    isPortAvaiable.value = restApiStore.portAvailable
   })
   testIsWorkspacePathValid(appStore.settings.workspace_path).then(valid => isWorkspacePathValid.value = valid)
   testIsFactorioArchivePathValid(appStore.settings.factorio_archive_path).then(valid => isFactorioArchivePathValid.value = valid)

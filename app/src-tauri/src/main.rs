@@ -38,7 +38,6 @@ async fn main() -> anyhow::Result<()> {
   #[allow(clippy::items_after_statements)]
   tauri::Builder::default()
     .invoke_handler(tauri::generate_handler![
-      crate::commands::my_custom_command,
       crate::commands::is_port_available,
       crate::commands::load_script,
       crate::commands::load_scripts_in_directory,
@@ -55,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
       crate::commands::file_exists,
       crate::commands::open_in_browser,
     ])
-    .manage(RwLock::new(app_settings()?))
+    .manage(Arc::new(RwLock::new(app_settings()?)))
     .manage(Arc::new(RwLock::new(instance_state)))
     .manage(RwLock::new(restapi_handle))
     .run(tauri::generate_context!())

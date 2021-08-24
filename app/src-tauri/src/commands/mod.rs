@@ -7,9 +7,6 @@ pub use instances::*;
 mod window;
 pub use window::*;
 
-mod test;
-pub use test::*;
-
 mod io;
 pub use io::*;
 

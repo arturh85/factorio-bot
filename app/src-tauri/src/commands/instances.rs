@@ -12,7 +12,7 @@ use tauri::{AppHandle, Manager, State, Wry};
 #[tauri::command]
 pub async fn start_instances(
   app_handle: AppHandle<Wry>,
-  app_settings: State<'_, RwLock<AppSettings>>,
+  app_settings: State<'_, Arc<RwLock<AppSettings>>>,
   instance_state: State<'_, Arc<RwLock<Option<InstanceState>>>>,
 ) -> Result<(), String> {
   if instance_state.read().await.is_some() {

@@ -2,9 +2,23 @@ use async_std::sync::{Arc, RwLock};
 use factorio_bot_core::factorio::process_control::InstanceState;
 use factorio_bot_core::settings::AppSettings;
 use rocket::data::{Limits, ToByteUnit};
+use rocket::http::Status;
+use rocket::response::status;
+use rocket::Request;
 use rocket_okapi::swagger_ui::*;
 
-pub async fn start_webserver(
+#[catch(default)]
+fn default_catcher(status: Status, req: &Request<'_>) -> status::Custom<String> {
+    let msg = format!("{} ({})", status, req.uri());
+    status::Custom(status, msg)
+}
+
+#[catch(404)]
+fn general_not_found() -> String {
+    "Not found".into()
+}
+
+pub async fn start(
     app_settings: Arc<RwLock<AppSettings>>,
     instance_state: Arc<RwLock<Option<InstanceState>>>,
 ) -> anyhow::Result<()> {
@@ -15,7 +29,11 @@ pub async fn start_webserver(
     rocket::custom(figment)
         .manage(app_settings)
         .manage(instance_state)
-        .mount("/", routes_with_openapi![crate::rest_api::find_entities])
+        .mount(
+            "/",
+            routes_with_openapi![crate::rest_api::find_entities, crate::rest_api::test],
+        )
+        .register("/", catchers![general_not_found, default_catcher])
         .mount(
             "/swagger-ui/",
             make_swagger_ui(&SwaggerUIConfig {
@@ -26,10 +44,5 @@ pub async fn start_webserver(
         .launch()
         .await
         .map_err(|err| anyhow::Error::from(err))?;
-    // rocket::build()
-    // .mount("/", routes_with_openapi![find_entities])
-    // .launch()
-    // .await?;
-    info!("build done");
     Ok(())
 }

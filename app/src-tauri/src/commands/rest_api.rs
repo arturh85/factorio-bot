@@ -7,7 +7,7 @@ use async_std::sync::{Arc, RwLock};
 use async_std::task::JoinHandle;
 use factorio_bot_core::factorio::process_control::InstanceState;
 use factorio_bot_core::settings::AppSettings;
-use factorio_bot_restapi::server::start_webserver;
+use factorio_bot_restapi::webserver::start;
 use tauri::State;
 
 #[tauri::command]
@@ -21,7 +21,8 @@ pub async fn start_restapi(
   }
   let app_settings = app_settings.inner().clone();
   let instance_state = instance_state.inner().clone();
-  let handle = async_std::task::spawn(start_webserver(app_settings, instance_state));
+  let webserver = start(app_settings, instance_state);
+  let handle = async_std::task::spawn(webserver);
   let mut restapi_handle = restapi_handle.write().await;
   *restapi_handle = Some(handle);
   Ok(())

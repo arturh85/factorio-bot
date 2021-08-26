@@ -1,59 +1,69 @@
-use factorio_bot_core::types::{AreaFilter, FactorioEntity, Position};
+use crate::error::{ErrorResponse, RestApiResult};
+use async_std::sync::{Arc, RwLock};
+use factorio_bot_core::factorio::process_control::InstanceState;
+use factorio_bot_core::types::{AreaFilter, FactorioEntity};
+use rocket::form::Form;
 use rocket::serde::json::Json;
 use rocket::State;
 
-use async_std::sync::{Arc, RwLock};
-use factorio_bot_core::factorio::process_control::InstanceState;
-
-#[derive(FromForm, JsonSchema)]
+#[derive(FromForm, Debug, JsonSchema)]
 pub struct FindEntitiesQueryParams {
+    /// w/h e.g. 2,3
+    area: Option<String>,
+    /// x/y e.g. 2,3
+    position: Option<String>,
+    /// radius to search in
+    radius: Option<f64>,
+    /// name to search for
+    name: Option<String>,
+    /// entity type to search for, see http://...
+    entity_type: Option<String>,
+}
+
+/// Finds entities in given area
+#[openapi(tag = "Query")]
+#[get("/testFindEntities?<foo>&<info..>")]
+pub async fn test(foo: String, info: FindEntitiesQueryParams) -> RestApiResult<String> {
+    info!("find entities called with {:?} {:?}", info, foo);
+    Ok(Json("test".into()))
+}
+
+/// Finds entities in given area
+#[openapi(tag = "Query")]
+#[get("/findEntities?<area>&<position>&<radius>&<name>&<entity_type>")]
+pub async fn find_entities(
     area: Option<String>,
     position: Option<String>,
     radius: Option<f64>,
     name: Option<String>,
     entity_type: Option<String>,
-}
-
-// /// # Create post using query params
-// ///
-// fn create_post_by_query(post: Post) -> Option<Json<Post>> {
-//     Some(Json(post))
-// }
-
-// #[get("/findEntities?<area>&<position>&<radius>&<name>&<entity_type>")]
-/// Returns the created post.
-#[openapi(tag = "Query")]
-#[get("/findEntities?<info..>")]
-pub async fn find_entities(
-    info: FindEntitiesQueryParams,
     instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
-) -> Json<Vec<FactorioEntity>> {
-    let area_filter = match &info.area {
+) -> RestApiResult<Vec<FactorioEntity>> {
+    let area_filter = match &area {
         Some(area) => AreaFilter::Rect(area.parse().unwrap()),
         None => {
-            if let Some(position) = &info.position {
-                AreaFilter::PositionRadius((position.parse().unwrap(), info.radius))
+            if let Some(position) = &position {
+                AreaFilter::PositionRadius((position.parse().unwrap(), radius))
             } else {
-                // FIXME: return Err
-                AreaFilter::PositionRadius((Position::new(1.0, 1.0), None))
-                // return Err(Debug::from(anyhow!(
-                //     "area or position + optional radius needed"
-                // )));
+                return Err(ErrorResponse::new(
+                    "area or position + optional radius needed".into(),
+                    1,
+                ));
             }
         }
     };
 
     let instance_state = instance_state.read().await;
     if let Some(instance_state) = &*instance_state {
-        Json(
+        Ok(Json(
             instance_state
                 .rcon
-                .find_entities_filtered(&area_filter, info.name.clone(), info.entity_type.clone())
+                .find_entities_filtered(&area_filter, name.clone(), entity_type.clone())
                 .await
                 .unwrap(),
-        )
+        ))
     } else {
-        Json(vec![])
+        Err(ErrorResponse::new("not started".into(), 2))
     }
 }
 

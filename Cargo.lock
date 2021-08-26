@@ -1482,6 +1482,9 @@ dependencies = [
  "rocket",
  "rocket_okapi",
  "schemars",
+ "serde 1.0.127",
+ "serde_derive",
+ "serde_json",
 ]
 
 [[package]]

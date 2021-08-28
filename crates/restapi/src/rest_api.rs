@@ -2,7 +2,6 @@ use crate::error::{ErrorResponse, RestApiResult};
 use async_std::sync::{Arc, RwLock};
 use factorio_bot_core::factorio::process_control::InstanceState;
 use factorio_bot_core::types::{AreaFilter, FactorioEntity};
-use rocket::form::Form;
 use rocket::serde::json::Json;
 use rocket::State;
 
@@ -22,9 +21,9 @@ pub struct FindEntitiesQueryParams {
 
 /// Finds entities in given area
 #[openapi(tag = "Query")]
-#[get("/testFindEntities?<foo>&<info..>")]
-pub async fn test(foo: String, info: FindEntitiesQueryParams) -> RestApiResult<String> {
-    info!("find entities called with {:?} {:?}", info, foo);
+#[get("/testFindEntities?<info..>")]
+pub async fn test(info: FindEntitiesQueryParams) -> RestApiResult<String> {
+    info!("find entities called with {:?}", info);
     Ok(Json("test".into()))
 }
 

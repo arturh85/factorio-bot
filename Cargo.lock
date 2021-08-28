@@ -1401,6 +1401,7 @@ dependencies = [
  "color-eyre",
  "config 0.11.0",
  "factorio-bot-core",
+ "factorio-bot-lua",
  "factorio-bot-restapi",
  "open 2.0.0",
  "paris",
@@ -1432,7 +1433,6 @@ dependencies = [
  "euclid",
  "factorio-blueprint",
  "flate2",
- "gag",
  "heim",
  "human-sort",
  "image",
@@ -1450,7 +1450,6 @@ dependencies = [
  "rand 0.8.4",
  "rcon",
  "rlua",
- "rlua-async",
  "rlua_serde",
  "runas",
  "rusttype",
@@ -1469,6 +1468,28 @@ dependencies = [
  "windows",
  "xz2",
  "zip",
+]
+
+[[package]]
+name = "factorio-bot-lua"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-std",
+ "dashmap",
+ "factorio-bot-core",
+ "gag",
+ "itertools 0.10.1",
+ "num-traits 0.2.14",
+ "paris",
+ "petgraph",
+ "rand 0.8.4",
+ "rlua",
+ "rlua-async",
+ "rlua_serde",
+ "serde 1.0.127",
+ "serde_derive",
+ "serde_json",
 ]
 
 [[package]]

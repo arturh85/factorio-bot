@@ -8,13 +8,13 @@ use factorio_blueprint::objects::Entity;
 use noisy_float::prelude::*;
 use num_traits::ToPrimitive;
 use pathfinding::utils::absdiff;
-use rlua::{Context, MultiValue};
 use serde_json::Value;
 use typescript_definitions::TypeScriptify;
 
 use crate::factorio::entity_graph::QuadTreeRect;
 use crate::factorio::util::{add_to_rect, add_to_rect_turned, calculate_distance, rect_floor_ceil};
 use crate::num_traits::FromPrimitive;
+use rlua::{Context, MultiValue};
 
 pub type FactorioInventory = HashMap<String, u32>;
 
@@ -108,12 +108,6 @@ pub struct InventoryResponse {
     pub fuel_inventory: Box<Option<BTreeMap<String, u32>>>,
 }
 
-impl rlua::ToLua<'_> for InventoryResponse {
-    fn to_lua(self, lua: Context) -> rlua::Result<rlua::Value> {
-        rlua_serde::to_value(lua, self)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ChunkPosition {
@@ -135,21 +129,6 @@ impl From<&Pos> for ChunkPosition {
 pub struct Position {
     pub x: f64,
     pub y: f64,
-}
-
-impl<'lua> rlua::FromLuaMulti<'lua> for Position {
-    fn from_lua_multi(values: MultiValue<'_>, _lua: Context<'_>) -> rlua::Result<Self> {
-        let values: Vec<&rlua::Value> = values.iter().collect();
-        if let rlua::Value::Number(x) = values[0] {
-            if let rlua::Value::Number(y) = values[1] {
-                Ok(Position::new(*x, *y))
-            } else {
-                Err(rlua::Error::RuntimeError("invalid position".into()))
-            }
-        } else {
-            Err(rlua::Error::RuntimeError("invalid position".into()))
-        }
-    }
 }
 
 impl std::fmt::Display for Position {
@@ -367,28 +346,6 @@ impl FromStr for Rect {
     }
 }
 
-impl rlua::ToLua<'_> for Rect {
-    fn to_lua(self, lua: Context) -> rlua::Result<rlua::Value> {
-        rlua_serde::to_value(lua, self)
-    }
-}
-
-//
-// impl<'lua> rlua::FromLuaMulti<'lua> for Rect {
-//     fn from_lua_multi(values: MultiValue<'_>, _lua: Context<'_>) -> rlua::Result<Self> {
-//         let values: Vec<&rlua::Value> = values.iter().collect();
-//         if let rlua::Value::Number(x) = values[0] {
-//             if let rlua::Value::Number(y) = values[1] {
-//                 Ok(Position::new(*x, *y))
-//             } else {
-//                 Err(rlua::Error::RuntimeError("invalid position".into()))
-//             }
-//         } else {
-//             Err(rlua::Error::RuntimeError("invalid position".into()))
-//         }
-//     }
-// }
-
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FactorioTile {
@@ -548,12 +505,6 @@ pub struct FactorioEntity {
     pub recipe: Option<String>,     // only CraftingMachines
     pub ghost_name: Option<String>, // only type = entity-ghost
     pub ghost_type: Option<String>, // only type = entity-ghost
-}
-
-impl rlua::ToLua<'_> for FactorioEntity {
-    fn to_lua(self, lua: Context) -> rlua::Result<rlua::Value> {
-        rlua_serde::to_value(lua, self)
-    }
 }
 
 impl aabb_quadtree::Spatial<Rect> for FactorioEntity {
@@ -897,4 +848,53 @@ pub struct PrimeVueTreeNode {
     pub label: String,
     pub leaf: bool,
     pub children: Vec<PrimeVueTreeNode>,
+}
+
+impl rlua::ToLua<'_> for InventoryResponse {
+    fn to_lua(self, lua: Context) -> rlua::Result<rlua::Value> {
+        rlua_serde::to_value(lua, self)
+    }
+}
+
+impl<'lua> rlua::FromLuaMulti<'lua> for Position {
+    fn from_lua_multi(values: MultiValue<'_>, _lua: Context<'_>) -> rlua::Result<Self> {
+        let values: Vec<&rlua::Value> = values.iter().collect();
+        if let rlua::Value::Number(x) = values[0] {
+            if let rlua::Value::Number(y) = values[1] {
+                Ok(Position::new(*x, *y))
+            } else {
+                Err(rlua::Error::RuntimeError("invalid position".into()))
+            }
+        } else {
+            Err(rlua::Error::RuntimeError("invalid position".into()))
+        }
+    }
+}
+
+impl rlua::ToLua<'_> for Rect {
+    fn to_lua(self, lua: Context) -> rlua::Result<rlua::Value> {
+        rlua_serde::to_value(lua, self)
+    }
+}
+
+//
+// impl<'lua> rlua::FromLuaMulti<'lua> for Rect {
+//     fn from_lua_multi(values: MultiValue<'_>, _lua: Context<'_>) -> rlua::Result<Self> {
+//         let values: Vec<&rlua::Value> = values.iter().collect();
+//         if let rlua::Value::Number(x) = values[0] {
+//             if let rlua::Value::Number(y) = values[1] {
+//                 Ok(Position::new(*x, *y))
+//             } else {
+//                 Err(rlua::Error::RuntimeError("invalid position".into()))
+//             }
+//         } else {
+//             Err(rlua::Error::RuntimeError("invalid position".into()))
+//         }
+//     }
+// }
+
+impl rlua::ToLua<'_> for FactorioEntity {
+    fn to_lua(self, lua: Context) -> rlua::Result<rlua::Value> {
+        rlua_serde::to_value(lua, self)
+    }
 }

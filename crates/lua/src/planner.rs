@@ -4,21 +4,21 @@ use std::io::{stdout, Read, Write};
 use std::path::Path;
 use std::time::Instant;
 
-use crate::factorio::instance_setup::setup_factorio_instance;
+use crate::lua_rcon::create_lua_rcon;
+use crate::lua_world::create_lua_world;
+use crate::plan_builder::create_lua_plan_builder;
 use async_std::sync::Arc;
 use dashmap::lock::RwLock;
+use factorio_bot_core::factorio::instance_setup::setup_factorio_instance;
+use factorio_bot_core::factorio::process_control::{start_factorio_server, FactorioStartCondition};
+use factorio_bot_core::factorio::rcon::{FactorioRcon, RconSettings};
+use factorio_bot_core::factorio::task_graph::TaskGraph;
+use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::settings::AppSettings;
+use factorio_bot_core::types::{EntityName, PlayerChangedMainInventoryEvent};
 use gag::BufferRedirect;
 use itertools::Itertools;
 use rlua::{Lua, Variadic};
-// use crate::factorio::plan_builder::create_lua_plan_builder;
-use crate::factorio::process_control::{start_factorio_server, FactorioStartCondition};
-use crate::factorio::rcon::{create_lua_rcon, FactorioRcon, RconSettings};
-use crate::factorio::task_graph::TaskGraph;
-use crate::factorio::world::{create_lua_world, FactorioWorld};
-// use crate::factorio::ws::FactorioWebSocketServer;
-use crate::factorio::plan_builder::create_lua_plan_builder;
-use crate::settings::AppSettings;
-use crate::types::{EntityName, PlayerChangedMainInventoryEvent};
 use rlua_async::ChunkExt;
 
 pub struct Planner {
@@ -312,7 +312,7 @@ pub fn execute_plan(
 
 #[cfg(test)]
 mod tests {
-    use crate::factorio::tests::{draw_world, fixture_world};
+    use factorio_bot_core::factorio::tests::{draw_world, fixture_world};
 
     use super::*;
 

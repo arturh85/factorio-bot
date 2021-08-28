@@ -7,7 +7,6 @@ extern crate enum_primitive_derive;
 extern crate num_traits;
 #[macro_use]
 extern crate paris;
-extern crate rlua_serde;
 #[macro_use]
 extern crate serde_derive;
 // #[macro_use]
@@ -22,7 +21,6 @@ extern crate include_dir;
 #[macro_use]
 extern crate schemars;
 
-pub mod constants;
 pub mod draw;
 pub mod factorio;
 pub mod settings;

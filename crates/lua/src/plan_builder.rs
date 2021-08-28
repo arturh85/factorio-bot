@@ -1,11 +1,11 @@
-use crate::factorio::task_graph::{MineTarget, PositionRadius, TaskGraph};
-use crate::factorio::util::calculate_distance;
-use crate::factorio::world::FactorioWorld;
-use crate::types::{
+use dashmap::lock::RwLock;
+use factorio_bot_core::factorio::task_graph::{MineTarget, PositionRadius, TaskGraph};
+use factorio_bot_core::factorio::util::calculate_distance;
+use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::types::{
     FactorioEntity, FactorioPlayer, PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent,
     Position,
 };
-use dashmap::lock::RwLock;
 use num_traits::ToPrimitive;
 use rlua::{Context, Table};
 use std::sync::Arc;

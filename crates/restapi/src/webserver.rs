@@ -43,6 +43,6 @@ pub async fn start(
         )
         .launch()
         .await
-        .map_err(|err| anyhow::Error::from(err))?;
+        .map_err(anyhow::Error::from)?;
     Ok(())
 }

@@ -10,7 +10,7 @@ pub fn file_exists(path: &str) -> Result<bool, String> {
 }
 
 #[tauri::command]
-pub async fn is_port_available(port: u16) -> bool {
+pub fn is_port_available(port: u16) -> bool {
   port_scanner::local_port_available(port)
 }
 

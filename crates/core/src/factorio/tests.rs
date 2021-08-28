@@ -10,7 +10,7 @@ use crate::factorio::world::FactorioWorld;
 use crate::types::{
     Direction, EntityName, FactorioItemPrototype, FactorioRecipe, FactorioTile, Position, Rect,
 };
-#[cfg(test)]
+// #[cfg(test)]
 use crate::types::{FactorioEntity, FactorioEntityPrototype};
 use image::RgbaImage;
 use imageproc::drawing::draw_hollow_rect_mut;
@@ -28,8 +28,8 @@ pub fn fixture_entity_prototypes() -> DashMap<String, FactorioEntityPrototype> {
         serde_json::from_str(include_str!("../../tests/entity-prototype-fixtures.json"))
             .expect("failed to parse fixture");
     let dashmap: DashMap<String, FactorioEntityPrototype> = DashMap::new();
-    for foo in prototypes {
-        dashmap.insert(foo.0, foo.1);
+    for prototype in prototypes {
+        dashmap.insert(prototype.0, prototype.1);
     }
     dashmap
 }
@@ -39,8 +39,8 @@ pub fn fixture_item_prototypes() -> DashMap<String, FactorioItemPrototype> {
         serde_json::from_str(include_str!("../../tests/item-prototype-fixtures.json"))
             .expect("failed to parse fixture");
     let dashmap: DashMap<String, FactorioItemPrototype> = DashMap::new();
-    for foo in prototypes {
-        dashmap.insert(foo.0, foo.1);
+    for prototype in prototypes {
+        dashmap.insert(prototype.0, prototype.1);
     }
     dashmap
 }
@@ -49,8 +49,8 @@ pub fn fixture_recipes() -> DashMap<String, FactorioRecipe> {
         serde_json::from_str(include_str!("../../tests/recipes-fixtures.json"))
             .expect("failed to parse fixture");
     let dashmap: DashMap<String, FactorioRecipe> = DashMap::new();
-    for foo in recipes {
-        dashmap.insert(foo.0, foo.1);
+    for prototype in recipes {
+        dashmap.insert(prototype.0, prototype.1);
     }
     dashmap
 }

@@ -221,6 +221,7 @@ pub struct MineTarget {
     pub count: u32,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum TaskData {
     Mine(MineTarget),

@@ -1,0 +1,24 @@
+[package]
+name = "factorio-bot-lua"
+version = "0.0.0"
+authors = ["Artur Hallmann <arturh@arturh.de>"]
+edition = "2018"
+
+[dependencies]
+factorio-bot-core = { path = "../core" }
+
+anyhow = "^1.0"
+async-std = { version = "^1.9", features = ["attributes", "tokio1"] }
+serde = "^1.0"
+serde_derive = "^1.0"
+serde_json = "^1.0"
+dashmap = "^4.0"
+gag = "^1.0"
+itertools = "^0.10"
+rlua = "^0.17"
+rlua_serde = "^0.4"
+rlua-async = "^0.4"
+num-traits = "^0.2"
+paris = { version = "^1.5", features = ["timestamps", "macros"] }
+petgraph = { version = "^0.5", features = ["all"] } # upgrade to 0.6 failed because of ptree
+rand = "^0.8"

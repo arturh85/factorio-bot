@@ -137,7 +137,8 @@ pub async fn setup_factorio_instance(
 
         #[cfg(unix)]
         {
-            let archive_path = PathBuf::from_str(factorio_archive_path)?;
+            let archive_path = PathBuf::from_str(factorio_archive_path)
+                .into_diagnostic("factorio::output_parser::could_not_canonicalize")?;
             let tar_path = archive_path.with_extension("");
             if !tar_path.exists() {
                 let mut logger = Logger::new();
@@ -147,7 +148,8 @@ pub async fn setup_factorio_instance(
                     tar_path.to_str().unwrap()
                 ));
 
-                let tar_gz = File::open(&archive_path)?;
+                let tar_gz = File::open(&archive_path)
+                    .into_diagnostic("factorio::output_parser::could_not_canonicalize")?;
                 let tar = xz2::read::XzDecoder::new(tar_gz);
                 let mut archive = tar::Archive::new(tar);
                 archive.unpack(&tar_path).expect("failed to decompress xz");
@@ -179,7 +181,8 @@ pub async fn setup_factorio_instance(
 
             let instance_data_path = instance_path.join(PathBuf::from("data"));
             if !workspace_data_path.exists() {
-                fs::rename(&instance_data_path, &workspace_data_path)?;
+                fs::rename(&instance_data_path, &workspace_data_path)
+                    .into_diagnostic("factorio::output_parser::could_not_canonicalize")?;
             } else {
                 std::fs::remove_dir_all(&instance_data_path).expect("failed to delete data folder");
             }

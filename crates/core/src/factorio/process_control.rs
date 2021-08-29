@@ -1,7 +1,4 @@
-use crate::errors::{
-    FactorioBinaryNotFound, FactorioInstanceNotFound, FactorioSavesNotFound,
-    FactorioSettingsNotFound, WorkspaceNotFound,
-};
+use crate::errors::*;
 use crate::factorio::instance_setup::setup_factorio_instance;
 use crate::factorio::output_reader::read_output;
 use crate::factorio::rcon::{FactorioRcon, RconSettings};

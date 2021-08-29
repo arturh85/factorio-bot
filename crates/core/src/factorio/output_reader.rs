@@ -11,6 +11,7 @@ use crate::factorio::output_parser::OutputParser;
 use crate::factorio::process_control::FactorioStartCondition;
 use crate::factorio::rcon::{FactorioRcon, RconSettings};
 use crate::factorio::world::FactorioWorld;
+use miette::{DiagnosticResult, IntoDiagnostic};
 use std::sync::mpsc::channel;
 
 pub async fn read_output(
@@ -21,17 +22,22 @@ pub async fn read_output(
     write_logs: bool,
     silent: bool,
     wait_until: FactorioStartCondition,
-) -> anyhow::Result<(Arc<FactorioWorld>, Arc<FactorioRcon>)> {
+) -> DiagnosticResult<(Arc<FactorioWorld>, Arc<FactorioRcon>)> {
     let mut log_file = match write_logs {
-        true => Some(File::create(log_path)?),
+        true => Some(
+            File::create(log_path)
+                .into_diagnostic("factorio::instance_setup::could_not_create_file")?,
+        ),
         false => None,
     };
     let mut parser = OutputParser::new();
     let wait_until_thread = wait_until.clone();
     let (tx1, rx1) = channel();
-    tx1.send(())?;
+    tx1.send(())
+        .into_diagnostic("factorio::instance_setup::could_not_send")?;
     let (tx2, rx2) = channel();
-    tx2.send(())?;
+    tx2.send(())
+        .into_diagnostic("factorio::instance_setup::could_not_send")?;
     let world = parser.world();
     async_std::task::spawn(async move {
         let lines = reader.lines();
@@ -104,7 +110,7 @@ pub async fn read_output(
                                             "<red>failed to parse</> <bright-blue>'{}'</>",
                                             line
                                         );
-                                        error!("<red>error: {}</>", err);
+                                        error!("<red>error: {:?}</>", err);
                                     }
                                 }
                             }
@@ -123,7 +129,8 @@ pub async fn read_output(
             };
         }
     });
-    tx1.send(())?;
+    tx1.send(())
+        .into_diagnostic("factorio::instance_setup::could_not_send")?;
     let rcon = Arc::new(
         FactorioRcon::new(rcon_settings, silent)
             .await
@@ -135,7 +142,8 @@ pub async fn read_output(
         .await
         .expect("always day");
     if wait_until == FactorioStartCondition::DiscoveryComplete {
-        tx2.send(())?;
+        tx2.send(())
+            .into_diagnostic("factorio::instance_setup::could_not_send")?;
     }
     Ok((world, rcon))
 }

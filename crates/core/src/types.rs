@@ -11,9 +11,11 @@ use pathfinding::utils::absdiff;
 use serde_json::Value;
 use typescript_definitions::TypeScriptify;
 
+use crate::errors::RectInvalid;
 use crate::factorio::entity_graph::QuadTreeRect;
 use crate::factorio::util::{add_to_rect, add_to_rect_turned, calculate_distance, rect_floor_ceil};
 use crate::num_traits::FromPrimitive;
+use miette::{DiagnosticResult, IntoDiagnostic};
 use rlua::{Context, MultiValue};
 
 pub type FactorioInventory = HashMap<String, u32>;
@@ -262,16 +264,23 @@ impl Default for Position {
 }
 
 impl FromStr for Position {
-    type Err = anyhow::Error;
+    type Err = miette::DiagnosticReport;
     fn from_str(str: &str) -> Result<Self, Self::Err> {
         let parts: Vec<&str> = str.split(',').collect();
         if parts.len() != 2 {
-            return Err(anyhow!(
-                "invalid position: expected A,B like 1.2,3.4 got {}",
-                str
-            ));
+            return Err(RectInvalid {
+                invalid_input: str.into(),
+            }
+            .into());
         }
-        Ok(Position::new(parts[0].parse()?, parts[1].parse()?))
+        Ok(Position::new(
+            parts[0]
+                .parse()
+                .into_diagnostic("factorio::output_parser::could_not_parse_position")?,
+            parts[1]
+                .parse()
+                .into_diagnostic("factorio::output_parser::could_not_parse_position")?,
+        ))
     }
 }
 
@@ -330,14 +339,14 @@ impl Into<QuadTreeRect> for Rect {
 }
 
 impl FromStr for Rect {
-    type Err = anyhow::Error;
+    type Err = miette::DiagnosticReport;
     fn from_str(str: &str) -> Result<Self, Self::Err> {
         let parts: Vec<&str> = str.split(';').collect();
         if parts.len() != 2 {
-            return Err(anyhow!(
-                "invalid rect: expected A,B;C,D like 1.2,3.4;5.6,7.8 got {}",
-                str
-            ));
+            return Err(RectInvalid {
+                invalid_input: str.into(),
+            }
+            .into());
         }
         Ok(Rect {
             left_top: parts[0].parse()?,
@@ -517,7 +526,7 @@ impl FactorioEntity {
     pub fn from_blueprint_entity(
         entity: Entity,
         prototypes: Arc<DashMap<String, FactorioEntityPrototype>>,
-    ) -> anyhow::Result<Self> {
+    ) -> DiagnosticResult<Self> {
         let prototype = prototypes.get(&entity.name).unwrap();
         let position: Position = entity.position.into();
         let direction = entity.direction.map(|d| d % 8).unwrap_or(0);

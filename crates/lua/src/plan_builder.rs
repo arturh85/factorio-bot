@@ -1,4 +1,5 @@
 use dashmap::lock::RwLock;
+use factorio_bot_core::errors::PlayerMissingItem;
 use factorio_bot_core::factorio::task_graph::{MineTarget, PositionRadius, TaskGraph};
 use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::factorio::world::FactorioWorld;
@@ -6,6 +7,7 @@ use factorio_bot_core::types::{
     FactorioEntity, FactorioPlayer, PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent,
     Position,
 };
+use miette::DiagnosticResult;
 use num_traits::ToPrimitive;
 use rlua::{Context, Table};
 use std::sync::Arc;
@@ -26,7 +28,7 @@ impl PlanBuilder {
         position: Position,
         name: &str,
         count: u32,
-    ) -> anyhow::Result<()> {
+    ) -> DiagnosticResult<()> {
         let mut graph = self.graph.write();
         let player = self
             .world
@@ -100,7 +102,7 @@ impl PlanBuilder {
     //         .unwrap_or(&0)
     // }
 
-    pub fn add_walk(&self, player_id: u32, goal: PositionRadius) -> anyhow::Result<()> {
+    pub fn add_walk(&self, player_id: u32, goal: PositionRadius) -> DiagnosticResult<()> {
         let distance = self.distance(player_id, &goal.position);
         let mut graph = self.graph.write();
         self.world
@@ -112,7 +114,7 @@ impl PlanBuilder {
         Ok(())
     }
 
-    pub fn add_place(&mut self, player_id: u32, entity: FactorioEntity) -> anyhow::Result<()> {
+    pub fn add_place(&mut self, player_id: u32, entity: FactorioEntity) -> DiagnosticResult<()> {
         let player = self.player(player_id);
         let distance = calculate_distance(&player.position, &entity.position);
         let build_distance = player.build_distance as f64;
@@ -125,11 +127,11 @@ impl PlanBuilder {
         let mut inventory = self.player(player_id).main_inventory;
         let inventory_item_count = *inventory.get(&entity.name).unwrap_or(&0);
         if inventory_item_count < 1 {
-            return Err(anyhow!(
-                "player #{} does not have {} in inventory",
+            return Err(PlayerMissingItem {
                 player_id,
-                &entity.name
-            ));
+                item: entity.name,
+            }
+            .into());
         }
         let mut graph = self.graph.write();
         graph.add_place_node(player_id, 1., entity.clone());

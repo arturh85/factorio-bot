@@ -18,6 +18,7 @@ use factorio_bot_core::settings::AppSettings;
 use factorio_bot_core::types::{EntityName, PlayerChangedMainInventoryEvent};
 use gag::BufferRedirect;
 use itertools::Itertools;
+use miette::{DiagnosticResult, IntoDiagnostic};
 use rlua::{Lua, Variadic};
 use rlua_async::ChunkExt;
 
@@ -46,9 +47,11 @@ impl Planner {
         self.graph = Arc::new(RwLock::new(TaskGraph::new()));
     }
 
-    pub fn plan(&mut self, lua_code: String, bot_count: u32) -> anyhow::Result<(String, String)> {
-        let mut stdout = BufferRedirect::stdout()?;
-        let mut stderr = BufferRedirect::stderr()?;
+    pub fn plan(&mut self, lua_code: String, bot_count: u32) -> DiagnosticResult<(String, String)> {
+        let mut stdout = BufferRedirect::stdout()
+            .into_diagnostic("factorio::output_parser::could_not_redirect_stdout")?;
+        let mut stderr = BufferRedirect::stderr()
+            .into_diagnostic("factorio::output_parser::could_not_redirect_stderr")?;
         let all_bots = self.initiate_missing_players_with_default_inventory(bot_count);
         self.plan_world = Arc::new((*self.real_world).clone());
         let lua = Lua::new();
@@ -92,8 +95,12 @@ impl Planner {
         }
         let mut stdout_str = String::new();
         let mut stderr_str = String::new();
-        stdout.read_to_string(&mut stdout_str)?;
-        stderr.read_to_string(&mut stderr_str)?;
+        stdout
+            .read_to_string(&mut stdout_str)
+            .into_diagnostic("factorio::output_parser::could_not_read_to_string")?;
+        stderr
+            .read_to_string(&mut stderr_str)
+            .into_diagnostic("factorio::output_parser::could_not_read_to_string")?;
         Ok((stdout_str, stderr_str))
     }
 
@@ -132,7 +139,7 @@ pub async fn start_factorio_and_plan_graph(
     seed: Option<String>,
     plan_name: &str,
     bot_count: u32,
-) -> anyhow::Result<TaskGraph> {
+) -> DiagnosticResult<TaskGraph> {
     let started = Instant::now();
     let instance_name = "plan";
     let rcon_settings = RconSettings::new(settings.rcon_port as u16, &settings.rcon_pass, None);
@@ -168,19 +175,17 @@ pub async fn start_factorio_and_plan_graph(
     info!("start took <yellow>{:?}</>", started.elapsed());
     let graph = loop {
         let started = Instant::now();
-        info!("foo 1");
         let mut planner = Planner::new(world.clone(), Some(rcon.clone()));
-        info!("foo 2");
         let lua_path_str = format!("plans/{}.lua", plan_name);
         let lua_path = Path::new(&lua_path_str);
-        let lua_path = std::fs::canonicalize(lua_path)?;
+        let lua_path = std::fs::canonicalize(lua_path)
+            .into_diagnostic("factorio::output_parser::could_not_canonicalize")?;
         if !lua_path.exists() {
-            anyhow::bail!("plan {} not found at {}", plan_name, lua_path_str);
+            panic!("plan {} not found at {}", plan_name, lua_path_str);
         }
-        let lua_code = read_to_string(lua_path)?;
-        info!("foo 3");
+        let lua_code = read_to_string(lua_path)
+            .into_diagnostic("factorio::output_parser::could_not_read_to_string")?;
         match std::thread::spawn(move || {
-            info!("foo 4");
             if let Err(err) = planner.plan(lua_code, bot_count) {
                 Err(err)
             } else {
@@ -202,17 +207,17 @@ pub async fn start_factorio_and_plan_graph(
 
                 if let Some(key) = input {
                     if key == 113 {
-                        anyhow::bail!("aborted")
+                        panic!("aborted")
                     }
                 }
                 info!("started");
-                stdout().flush()?;
+                stdout()
+                    .flush()
+                    .into_diagnostic("factorio::output_parser::could_not_flush")?;
                 continue;
             }
         }
-        info!("foo 5");
         let world = planner.world();
-        info!("foo 6");
         let graph = planner.graph();
         // for player in world.players.iter() {
         //     info!(

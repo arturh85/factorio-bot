@@ -54,7 +54,7 @@ pub async fn start_instances(
     }
     Err(err) => {
       error!("failed to start instances: {:?}", err);
-      Err(err.to_string())
+      Err(format!("{:?}", err))
     }
   }
 }

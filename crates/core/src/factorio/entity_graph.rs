@@ -22,6 +22,7 @@ use crate::types::{
     Direction, EntityName, EntityType, FactorioEntity, FactorioEntityPrototype, FactorioRecipe,
     FactorioTile, Pos, Position, Rect, ResourcePatch,
 };
+use miette::DiagnosticResult;
 
 pub struct EntityGraph {
     entity_graph: RwLock<EntityGraphInner>,
@@ -171,7 +172,7 @@ impl EntityGraph {
         &self,
         tiles: Vec<FactorioTile>,
         _clear_rect: Option<Rect>,
-    ) -> anyhow::Result<()> {
+    ) -> DiagnosticResult<()> {
         let mut tree = self.tile_tree.write();
         let mut blocked = self.blocked_tree.write();
         for tile in tiles {
@@ -189,7 +190,7 @@ impl EntityGraph {
         Ok(())
     }
 
-    pub fn add_blueprint_entities(&self, str: &str) -> anyhow::Result<()> {
+    pub fn add_blueprint_entities(&self, str: &str) -> DiagnosticResult<()> {
         let decoded = BlueprintCodec::decode_string(str).expect("failed to parse blueprint");
         let mut entities: Vec<FactorioEntity> = vec![];
         match decoded {
@@ -210,7 +211,7 @@ impl EntityGraph {
         &self,
         entities: Vec<FactorioEntity>,
         _clear_rect: Option<Rect>,
-    ) -> anyhow::Result<()> {
+    ) -> DiagnosticResult<()> {
         let mut resource_tree = self.resource_tree.write();
         for entity in &entities {
             if entity.entity_type == EntityType::Resource.to_string() {
@@ -475,7 +476,7 @@ impl EntityGraph {
         graph
     }
 
-    pub fn remove(&self, entity: &FactorioEntity) -> anyhow::Result<()> {
+    pub fn remove(&self, entity: &FactorioEntity) -> DiagnosticResult<()> {
         let mut nodes_to_remove: Vec<NodeIndex> = vec![];
         let mut edges_to_remove: Vec<EdgeIndex> = vec![];
         let mut entities_to_remove: Vec<ItemId> = vec![];
@@ -552,7 +553,7 @@ impl EntityGraph {
         Ok(())
     }
 
-    pub fn connect(&self) -> anyhow::Result<()> {
+    pub fn connect(&self) -> DiagnosticResult<()> {
         let _started = Instant::now();
         let tree = self.entity_tree.read();
         let mut edges_to_add: Vec<(NodeIndex, NodeIndex, f64)> = vec![];

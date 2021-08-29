@@ -7,6 +7,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::errors::{
+    RconError, RconNoWaterFound, RconPlayerBlockesAllPlacement, RconPlayerBlockesPlacement,
+    RconPlayerNotFound, RconRadiusLimitReached, RconTimeout, RconUnexpectedEmptyResponse,
+    RconUnexpectedOutput,
+};
 use crate::factorio::util::{
     blueprint_build_area, build_entity_path, calculate_distance, hashmap_to_lua, map_blocked_tiles,
     move_pos, move_position, position_to_lua, rect_to_lua, span_rect, str_to_lua, value_to_lua,
@@ -18,6 +23,7 @@ use crate::types::{
     AreaFilter, Direction, FactorioEntity, FactorioForce, FactorioTile, InventoryResponse, Pos,
     Position, Rect, RequestEntity,
 };
+use miette::{DiagnosticResult, IntoDiagnostic};
 
 const RCON_INTERFACE: &str = "botbridge";
 
@@ -28,6 +34,7 @@ pub struct FactorioRcon {
 }
 
 unsafe impl Send for FactorioRcon {}
+
 unsafe impl Sync for FactorioRcon {}
 
 pub struct ConnectionManager {
@@ -96,7 +103,7 @@ impl RconSettings {
 }
 
 impl FactorioRcon {
-    pub async fn new(settings: &RconSettings, silent: bool) -> anyhow::Result<Self> {
+    pub async fn new(settings: &RconSettings, silent: bool) -> DiagnosticResult<Self> {
         let address = format!(
             "{}:{}",
             settings.host.clone().unwrap_or_else(|| "127.0.0.1".into()),
@@ -104,18 +111,29 @@ impl FactorioRcon {
         );
         let manager = ConnectionManager::new(&address, &settings.pass);
         Ok(FactorioRcon {
-            pool: bb8::Pool::builder().max_size(15).build(manager).await?,
+            pool: bb8::Pool::builder()
+                .max_size(15)
+                .build(manager)
+                .await
+                .into_diagnostic("factorio::output_parser::could_not_build_connection_pool")?,
             silent,
         })
     }
 
-    pub async fn send(&self, command: &str) -> anyhow::Result<Option<Vec<String>>> {
+    pub async fn send(&self, command: &str) -> DiagnosticResult<Option<Vec<String>>> {
         if !self.silent {
             info!("<cyan>rcon</>  ⮜ <green>{}</>", command);
         }
         // let started = Instant::now();
-        let mut conn = self.pool.get().await?;
-        let result = conn.cmd(&String::from(command).add("\n")).await?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .into_diagnostic("factorio::output_parser::could_not_get_pool")?;
+        let result = conn
+            .cmd(&String::from(command).add("\n"))
+            .await
+            .into_diagnostic("factorio::output_parser::could_not_send_command")?;
         drop(conn);
         // info!("send took {} ms", started.elapsed().as_millis());
         if !result.is_empty() {
@@ -140,7 +158,7 @@ impl FactorioRcon {
         &self,
         function_name: &str,
         args: Vec<&str>,
-    ) -> anyhow::Result<Option<Vec<String>>> {
+    ) -> DiagnosticResult<Option<Vec<String>>> {
         let mut arg_string: String = args.join(", ");
         if !arg_string.is_empty() {
             arg_string = String::from(", ") + &arg_string;
@@ -152,12 +170,12 @@ impl FactorioRcon {
         .await
     }
 
-    pub async fn print(&self, str: &str) -> anyhow::Result<()> {
+    pub async fn print(&self, str: &str) -> DiagnosticResult<()> {
         self.send(&format!("/c print({})", str_to_lua(str))).await?;
         Ok(())
     }
 
-    pub async fn screenshot(&self, width: i16, height: i16, depth: i8) -> anyhow::Result<()> {
+    pub async fn screenshot(&self, width: i16, height: i16, depth: i8) -> DiagnosticResult<()> {
         self.send(&format!(
             "/screenshot {} {} {}",
             width.to_string(),
@@ -168,23 +186,23 @@ impl FactorioRcon {
         Ok(())
     }
 
-    pub async fn silent_print(&self, str: &str) -> anyhow::Result<()> {
+    pub async fn silent_print(&self, str: &str) -> DiagnosticResult<()> {
         self.send(&format!("/silent-command print({})", str_to_lua(str)))
             .await?;
         Ok(())
     }
 
-    pub async fn server_save(&self) -> anyhow::Result<()> {
+    pub async fn server_save(&self) -> DiagnosticResult<()> {
         self.send("/server-save").await?;
         Ok(())
     }
 
-    pub async fn whoami(&self, name: &str) -> anyhow::Result<()> {
+    pub async fn whoami(&self, name: &str) -> DiagnosticResult<()> {
         self.remote_call("whoami", vec![&str_to_lua(name)]).await?;
         Ok(())
     }
 
-    pub async fn add_research(&self, technology_name: &str) -> anyhow::Result<()> {
+    pub async fn add_research(&self, technology_name: &str) -> DiagnosticResult<()> {
         self.remote_call("add_research", vec![&str_to_lua(technology_name)])
             .await?;
         Ok(())
@@ -195,7 +213,7 @@ impl FactorioRcon {
         player_id: u32,
         item_name: &str,
         item_count: u32,
-    ) -> anyhow::Result<()> {
+    ) -> DiagnosticResult<()> {
         self.remote_call(
             "cheat_item",
             vec![
@@ -208,13 +226,13 @@ impl FactorioRcon {
         Ok(())
     }
 
-    pub async fn cheat_technology(&self, technology_name: &str) -> anyhow::Result<()> {
+    pub async fn cheat_technology(&self, technology_name: &str) -> DiagnosticResult<()> {
         self.remote_call("cheat_technology", vec![&str_to_lua(technology_name)])
             .await?;
         Ok(())
     }
 
-    pub async fn cheat_all_technologies(&self) -> anyhow::Result<()> {
+    pub async fn cheat_all_technologies(&self) -> DiagnosticResult<()> {
         self.remote_call("cheat_all_technologies", vec![]).await?;
         Ok(())
     }
@@ -230,10 +248,10 @@ impl FactorioRcon {
         only_ghosts: bool,
         inventory_player_ids: Vec<u32>,
         world: &Arc<FactorioWorld>,
-    ) -> anyhow::Result<Vec<FactorioEntity>> {
+    ) -> DiagnosticResult<Vec<FactorioEntity>> {
         let player = world.players.get(&player_id);
         if player.is_none() {
-            return Err(anyhow!("player not found"));
+            return Err(RconPlayerNotFound { player_id }.into());
         }
         let player = player.unwrap();
         let distance = calculate_distance(&player.position, position);
@@ -292,7 +310,7 @@ impl FactorioRcon {
             )
             .await?;
         if lines.is_none() {
-            return Err(anyhow!("Unexpected Empty Response"));
+            return Err(RconUnexpectedEmptyResponse {}.into());
         }
         let mut json = lines.unwrap().pop().unwrap();
         // empty objects/arrays are the same in lua
@@ -300,9 +318,10 @@ impl FactorioRcon {
             json = String::from("[]");
         }
         if &json[0..1] == "[" {
-            Ok(serde_json::from_str(json.as_str())?)
+            Ok(serde_json::from_str(json.as_str())
+                .into_diagnostic("factorio::output_parser::could_not_parse_json")?)
         } else {
-            Err(anyhow!("{}", json))
+            Err(RconError { message: json }.into())
         }
     }
 
@@ -312,10 +331,10 @@ impl FactorioRcon {
         name: &str,
         position: &Position,
         world: &Arc<FactorioWorld>,
-    ) -> anyhow::Result<FactorioEntity> {
+    ) -> DiagnosticResult<FactorioEntity> {
         let player = world.players.get(&player_id);
         if player.is_none() {
-            return Err(anyhow!("player not found"));
+            return Err(RconPlayerNotFound { player_id }.into());
         }
         let player = player.unwrap();
         let build_distance = player.build_distance as f64;
@@ -338,13 +357,14 @@ impl FactorioRcon {
             )
             .await?;
         if lines.is_none() {
-            return Err(anyhow!("Unexpected Empty Response"));
+            return Err(RconUnexpectedEmptyResponse {}.into());
         }
         let json = lines.unwrap().pop().unwrap();
         if &json[0..1] == "{" {
-            Ok(serde_json::from_str(json.as_str())?)
+            Ok(serde_json::from_str(json.as_str())
+                .into_diagnostic("factorio::output_parser::could_not_parse_json")?)
         } else {
-            Err(anyhow!("{}", json))
+            Err(RconError { message: json }.into())
         }
     }
 
@@ -355,7 +375,7 @@ impl FactorioRcon {
         position: &Position,
         direction: u8,
         force_build: bool,
-    ) -> anyhow::Result<Vec<FactorioEntity>> {
+    ) -> DiagnosticResult<Vec<FactorioEntity>> {
         let lines = self
             .remote_call(
                 "cheat_blueprint",
@@ -370,17 +390,18 @@ impl FactorioRcon {
             )
             .await?;
         if lines.is_none() {
-            return Err(anyhow!("Unexpected Empty Response"));
+            return Err(RconUnexpectedEmptyResponse {}.into());
         }
         let mut json = lines.unwrap().pop().unwrap();
         // empty objects/arrays are the same in lua
         if json == "{}" {
             json = String::from("[]");
         }
-        Ok(serde_json::from_str(json.as_str())?)
+        Ok(serde_json::from_str(json.as_str())
+            .into_diagnostic("factorio::output_parser::could_not_parse_json")?)
     }
 
-    pub async fn store_map_data(&self, key: &str, value: Value) -> anyhow::Result<()> {
+    pub async fn store_map_data(&self, key: &str, value: Value) -> DiagnosticResult<()> {
         self.remote_call(
             "store_map_data",
             vec![&str_to_lua(key), &value_to_lua(&value)],
@@ -389,7 +410,7 @@ impl FactorioRcon {
         Ok(())
     }
 
-    pub async fn retrieve_map_data(&self, key: &str) -> anyhow::Result<Option<Value>> {
+    pub async fn retrieve_map_data(&self, key: &str) -> DiagnosticResult<Option<Value>> {
         let lines = self
             .remote_call("retrieve_map_data", vec![&str_to_lua(key)])
             .await?;
@@ -401,14 +422,16 @@ impl FactorioRcon {
         if json == "{}" {
             json = String::from("[]");
         }
-        Ok(Some(serde_json::from_str(json.as_str())?))
+        Ok(Some(serde_json::from_str(json.as_str()).into_diagnostic(
+            "factorio::output_parser::could_not_parse_json",
+        )?))
     }
 
     async fn sleep_for_action_result(
         &self,
         world: &Arc<FactorioWorld>,
         action_id: u32,
-    ) -> anyhow::Result<()> {
+    ) -> DiagnosticResult<()> {
         let wait_start = Instant::now();
         loop {
             async_std::task::sleep(Duration::from_millis(50)).await;
@@ -417,11 +440,14 @@ impl FactorioRcon {
                     world.actions.remove(&action_id);
                     return Ok(());
                 } else {
-                    return Err(anyhow!("{}", *result));
+                    return Err(RconError {
+                        message: result.clone(),
+                    }
+                    .into());
                 }
             }
             if wait_start.elapsed() > Duration::from_secs(360) {
-                return Err(anyhow!("no action result received after 360 seconds"));
+                return Err(RconTimeout {}.into());
             }
         }
     }
@@ -430,7 +456,7 @@ impl FactorioRcon {
         &self,
         world: &Arc<FactorioWorld>,
         request_id: u32,
-    ) -> anyhow::Result<Vec<Position>> {
+    ) -> DiagnosticResult<Vec<Position>> {
         let wait_start = Instant::now();
         loop {
             async_std::task::sleep(Duration::from_millis(50)).await;
@@ -441,10 +467,11 @@ impl FactorioRcon {
                 if result == "{}" {
                     result = String::from("[]");
                 }
-                return Ok(serde_json::from_str(result.as_str())?);
+                return Ok(serde_json::from_str(result.as_str())
+                    .into_diagnostic("factorio::output_parser::could_not_parse_json")?);
             }
             if wait_start.elapsed() > Duration::from_secs(60) {
-                return Err(anyhow!("no path_request result received after 60 seconds"));
+                return Err(RconTimeout {}.into());
             }
         }
     }
@@ -455,7 +482,7 @@ impl FactorioRcon {
         player_id: u32,
         goal: &Position,
         radius: Option<f64>,
-    ) -> anyhow::Result<()> {
+    ) -> DiagnosticResult<()> {
         let mut next_action_id = world.as_ref().next_action_id.lock().await;
         let action_id: u32 = *next_action_id;
         *next_action_id = (*next_action_id + 1) % 1000;
@@ -475,10 +502,10 @@ impl FactorioRcon {
         name: &str,
         position: &Position,
         count: u32,
-    ) -> anyhow::Result<()> {
+    ) -> DiagnosticResult<()> {
         let player = world.players.get(&player_id);
         if player.is_none() {
-            return Err(anyhow!("player not found"));
+            return Err(RconPlayerNotFound { player_id }.into());
         }
         let player = player.unwrap();
         let mut next_action_id = world.as_ref().next_action_id.lock().await;
@@ -504,7 +531,7 @@ impl FactorioRcon {
         player_id: u32,
         recipe: &str,
         count: u32,
-    ) -> anyhow::Result<()> {
+    ) -> DiagnosticResult<()> {
         let mut next_action_id = world.as_ref().next_action_id.lock().await;
         let action_id: u32 = *next_action_id;
         *next_action_id = (*next_action_id + 1) % 1000;
@@ -517,7 +544,7 @@ impl FactorioRcon {
     pub async fn inventory_contents_at(
         &self,
         entities: Vec<RequestEntity>,
-    ) -> anyhow::Result<Vec<Option<InventoryResponse>>> {
+    ) -> DiagnosticResult<Vec<Option<InventoryResponse>>> {
         let positions: Vec<String> = entities
             .into_iter()
             .map(|entity| {
@@ -538,23 +565,25 @@ impl FactorioRcon {
             .remote_call("inventory_contents_at", vec![&vec_to_lua(positions)])
             .await?;
         if lines.is_none() {
-            return Err(anyhow!("Unexpected Empty Response"));
+            return Err(RconUnexpectedEmptyResponse {}.into());
         }
         let mut json = lines.unwrap().pop().unwrap();
         // empty objects/arrays are the same in lua
         if json == "{}" {
             json = String::from("[]");
         }
-        Ok(serde_json::from_str(json.as_str())?)
+        Ok(serde_json::from_str(json.as_str())
+            .into_diagnostic("factorio::output_parser::could_not_parse_json")?)
     }
 
-    pub async fn player_force(&self) -> anyhow::Result<FactorioForce> {
+    pub async fn player_force(&self) -> DiagnosticResult<FactorioForce> {
         let lines = self.remote_call("player_force", vec![]).await?;
         if lines.is_none() {
-            return Err(anyhow!("Unexpected Empty Response"));
+            return Err(RconUnexpectedEmptyResponse {}.into());
         }
         let json = lines.unwrap().pop().unwrap();
-        Ok(serde_json::from_str(json.as_str())?)
+        Ok(serde_json::from_str(json.as_str())
+            .into_diagnostic("factorio::output_parser::could_not_parse_json")?)
     }
 
     pub async fn place_entity(
@@ -564,10 +593,10 @@ impl FactorioRcon {
         entity_position: Position,
         direction: u8,
         world: &Arc<FactorioWorld>,
-    ) -> anyhow::Result<FactorioEntity> {
+    ) -> DiagnosticResult<FactorioEntity> {
         let player = world.players.get(&player_id);
         if player.is_none() {
-            return Err(anyhow!("player not found"));
+            return Err(RconPlayerNotFound { player_id }.into());
         }
         let player = player.unwrap();
         let player_position = player.position.clone();
@@ -592,7 +621,10 @@ impl FactorioRcon {
             .await?;
         if let Some(lines) = lines {
             if lines.len() != 1 {
-                Err(anyhow!("unexpected output {:?}", lines))
+                Err(RconUnexpectedOutput {
+                    output: lines.join("\n"),
+                }
+                .into())
             } else {
                 let line = &lines[0];
                 let chars =
@@ -628,7 +660,10 @@ impl FactorioRcon {
                                 .await?;
                             return if let Some(lines) = lines {
                                 if lines.len() != 1 {
-                                    return Err(anyhow!("unexpected output {:?}", lines));
+                                    return Err(RconUnexpectedOutput {
+                                        output: lines.join("\n"),
+                                    }
+                                    .into());
                                 }
                                 let line = &lines[0];
                                 let chars = UnicodeSegmentation::graphemes(line.as_str(), true)
@@ -636,24 +671,28 @@ impl FactorioRcon {
                                 if chars[0] == "{" {
                                     Ok(serde_json::from_str(line).unwrap())
                                 } else if &line[..] == "§player_blocks_placement§" {
-                                    Err(anyhow!("player still blocks placement"))
+                                    Err(RconPlayerBlockesPlacement {}.into())
                                 } else {
-                                    Err(anyhow!("{}", line))
+                                    Err(RconError {
+                                        message: line.clone(),
+                                    }
+                                    .into())
                                 }
                             } else {
-                                Err(anyhow!("unexpected empty output"))
+                                Err(RconUnexpectedEmptyResponse {}.into())
                             };
                         }
                     }
-                    Err(anyhow!(
-                        "Error: player blocks placement in all directions! "
-                    ))
+                    Err(RconPlayerBlockesAllPlacement {}.into())
                 } else {
-                    Err(anyhow!("{}", line))
+                    Err(RconError {
+                        message: line.clone(),
+                    }
+                    .into())
                 }
             }
         } else {
-            Err(anyhow!("unexpected empty output"))
+            Err(RconUnexpectedEmptyResponse {}.into())
         }
     }
 
@@ -667,10 +706,10 @@ impl FactorioRcon {
         item_name: String,
         item_count: u32,
         world: &Arc<FactorioWorld>,
-    ) -> anyhow::Result<()> {
+    ) -> DiagnosticResult<()> {
         let player = world.players.get(&player_id);
         if player.is_none() {
-            return Err(anyhow!("player not found"));
+            return Err(RconPlayerNotFound { player_id }.into());
         }
         let player = player.unwrap();
         let reach_distance = player.reach_distance as f64;
@@ -699,7 +738,10 @@ impl FactorioRcon {
             )
             .await?;
         if lines.is_some() {
-            return Err(anyhow!("{:?}", lines.unwrap()));
+            return Err(RconError {
+                message: format!("{:?}", lines.unwrap()),
+            }
+            .into());
         }
         Ok(())
     }
@@ -714,10 +756,10 @@ impl FactorioRcon {
         item_name: String,
         item_count: u32,
         world: &Arc<FactorioWorld>,
-    ) -> anyhow::Result<()> {
+    ) -> DiagnosticResult<()> {
         let player = world.players.get(&player_id);
         if player.is_none() {
-            return Err(anyhow!("player not found"));
+            return Err(RconPlayerNotFound { player_id }.into());
         }
         let player = player.unwrap();
         let reach_distance = player.reach_distance as f64;
@@ -745,12 +787,15 @@ impl FactorioRcon {
             )
             .await?;
         if lines.is_some() {
-            return Err(anyhow!("{:?}", lines.unwrap()));
+            return Err(RconError {
+                message: format!("{:?}", lines.unwrap()),
+            }
+            .into());
         }
         Ok(())
     }
 
-    pub async fn is_area_empty(&self, area_filter: &AreaFilter) -> anyhow::Result<bool> {
+    pub async fn is_area_empty(&self, area_filter: &AreaFilter) -> DiagnosticResult<bool> {
         let entities = self.find_entities_filtered(area_filter, None, None).await?;
         if !entities.is_empty() {
             return Ok(false);
@@ -787,7 +832,7 @@ impl FactorioRcon {
         area_filter: &AreaFilter,
         name: Option<String>,
         entity_type: Option<String>,
-    ) -> anyhow::Result<Vec<FactorioEntity>> {
+    ) -> DiagnosticResult<Vec<FactorioEntity>> {
         let mut args: HashMap<String, String> = HashMap::new();
         match area_filter {
             AreaFilter::Rect(area) => {
@@ -797,7 +842,7 @@ impl FactorioRcon {
                 args.insert(String::from("position"), position_to_lua(position));
                 if let Some(radius) = radius {
                     if radius > &3000.0 {
-                        return Err(anyhow!("max radius: 3000"));
+                        return Err(RconRadiusLimitReached { limit: 3000 }.into());
                     }
                     args.insert(String::from("radius"), radius.to_string());
                 }
@@ -816,21 +861,22 @@ impl FactorioRcon {
             )
             .await?;
         if result.is_none() {
-            return Err(anyhow!("Expected result from find_entities_filtered"));
+            return Err(RconUnexpectedEmptyResponse {}.into());
         }
         let mut json = result.unwrap().pop().unwrap();
         // empty objects/arrays are the same in lua
         if json == "{}" {
             json = String::from("[]");
         }
-        Ok(serde_json::from_str(json.as_str())?)
+        Ok(serde_json::from_str(json.as_str())
+            .into_diagnostic("factorio::output_parser::could_not_parse_json")?)
     }
 
     pub async fn parse_map_exchange_string(
         &self,
         name: &str,
         map_exchange_string: &str,
-    ) -> anyhow::Result<()> {
+    ) -> DiagnosticResult<()> {
         let result = self
             .remote_call(
                 "parse_map_exchange_string",
@@ -838,7 +884,10 @@ impl FactorioRcon {
             )
             .await?;
         if result.is_some() {
-            return Err(anyhow!("{}", result.unwrap().join("\n")));
+            return Err(RconError {
+                message: result.unwrap().join("\n"),
+            }
+            .into());
         }
         Ok(())
     }
@@ -846,7 +895,7 @@ impl FactorioRcon {
         &self,
         area_filter: &AreaFilter,
         name: Option<String>,
-    ) -> anyhow::Result<Vec<FactorioTile>> {
+    ) -> DiagnosticResult<Vec<FactorioTile>> {
         let mut args: HashMap<String, String> = HashMap::new();
         match area_filter {
             AreaFilter::Rect(area) => {
@@ -856,7 +905,7 @@ impl FactorioRcon {
                 args.insert(String::from("position"), position_to_lua(position));
                 if let Some(radius) = radius {
                     if radius > &3000.0 {
-                        return Err(anyhow!("max radius: 3000"));
+                        return Err(RconRadiusLimitReached { limit: 3000 }.into());
                     }
                     args.insert(String::from("radius"), radius.to_string());
                 }
@@ -869,14 +918,15 @@ impl FactorioRcon {
             .remote_call("find_tiles_filtered", vec![hashmap_to_lua(args).as_str()])
             .await?;
         if result.is_none() {
-            return Err(anyhow!("Expected result from find_tiles_filtered"));
+            return Err(RconUnexpectedEmptyResponse {}.into());
         }
         let mut json = result.unwrap().pop().unwrap();
         // empty objects/arrays are the same in lua
         if json == "{}" {
             json = String::from("[]");
         }
-        Ok(serde_json::from_str(json.as_str())?)
+        Ok(serde_json::from_str(json.as_str())
+            .into_diagnostic("factorio::output_parser::could_not_parse_json")?)
     }
 
     async fn async_request_player_path(
@@ -884,7 +934,7 @@ impl FactorioRcon {
         player_id: u32,
         goal: &Position,
         radius: Option<f64>,
-    ) -> anyhow::Result<u32> {
+    ) -> DiagnosticResult<u32> {
         let radius = match radius {
             Some(radius) => radius.to_string(),
             None => String::from("nil"),
@@ -896,12 +946,12 @@ impl FactorioRcon {
             )
             .await?;
         if result.is_none() {
-            return Err(anyhow!("Expected result from request_path"));
+            return Err(RconUnexpectedEmptyResponse {}.into());
         }
         let result = result.unwrap().pop().unwrap();
         match result.parse() {
             Ok(result) => Ok(result),
-            Err(_) => Err(anyhow!("{}", result)),
+            Err(_) => Err(RconError { message: result }.into()),
         }
     }
 
@@ -910,7 +960,7 @@ impl FactorioRcon {
         start: &Position,
         goal: &Position,
         radius: Option<f64>,
-    ) -> anyhow::Result<u32> {
+    ) -> DiagnosticResult<u32> {
         let radius = match radius {
             Some(radius) => radius.to_string(),
             None => String::from("nil"),
@@ -922,12 +972,12 @@ impl FactorioRcon {
             )
             .await?;
         if result.is_none() {
-            return Err(anyhow!("Expected result from request_path"));
+            return Err(RconUnexpectedEmptyResponse {}.into());
         }
         let result = result.unwrap().pop().unwrap();
         match result.parse() {
             Ok(result) => Ok(result),
-            Err(_) => Err(anyhow!("{}", result)),
+            Err(_) => Err(RconError { message: result }.into()),
         }
     }
 
@@ -950,7 +1000,7 @@ impl FactorioRcon {
         player_id: u32,
         goal: &Position,
         radius: Option<f64>,
-    ) -> anyhow::Result<Vec<Position>> {
+    ) -> DiagnosticResult<Vec<Position>> {
         let id = self
             .async_request_player_path(player_id, goal, radius)
             .await?;
@@ -958,11 +1008,11 @@ impl FactorioRcon {
             Ok(path) => Ok(path),
             Err(err) => {
                 warn!(
-                    "failed to find player_path() for #{} to {}/{}: {}",
+                    "failed to find player_path() for #{} to {}/{}: {:?}",
                     player_id,
                     goal.x(),
                     goal.y(),
-                    err.to_string()
+                    err
                 );
                 let player = world.players.get(&player_id).unwrap();
                 let mut direction = vector_normalize(&vector_substract(&player.position, goal));
@@ -992,18 +1042,18 @@ impl FactorioRcon {
         start: &Position,
         goal: &Position,
         radius: Option<f64>,
-    ) -> anyhow::Result<Vec<Position>> {
+    ) -> DiagnosticResult<Vec<Position>> {
         let id = self.async_request_path(start, goal, radius).await?;
         match self.sleep_for_path_request_result(world, id).await {
             Ok(path) => Ok(path),
             Err(err) => {
                 warn!(
-                    "failed to find path() from {}/{} to {}/{}: {}",
+                    "failed to find path() from {}/{} to {}/{}: {:?}",
                     start.x(),
                     start.y(),
                     goal.x(),
                     goal.y(),
-                    err.to_string()
+                    err
                 );
                 let mut direction = vector_normalize(&vector_substract(start, goal));
                 for _ in 0..4 {
@@ -1028,7 +1078,7 @@ impl FactorioRcon {
         action_id: u32,
         player_id: u32,
         waypoints: Vec<Position>,
-    ) -> anyhow::Result<()> {
+    ) -> DiagnosticResult<()> {
         // set_waypoints(action_id, player_id, waypoints)
         let action_id = action_id.to_string();
         let player_id = player_id.to_string();
@@ -1044,7 +1094,10 @@ impl FactorioRcon {
             )
             .await?;
         if let Some(result) = result {
-            return Err(anyhow!("{}", result.join("\n")));
+            return Err(RconError {
+                message: result.join("\n"),
+            }
+            .into());
         }
         Ok(())
     }
@@ -1056,7 +1109,7 @@ impl FactorioRcon {
         name: &str,
         position: &Position,
         count: u32,
-    ) -> anyhow::Result<()> {
+    ) -> DiagnosticResult<()> {
         let action_id = action_id.to_string();
         let player_id = player_id.to_string();
         let result = self
@@ -1072,7 +1125,10 @@ impl FactorioRcon {
             )
             .await?;
         if result.is_some() {
-            return Err(anyhow!("{:?}", result.unwrap()));
+            return Err(RconError {
+                message: format!("{:?}", result.unwrap()),
+            }
+            .into());
         }
         Ok(())
     }
@@ -1089,7 +1145,7 @@ impl FactorioRcon {
         from_position: &Position,
         to_position: &Position,
         to_direction: Direction,
-    ) -> anyhow::Result<Vec<FactorioEntity>> {
+    ) -> DiagnosticResult<Vec<FactorioEntity>> {
         let build_rect = span_rect(from_position, to_position, 20.0);
         let entities = self
             .find_entities_filtered(&AreaFilter::Rect(build_rect.clone()), None, None)
@@ -1119,7 +1175,7 @@ impl FactorioRcon {
         player_id: u32,
         recipe: &str,
         count: u32,
-    ) -> anyhow::Result<()> {
+    ) -> DiagnosticResult<()> {
         let action_id = action_id.to_string();
         let player_id = player_id.to_string();
         let result = self
@@ -1134,7 +1190,10 @@ impl FactorioRcon {
             )
             .await?;
         if result.is_some() {
-            return Err(anyhow!("{:?}", result.unwrap()));
+            return Err(RconError {
+                message: format!("{:?}", result.unwrap()),
+            }
+            .into());
         }
         Ok(())
     }
@@ -1144,7 +1203,7 @@ impl FactorioRcon {
         world: &Arc<FactorioWorld>,
         search_center: Position,
         pump_direction: Direction,
-    ) -> anyhow::Result<Vec<Pos>> {
+    ) -> DiagnosticResult<Vec<Pos>> {
         for radius in 3..10 {
             let tiles = self
                 .find_tiles_filtered(
@@ -1185,6 +1244,6 @@ impl FactorioRcon {
                 .map(|tile| (&tile.position).into())
                 .collect());
         }
-        Err(anyhow!("could not find water"))
+        Err(RconNoWaterFound {}.into())
     }
 }

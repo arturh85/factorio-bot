@@ -24,7 +24,6 @@ imageproc = "^0.22"
 rusttype = "^0.9"
 factorio-blueprint = "^0.2"
 include_dir = "^0.6"
-anyhow = "^1.0"
 num-traits = "^0.2"
 runas = "^0.2"
 async-trait = "^0.1"
@@ -51,7 +50,8 @@ toml = "^0.5"
 schemars = { version = "0.8", features = ["preserve_order"] }
 rlua = "^0.17"
 rlua_serde = "^0.4"
-
+miette = "^1.0"
+thiserror = "^1.0"
 #
 #[target.'cfg(unix)'.dependencies]
 #

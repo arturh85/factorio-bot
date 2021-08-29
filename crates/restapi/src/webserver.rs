@@ -1,6 +1,7 @@
 use async_std::sync::{Arc, RwLock};
 use factorio_bot_core::factorio::process_control::InstanceState;
 use factorio_bot_core::settings::AppSettings;
+use miette::DiagnosticResult;
 use rocket::data::{Limits, ToByteUnit};
 use rocket::http::Status;
 use rocket::response::status;
@@ -21,7 +22,7 @@ fn general_not_found() -> String {
 pub async fn start(
     app_settings: Arc<RwLock<AppSettings>>,
     instance_state: Arc<RwLock<Option<InstanceState>>>,
-) -> anyhow::Result<()> {
+) -> DiagnosticResult<()> {
     let port = app_settings.read().await.restapi_port;
     let figment = rocket::Config::figment()
         .merge(("port", port))
@@ -43,6 +44,7 @@ pub async fn start(
         )
         .launch()
         .await
-        .map_err(anyhow::Error::from)?;
+        .unwrap();
+    // .map_err(anyhow::Error::from)?;
     Ok(())
 }

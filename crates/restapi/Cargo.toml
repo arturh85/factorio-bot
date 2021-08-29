@@ -7,7 +7,6 @@ edition = "2018"
 [dependencies]
 factorio-bot-core = { path = "../core" }
 
-anyhow = "^1.0"
 rocket = { version = "0.5.0-rc.1", default-features = false, features = ["json"] }
 rocket_okapi = { version = "0.7.0-alpha-1" }
 okapi = { version = "0.6.0-alpha-1" }
@@ -16,3 +15,5 @@ async-std = { version = "^1.9", features = ["attributes", "tokio1"] }
 serde = "^1.0"
 serde_derive = "^1.0"
 serde_json = "^1.0"
+miette = "^1.0"
+thiserror = "^1.0"

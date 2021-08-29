@@ -1,3 +1,4 @@
+use crate::errors::{RconNoPathFound, RconSourcePositionBlocked, RconTargetPositionBlocked};
 use crate::factorio::entity_graph::QuadTreeRect;
 use crate::types::{
     Direction, FactorioEntity, FactorioEntityPrototype, FactorioTile, Pos, Position, Rect,
@@ -7,6 +8,7 @@ use factorio_blueprint::BlueprintCodec;
 use factorio_blueprint::Container::{Blueprint, BlueprintBook};
 use human_sort::compare;
 use itertools::Itertools;
+use miette::{DiagnosticResult, IntoDiagnostic};
 use num_traits::ToPrimitive;
 use pathfinding::prelude::astar;
 use serde_json::Value;
@@ -100,15 +102,20 @@ pub fn move_pos(pos: &Pos, direction: Direction, offset: i32) -> Pos {
     }
 }
 
-pub fn read_to_value(path: &Path) -> anyhow::Result<Value> {
-    let content = std::fs::read_to_string(path)?;
-    Ok(serde_json::from_str(content.as_str())?)
+pub fn read_to_value(path: &Path) -> DiagnosticResult<Value> {
+    let content = std::fs::read_to_string(path)
+        .into_diagnostic("factorio::util::could_not_read_to_string")?;
+    Ok(serde_json::from_str(content.as_str())
+        .into_diagnostic("factorio::output_parser::could_not_parse_json")?)
 }
 
-pub fn write_value_to(value: &Value, path: &Path) -> anyhow::Result<()> {
-    let mut outfile = fs::File::create(&path)?;
+pub fn write_value_to(value: &Value, path: &Path) -> DiagnosticResult<()> {
+    let mut outfile =
+        fs::File::create(&path).into_diagnostic("factorio::util::could_not_create_outfile")?;
     let bytes = serde_json::to_string(value).unwrap();
-    outfile.write_all(bytes.as_ref())?;
+    outfile
+        .write_all(bytes.as_ref())
+        .into_diagnostic("factorio::util::could_not_write")?;
     Ok(())
 }
 
@@ -352,7 +359,7 @@ pub fn build_entity_path(
     to_direction: Direction,
     block_entities: Vec<FactorioEntity>,
     block_tiles: Vec<FactorioTile>,
-) -> anyhow::Result<Vec<FactorioEntity>> {
+) -> DiagnosticResult<Vec<FactorioEntity>> {
     let from_position: Pos = from_position.into();
     let to_position: Pos = to_position.into();
     let blocked = map_blocked_tiles(
@@ -361,10 +368,10 @@ pub fn build_entity_path(
         &block_tiles.iter().collect(),
     );
     if blocked.contains_key(&from_position) {
-        return Err(anyhow!("fromPosition is blocked",));
+        return Err(RconSourcePositionBlocked {}.into());
     }
     if blocked.contains_key(&to_position) {
-        return Err(anyhow!("toPosition is blocked",));
+        return Err(RconTargetPositionBlocked {}.into());
     }
     // info!("start pathfinding");
     let path = astar(
@@ -463,7 +470,7 @@ pub fn build_entity_path(
             }
             Ok(result)
         }
-        None => Err(anyhow!("no path found")),
+        None => Err(RconNoPathFound {}.into()),
     }
 }
 

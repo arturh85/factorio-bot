@@ -11,10 +11,12 @@ use indicatif::HumanDuration;
 use paris::Logger;
 use serde_json::Value;
 
+use crate::errors::*;
 use crate::factorio::output_reader::read_output;
 use crate::factorio::process_control::{await_lock, FactorioStartCondition};
 use crate::factorio::rcon::RconSettings;
 use crate::factorio::util::{read_to_value, write_value_to};
+use miette::{DiagnosticResult, IntoDiagnostic};
 
 #[cfg(not(debug_assertions))]
 pub const MODS_CONTENT: include_dir::Dir = include_dir!("../../mods");
@@ -33,14 +35,14 @@ pub async fn setup_factorio_instance(
     map_exchange_string: Option<String>,
     seed: Option<String>,
     silent: bool,
-) -> anyhow::Result<()> {
+) -> DiagnosticResult<()> {
     let workspace_path = Path::new(&workspace_path_str);
     if !workspace_path.exists() {
         error!(
             "Failed to find workspace at <bright-blue>{:?}</>",
             workspace_path
         );
-        return Err(anyhow!("failed to find workspace"));
+        return Err(WorkspaceNotFound {}.into());
     }
     let workspace_data_path = workspace_path.join(PathBuf::from("data"));
     let instance_path = workspace_path.join(PathBuf::from(instance_name));
@@ -49,27 +51,39 @@ pub async fn setup_factorio_instance(
         if !silent {
             info!("Creating <bright-blue>{:?}</>", &instance_path);
         }
-        create_dir(instance_path).await?;
+        create_dir(instance_path)
+            .await
+            .into_diagnostic("factorio::instance_setup::could_not_create_instance_path")?;
     }
-    let readdir = instance_path.read_dir()?;
+    let readdir = instance_path
+        .read_dir()
+        .into_diagnostic("factorio::instance_setup::could_not_read_instance_dir")?;
     if readdir.count() == 0 {
         let started = Instant::now();
 
         #[cfg(windows)]
         {
             use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-            let file = fs::File::open(factorio_archive_path)?;
+            let file = fs::File::open(factorio_archive_path)
+                .into_diagnostic("factorio::instance_setup::could_not_open_archive_path")?;
             info!(
                 "Extracting <bright-blue>{}</> to <magenta>{}</>",
                 &factorio_archive_path,
                 instance_path.to_str().unwrap()
             );
 
-            let mut archive = zip::ZipArchive::new(file)?;
+            let mut archive = zip::ZipArchive::new(file)
+                .into_diagnostic("factorio::instance_setup::could_not_open_zip")?;
 
             let mut files: Vec<String> = vec![];
             for i in 0..archive.len() {
-                files.push(archive.by_index(i)?.name().into());
+                files.push(
+                    archive
+                        .by_index(i)
+                        .into_diagnostic("factorio::instance_setup::could_not_read_zip_entry")?
+                        .name()
+                        .into(),
+                );
             }
             if workspace_data_path.exists() {
                 files = files
@@ -89,17 +103,21 @@ pub async fn setup_factorio_instance(
                 // output_path is like Factorio_0.18.36\bin\x64\factorio.exe
                 let output_path = PathBuf::from(&file);
                 // output_path is like bin\x64\factorio.exe
-                let output_path =
-                    output_path.strip_prefix(output_path.components().next().unwrap())?;
+                let output_path = output_path
+                    .strip_prefix(output_path.components().next().unwrap())
+                    .into_diagnostic("factorio::instance_setup::strip_prefix")?;
                 // output_path is like $instance_path\bin\x64\factorio.exe
                 let output_path = PathBuf::from(instance_path).join(PathBuf::from(output_path));
 
                 if (&*file).ends_with('/') {
-                    fs::create_dir_all(&output_path)?;
+                    fs::create_dir_all(&output_path)
+                        .into_diagnostic("factorio::instance_setup::could_not_create_unpack_dir")?;
                 } else {
                     if let Some(p) = output_path.parent() {
                         if !p.exists() {
-                            fs::create_dir_all(&p)?;
+                            fs::create_dir_all(&p).into_diagnostic(
+                                "factorio::instance_setup::could_not_create_dir",
+                            )?;
                         }
                     }
 
@@ -111,7 +129,8 @@ pub async fn setup_factorio_instance(
             }
             if !workspace_data_path.exists() {
                 let instance_data_path = instance_path.join(PathBuf::from("data"));
-                fs::rename(&instance_data_path, &workspace_data_path)?;
+                fs::rename(&instance_data_path, &workspace_data_path)
+                    .into_diagnostic("factorio::instance_setup::could_not_rename_data")?;
             }
             bar.finish();
         }
@@ -179,29 +198,32 @@ pub async fn setup_factorio_instance(
         }
         #[cfg(not(debug_assertions))]
         {
-            std::fs::create_dir_all(&workspace_mods_path)?;
+            std::fs::create_dir_all(&workspace_mods_path)
+                .into_diagnostic("factorio::output_parser::could_not_canonicalize")?;
             if let Err(err) = MODS_CONTENT.extract(workspace_mods_path.clone()) {
                 error!("failed to extract static mods content: {:?}", err);
-                return Err(anyhow!("failed to extract mods content to workspace"));
+                return Err(ModExtractFailed {}.into());
             }
         }
         if !workspace_mods_path.exists() {
-            return Err(anyhow!("missing mods/ folder from working directory"));
+            return Err(MissingModsFolder {}.into());
         }
     }
     #[cfg(not(debug_assertions))]
     {
         let data_plans_path = workspace_path.join(PathBuf::from("plans"));
         if !data_plans_path.exists() {
-            std::fs::create_dir_all(&data_plans_path)?;
+            std::fs::create_dir_all(&data_plans_path)
+                .into_diagnostic("factorio::output_parser::could_not_canonicalize")?;
             if let Err(err) = PLANS_CONTENT.extract(data_plans_path.clone()) {
                 error!("failed to extract static plans content: {:?}", err);
-                return Err(anyhow!("failed to extract plans content to workspace"));
+                return Err(PlansExtractFailed {}.into());
             }
         }
     }
 
-    let workspace_mods_path = std::fs::canonicalize(workspace_mods_path)?;
+    let workspace_mods_path = std::fs::canonicalize(workspace_mods_path)
+        .into_diagnostic("factorio::instance_setup::could_not_canonicalize")?;
     let mods_path = instance_path.join(PathBuf::from("mods"));
     if !mods_path.exists() {
         if !silent {
@@ -220,21 +242,23 @@ pub async fn setup_factorio_instance(
                 .arg(&mods_path)
                 .arg(&workspace_mods_path)
                 .status()
-                .unwrap();
+                .into_diagnostic("factorio::instance_setup::could_not_create_symlink")?;
             // std::os::windows::fs::symlink_dir(&data_mods_path, &mods_path)?;
             if !status.success() {
-                return Err(anyhow!(
-                    "failed to create factorio mods symlink: {:?} -> {:?} ... {}",
-                    &mods_path,
-                    &workspace_mods_path,
-                    status.to_string()
-                ));
+                // return Err(anyhow!(
+                //     "failed to create factorio mods symlink: {:?} -> {:?} ... {}",
+                //     &mods_path,
+                //     &workspace_mods_path,
+                //     status.to_string()
+                // ));
+                return Err(ModSymlinkFailed {}.into());
             }
         }
     }
     let instance_data_path = instance_path.join(PathBuf::from("data"));
     if !instance_data_path.exists() && workspace_data_path.exists() {
-        let workspace_data_path = std::fs::canonicalize(workspace_data_path)?;
+        let workspace_data_path = std::fs::canonicalize(workspace_data_path)
+            .into_diagnostic("factorio::instance_setup::could_not_canonicalize")?;
         if !silent {
             info!(
                 "Creating Symlink for <bright-blue>{:?}</>",
@@ -254,15 +278,16 @@ pub async fn setup_factorio_instance(
                 .arg(&instance_data_path)
                 .arg(&workspace_data_path)
                 .status()
-                .unwrap();
+                .into_diagnostic("factorio::instance_setup::could_not_create_symlink")?;
             // std::os::windows::fs::symlink_dir(&workspace_data_path, &instance_data_path)?;
             if !status.success() {
-                return Err(anyhow!(
-                    "failed to create factorio data symlink: {:?} -> {:?} ... {}",
-                    &instance_data_path,
-                    &workspace_data_path,
-                    status.to_string()
-                ));
+                // return Err(anyhow!(
+                //     "failed to create factorio data symlink: {:?} -> {:?} ... {}",
+                //     &instance_data_path,
+                //     &workspace_data_path,
+                //     status.to_string()
+                // ));
+                return Err(ModSymlinkFailed {}.into());
             }
         }
     }
@@ -279,12 +304,15 @@ pub async fn setup_factorio_instance(
         let server_settings_path = instance_path.join(PathBuf::from("server-settings.json"));
         if !server_settings_path.exists() {
             let server_settings_data = include_bytes!("../data/server-settings.json");
-            let mut outfile = fs::File::create(&server_settings_path)?;
+            let mut outfile = fs::File::create(&server_settings_path)
+                .into_diagnostic("factorio::instance_setup::could_not_create_settings")?;
             if !silent {
                 info!("Creating <bright-blue>{:?}</>", &server_settings_path);
             }
             // io::copy(&mut template_file, &mut outfile)?;
-            outfile.write_all(server_settings_data)?;
+            outfile
+                .write_all(server_settings_data)
+                .into_diagnostic("factorio::instance_setup::could_not_write_settings")?;
         }
 
         let saves_path = instance_path.join(PathBuf::from("saves"));
@@ -292,14 +320,20 @@ pub async fn setup_factorio_instance(
             if !silent {
                 info!("Creating <bright-blue>{:?}</>", &saves_path);
             }
-            create_dir(&saves_path).await?;
+            create_dir(&saves_path)
+                .await
+                .into_diagnostic("factorio::instance_setup::could_not_create_saves_directory")?;
         }
 
         let saves_level_path = saves_path.join(PathBuf::from("level.zip"));
         let map_exchange_string_path = instance_path.join(PathBuf::from("map-exchange-string.txt"));
         if let Some(map_exchange_string) = &map_exchange_string {
             if !map_exchange_string_path.exists()
-                || read_to_string(&map_exchange_string_path)?.ne(map_exchange_string)
+                || read_to_string(&map_exchange_string_path)
+                    .into_diagnostic(
+                        "factorio::instance_setup::could_not_read_map_exchange_string_path",
+                    )?
+                    .ne(map_exchange_string)
             {
                 if !saves_level_path.exists() {
                     let binary = if cfg!(windows) {
@@ -313,7 +347,7 @@ pub async fn setup_factorio_instance(
                             "factorio binary missing at <bright-blue>{:?}</>",
                             factorio_binary_path
                         );
-                        return Err(anyhow!("failed to find factorio binary"));
+                        return Err(FactorioBinaryNotFound {}.into());
                     }
                     let mut args = vec!["--create", saves_level_path.to_str().unwrap()];
                     if let Some(seed) = seed.as_ref() {
@@ -330,7 +364,7 @@ pub async fn setup_factorio_instance(
                             std::str::from_utf8(&output.stdout).unwrap(),
                             std::str::from_utf8(&output.stderr).unwrap()
                         );
-                        return Err(anyhow!("failed to create factorio level"));
+                        return Err(FactorioLevelFailed {}.into());
                     }
                 }
                 update_map_gen_settings(
@@ -342,8 +376,14 @@ pub async fn setup_factorio_instance(
                     silent,
                 )
                 .await?;
-                fs::File::create(&map_exchange_string_path)?
-                    .write_all(map_exchange_string.as_ref())?;
+                fs::File::create(&map_exchange_string_path)
+                    .into_diagnostic(
+                        "factorio::instance_setup::could_not_create_map_exchange_string_path",
+                    )?
+                    .write_all(map_exchange_string.as_ref())
+                    .into_diagnostic(
+                        "factorio::instance_setup::could_not_write_map_exchange_string_path",
+                    )?;
             }
         }
 
@@ -365,7 +405,7 @@ pub async fn setup_factorio_instance(
                     "factorio binary missing at <bright-blue>{:?}</>",
                     factorio_binary_path
                 );
-                return Err(anyhow!("failed to find factorio binary"));
+                return Err(FactorioBinaryNotFound {}.into());
             }
             let mut args = vec!["--create", saves_level_path.to_str().unwrap()];
             if let Some(seed) = &seed {
@@ -401,7 +441,7 @@ pub async fn setup_factorio_instance(
                     std::str::from_utf8(&output.stdout).unwrap(),
                     std::str::from_utf8(&output.stderr).unwrap()
                 );
-                return Err(anyhow!("failed to create factorio level"));
+                return Err(FactorioLevelFailed {}.into());
             }
             if !silent {
                 logger.success(format!(
@@ -414,24 +454,34 @@ pub async fn setup_factorio_instance(
         let player_data_path = instance_path.join(PathBuf::from("player-data.json"));
         if !player_data_path.exists() {
             let player_data = include_bytes!("../data/player-data.json");
-            let mut outfile = fs::File::create(&player_data_path)?;
-            outfile.write_all(player_data)?;
+            let mut outfile = fs::File::create(&player_data_path)
+                .into_diagnostic("factorio::instance_setup::could_not_create_data_path")?;
+            outfile
+                .write_all(player_data)
+                .into_diagnostic("factorio::instance_setup::could_not_write_data_path")?;
             if !silent {
                 info!("Created <bright-blue>{:?}</>", &player_data_path);
             }
         }
         let mut value: Value = read_to_value(&player_data_path)?;
         value["service-username"] = Value::from(instance_name);
-        let player_data_file = File::create(&player_data_path)?;
-        serde_json::to_writer_pretty(player_data_file, &value)?;
+        let player_data_file = File::create(&player_data_path)
+            .into_diagnostic("factorio::instance_setup::could_not_create_file")?;
+        serde_json::to_writer_pretty(player_data_file, &value)
+            .into_diagnostic("factorio::instance_setup::could_not_create_writer")?;
 
         let config_path = instance_path.join(PathBuf::from("config"));
         if !config_path.exists() {
-            create_dir(&config_path).await?;
+            create_dir(&config_path)
+                .await
+                .into_diagnostic("factorio::instance_setup::could_not_create_dir")?;
             let config_ini_data = include_bytes!("../data/config.ini");
             let config_ini_path = config_path.join(PathBuf::from("config.ini"));
-            let mut outfile = fs::File::create(&config_ini_path)?;
-            outfile.write_all(config_ini_data)?;
+            let mut outfile = fs::File::create(&config_ini_path)
+                .into_diagnostic("factorio::instance_setup::could_not_create_file")?;
+            outfile
+                .write_all(config_ini_data)
+                .into_diagnostic("factorio::instance_setup::could_not_create_file")?;
             if !silent {
                 info!("Created <bright-blue>{:?}</>", &config_ini_path);
             }
@@ -447,14 +497,14 @@ pub async fn update_map_gen_settings(
     rcon_settings: &RconSettings,
     map_exchange_string: &str,
     silent: bool,
-) -> anyhow::Result<()> {
+) -> DiagnosticResult<()> {
     let workspace_path = Path::new(&workspace_path);
     if !workspace_path.exists() {
         error!(
             "Failed to find workspace at <bright-blue>{:?}</>",
             workspace_path
         );
-        return Err(anyhow!("failed to find workspace"));
+        return Err(WorkspaceNotFound {}.into());
     }
     let instance_path = workspace_path.join(PathBuf::from(instance_name));
     let instance_path = Path::new(&instance_path);
@@ -463,7 +513,7 @@ pub async fn update_map_gen_settings(
             "Failed to find instance at <bright-blue>{:?}</>",
             instance_path
         );
-        return Err(anyhow!("failed to find instance"));
+        return Err(FactorioInstanceNotFound {}.into());
     }
     let binary = if cfg!(windows) {
         "bin/x64/factorio.exe"
@@ -476,12 +526,12 @@ pub async fn update_map_gen_settings(
             "factorio binary missing at <bright-blue>{:?}</>",
             factorio_binary_path
         );
-        return Err(anyhow!("failed to find factorio binary"));
+        return Err(FactorioBinaryNotFound {}.into());
     }
     let saves_path = instance_path.join(PathBuf::from("saves"));
     if !saves_path.exists() {
         error!("saves missing at <bright-blue>{:?}</>", saves_path);
-        return Err(anyhow!("failed to find factorio saves folder"));
+        return Err(FactorioSavesNotFound {}.into());
     }
     let saves_level_path = saves_path.join(PathBuf::from("level.zip"));
     let server_settings_path = instance_path.join(PathBuf::from("server-settings.json"));
@@ -490,7 +540,7 @@ pub async fn update_map_gen_settings(
             "server settings missing at <bright-blue>{:?}</>",
             server_settings_path
         );
-        return Err(anyhow!("failed to find factorio server settings"));
+        return Err(FactorioSettingsNotFound {}.into());
     }
     await_lock(instance_path.join(PathBuf::from(".lock")), silent).await?;
     let mut logger = Logger::new();
@@ -536,7 +586,9 @@ pub async fn update_map_gen_settings(
     let map_settings_filename = "map-settings.json";
     rcon.parse_map_exchange_string(map_gen_settings_filename, map_exchange_string)
         .await?;
-    child.kill()?;
+    child
+        .kill()
+        .into_diagnostic("factorio::instance_setup::could_not_kill_child")?;
     let target_map_gen_settings_path =
         instance_path.join(PathBuf::from_str(map_gen_settings_filename).unwrap());
     let target_map_settings_path =

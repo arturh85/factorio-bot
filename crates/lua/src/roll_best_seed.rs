@@ -14,6 +14,7 @@ use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::settings::AppSettings;
 use factorio_bot_core::types::{AreaFilter, FactorioEntity, Position};
+use miette::{DiagnosticResult, IntoDiagnostic};
 
 #[derive(Debug, Copy, Clone)]
 pub enum RollSeedLimit {
@@ -28,7 +29,7 @@ pub async fn roll_seed(
     parallel: u8,
     plan_name: String,
     bot_count: u32,
-) -> anyhow::Result<Option<(u32, f64)>> {
+) -> DiagnosticResult<Option<(u32, f64)>> {
     let roll: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
     let best_seed_with_score: Arc<Mutex<Option<(u32, f64)>>> = Arc::new(Mutex::new(None));
     let workspace_path: Arc<String> = Arc::new(settings.workspace_path.into());
@@ -78,11 +79,13 @@ pub async fn roll_seed(
         let roll = roll.clone();
         let lua_path_str = format!("plans/{}.lua", plan_name);
         let lua_path = Path::new(&lua_path_str);
-        let lua_path = std::fs::canonicalize(lua_path)?;
+        let lua_path = std::fs::canonicalize(lua_path)
+            .into_diagnostic("factorio::output_parser::could_not_canonicalize")?;
         if !lua_path.exists() {
-            anyhow::bail!("plan {} not found at {}", plan_name, lua_path_str);
+            panic!("plan {} not found at {}", plan_name, lua_path_str);
         }
-        let lua_code = read_to_string(lua_path)?;
+        let lua_code = read_to_string(lua_path)
+            .into_diagnostic("factorio::output_parser::could_not_read_to_string")?;
         join_handles.push(std::thread::spawn(move || {
             task::spawn(async move {
                 while match limit {
@@ -152,7 +155,7 @@ pub async fn roll_seed(
                             );
                         },
                         Err(err) => {
-                            warn!("instance #{} rolled #{} with seed {} but failed: {}", p + 1,
+                            warn!("instance #{} rolled #{} with seed {} but failed: {:?}", p + 1,
                                   roll,seed, err);
                         }
                     }
@@ -186,20 +189,16 @@ pub async fn score_seed(
     _seed: u32,
     lua_code: &str,
     bot_count: u32,
-) -> anyhow::Result<f64> {
+) -> DiagnosticResult<f64> {
     let lua_code = lua_code.to_string();
     let _rcon = rcon.clone();
-    let planner = match std::thread::spawn::<_, anyhow::Result<Planner>>(move || {
+    let planner = std::thread::spawn::<_, DiagnosticResult<Planner>>(move || {
         let mut planner = Planner::new(world, Some(_rcon.clone()));
         planner.plan(lua_code, bot_count)?;
         Ok(planner)
     })
     .join()
-    .unwrap()
-    {
-        Ok(planner) => Ok(planner),
-        Err(_) => Err(anyhow!("failed to run script")),
-    }?;
+    .unwrap()?;
     let mut score = 0.0;
 
     let weight = planner.graph().shortest_path();
@@ -238,7 +237,7 @@ pub async fn find_nearest_entities(
     search_radius: f64,
     name: Option<String>,
     entity_type: Option<String>,
-) -> anyhow::Result<Vec<FactorioEntity>> {
+) -> DiagnosticResult<Vec<FactorioEntity>> {
     let mut entities = rcon
         .find_entities_filtered(
             &AreaFilter::PositionRadius((search_center.clone(), Some(search_radius))),

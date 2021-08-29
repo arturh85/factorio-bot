@@ -9,6 +9,7 @@ use aabb_quadtree::{ItemId, QuadTree};
 use dashmap::lock::{RwLock, RwLockReadGuard};
 use dashmap::DashMap;
 use euclid::{TypedPoint2D, TypedSize2D};
+use miette::DiagnosticResult;
 use num_traits::ToPrimitive;
 use petgraph::dot::{Config, Dot};
 use petgraph::graph::NodeIndex;
@@ -68,7 +69,7 @@ impl FlowGraph {
         }
     }
 
-    pub fn update(&self) -> anyhow::Result<()> {
+    pub fn update(&self) -> DiagnosticResult<()> {
         let _started = Instant::now();
         let inner = self.entity_graph.inner_graph();
         for entity_root_index in inner.externals(petgraph::Direction::Incoming) {

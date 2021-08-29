@@ -1,9 +1,14 @@
+use crate::errors::{
+    FactorioBinaryNotFound, FactorioInstanceNotFound, FactorioSavesNotFound,
+    FactorioSettingsNotFound, WorkspaceNotFound,
+};
 use crate::factorio::instance_setup::setup_factorio_instance;
 use crate::factorio::output_reader::read_output;
 use crate::factorio::rcon::{FactorioRcon, RconSettings};
 use crate::factorio::world::FactorioWorld;
 use crate::settings::AppSettings;
 use async_std::task;
+use miette::{DiagnosticResult, IntoDiagnostic};
 use paris::Logger;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -34,7 +39,7 @@ pub async fn start_factorio(
     // websocket_server: Option<Addr<FactorioWebSocketServer>>,
     write_logs: bool,
     silent: bool,
-) -> anyhow::Result<InstanceState> {
+) -> DiagnosticResult<InstanceState> {
     let mut world: Option<Arc<FactorioWorld>> = None;
     let rcon_settings =
         RconSettings::new(settings.rcon_port as u16, &settings.rcon_pass, server_host);
@@ -70,7 +75,7 @@ pub async fn start_factorio(
         )
         .await
         {
-            error!("Failed to setup Factorio <red>{}</>: ", err);
+            error!("Failed to setup Factorio <red>{:?}</>: ", err);
             break;
         }
     }
@@ -160,7 +165,9 @@ pub async fn start_factorio(
             }
         }
         unsafe {
-            EnumWindows(Some(enum_window), LPARAM(0_isize)).ok()?;
+            EnumWindows(Some(enum_window), LPARAM(0_isize))
+                .ok()
+                .into_diagnostic("factorio::output_parser::could_not_enum_windows")?;
             let max_width = GetSystemMetrics(SM_CXMAXIMIZED);
             let max_height = GetSystemMetrics(SM_CYMAXIMIZED);
             let count = HWNDS.len();
@@ -236,7 +243,7 @@ mod tests {
     }
 }
 
-pub async fn await_lock(lock_path: PathBuf, silent: bool) -> anyhow::Result<()> {
+pub async fn await_lock(lock_path: PathBuf, silent: bool) -> DiagnosticResult<()> {
     if lock_path.exists() {
         match std::fs::remove_file(&lock_path) {
             Ok(_) => {}
@@ -272,14 +279,24 @@ pub async fn await_lock(lock_path: PathBuf, silent: bool) -> anyhow::Result<()> 
                                     kill_list.push(id);
                                 }
                             }
-                        })?;
+                        })
+                        .into_diagnostic(
+                            "factorio::instance_setup::could_not_process_list::for_each_process",
+                        )?;
                         for id in kill_list {
-                            heim::process::get(id).await?.kill().await?;
+                            heim::process::get(id)
+                                .await
+                                .into_diagnostic("factorio::instance_setup::could_not_get_process")?
+                                .kill()
+                                .await
+                                .into_diagnostic(
+                                    "factorio::instance_setup::could_not_kill_process",
+                                )?;
                         }
                     }
                     #[cfg(unix)]
                     {
-                        return Err(anyhow!("Factorio instance already running!"));
+                        return Err(FactorioAlreadyStarted {})?;
                     }
                 }
             }
@@ -304,14 +321,14 @@ pub async fn start_factorio_server(
     write_logs: bool,
     silent: bool,
     wait_until: FactorioStartCondition,
-) -> anyhow::Result<(Arc<FactorioWorld>, Arc<FactorioRcon>, Child)> {
+) -> DiagnosticResult<(Arc<FactorioWorld>, Arc<FactorioRcon>, Child)> {
     let workspace_path = Path::new(&workspace_path);
     if !workspace_path.exists() {
         error!(
             "Failed to find workspace at <bright-blue>{:?}</>",
             workspace_path
         );
-        return Err(anyhow!("failed to find workspace"));
+        return Err(WorkspaceNotFound {}.into());
     }
     let instance_path = workspace_path.join(PathBuf::from(instance_name));
     let instance_path = Path::new(&instance_path);
@@ -320,7 +337,7 @@ pub async fn start_factorio_server(
             "Failed to find instance at <bright-blue>{:?}</>",
             instance_path
         );
-        return Err(anyhow!("failed to find instance"));
+        return Err(FactorioInstanceNotFound {}.into());
     }
     let binary = if cfg!(windows) {
         "bin/x64/factorio.exe"
@@ -335,12 +352,12 @@ pub async fn start_factorio_server(
             "factorio binary missing at <bright-blue>{:?}</>",
             factorio_binary_path
         );
-        return Err(anyhow!("failed to find factorio binary"));
+        return Err(FactorioBinaryNotFound {}.into());
     }
     let saves_path = instance_path.join(PathBuf::from("saves"));
     if !saves_path.exists() {
         error!("saves missing at <bright-blue>{:?}</>", saves_path);
-        return Err(anyhow!("failed to find factorio saves"));
+        return Err(FactorioSavesNotFound {}.into());
     }
     let saves_level_path = saves_path.join(PathBuf::from("level.zip"));
     if !saves_level_path.exists() {
@@ -348,7 +365,8 @@ pub async fn start_factorio_server(
             "save file missing at <bright-blue>{:?}</>",
             saves_level_path
         );
-        return Err(anyhow!("failed to find factorio saves/level.zip"));
+        // return Err(anyhow!("failed to find factorio saves/level.zip"));
+        return Err(FactorioSavesNotFound {}.into());
     }
     let server_settings_path = instance_path.join(PathBuf::from("server-settings.json"));
     if !server_settings_path.exists() {
@@ -356,7 +374,7 @@ pub async fn start_factorio_server(
             "server settings missing at <bright-blue>{:?}</>",
             server_settings_path
         );
-        return Err(anyhow!("server settings missing"));
+        return Err(FactorioSettingsNotFound {}.into());
     }
     let args = &[
         "--start-server",
@@ -433,7 +451,7 @@ pub async fn start_factorio_client(
     server_host: Option<&str>,
     write_logs: bool,
     silent: bool,
-) -> anyhow::Result<Child> {
+) -> DiagnosticResult<Child> {
     let workspace_path: String = settings.workspace_path.to_string();
     let workspace_path = Path::new(&workspace_path);
     if !workspace_path.exists() {
@@ -441,7 +459,7 @@ pub async fn start_factorio_client(
             "Failed to find workspace at <bright-blue>{:?}</>",
             workspace_path
         );
-        return Err(anyhow!("failed to find workspace"));
+        return Err(WorkspaceNotFound {}.into());
     }
     let instance_path = workspace_path.join(PathBuf::from(&instance_name));
     let instance_path = Path::new(&instance_path);
@@ -450,7 +468,7 @@ pub async fn start_factorio_client(
             "Failed to find instance at <bright-blue>{:?}</>",
             instance_path
         );
-        return Err(anyhow!("failed to find instance"));
+        return Err(FactorioInstanceNotFound {}.into());
     }
     let binary = if cfg!(windows) {
         "bin/x64/factorio.exe"
@@ -463,7 +481,7 @@ pub async fn start_factorio_client(
             "factorio binary missing at <bright-blue>{:?}</>",
             factorio_binary_path
         );
-        return Err(anyhow!("failed to find factorio binary"));
+        return Err(FactorioBinaryNotFound {}.into());
     }
     await_lock(instance_path.join(PathBuf::from(".lock")), silent).await?;
     let args = &[
@@ -499,7 +517,10 @@ pub async fn start_factorio_client(
         instance_name
     );
     let mut log_file = match write_logs {
-        true => Some(File::create(log_filename)?),
+        true => Some(
+            File::create(log_filename)
+                .into_diagnostic("factorio::process_control::could_not_create_file")?,
+        ),
         false => None,
     };
     // let handle = thread::spawn(move || {
@@ -516,7 +537,8 @@ pub async fn start_factorio_client(
     // });
     let is_client = server_host.is_some();
     let (tx, rx) = channel();
-    tx.send(())?;
+    tx.send(())
+        .into_diagnostic("factorio::output_parser::could_not_send")?;
     std::thread::spawn(move || {
         task::spawn(async move {
             let mut initialized = false;
@@ -547,6 +569,7 @@ pub async fn start_factorio_client(
             }
         });
     });
-    tx.send(())?;
+    tx.send(())
+        .into_diagnostic("factorio::output_parser::could_not_send")?;
     Ok(child)
 }

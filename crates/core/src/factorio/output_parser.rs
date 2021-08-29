@@ -10,6 +10,7 @@ use crate::types::{
     FactorioItemPrototype, FactorioRecipe, FactorioTile, PlayerChangedDistanceEvent,
     PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent, Pos, Position, Rect,
 };
+use miette::{DiagnosticResult, IntoDiagnostic};
 
 pub struct OutputParser {
     world: Arc<FactorioWorld>,
@@ -17,7 +18,7 @@ pub struct OutputParser {
 }
 
 impl OutputParser {
-    pub async fn parse(&mut self, _tick: u64, action: &str, rest: &str) -> anyhow::Result<()> {
+    pub async fn parse(&mut self, _tick: u64, action: &str, rest: &str) -> DiagnosticResult<()> {
         match action {
             "entities" => {
                 let colon_pos = rest.find(':').unwrap();
@@ -147,8 +148,12 @@ impl OutputParser {
                     let action_status = &rest[0..pos];
                     let rest = &rest[pos + 1..];
                     let action_id: u32 = match rest.find(' ') {
-                        Some(pos) => (&rest[0..pos]).parse()?,
-                        None => rest.parse()?,
+                        Some(pos) => (&rest[0..pos])
+                            .parse()
+                            .into_diagnostic("factorio::output_parser::could_not_parse")?,
+                        None => rest
+                            .parse()
+                            .into_diagnostic("factorio::output_parser::could_not_parse")?,
                     };
                     let result = match action_status {
                         "ok" => "ok",
@@ -156,21 +161,25 @@ impl OutputParser {
                             let pos = rest.find(' ').unwrap();
                             &rest[pos + 1..]
                         }
-                        _ => panic!("unexpected action_completed {}",  action_status),
+                        _ => panic!("unexpected action_completed {}", action_status),
                     };
                     self.world.actions.insert(action_id, String::from(result));
                 }
             }
             "on_script_path_request_finished" => {
                 let parts: Vec<&str> = rest.split('#').collect();
-                let id: u32 = parts[0].parse()?;
+                let id: u32 = parts[0]
+                    .parse()
+                    .into_diagnostic("factorio::output_parser::could_not_parse")?;
                 self.world.path_requests.insert(id, String::from(parts[1]));
             }
             "STATIC_DATA_END" => {
                 // handled by OutputReader
             }
             "on_player_left_game" => {
-                let player_id: u32 = rest.parse()?;
+                let player_id: u32 = rest
+                    .parse()
+                    .into_diagnostic("factorio::output_parser::could_not_parse")?;
                 self.world.remove_player(player_id)?;
                 // if let Some(websocket_server) = self.websocket_server.as_ref() {
                 //     websocket_server
@@ -208,7 +217,8 @@ impl OutputParser {
                 self.world.on_some_entity_deleted(entity)?;
             }
             "on_player_main_inventory_changed" => {
-                let event: PlayerChangedMainInventoryEvent = serde_json::from_str(rest)?;
+                let event: PlayerChangedMainInventoryEvent = serde_json::from_str(rest)
+                    .into_diagnostic("factorio::output_parser::could_not_parse_json")?;
                 let _player_id = event.player_id;
                 self.world.player_changed_main_inventory(event)?;
                 // if let Some(websocket_server) = self.websocket_server.as_ref() {
@@ -220,7 +230,8 @@ impl OutputParser {
                 // }
             }
             "on_player_changed_position" => {
-                let event: PlayerChangedPositionEvent = serde_json::from_str(rest)?;
+                let event: PlayerChangedPositionEvent = serde_json::from_str(rest)
+                    .into_diagnostic("factorio::output_parser::could_not_parse_json")?;
                 let _player_id = event.player_id;
                 self.world.player_changed_position(event)?;
                 // if let Some(websocket_server) = self.websocket_server.as_ref() {
@@ -232,7 +243,8 @@ impl OutputParser {
                 // }
             }
             "on_player_changed_distance" => {
-                let event: PlayerChangedDistanceEvent = serde_json::from_str(rest)?;
+                let event: PlayerChangedDistanceEvent = serde_json::from_str(rest)
+                    .into_diagnostic("factorio::output_parser::could_not_parse_json")?;
                 let _player_id = event.player_id;
                 self.world.player_changed_distance(event)?;
                 // if let Some(websocket_server) = self.websocket_server.as_ref() {
@@ -256,7 +268,7 @@ impl OutputParser {
         Ok(())
     }
 
-    pub fn on_init(&self) -> anyhow::Result<()> {
+    pub fn on_init(&self) -> DiagnosticResult<()> {
         self.world.entity_graph.connect()?;
         self.world.flow_graph.update()?;
         Ok(())

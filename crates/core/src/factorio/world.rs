@@ -8,6 +8,7 @@ use crate::types::{
 use async_std::sync::Mutex;
 use dashmap::DashMap;
 use image::RgbaImage;
+use miette::DiagnosticResult;
 use std::sync::Arc;
 
 pub struct FactorioWorld {
@@ -57,7 +58,7 @@ impl FactorioWorld {
     pub fn update_entity_prototypes(
         &self,
         entity_prototypes: Vec<FactorioEntityPrototype>,
-    ) -> anyhow::Result<()> {
+    ) -> DiagnosticResult<()> {
         for entity_prototype in entity_prototypes {
             self.entity_prototypes
                 .insert(entity_prototype.name.clone(), entity_prototype);
@@ -68,7 +69,7 @@ impl FactorioWorld {
     pub fn update_item_prototypes(
         &self,
         item_prototypes: Vec<FactorioItemPrototype>,
-    ) -> anyhow::Result<()> {
+    ) -> DiagnosticResult<()> {
         for item_prototype in item_prototypes {
             self.item_prototypes
                 .insert(item_prototype.name.clone(), item_prototype);
@@ -76,12 +77,15 @@ impl FactorioWorld {
         Ok(())
     }
 
-    pub fn remove_player(&self, player_id: u32) -> anyhow::Result<()> {
+    pub fn remove_player(&self, player_id: u32) -> DiagnosticResult<()> {
         self.players.remove(&player_id);
         Ok(())
     }
 
-    pub fn player_changed_distance(&self, event: PlayerChangedDistanceEvent) -> anyhow::Result<()> {
+    pub fn player_changed_distance(
+        &self,
+        event: PlayerChangedDistanceEvent,
+    ) -> DiagnosticResult<()> {
         let player = if self.players.contains_key(&event.player_id) {
             let existing_player = self.players.get(&event.player_id).unwrap();
             FactorioPlayer {
@@ -111,7 +115,10 @@ impl FactorioWorld {
         Ok(())
     }
 
-    pub fn player_changed_position(&self, event: PlayerChangedPositionEvent) -> anyhow::Result<()> {
+    pub fn player_changed_position(
+        &self,
+        event: PlayerChangedPositionEvent,
+    ) -> DiagnosticResult<()> {
         let player = if self.players.contains_key(&event.player_id) {
             let existing_player = self.players.get(&event.player_id).unwrap();
             FactorioPlayer {
@@ -136,24 +143,24 @@ impl FactorioWorld {
         Ok(())
     }
 
-    pub fn update_force(&self, force: FactorioForce) -> anyhow::Result<()> {
+    pub fn update_force(&self, force: FactorioForce) -> DiagnosticResult<()> {
         let name = force.name.clone();
         self.forces.insert(name, force);
         Ok(())
     }
 
-    pub fn on_some_entity_updated(&self, _entity: FactorioEntity) -> anyhow::Result<()> {
+    pub fn on_some_entity_updated(&self, _entity: FactorioEntity) -> DiagnosticResult<()> {
         // TODO: update entity direction
         Ok(())
     }
 
-    pub fn on_some_entity_created(&self, entity: FactorioEntity) -> anyhow::Result<()> {
+    pub fn on_some_entity_created(&self, entity: FactorioEntity) -> DiagnosticResult<()> {
         info!("XXX on_some_entity_created {:?}", &entity);
         self.entity_graph.add(vec![entity], None)?;
         Ok(())
     }
 
-    pub fn on_some_entity_deleted(&self, entity: FactorioEntity) -> anyhow::Result<()> {
+    pub fn on_some_entity_deleted(&self, entity: FactorioEntity) -> DiagnosticResult<()> {
         self.entity_graph.remove(&entity)?;
         Ok(())
     }
@@ -161,7 +168,7 @@ impl FactorioWorld {
     pub fn player_changed_main_inventory(
         &self,
         event: PlayerChangedMainInventoryEvent,
-    ) -> anyhow::Result<()> {
+    ) -> DiagnosticResult<()> {
         let player = if self.players.contains_key(&event.player_id) {
             let existing_player = self.players.get(&event.player_id).unwrap();
             FactorioPlayer {
@@ -186,32 +193,32 @@ impl FactorioWorld {
         Ok(())
     }
 
-    pub fn update_recipes(&self, recipes: Vec<FactorioRecipe>) -> anyhow::Result<()> {
+    pub fn update_recipes(&self, recipes: Vec<FactorioRecipe>) -> DiagnosticResult<()> {
         for recipe in recipes {
             self.recipes.insert(recipe.name.clone(), recipe);
         }
         Ok(())
     }
 
-    pub fn update_graphics(&self, graphics: Vec<FactorioGraphic>) -> anyhow::Result<()> {
+    pub fn update_graphics(&self, graphics: Vec<FactorioGraphic>) -> DiagnosticResult<()> {
         for graphic in graphics {
             self.graphics.insert(graphic.entity_name.clone(), graphic);
         }
         Ok(())
     }
 
-    pub fn update_chunk_tiles(&self, tiles: Vec<FactorioTile>) -> anyhow::Result<()> {
+    pub fn update_chunk_tiles(&self, tiles: Vec<FactorioTile>) -> DiagnosticResult<()> {
         self.entity_graph.add_tiles(tiles, None)?; // FIXME: add clear rect from chunk_position
         Ok(())
     }
 
     #[allow(clippy::map_clone)]
-    pub fn update_chunk_entities(&self, entities: Vec<FactorioEntity>) -> anyhow::Result<()> {
+    pub fn update_chunk_entities(&self, entities: Vec<FactorioEntity>) -> DiagnosticResult<()> {
         self.entity_graph.add(entities, None)?; // FIXME: add clear rect
         Ok(())
     }
 
-    pub fn import(&mut self, world: Arc<FactorioWorld>) -> anyhow::Result<()> {
+    pub fn import(&mut self, world: Arc<FactorioWorld>) -> DiagnosticResult<()> {
         for player in world.players.iter() {
             self.players.insert(player.player_id, player.clone());
         }

@@ -1,5 +1,4 @@
-#[macro_use]
-extern crate anyhow;
+extern crate miette;
 #[macro_use]
 extern crate paris;
 

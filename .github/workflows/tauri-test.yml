@@ -43,3 +43,6 @@ jobs:
         run: cd app; yarn cargo:test
       - name: 🚧 build rust
         run: cd app; yarn tauri:build
+      - name: ✅ run rust lint
+        continue-on-error: true
+        run: cd app; yarn cargo:clippy

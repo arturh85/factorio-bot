@@ -1,8 +1,6 @@
 use indicatif::HumanDuration;
 use miette::{DiagnosticResult, IntoDiagnostic};
-use paris::Logger;
 use std::fs;
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -133,6 +131,8 @@ pub fn extract_archive(
 
     #[cfg(unix)]
     {
+        use paris::Logger;
+        use std::fs::File;
         use std::str::FromStr;
         let archive_path = PathBuf::from_str(archive)
             .into_diagnostic("factorio::output_parser::could_not_canonicalize")?;

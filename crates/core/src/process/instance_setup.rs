@@ -57,7 +57,7 @@ pub async fn setup_factorio_instance(
         .read_dir()
         .into_diagnostic("factorio::instance_setup::could_not_read_instance_dir")?;
     if readdir.count() == 0 {
-        extract_archive(factorio_archive_path, instance_path, &workspace_path)?;
+        extract_archive(factorio_archive_path, instance_path, workspace_path)?;
     }
     #[allow(unused_mut)]
     let mut workspace_mods_path = workspace_path.join(PathBuf::from("mods"));

@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-pub fn symlink(original: &PathBuf, link: &PathBuf) -> DiagnosticResult<()> {
+pub fn symlink(original: &Path, link: &Path) -> DiagnosticResult<()> {
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(original, link)
@@ -31,7 +31,7 @@ pub fn symlink(original: &PathBuf, link: &PathBuf) -> DiagnosticResult<()> {
 pub fn extract_archive(
     archive: &str,
     target_directory: &Path,
-    workspace_data_path: &PathBuf,
+    workspace_data_path: &Path,
 ) -> DiagnosticResult<()> {
     let started = Instant::now();
 

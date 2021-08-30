@@ -58,10 +58,10 @@ thiserror = "^1.0"
 [target.'cfg(windows)'.dependencies]
 process_list = "^0.2"
 heim = {version = "0.1.0-beta.3", default-features = false, features = ["process"]}
-windows = "^0.18"
+windows = "^0.19"
 
 [target.'cfg(windows)'.build-dependencies]
-windows = "^0.18"
+windows = "^0.19"
 
 [build-dependencies]
 serde = { version = "^1.0", features = [ "derive" ] }

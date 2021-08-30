@@ -10,7 +10,7 @@ Factorio Bot is a bot platform for the game
 [Factorio](https://www.factorio.com) inspired by [factorio-bot](https://github.com/Windfisch/factorio-bot/)
 
 Goals / Use Cases:
-- TAS (Tool Assisted Speedrun) to beat the world record with enough bots to share the workload efficiently
+- TAS (Tool Assisted Speedrun) to beat the world record with many bots which share the workload efficiently
 - Learning Environment to train Machine Learning algorithms within Factorio
 - Playground for Factorio Experiments
 
@@ -23,16 +23,22 @@ Goals / Use Cases:
 - [Factorio Bot 0.1.0: Research automation with 1 Bot in 12:33](https://youtu.be/6KXYuVDRZ-I)
 
 ## Features
-- [x] extract factorio .zip/tar.xz and symlink bridge mod
-- [x] start Factorio server and/or one or multiple clients (unrestricted) 
-- [x] read factorio recipes/entity prototypes/item prototypes/graphics
-- [ ] read map contents by chunk for leaflet based Map View
+- [x] sets up & starts factorio server & configurable number of clients
+- [x] resizes Factorio client windows so the whole screen is equally used
+- [x] integrated lua editor which allows scripting of bots 
+- [x] uses included factorio mod to read factorio instance ...
+  - [x] recipes
+  - [x] entity prototypes
+  - [x] item prototypes
+  - [x] placed entities
 - Build Graphs of:
-  - [ ] Entity Connections with distance based weights
-  - [ ] Flow Connections with flow rate per second for each belt side/resource
-  - [ ] Bot Task Dependencies with time estimate based weights 
-- [ ] Use whatever mods you want
-- [x] should work on Win/Mac/Linux, not tested on Mac
+  - [ ] Entity Connections with distance based weights (currently broken)
+  - [ ] Flow Connections with flow rate per second for each belt side/resource (currently broken)
+  - [ ] Bot Task Dependencies with time estimate based weights (currently broken)
+- [ ] (optional) REST API Endpoints with OpenAPI specs
+- [ ] read map contents by chunk for leaflet based Map View (currently broken)
+- [x] use whatever mods you want, configured in central location for all instances
+- [x] should work on Win/Mac/Linux (not tested on Mac)
 - [x] MIT licenced
 
 # Installation

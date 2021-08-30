@@ -234,7 +234,8 @@ pub async fn setup_factorio_instance(
         }
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(&workspace_mods_path, &mods_path)?;
+            std::os::unix::fs::symlink(&workspace_mods_path, &mods_path)
+                .into_diagnostic("factorio::instance_setup::could_not_create_symlink")?;
         }
         #[cfg(windows)]
         {
@@ -270,7 +271,8 @@ pub async fn setup_factorio_instance(
         }
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(&workspace_data_path, &instance_data_path)?;
+            std::os::unix::fs::symlink(&workspace_data_path, &instance_data_path)
+                .into_diagnostic("factorio::instance_setup::could_not_create_symlink")?;
         }
         #[cfg(windows)]
         {

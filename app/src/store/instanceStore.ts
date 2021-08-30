@@ -25,6 +25,9 @@ export const useInstanceStore = defineStore({
         }
     },
     actions: {
+        async checkInstanceState() {
+            this.started = await invoke('is_instance_started')
+        },
         async startInstances() {
             if(this.started) {
                 throw new Error('already started')

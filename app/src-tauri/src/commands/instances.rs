@@ -60,6 +60,13 @@ pub async fn start_instances(
 }
 
 #[tauri::command]
+pub async fn is_instance_started(
+  instance_state: State<'_, Arc<RwLock<Option<InstanceState>>>>,
+) -> Result<bool, String> {
+  Ok(instance_state.read().await.is_some())
+}
+
+#[tauri::command]
 pub async fn stop_instances(
   app_handle: AppHandle<Wry>,
   instance_state: State<'_, Arc<RwLock<Option<InstanceState>>>>,

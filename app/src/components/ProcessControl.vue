@@ -3,8 +3,8 @@ import {computed} from 'vue';
 import {useInstanceStore} from '@/store/instanceStore';
 import Button from 'primevue/button';
 import { useToast } from 'primevue/usetoast';
-import Checkbox from 'primevue/checkbox';
 import {useAppStore} from '@/store/appStore';
+import ToggleButton from 'primevue/togglebutton';
 
 
 const instanceStore = useInstanceStore()
@@ -57,7 +57,7 @@ const stopInstances = async() => {
 </script>
 
 <template>
-  <Checkbox v-model="recreateLevel" :binary="true"  label="Recreate Level" />
+  <ToggleButton v-model="recreateLevel" onLabel="Recreate Level" offLabel="Use existing Level" onIcon="pi pi-check" offIcon="pi pi-times" />
   <Button :icon="isStarted ? 'pi pi-check' : ''"
           :label="buttonLabel"
           :class="isStarted ? 'p-button-success' : 'p-button-error' + ' p-mr-2 p-mb-2'"

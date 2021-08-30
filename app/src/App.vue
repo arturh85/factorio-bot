@@ -39,6 +39,7 @@ import {useAppStore} from '@/store/appStore';
 import AppConfig from '@/AppConfig.vue';
 import Toast from 'primevue/toast';
 import {useRestApiStore} from '@/store/restapiStore';
+import {useInstanceStore} from '@/store/instanceStore';
 
 export default {
   data() {
@@ -161,6 +162,8 @@ export default {
     }
   },
   async created() {
+    const instanceStore = useInstanceStore()
+    await instanceStore.checkInstanceState()
     const appStore = useAppStore()
     await appStore.maximizeWindow()
     const settings = await appStore.loadSettings()

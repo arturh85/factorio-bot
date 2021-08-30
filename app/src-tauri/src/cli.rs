@@ -1,5 +1,5 @@
 use clap::{App, Arg};
-use factorio_bot_core::factorio::process_control::start_factorio;
+use factorio_bot_core::process::process_control::start_factorio;
 use factorio_bot_core::settings::APP_SETTINGS_DEFAULT;
 
 pub async fn handle_cli() {

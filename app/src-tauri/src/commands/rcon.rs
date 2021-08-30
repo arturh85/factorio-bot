@@ -1,7 +1,7 @@
 #![allow(clippy::module_name_repetitions)]
 use crate::commands::ERR_TO_STRING;
 use async_std::sync::{Arc, RwLock};
-use factorio_bot_core::factorio::process_control::InstanceState;
+use factorio_bot_core::process::process_control::InstanceState;
 use tauri::State;
 
 #[tauri::command]

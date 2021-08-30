@@ -5,7 +5,7 @@
 )]
 use crate::constants;
 use async_std::sync::{Arc, RwLock};
-use factorio_bot_core::factorio::process_control::{start_factorio, InstanceState};
+use factorio_bot_core::process::process_control::{start_factorio, InstanceState};
 use factorio_bot_core::settings::AppSettings;
 use tauri::{AppHandle, Manager, State, Wry};
 

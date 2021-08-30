@@ -1,21 +1,19 @@
+use async_std::fs::create_dir;
+use paris::Logger;
+use serde_json::Value;
 use std::fs;
 use std::fs::{read_to_string, File};
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::time::Instant;
-
-use async_std::fs::create_dir;
-use indicatif::HumanDuration;
-use paris::Logger;
-use serde_json::Value;
 
 use crate::errors::*;
-use crate::factorio::output_reader::read_output;
-use crate::factorio::process_control::{await_lock, FactorioStartCondition};
 use crate::factorio::rcon::RconSettings;
 use crate::factorio::util::{read_to_value, write_value_to};
+use crate::process::io_utils::{extract_archive, symlink};
+use crate::process::output_reader::read_output;
+use crate::process::process_control::{await_lock, FactorioStartCondition};
 use miette::{DiagnosticResult, IntoDiagnostic};
 
 #[cfg(not(debug_assertions))]
@@ -59,138 +57,7 @@ pub async fn setup_factorio_instance(
         .read_dir()
         .into_diagnostic("factorio::instance_setup::could_not_read_instance_dir")?;
     if readdir.count() == 0 {
-        let started = Instant::now();
-
-        #[cfg(windows)]
-        {
-            use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-            let file = fs::File::open(factorio_archive_path)
-                .into_diagnostic("factorio::instance_setup::could_not_open_archive_path")?;
-            info!(
-                "Extracting <bright-blue>{}</> to <magenta>{}</>",
-                &factorio_archive_path,
-                instance_path.to_str().unwrap()
-            );
-
-            let mut archive = zip::ZipArchive::new(file)
-                .into_diagnostic("factorio::instance_setup::could_not_open_zip")?;
-
-            let mut files: Vec<String> = vec![];
-            for i in 0..archive.len() {
-                files.push(
-                    archive
-                        .by_index(i)
-                        .into_diagnostic("factorio::instance_setup::could_not_read_zip_entry")?
-                        .name()
-                        .into(),
-                );
-            }
-            if workspace_data_path.exists() {
-                files = files
-                    .into_iter()
-                    .filter(|file| !file.contains("/data/"))
-                    .collect();
-            }
-            let bar = ProgressBar::new(files.len() as u64);
-            bar.set_draw_target(ProgressDrawTarget::stdout());
-            bar.set_style(
-                ProgressStyle::default_spinner().template("{msg}\n{wide_bar} {pos}/{len}"),
-            );
-            for file in files {
-                let message = format!("extracting {}", &file);
-                bar.set_message(message);
-                bar.tick();
-                // output_path is like Factorio_0.18.36\bin\x64\factorio.exe
-                let output_path = PathBuf::from(&file);
-                // output_path is like bin\x64\factorio.exe
-                let output_path = output_path
-                    .strip_prefix(output_path.components().next().unwrap())
-                    .into_diagnostic("factorio::instance_setup::strip_prefix")?;
-                // output_path is like $instance_path\bin\x64\factorio.exe
-                let output_path = PathBuf::from(instance_path).join(PathBuf::from(output_path));
-
-                if (&*file).ends_with('/') {
-                    fs::create_dir_all(&output_path)
-                        .into_diagnostic("factorio::instance_setup::could_not_create_unpack_dir")?;
-                } else {
-                    if let Some(p) = output_path.parent() {
-                        if !p.exists() {
-                            fs::create_dir_all(&p).into_diagnostic(
-                                "factorio::instance_setup::could_not_create_dir",
-                            )?;
-                        }
-                    }
-
-                    let mut outfile = fs::File::create(&output_path).unwrap();
-                    let mut file = archive.by_name(&file).unwrap();
-                    std::io::copy(&mut file, &mut outfile).unwrap();
-                }
-                bar.inc(1);
-            }
-            if !workspace_data_path.exists() {
-                let instance_data_path = instance_path.join(PathBuf::from("data"));
-                fs::rename(&instance_data_path, &workspace_data_path)
-                    .into_diagnostic("factorio::instance_setup::could_not_rename_data")?;
-            }
-            bar.finish();
-        }
-
-        #[cfg(unix)]
-        {
-            let archive_path = PathBuf::from_str(factorio_archive_path)
-                .into_diagnostic("factorio::output_parser::could_not_canonicalize")?;
-            let tar_path = archive_path.with_extension("");
-            if !tar_path.exists() {
-                let mut logger = Logger::new();
-                logger.loading(format!(
-                    "Uncompressing <bright-blue>{}</> to <magenta>{}</> ...",
-                    &archive_path.to_str().unwrap(),
-                    tar_path.to_str().unwrap()
-                ));
-
-                let tar_gz = File::open(&archive_path)
-                    .into_diagnostic("factorio::output_parser::could_not_canonicalize")?;
-                let tar = xz2::read::XzDecoder::new(tar_gz);
-                let mut archive = tar::Archive::new(tar);
-                archive.unpack(&tar_path).expect("failed to decompress xz");
-                logger.success(format!(
-                    "Uncompressed <bright-blue>{}</> to <magenta>{}</>",
-                    &archive_path.to_str().unwrap(),
-                    tar_path.to_str().unwrap()
-                ));
-            }
-            let mut logger = Logger::new();
-            logger.loading(format!(
-                "Extracting <bright-blue>{}</> to <magenta>{}</> ...",
-                &tar_path.to_str().unwrap(),
-                workspace_path.to_str().unwrap()
-            ));
-            // FIXME: what did this do ...?
-            // let mut archive = archiver_rs::Tar::open(&tar_path).unwrap();
-            // archive.extract(workspace_path).expect("failed to extract");
-            logger.success("Extraction finished");
-
-            let extracted_path = workspace_path.join(PathBuf::from("factorio"));
-            if extracted_path.exists() {
-                std::fs::remove_dir(&instance_path).expect("failed to delete empty folder");
-                std::fs::rename(&extracted_path, instance_path).expect("failed to rename");
-                success!("Renamed {:?} to {:?}", &extracted_path, instance_path);
-            } else {
-                error!("Failed to find {:?}", &extracted_path);
-            }
-
-            let instance_data_path = instance_path.join(PathBuf::from("data"));
-            if !workspace_data_path.exists() {
-                fs::rename(&instance_data_path, &workspace_data_path)
-                    .into_diagnostic("factorio::output_parser::could_not_canonicalize")?;
-            } else {
-                std::fs::remove_dir_all(&instance_data_path).expect("failed to delete data folder");
-            }
-        }
-        info!(
-            "Extracting took <yellow>{}</>",
-            HumanDuration(started.elapsed())
-        );
+        extract_archive(factorio_archive_path, instance_path, &workspace_data_path)?;
     }
     #[allow(unused_mut)]
     let mut workspace_mods_path = workspace_path.join(PathBuf::from("mods"));
@@ -232,32 +99,7 @@ pub async fn setup_factorio_instance(
         if !silent {
             info!("Creating Symlink for <bright-blue>{:?}</>", &mods_path);
         }
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(&workspace_mods_path, &mods_path)
-                .into_diagnostic("factorio::instance_setup::could_not_create_symlink")?;
-        }
-        #[cfg(windows)]
-        {
-            let status = runas::Command::new("cmd.exe")
-                .arg("/C")
-                .arg("mklink")
-                .arg("/D")
-                .arg(&mods_path)
-                .arg(&workspace_mods_path)
-                .status()
-                .into_diagnostic("factorio::instance_setup::could_not_create_symlink")?;
-            // std::os::windows::fs::symlink_dir(&data_mods_path, &mods_path)?;
-            if !status.success() {
-                // return Err(anyhow!(
-                //     "failed to create factorio mods symlink: {:?} -> {:?} ... {}",
-                //     &mods_path,
-                //     &workspace_mods_path,
-                //     status.to_string()
-                // ));
-                return Err(ModSymlinkFailed {}.into());
-            }
-        }
+        symlink(&workspace_mods_path, &mods_path)?;
     }
     let instance_data_path = instance_path.join(PathBuf::from("data"));
     if !instance_data_path.exists() && workspace_data_path.exists() {
@@ -269,32 +111,7 @@ pub async fn setup_factorio_instance(
                 &instance_data_path
             );
         }
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(&workspace_data_path, &instance_data_path)
-                .into_diagnostic("factorio::instance_setup::could_not_create_symlink")?;
-        }
-        #[cfg(windows)]
-        {
-            let status = runas::Command::new("cmd.exe")
-                .arg("/C")
-                .arg("mklink")
-                .arg("/D")
-                .arg(&instance_data_path)
-                .arg(&workspace_data_path)
-                .status()
-                .into_diagnostic("factorio::instance_setup::could_not_create_symlink")?;
-            // std::os::windows::fs::symlink_dir(&workspace_data_path, &instance_data_path)?;
-            if !status.success() {
-                // return Err(anyhow!(
-                //     "failed to create factorio data symlink: {:?} -> {:?} ... {}",
-                //     &instance_data_path,
-                //     &workspace_data_path,
-                //     status.to_string()
-                // ));
-                return Err(ModSymlinkFailed {}.into());
-            }
-        }
+        symlink(&workspace_data_path, &instance_data_path)?;
     }
     // delete server/script-output/*
     // let script_output_put = instance_path.join(PathBuf::from("script-output"));

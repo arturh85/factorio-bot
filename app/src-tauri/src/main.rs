@@ -12,7 +12,7 @@ mod constants;
 use async_std::sync::{Arc, RwLock};
 use async_std::task::JoinHandle;
 use factorio_bot::cli::handle_cli;
-use factorio_bot_core::factorio::process_control::InstanceState;
+use factorio_bot_core::process::process_control::InstanceState;
 use factorio_bot_core::settings::AppSettings;
 use miette::{DiagnosticResult, IntoDiagnostic};
 use std::borrow::Cow;

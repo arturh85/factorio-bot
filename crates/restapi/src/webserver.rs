@@ -1,5 +1,5 @@
 use async_std::sync::{Arc, RwLock};
-use factorio_bot_core::factorio::process_control::InstanceState;
+use factorio_bot_core::process::process_control::InstanceState;
 use factorio_bot_core::settings::AppSettings;
 use miette::DiagnosticResult;
 use rocket::data::{Limits, ToByteUnit};

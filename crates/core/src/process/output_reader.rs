@@ -7,10 +7,10 @@ use std::sync::Arc;
 // use crate::factorio::ws::FactorioWebSocketServer;
 // use tokio::sync::mpsc::channel;
 
-use crate::factorio::output_parser::OutputParser;
-use crate::factorio::process_control::FactorioStartCondition;
 use crate::factorio::rcon::{FactorioRcon, RconSettings};
 use crate::factorio::world::FactorioWorld;
+use crate::process::output_parser::OutputParser;
+use crate::process::process_control::FactorioStartCondition;
 use miette::{DiagnosticResult, IntoDiagnostic};
 use std::sync::mpsc::channel;
 

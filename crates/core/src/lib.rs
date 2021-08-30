@@ -23,5 +23,6 @@ extern crate schemars;
 pub mod draw;
 pub mod errors;
 pub mod factorio;
+pub mod process;
 pub mod settings;
 pub mod types;

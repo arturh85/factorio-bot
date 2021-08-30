@@ -1,6 +1,6 @@
 use crate::error::{ErrorResponse, RestApiResult};
 use async_std::sync::{Arc, RwLock};
-use factorio_bot_core::factorio::process_control::InstanceState;
+use factorio_bot_core::process::process_control::InstanceState;
 use factorio_bot_core::types::{AreaFilter, FactorioEntity};
 use rocket::serde::json::Json;
 use rocket::State;

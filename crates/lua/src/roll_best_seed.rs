@@ -7,11 +7,11 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use crate::planner::Planner;
-use factorio_bot_core::factorio::instance_setup::setup_factorio_instance;
-use factorio_bot_core::factorio::process_control::{start_factorio_server, FactorioStartCondition};
 use factorio_bot_core::factorio::rcon::{FactorioRcon, RconSettings};
 use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::process::instance_setup::setup_factorio_instance;
+use factorio_bot_core::process::process_control::{start_factorio_server, FactorioStartCondition};
 use factorio_bot_core::settings::AppSettings;
 use factorio_bot_core::types::{AreaFilter, FactorioEntity, Position};
 use miette::{DiagnosticResult, IntoDiagnostic};

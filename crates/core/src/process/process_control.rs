@@ -171,28 +171,7 @@ pub async fn await_lock(lock_path: PathBuf, silent: bool) -> DiagnosticResult<()
                     error!("Factorio instance already running!");
                     #[cfg(windows)]
                     {
-                        let mut kill_list: Vec<u32> = vec![];
-                        process_list::for_each_process(|id, name| {
-                            if let Some(name) = name.to_str() {
-                                if name.contains("factorio.exe") {
-                                    info!("killing process {}: \"{}\"", id, name);
-                                    kill_list.push(id);
-                                }
-                            }
-                        })
-                        .into_diagnostic(
-                            "factorio::instance_setup::could_not_process_list::for_each_process",
-                        )?;
-                        for id in kill_list {
-                            heim::process::get(id)
-                                .await
-                                .into_diagnostic("factorio::instance_setup::could_not_get_process")?
-                                .kill()
-                                .await
-                                .into_diagnostic(
-                                    "factorio::instance_setup::could_not_kill_process",
-                                )?;
-                        }
+                        crate::process::io_utils::kill_process("factorio.exe").await?;
                     }
                     #[cfg(unix)]
                     {

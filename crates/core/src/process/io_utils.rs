@@ -5,6 +5,29 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+#[cfg(target_os = "windows")]
+pub async fn kill_process(process_name: &str) -> DiagnosticResult<()> {
+    let mut kill_list: Vec<u32> = vec![];
+    process_list::for_each_process(|id, name| {
+        if let Some(name) = name.to_str() {
+            if name.contains(process_name) {
+                info!("killing process {}: \"{}\"", id, name);
+                kill_list.push(id);
+            }
+        }
+    })
+    .into_diagnostic("factorio::instance_setup::could_not_process_list::for_each_process")?;
+    for id in kill_list {
+        heim::process::get(id)
+            .await
+            .into_diagnostic("factorio::instance_setup::could_not_get_process")?
+            .kill()
+            .await
+            .into_diagnostic("factorio::instance_setup::could_not_kill_process")?;
+    }
+    Ok(())
+}
+
 pub fn symlink(original: &Path, link: &Path) -> DiagnosticResult<()> {
     #[cfg(unix)]
     {

@@ -47,7 +47,7 @@ export const useInstanceStore = defineStore({
                 console.error('failed to start instances', err)
                 this.starting = false
                 this.failed = true
-                throw new Error(err)
+                throw new Error(err as string)
             }
         },
         async stopInstances() {
@@ -64,7 +64,7 @@ export const useInstanceStore = defineStore({
                 console.error('failed to stop instances', err)
                 this.stopping = false
                 this.failed = true
-                throw new Error(err)
+                throw new Error(err as string)
             }
         }
     }

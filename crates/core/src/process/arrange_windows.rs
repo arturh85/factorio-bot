@@ -1,5 +1,4 @@
 use miette::{DiagnosticResult, IntoDiagnostic};
-use std::time::Duration;
 
 /// arrange factorio windows to fill the primary display
 pub async fn arrange_windows(client_count: u8) -> DiagnosticResult<()> {
@@ -15,7 +14,7 @@ pub async fn arrange_windows(client_count: u8) -> DiagnosticResult<()> {
                 SM_CYMAXIMIZED,
             },
         };
-        async_std::task::sleep(Duration::from_secs(client_count as u64)).await; // wait for window to be visible, hopefully
+        async_std::task::sleep(std::time::Duration::from_secs(client_count as u64)).await; // wait for window to be visible, hopefully
         static mut HWNDS: Vec<HWND> = Vec::new();
         extern "system" fn enum_window(window: HWND, _: LPARAM) -> BOOL {
             unsafe {

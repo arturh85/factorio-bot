@@ -1,7 +1,8 @@
-use crate::errors::*;
 use indicatif::HumanDuration;
 use miette::{DiagnosticResult, IntoDiagnostic};
+use paris::Logger;
 use std::fs;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -45,7 +46,7 @@ pub fn symlink(original: &Path, link: &Path) -> DiagnosticResult<()> {
             .status()
             .into_diagnostic("factorio::io::could_not_create_symlink")?;
         if !status.success() {
-            return Err(ModSymlinkFailed {}.into());
+            return Err(crate::errors::ModSymlinkFailed {}.into());
         }
     }
     Ok(())
@@ -54,9 +55,10 @@ pub fn symlink(original: &Path, link: &Path) -> DiagnosticResult<()> {
 pub fn extract_archive(
     archive: &str,
     target_directory: &Path,
-    workspace_data_path: &Path,
+    workspace_path: &Path,
 ) -> DiagnosticResult<()> {
     let started = Instant::now();
+    let workspace_data_path = workspace_path.join(PathBuf::from("data"));
 
     #[cfg(windows)]
     {
@@ -131,6 +133,7 @@ pub fn extract_archive(
 
     #[cfg(unix)]
     {
+        use std::str::FromStr;
         let archive_path = PathBuf::from_str(archive)
             .into_diagnostic("factorio::output_parser::could_not_canonicalize")?;
         let tar_path = archive_path.with_extension("");

@@ -54,7 +54,7 @@ pub async fn load_scripts_in_directory(
     {
       std::fs::create_dir_all(&workspace_plans_path)
         .map_err(|e| String::from("error: ") + &e.to_string())?;
-      if let Err(err) = factorio_bot_core::factorio::instance_setup::PLANS_CONTENT
+      if let Err(err) = factorio_bot_core::process::instance_setup::PLANS_CONTENT
         .extract(workspace_plans_path.clone())
       {
         error!("failed to extract static mods content: {:?}", err);
@@ -126,7 +126,7 @@ pub async fn load_script(
     {
       std::fs::create_dir_all(&workspace_plans_path)
         .map_err(|e| String::from("error: ") + &e.to_string())?;
-      if let Err(err) = factorio_bot_core::factorio::instance_setup::PLANS_CONTENT
+      if let Err(err) = factorio_bot_core::process::instance_setup::PLANS_CONTENT
         .extract(workspace_plans_path.clone())
       {
         error!("failed to extract static mods content: {:?}", err);

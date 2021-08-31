@@ -175,7 +175,7 @@ pub async fn await_lock(lock_path: PathBuf, silent: bool) -> DiagnosticResult<()
                     }
                     #[cfg(unix)]
                     {
-                        return Err(FactorioAlreadyStarted {})?;
+                        return Err(FactorioAlreadyStarted {}.into());
                     }
                 }
             }

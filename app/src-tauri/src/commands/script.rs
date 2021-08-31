@@ -5,6 +5,7 @@ use factorio_bot_core::process::process_control::InstanceState;
 use factorio_bot_core::settings::AppSettings;
 use factorio_bot_core::types::PrimeVueTreeNode;
 use factorio_bot_lua::planner::Planner;
+use miette::DiagnosticResult;
 use std::path::{Path, PathBuf};
 use tauri::State;
 
@@ -24,15 +25,11 @@ pub async fn execute_script(
       let (stdout, stderr) = planner
         .plan(code, app_settings.read().await.client_count as u32)
         .map_err(ERR_TO_STRING)?;
-      Ok((stdout, stderr))
-    } else {
-      warn!("execute_script called without world instance");
-      Err("execute_script called without world instance".into())
+      return Ok((stdout, stderr));
     }
-  } else {
-    warn!("execute_script called without running instance");
-    Err("execute_script called without world instance".into())
   }
+  warn!("execute_script called without running instance");
+  Err("execute_script called without world instance".into())
 }
 
 #[tauri::command]
@@ -43,31 +40,7 @@ pub async fn load_scripts_in_directory(
   let app_settings = &app_settings.read().await;
   let workspace_path = app_settings.workspace_path.to_string();
   let workspace_path = Path::new(&workspace_path);
-  #[allow(unused_mut)]
-  let mut workspace_plans_path = workspace_path.join(PathBuf::from("scripts"));
-  if !workspace_plans_path.exists() {
-    #[cfg(debug_assertions)]
-    {
-      workspace_plans_path = PathBuf::from("../../scripts");
-    }
-    #[cfg(not(debug_assertions))]
-    {
-      std::fs::create_dir_all(&workspace_plans_path)
-        .map_err(|e| String::from("error: ") + &e.to_string())?;
-      if let Err(err) = factorio_bot_core::process::instance_setup::PLANS_CONTENT
-        .extract(workspace_plans_path.clone())
-      {
-        error!("failed to extract static mods content: {:?}", err);
-        return Err("failed to extract mods content to workspace".into());
-      }
-    }
-    if !workspace_plans_path.exists() {
-      return Err(format!(
-        "missing scripts/ folder from working directory: {:?}",
-        workspace_plans_path
-      ));
-    }
-  }
+  let workspace_plans_path = prepare_workspace_scripts(workspace_path)?;
 
   if path.contains("..") {
     return Err("invalid path".into());
@@ -115,6 +88,23 @@ pub async fn load_script(
   let app_settings = &app_settings.read().await;
   let workspace_path = app_settings.workspace_path.to_string();
   let workspace_path = Path::new(&workspace_path);
+  let workspace_plans_path = prepare_workspace_scripts(workspace_path)?;
+  if path.contains("..") {
+    return Err("invalid path".into());
+  }
+
+  let path = PathBuf::from(&path[1..]);
+  let dir_path = workspace_plans_path.join(&path);
+  if !dir_path.exists() {
+    return Err("path not found".into());
+  }
+  if !dir_path.is_file() {
+    return Err("path not directory".into());
+  }
+  std::fs::read_to_string(dir_path).map_err(|e| String::from("error: ") + &e.to_string())
+}
+
+fn prepare_workspace_scripts(workspace_path: &Path) -> Result<PathBuf, String> {
   #[allow(unused_mut)]
   let mut workspace_plans_path = workspace_path.join(PathBuf::from("scripts"));
   if !workspace_plans_path.exists() {
@@ -140,18 +130,5 @@ pub async fn load_script(
       ));
     }
   }
-
-  if path.contains("..") {
-    return Err("invalid path".into());
-  }
-
-  let path = PathBuf::from(&path[1..]);
-  let dir_path = workspace_plans_path.join(&path);
-  if !dir_path.exists() {
-    return Err("path not found".into());
-  }
-  if !dir_path.is_file() {
-    return Err("path not directory".into());
-  }
-  std::fs::read_to_string(dir_path).map_err(|e| String::from("error: ") + &e.to_string())
+  Ok(workspace_plans_path)
 }

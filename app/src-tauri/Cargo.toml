@@ -18,7 +18,7 @@ factorio-bot-core = { path = "../../crates/core" }
 factorio-bot-restapi = { path = "../../crates/restapi" }
 factorio-bot-lua = { path = "../../crates/lua" }
 serde = { version = "^1.0", features = [ "derive" ] }
-tauri = { version = "^1.0.0-beta.5", features = ["dialog-all", "dialog-open", "fs-read-binary-file", "fs-read-dir", "fs-read-text-file", "fs-write-file", "menu", "shell-execute", "shell-open"] }
+tauri = { version = "1.0.0-beta.5", features = ["dialog-all", "dialog-open", "fs-read-binary-file", "fs-read-dir", "fs-read-text-file", "fs-write-file", "menu", "shell-execute", "shell-open"] }
 toml = "^0.5"
 clap = "^2.33"
 open = "^2.0"
@@ -32,7 +32,7 @@ thiserror = "^1.0"
 [build-dependencies]
 typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"] }
 factorio-bot-core = { path = "../../crates/core" }
-tauri-build = { version = "^1.0.0-beta.3" }
+tauri-build = { version = "1.0.0-beta.3" }
 serde = { version = "^1.0", features = [ "derive" ] }
 
 [features]

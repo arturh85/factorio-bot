@@ -5,7 +5,6 @@ use factorio_bot_core::process::process_control::InstanceState;
 use factorio_bot_core::settings::AppSettings;
 use factorio_bot_core::types::PrimeVueTreeNode;
 use factorio_bot_lua::planner::Planner;
-use miette::DiagnosticResult;
 use std::path::{Path, PathBuf};
 use tauri::State;
 

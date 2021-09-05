@@ -5,16 +5,35 @@ on:
       - 'releases/**'
 
 jobs:
-  generate-changelog:
-    name: Generate changelog
+  create-github-release:
+    name: Create Github Release
     runs-on: ubuntu-18.04
     outputs:
-      release_body: ${{ steps.release.outputs.release_body }}
+      id: ${{ steps.create_release.outputs.id }}
     steps:
       - name: Checkout
         uses: actions/checkout@main
         with:
           fetch-depth: 0
+      - name: ⚡ install NodeJS 16
+        uses: actions/setup-node@v1
+        with:
+          node-version: 16
+      - name: 🦠 extract version from app/src-tauri/Cargo.toml to package.json & tauri.conf.json & ENV
+        run: cd app; node update-package-version.js
+      - name: 🔖 create github draft release
+        uses: ncipollo/release-action@v1
+        id: create_draft_release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          allowUpdates: true
+          replacesArtifacts: false
+          name: "Factorio Bot v${{ env.PACKAGE_VERSION }}"
+          tag: v${{ env.PACKAGE_VERSION }}
+          body: "body filled later"
+          draft: true
+          prerelease: true
       - name: Generate a changelog
         uses: orhun/git-cliff-action@v1
         id: git-cliff
@@ -33,6 +52,21 @@ jobs:
           r="${r//$'\n'/'%0A'}"
           r="${r//$'\r'/'%0D'}"
           echo "::set-output name=release_body::$r"
+
+
+      - name: 🔖 create github release
+        uses: ncipollo/release-action@v1
+        id: create_release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          allowUpdates: true
+          replacesArtifacts: false
+          name: "Factorio Bot v${{ env.PACKAGE_VERSION }}"
+          tag: v${{ env.PACKAGE_VERSION }}
+          body: "${{ steps.release.outputs.release_body }}"
+          draft: false
+          prerelease: true
 
   publish-tauri:
     needs: generate-changelog
@@ -86,26 +120,13 @@ jobs:
       - name: 🚚 move build output to correct folder
         run: cp -r target app/src-tauri/target/
 
-      - name: 🔖 create github release
-        uses: ncipollo/release-action@v1
-        id: create_release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          allowUpdates: true
-          replacesArtifacts: false
-          name: "Factorio Bot v${{ env.PACKAGE_VERSION }}"
-          tag: v${{ env.PACKAGE_VERSION }}
-          body: "${{ needs.generate-changelog.outputs.release_body }}"
-          draft: false
-          prerelease: true
 
       - name: 📦️ upload tauri artifacts to release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          releaseId: ${{ steps.create_release.outputs.id }}
+          releaseId: ${{ needs.create-github-release.outputs.id }}
           iconPath: "../public/logo.png"
           configPath: "tauri.conf.json"
           projectPath: "./app"

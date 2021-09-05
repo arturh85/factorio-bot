@@ -1418,7 +1418,7 @@ dependencies = [
 
 [[package]]
 name = "factorio-bot"
-version = "0.2.0-dev"
+version = "0.2.1-dev"
 dependencies = [
  "async-std",
  "clap",

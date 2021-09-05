@@ -54,7 +54,7 @@ jobs:
         run: cd app; yarn tauri:build
 
       - name: 🚚 move build output to correct folder
-        run: mv target app/src-tauri/target/
+        run: cp -r target app/src-tauri/target/
 
       - name: Generate a changelog
         uses: orhun/git-cliff-action@v1

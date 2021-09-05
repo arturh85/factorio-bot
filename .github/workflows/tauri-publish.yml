@@ -24,6 +24,10 @@ jobs:
           profile: minimal
           toolchain: stable
       - uses: Swatinem/rust-cache@v1
+      - uses: actions/cache@v2
+        with:
+          path: '**/node_modules'
+          key: ${{ runner.os }}-modules-${{ hashFiles('**/yarn.lock') }}
       - name: ⚡ install cargo tauri-bundler
         run: cargo install tauri-bundler --force
       - name: ⚡ install apt webkit2gtk (ubuntu only)

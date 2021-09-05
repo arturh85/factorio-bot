@@ -3,6 +3,10 @@ All notable changes to this project will be documented in this file.
 
 ## [unreleased]
 
+### Feature
+
+- Added Changelogs with git-cliff
+
 ### Milestone
 
 - Factorio Start works

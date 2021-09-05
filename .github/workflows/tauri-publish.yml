@@ -39,7 +39,7 @@ jobs:
         id: git-cliff
         with:
           config: cliff.toml
-          args: -vv --latest --tag v${{ env.PACKAGE_VERSION }} --strip header
+          args: -vv --tag v${{ env.PACKAGE_VERSION }} --strip header
         env:
           OUTPUT: CHANGES.md
       - name: Set the release body

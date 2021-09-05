@@ -163,13 +163,16 @@ export default {
   },
   async created() {
     const instanceStore = useInstanceStore()
-    await instanceStore.checkInstanceState()
+    const started = await instanceStore.checkInstanceState()
     const appStore = useAppStore()
     await appStore.maximizeWindow()
     const settings = await appStore.loadSettings()
     if (settings.enable_restapi) {
       const restApiStore = useRestApiStore()
       await restApiStore.startRestApi()
+    }
+    if (!started && settings.enable_autostart) {
+      await instanceStore.startInstances();
     }
   },
   beforeUpdate() {

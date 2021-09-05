@@ -21,7 +21,9 @@ jobs:
       - name: ⚡ install Rust stable
         uses: actions-rs/toolchain@v1
         with:
+          profile: minimal
           toolchain: stable
+      - uses: Swatinem/rust-cache@v1
       - name: ⚡ install cargo tauri-bundler
         run: cargo install tauri-bundler --force
       - name: ⚡ install apt webkit2gtk (ubuntu only)
@@ -50,6 +52,26 @@ jobs:
       - name: 🚚 move build output to correct folder
         run: mv target app/src-tauri/target/
 
+      - name: Generate a changelog
+        uses: orhun/git-cliff-action@v1
+        id: git-cliff
+        with:
+          config: cliff.toml
+          args: -vv --latest --strip header
+        env:
+          OUTPUT: CHANGES.md
+
+      - name: Set the release body
+        id: release
+        shell: bash
+        run: |
+          r=$(cat ${{ steps.git-cliff.outputs.changelog }})
+          r="$(printf "$r" | tail -n +3)"
+          r="${r//'%'/'%25'}"
+          r="${r//$'\n'/'%0A'}"
+          r="${r//$'\r'/'%0D'}"
+          echo "::set-output name=release_body::$r"
+
       - name: 🔖 create github release
         uses: ncipollo/release-action@v1
         id: create_release
@@ -60,7 +82,7 @@ jobs:
           replacesArtifacts: false
           name: "Factorio Bot v${{ env.PACKAGE_VERSION }}"
           tag: v${{ env.PACKAGE_VERSION }}
-          body: "See the assets to download this version and install."
+          body: "${{ steps.release.outputs.release_body }}"
           draft: false
           prerelease: true
 

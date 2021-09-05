@@ -33,6 +33,13 @@ export const useAppStore = defineStore({
         return null
       }
     },
+    getEnableAutostart(): boolean | null {
+      if (this.settings) {
+        return this.settings.enable_autostart
+      } else {
+        return null
+      }
+    },
     getRestapiPort(): number | null {
       if (this.settings) {
         return this.settings.restapi_port
@@ -110,6 +117,12 @@ export const useAppStore = defineStore({
           await restApiStore.startRestApi()
         }
         this.settings.enable_restapi = enableRestapi
+        await this._updateSettings()
+      }
+    },
+    async updateEnableAutostart(enableAutostart: boolean) {
+      if (this.settings !== null) {
+        this.settings.enable_autostart = enableAutostart
         await this._updateSettings()
       }
     },

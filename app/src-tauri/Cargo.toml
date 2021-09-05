@@ -27,7 +27,7 @@ color-eyre = "^0.5"
 port_scanner = "*"
 miette = "^1.0"
 thiserror = "^1.0"
-
+parking_lot = "^0.11"
 
 [build-dependencies]
 typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"] }

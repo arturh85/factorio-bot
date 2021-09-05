@@ -4,10 +4,10 @@
     "version": "0.0.0"
   },
   "build": {
-    "distDir": "../dist",
+    "distDir": "../app/dist",
     "devPath": "http://localhost:8080",
-    "beforeDevCommand": "",
-    "beforeBuildCommand": "",
+    "beforeDevCommand": "nonesense1",
+    "beforeBuildCommand": "nonesense2",
     "withGlobalTauri": false
   },
   "tauri": {

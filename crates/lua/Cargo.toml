@@ -6,6 +6,7 @@ edition = "2018"
 
 [dependencies]
 factorio-bot-core = { path = "../core" }
+parking_lot = "^0.11"
 
 async-std = { version = "^1.9", features = ["attributes", "tokio1"] }
 serde = "^1.0"

@@ -51,6 +51,14 @@ const enableRestapi = computed({
     appStore.updateEnableRestApi(val)
   }
 })
+const enableAutostart = computed({
+  get(): boolean {
+    return appStore.getEnableAutostart as boolean
+  },
+  set(val: boolean) {
+    appStore.updateEnableAutostart(val)
+  }
+})
 const restapiPort = computed({
   get(): string {
     return appStore.getRestapiPort as any
@@ -178,6 +186,16 @@ const settings = computed(() => appStore.getSettings)
           <div class="p-field p-col">
             <div class="p-inputgroup">
               <Checkbox v-model="recreateLevel" :binary="true" label="Recreate Level"/>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="card p-fluid">
+        <h5>Autostart Factorio</h5>
+        <div class="p-formgrid p-grid">
+          <div class="p-field p-col">
+            <div class="p-inputgroup">
+              <Checkbox v-model="enableAutostart" :binary="true" label="Enable Autostart"/>
             </div>
           </div>
         </div>

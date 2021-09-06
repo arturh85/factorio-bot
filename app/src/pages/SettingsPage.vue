@@ -1,4 +1,4 @@
-<script lang="ts" setup>
+<script setup lang="ts">
 import {computed, watch, ref} from 'vue';
 import {useAppStore} from '@/store/appStore';
 import {open} from '@tauri-apps/api/dialog'

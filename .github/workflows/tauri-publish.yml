@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-18.04
     outputs:
       id: ${{ steps.create_release.outputs.id }}
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
       - name: Checkout
         uses: actions/checkout@main
@@ -149,7 +150,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          upload_url: ${{ needs.create-github-release.outputs.upload_url }}
           asset_path: ./.github/chocolatey/factorio-bot-installer.exe
           asset_name: factorio-bot-installer.exe
           asset_content_type: application/octet-stream

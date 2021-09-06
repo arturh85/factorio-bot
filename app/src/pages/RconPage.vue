@@ -1,4 +1,4 @@
-<script lang="ts" setup>
+<script setup lang="ts">
 import Textarea from 'primevue/textarea';
 import Button from 'primevue/button';
 import {computed, ref} from 'vue';
@@ -18,9 +18,9 @@ const execute = async(command: string) => {
 }
 const isExecuting = computed(() => rconStore.isExecuting)
 
-const cheatCommands = [{
-  command: ''
-}]
+// const cheatCommands = [{
+//   command: ''
+// }]
 
 </script>
 

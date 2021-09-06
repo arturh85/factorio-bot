@@ -1,4 +1,4 @@
-<script lang="ts" setup>
+<script setup lang="ts">
 import {computed} from 'vue';
 import {useInstanceStore} from '@/store/instanceStore';
 import Button from 'primevue/button';

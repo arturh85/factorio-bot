@@ -119,8 +119,7 @@ jobs:
         run: cd app; yarn tauri:build
 
       - name: 🚚 move build output to correct folder
-        run: cp -r target app/src-tauri/target/
-
+        run: mv target/ app/src-tauri/target/
 
       - name: 📦️ upload tauri artifacts to release
         uses: tauri-apps/tauri-action@v0
@@ -133,45 +132,48 @@ jobs:
           projectPath: "./app"
           npmScript: "dummy" # dummy script because already build & moved
 
-      - name: 🚚 move binary for NSIS (windows only)
-        if: matrix.platform == 'windows-latest'
-        run: mv app/src-tauri/target/release/deps/factorio_bot.exe .github/chocolatey/factorio-bot.exe
-      - name: 🚧 build NSIS installer (windows only)
-        if: matrix.platform == 'windows-latest'
-        uses: joncloud/makensis-action@v3.6
-        with:
-          script-file: ".github/chocolatey/installer.nsi"
-          arguments: "/V3"
+      - name: 🚚 move build back so it can be cached
+        run: mv app/src-tauri/target/ target/
 
-      - name: 📦️ upload NSIS installer to release (windows only)
-        if: matrix.platform == 'windows-latest'
-        id: upload-release-asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-github-release.outputs.upload_url }}
-          asset_path: ./.github/chocolatey/factorio-bot-installer.exe
-          asset_name: factorio-bot-installer.exe
-          asset_content_type: application/octet-stream
-      - name: 🚧 calculate checksum for chocolatey (windows only)
-        if: matrix.platform == 'windows-latest'
-        run: cd app; yarn checksum:update
-      - name: 🚧 build nuget package for chocolatey (windows only)
-        if: matrix.platform == 'windows-latest'
-        uses: crazy-max/ghaction-chocolatey@v1
-        with:
-          args: pack .github/chocolatey/factorio-bot.nuspec
-      - name: 🚚 rename nupkg without version in filename (windows only)
-        if: matrix.platform == 'windows-latest'
-        run: mv factorio-bot.*.nupkg factorio-bot.nupkg
-      - name: 📦 publish nuget package to chocolatey (windows only)
-        if: matrix.platform == 'windows-latest'
-        uses: crazy-max/ghaction-chocolatey@v1
-        env:
-          APIKEY: ${{ secrets.CHOCOLATEY_APIKEY }}
-        with:
-          args: push factorio-bot.nupkg --key "${{ env.APIKEY }}" --source https://push.chocolatey.org/
+#      - name: 🚚 move binary for NSIS (windows only)
+#        if: matrix.platform == 'windows-latest'
+#        run: mv app/src-tauri/target/release/deps/factorio_bot.exe .github/chocolatey/factorio-bot.exe
+#      - name: 🚧 build NSIS installer (windows only)
+#        if: matrix.platform == 'windows-latest'
+#        uses: joncloud/makensis-action@v3.6
+#        with:
+#          script-file: ".github/chocolatey/installer.nsi"
+#          arguments: "/V3"
+
+#      - name: 📦️ upload NSIS installer to release (windows only)
+#        if: matrix.platform == 'windows-latest'
+#        id: upload-release-asset
+#        uses: actions/upload-release-asset@v1
+#        env:
+#          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#        with:
+#          upload_url: ${{ needs.create-github-release.outputs.upload_url }}
+#          asset_path: ./.github/chocolatey/factorio-bot-installer.exe
+#          asset_name: factorio-bot-installer.exe
+#          asset_content_type: application/octet-stream
+#      - name: 🚧 calculate checksum for chocolatey (windows only)
+#        if: matrix.platform == 'windows-latest'
+#        run: cd app; yarn checksum:update
+#      - name: 🚧 build nuget package for chocolatey (windows only)
+#        if: matrix.platform == 'windows-latest'
+#        uses: crazy-max/ghaction-chocolatey@v1
+#        with:
+#          args: pack .github/chocolatey/factorio-bot.nuspec
+#      - name: 🚚 rename nupkg without version in filename (windows only)
+#        if: matrix.platform == 'windows-latest'
+#        run: mv factorio-bot.*.nupkg factorio-bot.nupkg
+#      - name: 📦 publish nuget package to chocolatey (windows only)
+#        if: matrix.platform == 'windows-latest'
+#        uses: crazy-max/ghaction-chocolatey@v1
+#        env:
+#          APIKEY: ${{ secrets.CHOCOLATEY_APIKEY }}
+#        with:
+#          args: push factorio-bot.nupkg --key "${{ env.APIKEY }}" --source https://push.chocolatey.org/
 
       - name: 🚧 build rust doc for gh-pages (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'

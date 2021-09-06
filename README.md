@@ -44,7 +44,6 @@ Goals / Use Cases:
 # Installation
 
 - Download the [latest release](https://github.com/arturh85/factorio-bot-tauri/releases) for your Operating System
-  - on windows you can use the [chocolatey](https://chocolatey.org/) package manager: `choco install factorio-bot --version=0.2.0`
 - Download [Factorio](https://www.factorio.com) as .zip or .tar.xz (don't use the headless version!)
 - Start the application and select your downloaded factorio archive under `Settings`
 - Use the `Start` Button in the top right to start the given number of factorio instances with given seed/map exchange string

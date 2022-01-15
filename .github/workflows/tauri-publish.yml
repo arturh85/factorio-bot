@@ -40,7 +40,7 @@ jobs:
         id: git-cliff
         with:
           config: cliff.toml
-          args: -vv --tag v${{ env.PACKAGE_VERSION }} --strip header
+          args: -vv --latest --strip header
         env:
           OUTPUT: CHANGES.md
       - name: Set the release body
@@ -183,9 +183,9 @@ jobs:
         if: matrix.platform == 'ubuntu-latest'
         run: mdbook build docs && mv docs/book public/book && mv index.html public/
 
-      - name: 🚚 move app stats.html to gh-pages (ubuntu only)
-        if: matrix.platform == 'ubuntu-latest'
-        run: mv app/dist/stats.html public/stats.html
+        - name: 🚚 move app stats.html to gh-pages (ubuntu only)
+          if: matrix.platform == 'ubuntu-latest'
+          run: mv app/dist/stats.html public/stats.html
 
       - name: 📦 deploy public to gh-pages (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'

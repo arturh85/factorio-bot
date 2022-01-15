@@ -1,0 +1,276 @@
+<!DOCTYPE HTML>
+<html lang="en" class="sidebar-visible no-js">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>README - Factorio Bot - User Guide</title>
+        <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff" />
+
+        <link rel="shortcut icon" href="">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link href="https://fonts.googleapis.com/css?family=Open+Sans:300italic,400italic,600italic,700italic,800italic,400,300,600,700,800" rel="stylesheet" type="text/css">
+        <link href="https://fonts.googleapis.com/css?family=Source+Code+Pro:500" rel="stylesheet" type="text/css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="highlight.css">
+        <link rel="stylesheet" href="tomorrow-night.css">
+        <link rel="stylesheet" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+    </head>
+    <body class="light">
+        <!-- Provide site root to javascript -->
+        <script type="text/javascript">
+            var path_to_root = "";
+            var default_theme = "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script type="text/javascript">
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script type="text/javascript">
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            document.body.className = theme;
+            document.querySelector('html').className = theme + ' js';
+        </script>
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script type="text/javascript">
+            var html = document.querySelector('html');
+            var sidebar = 'hidden';
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            }
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded "><a href="../../index.html" class="active"><strong aria-hidden="true">1.</strong> README</a></li><li class="chapter-item expanded "><a href="howto_setup.html"><strong aria-hidden="true">2.</strong> Howto: Setup Factorio Bot</a></li><li class="chapter-item expanded "><a href="LuaGlobals.html"><strong aria-hidden="true">3.</strong> Lua API Docs</a></li><li class="chapter-item expanded "><a href="LuaGlobals.html"><strong aria-hidden="true">4.</strong> Lua Globals</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle"></div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar" class="menu-bar">
+                    <div id="menu-bar-sticky-container">
+                        <div class="left-buttons">
+                            <button id="sidebar-toggle" class="icon-button" type="button" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                                <i class="fa fa-bars"></i>
+                            </button>
+                            <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                                <i class="fa fa-paint-brush"></i>
+                            </button>
+                            <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                                <li role="none"><button role="menuitem" class="theme" id="light">Light (default)</button></li>
+                                <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                                <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                                <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                                <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                            </ul>
+                            <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                                <i class="fa fa-search"></i>
+                            </button>
+                        </div>
+
+                        <h1 class="menu-title">Factorio Bot - User Guide</h1>
+
+                        <div class="right-buttons">
+                            <a href="print.html" title="Print this book" aria-label="Print this book">
+                                <i id="print-button" class="fa fa-print"></i>
+                            </a>
+                            <a href="https://github.com/arturh85/factorio-bot-tauri" title="Git repository" aria-label="Git repository">
+                                <i id="git-repository-button" class="fa fa-github"></i>
+                            </a>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" name="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script type="text/javascript">
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="factorio-bot"><a class="header" href="#factorio-bot">Factorio Bot</a></h1>
+<ul>
+<li><a href="https://arturh85.github.io/factorio-bot-tauri/book/">User Guide</a></li>
+<li><a href="https://arturh85.github.io/factorio-bot-tauri/doc/factorio_bot/">API Docs</a></li>
+<li><a href="https://arturh85.github.io/factorio-bot-tauri/stats.html">Frontend Build Statistics</a></li>
+</ul>
+<h1 id="what-is-it"><a class="header" href="#what-is-it">What is it?</a></h1>
+<p>Factorio Bot is a bot platform for the game
+<a href="https://www.factorio.com">Factorio</a> inspired by <a href="https://github.com/Windfisch/factorio-bot/">factorio-bot</a></p>
+<p>Goals / Use Cases:</p>
+<ul>
+<li>TAS (Tool Assisted Speedrun) to beat the world record with many bots which share the workload efficiently</li>
+<li>Learning Environment to train Machine Learning algorithms within Factorio</li>
+<li>Playground for Factorio Experiments</li>
+</ul>
+<h2 id="youtube-videos"><a class="header" href="#youtube-videos">Youtube Videos</a></h2>
+<ul>
+<li>
+<p>Reference: <a href="https://www.youtube.com/watch?v=rHvaZMdjnLE&amp;t=455">Any% World Record gets automation in 7:33</a></p>
+</li>
+<li>
+<p><a href="https://youtu.be/iFhcyjfcjx8">Factorio Bot 0.1.2: Research logistics with 4 Bots in 15:51</a></p>
+</li>
+<li>
+<p><a href="https://youtu.be/1vbWWiSV6Sw">Factorio Bot 0.1.1: Research automation with 1 Bot in 8:57</a></p>
+</li>
+<li>
+<p><a href="https://youtu.be/6KXYuVDRZ-I">Factorio Bot 0.1.0: Research automation with 1 Bot in 12:33</a></p>
+</li>
+</ul>
+<h2 id="features"><a class="header" href="#features">Features</a></h2>
+<ul>
+<li><input disabled="" type="checkbox" checked=""/>
+sets up &amp; starts factorio server &amp; configurable number of clients</li>
+<li><input disabled="" type="checkbox" checked=""/>
+resizes Factorio client windows so the whole screen is equally used</li>
+<li><input disabled="" type="checkbox" checked=""/>
+integrated lua editor which allows scripting of bots </li>
+<li><input disabled="" type="checkbox" checked=""/>
+uses included factorio mod to read factorio instance ...
+<ul>
+<li><input disabled="" type="checkbox" checked=""/>
+recipes</li>
+<li><input disabled="" type="checkbox" checked=""/>
+entity prototypes</li>
+<li><input disabled="" type="checkbox" checked=""/>
+item prototypes</li>
+<li><input disabled="" type="checkbox" checked=""/>
+placed entities</li>
+</ul>
+</li>
+<li>Build Graphs of:
+<ul>
+<li><input disabled="" type="checkbox"/>
+Entity Connections with distance based weights (currently broken)</li>
+<li><input disabled="" type="checkbox"/>
+Flow Connections with flow rate per second for each belt side/resource (currently broken)</li>
+<li><input disabled="" type="checkbox"/>
+Bot Task Dependencies with time estimate based weights (currently broken)</li>
+</ul>
+</li>
+<li><input disabled="" type="checkbox"/>
+(optional) REST API Endpoints with OpenAPI specs</li>
+<li><input disabled="" type="checkbox"/>
+read map contents by chunk for leaflet based Map View (currently broken)</li>
+<li><input disabled="" type="checkbox" checked=""/>
+use whatever mods you want, configured in central location for all instances</li>
+<li><input disabled="" type="checkbox" checked=""/>
+should work on Win/Mac/Linux (not tested on Mac)</li>
+<li><input disabled="" type="checkbox" checked=""/>
+MIT licenced</li>
+</ul>
+<h1 id="installation"><a class="header" href="#installation">Installation</a></h1>
+<ul>
+<li>Download the <a href="https://github.com/arturh85/factorio-bot-tauri/releases">latest release</a> for your Operating System</li>
+<li>Download <a href="https://www.factorio.com">Factorio</a> as .zip or .tar.xz (don't use the headless version!)</li>
+<li>Start the application and select your downloaded factorio archive under <code>Settings</code></li>
+<li>Use the <code>Start</code> Button in the top right to start the given number of factorio instances with given seed/map exchange string</li>
+<li>Select the Script you want to run and execute it</li>
+</ul>
+<h1 id="technologies-used"><a class="header" href="#technologies-used">Technologies used</a></h1>
+<h2 id="frontend-vitejs--primevue"><a class="header" href="#frontend-vitejs--primevue">Frontend: Vite.js + PrimeVue</a></h2>
+<ul>
+<li><a href="https://vitejs.dev/">Vite.js</a> is a new modern bundler for javascript which is blazing fast and includes many sensible defaults.</li>
+<li><a href="https://vuejs.org/">Vue.js</a> is an incremental frontend framework which is an absolute joy to work with. It has seen very impressive improvements in version 3 including Composition Api, script setup, dynamic css binding and ... .</li>
+<li><a href="https://www.primefaces.org/primevue/">PrimeVue</a> is the a component library for Vue 3. Lots of premade components will make your job as application developer easier and more fun.</li>
+</ul>
+<h2 id="backend-rust--tauri"><a class="header" href="#backend-rust--tauri">Backend: Rust + Tauri</a></h2>
+<ul>
+<li><a href="https://tauri.studio/">Tauri</a> is a new modern technology to turn your web apps into a desktop app for multiple platforms (Windows, MacOS, Linux, android and ios soon). Tauri apps have very small file size and tiny memory consumption.</li>
+</ul>
+<h2 id="setup-development-environment"><a class="header" href="#setup-development-environment">Setup Development Environment</a></h2>
+<ul>
+<li>Ready your workspace according to <a href="https://tauri.studio/en/docs/getting-started/intro/">Tauri Getting Started</a></li>
+<li>Clone repository <code>git clone git@github.com:arturh85/factorio-bot-tauri.git</code></li>
+<li>Change to frontend/</li>
+<li><code>cd frontend/</code></li>
+<li><code>yarn</code> or <code>npm i</code></li>
+</ul>
+<h2 id="development-usage"><a class="header" href="#development-usage">Development Usage</a></h2>
+<ul>
+<li><code>npm start</code> starts the application while watching for changes </li>
+</ul>
+<h2 id="contribute"><a class="header" href="#contribute">Contribute</a></h2>
+<p>Send me your Pull Requests :)</p>
+<h2 id="contact"><a class="header" href="#contact">Contact</a></h2>
+<p>Email: <a href="mailto:arturh@arturh.de">arturh@arturh.de</a></p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="next" href="howto_setup.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a href="howto_setup.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+        <script src="elasticlunr.min.js" type="text/javascript" charset="utf-8"></script>
+        <script src="mark.min.js" type="text/javascript" charset="utf-8"></script>
+        <script src="searcher.js" type="text/javascript" charset="utf-8"></script>
+        <script src="clipboard.min.js" type="text/javascript" charset="utf-8"></script>
+        <script src="highlight.js" type="text/javascript" charset="utf-8"></script>
+        <script src="book.js" type="text/javascript" charset="utf-8"></script>
+
+        <!-- Custom JS scripts -->
+    </body>
+</html>

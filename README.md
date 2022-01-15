@@ -62,9 +62,15 @@ Goals / Use Cases:
 ## Setup Development Environment 
 - Ready your workspace according to [Tauri Getting Started](https://tauri.studio/en/docs/getting-started/intro/)
 - Clone repository `git clone git@github.com:arturh85/factorio-bot-tauri.git`
-- Change to frontend/
-- `cd frontend/`
+- Change directory to app/
+- `cd app/`
 - `yarn` or `npm i`
+
+## Cargo dependencies
+
+- `cargo install tauri-cli`
+- `cargo install mdbook`
+ 
 
 ## Development Usage
 

@@ -1,0 +1,3605 @@
+Lua Globals
+===========
+
+dump (function)
+-----
+
+function: 000001B55DCAC0F0
+see LUA Docs
+
+
+tonumber (function)
+-----
+
+function: 00007FF7C9931D30
+see LUA Docs
+
+
+print (function)
+-----
+
+function: 000001B55E608270
+see LUA Docs
+
+
+world (table)
+-----
+
+- player: function: 000001B55E6083B0
+- inventory: function: 000001B55E6085F0
+- recipe: function: 000001B55E6084F0
+- findFreeResourceRect: function: 000001B55E608830
+
+
+collectgarbage (function)
+-----
+
+function: 00007FF7C9932200
+see LUA Docs
+
+
+getmetatable (function)
+-----
+
+function: 00007FF7C9931F40
+see LUA Docs
+
+
+select (function)
+-----
+
+function: 00007FF7C9932AE0
+see LUA Docs
+
+
+os (table)
+-----
+
+- setlocale: function: 00007FF7C9936EA0
+- clock: function: 00007FF7C9936580
+- rename: function: 00007FF7C9936410
+- exit: function: 00007FF7C9936F20
+- tmpname: function: 00007FF7C9936490
+- execute: function: 00007FF7C9936340
+- time: function: 00007FF7C9936CA0
+- remove: function: 00007FF7C99363B0
+- getenv: function: 00007FF7C9936530
+- difftime: function: 00007FF7C9936E40
+- date: function: 00007FF7C9936A00
+
+
+_G (table)
+-----
+
+- dump: function: 000001B55DCAC0F0
+- tonumber: function: 00007FF7C9931D30
+- print: function: 000001B55E608270
+- world:
+  - player: function: 000001B55E6083B0
+  - inventory: function: 000001B55E6085F0
+  - recipe: function: 000001B55E6084F0
+  - findFreeResourceRect: function: 000001B55E608830
+- collectgarbage: function: 00007FF7C9932200
+- getmetatable: function: 00007FF7C9931F40
+- select: function: 00007FF7C9932AE0
+- os:
+  - setlocale: function: 00007FF7C9936EA0
+  - clock: function: 00007FF7C9936580
+  - rename: function: 00007FF7C9936410
+  - exit: function: 00007FF7C9936F20
+  - tmpname: function: 00007FF7C9936490
+  - execute: function: 00007FF7C9936340
+  - time: function: 00007FF7C9936CA0
+  - remove: function: 00007FF7C99363B0
+  - getenv: function: 00007FF7C9936530
+  - difftime: function: 00007FF7C9936E40
+  - date: function: 00007FF7C9936A00
+- _G:
+  - dump: function: 000001B55DCAC0F0
+  - tonumber: function: 00007FF7C9931D30
+  - print: function: 000001B55E608270
+  - world:
+    - player: function: 000001B55E6083B0
+    - inventory: function: 000001B55E6085F0
+    - recipe: function: 000001B55E6084F0
+    - findFreeResourceRect: function: 000001B55E608830
+  - collectgarbage: function: 00007FF7C9932200
+  - getmetatable: function: 00007FF7C9931F40
+  - select: function: 00007FF7C9932AE0
+  - os:
+    - setlocale: function: 00007FF7C9936EA0
+    - clock: function: 00007FF7C9936580
+    - rename: function: 00007FF7C9936410
+    - exit: function: 00007FF7C9936F20
+    - tmpname: function: 00007FF7C9936490
+    - execute: function: 00007FF7C9936340
+    - time: function: 00007FF7C9936CA0
+    - remove: function: 00007FF7C99363B0
+    - getenv: function: 00007FF7C9936530
+    - difftime: function: 00007FF7C9936E40
+    - date: function: 00007FF7C9936A00
+  - _G:
+    - dump: function: 000001B55DCAC0F0
+    - tonumber: function: 00007FF7C9931D30
+    - print: function: 000001B55E608270
+    - world:
+      - player: function: 000001B55E6083B0
+      - inventory: function: 000001B55E6085F0
+      - recipe: function: 000001B55E6084F0
+      - findFreeResourceRect: function: 000001B55E608830
+    - collectgarbage: function: 00007FF7C9932200
+    - getmetatable: function: 00007FF7C9931F40
+    - select: function: 00007FF7C9932AE0
+    - os:
+      - setlocale: function: 00007FF7C9936EA0
+      - clock: function: 00007FF7C9936580
+      - rename: function: 00007FF7C9936410
+      - exit: function: 00007FF7C9936F20
+      - tmpname: function: 00007FF7C9936490
+      - execute: function: 00007FF7C9936340
+      - time: function: 00007FF7C9936CA0
+      - remove: function: 00007FF7C99363B0
+      - getenv: function: 00007FF7C9936530
+      - difftime: function: 00007FF7C9936E40
+      - date: function: 00007FF7C9936A00
+    - _G:
+      - dump: function: 000001B55DCAC0F0
+      - tonumber: function: 00007FF7C9931D30
+      - print: function: 000001B55E608270
+      - world:
+        - player: function: 000001B55E6083B0
+        - inventory: function: 000001B55E6085F0
+        - recipe: function: 000001B55E6084F0
+        - findFreeResourceRect: function: 000001B55E608830
+      - collectgarbage: function: 00007FF7C9932200
+      - getmetatable: function: 00007FF7C9931F40
+      - select: function: 00007FF7C9932AE0
+      - os:
+        - setlocale: function: 00007FF7C9936EA0
+        - clock: function: 00007FF7C9936580
+        - rename: function: 00007FF7C9936410
+        - exit: function: 00007FF7C9936F20
+        - tmpname: function: 00007FF7C9936490
+        - execute: function: 00007FF7C9936340
+        - time: function: 00007FF7C9936CA0
+        - remove: function: 00007FF7C99363B0
+        - getenv: function: 00007FF7C9936530
+        - difftime: function: 00007FF7C9936E40
+        - date: function: 00007FF7C9936A00
+      - _G:
+        - dump: function: 000001B55DCAC0F0
+        - tonumber: function: 00007FF7C9931D30
+        - print: function: 000001B55E608270
+        - world:
+          - player: function: 000001B55E6083B0
+          - inventory: function: 000001B55E6085F0
+          - recipe: function: 000001B55E6084F0
+          - findFreeResourceRect: function: 000001B55E608830
+        - collectgarbage: function: 00007FF7C9932200
+        - getmetatable: function: 00007FF7C9931F40
+        - select: function: 00007FF7C9932AE0
+        - os:
+          - setlocale: function: 00007FF7C9936EA0
+          - clock: function: 00007FF7C9936580
+          - rename: function: 00007FF7C9936410
+          - exit: function: 00007FF7C9936F20
+          - tmpname: function: 00007FF7C9936490
+          - execute: function: 00007FF7C9936340
+          - time: function: 00007FF7C9936CA0
+          - remove: function: 00007FF7C99363B0
+          - getenv: function: 00007FF7C9936530
+          - difftime: function: 00007FF7C9936E40
+          - date: function: 00007FF7C9936A00
+        - _G:
+          - dump: function: 000001B55DCAC0F0
+          - tonumber: function: 00007FF7C9931D30
+          - print: function: 000001B55E608270
+          - world:
+          - collectgarbage: function: 00007FF7C9932200
+          - getmetatable: function: 00007FF7C9931F40
+          - select: function: 00007FF7C9932AE0
+          - os:
+          - _G:
+          - dofile: function: 00007FF7C99329B0
+          - type: function: 00007FF7C9932300
+          - coroutine:
+          - tostring: function: 00007FF7C9932D80
+          - next: function: 00007FF7C9932440
+          - load: function: 00007FF7C9932800
+          - require: function: 000001B55E608F30
+          - rawequal: function: 00007FF7C9932060
+          - print_warn: function: 000001B55E6089B0
+          - table:
+          - file: file (000001B55B1CD140)
+          - rawlen: function: 00007FF7C99320C0
+          - ipairs: function: 00007FF7C9932550
+          - rcon:
+          - xpcall: function: 00007FF7C91D3730
+          - package:
+          - plan:
+          - io:
+          - loadfile: function: 00007FF7C9932640
+          - rawset: function: 00007FF7C9932190
+          - rawget: function: 00007FF7C9932130
+          - all_bots:
+          - setmetatable: function: 00007FF7C9931FB0
+          - assert: function: 00007FF7C9932A40
+          - print_err: function: 000001B55E6087F0
+          - math:
+          - utf8:
+          - string:
+          - _VERSION: Lua 5.3
+          - error: function: 00007FF7C9931EB0
+          - pairs: function: 00007FF7C99324B0
+          - pcall: function: 00007FF7C91D35F0
+        - dofile: function: 00007FF7C99329B0
+        - type: function: 00007FF7C9932300
+        - coroutine:
+          - resume: function: 00007FF7C9932FC0
+          - status: function: 00007FF7C9933200
+          - wrap: function: 00007FF7C9933190
+          - create: function: 00007FF7C9933120
+          - isyieldable: function: 00007FF7C9933330
+          - yield: function: 00007FF7C99331D0
+          - running: function: 00007FF7C9933360
+        - tostring: function: 00007FF7C9932D80
+        - next: function: 00007FF7C9932440
+        - load: function: 00007FF7C9932800
+        - require: function: 000001B55E608F30
+        - rawequal: function: 00007FF7C9932060
+        - print_warn: function: 000001B55E6089B0
+        - table:
+          - pack: function: 00007FF7C9933C20
+          - remove: function: 00007FF7C9933690
+          - sort: function: 00007FF7C9934490
+          - move: function: 00007FF7C99337B0
+          - unpack: function: 00007FF7C9933CD0
+          - concat: function: 00007FF7C9933AC0
+          - insert: function: 00007FF7C9933560
+        - file: file (000001B55B1CD140)
+        - rawlen: function: 00007FF7C99320C0
+        - ipairs: function: 00007FF7C9932550
+        - rcon:
+          - move: function: 000001B55DC44F70
+          - insertToInventory: function: 000001B55A21B6C0
+          - mine: function: 000001B55DC44970
+          - cheatItem: function: 000001B55DC44670
+          - cheatTechnology: function: 000001B55DC44B30
+          - print: function: 000001B55DC44D70
+          - findEntitiesInRadius: function: 000001B55E608D70
+          - removeFromInventory: function: 000001B55B339770
+          - placeEntity: function: 000001B55A21B680
+          - cheatAllTechnologies: function: 000001B55DC44870
+          - inventoryContentsAt: function: 000001B55DC44470
+          - craft: function: 000001B55DC44A30
+          - addResearch: function: 000001B55DC44830
+          - cheatBlueprint: function: 000001B55DC44630
+          - reviveGhost: function: 000001B55DC44C70
+          - placeBlueprint: function: 000001B55DC44DB0
+        - xpcall: function: 00007FF7C91D3730
+        - package:
+          - config: \
+;
+?
+!
+-
+
+          - searchers:
+          - loaded:
+          - cpath: D:\projects\factorio-bot-tauri\target\debug\?.dll;D:\projects\factorio-bot-tauri\target\debug\..\lib\lua\5.3\?.dll;D:\projects\factorio-bot-tauri\target\debug\loadall.dll;.\?.dll
+          - preload:
+          - loadlib: function: 00007FF7C993E1C0
+          - path: D:\projects\factorio-bot-tauri\target\debug\lua\?.lua;D:\projects\factorio-bot-tauri\target\debug\lua\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\?.lua;D:\projects\factorio-bot-tauri\target\debug\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?\init.lua;.\?.lua;.\?\init.lua
+          - searchpath: function: 00007FF7C993E550
+        - plan:
+          - mine: function: 000001B55E608470
+          - groupEnd: function: 000001B55E608E30
+          - walk: function: 000001B55E608D30
+          - groupStart: function: 000001B55E608230
+        - io:
+          - write: function: 00007FF7C9935D90
+          - stderr: file (00007FF8A792F540)
+          - stdout: file (00007FF8A792F4E8)
+          - read: function: 00007FF7C9935B70
+          - input: function: 00007FF7C9934E60
+          - open: function: 00007FF7C9934B00
+          - lines: function: 00007FF7C9935100
+          - type: function: 00007FF7C99346D0
+          - stdin: file (00007FF8A792F490)
+          - close: function: 00007FF7C9934910
+          - tmpfile: function: 00007FF7C9934CD0
+          - popen: function: 00007FF7C9934C20
+          - output: function: 00007FF7C9934E90
+          - flush: function: 00007FF7C9935FC0
+        - loadfile: function: 00007FF7C9932640
+        - rawset: function: 00007FF7C9932190
+        - rawget: function: 00007FF7C9932130
+        - all_bots:
+          - 1: 1
+        - setmetatable: function: 00007FF7C9931FB0
+        - assert: function: 00007FF7C9932A40
+        - print_err: function: 000001B55E6087F0
+        - math:
+          - mininteger: -9223372036854775808
+          - rad: function: 00007FF7C993D600
+          - log: function: 00007FF7C993D4B0
+          - huge: inf
+          - randomseed: function: 00007FF7C993D900
+          - ceil: function: 00007FF7C993D1A0
+          - floor: function: 00007FF7C993D130
+          - tointeger: function: 00007FF7C993D050
+          - cos: function: 00007FF7C993CEE0
+          - maxinteger: 9223372036854775807
+          - pi: 3.1415926535898
+          - asin: function: 00007FF7C993CF60
+          - sin: function: 00007FF7C993CEA0
+          - min: function: 00007FF7C993D640
+          - abs: function: 00007FF7C993CE10
+          - tan: function: 00007FF7C993CF20
+          - sqrt: function: 00007FF7C993D400
+          - type: function: 00007FF7C993D940
+          - random: function: 00007FF7C993D780
+          - deg: function: 00007FF7C993D5C0
+          - modf: function: 00007FF7C993D310
+          - acos: function: 00007FF7C993CFA0
+          - fmod: function: 00007FF7C993D210
+          - atan: function: 00007FF7C993CFE0
+          - ult: function: 00007FF7C993D440
+          - max: function: 00007FF7C993D6E0
+          - exp: function: 00007FF7C993D580
+        - utf8:
+          - len: function: 00007FF7C993C4D0
+          - charpattern: [ -Â-ô][€-¿]*
+          - codepoint: function: 00007FF7C993C650
+          - offset: function: 00007FF7C993C950
+          - char: function: 00007FF7C993C880
+          - codes: function: 00007FF7C993CCB0
+        - string:
+          - dump: function: 00007FF7C9937920
+          - sub: function: 00007FF7C99370C0
+          - byte: function: 00007FF7C9937680
+          - char: function: 00007FF7C99377E0
+          - match: function: 00007FF7C9939130
+          - find: function: 00007FF7C9939100
+          - unpack: function: 00007FF7C993BC80
+          - upper: function: 00007FF7C9937390
+          - format: function: 00007FF7C993A510
+          - gsub: function: 00007FF7C9939710
+          - pack: function: 00007FF7C993B2B0
+          - gmatch: function: 00007FF7C9939250
+          - packsize: function: 00007FF7C993B980
+          - rep: function: 00007FF7C9937480
+          - lower: function: 00007FF7C99372A0
+          - reverse: function: 00007FF7C99371C0
+          - len: function: 00007FF7C9937030
+        - _VERSION: Lua 5.3
+        - error: function: 00007FF7C9931EB0
+        - pairs: function: 00007FF7C99324B0
+        - pcall: function: 00007FF7C91D35F0
+      - dofile: function: 00007FF7C99329B0
+      - type: function: 00007FF7C9932300
+      - coroutine:
+        - resume: function: 00007FF7C9932FC0
+        - status: function: 00007FF7C9933200
+        - wrap: function: 00007FF7C9933190
+        - create: function: 00007FF7C9933120
+        - isyieldable: function: 00007FF7C9933330
+        - yield: function: 00007FF7C99331D0
+        - running: function: 00007FF7C9933360
+      - tostring: function: 00007FF7C9932D80
+      - next: function: 00007FF7C9932440
+      - load: function: 00007FF7C9932800
+      - require: function: 000001B55E608F30
+      - rawequal: function: 00007FF7C9932060
+      - print_warn: function: 000001B55E6089B0
+      - table:
+        - pack: function: 00007FF7C9933C20
+        - remove: function: 00007FF7C9933690
+        - sort: function: 00007FF7C9934490
+        - move: function: 00007FF7C99337B0
+        - unpack: function: 00007FF7C9933CD0
+        - concat: function: 00007FF7C9933AC0
+        - insert: function: 00007FF7C9933560
+      - file: file (000001B55B1CD140)
+      - rawlen: function: 00007FF7C99320C0
+      - ipairs: function: 00007FF7C9932550
+      - rcon:
+        - move: function: 000001B55DC44F70
+        - insertToInventory: function: 000001B55A21B6C0
+        - mine: function: 000001B55DC44970
+        - cheatItem: function: 000001B55DC44670
+        - cheatTechnology: function: 000001B55DC44B30
+        - print: function: 000001B55DC44D70
+        - findEntitiesInRadius: function: 000001B55E608D70
+        - removeFromInventory: function: 000001B55B339770
+        - placeEntity: function: 000001B55A21B680
+        - cheatAllTechnologies: function: 000001B55DC44870
+        - inventoryContentsAt: function: 000001B55DC44470
+        - craft: function: 000001B55DC44A30
+        - addResearch: function: 000001B55DC44830
+        - cheatBlueprint: function: 000001B55DC44630
+        - reviveGhost: function: 000001B55DC44C70
+        - placeBlueprint: function: 000001B55DC44DB0
+      - xpcall: function: 00007FF7C91D3730
+      - package:
+        - config: \
+;
+?
+!
+-
+
+        - searchers:
+          - 1: function: 000001B55E608CB0
+          - 2: function: 000001B55E6082B0
+          - 3: function: 000001B55E608EF0
+          - 4: function: 000001B55E608130
+        - loaded:
+          - io:
+          - table:
+          - utf8:
+          - math:
+          - coroutine:
+          - os:
+          - string:
+          - _G:
+          - package:
+        - cpath: D:\projects\factorio-bot-tauri\target\debug\?.dll;D:\projects\factorio-bot-tauri\target\debug\..\lib\lua\5.3\?.dll;D:\projects\factorio-bot-tauri\target\debug\loadall.dll;.\?.dll
+        - preload:
+        - loadlib: function: 00007FF7C993E1C0
+        - path: D:\projects\factorio-bot-tauri\target\debug\lua\?.lua;D:\projects\factorio-bot-tauri\target\debug\lua\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\?.lua;D:\projects\factorio-bot-tauri\target\debug\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?\init.lua;.\?.lua;.\?\init.lua
+        - searchpath: function: 00007FF7C993E550
+      - plan:
+        - mine: function: 000001B55E608470
+        - groupEnd: function: 000001B55E608E30
+        - walk: function: 000001B55E608D30
+        - groupStart: function: 000001B55E608230
+      - io:
+        - write: function: 00007FF7C9935D90
+        - stderr: file (00007FF8A792F540)
+        - stdout: file (00007FF8A792F4E8)
+        - read: function: 00007FF7C9935B70
+        - input: function: 00007FF7C9934E60
+        - open: function: 00007FF7C9934B00
+        - lines: function: 00007FF7C9935100
+        - type: function: 00007FF7C99346D0
+        - stdin: file (00007FF8A792F490)
+        - close: function: 00007FF7C9934910
+        - tmpfile: function: 00007FF7C9934CD0
+        - popen: function: 00007FF7C9934C20
+        - output: function: 00007FF7C9934E90
+        - flush: function: 00007FF7C9935FC0
+      - loadfile: function: 00007FF7C9932640
+      - rawset: function: 00007FF7C9932190
+      - rawget: function: 00007FF7C9932130
+      - all_bots:
+        - 1: 1
+      - setmetatable: function: 00007FF7C9931FB0
+      - assert: function: 00007FF7C9932A40
+      - print_err: function: 000001B55E6087F0
+      - math:
+        - mininteger: -9223372036854775808
+        - rad: function: 00007FF7C993D600
+        - log: function: 00007FF7C993D4B0
+        - huge: inf
+        - randomseed: function: 00007FF7C993D900
+        - ceil: function: 00007FF7C993D1A0
+        - floor: function: 00007FF7C993D130
+        - tointeger: function: 00007FF7C993D050
+        - cos: function: 00007FF7C993CEE0
+        - maxinteger: 9223372036854775807
+        - pi: 3.1415926535898
+        - asin: function: 00007FF7C993CF60
+        - sin: function: 00007FF7C993CEA0
+        - min: function: 00007FF7C993D640
+        - abs: function: 00007FF7C993CE10
+        - tan: function: 00007FF7C993CF20
+        - sqrt: function: 00007FF7C993D400
+        - type: function: 00007FF7C993D940
+        - random: function: 00007FF7C993D780
+        - deg: function: 00007FF7C993D5C0
+        - modf: function: 00007FF7C993D310
+        - acos: function: 00007FF7C993CFA0
+        - fmod: function: 00007FF7C993D210
+        - atan: function: 00007FF7C993CFE0
+        - ult: function: 00007FF7C993D440
+        - max: function: 00007FF7C993D6E0
+        - exp: function: 00007FF7C993D580
+      - utf8:
+        - len: function: 00007FF7C993C4D0
+        - charpattern: [ -Â-ô][€-¿]*
+        - codepoint: function: 00007FF7C993C650
+        - offset: function: 00007FF7C993C950
+        - char: function: 00007FF7C993C880
+        - codes: function: 00007FF7C993CCB0
+      - string:
+        - dump: function: 00007FF7C9937920
+        - sub: function: 00007FF7C99370C0
+        - byte: function: 00007FF7C9937680
+        - char: function: 00007FF7C99377E0
+        - match: function: 00007FF7C9939130
+        - find: function: 00007FF7C9939100
+        - unpack: function: 00007FF7C993BC80
+        - upper: function: 00007FF7C9937390
+        - format: function: 00007FF7C993A510
+        - gsub: function: 00007FF7C9939710
+        - pack: function: 00007FF7C993B2B0
+        - gmatch: function: 00007FF7C9939250
+        - packsize: function: 00007FF7C993B980
+        - rep: function: 00007FF7C9937480
+        - lower: function: 00007FF7C99372A0
+        - reverse: function: 00007FF7C99371C0
+        - len: function: 00007FF7C9937030
+      - _VERSION: Lua 5.3
+      - error: function: 00007FF7C9931EB0
+      - pairs: function: 00007FF7C99324B0
+      - pcall: function: 00007FF7C91D35F0
+    - dofile: function: 00007FF7C99329B0
+    - type: function: 00007FF7C9932300
+    - coroutine:
+      - resume: function: 00007FF7C9932FC0
+      - status: function: 00007FF7C9933200
+      - wrap: function: 00007FF7C9933190
+      - create: function: 00007FF7C9933120
+      - isyieldable: function: 00007FF7C9933330
+      - yield: function: 00007FF7C99331D0
+      - running: function: 00007FF7C9933360
+    - tostring: function: 00007FF7C9932D80
+    - next: function: 00007FF7C9932440
+    - load: function: 00007FF7C9932800
+    - require: function: 000001B55E608F30
+    - rawequal: function: 00007FF7C9932060
+    - print_warn: function: 000001B55E6089B0
+    - table:
+      - pack: function: 00007FF7C9933C20
+      - remove: function: 00007FF7C9933690
+      - sort: function: 00007FF7C9934490
+      - move: function: 00007FF7C99337B0
+      - unpack: function: 00007FF7C9933CD0
+      - concat: function: 00007FF7C9933AC0
+      - insert: function: 00007FF7C9933560
+    - file: file (000001B55B1CD140)
+    - rawlen: function: 00007FF7C99320C0
+    - ipairs: function: 00007FF7C9932550
+    - rcon:
+      - move: function: 000001B55DC44F70
+      - insertToInventory: function: 000001B55A21B6C0
+      - mine: function: 000001B55DC44970
+      - cheatItem: function: 000001B55DC44670
+      - cheatTechnology: function: 000001B55DC44B30
+      - print: function: 000001B55DC44D70
+      - findEntitiesInRadius: function: 000001B55E608D70
+      - removeFromInventory: function: 000001B55B339770
+      - placeEntity: function: 000001B55A21B680
+      - cheatAllTechnologies: function: 000001B55DC44870
+      - inventoryContentsAt: function: 000001B55DC44470
+      - craft: function: 000001B55DC44A30
+      - addResearch: function: 000001B55DC44830
+      - cheatBlueprint: function: 000001B55DC44630
+      - reviveGhost: function: 000001B55DC44C70
+      - placeBlueprint: function: 000001B55DC44DB0
+    - xpcall: function: 00007FF7C91D3730
+    - package:
+      - config: \
+;
+?
+!
+-
+
+      - searchers:
+        - 1: function: 000001B55E608CB0
+        - 2: function: 000001B55E6082B0
+        - 3: function: 000001B55E608EF0
+        - 4: function: 000001B55E608130
+      - loaded:
+        - io:
+          - write: function: 00007FF7C9935D90
+          - stderr: file (00007FF8A792F540)
+          - stdout: file (00007FF8A792F4E8)
+          - read: function: 00007FF7C9935B70
+          - input: function: 00007FF7C9934E60
+          - open: function: 00007FF7C9934B00
+          - lines: function: 00007FF7C9935100
+          - type: function: 00007FF7C99346D0
+          - stdin: file (00007FF8A792F490)
+          - close: function: 00007FF7C9934910
+          - tmpfile: function: 00007FF7C9934CD0
+          - popen: function: 00007FF7C9934C20
+          - output: function: 00007FF7C9934E90
+          - flush: function: 00007FF7C9935FC0
+        - table:
+          - pack: function: 00007FF7C9933C20
+          - remove: function: 00007FF7C9933690
+          - sort: function: 00007FF7C9934490
+          - move: function: 00007FF7C99337B0
+          - unpack: function: 00007FF7C9933CD0
+          - concat: function: 00007FF7C9933AC0
+          - insert: function: 00007FF7C9933560
+        - utf8:
+          - len: function: 00007FF7C993C4D0
+          - charpattern: [ -Â-ô][€-¿]*
+          - codepoint: function: 00007FF7C993C650
+          - offset: function: 00007FF7C993C950
+          - char: function: 00007FF7C993C880
+          - codes: function: 00007FF7C993CCB0
+        - math:
+          - mininteger: -9223372036854775808
+          - rad: function: 00007FF7C993D600
+          - log: function: 00007FF7C993D4B0
+          - huge: inf
+          - randomseed: function: 00007FF7C993D900
+          - ceil: function: 00007FF7C993D1A0
+          - floor: function: 00007FF7C993D130
+          - tointeger: function: 00007FF7C993D050
+          - cos: function: 00007FF7C993CEE0
+          - maxinteger: 9223372036854775807
+          - pi: 3.1415926535898
+          - asin: function: 00007FF7C993CF60
+          - sin: function: 00007FF7C993CEA0
+          - min: function: 00007FF7C993D640
+          - abs: function: 00007FF7C993CE10
+          - tan: function: 00007FF7C993CF20
+          - sqrt: function: 00007FF7C993D400
+          - type: function: 00007FF7C993D940
+          - random: function: 00007FF7C993D780
+          - deg: function: 00007FF7C993D5C0
+          - modf: function: 00007FF7C993D310
+          - acos: function: 00007FF7C993CFA0
+          - fmod: function: 00007FF7C993D210
+          - atan: function: 00007FF7C993CFE0
+          - ult: function: 00007FF7C993D440
+          - max: function: 00007FF7C993D6E0
+          - exp: function: 00007FF7C993D580
+        - coroutine:
+          - resume: function: 00007FF7C9932FC0
+          - status: function: 00007FF7C9933200
+          - wrap: function: 00007FF7C9933190
+          - create: function: 00007FF7C9933120
+          - isyieldable: function: 00007FF7C9933330
+          - yield: function: 00007FF7C99331D0
+          - running: function: 00007FF7C9933360
+        - os:
+          - setlocale: function: 00007FF7C9936EA0
+          - clock: function: 00007FF7C9936580
+          - rename: function: 00007FF7C9936410
+          - exit: function: 00007FF7C9936F20
+          - tmpname: function: 00007FF7C9936490
+          - execute: function: 00007FF7C9936340
+          - time: function: 00007FF7C9936CA0
+          - remove: function: 00007FF7C99363B0
+          - getenv: function: 00007FF7C9936530
+          - difftime: function: 00007FF7C9936E40
+          - date: function: 00007FF7C9936A00
+        - string:
+          - dump: function: 00007FF7C9937920
+          - sub: function: 00007FF7C99370C0
+          - byte: function: 00007FF7C9937680
+          - char: function: 00007FF7C99377E0
+          - match: function: 00007FF7C9939130
+          - find: function: 00007FF7C9939100
+          - unpack: function: 00007FF7C993BC80
+          - upper: function: 00007FF7C9937390
+          - format: function: 00007FF7C993A510
+          - gsub: function: 00007FF7C9939710
+          - pack: function: 00007FF7C993B2B0
+          - gmatch: function: 00007FF7C9939250
+          - packsize: function: 00007FF7C993B980
+          - rep: function: 00007FF7C9937480
+          - lower: function: 00007FF7C99372A0
+          - reverse: function: 00007FF7C99371C0
+          - len: function: 00007FF7C9937030
+        - _G:
+          - dump: function: 000001B55DCAC0F0
+          - tonumber: function: 00007FF7C9931D30
+          - print: function: 000001B55E608270
+          - world:
+          - collectgarbage: function: 00007FF7C9932200
+          - getmetatable: function: 00007FF7C9931F40
+          - select: function: 00007FF7C9932AE0
+          - os:
+          - _G:
+          - dofile: function: 00007FF7C99329B0
+          - type: function: 00007FF7C9932300
+          - coroutine:
+          - tostring: function: 00007FF7C9932D80
+          - next: function: 00007FF7C9932440
+          - load: function: 00007FF7C9932800
+          - require: function: 000001B55E608F30
+          - rawequal: function: 00007FF7C9932060
+          - print_warn: function: 000001B55E6089B0
+          - table:
+          - file: file (000001B55B1CD140)
+          - rawlen: function: 00007FF7C99320C0
+          - ipairs: function: 00007FF7C9932550
+          - rcon:
+          - xpcall: function: 00007FF7C91D3730
+          - package:
+          - plan:
+          - io:
+          - loadfile: function: 00007FF7C9932640
+          - rawset: function: 00007FF7C9932190
+          - rawget: function: 00007FF7C9932130
+          - all_bots:
+          - setmetatable: function: 00007FF7C9931FB0
+          - assert: function: 00007FF7C9932A40
+          - print_err: function: 000001B55E6087F0
+          - math:
+          - utf8:
+          - string:
+          - _VERSION: Lua 5.3
+          - error: function: 00007FF7C9931EB0
+          - pairs: function: 00007FF7C99324B0
+          - pcall: function: 00007FF7C91D35F0
+        - package:
+          - config: \
+;
+?
+!
+-
+
+          - searchers:
+          - loaded:
+          - cpath: D:\projects\factorio-bot-tauri\target\debug\?.dll;D:\projects\factorio-bot-tauri\target\debug\..\lib\lua\5.3\?.dll;D:\projects\factorio-bot-tauri\target\debug\loadall.dll;.\?.dll
+          - preload:
+          - loadlib: function: 00007FF7C993E1C0
+          - path: D:\projects\factorio-bot-tauri\target\debug\lua\?.lua;D:\projects\factorio-bot-tauri\target\debug\lua\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\?.lua;D:\projects\factorio-bot-tauri\target\debug\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?\init.lua;.\?.lua;.\?\init.lua
+          - searchpath: function: 00007FF7C993E550
+      - cpath: D:\projects\factorio-bot-tauri\target\debug\?.dll;D:\projects\factorio-bot-tauri\target\debug\..\lib\lua\5.3\?.dll;D:\projects\factorio-bot-tauri\target\debug\loadall.dll;.\?.dll
+      - preload:
+      - loadlib: function: 00007FF7C993E1C0
+      - path: D:\projects\factorio-bot-tauri\target\debug\lua\?.lua;D:\projects\factorio-bot-tauri\target\debug\lua\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\?.lua;D:\projects\factorio-bot-tauri\target\debug\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?\init.lua;.\?.lua;.\?\init.lua
+      - searchpath: function: 00007FF7C993E550
+    - plan:
+      - mine: function: 000001B55E608470
+      - groupEnd: function: 000001B55E608E30
+      - walk: function: 000001B55E608D30
+      - groupStart: function: 000001B55E608230
+    - io:
+      - write: function: 00007FF7C9935D90
+      - stderr: file (00007FF8A792F540)
+      - stdout: file (00007FF8A792F4E8)
+      - read: function: 00007FF7C9935B70
+      - input: function: 00007FF7C9934E60
+      - open: function: 00007FF7C9934B00
+      - lines: function: 00007FF7C9935100
+      - type: function: 00007FF7C99346D0
+      - stdin: file (00007FF8A792F490)
+      - close: function: 00007FF7C9934910
+      - tmpfile: function: 00007FF7C9934CD0
+      - popen: function: 00007FF7C9934C20
+      - output: function: 00007FF7C9934E90
+      - flush: function: 00007FF7C9935FC0
+    - loadfile: function: 00007FF7C9932640
+    - rawset: function: 00007FF7C9932190
+    - rawget: function: 00007FF7C9932130
+    - all_bots:
+      - 1: 1
+    - setmetatable: function: 00007FF7C9931FB0
+    - assert: function: 00007FF7C9932A40
+    - print_err: function: 000001B55E6087F0
+    - math:
+      - mininteger: -9223372036854775808
+      - rad: function: 00007FF7C993D600
+      - log: function: 00007FF7C993D4B0
+      - huge: inf
+      - randomseed: function: 00007FF7C993D900
+      - ceil: function: 00007FF7C993D1A0
+      - floor: function: 00007FF7C993D130
+      - tointeger: function: 00007FF7C993D050
+      - cos: function: 00007FF7C993CEE0
+      - maxinteger: 9223372036854775807
+      - pi: 3.1415926535898
+      - asin: function: 00007FF7C993CF60
+      - sin: function: 00007FF7C993CEA0
+      - min: function: 00007FF7C993D640
+      - abs: function: 00007FF7C993CE10
+      - tan: function: 00007FF7C993CF20
+      - sqrt: function: 00007FF7C993D400
+      - type: function: 00007FF7C993D940
+      - random: function: 00007FF7C993D780
+      - deg: function: 00007FF7C993D5C0
+      - modf: function: 00007FF7C993D310
+      - acos: function: 00007FF7C993CFA0
+      - fmod: function: 00007FF7C993D210
+      - atan: function: 00007FF7C993CFE0
+      - ult: function: 00007FF7C993D440
+      - max: function: 00007FF7C993D6E0
+      - exp: function: 00007FF7C993D580
+    - utf8:
+      - len: function: 00007FF7C993C4D0
+      - charpattern: [ -Â-ô][€-¿]*
+      - codepoint: function: 00007FF7C993C650
+      - offset: function: 00007FF7C993C950
+      - char: function: 00007FF7C993C880
+      - codes: function: 00007FF7C993CCB0
+    - string:
+      - dump: function: 00007FF7C9937920
+      - sub: function: 00007FF7C99370C0
+      - byte: function: 00007FF7C9937680
+      - char: function: 00007FF7C99377E0
+      - match: function: 00007FF7C9939130
+      - find: function: 00007FF7C9939100
+      - unpack: function: 00007FF7C993BC80
+      - upper: function: 00007FF7C9937390
+      - format: function: 00007FF7C993A510
+      - gsub: function: 00007FF7C9939710
+      - pack: function: 00007FF7C993B2B0
+      - gmatch: function: 00007FF7C9939250
+      - packsize: function: 00007FF7C993B980
+      - rep: function: 00007FF7C9937480
+      - lower: function: 00007FF7C99372A0
+      - reverse: function: 00007FF7C99371C0
+      - len: function: 00007FF7C9937030
+    - _VERSION: Lua 5.3
+    - error: function: 00007FF7C9931EB0
+    - pairs: function: 00007FF7C99324B0
+    - pcall: function: 00007FF7C91D35F0
+  - dofile: function: 00007FF7C99329B0
+  - type: function: 00007FF7C9932300
+  - coroutine:
+    - resume: function: 00007FF7C9932FC0
+    - status: function: 00007FF7C9933200
+    - wrap: function: 00007FF7C9933190
+    - create: function: 00007FF7C9933120
+    - isyieldable: function: 00007FF7C9933330
+    - yield: function: 00007FF7C99331D0
+    - running: function: 00007FF7C9933360
+  - tostring: function: 00007FF7C9932D80
+  - next: function: 00007FF7C9932440
+  - load: function: 00007FF7C9932800
+  - require: function: 000001B55E608F30
+  - rawequal: function: 00007FF7C9932060
+  - print_warn: function: 000001B55E6089B0
+  - table:
+    - pack: function: 00007FF7C9933C20
+    - remove: function: 00007FF7C9933690
+    - sort: function: 00007FF7C9934490
+    - move: function: 00007FF7C99337B0
+    - unpack: function: 00007FF7C9933CD0
+    - concat: function: 00007FF7C9933AC0
+    - insert: function: 00007FF7C9933560
+  - file: file (000001B55B1CD140)
+  - rawlen: function: 00007FF7C99320C0
+  - ipairs: function: 00007FF7C9932550
+  - rcon:
+    - move: function: 000001B55DC44F70
+    - insertToInventory: function: 000001B55A21B6C0
+    - mine: function: 000001B55DC44970
+    - cheatItem: function: 000001B55DC44670
+    - cheatTechnology: function: 000001B55DC44B30
+    - print: function: 000001B55DC44D70
+    - findEntitiesInRadius: function: 000001B55E608D70
+    - removeFromInventory: function: 000001B55B339770
+    - placeEntity: function: 000001B55A21B680
+    - cheatAllTechnologies: function: 000001B55DC44870
+    - inventoryContentsAt: function: 000001B55DC44470
+    - craft: function: 000001B55DC44A30
+    - addResearch: function: 000001B55DC44830
+    - cheatBlueprint: function: 000001B55DC44630
+    - reviveGhost: function: 000001B55DC44C70
+    - placeBlueprint: function: 000001B55DC44DB0
+  - xpcall: function: 00007FF7C91D3730
+  - package:
+    - config: \
+;
+?
+!
+-
+
+    - searchers:
+      - 1: function: 000001B55E608CB0
+      - 2: function: 000001B55E6082B0
+      - 3: function: 000001B55E608EF0
+      - 4: function: 000001B55E608130
+    - loaded:
+      - io:
+        - write: function: 00007FF7C9935D90
+        - stderr: file (00007FF8A792F540)
+        - stdout: file (00007FF8A792F4E8)
+        - read: function: 00007FF7C9935B70
+        - input: function: 00007FF7C9934E60
+        - open: function: 00007FF7C9934B00
+        - lines: function: 00007FF7C9935100
+        - type: function: 00007FF7C99346D0
+        - stdin: file (00007FF8A792F490)
+        - close: function: 00007FF7C9934910
+        - tmpfile: function: 00007FF7C9934CD0
+        - popen: function: 00007FF7C9934C20
+        - output: function: 00007FF7C9934E90
+        - flush: function: 00007FF7C9935FC0
+      - table:
+        - pack: function: 00007FF7C9933C20
+        - remove: function: 00007FF7C9933690
+        - sort: function: 00007FF7C9934490
+        - move: function: 00007FF7C99337B0
+        - unpack: function: 00007FF7C9933CD0
+        - concat: function: 00007FF7C9933AC0
+        - insert: function: 00007FF7C9933560
+      - utf8:
+        - len: function: 00007FF7C993C4D0
+        - charpattern: [ -Â-ô][€-¿]*
+        - codepoint: function: 00007FF7C993C650
+        - offset: function: 00007FF7C993C950
+        - char: function: 00007FF7C993C880
+        - codes: function: 00007FF7C993CCB0
+      - math:
+        - mininteger: -9223372036854775808
+        - rad: function: 00007FF7C993D600
+        - log: function: 00007FF7C993D4B0
+        - huge: inf
+        - randomseed: function: 00007FF7C993D900
+        - ceil: function: 00007FF7C993D1A0
+        - floor: function: 00007FF7C993D130
+        - tointeger: function: 00007FF7C993D050
+        - cos: function: 00007FF7C993CEE0
+        - maxinteger: 9223372036854775807
+        - pi: 3.1415926535898
+        - asin: function: 00007FF7C993CF60
+        - sin: function: 00007FF7C993CEA0
+        - min: function: 00007FF7C993D640
+        - abs: function: 00007FF7C993CE10
+        - tan: function: 00007FF7C993CF20
+        - sqrt: function: 00007FF7C993D400
+        - type: function: 00007FF7C993D940
+        - random: function: 00007FF7C993D780
+        - deg: function: 00007FF7C993D5C0
+        - modf: function: 00007FF7C993D310
+        - acos: function: 00007FF7C993CFA0
+        - fmod: function: 00007FF7C993D210
+        - atan: function: 00007FF7C993CFE0
+        - ult: function: 00007FF7C993D440
+        - max: function: 00007FF7C993D6E0
+        - exp: function: 00007FF7C993D580
+      - coroutine:
+        - resume: function: 00007FF7C9932FC0
+        - status: function: 00007FF7C9933200
+        - wrap: function: 00007FF7C9933190
+        - create: function: 00007FF7C9933120
+        - isyieldable: function: 00007FF7C9933330
+        - yield: function: 00007FF7C99331D0
+        - running: function: 00007FF7C9933360
+      - os:
+        - setlocale: function: 00007FF7C9936EA0
+        - clock: function: 00007FF7C9936580
+        - rename: function: 00007FF7C9936410
+        - exit: function: 00007FF7C9936F20
+        - tmpname: function: 00007FF7C9936490
+        - execute: function: 00007FF7C9936340
+        - time: function: 00007FF7C9936CA0
+        - remove: function: 00007FF7C99363B0
+        - getenv: function: 00007FF7C9936530
+        - difftime: function: 00007FF7C9936E40
+        - date: function: 00007FF7C9936A00
+      - string:
+        - dump: function: 00007FF7C9937920
+        - sub: function: 00007FF7C99370C0
+        - byte: function: 00007FF7C9937680
+        - char: function: 00007FF7C99377E0
+        - match: function: 00007FF7C9939130
+        - find: function: 00007FF7C9939100
+        - unpack: function: 00007FF7C993BC80
+        - upper: function: 00007FF7C9937390
+        - format: function: 00007FF7C993A510
+        - gsub: function: 00007FF7C9939710
+        - pack: function: 00007FF7C993B2B0
+        - gmatch: function: 00007FF7C9939250
+        - packsize: function: 00007FF7C993B980
+        - rep: function: 00007FF7C9937480
+        - lower: function: 00007FF7C99372A0
+        - reverse: function: 00007FF7C99371C0
+        - len: function: 00007FF7C9937030
+      - _G:
+        - dump: function: 000001B55DCAC0F0
+        - tonumber: function: 00007FF7C9931D30
+        - print: function: 000001B55E608270
+        - world:
+          - player: function: 000001B55E6083B0
+          - inventory: function: 000001B55E6085F0
+          - recipe: function: 000001B55E6084F0
+          - findFreeResourceRect: function: 000001B55E608830
+        - collectgarbage: function: 00007FF7C9932200
+        - getmetatable: function: 00007FF7C9931F40
+        - select: function: 00007FF7C9932AE0
+        - os:
+          - setlocale: function: 00007FF7C9936EA0
+          - clock: function: 00007FF7C9936580
+          - rename: function: 00007FF7C9936410
+          - exit: function: 00007FF7C9936F20
+          - tmpname: function: 00007FF7C9936490
+          - execute: function: 00007FF7C9936340
+          - time: function: 00007FF7C9936CA0
+          - remove: function: 00007FF7C99363B0
+          - getenv: function: 00007FF7C9936530
+          - difftime: function: 00007FF7C9936E40
+          - date: function: 00007FF7C9936A00
+        - _G:
+          - dump: function: 000001B55DCAC0F0
+          - tonumber: function: 00007FF7C9931D30
+          - print: function: 000001B55E608270
+          - world:
+          - collectgarbage: function: 00007FF7C9932200
+          - getmetatable: function: 00007FF7C9931F40
+          - select: function: 00007FF7C9932AE0
+          - os:
+          - _G:
+          - dofile: function: 00007FF7C99329B0
+          - type: function: 00007FF7C9932300
+          - coroutine:
+          - tostring: function: 00007FF7C9932D80
+          - next: function: 00007FF7C9932440
+          - load: function: 00007FF7C9932800
+          - require: function: 000001B55E608F30
+          - rawequal: function: 00007FF7C9932060
+          - print_warn: function: 000001B55E6089B0
+          - table:
+          - file: file (000001B55B1CD140)
+          - rawlen: function: 00007FF7C99320C0
+          - ipairs: function: 00007FF7C9932550
+          - rcon:
+          - xpcall: function: 00007FF7C91D3730
+          - package:
+          - plan:
+          - io:
+          - loadfile: function: 00007FF7C9932640
+          - rawset: function: 00007FF7C9932190
+          - rawget: function: 00007FF7C9932130
+          - all_bots:
+          - setmetatable: function: 00007FF7C9931FB0
+          - assert: function: 00007FF7C9932A40
+          - print_err: function: 000001B55E6087F0
+          - math:
+          - utf8:
+          - string:
+          - _VERSION: Lua 5.3
+          - error: function: 00007FF7C9931EB0
+          - pairs: function: 00007FF7C99324B0
+          - pcall: function: 00007FF7C91D35F0
+        - dofile: function: 00007FF7C99329B0
+        - type: function: 00007FF7C9932300
+        - coroutine:
+          - resume: function: 00007FF7C9932FC0
+          - status: function: 00007FF7C9933200
+          - wrap: function: 00007FF7C9933190
+          - create: function: 00007FF7C9933120
+          - isyieldable: function: 00007FF7C9933330
+          - yield: function: 00007FF7C99331D0
+          - running: function: 00007FF7C9933360
+        - tostring: function: 00007FF7C9932D80
+        - next: function: 00007FF7C9932440
+        - load: function: 00007FF7C9932800
+        - require: function: 000001B55E608F30
+        - rawequal: function: 00007FF7C9932060
+        - print_warn: function: 000001B55E6089B0
+        - table:
+          - pack: function: 00007FF7C9933C20
+          - remove: function: 00007FF7C9933690
+          - sort: function: 00007FF7C9934490
+          - move: function: 00007FF7C99337B0
+          - unpack: function: 00007FF7C9933CD0
+          - concat: function: 00007FF7C9933AC0
+          - insert: function: 00007FF7C9933560
+        - file: file (000001B55B1CD140)
+        - rawlen: function: 00007FF7C99320C0
+        - ipairs: function: 00007FF7C9932550
+        - rcon:
+          - move: function: 000001B55DC44F70
+          - insertToInventory: function: 000001B55A21B6C0
+          - mine: function: 000001B55DC44970
+          - cheatItem: function: 000001B55DC44670
+          - cheatTechnology: function: 000001B55DC44B30
+          - print: function: 000001B55DC44D70
+          - findEntitiesInRadius: function: 000001B55E608D70
+          - removeFromInventory: function: 000001B55B339770
+          - placeEntity: function: 000001B55A21B680
+          - cheatAllTechnologies: function: 000001B55DC44870
+          - inventoryContentsAt: function: 000001B55DC44470
+          - craft: function: 000001B55DC44A30
+          - addResearch: function: 000001B55DC44830
+          - cheatBlueprint: function: 000001B55DC44630
+          - reviveGhost: function: 000001B55DC44C70
+          - placeBlueprint: function: 000001B55DC44DB0
+        - xpcall: function: 00007FF7C91D3730
+        - package:
+          - config: \
+;
+?
+!
+-
+
+          - searchers:
+          - loaded:
+          - cpath: D:\projects\factorio-bot-tauri\target\debug\?.dll;D:\projects\factorio-bot-tauri\target\debug\..\lib\lua\5.3\?.dll;D:\projects\factorio-bot-tauri\target\debug\loadall.dll;.\?.dll
+          - preload:
+          - loadlib: function: 00007FF7C993E1C0
+          - path: D:\projects\factorio-bot-tauri\target\debug\lua\?.lua;D:\projects\factorio-bot-tauri\target\debug\lua\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\?.lua;D:\projects\factorio-bot-tauri\target\debug\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?\init.lua;.\?.lua;.\?\init.lua
+          - searchpath: function: 00007FF7C993E550
+        - plan:
+          - mine: function: 000001B55E608470
+          - groupEnd: function: 000001B55E608E30
+          - walk: function: 000001B55E608D30
+          - groupStart: function: 000001B55E608230
+        - io:
+          - write: function: 00007FF7C9935D90
+          - stderr: file (00007FF8A792F540)
+          - stdout: file (00007FF8A792F4E8)
+          - read: function: 00007FF7C9935B70
+          - input: function: 00007FF7C9934E60
+          - open: function: 00007FF7C9934B00
+          - lines: function: 00007FF7C9935100
+          - type: function: 00007FF7C99346D0
+          - stdin: file (00007FF8A792F490)
+          - close: function: 00007FF7C9934910
+          - tmpfile: function: 00007FF7C9934CD0
+          - popen: function: 00007FF7C9934C20
+          - output: function: 00007FF7C9934E90
+          - flush: function: 00007FF7C9935FC0
+        - loadfile: function: 00007FF7C9932640
+        - rawset: function: 00007FF7C9932190
+        - rawget: function: 00007FF7C9932130
+        - all_bots:
+          - 1: 1
+        - setmetatable: function: 00007FF7C9931FB0
+        - assert: function: 00007FF7C9932A40
+        - print_err: function: 000001B55E6087F0
+        - math:
+          - mininteger: -9223372036854775808
+          - rad: function: 00007FF7C993D600
+          - log: function: 00007FF7C993D4B0
+          - huge: inf
+          - randomseed: function: 00007FF7C993D900
+          - ceil: function: 00007FF7C993D1A0
+          - floor: function: 00007FF7C993D130
+          - tointeger: function: 00007FF7C993D050
+          - cos: function: 00007FF7C993CEE0
+          - maxinteger: 9223372036854775807
+          - pi: 3.1415926535898
+          - asin: function: 00007FF7C993CF60
+          - sin: function: 00007FF7C993CEA0
+          - min: function: 00007FF7C993D640
+          - abs: function: 00007FF7C993CE10
+          - tan: function: 00007FF7C993CF20
+          - sqrt: function: 00007FF7C993D400
+          - type: function: 00007FF7C993D940
+          - random: function: 00007FF7C993D780
+          - deg: function: 00007FF7C993D5C0
+          - modf: function: 00007FF7C993D310
+          - acos: function: 00007FF7C993CFA0
+          - fmod: function: 00007FF7C993D210
+          - atan: function: 00007FF7C993CFE0
+          - ult: function: 00007FF7C993D440
+          - max: function: 00007FF7C993D6E0
+          - exp: function: 00007FF7C993D580
+        - utf8:
+          - len: function: 00007FF7C993C4D0
+          - charpattern: [ -Â-ô][€-¿]*
+          - codepoint: function: 00007FF7C993C650
+          - offset: function: 00007FF7C993C950
+          - char: function: 00007FF7C993C880
+          - codes: function: 00007FF7C993CCB0
+        - string:
+          - dump: function: 00007FF7C9937920
+          - sub: function: 00007FF7C99370C0
+          - byte: function: 00007FF7C9937680
+          - char: function: 00007FF7C99377E0
+          - match: function: 00007FF7C9939130
+          - find: function: 00007FF7C9939100
+          - unpack: function: 00007FF7C993BC80
+          - upper: function: 00007FF7C9937390
+          - format: function: 00007FF7C993A510
+          - gsub: function: 00007FF7C9939710
+          - pack: function: 00007FF7C993B2B0
+          - gmatch: function: 00007FF7C9939250
+          - packsize: function: 00007FF7C993B980
+          - rep: function: 00007FF7C9937480
+          - lower: function: 00007FF7C99372A0
+          - reverse: function: 00007FF7C99371C0
+          - len: function: 00007FF7C9937030
+        - _VERSION: Lua 5.3
+        - error: function: 00007FF7C9931EB0
+        - pairs: function: 00007FF7C99324B0
+        - pcall: function: 00007FF7C91D35F0
+      - package:
+        - config: \
+;
+?
+!
+-
+
+        - searchers:
+          - 1: function: 000001B55E608CB0
+          - 2: function: 000001B55E6082B0
+          - 3: function: 000001B55E608EF0
+          - 4: function: 000001B55E608130
+        - loaded:
+          - io:
+          - table:
+          - utf8:
+          - math:
+          - coroutine:
+          - os:
+          - string:
+          - _G:
+          - package:
+        - cpath: D:\projects\factorio-bot-tauri\target\debug\?.dll;D:\projects\factorio-bot-tauri\target\debug\..\lib\lua\5.3\?.dll;D:\projects\factorio-bot-tauri\target\debug\loadall.dll;.\?.dll
+        - preload:
+        - loadlib: function: 00007FF7C993E1C0
+        - path: D:\projects\factorio-bot-tauri\target\debug\lua\?.lua;D:\projects\factorio-bot-tauri\target\debug\lua\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\?.lua;D:\projects\factorio-bot-tauri\target\debug\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?\init.lua;.\?.lua;.\?\init.lua
+        - searchpath: function: 00007FF7C993E550
+    - cpath: D:\projects\factorio-bot-tauri\target\debug\?.dll;D:\projects\factorio-bot-tauri\target\debug\..\lib\lua\5.3\?.dll;D:\projects\factorio-bot-tauri\target\debug\loadall.dll;.\?.dll
+    - preload:
+    - loadlib: function: 00007FF7C993E1C0
+    - path: D:\projects\factorio-bot-tauri\target\debug\lua\?.lua;D:\projects\factorio-bot-tauri\target\debug\lua\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\?.lua;D:\projects\factorio-bot-tauri\target\debug\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?\init.lua;.\?.lua;.\?\init.lua
+    - searchpath: function: 00007FF7C993E550
+  - plan:
+    - mine: function: 000001B55E608470
+    - groupEnd: function: 000001B55E608E30
+    - walk: function: 000001B55E608D30
+    - groupStart: function: 000001B55E608230
+  - io:
+    - write: function: 00007FF7C9935D90
+    - stderr: file (00007FF8A792F540)
+    - stdout: file (00007FF8A792F4E8)
+    - read: function: 00007FF7C9935B70
+    - input: function: 00007FF7C9934E60
+    - open: function: 00007FF7C9934B00
+    - lines: function: 00007FF7C9935100
+    - type: function: 00007FF7C99346D0
+    - stdin: file (00007FF8A792F490)
+    - close: function: 00007FF7C9934910
+    - tmpfile: function: 00007FF7C9934CD0
+    - popen: function: 00007FF7C9934C20
+    - output: function: 00007FF7C9934E90
+    - flush: function: 00007FF7C9935FC0
+  - loadfile: function: 00007FF7C9932640
+  - rawset: function: 00007FF7C9932190
+  - rawget: function: 00007FF7C9932130
+  - all_bots:
+    - 1: 1
+  - setmetatable: function: 00007FF7C9931FB0
+  - assert: function: 00007FF7C9932A40
+  - print_err: function: 000001B55E6087F0
+  - math:
+    - mininteger: -9223372036854775808
+    - rad: function: 00007FF7C993D600
+    - log: function: 00007FF7C993D4B0
+    - huge: inf
+    - randomseed: function: 00007FF7C993D900
+    - ceil: function: 00007FF7C993D1A0
+    - floor: function: 00007FF7C993D130
+    - tointeger: function: 00007FF7C993D050
+    - cos: function: 00007FF7C993CEE0
+    - maxinteger: 9223372036854775807
+    - pi: 3.1415926535898
+    - asin: function: 00007FF7C993CF60
+    - sin: function: 00007FF7C993CEA0
+    - min: function: 00007FF7C993D640
+    - abs: function: 00007FF7C993CE10
+    - tan: function: 00007FF7C993CF20
+    - sqrt: function: 00007FF7C993D400
+    - type: function: 00007FF7C993D940
+    - random: function: 00007FF7C993D780
+    - deg: function: 00007FF7C993D5C0
+    - modf: function: 00007FF7C993D310
+    - acos: function: 00007FF7C993CFA0
+    - fmod: function: 00007FF7C993D210
+    - atan: function: 00007FF7C993CFE0
+    - ult: function: 00007FF7C993D440
+    - max: function: 00007FF7C993D6E0
+    - exp: function: 00007FF7C993D580
+  - utf8:
+    - len: function: 00007FF7C993C4D0
+    - charpattern: [ -Â-ô][€-¿]*
+    - codepoint: function: 00007FF7C993C650
+    - offset: function: 00007FF7C993C950
+    - char: function: 00007FF7C993C880
+    - codes: function: 00007FF7C993CCB0
+  - string:
+    - dump: function: 00007FF7C9937920
+    - sub: function: 00007FF7C99370C0
+    - byte: function: 00007FF7C9937680
+    - char: function: 00007FF7C99377E0
+    - match: function: 00007FF7C9939130
+    - find: function: 00007FF7C9939100
+    - unpack: function: 00007FF7C993BC80
+    - upper: function: 00007FF7C9937390
+    - format: function: 00007FF7C993A510
+    - gsub: function: 00007FF7C9939710
+    - pack: function: 00007FF7C993B2B0
+    - gmatch: function: 00007FF7C9939250
+    - packsize: function: 00007FF7C993B980
+    - rep: function: 00007FF7C9937480
+    - lower: function: 00007FF7C99372A0
+    - reverse: function: 00007FF7C99371C0
+    - len: function: 00007FF7C9937030
+  - _VERSION: Lua 5.3
+  - error: function: 00007FF7C9931EB0
+  - pairs: function: 00007FF7C99324B0
+  - pcall: function: 00007FF7C91D35F0
+- dofile: function: 00007FF7C99329B0
+- type: function: 00007FF7C9932300
+- coroutine:
+  - resume: function: 00007FF7C9932FC0
+  - status: function: 00007FF7C9933200
+  - wrap: function: 00007FF7C9933190
+  - create: function: 00007FF7C9933120
+  - isyieldable: function: 00007FF7C9933330
+  - yield: function: 00007FF7C99331D0
+  - running: function: 00007FF7C9933360
+- tostring: function: 00007FF7C9932D80
+- next: function: 00007FF7C9932440
+- load: function: 00007FF7C9932800
+- require: function: 000001B55E608F30
+- rawequal: function: 00007FF7C9932060
+- print_warn: function: 000001B55E6089B0
+- table:
+  - pack: function: 00007FF7C9933C20
+  - remove: function: 00007FF7C9933690
+  - sort: function: 00007FF7C9934490
+  - move: function: 00007FF7C99337B0
+  - unpack: function: 00007FF7C9933CD0
+  - concat: function: 00007FF7C9933AC0
+  - insert: function: 00007FF7C9933560
+- file: file (000001B55B1CD140)
+- rawlen: function: 00007FF7C99320C0
+- ipairs: function: 00007FF7C9932550
+- rcon:
+  - move: function: 000001B55DC44F70
+  - insertToInventory: function: 000001B55A21B6C0
+  - mine: function: 000001B55DC44970
+  - cheatItem: function: 000001B55DC44670
+  - cheatTechnology: function: 000001B55DC44B30
+  - print: function: 000001B55DC44D70
+  - findEntitiesInRadius: function: 000001B55E608D70
+  - removeFromInventory: function: 000001B55B339770
+  - placeEntity: function: 000001B55A21B680
+  - cheatAllTechnologies: function: 000001B55DC44870
+  - inventoryContentsAt: function: 000001B55DC44470
+  - craft: function: 000001B55DC44A30
+  - addResearch: function: 000001B55DC44830
+  - cheatBlueprint: function: 000001B55DC44630
+  - reviveGhost: function: 000001B55DC44C70
+  - placeBlueprint: function: 000001B55DC44DB0
+- xpcall: function: 00007FF7C91D3730
+- package:
+  - config: \
+;
+?
+!
+-
+
+  - searchers:
+    - 1: function: 000001B55E608CB0
+    - 2: function: 000001B55E6082B0
+    - 3: function: 000001B55E608EF0
+    - 4: function: 000001B55E608130
+  - loaded:
+    - io:
+      - write: function: 00007FF7C9935D90
+      - stderr: file (00007FF8A792F540)
+      - stdout: file (00007FF8A792F4E8)
+      - read: function: 00007FF7C9935B70
+      - input: function: 00007FF7C9934E60
+      - open: function: 00007FF7C9934B00
+      - lines: function: 00007FF7C9935100
+      - type: function: 00007FF7C99346D0
+      - stdin: file (00007FF8A792F490)
+      - close: function: 00007FF7C9934910
+      - tmpfile: function: 00007FF7C9934CD0
+      - popen: function: 00007FF7C9934C20
+      - output: function: 00007FF7C9934E90
+      - flush: function: 00007FF7C9935FC0
+    - table:
+      - pack: function: 00007FF7C9933C20
+      - remove: function: 00007FF7C9933690
+      - sort: function: 00007FF7C9934490
+      - move: function: 00007FF7C99337B0
+      - unpack: function: 00007FF7C9933CD0
+      - concat: function: 00007FF7C9933AC0
+      - insert: function: 00007FF7C9933560
+    - utf8:
+      - len: function: 00007FF7C993C4D0
+      - charpattern: [ -Â-ô][€-¿]*
+      - codepoint: function: 00007FF7C993C650
+      - offset: function: 00007FF7C993C950
+      - char: function: 00007FF7C993C880
+      - codes: function: 00007FF7C993CCB0
+    - math:
+      - mininteger: -9223372036854775808
+      - rad: function: 00007FF7C993D600
+      - log: function: 00007FF7C993D4B0
+      - huge: inf
+      - randomseed: function: 00007FF7C993D900
+      - ceil: function: 00007FF7C993D1A0
+      - floor: function: 00007FF7C993D130
+      - tointeger: function: 00007FF7C993D050
+      - cos: function: 00007FF7C993CEE0
+      - maxinteger: 9223372036854775807
+      - pi: 3.1415926535898
+      - asin: function: 00007FF7C993CF60
+      - sin: function: 00007FF7C993CEA0
+      - min: function: 00007FF7C993D640
+      - abs: function: 00007FF7C993CE10
+      - tan: function: 00007FF7C993CF20
+      - sqrt: function: 00007FF7C993D400
+      - type: function: 00007FF7C993D940
+      - random: function: 00007FF7C993D780
+      - deg: function: 00007FF7C993D5C0
+      - modf: function: 00007FF7C993D310
+      - acos: function: 00007FF7C993CFA0
+      - fmod: function: 00007FF7C993D210
+      - atan: function: 00007FF7C993CFE0
+      - ult: function: 00007FF7C993D440
+      - max: function: 00007FF7C993D6E0
+      - exp: function: 00007FF7C993D580
+    - coroutine:
+      - resume: function: 00007FF7C9932FC0
+      - status: function: 00007FF7C9933200
+      - wrap: function: 00007FF7C9933190
+      - create: function: 00007FF7C9933120
+      - isyieldable: function: 00007FF7C9933330
+      - yield: function: 00007FF7C99331D0
+      - running: function: 00007FF7C9933360
+    - os:
+      - setlocale: function: 00007FF7C9936EA0
+      - clock: function: 00007FF7C9936580
+      - rename: function: 00007FF7C9936410
+      - exit: function: 00007FF7C9936F20
+      - tmpname: function: 00007FF7C9936490
+      - execute: function: 00007FF7C9936340
+      - time: function: 00007FF7C9936CA0
+      - remove: function: 00007FF7C99363B0
+      - getenv: function: 00007FF7C9936530
+      - difftime: function: 00007FF7C9936E40
+      - date: function: 00007FF7C9936A00
+    - string:
+      - dump: function: 00007FF7C9937920
+      - sub: function: 00007FF7C99370C0
+      - byte: function: 00007FF7C9937680
+      - char: function: 00007FF7C99377E0
+      - match: function: 00007FF7C9939130
+      - find: function: 00007FF7C9939100
+      - unpack: function: 00007FF7C993BC80
+      - upper: function: 00007FF7C9937390
+      - format: function: 00007FF7C993A510
+      - gsub: function: 00007FF7C9939710
+      - pack: function: 00007FF7C993B2B0
+      - gmatch: function: 00007FF7C9939250
+      - packsize: function: 00007FF7C993B980
+      - rep: function: 00007FF7C9937480
+      - lower: function: 00007FF7C99372A0
+      - reverse: function: 00007FF7C99371C0
+      - len: function: 00007FF7C9937030
+    - _G:
+      - dump: function: 000001B55DCAC0F0
+      - tonumber: function: 00007FF7C9931D30
+      - print: function: 000001B55E608270
+      - world:
+        - player: function: 000001B55E6083B0
+        - inventory: function: 000001B55E6085F0
+        - recipe: function: 000001B55E6084F0
+        - findFreeResourceRect: function: 000001B55E608830
+      - collectgarbage: function: 00007FF7C9932200
+      - getmetatable: function: 00007FF7C9931F40
+      - select: function: 00007FF7C9932AE0
+      - os:
+        - setlocale: function: 00007FF7C9936EA0
+        - clock: function: 00007FF7C9936580
+        - rename: function: 00007FF7C9936410
+        - exit: function: 00007FF7C9936F20
+        - tmpname: function: 00007FF7C9936490
+        - execute: function: 00007FF7C9936340
+        - time: function: 00007FF7C9936CA0
+        - remove: function: 00007FF7C99363B0
+        - getenv: function: 00007FF7C9936530
+        - difftime: function: 00007FF7C9936E40
+        - date: function: 00007FF7C9936A00
+      - _G:
+        - dump: function: 000001B55DCAC0F0
+        - tonumber: function: 00007FF7C9931D30
+        - print: function: 000001B55E608270
+        - world:
+          - player: function: 000001B55E6083B0
+          - inventory: function: 000001B55E6085F0
+          - recipe: function: 000001B55E6084F0
+          - findFreeResourceRect: function: 000001B55E608830
+        - collectgarbage: function: 00007FF7C9932200
+        - getmetatable: function: 00007FF7C9931F40
+        - select: function: 00007FF7C9932AE0
+        - os:
+          - setlocale: function: 00007FF7C9936EA0
+          - clock: function: 00007FF7C9936580
+          - rename: function: 00007FF7C9936410
+          - exit: function: 00007FF7C9936F20
+          - tmpname: function: 00007FF7C9936490
+          - execute: function: 00007FF7C9936340
+          - time: function: 00007FF7C9936CA0
+          - remove: function: 00007FF7C99363B0
+          - getenv: function: 00007FF7C9936530
+          - difftime: function: 00007FF7C9936E40
+          - date: function: 00007FF7C9936A00
+        - _G:
+          - dump: function: 000001B55DCAC0F0
+          - tonumber: function: 00007FF7C9931D30
+          - print: function: 000001B55E608270
+          - world:
+          - collectgarbage: function: 00007FF7C9932200
+          - getmetatable: function: 00007FF7C9931F40
+          - select: function: 00007FF7C9932AE0
+          - os:
+          - _G:
+          - dofile: function: 00007FF7C99329B0
+          - type: function: 00007FF7C9932300
+          - coroutine:
+          - tostring: function: 00007FF7C9932D80
+          - next: function: 00007FF7C9932440
+          - load: function: 00007FF7C9932800
+          - require: function: 000001B55E608F30
+          - rawequal: function: 00007FF7C9932060
+          - print_warn: function: 000001B55E6089B0
+          - table:
+          - file: file (000001B55B1CD140)
+          - rawlen: function: 00007FF7C99320C0
+          - ipairs: function: 00007FF7C9932550
+          - rcon:
+          - xpcall: function: 00007FF7C91D3730
+          - package:
+          - plan:
+          - io:
+          - loadfile: function: 00007FF7C9932640
+          - rawset: function: 00007FF7C9932190
+          - rawget: function: 00007FF7C9932130
+          - all_bots:
+          - setmetatable: function: 00007FF7C9931FB0
+          - assert: function: 00007FF7C9932A40
+          - print_err: function: 000001B55E6087F0
+          - math:
+          - utf8:
+          - string:
+          - _VERSION: Lua 5.3
+          - error: function: 00007FF7C9931EB0
+          - pairs: function: 00007FF7C99324B0
+          - pcall: function: 00007FF7C91D35F0
+        - dofile: function: 00007FF7C99329B0
+        - type: function: 00007FF7C9932300
+        - coroutine:
+          - resume: function: 00007FF7C9932FC0
+          - status: function: 00007FF7C9933200
+          - wrap: function: 00007FF7C9933190
+          - create: function: 00007FF7C9933120
+          - isyieldable: function: 00007FF7C9933330
+          - yield: function: 00007FF7C99331D0
+          - running: function: 00007FF7C9933360
+        - tostring: function: 00007FF7C9932D80
+        - next: function: 00007FF7C9932440
+        - load: function: 00007FF7C9932800
+        - require: function: 000001B55E608F30
+        - rawequal: function: 00007FF7C9932060
+        - print_warn: function: 000001B55E6089B0
+        - table:
+          - pack: function: 00007FF7C9933C20
+          - remove: function: 00007FF7C9933690
+          - sort: function: 00007FF7C9934490
+          - move: function: 00007FF7C99337B0
+          - unpack: function: 00007FF7C9933CD0
+          - concat: function: 00007FF7C9933AC0
+          - insert: function: 00007FF7C9933560
+        - file: file (000001B55B1CD140)
+        - rawlen: function: 00007FF7C99320C0
+        - ipairs: function: 00007FF7C9932550
+        - rcon:
+          - move: function: 000001B55DC44F70
+          - insertToInventory: function: 000001B55A21B6C0
+          - mine: function: 000001B55DC44970
+          - cheatItem: function: 000001B55DC44670
+          - cheatTechnology: function: 000001B55DC44B30
+          - print: function: 000001B55DC44D70
+          - findEntitiesInRadius: function: 000001B55E608D70
+          - removeFromInventory: function: 000001B55B339770
+          - placeEntity: function: 000001B55A21B680
+          - cheatAllTechnologies: function: 000001B55DC44870
+          - inventoryContentsAt: function: 000001B55DC44470
+          - craft: function: 000001B55DC44A30
+          - addResearch: function: 000001B55DC44830
+          - cheatBlueprint: function: 000001B55DC44630
+          - reviveGhost: function: 000001B55DC44C70
+          - placeBlueprint: function: 000001B55DC44DB0
+        - xpcall: function: 00007FF7C91D3730
+        - package:
+          - config: \
+;
+?
+!
+-
+
+          - searchers:
+          - loaded:
+          - cpath: D:\projects\factorio-bot-tauri\target\debug\?.dll;D:\projects\factorio-bot-tauri\target\debug\..\lib\lua\5.3\?.dll;D:\projects\factorio-bot-tauri\target\debug\loadall.dll;.\?.dll
+          - preload:
+          - loadlib: function: 00007FF7C993E1C0
+          - path: D:\projects\factorio-bot-tauri\target\debug\lua\?.lua;D:\projects\factorio-bot-tauri\target\debug\lua\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\?.lua;D:\projects\factorio-bot-tauri\target\debug\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?\init.lua;.\?.lua;.\?\init.lua
+          - searchpath: function: 00007FF7C993E550
+        - plan:
+          - mine: function: 000001B55E608470
+          - groupEnd: function: 000001B55E608E30
+          - walk: function: 000001B55E608D30
+          - groupStart: function: 000001B55E608230
+        - io:
+          - write: function: 00007FF7C9935D90
+          - stderr: file (00007FF8A792F540)
+          - stdout: file (00007FF8A792F4E8)
+          - read: function: 00007FF7C9935B70
+          - input: function: 00007FF7C9934E60
+          - open: function: 00007FF7C9934B00
+          - lines: function: 00007FF7C9935100
+          - type: function: 00007FF7C99346D0
+          - stdin: file (00007FF8A792F490)
+          - close: function: 00007FF7C9934910
+          - tmpfile: function: 00007FF7C9934CD0
+          - popen: function: 00007FF7C9934C20
+          - output: function: 00007FF7C9934E90
+          - flush: function: 00007FF7C9935FC0
+        - loadfile: function: 00007FF7C9932640
+        - rawset: function: 00007FF7C9932190
+        - rawget: function: 00007FF7C9932130
+        - all_bots:
+          - 1: 1
+        - setmetatable: function: 00007FF7C9931FB0
+        - assert: function: 00007FF7C9932A40
+        - print_err: function: 000001B55E6087F0
+        - math:
+          - mininteger: -9223372036854775808
+          - rad: function: 00007FF7C993D600
+          - log: function: 00007FF7C993D4B0
+          - huge: inf
+          - randomseed: function: 00007FF7C993D900
+          - ceil: function: 00007FF7C993D1A0
+          - floor: function: 00007FF7C993D130
+          - tointeger: function: 00007FF7C993D050
+          - cos: function: 00007FF7C993CEE0
+          - maxinteger: 9223372036854775807
+          - pi: 3.1415926535898
+          - asin: function: 00007FF7C993CF60
+          - sin: function: 00007FF7C993CEA0
+          - min: function: 00007FF7C993D640
+          - abs: function: 00007FF7C993CE10
+          - tan: function: 00007FF7C993CF20
+          - sqrt: function: 00007FF7C993D400
+          - type: function: 00007FF7C993D940
+          - random: function: 00007FF7C993D780
+          - deg: function: 00007FF7C993D5C0
+          - modf: function: 00007FF7C993D310
+          - acos: function: 00007FF7C993CFA0
+          - fmod: function: 00007FF7C993D210
+          - atan: function: 00007FF7C993CFE0
+          - ult: function: 00007FF7C993D440
+          - max: function: 00007FF7C993D6E0
+          - exp: function: 00007FF7C993D580
+        - utf8:
+          - len: function: 00007FF7C993C4D0
+          - charpattern: [ -Â-ô][€-¿]*
+          - codepoint: function: 00007FF7C993C650
+          - offset: function: 00007FF7C993C950
+          - char: function: 00007FF7C993C880
+          - codes: function: 00007FF7C993CCB0
+        - string:
+          - dump: function: 00007FF7C9937920
+          - sub: function: 00007FF7C99370C0
+          - byte: function: 00007FF7C9937680
+          - char: function: 00007FF7C99377E0
+          - match: function: 00007FF7C9939130
+          - find: function: 00007FF7C9939100
+          - unpack: function: 00007FF7C993BC80
+          - upper: function: 00007FF7C9937390
+          - format: function: 00007FF7C993A510
+          - gsub: function: 00007FF7C9939710
+          - pack: function: 00007FF7C993B2B0
+          - gmatch: function: 00007FF7C9939250
+          - packsize: function: 00007FF7C993B980
+          - rep: function: 00007FF7C9937480
+          - lower: function: 00007FF7C99372A0
+          - reverse: function: 00007FF7C99371C0
+          - len: function: 00007FF7C9937030
+        - _VERSION: Lua 5.3
+        - error: function: 00007FF7C9931EB0
+        - pairs: function: 00007FF7C99324B0
+        - pcall: function: 00007FF7C91D35F0
+      - dofile: function: 00007FF7C99329B0
+      - type: function: 00007FF7C9932300
+      - coroutine:
+        - resume: function: 00007FF7C9932FC0
+        - status: function: 00007FF7C9933200
+        - wrap: function: 00007FF7C9933190
+        - create: function: 00007FF7C9933120
+        - isyieldable: function: 00007FF7C9933330
+        - yield: function: 00007FF7C99331D0
+        - running: function: 00007FF7C9933360
+      - tostring: function: 00007FF7C9932D80
+      - next: function: 00007FF7C9932440
+      - load: function: 00007FF7C9932800
+      - require: function: 000001B55E608F30
+      - rawequal: function: 00007FF7C9932060
+      - print_warn: function: 000001B55E6089B0
+      - table:
+        - pack: function: 00007FF7C9933C20
+        - remove: function: 00007FF7C9933690
+        - sort: function: 00007FF7C9934490
+        - move: function: 00007FF7C99337B0
+        - unpack: function: 00007FF7C9933CD0
+        - concat: function: 00007FF7C9933AC0
+        - insert: function: 00007FF7C9933560
+      - file: file (000001B55B1CD140)
+      - rawlen: function: 00007FF7C99320C0
+      - ipairs: function: 00007FF7C9932550
+      - rcon:
+        - move: function: 000001B55DC44F70
+        - insertToInventory: function: 000001B55A21B6C0
+        - mine: function: 000001B55DC44970
+        - cheatItem: function: 000001B55DC44670
+        - cheatTechnology: function: 000001B55DC44B30
+        - print: function: 000001B55DC44D70
+        - findEntitiesInRadius: function: 000001B55E608D70
+        - removeFromInventory: function: 000001B55B339770
+        - placeEntity: function: 000001B55A21B680
+        - cheatAllTechnologies: function: 000001B55DC44870
+        - inventoryContentsAt: function: 000001B55DC44470
+        - craft: function: 000001B55DC44A30
+        - addResearch: function: 000001B55DC44830
+        - cheatBlueprint: function: 000001B55DC44630
+        - reviveGhost: function: 000001B55DC44C70
+        - placeBlueprint: function: 000001B55DC44DB0
+      - xpcall: function: 00007FF7C91D3730
+      - package:
+        - config: \
+;
+?
+!
+-
+
+        - searchers:
+          - 1: function: 000001B55E608CB0
+          - 2: function: 000001B55E6082B0
+          - 3: function: 000001B55E608EF0
+          - 4: function: 000001B55E608130
+        - loaded:
+          - io:
+          - table:
+          - utf8:
+          - math:
+          - coroutine:
+          - os:
+          - string:
+          - _G:
+          - package:
+        - cpath: D:\projects\factorio-bot-tauri\target\debug\?.dll;D:\projects\factorio-bot-tauri\target\debug\..\lib\lua\5.3\?.dll;D:\projects\factorio-bot-tauri\target\debug\loadall.dll;.\?.dll
+        - preload:
+        - loadlib: function: 00007FF7C993E1C0
+        - path: D:\projects\factorio-bot-tauri\target\debug\lua\?.lua;D:\projects\factorio-bot-tauri\target\debug\lua\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\?.lua;D:\projects\factorio-bot-tauri\target\debug\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?\init.lua;.\?.lua;.\?\init.lua
+        - searchpath: function: 00007FF7C993E550
+      - plan:
+        - mine: function: 000001B55E608470
+        - groupEnd: function: 000001B55E608E30
+        - walk: function: 000001B55E608D30
+        - groupStart: function: 000001B55E608230
+      - io:
+        - write: function: 00007FF7C9935D90
+        - stderr: file (00007FF8A792F540)
+        - stdout: file (00007FF8A792F4E8)
+        - read: function: 00007FF7C9935B70
+        - input: function: 00007FF7C9934E60
+        - open: function: 00007FF7C9934B00
+        - lines: function: 00007FF7C9935100
+        - type: function: 00007FF7C99346D0
+        - stdin: file (00007FF8A792F490)
+        - close: function: 00007FF7C9934910
+        - tmpfile: function: 00007FF7C9934CD0
+        - popen: function: 00007FF7C9934C20
+        - output: function: 00007FF7C9934E90
+        - flush: function: 00007FF7C9935FC0
+      - loadfile: function: 00007FF7C9932640
+      - rawset: function: 00007FF7C9932190
+      - rawget: function: 00007FF7C9932130
+      - all_bots:
+        - 1: 1
+      - setmetatable: function: 00007FF7C9931FB0
+      - assert: function: 00007FF7C9932A40
+      - print_err: function: 000001B55E6087F0
+      - math:
+        - mininteger: -9223372036854775808
+        - rad: function: 00007FF7C993D600
+        - log: function: 00007FF7C993D4B0
+        - huge: inf
+        - randomseed: function: 00007FF7C993D900
+        - ceil: function: 00007FF7C993D1A0
+        - floor: function: 00007FF7C993D130
+        - tointeger: function: 00007FF7C993D050
+        - cos: function: 00007FF7C993CEE0
+        - maxinteger: 9223372036854775807
+        - pi: 3.1415926535898
+        - asin: function: 00007FF7C993CF60
+        - sin: function: 00007FF7C993CEA0
+        - min: function: 00007FF7C993D640
+        - abs: function: 00007FF7C993CE10
+        - tan: function: 00007FF7C993CF20
+        - sqrt: function: 00007FF7C993D400
+        - type: function: 00007FF7C993D940
+        - random: function: 00007FF7C993D780
+        - deg: function: 00007FF7C993D5C0
+        - modf: function: 00007FF7C993D310
+        - acos: function: 00007FF7C993CFA0
+        - fmod: function: 00007FF7C993D210
+        - atan: function: 00007FF7C993CFE0
+        - ult: function: 00007FF7C993D440
+        - max: function: 00007FF7C993D6E0
+        - exp: function: 00007FF7C993D580
+      - utf8:
+        - len: function: 00007FF7C993C4D0
+        - charpattern: [ -Â-ô][€-¿]*
+        - codepoint: function: 00007FF7C993C650
+        - offset: function: 00007FF7C993C950
+        - char: function: 00007FF7C993C880
+        - codes: function: 00007FF7C993CCB0
+      - string:
+        - dump: function: 00007FF7C9937920
+        - sub: function: 00007FF7C99370C0
+        - byte: function: 00007FF7C9937680
+        - char: function: 00007FF7C99377E0
+        - match: function: 00007FF7C9939130
+        - find: function: 00007FF7C9939100
+        - unpack: function: 00007FF7C993BC80
+        - upper: function: 00007FF7C9937390
+        - format: function: 00007FF7C993A510
+        - gsub: function: 00007FF7C9939710
+        - pack: function: 00007FF7C993B2B0
+        - gmatch: function: 00007FF7C9939250
+        - packsize: function: 00007FF7C993B980
+        - rep: function: 00007FF7C9937480
+        - lower: function: 00007FF7C99372A0
+        - reverse: function: 00007FF7C99371C0
+        - len: function: 00007FF7C9937030
+      - _VERSION: Lua 5.3
+      - error: function: 00007FF7C9931EB0
+      - pairs: function: 00007FF7C99324B0
+      - pcall: function: 00007FF7C91D35F0
+    - package:
+      - config: \
+;
+?
+!
+-
+
+      - searchers:
+        - 1: function: 000001B55E608CB0
+        - 2: function: 000001B55E6082B0
+        - 3: function: 000001B55E608EF0
+        - 4: function: 000001B55E608130
+      - loaded:
+        - io:
+          - write: function: 00007FF7C9935D90
+          - stderr: file (00007FF8A792F540)
+          - stdout: file (00007FF8A792F4E8)
+          - read: function: 00007FF7C9935B70
+          - input: function: 00007FF7C9934E60
+          - open: function: 00007FF7C9934B00
+          - lines: function: 00007FF7C9935100
+          - type: function: 00007FF7C99346D0
+          - stdin: file (00007FF8A792F490)
+          - close: function: 00007FF7C9934910
+          - tmpfile: function: 00007FF7C9934CD0
+          - popen: function: 00007FF7C9934C20
+          - output: function: 00007FF7C9934E90
+          - flush: function: 00007FF7C9935FC0
+        - table:
+          - pack: function: 00007FF7C9933C20
+          - remove: function: 00007FF7C9933690
+          - sort: function: 00007FF7C9934490
+          - move: function: 00007FF7C99337B0
+          - unpack: function: 00007FF7C9933CD0
+          - concat: function: 00007FF7C9933AC0
+          - insert: function: 00007FF7C9933560
+        - utf8:
+          - len: function: 00007FF7C993C4D0
+          - charpattern: [ -Â-ô][€-¿]*
+          - codepoint: function: 00007FF7C993C650
+          - offset: function: 00007FF7C993C950
+          - char: function: 00007FF7C993C880
+          - codes: function: 00007FF7C993CCB0
+        - math:
+          - mininteger: -9223372036854775808
+          - rad: function: 00007FF7C993D600
+          - log: function: 00007FF7C993D4B0
+          - huge: inf
+          - randomseed: function: 00007FF7C993D900
+          - ceil: function: 00007FF7C993D1A0
+          - floor: function: 00007FF7C993D130
+          - tointeger: function: 00007FF7C993D050
+          - cos: function: 00007FF7C993CEE0
+          - maxinteger: 9223372036854775807
+          - pi: 3.1415926535898
+          - asin: function: 00007FF7C993CF60
+          - sin: function: 00007FF7C993CEA0
+          - min: function: 00007FF7C993D640
+          - abs: function: 00007FF7C993CE10
+          - tan: function: 00007FF7C993CF20
+          - sqrt: function: 00007FF7C993D400
+          - type: function: 00007FF7C993D940
+          - random: function: 00007FF7C993D780
+          - deg: function: 00007FF7C993D5C0
+          - modf: function: 00007FF7C993D310
+          - acos: function: 00007FF7C993CFA0
+          - fmod: function: 00007FF7C993D210
+          - atan: function: 00007FF7C993CFE0
+          - ult: function: 00007FF7C993D440
+          - max: function: 00007FF7C993D6E0
+          - exp: function: 00007FF7C993D580
+        - coroutine:
+          - resume: function: 00007FF7C9932FC0
+          - status: function: 00007FF7C9933200
+          - wrap: function: 00007FF7C9933190
+          - create: function: 00007FF7C9933120
+          - isyieldable: function: 00007FF7C9933330
+          - yield: function: 00007FF7C99331D0
+          - running: function: 00007FF7C9933360
+        - os:
+          - setlocale: function: 00007FF7C9936EA0
+          - clock: function: 00007FF7C9936580
+          - rename: function: 00007FF7C9936410
+          - exit: function: 00007FF7C9936F20
+          - tmpname: function: 00007FF7C9936490
+          - execute: function: 00007FF7C9936340
+          - time: function: 00007FF7C9936CA0
+          - remove: function: 00007FF7C99363B0
+          - getenv: function: 00007FF7C9936530
+          - difftime: function: 00007FF7C9936E40
+          - date: function: 00007FF7C9936A00
+        - string:
+          - dump: function: 00007FF7C9937920
+          - sub: function: 00007FF7C99370C0
+          - byte: function: 00007FF7C9937680
+          - char: function: 00007FF7C99377E0
+          - match: function: 00007FF7C9939130
+          - find: function: 00007FF7C9939100
+          - unpack: function: 00007FF7C993BC80
+          - upper: function: 00007FF7C9937390
+          - format: function: 00007FF7C993A510
+          - gsub: function: 00007FF7C9939710
+          - pack: function: 00007FF7C993B2B0
+          - gmatch: function: 00007FF7C9939250
+          - packsize: function: 00007FF7C993B980
+          - rep: function: 00007FF7C9937480
+          - lower: function: 00007FF7C99372A0
+          - reverse: function: 00007FF7C99371C0
+          - len: function: 00007FF7C9937030
+        - _G:
+          - dump: function: 000001B55DCAC0F0
+          - tonumber: function: 00007FF7C9931D30
+          - print: function: 000001B55E608270
+          - world:
+          - collectgarbage: function: 00007FF7C9932200
+          - getmetatable: function: 00007FF7C9931F40
+          - select: function: 00007FF7C9932AE0
+          - os:
+          - _G:
+          - dofile: function: 00007FF7C99329B0
+          - type: function: 00007FF7C9932300
+          - coroutine:
+          - tostring: function: 00007FF7C9932D80
+          - next: function: 00007FF7C9932440
+          - load: function: 00007FF7C9932800
+          - require: function: 000001B55E608F30
+          - rawequal: function: 00007FF7C9932060
+          - print_warn: function: 000001B55E6089B0
+          - table:
+          - file: file (000001B55B1CD140)
+          - rawlen: function: 00007FF7C99320C0
+          - ipairs: function: 00007FF7C9932550
+          - rcon:
+          - xpcall: function: 00007FF7C91D3730
+          - package:
+          - plan:
+          - io:
+          - loadfile: function: 00007FF7C9932640
+          - rawset: function: 00007FF7C9932190
+          - rawget: function: 00007FF7C9932130
+          - all_bots:
+          - setmetatable: function: 00007FF7C9931FB0
+          - assert: function: 00007FF7C9932A40
+          - print_err: function: 000001B55E6087F0
+          - math:
+          - utf8:
+          - string:
+          - _VERSION: Lua 5.3
+          - error: function: 00007FF7C9931EB0
+          - pairs: function: 00007FF7C99324B0
+          - pcall: function: 00007FF7C91D35F0
+        - package:
+          - config: \
+;
+?
+!
+-
+
+          - searchers:
+          - loaded:
+          - cpath: D:\projects\factorio-bot-tauri\target\debug\?.dll;D:\projects\factorio-bot-tauri\target\debug\..\lib\lua\5.3\?.dll;D:\projects\factorio-bot-tauri\target\debug\loadall.dll;.\?.dll
+          - preload:
+          - loadlib: function: 00007FF7C993E1C0
+          - path: D:\projects\factorio-bot-tauri\target\debug\lua\?.lua;D:\projects\factorio-bot-tauri\target\debug\lua\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\?.lua;D:\projects\factorio-bot-tauri\target\debug\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?\init.lua;.\?.lua;.\?\init.lua
+          - searchpath: function: 00007FF7C993E550
+      - cpath: D:\projects\factorio-bot-tauri\target\debug\?.dll;D:\projects\factorio-bot-tauri\target\debug\..\lib\lua\5.3\?.dll;D:\projects\factorio-bot-tauri\target\debug\loadall.dll;.\?.dll
+      - preload:
+      - loadlib: function: 00007FF7C993E1C0
+      - path: D:\projects\factorio-bot-tauri\target\debug\lua\?.lua;D:\projects\factorio-bot-tauri\target\debug\lua\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\?.lua;D:\projects\factorio-bot-tauri\target\debug\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?\init.lua;.\?.lua;.\?\init.lua
+      - searchpath: function: 00007FF7C993E550
+  - cpath: D:\projects\factorio-bot-tauri\target\debug\?.dll;D:\projects\factorio-bot-tauri\target\debug\..\lib\lua\5.3\?.dll;D:\projects\factorio-bot-tauri\target\debug\loadall.dll;.\?.dll
+  - preload:
+  - loadlib: function: 00007FF7C993E1C0
+  - path: D:\projects\factorio-bot-tauri\target\debug\lua\?.lua;D:\projects\factorio-bot-tauri\target\debug\lua\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\?.lua;D:\projects\factorio-bot-tauri\target\debug\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?\init.lua;.\?.lua;.\?\init.lua
+  - searchpath: function: 00007FF7C993E550
+- plan:
+  - mine: function: 000001B55E608470
+  - groupEnd: function: 000001B55E608E30
+  - walk: function: 000001B55E608D30
+  - groupStart: function: 000001B55E608230
+- io:
+  - write: function: 00007FF7C9935D90
+  - stderr: file (00007FF8A792F540)
+  - stdout: file (00007FF8A792F4E8)
+  - read: function: 00007FF7C9935B70
+  - input: function: 00007FF7C9934E60
+  - open: function: 00007FF7C9934B00
+  - lines: function: 00007FF7C9935100
+  - type: function: 00007FF7C99346D0
+  - stdin: file (00007FF8A792F490)
+  - close: function: 00007FF7C9934910
+  - tmpfile: function: 00007FF7C9934CD0
+  - popen: function: 00007FF7C9934C20
+  - output: function: 00007FF7C9934E90
+  - flush: function: 00007FF7C9935FC0
+- loadfile: function: 00007FF7C9932640
+- rawset: function: 00007FF7C9932190
+- rawget: function: 00007FF7C9932130
+- all_bots:
+  - 1: 1
+- setmetatable: function: 00007FF7C9931FB0
+- assert: function: 00007FF7C9932A40
+- print_err: function: 000001B55E6087F0
+- math:
+  - mininteger: -9223372036854775808
+  - rad: function: 00007FF7C993D600
+  - log: function: 00007FF7C993D4B0
+  - huge: inf
+  - randomseed: function: 00007FF7C993D900
+  - ceil: function: 00007FF7C993D1A0
+  - floor: function: 00007FF7C993D130
+  - tointeger: function: 00007FF7C993D050
+  - cos: function: 00007FF7C993CEE0
+  - maxinteger: 9223372036854775807
+  - pi: 3.1415926535898
+  - asin: function: 00007FF7C993CF60
+  - sin: function: 00007FF7C993CEA0
+  - min: function: 00007FF7C993D640
+  - abs: function: 00007FF7C993CE10
+  - tan: function: 00007FF7C993CF20
+  - sqrt: function: 00007FF7C993D400
+  - type: function: 00007FF7C993D940
+  - random: function: 00007FF7C993D780
+  - deg: function: 00007FF7C993D5C0
+  - modf: function: 00007FF7C993D310
+  - acos: function: 00007FF7C993CFA0
+  - fmod: function: 00007FF7C993D210
+  - atan: function: 00007FF7C993CFE0
+  - ult: function: 00007FF7C993D440
+  - max: function: 00007FF7C993D6E0
+  - exp: function: 00007FF7C993D580
+- utf8:
+  - len: function: 00007FF7C993C4D0
+  - charpattern: [ -Â-ô][€-¿]*
+  - codepoint: function: 00007FF7C993C650
+  - offset: function: 00007FF7C993C950
+  - char: function: 00007FF7C993C880
+  - codes: function: 00007FF7C993CCB0
+- string:
+  - dump: function: 00007FF7C9937920
+  - sub: function: 00007FF7C99370C0
+  - byte: function: 00007FF7C9937680
+  - char: function: 00007FF7C99377E0
+  - match: function: 00007FF7C9939130
+  - find: function: 00007FF7C9939100
+  - unpack: function: 00007FF7C993BC80
+  - upper: function: 00007FF7C9937390
+  - format: function: 00007FF7C993A510
+  - gsub: function: 00007FF7C9939710
+  - pack: function: 00007FF7C993B2B0
+  - gmatch: function: 00007FF7C9939250
+  - packsize: function: 00007FF7C993B980
+  - rep: function: 00007FF7C9937480
+  - lower: function: 00007FF7C99372A0
+  - reverse: function: 00007FF7C99371C0
+  - len: function: 00007FF7C9937030
+- _VERSION: Lua 5.3
+- error: function: 00007FF7C9931EB0
+- pairs: function: 00007FF7C99324B0
+- pcall: function: 00007FF7C91D35F0
+
+
+dofile (function)
+-----
+
+function: 00007FF7C99329B0
+see LUA Docs
+
+
+type (function)
+-----
+
+function: 00007FF7C9932300
+see LUA Docs
+
+
+coroutine (table)
+-----
+
+- resume: function: 00007FF7C9932FC0
+- status: function: 00007FF7C9933200
+- wrap: function: 00007FF7C9933190
+- create: function: 00007FF7C9933120
+- isyieldable: function: 00007FF7C9933330
+- yield: function: 00007FF7C99331D0
+- running: function: 00007FF7C9933360
+
+
+tostring (function)
+-----
+
+function: 00007FF7C9932D80
+see LUA Docs
+
+
+next (function)
+-----
+
+function: 00007FF7C9932440
+see LUA Docs
+
+
+load (function)
+-----
+
+function: 00007FF7C9932800
+see LUA Docs
+
+
+require (function)
+-----
+
+function: 000001B55E608F30
+see LUA Docs
+
+
+rawequal (function)
+-----
+
+function: 00007FF7C9932060
+see LUA Docs
+
+
+print_warn (function)
+-----
+
+function: 000001B55E6089B0
+see LUA Docs
+
+
+table (table)
+-----
+
+- pack: function: 00007FF7C9933C20
+- remove: function: 00007FF7C9933690
+- sort: function: 00007FF7C9934490
+- move: function: 00007FF7C99337B0
+- unpack: function: 00007FF7C9933CD0
+- concat: function: 00007FF7C9933AC0
+- insert: function: 00007FF7C9933560
+
+
+file (userdata)
+-----
+
+file (000001B55B1CD140)
+see LUA Docs
+
+
+rawlen (function)
+-----
+
+function: 00007FF7C99320C0
+see LUA Docs
+
+
+ipairs (function)
+-----
+
+function: 00007FF7C9932550
+see LUA Docs
+
+
+rcon (table)
+-----
+
+- move: function: 000001B55DC44F70
+- insertToInventory: function: 000001B55A21B6C0
+- mine: function: 000001B55DC44970
+- cheatItem: function: 000001B55DC44670
+- cheatTechnology: function: 000001B55DC44B30
+- print: function: 000001B55DC44D70
+- findEntitiesInRadius: function: 000001B55E608D70
+- removeFromInventory: function: 000001B55B339770
+- placeEntity: function: 000001B55A21B680
+- cheatAllTechnologies: function: 000001B55DC44870
+- inventoryContentsAt: function: 000001B55DC44470
+- craft: function: 000001B55DC44A30
+- addResearch: function: 000001B55DC44830
+- cheatBlueprint: function: 000001B55DC44630
+- reviveGhost: function: 000001B55DC44C70
+- placeBlueprint: function: 000001B55DC44DB0
+
+
+xpcall (function)
+-----
+
+function: 00007FF7C91D3730
+see LUA Docs
+
+
+package (table)
+-----
+
+- config: \
+;
+?
+!
+-
+
+- searchers:
+  - 1: function: 000001B55E608CB0
+  - 2: function: 000001B55E6082B0
+  - 3: function: 000001B55E608EF0
+  - 4: function: 000001B55E608130
+- loaded:
+  - io:
+    - write: function: 00007FF7C9935D90
+    - stderr: file (00007FF8A792F540)
+    - stdout: file (00007FF8A792F4E8)
+    - read: function: 00007FF7C9935B70
+    - input: function: 00007FF7C9934E60
+    - open: function: 00007FF7C9934B00
+    - lines: function: 00007FF7C9935100
+    - type: function: 00007FF7C99346D0
+    - stdin: file (00007FF8A792F490)
+    - close: function: 00007FF7C9934910
+    - tmpfile: function: 00007FF7C9934CD0
+    - popen: function: 00007FF7C9934C20
+    - output: function: 00007FF7C9934E90
+    - flush: function: 00007FF7C9935FC0
+  - table:
+    - pack: function: 00007FF7C9933C20
+    - remove: function: 00007FF7C9933690
+    - sort: function: 00007FF7C9934490
+    - move: function: 00007FF7C99337B0
+    - unpack: function: 00007FF7C9933CD0
+    - concat: function: 00007FF7C9933AC0
+    - insert: function: 00007FF7C9933560
+  - utf8:
+    - len: function: 00007FF7C993C4D0
+    - charpattern: [ -Â-ô][€-¿]*
+    - codepoint: function: 00007FF7C993C650
+    - offset: function: 00007FF7C993C950
+    - char: function: 00007FF7C993C880
+    - codes: function: 00007FF7C993CCB0
+  - math:
+    - mininteger: -9223372036854775808
+    - rad: function: 00007FF7C993D600
+    - log: function: 00007FF7C993D4B0
+    - huge: inf
+    - randomseed: function: 00007FF7C993D900
+    - ceil: function: 00007FF7C993D1A0
+    - floor: function: 00007FF7C993D130
+    - tointeger: function: 00007FF7C993D050
+    - cos: function: 00007FF7C993CEE0
+    - maxinteger: 9223372036854775807
+    - pi: 3.1415926535898
+    - asin: function: 00007FF7C993CF60
+    - sin: function: 00007FF7C993CEA0
+    - min: function: 00007FF7C993D640
+    - abs: function: 00007FF7C993CE10
+    - tan: function: 00007FF7C993CF20
+    - sqrt: function: 00007FF7C993D400
+    - type: function: 00007FF7C993D940
+    - random: function: 00007FF7C993D780
+    - deg: function: 00007FF7C993D5C0
+    - modf: function: 00007FF7C993D310
+    - acos: function: 00007FF7C993CFA0
+    - fmod: function: 00007FF7C993D210
+    - atan: function: 00007FF7C993CFE0
+    - ult: function: 00007FF7C993D440
+    - max: function: 00007FF7C993D6E0
+    - exp: function: 00007FF7C993D580
+  - coroutine:
+    - resume: function: 00007FF7C9932FC0
+    - status: function: 00007FF7C9933200
+    - wrap: function: 00007FF7C9933190
+    - create: function: 00007FF7C9933120
+    - isyieldable: function: 00007FF7C9933330
+    - yield: function: 00007FF7C99331D0
+    - running: function: 00007FF7C9933360
+  - os:
+    - setlocale: function: 00007FF7C9936EA0
+    - clock: function: 00007FF7C9936580
+    - rename: function: 00007FF7C9936410
+    - exit: function: 00007FF7C9936F20
+    - tmpname: function: 00007FF7C9936490
+    - execute: function: 00007FF7C9936340
+    - time: function: 00007FF7C9936CA0
+    - remove: function: 00007FF7C99363B0
+    - getenv: function: 00007FF7C9936530
+    - difftime: function: 00007FF7C9936E40
+    - date: function: 00007FF7C9936A00
+  - string:
+    - dump: function: 00007FF7C9937920
+    - sub: function: 00007FF7C99370C0
+    - byte: function: 00007FF7C9937680
+    - char: function: 00007FF7C99377E0
+    - match: function: 00007FF7C9939130
+    - find: function: 00007FF7C9939100
+    - unpack: function: 00007FF7C993BC80
+    - upper: function: 00007FF7C9937390
+    - format: function: 00007FF7C993A510
+    - gsub: function: 00007FF7C9939710
+    - pack: function: 00007FF7C993B2B0
+    - gmatch: function: 00007FF7C9939250
+    - packsize: function: 00007FF7C993B980
+    - rep: function: 00007FF7C9937480
+    - lower: function: 00007FF7C99372A0
+    - reverse: function: 00007FF7C99371C0
+    - len: function: 00007FF7C9937030
+  - _G:
+    - dump: function: 000001B55DCAC0F0
+    - tonumber: function: 00007FF7C9931D30
+    - print: function: 000001B55E608270
+    - world:
+      - player: function: 000001B55E6083B0
+      - inventory: function: 000001B55E6085F0
+      - recipe: function: 000001B55E6084F0
+      - findFreeResourceRect: function: 000001B55E608830
+    - collectgarbage: function: 00007FF7C9932200
+    - getmetatable: function: 00007FF7C9931F40
+    - select: function: 00007FF7C9932AE0
+    - os:
+      - setlocale: function: 00007FF7C9936EA0
+      - clock: function: 00007FF7C9936580
+      - rename: function: 00007FF7C9936410
+      - exit: function: 00007FF7C9936F20
+      - tmpname: function: 00007FF7C9936490
+      - execute: function: 00007FF7C9936340
+      - time: function: 00007FF7C9936CA0
+      - remove: function: 00007FF7C99363B0
+      - getenv: function: 00007FF7C9936530
+      - difftime: function: 00007FF7C9936E40
+      - date: function: 00007FF7C9936A00
+    - _G:
+      - dump: function: 000001B55DCAC0F0
+      - tonumber: function: 00007FF7C9931D30
+      - print: function: 000001B55E608270
+      - world:
+        - player: function: 000001B55E6083B0
+        - inventory: function: 000001B55E6085F0
+        - recipe: function: 000001B55E6084F0
+        - findFreeResourceRect: function: 000001B55E608830
+      - collectgarbage: function: 00007FF7C9932200
+      - getmetatable: function: 00007FF7C9931F40
+      - select: function: 00007FF7C9932AE0
+      - os:
+        - setlocale: function: 00007FF7C9936EA0
+        - clock: function: 00007FF7C9936580
+        - rename: function: 00007FF7C9936410
+        - exit: function: 00007FF7C9936F20
+        - tmpname: function: 00007FF7C9936490
+        - execute: function: 00007FF7C9936340
+        - time: function: 00007FF7C9936CA0
+        - remove: function: 00007FF7C99363B0
+        - getenv: function: 00007FF7C9936530
+        - difftime: function: 00007FF7C9936E40
+        - date: function: 00007FF7C9936A00
+      - _G:
+        - dump: function: 000001B55DCAC0F0
+        - tonumber: function: 00007FF7C9931D30
+        - print: function: 000001B55E608270
+        - world:
+          - player: function: 000001B55E6083B0
+          - inventory: function: 000001B55E6085F0
+          - recipe: function: 000001B55E6084F0
+          - findFreeResourceRect: function: 000001B55E608830
+        - collectgarbage: function: 00007FF7C9932200
+        - getmetatable: function: 00007FF7C9931F40
+        - select: function: 00007FF7C9932AE0
+        - os:
+          - setlocale: function: 00007FF7C9936EA0
+          - clock: function: 00007FF7C9936580
+          - rename: function: 00007FF7C9936410
+          - exit: function: 00007FF7C9936F20
+          - tmpname: function: 00007FF7C9936490
+          - execute: function: 00007FF7C9936340
+          - time: function: 00007FF7C9936CA0
+          - remove: function: 00007FF7C99363B0
+          - getenv: function: 00007FF7C9936530
+          - difftime: function: 00007FF7C9936E40
+          - date: function: 00007FF7C9936A00
+        - _G:
+          - dump: function: 000001B55DCAC0F0
+          - tonumber: function: 00007FF7C9931D30
+          - print: function: 000001B55E608270
+          - world:
+          - collectgarbage: function: 00007FF7C9932200
+          - getmetatable: function: 00007FF7C9931F40
+          - select: function: 00007FF7C9932AE0
+          - os:
+          - _G:
+          - dofile: function: 00007FF7C99329B0
+          - type: function: 00007FF7C9932300
+          - coroutine:
+          - tostring: function: 00007FF7C9932D80
+          - next: function: 00007FF7C9932440
+          - load: function: 00007FF7C9932800
+          - require: function: 000001B55E608F30
+          - rawequal: function: 00007FF7C9932060
+          - print_warn: function: 000001B55E6089B0
+          - table:
+          - file: file (000001B55B1CD140)
+          - rawlen: function: 00007FF7C99320C0
+          - ipairs: function: 00007FF7C9932550
+          - rcon:
+          - xpcall: function: 00007FF7C91D3730
+          - package:
+          - plan:
+          - io:
+          - loadfile: function: 00007FF7C9932640
+          - rawset: function: 00007FF7C9932190
+          - rawget: function: 00007FF7C9932130
+          - all_bots:
+          - setmetatable: function: 00007FF7C9931FB0
+          - assert: function: 00007FF7C9932A40
+          - print_err: function: 000001B55E6087F0
+          - math:
+          - utf8:
+          - string:
+          - _VERSION: Lua 5.3
+          - error: function: 00007FF7C9931EB0
+          - pairs: function: 00007FF7C99324B0
+          - pcall: function: 00007FF7C91D35F0
+        - dofile: function: 00007FF7C99329B0
+        - type: function: 00007FF7C9932300
+        - coroutine:
+          - resume: function: 00007FF7C9932FC0
+          - status: function: 00007FF7C9933200
+          - wrap: function: 00007FF7C9933190
+          - create: function: 00007FF7C9933120
+          - isyieldable: function: 00007FF7C9933330
+          - yield: function: 00007FF7C99331D0
+          - running: function: 00007FF7C9933360
+        - tostring: function: 00007FF7C9932D80
+        - next: function: 00007FF7C9932440
+        - load: function: 00007FF7C9932800
+        - require: function: 000001B55E608F30
+        - rawequal: function: 00007FF7C9932060
+        - print_warn: function: 000001B55E6089B0
+        - table:
+          - pack: function: 00007FF7C9933C20
+          - remove: function: 00007FF7C9933690
+          - sort: function: 00007FF7C9934490
+          - move: function: 00007FF7C99337B0
+          - unpack: function: 00007FF7C9933CD0
+          - concat: function: 00007FF7C9933AC0
+          - insert: function: 00007FF7C9933560
+        - file: file (000001B55B1CD140)
+        - rawlen: function: 00007FF7C99320C0
+        - ipairs: function: 00007FF7C9932550
+        - rcon:
+          - move: function: 000001B55DC44F70
+          - insertToInventory: function: 000001B55A21B6C0
+          - mine: function: 000001B55DC44970
+          - cheatItem: function: 000001B55DC44670
+          - cheatTechnology: function: 000001B55DC44B30
+          - print: function: 000001B55DC44D70
+          - findEntitiesInRadius: function: 000001B55E608D70
+          - removeFromInventory: function: 000001B55B339770
+          - placeEntity: function: 000001B55A21B680
+          - cheatAllTechnologies: function: 000001B55DC44870
+          - inventoryContentsAt: function: 000001B55DC44470
+          - craft: function: 000001B55DC44A30
+          - addResearch: function: 000001B55DC44830
+          - cheatBlueprint: function: 000001B55DC44630
+          - reviveGhost: function: 000001B55DC44C70
+          - placeBlueprint: function: 000001B55DC44DB0
+        - xpcall: function: 00007FF7C91D3730
+        - package:
+          - config: \
+;
+?
+!
+-
+
+          - searchers:
+          - loaded:
+          - cpath: D:\projects\factorio-bot-tauri\target\debug\?.dll;D:\projects\factorio-bot-tauri\target\debug\..\lib\lua\5.3\?.dll;D:\projects\factorio-bot-tauri\target\debug\loadall.dll;.\?.dll
+          - preload:
+          - loadlib: function: 00007FF7C993E1C0
+          - path: D:\projects\factorio-bot-tauri\target\debug\lua\?.lua;D:\projects\factorio-bot-tauri\target\debug\lua\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\?.lua;D:\projects\factorio-bot-tauri\target\debug\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?\init.lua;.\?.lua;.\?\init.lua
+          - searchpath: function: 00007FF7C993E550
+        - plan:
+          - mine: function: 000001B55E608470
+          - groupEnd: function: 000001B55E608E30
+          - walk: function: 000001B55E608D30
+          - groupStart: function: 000001B55E608230
+        - io:
+          - write: function: 00007FF7C9935D90
+          - stderr: file (00007FF8A792F540)
+          - stdout: file (00007FF8A792F4E8)
+          - read: function: 00007FF7C9935B70
+          - input: function: 00007FF7C9934E60
+          - open: function: 00007FF7C9934B00
+          - lines: function: 00007FF7C9935100
+          - type: function: 00007FF7C99346D0
+          - stdin: file (00007FF8A792F490)
+          - close: function: 00007FF7C9934910
+          - tmpfile: function: 00007FF7C9934CD0
+          - popen: function: 00007FF7C9934C20
+          - output: function: 00007FF7C9934E90
+          - flush: function: 00007FF7C9935FC0
+        - loadfile: function: 00007FF7C9932640
+        - rawset: function: 00007FF7C9932190
+        - rawget: function: 00007FF7C9932130
+        - all_bots:
+          - 1: 1
+        - setmetatable: function: 00007FF7C9931FB0
+        - assert: function: 00007FF7C9932A40
+        - print_err: function: 000001B55E6087F0
+        - math:
+          - mininteger: -9223372036854775808
+          - rad: function: 00007FF7C993D600
+          - log: function: 00007FF7C993D4B0
+          - huge: inf
+          - randomseed: function: 00007FF7C993D900
+          - ceil: function: 00007FF7C993D1A0
+          - floor: function: 00007FF7C993D130
+          - tointeger: function: 00007FF7C993D050
+          - cos: function: 00007FF7C993CEE0
+          - maxinteger: 9223372036854775807
+          - pi: 3.1415926535898
+          - asin: function: 00007FF7C993CF60
+          - sin: function: 00007FF7C993CEA0
+          - min: function: 00007FF7C993D640
+          - abs: function: 00007FF7C993CE10
+          - tan: function: 00007FF7C993CF20
+          - sqrt: function: 00007FF7C993D400
+          - type: function: 00007FF7C993D940
+          - random: function: 00007FF7C993D780
+          - deg: function: 00007FF7C993D5C0
+          - modf: function: 00007FF7C993D310
+          - acos: function: 00007FF7C993CFA0
+          - fmod: function: 00007FF7C993D210
+          - atan: function: 00007FF7C993CFE0
+          - ult: function: 00007FF7C993D440
+          - max: function: 00007FF7C993D6E0
+          - exp: function: 00007FF7C993D580
+        - utf8:
+          - len: function: 00007FF7C993C4D0
+          - charpattern: [ -Â-ô][€-¿]*
+          - codepoint: function: 00007FF7C993C650
+          - offset: function: 00007FF7C993C950
+          - char: function: 00007FF7C993C880
+          - codes: function: 00007FF7C993CCB0
+        - string:
+          - dump: function: 00007FF7C9937920
+          - sub: function: 00007FF7C99370C0
+          - byte: function: 00007FF7C9937680
+          - char: function: 00007FF7C99377E0
+          - match: function: 00007FF7C9939130
+          - find: function: 00007FF7C9939100
+          - unpack: function: 00007FF7C993BC80
+          - upper: function: 00007FF7C9937390
+          - format: function: 00007FF7C993A510
+          - gsub: function: 00007FF7C9939710
+          - pack: function: 00007FF7C993B2B0
+          - gmatch: function: 00007FF7C9939250
+          - packsize: function: 00007FF7C993B980
+          - rep: function: 00007FF7C9937480
+          - lower: function: 00007FF7C99372A0
+          - reverse: function: 00007FF7C99371C0
+          - len: function: 00007FF7C9937030
+        - _VERSION: Lua 5.3
+        - error: function: 00007FF7C9931EB0
+        - pairs: function: 00007FF7C99324B0
+        - pcall: function: 00007FF7C91D35F0
+      - dofile: function: 00007FF7C99329B0
+      - type: function: 00007FF7C9932300
+      - coroutine:
+        - resume: function: 00007FF7C9932FC0
+        - status: function: 00007FF7C9933200
+        - wrap: function: 00007FF7C9933190
+        - create: function: 00007FF7C9933120
+        - isyieldable: function: 00007FF7C9933330
+        - yield: function: 00007FF7C99331D0
+        - running: function: 00007FF7C9933360
+      - tostring: function: 00007FF7C9932D80
+      - next: function: 00007FF7C9932440
+      - load: function: 00007FF7C9932800
+      - require: function: 000001B55E608F30
+      - rawequal: function: 00007FF7C9932060
+      - print_warn: function: 000001B55E6089B0
+      - table:
+        - pack: function: 00007FF7C9933C20
+        - remove: function: 00007FF7C9933690
+        - sort: function: 00007FF7C9934490
+        - move: function: 00007FF7C99337B0
+        - unpack: function: 00007FF7C9933CD0
+        - concat: function: 00007FF7C9933AC0
+        - insert: function: 00007FF7C9933560
+      - file: file (000001B55B1CD140)
+      - rawlen: function: 00007FF7C99320C0
+      - ipairs: function: 00007FF7C9932550
+      - rcon:
+        - move: function: 000001B55DC44F70
+        - insertToInventory: function: 000001B55A21B6C0
+        - mine: function: 000001B55DC44970
+        - cheatItem: function: 000001B55DC44670
+        - cheatTechnology: function: 000001B55DC44B30
+        - print: function: 000001B55DC44D70
+        - findEntitiesInRadius: function: 000001B55E608D70
+        - removeFromInventory: function: 000001B55B339770
+        - placeEntity: function: 000001B55A21B680
+        - cheatAllTechnologies: function: 000001B55DC44870
+        - inventoryContentsAt: function: 000001B55DC44470
+        - craft: function: 000001B55DC44A30
+        - addResearch: function: 000001B55DC44830
+        - cheatBlueprint: function: 000001B55DC44630
+        - reviveGhost: function: 000001B55DC44C70
+        - placeBlueprint: function: 000001B55DC44DB0
+      - xpcall: function: 00007FF7C91D3730
+      - package:
+        - config: \
+;
+?
+!
+-
+
+        - searchers:
+          - 1: function: 000001B55E608CB0
+          - 2: function: 000001B55E6082B0
+          - 3: function: 000001B55E608EF0
+          - 4: function: 000001B55E608130
+        - loaded:
+          - io:
+          - table:
+          - utf8:
+          - math:
+          - coroutine:
+          - os:
+          - string:
+          - _G:
+          - package:
+        - cpath: D:\projects\factorio-bot-tauri\target\debug\?.dll;D:\projects\factorio-bot-tauri\target\debug\..\lib\lua\5.3\?.dll;D:\projects\factorio-bot-tauri\target\debug\loadall.dll;.\?.dll
+        - preload:
+        - loadlib: function: 00007FF7C993E1C0
+        - path: D:\projects\factorio-bot-tauri\target\debug\lua\?.lua;D:\projects\factorio-bot-tauri\target\debug\lua\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\?.lua;D:\projects\factorio-bot-tauri\target\debug\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?\init.lua;.\?.lua;.\?\init.lua
+        - searchpath: function: 00007FF7C993E550
+      - plan:
+        - mine: function: 000001B55E608470
+        - groupEnd: function: 000001B55E608E30
+        - walk: function: 000001B55E608D30
+        - groupStart: function: 000001B55E608230
+      - io:
+        - write: function: 00007FF7C9935D90
+        - stderr: file (00007FF8A792F540)
+        - stdout: file (00007FF8A792F4E8)
+        - read: function: 00007FF7C9935B70
+        - input: function: 00007FF7C9934E60
+        - open: function: 00007FF7C9934B00
+        - lines: function: 00007FF7C9935100
+        - type: function: 00007FF7C99346D0
+        - stdin: file (00007FF8A792F490)
+        - close: function: 00007FF7C9934910
+        - tmpfile: function: 00007FF7C9934CD0
+        - popen: function: 00007FF7C9934C20
+        - output: function: 00007FF7C9934E90
+        - flush: function: 00007FF7C9935FC0
+      - loadfile: function: 00007FF7C9932640
+      - rawset: function: 00007FF7C9932190
+      - rawget: function: 00007FF7C9932130
+      - all_bots:
+        - 1: 1
+      - setmetatable: function: 00007FF7C9931FB0
+      - assert: function: 00007FF7C9932A40
+      - print_err: function: 000001B55E6087F0
+      - math:
+        - mininteger: -9223372036854775808
+        - rad: function: 00007FF7C993D600
+        - log: function: 00007FF7C993D4B0
+        - huge: inf
+        - randomseed: function: 00007FF7C993D900
+        - ceil: function: 00007FF7C993D1A0
+        - floor: function: 00007FF7C993D130
+        - tointeger: function: 00007FF7C993D050
+        - cos: function: 00007FF7C993CEE0
+        - maxinteger: 9223372036854775807
+        - pi: 3.1415926535898
+        - asin: function: 00007FF7C993CF60
+        - sin: function: 00007FF7C993CEA0
+        - min: function: 00007FF7C993D640
+        - abs: function: 00007FF7C993CE10
+        - tan: function: 00007FF7C993CF20
+        - sqrt: function: 00007FF7C993D400
+        - type: function: 00007FF7C993D940
+        - random: function: 00007FF7C993D780
+        - deg: function: 00007FF7C993D5C0
+        - modf: function: 00007FF7C993D310
+        - acos: function: 00007FF7C993CFA0
+        - fmod: function: 00007FF7C993D210
+        - atan: function: 00007FF7C993CFE0
+        - ult: function: 00007FF7C993D440
+        - max: function: 00007FF7C993D6E0
+        - exp: function: 00007FF7C993D580
+      - utf8:
+        - len: function: 00007FF7C993C4D0
+        - charpattern: [ -Â-ô][€-¿]*
+        - codepoint: function: 00007FF7C993C650
+        - offset: function: 00007FF7C993C950
+        - char: function: 00007FF7C993C880
+        - codes: function: 00007FF7C993CCB0
+      - string:
+        - dump: function: 00007FF7C9937920
+        - sub: function: 00007FF7C99370C0
+        - byte: function: 00007FF7C9937680
+        - char: function: 00007FF7C99377E0
+        - match: function: 00007FF7C9939130
+        - find: function: 00007FF7C9939100
+        - unpack: function: 00007FF7C993BC80
+        - upper: function: 00007FF7C9937390
+        - format: function: 00007FF7C993A510
+        - gsub: function: 00007FF7C9939710
+        - pack: function: 00007FF7C993B2B0
+        - gmatch: function: 00007FF7C9939250
+        - packsize: function: 00007FF7C993B980
+        - rep: function: 00007FF7C9937480
+        - lower: function: 00007FF7C99372A0
+        - reverse: function: 00007FF7C99371C0
+        - len: function: 00007FF7C9937030
+      - _VERSION: Lua 5.3
+      - error: function: 00007FF7C9931EB0
+      - pairs: function: 00007FF7C99324B0
+      - pcall: function: 00007FF7C91D35F0
+    - dofile: function: 00007FF7C99329B0
+    - type: function: 00007FF7C9932300
+    - coroutine:
+      - resume: function: 00007FF7C9932FC0
+      - status: function: 00007FF7C9933200
+      - wrap: function: 00007FF7C9933190
+      - create: function: 00007FF7C9933120
+      - isyieldable: function: 00007FF7C9933330
+      - yield: function: 00007FF7C99331D0
+      - running: function: 00007FF7C9933360
+    - tostring: function: 00007FF7C9932D80
+    - next: function: 00007FF7C9932440
+    - load: function: 00007FF7C9932800
+    - require: function: 000001B55E608F30
+    - rawequal: function: 00007FF7C9932060
+    - print_warn: function: 000001B55E6089B0
+    - table:
+      - pack: function: 00007FF7C9933C20
+      - remove: function: 00007FF7C9933690
+      - sort: function: 00007FF7C9934490
+      - move: function: 00007FF7C99337B0
+      - unpack: function: 00007FF7C9933CD0
+      - concat: function: 00007FF7C9933AC0
+      - insert: function: 00007FF7C9933560
+    - file: file (000001B55B1CD140)
+    - rawlen: function: 00007FF7C99320C0
+    - ipairs: function: 00007FF7C9932550
+    - rcon:
+      - move: function: 000001B55DC44F70
+      - insertToInventory: function: 000001B55A21B6C0
+      - mine: function: 000001B55DC44970
+      - cheatItem: function: 000001B55DC44670
+      - cheatTechnology: function: 000001B55DC44B30
+      - print: function: 000001B55DC44D70
+      - findEntitiesInRadius: function: 000001B55E608D70
+      - removeFromInventory: function: 000001B55B339770
+      - placeEntity: function: 000001B55A21B680
+      - cheatAllTechnologies: function: 000001B55DC44870
+      - inventoryContentsAt: function: 000001B55DC44470
+      - craft: function: 000001B55DC44A30
+      - addResearch: function: 000001B55DC44830
+      - cheatBlueprint: function: 000001B55DC44630
+      - reviveGhost: function: 000001B55DC44C70
+      - placeBlueprint: function: 000001B55DC44DB0
+    - xpcall: function: 00007FF7C91D3730
+    - package:
+      - config: \
+;
+?
+!
+-
+
+      - searchers:
+        - 1: function: 000001B55E608CB0
+        - 2: function: 000001B55E6082B0
+        - 3: function: 000001B55E608EF0
+        - 4: function: 000001B55E608130
+      - loaded:
+        - io:
+          - write: function: 00007FF7C9935D90
+          - stderr: file (00007FF8A792F540)
+          - stdout: file (00007FF8A792F4E8)
+          - read: function: 00007FF7C9935B70
+          - input: function: 00007FF7C9934E60
+          - open: function: 00007FF7C9934B00
+          - lines: function: 00007FF7C9935100
+          - type: function: 00007FF7C99346D0
+          - stdin: file (00007FF8A792F490)
+          - close: function: 00007FF7C9934910
+          - tmpfile: function: 00007FF7C9934CD0
+          - popen: function: 00007FF7C9934C20
+          - output: function: 00007FF7C9934E90
+          - flush: function: 00007FF7C9935FC0
+        - table:
+          - pack: function: 00007FF7C9933C20
+          - remove: function: 00007FF7C9933690
+          - sort: function: 00007FF7C9934490
+          - move: function: 00007FF7C99337B0
+          - unpack: function: 00007FF7C9933CD0
+          - concat: function: 00007FF7C9933AC0
+          - insert: function: 00007FF7C9933560
+        - utf8:
+          - len: function: 00007FF7C993C4D0
+          - charpattern: [ -Â-ô][€-¿]*
+          - codepoint: function: 00007FF7C993C650
+          - offset: function: 00007FF7C993C950
+          - char: function: 00007FF7C993C880
+          - codes: function: 00007FF7C993CCB0
+        - math:
+          - mininteger: -9223372036854775808
+          - rad: function: 00007FF7C993D600
+          - log: function: 00007FF7C993D4B0
+          - huge: inf
+          - randomseed: function: 00007FF7C993D900
+          - ceil: function: 00007FF7C993D1A0
+          - floor: function: 00007FF7C993D130
+          - tointeger: function: 00007FF7C993D050
+          - cos: function: 00007FF7C993CEE0
+          - maxinteger: 9223372036854775807
+          - pi: 3.1415926535898
+          - asin: function: 00007FF7C993CF60
+          - sin: function: 00007FF7C993CEA0
+          - min: function: 00007FF7C993D640
+          - abs: function: 00007FF7C993CE10
+          - tan: function: 00007FF7C993CF20
+          - sqrt: function: 00007FF7C993D400
+          - type: function: 00007FF7C993D940
+          - random: function: 00007FF7C993D780
+          - deg: function: 00007FF7C993D5C0
+          - modf: function: 00007FF7C993D310
+          - acos: function: 00007FF7C993CFA0
+          - fmod: function: 00007FF7C993D210
+          - atan: function: 00007FF7C993CFE0
+          - ult: function: 00007FF7C993D440
+          - max: function: 00007FF7C993D6E0
+          - exp: function: 00007FF7C993D580
+        - coroutine:
+          - resume: function: 00007FF7C9932FC0
+          - status: function: 00007FF7C9933200
+          - wrap: function: 00007FF7C9933190
+          - create: function: 00007FF7C9933120
+          - isyieldable: function: 00007FF7C9933330
+          - yield: function: 00007FF7C99331D0
+          - running: function: 00007FF7C9933360
+        - os:
+          - setlocale: function: 00007FF7C9936EA0
+          - clock: function: 00007FF7C9936580
+          - rename: function: 00007FF7C9936410
+          - exit: function: 00007FF7C9936F20
+          - tmpname: function: 00007FF7C9936490
+          - execute: function: 00007FF7C9936340
+          - time: function: 00007FF7C9936CA0
+          - remove: function: 00007FF7C99363B0
+          - getenv: function: 00007FF7C9936530
+          - difftime: function: 00007FF7C9936E40
+          - date: function: 00007FF7C9936A00
+        - string:
+          - dump: function: 00007FF7C9937920
+          - sub: function: 00007FF7C99370C0
+          - byte: function: 00007FF7C9937680
+          - char: function: 00007FF7C99377E0
+          - match: function: 00007FF7C9939130
+          - find: function: 00007FF7C9939100
+          - unpack: function: 00007FF7C993BC80
+          - upper: function: 00007FF7C9937390
+          - format: function: 00007FF7C993A510
+          - gsub: function: 00007FF7C9939710
+          - pack: function: 00007FF7C993B2B0
+          - gmatch: function: 00007FF7C9939250
+          - packsize: function: 00007FF7C993B980
+          - rep: function: 00007FF7C9937480
+          - lower: function: 00007FF7C99372A0
+          - reverse: function: 00007FF7C99371C0
+          - len: function: 00007FF7C9937030
+        - _G:
+          - dump: function: 000001B55DCAC0F0
+          - tonumber: function: 00007FF7C9931D30
+          - print: function: 000001B55E608270
+          - world:
+          - collectgarbage: function: 00007FF7C9932200
+          - getmetatable: function: 00007FF7C9931F40
+          - select: function: 00007FF7C9932AE0
+          - os:
+          - _G:
+          - dofile: function: 00007FF7C99329B0
+          - type: function: 00007FF7C9932300
+          - coroutine:
+          - tostring: function: 00007FF7C9932D80
+          - next: function: 00007FF7C9932440
+          - load: function: 00007FF7C9932800
+          - require: function: 000001B55E608F30
+          - rawequal: function: 00007FF7C9932060
+          - print_warn: function: 000001B55E6089B0
+          - table:
+          - file: file (000001B55B1CD140)
+          - rawlen: function: 00007FF7C99320C0
+          - ipairs: function: 00007FF7C9932550
+          - rcon:
+          - xpcall: function: 00007FF7C91D3730
+          - package:
+          - plan:
+          - io:
+          - loadfile: function: 00007FF7C9932640
+          - rawset: function: 00007FF7C9932190
+          - rawget: function: 00007FF7C9932130
+          - all_bots:
+          - setmetatable: function: 00007FF7C9931FB0
+          - assert: function: 00007FF7C9932A40
+          - print_err: function: 000001B55E6087F0
+          - math:
+          - utf8:
+          - string:
+          - _VERSION: Lua 5.3
+          - error: function: 00007FF7C9931EB0
+          - pairs: function: 00007FF7C99324B0
+          - pcall: function: 00007FF7C91D35F0
+        - package:
+          - config: \
+;
+?
+!
+-
+
+          - searchers:
+          - loaded:
+          - cpath: D:\projects\factorio-bot-tauri\target\debug\?.dll;D:\projects\factorio-bot-tauri\target\debug\..\lib\lua\5.3\?.dll;D:\projects\factorio-bot-tauri\target\debug\loadall.dll;.\?.dll
+          - preload:
+          - loadlib: function: 00007FF7C993E1C0
+          - path: D:\projects\factorio-bot-tauri\target\debug\lua\?.lua;D:\projects\factorio-bot-tauri\target\debug\lua\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\?.lua;D:\projects\factorio-bot-tauri\target\debug\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?\init.lua;.\?.lua;.\?\init.lua
+          - searchpath: function: 00007FF7C993E550
+      - cpath: D:\projects\factorio-bot-tauri\target\debug\?.dll;D:\projects\factorio-bot-tauri\target\debug\..\lib\lua\5.3\?.dll;D:\projects\factorio-bot-tauri\target\debug\loadall.dll;.\?.dll
+      - preload:
+      - loadlib: function: 00007FF7C993E1C0
+      - path: D:\projects\factorio-bot-tauri\target\debug\lua\?.lua;D:\projects\factorio-bot-tauri\target\debug\lua\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\?.lua;D:\projects\factorio-bot-tauri\target\debug\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?\init.lua;.\?.lua;.\?\init.lua
+      - searchpath: function: 00007FF7C993E550
+    - plan:
+      - mine: function: 000001B55E608470
+      - groupEnd: function: 000001B55E608E30
+      - walk: function: 000001B55E608D30
+      - groupStart: function: 000001B55E608230
+    - io:
+      - write: function: 00007FF7C9935D90
+      - stderr: file (00007FF8A792F540)
+      - stdout: file (00007FF8A792F4E8)
+      - read: function: 00007FF7C9935B70
+      - input: function: 00007FF7C9934E60
+      - open: function: 00007FF7C9934B00
+      - lines: function: 00007FF7C9935100
+      - type: function: 00007FF7C99346D0
+      - stdin: file (00007FF8A792F490)
+      - close: function: 00007FF7C9934910
+      - tmpfile: function: 00007FF7C9934CD0
+      - popen: function: 00007FF7C9934C20
+      - output: function: 00007FF7C9934E90
+      - flush: function: 00007FF7C9935FC0
+    - loadfile: function: 00007FF7C9932640
+    - rawset: function: 00007FF7C9932190
+    - rawget: function: 00007FF7C9932130
+    - all_bots:
+      - 1: 1
+    - setmetatable: function: 00007FF7C9931FB0
+    - assert: function: 00007FF7C9932A40
+    - print_err: function: 000001B55E6087F0
+    - math:
+      - mininteger: -9223372036854775808
+      - rad: function: 00007FF7C993D600
+      - log: function: 00007FF7C993D4B0
+      - huge: inf
+      - randomseed: function: 00007FF7C993D900
+      - ceil: function: 00007FF7C993D1A0
+      - floor: function: 00007FF7C993D130
+      - tointeger: function: 00007FF7C993D050
+      - cos: function: 00007FF7C993CEE0
+      - maxinteger: 9223372036854775807
+      - pi: 3.1415926535898
+      - asin: function: 00007FF7C993CF60
+      - sin: function: 00007FF7C993CEA0
+      - min: function: 00007FF7C993D640
+      - abs: function: 00007FF7C993CE10
+      - tan: function: 00007FF7C993CF20
+      - sqrt: function: 00007FF7C993D400
+      - type: function: 00007FF7C993D940
+      - random: function: 00007FF7C993D780
+      - deg: function: 00007FF7C993D5C0
+      - modf: function: 00007FF7C993D310
+      - acos: function: 00007FF7C993CFA0
+      - fmod: function: 00007FF7C993D210
+      - atan: function: 00007FF7C993CFE0
+      - ult: function: 00007FF7C993D440
+      - max: function: 00007FF7C993D6E0
+      - exp: function: 00007FF7C993D580
+    - utf8:
+      - len: function: 00007FF7C993C4D0
+      - charpattern: [ -Â-ô][€-¿]*
+      - codepoint: function: 00007FF7C993C650
+      - offset: function: 00007FF7C993C950
+      - char: function: 00007FF7C993C880
+      - codes: function: 00007FF7C993CCB0
+    - string:
+      - dump: function: 00007FF7C9937920
+      - sub: function: 00007FF7C99370C0
+      - byte: function: 00007FF7C9937680
+      - char: function: 00007FF7C99377E0
+      - match: function: 00007FF7C9939130
+      - find: function: 00007FF7C9939100
+      - unpack: function: 00007FF7C993BC80
+      - upper: function: 00007FF7C9937390
+      - format: function: 00007FF7C993A510
+      - gsub: function: 00007FF7C9939710
+      - pack: function: 00007FF7C993B2B0
+      - gmatch: function: 00007FF7C9939250
+      - packsize: function: 00007FF7C993B980
+      - rep: function: 00007FF7C9937480
+      - lower: function: 00007FF7C99372A0
+      - reverse: function: 00007FF7C99371C0
+      - len: function: 00007FF7C9937030
+    - _VERSION: Lua 5.3
+    - error: function: 00007FF7C9931EB0
+    - pairs: function: 00007FF7C99324B0
+    - pcall: function: 00007FF7C91D35F0
+  - package:
+    - config: \
+;
+?
+!
+-
+
+    - searchers:
+      - 1: function: 000001B55E608CB0
+      - 2: function: 000001B55E6082B0
+      - 3: function: 000001B55E608EF0
+      - 4: function: 000001B55E608130
+    - loaded:
+      - io:
+        - write: function: 00007FF7C9935D90
+        - stderr: file (00007FF8A792F540)
+        - stdout: file (00007FF8A792F4E8)
+        - read: function: 00007FF7C9935B70
+        - input: function: 00007FF7C9934E60
+        - open: function: 00007FF7C9934B00
+        - lines: function: 00007FF7C9935100
+        - type: function: 00007FF7C99346D0
+        - stdin: file (00007FF8A792F490)
+        - close: function: 00007FF7C9934910
+        - tmpfile: function: 00007FF7C9934CD0
+        - popen: function: 00007FF7C9934C20
+        - output: function: 00007FF7C9934E90
+        - flush: function: 00007FF7C9935FC0
+      - table:
+        - pack: function: 00007FF7C9933C20
+        - remove: function: 00007FF7C9933690
+        - sort: function: 00007FF7C9934490
+        - move: function: 00007FF7C99337B0
+        - unpack: function: 00007FF7C9933CD0
+        - concat: function: 00007FF7C9933AC0
+        - insert: function: 00007FF7C9933560
+      - utf8:
+        - len: function: 00007FF7C993C4D0
+        - charpattern: [ -Â-ô][€-¿]*
+        - codepoint: function: 00007FF7C993C650
+        - offset: function: 00007FF7C993C950
+        - char: function: 00007FF7C993C880
+        - codes: function: 00007FF7C993CCB0
+      - math:
+        - mininteger: -9223372036854775808
+        - rad: function: 00007FF7C993D600
+        - log: function: 00007FF7C993D4B0
+        - huge: inf
+        - randomseed: function: 00007FF7C993D900
+        - ceil: function: 00007FF7C993D1A0
+        - floor: function: 00007FF7C993D130
+        - tointeger: function: 00007FF7C993D050
+        - cos: function: 00007FF7C993CEE0
+        - maxinteger: 9223372036854775807
+        - pi: 3.1415926535898
+        - asin: function: 00007FF7C993CF60
+        - sin: function: 00007FF7C993CEA0
+        - min: function: 00007FF7C993D640
+        - abs: function: 00007FF7C993CE10
+        - tan: function: 00007FF7C993CF20
+        - sqrt: function: 00007FF7C993D400
+        - type: function: 00007FF7C993D940
+        - random: function: 00007FF7C993D780
+        - deg: function: 00007FF7C993D5C0
+        - modf: function: 00007FF7C993D310
+        - acos: function: 00007FF7C993CFA0
+        - fmod: function: 00007FF7C993D210
+        - atan: function: 00007FF7C993CFE0
+        - ult: function: 00007FF7C993D440
+        - max: function: 00007FF7C993D6E0
+        - exp: function: 00007FF7C993D580
+      - coroutine:
+        - resume: function: 00007FF7C9932FC0
+        - status: function: 00007FF7C9933200
+        - wrap: function: 00007FF7C9933190
+        - create: function: 00007FF7C9933120
+        - isyieldable: function: 00007FF7C9933330
+        - yield: function: 00007FF7C99331D0
+        - running: function: 00007FF7C9933360
+      - os:
+        - setlocale: function: 00007FF7C9936EA0
+        - clock: function: 00007FF7C9936580
+        - rename: function: 00007FF7C9936410
+        - exit: function: 00007FF7C9936F20
+        - tmpname: function: 00007FF7C9936490
+        - execute: function: 00007FF7C9936340
+        - time: function: 00007FF7C9936CA0
+        - remove: function: 00007FF7C99363B0
+        - getenv: function: 00007FF7C9936530
+        - difftime: function: 00007FF7C9936E40
+        - date: function: 00007FF7C9936A00
+      - string:
+        - dump: function: 00007FF7C9937920
+        - sub: function: 00007FF7C99370C0
+        - byte: function: 00007FF7C9937680
+        - char: function: 00007FF7C99377E0
+        - match: function: 00007FF7C9939130
+        - find: function: 00007FF7C9939100
+        - unpack: function: 00007FF7C993BC80
+        - upper: function: 00007FF7C9937390
+        - format: function: 00007FF7C993A510
+        - gsub: function: 00007FF7C9939710
+        - pack: function: 00007FF7C993B2B0
+        - gmatch: function: 00007FF7C9939250
+        - packsize: function: 00007FF7C993B980
+        - rep: function: 00007FF7C9937480
+        - lower: function: 00007FF7C99372A0
+        - reverse: function: 00007FF7C99371C0
+        - len: function: 00007FF7C9937030
+      - _G:
+        - dump: function: 000001B55DCAC0F0
+        - tonumber: function: 00007FF7C9931D30
+        - print: function: 000001B55E608270
+        - world:
+          - player: function: 000001B55E6083B0
+          - inventory: function: 000001B55E6085F0
+          - recipe: function: 000001B55E6084F0
+          - findFreeResourceRect: function: 000001B55E608830
+        - collectgarbage: function: 00007FF7C9932200
+        - getmetatable: function: 00007FF7C9931F40
+        - select: function: 00007FF7C9932AE0
+        - os:
+          - setlocale: function: 00007FF7C9936EA0
+          - clock: function: 00007FF7C9936580
+          - rename: function: 00007FF7C9936410
+          - exit: function: 00007FF7C9936F20
+          - tmpname: function: 00007FF7C9936490
+          - execute: function: 00007FF7C9936340
+          - time: function: 00007FF7C9936CA0
+          - remove: function: 00007FF7C99363B0
+          - getenv: function: 00007FF7C9936530
+          - difftime: function: 00007FF7C9936E40
+          - date: function: 00007FF7C9936A00
+        - _G:
+          - dump: function: 000001B55DCAC0F0
+          - tonumber: function: 00007FF7C9931D30
+          - print: function: 000001B55E608270
+          - world:
+          - collectgarbage: function: 00007FF7C9932200
+          - getmetatable: function: 00007FF7C9931F40
+          - select: function: 00007FF7C9932AE0
+          - os:
+          - _G:
+          - dofile: function: 00007FF7C99329B0
+          - type: function: 00007FF7C9932300
+          - coroutine:
+          - tostring: function: 00007FF7C9932D80
+          - next: function: 00007FF7C9932440
+          - load: function: 00007FF7C9932800
+          - require: function: 000001B55E608F30
+          - rawequal: function: 00007FF7C9932060
+          - print_warn: function: 000001B55E6089B0
+          - table:
+          - file: file (000001B55B1CD140)
+          - rawlen: function: 00007FF7C99320C0
+          - ipairs: function: 00007FF7C9932550
+          - rcon:
+          - xpcall: function: 00007FF7C91D3730
+          - package:
+          - plan:
+          - io:
+          - loadfile: function: 00007FF7C9932640
+          - rawset: function: 00007FF7C9932190
+          - rawget: function: 00007FF7C9932130
+          - all_bots:
+          - setmetatable: function: 00007FF7C9931FB0
+          - assert: function: 00007FF7C9932A40
+          - print_err: function: 000001B55E6087F0
+          - math:
+          - utf8:
+          - string:
+          - _VERSION: Lua 5.3
+          - error: function: 00007FF7C9931EB0
+          - pairs: function: 00007FF7C99324B0
+          - pcall: function: 00007FF7C91D35F0
+        - dofile: function: 00007FF7C99329B0
+        - type: function: 00007FF7C9932300
+        - coroutine:
+          - resume: function: 00007FF7C9932FC0
+          - status: function: 00007FF7C9933200
+          - wrap: function: 00007FF7C9933190
+          - create: function: 00007FF7C9933120
+          - isyieldable: function: 00007FF7C9933330
+          - yield: function: 00007FF7C99331D0
+          - running: function: 00007FF7C9933360
+        - tostring: function: 00007FF7C9932D80
+        - next: function: 00007FF7C9932440
+        - load: function: 00007FF7C9932800
+        - require: function: 000001B55E608F30
+        - rawequal: function: 00007FF7C9932060
+        - print_warn: function: 000001B55E6089B0
+        - table:
+          - pack: function: 00007FF7C9933C20
+          - remove: function: 00007FF7C9933690
+          - sort: function: 00007FF7C9934490
+          - move: function: 00007FF7C99337B0
+          - unpack: function: 00007FF7C9933CD0
+          - concat: function: 00007FF7C9933AC0
+          - insert: function: 00007FF7C9933560
+        - file: file (000001B55B1CD140)
+        - rawlen: function: 00007FF7C99320C0
+        - ipairs: function: 00007FF7C9932550
+        - rcon:
+          - move: function: 000001B55DC44F70
+          - insertToInventory: function: 000001B55A21B6C0
+          - mine: function: 000001B55DC44970
+          - cheatItem: function: 000001B55DC44670
+          - cheatTechnology: function: 000001B55DC44B30
+          - print: function: 000001B55DC44D70
+          - findEntitiesInRadius: function: 000001B55E608D70
+          - removeFromInventory: function: 000001B55B339770
+          - placeEntity: function: 000001B55A21B680
+          - cheatAllTechnologies: function: 000001B55DC44870
+          - inventoryContentsAt: function: 000001B55DC44470
+          - craft: function: 000001B55DC44A30
+          - addResearch: function: 000001B55DC44830
+          - cheatBlueprint: function: 000001B55DC44630
+          - reviveGhost: function: 000001B55DC44C70
+          - placeBlueprint: function: 000001B55DC44DB0
+        - xpcall: function: 00007FF7C91D3730
+        - package:
+          - config: \
+;
+?
+!
+-
+
+          - searchers:
+          - loaded:
+          - cpath: D:\projects\factorio-bot-tauri\target\debug\?.dll;D:\projects\factorio-bot-tauri\target\debug\..\lib\lua\5.3\?.dll;D:\projects\factorio-bot-tauri\target\debug\loadall.dll;.\?.dll
+          - preload:
+          - loadlib: function: 00007FF7C993E1C0
+          - path: D:\projects\factorio-bot-tauri\target\debug\lua\?.lua;D:\projects\factorio-bot-tauri\target\debug\lua\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\?.lua;D:\projects\factorio-bot-tauri\target\debug\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?\init.lua;.\?.lua;.\?\init.lua
+          - searchpath: function: 00007FF7C993E550
+        - plan:
+          - mine: function: 000001B55E608470
+          - groupEnd: function: 000001B55E608E30
+          - walk: function: 000001B55E608D30
+          - groupStart: function: 000001B55E608230
+        - io:
+          - write: function: 00007FF7C9935D90
+          - stderr: file (00007FF8A792F540)
+          - stdout: file (00007FF8A792F4E8)
+          - read: function: 00007FF7C9935B70
+          - input: function: 00007FF7C9934E60
+          - open: function: 00007FF7C9934B00
+          - lines: function: 00007FF7C9935100
+          - type: function: 00007FF7C99346D0
+          - stdin: file (00007FF8A792F490)
+          - close: function: 00007FF7C9934910
+          - tmpfile: function: 00007FF7C9934CD0
+          - popen: function: 00007FF7C9934C20
+          - output: function: 00007FF7C9934E90
+          - flush: function: 00007FF7C9935FC0
+        - loadfile: function: 00007FF7C9932640
+        - rawset: function: 00007FF7C9932190
+        - rawget: function: 00007FF7C9932130
+        - all_bots:
+          - 1: 1
+        - setmetatable: function: 00007FF7C9931FB0
+        - assert: function: 00007FF7C9932A40
+        - print_err: function: 000001B55E6087F0
+        - math:
+          - mininteger: -9223372036854775808
+          - rad: function: 00007FF7C993D600
+          - log: function: 00007FF7C993D4B0
+          - huge: inf
+          - randomseed: function: 00007FF7C993D900
+          - ceil: function: 00007FF7C993D1A0
+          - floor: function: 00007FF7C993D130
+          - tointeger: function: 00007FF7C993D050
+          - cos: function: 00007FF7C993CEE0
+          - maxinteger: 9223372036854775807
+          - pi: 3.1415926535898
+          - asin: function: 00007FF7C993CF60
+          - sin: function: 00007FF7C993CEA0
+          - min: function: 00007FF7C993D640
+          - abs: function: 00007FF7C993CE10
+          - tan: function: 00007FF7C993CF20
+          - sqrt: function: 00007FF7C993D400
+          - type: function: 00007FF7C993D940
+          - random: function: 00007FF7C993D780
+          - deg: function: 00007FF7C993D5C0
+          - modf: function: 00007FF7C993D310
+          - acos: function: 00007FF7C993CFA0
+          - fmod: function: 00007FF7C993D210
+          - atan: function: 00007FF7C993CFE0
+          - ult: function: 00007FF7C993D440
+          - max: function: 00007FF7C993D6E0
+          - exp: function: 00007FF7C993D580
+        - utf8:
+          - len: function: 00007FF7C993C4D0
+          - charpattern: [ -Â-ô][€-¿]*
+          - codepoint: function: 00007FF7C993C650
+          - offset: function: 00007FF7C993C950
+          - char: function: 00007FF7C993C880
+          - codes: function: 00007FF7C993CCB0
+        - string:
+          - dump: function: 00007FF7C9937920
+          - sub: function: 00007FF7C99370C0
+          - byte: function: 00007FF7C9937680
+          - char: function: 00007FF7C99377E0
+          - match: function: 00007FF7C9939130
+          - find: function: 00007FF7C9939100
+          - unpack: function: 00007FF7C993BC80
+          - upper: function: 00007FF7C9937390
+          - format: function: 00007FF7C993A510
+          - gsub: function: 00007FF7C9939710
+          - pack: function: 00007FF7C993B2B0
+          - gmatch: function: 00007FF7C9939250
+          - packsize: function: 00007FF7C993B980
+          - rep: function: 00007FF7C9937480
+          - lower: function: 00007FF7C99372A0
+          - reverse: function: 00007FF7C99371C0
+          - len: function: 00007FF7C9937030
+        - _VERSION: Lua 5.3
+        - error: function: 00007FF7C9931EB0
+        - pairs: function: 00007FF7C99324B0
+        - pcall: function: 00007FF7C91D35F0
+      - package:
+        - config: \
+;
+?
+!
+-
+
+        - searchers:
+          - 1: function: 000001B55E608CB0
+          - 2: function: 000001B55E6082B0
+          - 3: function: 000001B55E608EF0
+          - 4: function: 000001B55E608130
+        - loaded:
+          - io:
+          - table:
+          - utf8:
+          - math:
+          - coroutine:
+          - os:
+          - string:
+          - _G:
+          - package:
+        - cpath: D:\projects\factorio-bot-tauri\target\debug\?.dll;D:\projects\factorio-bot-tauri\target\debug\..\lib\lua\5.3\?.dll;D:\projects\factorio-bot-tauri\target\debug\loadall.dll;.\?.dll
+        - preload:
+        - loadlib: function: 00007FF7C993E1C0
+        - path: D:\projects\factorio-bot-tauri\target\debug\lua\?.lua;D:\projects\factorio-bot-tauri\target\debug\lua\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\?.lua;D:\projects\factorio-bot-tauri\target\debug\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?\init.lua;.\?.lua;.\?\init.lua
+        - searchpath: function: 00007FF7C993E550
+    - cpath: D:\projects\factorio-bot-tauri\target\debug\?.dll;D:\projects\factorio-bot-tauri\target\debug\..\lib\lua\5.3\?.dll;D:\projects\factorio-bot-tauri\target\debug\loadall.dll;.\?.dll
+    - preload:
+    - loadlib: function: 00007FF7C993E1C0
+    - path: D:\projects\factorio-bot-tauri\target\debug\lua\?.lua;D:\projects\factorio-bot-tauri\target\debug\lua\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\?.lua;D:\projects\factorio-bot-tauri\target\debug\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?\init.lua;.\?.lua;.\?\init.lua
+    - searchpath: function: 00007FF7C993E550
+- cpath: D:\projects\factorio-bot-tauri\target\debug\?.dll;D:\projects\factorio-bot-tauri\target\debug\..\lib\lua\5.3\?.dll;D:\projects\factorio-bot-tauri\target\debug\loadall.dll;.\?.dll
+- preload:
+- loadlib: function: 00007FF7C993E1C0
+- path: D:\projects\factorio-bot-tauri\target\debug\lua\?.lua;D:\projects\factorio-bot-tauri\target\debug\lua\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\?.lua;D:\projects\factorio-bot-tauri\target\debug\?\init.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?.lua;D:\projects\factorio-bot-tauri\target\debug\..\share\lua\5.3\?\init.lua;.\?.lua;.\?\init.lua
+- searchpath: function: 00007FF7C993E550
+
+
+plan (table)
+-----
+
+- mine: function: 000001B55E608470
+- groupEnd: function: 000001B55E608E30
+- walk: function: 000001B55E608D30
+- groupStart: function: 000001B55E608230
+
+
+io (table)
+-----
+
+- write: function: 00007FF7C9935D90
+- stderr: file (00007FF8A792F540)
+- stdout: file (00007FF8A792F4E8)
+- read: function: 00007FF7C9935B70
+- input: function: 00007FF7C9934E60
+- open: function: 00007FF7C9934B00
+- lines: function: 00007FF7C9935100
+- type: function: 00007FF7C99346D0
+- stdin: file (00007FF8A792F490)
+- close: function: 00007FF7C9934910
+- tmpfile: function: 00007FF7C9934CD0
+- popen: function: 00007FF7C9934C20
+- output: function: 00007FF7C9934E90
+- flush: function: 00007FF7C9935FC0
+
+
+loadfile (function)
+-----
+
+function: 00007FF7C9932640
+see LUA Docs
+
+
+rawset (function)
+-----
+
+function: 00007FF7C9932190
+see LUA Docs
+
+
+rawget (function)
+-----
+
+function: 00007FF7C9932130
+see LUA Docs
+
+
+all_bots (table)
+-----
+
+- 1: 1
+
+
+setmetatable (function)
+-----
+
+function: 00007FF7C9931FB0
+see LUA Docs
+
+
+assert (function)
+-----
+
+function: 00007FF7C9932A40
+see LUA Docs
+
+
+print_err (function)
+-----
+
+function: 000001B55E6087F0
+see LUA Docs
+
+
+math (table)
+-----
+
+- mininteger: -9223372036854775808
+- rad: function: 00007FF7C993D600
+- log: function: 00007FF7C993D4B0
+- huge: inf
+- randomseed: function: 00007FF7C993D900
+- ceil: function: 00007FF7C993D1A0
+- floor: function: 00007FF7C993D130
+- tointeger: function: 00007FF7C993D050
+- cos: function: 00007FF7C993CEE0
+- maxinteger: 9223372036854775807
+- pi: 3.1415926535898
+- asin: function: 00007FF7C993CF60
+- sin: function: 00007FF7C993CEA0
+- min: function: 00007FF7C993D640
+- abs: function: 00007FF7C993CE10
+- tan: function: 00007FF7C993CF20
+- sqrt: function: 00007FF7C993D400
+- type: function: 00007FF7C993D940
+- random: function: 00007FF7C993D780
+- deg: function: 00007FF7C993D5C0
+- modf: function: 00007FF7C993D310
+- acos: function: 00007FF7C993CFA0
+- fmod: function: 00007FF7C993D210
+- atan: function: 00007FF7C993CFE0
+- ult: function: 00007FF7C993D440
+- max: function: 00007FF7C993D6E0
+- exp: function: 00007FF7C993D580
+
+
+utf8 (table)
+-----
+
+- len: function: 00007FF7C993C4D0
+- charpattern: [ -Â-ô][€-¿]*
+- codepoint: function: 00007FF7C993C650
+- offset: function: 00007FF7C993C950
+- char: function: 00007FF7C993C880
+- codes: function: 00007FF7C993CCB0
+
+
+string (table)
+-----
+
+- dump: function: 00007FF7C9937920
+- sub: function: 00007FF7C99370C0
+- byte: function: 00007FF7C9937680
+- char: function: 00007FF7C99377E0
+- match: function: 00007FF7C9939130
+- find: function: 00007FF7C9939100
+- unpack: function: 00007FF7C993BC80
+- upper: function: 00007FF7C9937390
+- format: function: 00007FF7C993A510
+- gsub: function: 00007FF7C9939710
+- pack: function: 00007FF7C993B2B0
+- gmatch: function: 00007FF7C9939250
+- packsize: function: 00007FF7C993B980
+- rep: function: 00007FF7C9937480
+- lower: function: 00007FF7C99372A0
+- reverse: function: 00007FF7C99371C0
+- len: function: 00007FF7C9937030
+
+
+_VERSION (string)
+-----
+
+Lua 5.3
+see LUA Docs
+
+
+error (function)
+-----
+
+function: 00007FF7C9931EB0
+see LUA Docs
+
+
+pairs (function)
+-----
+
+function: 00007FF7C99324B0
+see LUA Docs
+
+
+pcall (function)
+-----
+
+function: 00007FF7C91D35F0
+see LUA Docs
+
+

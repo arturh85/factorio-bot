@@ -36,7 +36,7 @@ pub fn value_to_lua(value: &Value) -> String {
         Value::Array(vec) => format!(
             "{{ {} }}",
             vec.iter()
-                .map(|value| value_to_lua(value))
+                .map(value_to_lua)
                 .collect::<Vec<String>>()
                 .join(", ")
         ),

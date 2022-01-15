@@ -177,13 +177,13 @@ pub async fn handle_cli() {
     if let Some(_world) = &instance_state.world {
       // start_webserver(rcon, websocket_server, open_browser, world).await;
     }
-  } else if let Some(_matches) = matches.subcommand_matches("rcon") {
+    // } else if let Some(_matches) = matches.subcommand_matches("rcon") {
     // let command = matches.value_of("command").unwrap();
     // let server_host = matches.value_of("server");
     // let rcon_settings = RconSettings::new_from_config(&settings, server_host);
     // let rcon = FactorioRcon::new(&rcon_settings, false).await.unwrap();
     // rcon.send(command).await.unwrap();
-  } else if let Some(_matches) = matches.subcommand_matches("roll-seed") {
+    // } else if let Some(_matches) = matches.subcommand_matches("roll-seed") {
     // if let Some((seed, score)) = roll_seed(
     //   settings,
     //   matches.value_of("map").expect("map required!").into(),
@@ -201,7 +201,7 @@ pub async fn handle_cli() {
     // } else {
     //   eprintln!("no seed found");
     // }
-  } else if let Some(_matches) = matches.subcommand_matches("plan") {
+    // } else if let Some(_matches) = matches.subcommand_matches("plan") {
     // let seed = matches.value_of("seed").map(|s| s.to_string());
     // let name = matches.value_of("name").unwrap().to_string();
     // let map_exchange_string = matches.value_of("map").map(|s| s.to_string());

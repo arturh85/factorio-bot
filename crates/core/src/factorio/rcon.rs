@@ -176,13 +176,8 @@ impl FactorioRcon {
     }
 
     pub async fn screenshot(&self, width: i16, height: i16, depth: i8) -> DiagnosticResult<()> {
-        self.send(&format!(
-            "/screenshot {} {} {}",
-            width.to_string(),
-            height.to_string(),
-            depth.to_string()
-        ))
-        .await?;
+        self.send(&format!("/screenshot {} {} {}", width, height, depth))
+            .await?;
         Ok(())
     }
 
@@ -1084,7 +1079,7 @@ impl FactorioRcon {
         let player_id = player_id.to_string();
         let waypoints = waypoints
             .iter()
-            .map(|position| position_to_lua(position))
+            .map(position_to_lua)
             .collect::<Vec<String>>()
             .join(", ");
         let result = self

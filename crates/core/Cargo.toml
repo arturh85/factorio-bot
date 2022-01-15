@@ -2,7 +2,7 @@
 name = "factorio-bot-core"
 version = "0.0.0"
 authors = ["Artur Hallmann <arturh@arturh.de>"]
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 rand = "^0.8"

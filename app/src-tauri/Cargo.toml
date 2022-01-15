@@ -6,7 +6,7 @@ authors = [ "Artur Hallmann <arturh@arturh.de>" ]
 license = "MIT"
 repository = ""
 default-run = "factorio-bot"
-edition = "2018"
+edition = "2021"
 
 
 [dependencies]

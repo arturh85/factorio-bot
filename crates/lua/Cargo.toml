@@ -15,12 +15,12 @@ serde_json = "^1.0"
 dashmap = "^4.0"
 gag = "^1.0"
 itertools = "^0.10"
-rlua = "^0.17"
+rlua = "^0.17" # cannot update to 0.18 because rlua-async 0.4 depends on 0.17
 rlua_serde = "^0.4"
 rlua-async = "^0.4"
 num-traits = "^0.2"
 paris = { version = "^1.5", features = ["timestamps", "macros"] }
-petgraph = { version = "^0.5", features = ["all"] } # upgrade to 0.6 failed because of ptree
+petgraph = { version = "^0.6", features = ["all"] } # upgrade to 0.6 failed because of ptree
 rand = "^0.8"
-miette = "^1.0"
+miette = "^1.1"
 thiserror = "^1.0"

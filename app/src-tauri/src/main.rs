@@ -41,6 +41,7 @@ async fn main() -> DiagnosticResult<()> {
   #[allow(clippy::items_after_statements)]
   tauri::Builder::default()
     .invoke_handler(tauri::generate_handler![
+      crate::commands::is_restapi_started,
       crate::commands::is_instance_started,
       crate::commands::is_port_available,
       crate::commands::load_script,

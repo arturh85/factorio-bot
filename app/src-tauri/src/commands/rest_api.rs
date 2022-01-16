@@ -42,3 +42,11 @@ pub async fn stop_restapi(
   }
   Ok(())
 }
+
+
+#[tauri::command]
+pub async fn is_restapi_started(
+  restapi_handle: State<'_, RwLock<Option<JoinHandle<DiagnosticResult<()>>>>>,
+) -> Result<bool, String> {
+  Ok(restapi_handle.read().await.is_some())
+}

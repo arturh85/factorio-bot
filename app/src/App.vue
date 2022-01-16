@@ -176,10 +176,10 @@ onMounted(async () => {
   const appStore = useAppStore()
   await appStore.maximizeWindow()
   const settings = await appStore.loadSettings()
-
   if (settings) {
     if (settings.enable_restapi) {
       const restApiStore = useRestApiStore()
+      await restApiStore.init()
       if (!restApiStore.started) {
         await restApiStore.startRestApi()
       }

@@ -29,6 +29,9 @@ export const useRestApiStore = defineStore({
         }
     },
     actions: {
+        async init() {
+            this.started = await invoke('is_restapi_started')
+        },
         async startRestApi() {
             if(this.started) {
                 throw new Error('already started')
@@ -49,7 +52,7 @@ export const useRestApiStore = defineStore({
                 console.error('failed to start rest api', err)
                 this.starting = false
                 this.failed = true
-                throw new Error(err)
+                throw new Error(err as string)
             }
         },
         async stopRestApi() {
@@ -66,7 +69,7 @@ export const useRestApiStore = defineStore({
                 console.error('failed to stop rest api', err)
                 this.stopping = false
                 this.failed = true
-                throw new Error(err)
+                throw new Error(err as string)
             }
         }
     }

@@ -4,41 +4,33 @@ use miette::DiagnosticResult;
 pub async fn arrange_windows(_client_count: u8) -> DiagnosticResult<()> {
     #[cfg(windows)]
     {
-        mod bindings {
-            windows::include_bindings!();
-        }
-        use bindings::Windows::Win32::{
-            Foundation::{BOOL, HWND, LPARAM, PWSTR},
-            UI::WindowsAndMessaging::{
-                EnumWindows, GetSystemMetrics, GetWindowTextW, MoveWindow, SM_CXMAXIMIZED,
-                SM_CYMAXIMIZED,
-            },
+        use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            EnumWindows, GetSystemMetrics, GetWindowTextW, MoveWindow, SM_CXMAXIMIZED,
+            SM_CYMAXIMIZED,
         };
-        use miette::IntoDiagnostic;
         async_std::task::sleep(std::time::Duration::from_secs(_client_count as u64)).await; // wait for window to be visible, hopefully
         static mut HWNDS: Vec<HWND> = Vec::new();
         extern "system" fn enum_window(window: HWND, _: LPARAM) -> BOOL {
             unsafe {
                 let mut text: [u16; 512] = [0; 512];
-                let len = GetWindowTextW(window, PWSTR(text.as_mut_ptr()), text.len() as i32);
+                let len = GetWindowTextW(window, text.as_mut_ptr(), text.len().try_into().unwrap());
                 let text = String::from_utf16_lossy(&text[..len as usize]);
                 if !text.is_empty() && text.contains("Factorio ") && !text.contains("Factorio Bot")
                 {
                     HWNDS.push(window);
                 }
-                BOOL(1)
+                1
             }
         }
         unsafe {
-            EnumWindows(Some(enum_window), LPARAM(0_isize))
-                .ok()
-                .into_diagnostic("factorio::process::could_not_enum_windows")?;
+            EnumWindows(Some(enum_window), 0_isize);
             let max_width = GetSystemMetrics(SM_CXMAXIMIZED);
             let max_height = GetSystemMetrics(SM_CYMAXIMIZED);
             let count = HWNDS.len();
             for (index, window) in HWNDS.iter().enumerate() {
                 let (x, y, w, h) = window_size(max_width, max_height, count, index);
-                MoveWindow(window, x, y, w, h, BOOL(1)).unwrap();
+                MoveWindow(*window, x, y, w, h, 1);
             }
             HWNDS.clear();
         }

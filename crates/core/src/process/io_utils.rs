@@ -5,24 +5,39 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 #[cfg(target_os = "windows")]
+use windows_sys::Win32::Foundation::{HINSTANCE, CloseHandle};
+use windows_sys::Win32::System::ProcessStatus::{K32EnumProcesses, K32EnumProcessModules, K32GetModuleBaseNameW};
+use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
+
 pub async fn kill_process(process_name: &str) -> DiagnosticResult<()> {
     let mut kill_list: Vec<u32> = vec![];
-    process_list::for_each_process(|id, name| {
-        if let Some(name) = name.to_str() {
-            if name.contains(process_name) {
-                info!("killing process {}: \"{}\"", id, name);
-                kill_list.push(id);
+    let mut processes = [0u32; 10240];
+    let mut process_count = 0;
+    unsafe {
+        K32EnumProcesses(&mut processes[0], 10240, &mut process_count);
+        for process_idx in 0usize..(process_count as usize) {
+            let process_id = processes[process_idx];
+            let process_handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, process_id);
+            let mut module = 0isize;
+            let mut cb_needed = 0u32;
+            if K32EnumProcessModules(process_handle, &mut module, 4,
+                                       &mut cb_needed) > 0 {
+                let mut text: [u16; 512] = [0; 512];
+                let len = K32GetModuleBaseNameW(process_handle, module, text.as_mut_ptr(),
+                                                (text.len()/4).try_into().unwrap() );
+                let name = String::from_utf16_lossy(&text[..len as usize]);
+                if name.contains(process_name) {
+                    info!("killing process {process_id}: \"{name}\"");
+                    kill_list.push(process_id);
+                }
             }
+            CloseHandle(process_handle);
         }
-    })
-    .into_diagnostic("factorio::instance_setup::could_not_process_list::for_each_process")?;
-    for id in kill_list {
-        heim::process::get(id)
-            .await
-            .into_diagnostic("factorio::instance_setup::could_not_get_process")?
-            .kill()
-            .await
-            .into_diagnostic("factorio::instance_setup::could_not_kill_process")?;
+        for id in kill_list {
+                let process_handle = OpenProcess(PROCESS_TERMINATE, 1, id);
+                TerminateProcess(process_handle, 0);
+                CloseHandle(process_handle);
+        }
     }
     Ok(())
 }

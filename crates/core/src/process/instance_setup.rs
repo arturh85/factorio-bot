@@ -76,7 +76,10 @@ pub async fn setup_factorio_instance(
             }
         }
         if !workspace_mods_path.exists() {
-            return Err(MissingModsFolder {}.into());
+            workspace_mods_path = PathBuf::from("mods");
+            if !workspace_mods_path.exists() {
+                return Err(MissingModsFolder {}.into());
+            }
         }
     }
     #[cfg(not(debug_assertions))]

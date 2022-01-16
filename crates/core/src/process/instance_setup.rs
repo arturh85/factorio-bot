@@ -17,9 +17,9 @@ use crate::process::process_control::{await_lock, FactorioStartCondition};
 use miette::{DiagnosticResult, IntoDiagnostic};
 
 #[cfg(not(debug_assertions))]
-pub const MODS_CONTENT: include_dir::Dir = include_dir!("../../mods");
+pub const MODS_CONTENT: include_dir::Dir = include_dir!("mods");
 #[cfg(not(debug_assertions))]
-pub const PLANS_CONTENT: include_dir::Dir = include_dir!("../../scripts");
+pub const PLANS_CONTENT: include_dir::Dir = include_dir!("scripts");
 
 #[allow(clippy::too_many_arguments)]
 pub async fn setup_factorio_instance(

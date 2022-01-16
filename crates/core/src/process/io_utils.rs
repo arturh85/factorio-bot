@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 #[cfg(target_os = "windows")]
-use windows_sys::Win32::Foundation::{CloseHandle};
-use windows_sys::Win32::System::ProcessStatus::{K32EnumProcesses, K32EnumProcessModules, K32GetModuleBaseNameW};
-use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
-
 pub async fn kill_process(process_name: &str) -> DiagnosticResult<()> {
+    use windows_sys::Win32::Foundation::{CloseHandle};
+    use windows_sys::Win32::System::ProcessStatus::{K32EnumProcesses, K32EnumProcessModules, K32GetModuleBaseNameW};
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
+
     let mut kill_list: Vec<u32> = vec![];
     const PROCESSES_SIZE: usize = 10240;
     let mut processes = [0u32; PROCESSES_SIZE];
@@ -26,7 +26,7 @@ pub async fn kill_process(process_name: &str) -> DiagnosticResult<()> {
                 let len = K32GetModuleBaseNameW(process_handle, module, text.as_mut_ptr(),
                                                 (text.len()/4).try_into().unwrap() );
                 let name = String::from_utf16_lossy(&text[..len as usize]);
-                if name.contains(process_name) {
+                if name.eq(process_name) {
                     info!("killing process {process_id}: \"{name}\"");
                     kill_list.push(*process_id);
                 }

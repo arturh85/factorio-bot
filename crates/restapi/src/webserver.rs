@@ -43,7 +43,7 @@ pub async fn start(
         )
         .mount(
             "/",
-            routes_with_openapi![crate::rest_api::find_entities, crate::rest_api::test],
+            rocket_okapi::routes_with_openapi![crate::rest_api::find_entities, crate::rest_api::test],
         )
         .mount(
             "/swagger-ui/",

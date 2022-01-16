@@ -11,13 +11,13 @@ use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCE
 
 pub async fn kill_process(process_name: &str) -> DiagnosticResult<()> {
     let mut kill_list: Vec<u32> = vec![];
-    let mut processes = [0u32; 10240];
+    const PROCESSES_SIZE: usize = 10240;
+    let mut processes = [0u32; PROCESSES_SIZE];
     let mut process_count = 0;
     unsafe {
-        K32EnumProcesses(&mut processes[0], 10240, &mut process_count);
-        for process_idx in 0usize..(process_count as usize) {
-            let process_id = processes[process_idx];
-            let process_handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, process_id);
+        K32EnumProcesses(&mut processes[0], PROCESSES_SIZE as u32, &mut process_count);
+        for process_id in processes.iter().take(process_count as usize) {
+            let process_handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, *process_id);
             let mut module = 0isize;
             let mut cb_needed = 0u32;
             if K32EnumProcessModules(process_handle, &mut module, 4,
@@ -28,15 +28,16 @@ pub async fn kill_process(process_name: &str) -> DiagnosticResult<()> {
                 let name = String::from_utf16_lossy(&text[..len as usize]);
                 if name.contains(process_name) {
                     info!("killing process {process_id}: \"{name}\"");
-                    kill_list.push(process_id);
+                    kill_list.push(*process_id);
                 }
             }
+
             CloseHandle(process_handle);
         }
         for id in kill_list {
-                let process_handle = OpenProcess(PROCESS_TERMINATE, 1, id);
-                TerminateProcess(process_handle, 0);
-                CloseHandle(process_handle);
+            let process_handle = OpenProcess(PROCESS_TERMINATE, 0, id);
+            TerminateProcess(process_handle, 0);
+            CloseHandle(process_handle);
         }
     }
     Ok(())

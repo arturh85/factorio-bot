@@ -61,7 +61,7 @@
 import RadioButton from 'primevue/radiobutton';
 import InputSwitch from 'primevue/inputswitch';
 
-import {defineProps, defineEmits, ref, computed} from 'vue';
+import {ref, computed} from 'vue';
 
 const props = defineProps({
   layoutMode: {

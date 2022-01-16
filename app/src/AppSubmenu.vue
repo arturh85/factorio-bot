@@ -33,7 +33,7 @@
 </template>
 
 <script setup lang="ts">
-import {defineProps, defineEmits, ref} from 'vue';
+import {ref} from 'vue';
 defineProps({
   items: Array,
   root: {

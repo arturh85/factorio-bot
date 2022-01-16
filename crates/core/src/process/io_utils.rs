@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 #[cfg(target_os = "windows")]
-use windows_sys::Win32::Foundation::{HINSTANCE, CloseHandle};
+use windows_sys::Win32::Foundation::{CloseHandle};
 use windows_sys::Win32::System::ProcessStatus::{K32EnumProcesses, K32EnumProcessModules, K32GetModuleBaseNameW};
 use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
 

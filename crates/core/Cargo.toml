@@ -6,7 +6,7 @@ edition = "2021"
 
 [dependencies]
 rand = "^0.8"
-rcon = "^0.5"
+rcon = { version = "^0.6", features = ["rt-async-std"] }
 bb8 = "^0.7"
 serde = "^1.0"
 serde_derive = "^1.0"

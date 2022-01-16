@@ -1,5 +1,5 @@
 use config::Config;
-use rcon::Connection;
+use rcon::{AsyncStdStream, Connection};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::ops::Add;
@@ -55,7 +55,7 @@ impl ConnectionManager {
 
 #[async_trait]
 impl bb8::ManageConnection for ConnectionManager {
-    type Connection = rcon::Connection;
+    type Connection = rcon::Connection<AsyncStdStream>;
     type Error = rcon::Error;
 
     async fn connect(&self) -> Result<Self::Connection, Self::Error> {

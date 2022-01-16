@@ -6,6 +6,7 @@ use rocket::data::{Limits, ToByteUnit};
 use rocket::http::Status;
 use rocket::response::status;
 use rocket::Request;
+use rocket::response::content::Html;
 use rocket_okapi::swagger_ui::*;
 
 #[catch(default)]
@@ -17,6 +18,12 @@ fn default_catcher(status: Status, req: &Request<'_>) -> status::Custom<String> 
 #[catch(404)]
 fn general_not_found() -> String {
     "Not found".into()
+}
+
+
+#[get("/")]
+fn index() -> Html<&'static str> {
+    Html(include_str!("rapidoc.html"))
 }
 
 pub async fn start(
@@ -32,9 +39,12 @@ pub async fn start(
         .manage(instance_state)
         .mount(
             "/",
+            rocket::routes![index],
+        )
+        .mount(
+            "/",
             routes_with_openapi![crate::rest_api::find_entities, crate::rest_api::test],
         )
-        .register("/", catchers![general_not_found, default_catcher])
         .mount(
             "/swagger-ui/",
             make_swagger_ui(&SwaggerUIConfig {
@@ -42,6 +52,7 @@ pub async fn start(
                 ..SwaggerUIConfig::default()
             }),
         )
+        .register("/", catchers![general_not_found, default_catcher])
         .launch()
         .await
         .unwrap();

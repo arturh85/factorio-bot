@@ -6,7 +6,7 @@ use crate::process::instance_setup::setup_factorio_instance;
 use crate::process::output_reader::read_output;
 use crate::settings::AppSettings;
 use async_std::task;
-use miette::{DiagnosticResult, IntoDiagnostic};
+use miette::{Result, IntoDiagnostic};
 use paris::Logger;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -37,7 +37,7 @@ pub async fn start_factorio(
     // websocket_server: Option<Addr<FactorioWebSocketServer>>,
     write_logs: bool,
     silent: bool,
-) -> DiagnosticResult<InstanceState> {
+) -> Result<InstanceState> {
     let mut world: Option<Arc<FactorioWorld>> = None;
     let rcon_settings =
         RconSettings::new(settings.rcon_port as u16, &settings.rcon_pass, server_host);
@@ -143,7 +143,7 @@ pub async fn start_factorio(
     })
 }
 
-pub async fn await_lock(lock_path: PathBuf, silent: bool) -> DiagnosticResult<()> {
+pub async fn await_lock(lock_path: PathBuf, silent: bool) -> Result<()> {
     if lock_path.exists() {
         match std::fs::remove_file(&lock_path) {
             Ok(_) => {}
@@ -200,7 +200,7 @@ pub async fn start_factorio_server(
     write_logs: bool,
     silent: bool,
     wait_until: FactorioStartCondition,
-) -> DiagnosticResult<(Arc<FactorioWorld>, Arc<FactorioRcon>, Child)> {
+) -> Result<(Arc<FactorioWorld>, Arc<FactorioRcon>, Child)> {
     let workspace_path = Path::new(&workspace_path);
     if !workspace_path.exists() {
         error!(
@@ -330,7 +330,7 @@ pub async fn start_factorio_client(
     server_host: Option<&str>,
     write_logs: bool,
     silent: bool,
-) -> DiagnosticResult<Child> {
+) -> Result<Child> {
     let workspace_path: String = settings.workspace_path.to_string();
     let workspace_path = Path::new(&workspace_path);
     if !workspace_path.exists() {
@@ -398,7 +398,7 @@ pub async fn start_factorio_client(
     let mut log_file = match write_logs {
         true => Some(
             File::create(log_filename)
-                .into_diagnostic("factorio::process_control::could_not_create_file")?,
+                .into_diagnostic()?,
         ),
         false => None,
     };
@@ -417,7 +417,7 @@ pub async fn start_factorio_client(
     let is_client = server_host.is_some();
     let (tx, rx) = channel();
     tx.send(())
-        .into_diagnostic("factorio::output_parser::could_not_send")?;
+        .into_diagnostic()?;
     std::thread::spawn(move || {
         task::spawn(async move {
             let mut initialized = false;
@@ -449,6 +449,6 @@ pub async fn start_factorio_client(
         });
     });
     tx.send(())
-        .into_diagnostic("factorio::output_parser::could_not_send")?;
+        .into_diagnostic()?;
     Ok(child)
 }

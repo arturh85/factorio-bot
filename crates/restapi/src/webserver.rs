@@ -1,7 +1,7 @@
 use async_std::sync::{Arc, RwLock};
 use factorio_bot_core::process::process_control::InstanceState;
 use factorio_bot_core::settings::AppSettings;
-use miette::DiagnosticResult;
+use miette::Result;
 use rocket::data::{Limits, ToByteUnit};
 use rocket::http::Status;
 use rocket::response::status;
@@ -29,7 +29,7 @@ fn index() -> Html<&'static str> {
 pub async fn start(
     app_settings: Arc<RwLock<AppSettings>>,
     instance_state: Arc<RwLock<Option<InstanceState>>>,
-) -> DiagnosticResult<()> {
+) -> Result<()> {
     let port = app_settings.read().await.restapi_port;
     let figment = rocket::Config::figment()
         .merge(("port", port))

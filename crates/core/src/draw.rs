@@ -5,7 +5,7 @@ use crate::factorio::util::{
     scaled_draw_rect, vector_add, vector_multiply, vector_normalize, vector_substract,
 };
 use crate::types::{Position, Rect};
-use dashmap::lock::RwLockReadGuard;
+use parking_lot::RwLockReadGuard;
 use std::collections::HashMap;
 
 //Hallo Welt!

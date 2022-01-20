@@ -14,10 +14,10 @@ use async_std::task::JoinHandle;
 use factorio_bot::cli::handle_cli;
 use factorio_bot_core::process::process_control::InstanceState;
 use factorio_bot_core::settings::AppSettings;
-use miette::{DiagnosticResult, IntoDiagnostic};
+use miette::{Result, IntoDiagnostic};
 use std::borrow::Cow;
 
-fn app_settings() -> DiagnosticResult<AppSettings> {
+fn app_settings() -> Result<AppSettings> {
   let mut app_settings = AppSettings::load(constants::app_settings_path())?;
   if app_settings.workspace_path == "" {
     let s: String = constants::app_workspace_path().to_str().unwrap().into();
@@ -27,16 +27,16 @@ fn app_settings() -> DiagnosticResult<AppSettings> {
 }
 
 #[async_std::main]
-async fn main() -> DiagnosticResult<()> {
+async fn main() -> Result<()> {
   color_eyre::install().unwrap();
   handle_cli().await;
   std::fs::create_dir_all(constants::app_data_dir())
-    .into_diagnostic("factorio::output_parser::could_not_canonicalize")?;
+    .into_diagnostic()?;
   std::fs::create_dir_all(constants::app_workspace_path())
-    .into_diagnostic("factorio::output_parser::could_not_canonicalize")?;
+    .into_diagnostic()?;
   info!("factorio-bot started");
   let instance_state: Option<InstanceState> = None;
-  let restapi_handle: Option<JoinHandle<DiagnosticResult<()>>> = None;
+  let restapi_handle: Option<JoinHandle<Result<()>>> = None;
 
   #[allow(clippy::items_after_statements)]
   tauri::Builder::default()

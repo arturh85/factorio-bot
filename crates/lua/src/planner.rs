@@ -8,7 +8,7 @@ use crate::lua_rcon::create_lua_rcon;
 use crate::lua_world::create_lua_world;
 use crate::plan_builder::create_lua_plan_builder;
 use async_std::sync::Arc;
-use dashmap::lock::RwLock;
+use parking_lot::RwLock;
 use factorio_bot_core::factorio::rcon::{FactorioRcon, RconSettings};
 use factorio_bot_core::factorio::task_graph::TaskGraph;
 use factorio_bot_core::factorio::world::FactorioWorld;
@@ -18,7 +18,7 @@ use factorio_bot_core::settings::AppSettings;
 use factorio_bot_core::types::{EntityName, PlayerChangedMainInventoryEvent};
 use gag::BufferRedirect;
 use itertools::Itertools;
-use miette::{DiagnosticResult, IntoDiagnostic};
+use miette::{Result, IntoDiagnostic};
 use rlua::{Lua, Variadic};
 use rlua_async::ChunkExt;
 
@@ -47,11 +47,11 @@ impl Planner {
         self.graph = Arc::new(RwLock::new(TaskGraph::new()));
     }
 
-    pub fn plan(&mut self, lua_code: String, bot_count: u32) -> DiagnosticResult<(String, String)> {
+    pub fn plan(&mut self, lua_code: String, bot_count: u32) -> Result<(String, String)> {
         let mut stdout = BufferRedirect::stdout()
-            .into_diagnostic("factorio::output_parser::could_not_redirect_stdout")?;
+            .into_diagnostic()?;
         let mut stderr = BufferRedirect::stderr()
-            .into_diagnostic("factorio::output_parser::could_not_redirect_stderr")?;
+            .into_diagnostic()?;
         let all_bots = self.initiate_missing_players_with_default_inventory(bot_count);
         self.plan_world = Arc::new((*self.real_world).clone());
         let lua = Lua::new();
@@ -97,10 +97,10 @@ impl Planner {
         let mut stderr_str = String::new();
         stdout
             .read_to_string(&mut stdout_str)
-            .into_diagnostic("factorio::output_parser::could_not_read_to_string")?;
+            .into_diagnostic()?;
         stderr
             .read_to_string(&mut stderr_str)
-            .into_diagnostic("factorio::output_parser::could_not_read_to_string")?;
+            .into_diagnostic()?;
         Ok((stdout_str, stderr_str))
     }
 
@@ -139,7 +139,7 @@ pub async fn start_factorio_and_plan_graph(
     seed: Option<String>,
     plan_name: &str,
     bot_count: u32,
-) -> DiagnosticResult<TaskGraph> {
+) -> Result<TaskGraph> {
     let started = Instant::now();
     let instance_name = "plan";
     let rcon_settings = RconSettings::new(settings.rcon_port as u16, &settings.rcon_pass, None);
@@ -179,12 +179,12 @@ pub async fn start_factorio_and_plan_graph(
         let lua_path_str = format!("plans/{}.lua", plan_name);
         let lua_path = Path::new(&lua_path_str);
         let lua_path = std::fs::canonicalize(lua_path)
-            .into_diagnostic("factorio::output_parser::could_not_canonicalize")?;
+            .into_diagnostic()?;
         if !lua_path.exists() {
             panic!("plan {} not found at {}", plan_name, lua_path_str);
         }
         let lua_code = read_to_string(lua_path)
-            .into_diagnostic("factorio::output_parser::could_not_read_to_string")?;
+            .into_diagnostic()?;
         match std::thread::spawn(move || {
             if let Err(err) = planner.plan(lua_code, bot_count) {
                 Err(err)
@@ -213,7 +213,7 @@ pub async fn start_factorio_and_plan_graph(
                 info!("started");
                 stdout()
                     .flush()
-                    .into_diagnostic("factorio::output_parser::could_not_flush")?;
+                    .into_diagnostic()?;
                 continue;
             }
         }

@@ -8,14 +8,14 @@ use async_std::task::JoinHandle;
 use factorio_bot_core::process::process_control::InstanceState;
 use factorio_bot_core::settings::AppSettings;
 use factorio_bot_restapi::webserver::start;
-use miette::DiagnosticResult;
+use miette::Result;
 use tauri::State;
 
 #[tauri::command]
 pub async fn start_restapi(
   app_settings: State<'_, Arc<RwLock<AppSettings>>>,
   instance_state: State<'_, Arc<RwLock<Option<InstanceState>>>>,
-  restapi_handle: State<'_, RwLock<Option<JoinHandle<DiagnosticResult<()>>>>>,
+  restapi_handle: State<'_, RwLock<Option<JoinHandle<Result<()>>>>>,
 ) -> Result<(), String> {
   if restapi_handle.read().await.is_some() {
     return Result::Err("already started".into());
@@ -31,7 +31,7 @@ pub async fn start_restapi(
 
 #[tauri::command]
 pub async fn stop_restapi(
-  restapi_handle: State<'_, RwLock<Option<JoinHandle<DiagnosticResult<()>>>>>,
+  restapi_handle: State<'_, RwLock<Option<JoinHandle<Result<()>>>>>,
 ) -> Result<(), String> {
   if restapi_handle.read().await.is_none() {
     return Result::Err("not started".into());
@@ -46,7 +46,7 @@ pub async fn stop_restapi(
 
 #[tauri::command]
 pub async fn is_restapi_started(
-  restapi_handle: State<'_, RwLock<Option<JoinHandle<DiagnosticResult<()>>>>>,
+  restapi_handle: State<'_, RwLock<Option<JoinHandle<Result<()>>>>>,
 ) -> Result<bool, String> {
   Ok(restapi_handle.read().await.is_some())
 }

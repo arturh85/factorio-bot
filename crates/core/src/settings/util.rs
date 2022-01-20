@@ -1,30 +1,30 @@
 use crate::settings::{AppSettings, APP_SETTINGS_DEFAULT};
-use miette::{DiagnosticResult, IntoDiagnostic};
+use miette::{Result, IntoDiagnostic};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 impl AppSettings {
-    pub fn load(file_path: PathBuf) -> DiagnosticResult<AppSettings> {
+    pub fn load(file_path: PathBuf) -> Result<AppSettings> {
         if Path::exists(&file_path) {
             let file_contents = ::std::fs::read_to_string(file_path)
-                .into_diagnostic("factorio::output_parser::could_not_read_to_string")?;
+                .into_diagnostic()?;
             let mut app_settings = serde_json::to_value(APP_SETTINGS_DEFAULT)
-                .into_diagnostic("factorio::output_parser::could_not_create_value")?;
+                .into_diagnostic()?;
             let result: Value = ::toml::from_str(&file_contents)
-                .into_diagnostic("factorio::output_parser::could_not_parse_toml")?;
+                .into_diagnostic()?;
             AppSettings::merge(&mut app_settings, &result);
             Ok(serde_json::from_value(app_settings)
-                .into_diagnostic("factorio::output_parser::could_not_create_value")?)
+                .into_diagnostic()?)
         } else {
             Ok(APP_SETTINGS_DEFAULT)
         }
     }
 
-    pub fn save(file_path: PathBuf, app_settings: &AppSettings) -> DiagnosticResult<()> {
+    pub fn save(file_path: PathBuf, app_settings: &AppSettings) -> Result<()> {
         let file_contents = ::toml::to_string(app_settings)
-            .into_diagnostic("factorio::output_parser::could_not_parse_json")?;
+            .into_diagnostic()?;
         ::std::fs::write(file_path, file_contents)
-            .into_diagnostic("factorio::output_parser::could_not_parse_json")?;
+            .into_diagnostic()?;
         Ok(())
     }
 

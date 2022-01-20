@@ -12,7 +12,7 @@ serde = "^1.0"
 serde_derive = "^1.0"
 serde_json = "^1.0"
 config = "^0.11"
-pathfinding = "^2.2"
+pathfinding = "^3.0"
 parking_lot = "^0.11"
 paris = { version = "^1.5", features = ["timestamps", "macros"] }
 color-eyre = "^0.6.0"
@@ -29,15 +29,15 @@ num-traits = "^0.2"
 runas = "^0.2"
 async-trait = "^0.1"
 async-std = { version = "^1.10", features = ["attributes", "tokio1"] }
-noisy_float = { version = "^0.1", features = ["serde-1"] } # could not upgrade to 0.2 due to factorio-blueprint
+noisy_float = { version = "^0.2", features = ["serde"] }
 typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"]}
 enum-primitive-derive = "^0.2"
 unicode-segmentation = "^1.8"
 strum = "^0.23"
 strum_macros = "^0.23"
 aabb-quadtree = "^0.2"
-dashmap = "^4.0"
-euclid = "^0.19" # changes required for 0.22
+dashmap = "^5.0"
+euclid = "^0.19" # aabb-quadtree 0.2 depends on euclid 0.19
 smallvec = "*"
 base64 = "^0.13"
 ptree = "^0.4"
@@ -51,7 +51,7 @@ toml = "^0.5"
 schemars = { version = "0.8", features = ["preserve_order"] }
 rlua = "^0.17" # cannot update to 0.18 because rlua-async 0.4 depends on 0.17
 rlua_serde = "^0.4"
-miette = "^1.0"
+miette = {version = "^3.3", features = ["fancy"] }
 thiserror = "^1.0"
 #
 #[target.'cfg(unix)'.dependencies]

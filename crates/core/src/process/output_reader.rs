@@ -11,7 +11,7 @@ use crate::factorio::rcon::{FactorioRcon, RconSettings};
 use crate::factorio::world::FactorioWorld;
 use crate::process::output_parser::OutputParser;
 use crate::process::process_control::FactorioStartCondition;
-use miette::{DiagnosticResult, IntoDiagnostic};
+use miette::{Result, IntoDiagnostic};
 use std::sync::mpsc::channel;
 
 pub async fn read_output(
@@ -22,11 +22,11 @@ pub async fn read_output(
     write_logs: bool,
     silent: bool,
     wait_until: FactorioStartCondition,
-) -> DiagnosticResult<(Arc<FactorioWorld>, Arc<FactorioRcon>)> {
+) -> Result<(Arc<FactorioWorld>, Arc<FactorioRcon>)> {
     let mut log_file = match write_logs {
         true => Some(
             File::create(log_path)
-                .into_diagnostic("factorio::instance_setup::could_not_create_file")?,
+                .into_diagnostic()?,
         ),
         false => None,
     };
@@ -34,10 +34,10 @@ pub async fn read_output(
     let wait_until_thread = wait_until.clone();
     let (tx1, rx1) = channel();
     tx1.send(())
-        .into_diagnostic("factorio::instance_setup::could_not_send")?;
+        .into_diagnostic()?;
     let (tx2, rx2) = channel();
     tx2.send(())
-        .into_diagnostic("factorio::instance_setup::could_not_send")?;
+        .into_diagnostic()?;
     let world = parser.world();
     async_std::task::spawn(async move {
         let lines = reader.lines();
@@ -130,7 +130,7 @@ pub async fn read_output(
         }
     });
     tx1.send(())
-        .into_diagnostic("factorio::instance_setup::could_not_send")?;
+        .into_diagnostic()?;
     let rcon = Arc::new(
         FactorioRcon::new(rcon_settings, silent)
             .await
@@ -143,7 +143,7 @@ pub async fn read_output(
         .expect("always day");
     if wait_until == FactorioStartCondition::DiscoveryComplete {
         tx2.send(())
-            .into_diagnostic("factorio::instance_setup::could_not_send")?;
+            .into_diagnostic()?;
     }
     Ok((world, rcon))
 }

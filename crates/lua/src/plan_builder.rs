@@ -1,4 +1,4 @@
-use dashmap::lock::RwLock;
+use parking_lot::RwLock;
 use factorio_bot_core::errors::PlayerMissingItem;
 use factorio_bot_core::factorio::task_graph::{MineTarget, PositionRadius, TaskGraph};
 use factorio_bot_core::factorio::util::calculate_distance;
@@ -7,7 +7,7 @@ use factorio_bot_core::types::{
     FactorioEntity, FactorioPlayer, PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent,
     Position,
 };
-use miette::DiagnosticResult;
+use miette::Result;
 use num_traits::ToPrimitive;
 use rlua::{Context, Table};
 use std::sync::Arc;
@@ -28,7 +28,7 @@ impl PlanBuilder {
         position: Position,
         name: &str,
         count: u32,
-    ) -> DiagnosticResult<()> {
+    ) -> Result<()> {
         let mut graph = self.graph.write();
         let player = self
             .world
@@ -102,7 +102,7 @@ impl PlanBuilder {
     //         .unwrap_or(&0)
     // }
 
-    pub fn add_walk(&self, player_id: u32, goal: PositionRadius) -> DiagnosticResult<()> {
+    pub fn add_walk(&self, player_id: u32, goal: PositionRadius) -> Result<()> {
         let distance = self.distance(player_id, &goal.position);
         let mut graph = self.graph.write();
         self.world
@@ -114,7 +114,7 @@ impl PlanBuilder {
         Ok(())
     }
 
-    pub fn add_place(&mut self, player_id: u32, entity: FactorioEntity) -> DiagnosticResult<()> {
+    pub fn add_place(&mut self, player_id: u32, entity: FactorioEntity) -> Result<()> {
         let player = self.player(player_id);
         let distance = calculate_distance(&player.position, &entity.position);
         let build_distance = player.build_distance as f64;

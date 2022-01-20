@@ -10,7 +10,7 @@ use crate::types::{
     FactorioItemPrototype, FactorioRecipe, FactorioTile, PlayerChangedDistanceEvent,
     PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent, Pos, Position, Rect,
 };
-use miette::{DiagnosticResult, IntoDiagnostic};
+use miette::{Result, IntoDiagnostic};
 
 pub struct OutputParser {
     world: Arc<FactorioWorld>,
@@ -18,7 +18,7 @@ pub struct OutputParser {
 }
 
 impl OutputParser {
-    pub async fn parse(&mut self, _tick: u64, action: &str, rest: &str) -> DiagnosticResult<()> {
+    pub async fn parse(&mut self, _tick: u64, action: &str, rest: &str) -> Result<()> {
         match action {
             "entities" => {
                 let colon_pos = rest.find(':').unwrap();
@@ -150,10 +150,10 @@ impl OutputParser {
                     let action_id: u32 = match rest.find(' ') {
                         Some(pos) => (&rest[0..pos])
                             .parse()
-                            .into_diagnostic("factorio::output_parser::could_not_parse")?,
+                            .into_diagnostic()?,
                         None => rest
                             .parse()
-                            .into_diagnostic("factorio::output_parser::could_not_parse")?,
+                            .into_diagnostic()?,
                     };
                     let result = match action_status {
                         "ok" => "ok",
@@ -170,7 +170,7 @@ impl OutputParser {
                 let parts: Vec<&str> = rest.split('#').collect();
                 let id: u32 = parts[0]
                     .parse()
-                    .into_diagnostic("factorio::output_parser::could_not_parse")?;
+                    .into_diagnostic()?;
                 self.world.path_requests.insert(id, String::from(parts[1]));
             }
             "STATIC_DATA_END" => {
@@ -179,7 +179,7 @@ impl OutputParser {
             "on_player_left_game" => {
                 let player_id: u32 = rest
                     .parse()
-                    .into_diagnostic("factorio::output_parser::could_not_parse")?;
+                    .into_diagnostic()?;
                 self.world.remove_player(player_id)?;
                 // if let Some(websocket_server) = self.websocket_server.as_ref() {
                 //     websocket_server
@@ -218,7 +218,7 @@ impl OutputParser {
             }
             "on_player_main_inventory_changed" => {
                 let event: PlayerChangedMainInventoryEvent = serde_json::from_str(rest)
-                    .into_diagnostic("factorio::output_parser::could_not_parse_json")?;
+                    .into_diagnostic()?;
                 let _player_id = event.player_id;
                 self.world.player_changed_main_inventory(event)?;
                 // if let Some(websocket_server) = self.websocket_server.as_ref() {
@@ -231,7 +231,7 @@ impl OutputParser {
             }
             "on_player_changed_position" => {
                 let event: PlayerChangedPositionEvent = serde_json::from_str(rest)
-                    .into_diagnostic("factorio::output_parser::could_not_parse_json")?;
+                    .into_diagnostic()?;
                 let _player_id = event.player_id;
                 self.world.player_changed_position(event)?;
                 // if let Some(websocket_server) = self.websocket_server.as_ref() {
@@ -244,7 +244,7 @@ impl OutputParser {
             }
             "on_player_changed_distance" => {
                 let event: PlayerChangedDistanceEvent = serde_json::from_str(rest)
-                    .into_diagnostic("factorio::output_parser::could_not_parse_json")?;
+                    .into_diagnostic()?;
                 let _player_id = event.player_id;
                 self.world.player_changed_distance(event)?;
                 // if let Some(websocket_server) = self.websocket_server.as_ref() {
@@ -268,7 +268,7 @@ impl OutputParser {
         Ok(())
     }
 
-    pub fn on_init(&self) -> DiagnosticResult<()> {
+    pub fn on_init(&self) -> Result<()> {
         self.world.entity_graph.connect()?;
         self.world.flow_graph.update()?;
         Ok(())

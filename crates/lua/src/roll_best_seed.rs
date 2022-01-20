@@ -14,7 +14,7 @@ use factorio_bot_core::process::instance_setup::setup_factorio_instance;
 use factorio_bot_core::process::process_control::{start_factorio_server, FactorioStartCondition};
 use factorio_bot_core::settings::AppSettings;
 use factorio_bot_core::types::{AreaFilter, FactorioEntity, Position};
-use miette::{DiagnosticResult, IntoDiagnostic};
+use miette::{Result, IntoDiagnostic};
 
 #[derive(Debug, Copy, Clone)]
 pub enum RollSeedLimit {
@@ -29,7 +29,7 @@ pub async fn roll_seed(
     parallel: u8,
     plan_name: String,
     bot_count: u32,
-) -> DiagnosticResult<Option<(u32, f64)>> {
+) -> Result<Option<(u32, f64)>> {
     let roll: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
     let best_seed_with_score: Arc<Mutex<Option<(u32, f64)>>> = Arc::new(Mutex::new(None));
     let workspace_path: Arc<String> = Arc::new(settings.workspace_path.into());
@@ -80,12 +80,12 @@ pub async fn roll_seed(
         let lua_path_str = format!("plans/{}.lua", plan_name);
         let lua_path = Path::new(&lua_path_str);
         let lua_path = std::fs::canonicalize(lua_path)
-            .into_diagnostic("factorio::output_parser::could_not_canonicalize")?;
+            .into_diagnostic()?;
         if !lua_path.exists() {
             panic!("plan {} not found at {}", plan_name, lua_path_str);
         }
         let lua_code = read_to_string(lua_path)
-            .into_diagnostic("factorio::output_parser::could_not_read_to_string")?;
+            .into_diagnostic()?;
         join_handles.push(std::thread::spawn(move || {
             task::spawn(async move {
                 while match limit {
@@ -189,10 +189,10 @@ pub async fn score_seed(
     _seed: u32,
     lua_code: &str,
     bot_count: u32,
-) -> DiagnosticResult<f64> {
+) -> Result<f64> {
     let lua_code = lua_code.to_string();
     let _rcon = rcon.clone();
-    let planner = std::thread::spawn::<_, DiagnosticResult<Planner>>(move || {
+    let planner = std::thread::spawn::<_, Result<Planner>>(move || {
         let mut planner = Planner::new(world, Some(_rcon.clone()));
         planner.plan(lua_code, bot_count)?;
         Ok(planner)
@@ -237,7 +237,7 @@ pub async fn find_nearest_entities(
     search_radius: f64,
     name: Option<String>,
     entity_type: Option<String>,
-) -> DiagnosticResult<Vec<FactorioEntity>> {
+) -> Result<Vec<FactorioEntity>> {
     let mut entities = rcon
         .find_entities_filtered(
             &AreaFilter::PositionRadius((search_center.clone(), Some(search_radius))),

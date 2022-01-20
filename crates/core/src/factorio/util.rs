@@ -8,7 +8,7 @@ use factorio_blueprint::BlueprintCodec;
 use factorio_blueprint::Container::{Blueprint, BlueprintBook};
 use human_sort::compare;
 use itertools::Itertools;
-use miette::{DiagnosticResult, IntoDiagnostic};
+use miette::{Result, IntoDiagnostic};
 use num_traits::ToPrimitive;
 use pathfinding::prelude::astar;
 use serde_json::Value;
@@ -102,20 +102,20 @@ pub fn move_pos(pos: &Pos, direction: Direction, offset: i32) -> Pos {
     }
 }
 
-pub fn read_to_value(path: &Path) -> DiagnosticResult<Value> {
+pub fn read_to_value(path: &Path) -> Result<Value> {
     let content = std::fs::read_to_string(path)
-        .into_diagnostic("factorio::util::could_not_read_to_string")?;
+        .into_diagnostic()?;
     Ok(serde_json::from_str(content.as_str())
-        .into_diagnostic("factorio::output_parser::could_not_parse_json")?)
+        .into_diagnostic()?)
 }
 
-pub fn write_value_to(value: &Value, path: &Path) -> DiagnosticResult<()> {
+pub fn write_value_to(value: &Value, path: &Path) -> Result<()> {
     let mut outfile =
-        fs::File::create(&path).into_diagnostic("factorio::util::could_not_create_outfile")?;
+        fs::File::create(&path).into_diagnostic()?;
     let bytes = serde_json::to_string(value).unwrap();
     outfile
         .write_all(bytes.as_ref())
-        .into_diagnostic("factorio::util::could_not_write")?;
+        .into_diagnostic()?;
     Ok(())
 }
 
@@ -359,7 +359,7 @@ pub fn build_entity_path(
     to_direction: Direction,
     block_entities: Vec<FactorioEntity>,
     block_tiles: Vec<FactorioTile>,
-) -> DiagnosticResult<Vec<FactorioEntity>> {
+) -> Result<Vec<FactorioEntity>> {
     let from_position: Pos = from_position.into();
     let to_position: Pos = to_position.into();
     let blocked = map_blocked_tiles(

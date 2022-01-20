@@ -1,11 +1,11 @@
 use indicatif::HumanDuration;
-use miette::{DiagnosticResult, IntoDiagnostic};
+use miette::{Result, IntoDiagnostic};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 #[cfg(target_os = "windows")]
-pub async fn kill_process(process_name: &str) -> DiagnosticResult<()> {
+pub async fn kill_process(process_name: &str) -> Result<()> {
     use windows_sys::Win32::Foundation::{CloseHandle};
     use windows_sys::Win32::System::ProcessStatus::{K32EnumProcesses, K32EnumProcessModules, K32GetModuleBaseNameW};
     use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
@@ -43,11 +43,11 @@ pub async fn kill_process(process_name: &str) -> DiagnosticResult<()> {
     Ok(())
 }
 
-pub fn symlink(original: &Path, link: &Path) -> DiagnosticResult<()> {
+pub fn symlink(original: &Path, link: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(original, link)
-            .into_diagnostic("factorio::io::could_not_create_symlink")?;
+            .into_diagnostic()?;
     }
     #[cfg(windows)]
     {
@@ -58,7 +58,7 @@ pub fn symlink(original: &Path, link: &Path) -> DiagnosticResult<()> {
             .arg(link)
             .arg(original)
             .status()
-            .into_diagnostic("factorio::io::could_not_create_symlink")?;
+            .into_diagnostic()?;
         if !status.success() {
             return Err(crate::errors::ModSymlinkFailed {}.into());
         }
@@ -70,7 +70,7 @@ pub fn extract_archive(
     archive: &str,
     target_directory: &Path,
     workspace_path: &Path,
-) -> DiagnosticResult<()> {
+) -> Result<()> {
     let started = Instant::now();
     let workspace_data_path = workspace_path.join(PathBuf::from("data"));
 
@@ -78,7 +78,7 @@ pub fn extract_archive(
     {
         use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
         let file = fs::File::open(archive)
-            .into_diagnostic("factorio::instance_setup::could_not_open_archive_path")?;
+            .into_diagnostic()?;
         info!(
             "Extracting <bright-blue>{}</> to <magenta>{}</>",
             &archive,
@@ -86,14 +86,14 @@ pub fn extract_archive(
         );
 
         let mut archive = zip::ZipArchive::new(file)
-            .into_diagnostic("factorio::instance_setup::could_not_open_zip")?;
+            .into_diagnostic()?;
 
         let mut files: Vec<String> = vec![];
         for i in 0..archive.len() {
             files.push(
                 archive
                     .by_index(i)
-                    .into_diagnostic("factorio::instance_setup::could_not_read_zip_entry")?
+                    .into_diagnostic()?
                     .name()
                     .into(),
             );
@@ -116,18 +116,18 @@ pub fn extract_archive(
             // output_path is like bin\x64\factorio.exe
             let output_path = output_path
                 .strip_prefix(output_path.components().next().unwrap())
-                .into_diagnostic("factorio::instance_setup::strip_prefix")?;
+                .into_diagnostic()?;
             // output_path is like $target_directory\bin\x64\factorio.exe
             let output_path = PathBuf::from(target_directory).join(PathBuf::from(output_path));
 
             if (&*file).ends_with('/') {
                 fs::create_dir_all(&output_path)
-                    .into_diagnostic("factorio::instance_setup::could_not_create_unpack_dir")?;
+                    .into_diagnostic()?;
             } else {
                 if let Some(p) = output_path.parent() {
                     if !p.exists() {
                         fs::create_dir_all(&p)
-                            .into_diagnostic("factorio::instance_setup::could_not_create_dir")?;
+                            .into_diagnostic()?;
                     }
                 }
 
@@ -140,7 +140,7 @@ pub fn extract_archive(
         if !workspace_data_path.exists() {
             let instance_data_path = target_directory.join(PathBuf::from("data"));
             fs::rename(&instance_data_path, &workspace_data_path)
-                .into_diagnostic("factorio::instance_setup::could_not_rename_data")?;
+                .into_diagnostic()?;
         }
         bar.finish();
     }
@@ -151,7 +151,7 @@ pub fn extract_archive(
         use std::fs::File;
         use std::str::FromStr;
         let archive_path = PathBuf::from_str(archive)
-            .into_diagnostic("factorio::output_parser::could_not_canonicalize")?;
+            .into_diagnostic()?;
         let tar_path = archive_path.with_extension("");
         if !tar_path.exists() {
             let mut logger = Logger::new();
@@ -162,7 +162,7 @@ pub fn extract_archive(
             ));
 
             let tar_gz = File::open(&archive_path)
-                .into_diagnostic("factorio::output_parser::could_not_canonicalize")?;
+                .into_diagnostic()?;
             let tar = xz2::read::XzDecoder::new(tar_gz);
             let mut archive = tar::Archive::new(tar);
             archive.unpack(&tar_path).expect("failed to decompress xz");
@@ -195,7 +195,7 @@ pub fn extract_archive(
         let instance_data_path = target_directory.join(PathBuf::from("data"));
         if !workspace_data_path.exists() {
             fs::rename(&instance_data_path, &workspace_data_path)
-                .into_diagnostic("factorio::output_parser::could_not_canonicalize")?;
+                .into_diagnostic()?;
         } else {
             std::fs::remove_dir_all(&instance_data_path).expect("failed to delete data folder");
         }

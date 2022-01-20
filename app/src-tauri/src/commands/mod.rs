@@ -19,5 +19,5 @@ pub use rcon::*;
 mod rest_api;
 pub use rest_api::*;
 
-const ERR_TO_STRING: fn(miette::DiagnosticReport) -> String =
+const ERR_TO_STRING: fn(miette::Report) -> String =
   |e| String::from("error: ") + &*format!("{:?}", e);

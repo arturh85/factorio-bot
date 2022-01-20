@@ -1,7 +1,7 @@
-use miette::DiagnosticResult;
+use miette::Result;
 
 /// arrange factorio windows to fill the primary display
-pub async fn arrange_windows(_client_count: u8) -> DiagnosticResult<()> {
+pub async fn arrange_windows(_client_count: u8) -> Result<()> {
     #[cfg(windows)]
     {
         use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};

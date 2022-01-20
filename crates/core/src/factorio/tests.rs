@@ -14,9 +14,9 @@ use crate::types::{
 use crate::types::{FactorioEntity, FactorioEntityPrototype};
 use image::RgbaImage;
 use imageproc::drawing::draw_hollow_rect_mut;
-use miette::DiagnosticResult;
+use miette::Result;
 
-pub fn entity_graph_from(entities: Vec<FactorioEntity>) -> DiagnosticResult<EntityGraph> {
+pub fn entity_graph_from(entities: Vec<FactorioEntity>) -> Result<EntityGraph> {
     let prototypes = fixture_entity_prototypes();
     let graph = EntityGraph::new(Arc::new(prototypes), Arc::new(DashMap::new()));
     graph.add(entities, None)?;

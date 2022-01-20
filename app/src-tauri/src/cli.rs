@@ -9,10 +9,10 @@ pub async fn handle_cli() {
     .about("Bot for Factorio")
     .subcommand(
       App::new("rcon")
-        .arg(Arg::with_name("command").required(true).last(true))
+        .arg(Arg::new("command").required(true).last(true))
         .arg(
-          Arg::with_name("server")
-            .short("server")
+          Arg::new("server")
+            .short('s')
             .long("server")
             .value_name("server")
             .required(false)
@@ -23,45 +23,45 @@ pub async fn handle_cli() {
     .subcommand(
       App::new("roll-seed")
         .arg(
-          Arg::with_name("map")
+          Arg::new("map")
             .long("map")
             .value_name("map")
             .required(true)
             .help("use given map exchange string"),
         )
         .arg(
-          Arg::with_name("seconds")
-            .short("s")
+          Arg::new("seconds")
+            .short('s')
             .long("seconds")
             .value_name("seconds")
             .default_value("360")
             .help("limits how long to roll seeds"),
         )
         .arg(
-          Arg::with_name("parallel")
-            .short("p")
+          Arg::new("parallel")
+            .short('p')
             .long("parallel")
             .value_name("parallel")
             .default_value("4")
             .help("how many rolling servers to run in parallel"),
         )
         .arg(
-          Arg::with_name("name")
+          Arg::new("name")
             .long("name")
             .value_name("name")
             .required(true)
             .help("name of plan without .lua extension"),
         )
         .arg(
-          Arg::with_name("rolls")
-            .short("r")
+          Arg::new("rolls")
+            .short('r')
             .long("rolls")
             .value_name("rolls")
             .help("how many seeds to roll"),
         )
         .arg(
-          Arg::with_name("clients")
-            .short("c")
+          Arg::new("clients")
+            .short('c')
             .long("clients")
             .default_value("1")
             .help("number of clients to plan for"),
@@ -71,29 +71,29 @@ pub async fn handle_cli() {
     .subcommand(
       App::new("plan")
         .arg(
-          Arg::with_name("map")
+          Arg::new("map")
             .long("map")
             .value_name("map")
             .required(true)
             .help("use given map exchange string"),
         )
         .arg(
-          Arg::with_name("seed")
+          Arg::new("seed")
             .long("seed")
             .value_name("seed")
             .required(false)
             .help("use given seed to recreate level"),
         )
         .arg(
-          Arg::with_name("name")
+          Arg::new("name")
             .long("name")
             .value_name("name")
             .required(true)
             .help("name of plan without .lua extension"),
         )
         .arg(
-          Arg::with_name("clients")
-            .short("c")
+          Arg::new("clients")
+            .short('c')
             .long("clients")
             .default_value("1")
             .help("number of clients to plan for"),
@@ -104,43 +104,43 @@ pub async fn handle_cli() {
       App::new("start")
         .about("start the factorio server and clients + web server")
         .arg(
-          Arg::with_name("clients")
-            .short("c")
+          Arg::new("clients")
+            .short('c')
             .long("clients")
             .default_value("1")
             .help("number of clients to start in addition to the server"),
         )
         .arg(
-          Arg::with_name("server")
-            .short("server")
+          Arg::new("server")
+            .short('s')
             .long("server")
             .value_name("server")
             .required(false)
             .help("connect to server instead of starting a server"),
         )
         .arg(
-          Arg::with_name("seed")
+          Arg::new("seed")
             .long("seed")
             .value_name("seed")
             .required(false)
             .help("use given seed to recreate level"),
         )
         .arg(
-          Arg::with_name("map")
+          Arg::new("map")
             .long("map")
             .value_name("map")
             .required(false)
             .help("use given map exchange string"),
         )
         .arg(
-          Arg::with_name("new")
+          Arg::new("new")
             .long("new")
-            .short("n")
+            .short('n')
             .help("recreate level by deleting server map if exists"),
         )
         .arg(
-          Arg::with_name("logs")
-            .short("l")
+          Arg::new("logs")
+            .short('l')
             .long("logs")
             .help("enabled writing server & client logs to workspace"),
         )

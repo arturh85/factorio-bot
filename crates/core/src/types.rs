@@ -15,7 +15,7 @@ use crate::errors::RectInvalid;
 use crate::factorio::entity_graph::QuadTreeRect;
 use crate::factorio::util::{add_to_rect, add_to_rect_turned, calculate_distance, rect_floor_ceil};
 use crate::num_traits::FromPrimitive;
-use miette::{DiagnosticResult, IntoDiagnostic};
+use miette::{Result, IntoDiagnostic};
 use rlua::{Context, MultiValue};
 
 pub type FactorioInventory = HashMap<String, u32>;
@@ -264,7 +264,7 @@ impl Default for Position {
 }
 
 impl FromStr for Position {
-    type Err = miette::DiagnosticReport;
+    type Err = miette::Report;
     fn from_str(str: &str) -> Result<Self, Self::Err> {
         let parts: Vec<&str> = str.split(',').collect();
         if parts.len() != 2 {
@@ -276,10 +276,10 @@ impl FromStr for Position {
         Ok(Position::new(
             parts[0]
                 .parse()
-                .into_diagnostic("factorio::output_parser::could_not_parse_position")?,
+                .into_diagnostic()?,
             parts[1]
                 .parse()
-                .into_diagnostic("factorio::output_parser::could_not_parse_position")?,
+                .into_diagnostic()?,
         ))
     }
 }
@@ -339,7 +339,7 @@ impl Into<QuadTreeRect> for Rect {
 }
 
 impl FromStr for Rect {
-    type Err = miette::DiagnosticReport;
+    type Err = miette::Report;
     fn from_str(str: &str) -> Result<Self, Self::Err> {
         let parts: Vec<&str> = str.split(';').collect();
         if parts.len() != 2 {
@@ -526,7 +526,7 @@ impl FactorioEntity {
     pub fn from_blueprint_entity(
         entity: Entity,
         prototypes: Arc<DashMap<String, FactorioEntityPrototype>>,
-    ) -> DiagnosticResult<Self> {
+    ) -> Result<Self> {
         let prototype = prototypes.get(&entity.name).unwrap();
         let position: Position = entity.position.into();
         let direction = entity.direction.map(|d| d % 8).unwrap_or(0);

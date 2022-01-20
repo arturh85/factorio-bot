@@ -2,11 +2,11 @@ use std::io::Read;
 
 use base64::decode;
 use flate2::read::ZlibDecoder;
-use miette::{DiagnosticResult, IntoDiagnostic};
+use miette::{Result, IntoDiagnostic};
 
-pub fn read_factorio_planner(exchange_str: &str) -> DiagnosticResult<()> {
+pub fn read_factorio_planner(exchange_str: &str) -> Result<()> {
     let content =
-        decode(exchange_str).into_diagnostic("factorio::output_parser::could_not_decode")?;
+        decode(exchange_str).into_diagnostic()?;
     let mut content = ZlibDecoder::new(&content[..]);
     let mut s = String::new();
     content.read_to_string(&mut s).unwrap();

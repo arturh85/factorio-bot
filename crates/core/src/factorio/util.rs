@@ -8,7 +8,7 @@ use factorio_blueprint::BlueprintCodec;
 use factorio_blueprint::Container::{Blueprint, BlueprintBook};
 use human_sort::compare;
 use itertools::Itertools;
-use miette::{Result, IntoDiagnostic};
+use miette::{IntoDiagnostic, Result};
 use num_traits::ToPrimitive;
 use pathfinding::prelude::astar;
 use serde_json::Value;
@@ -103,19 +103,14 @@ pub fn move_pos(pos: &Pos, direction: Direction, offset: i32) -> Pos {
 }
 
 pub fn read_to_value(path: &Path) -> Result<Value> {
-    let content = std::fs::read_to_string(path)
-        .into_diagnostic()?;
-    Ok(serde_json::from_str(content.as_str())
-        .into_diagnostic()?)
+    let content = std::fs::read_to_string(path).into_diagnostic()?;
+    serde_json::from_str(content.as_str()).into_diagnostic()
 }
 
 pub fn write_value_to(value: &Value, path: &Path) -> Result<()> {
-    let mut outfile =
-        fs::File::create(&path).into_diagnostic()?;
+    let mut outfile = fs::File::create(&path).into_diagnostic()?;
     let bytes = serde_json::to_string(value).unwrap();
-    outfile
-        .write_all(bytes.as_ref())
-        .into_diagnostic()?;
+    outfile.write_all(bytes.as_ref()).into_diagnostic()?;
     Ok(())
 }
 

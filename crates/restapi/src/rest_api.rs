@@ -59,6 +59,7 @@ pub async fn find_entities(
 /// Plan path from one position to another
 #[openapi(tag = "Query")]
 #[get("/planPath?<entity_name>&<entity_type>&<underground_entity_name>&<underground_entity_type>&<underground_max>&<from_position>&<to_position>&<to_direction>")]
+#[allow(clippy::too_many_arguments)]
 pub async fn plan_path(
     instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
     entity_name: String,
@@ -239,7 +240,7 @@ pub async fn place_entity(
                 item.clone(),
                 position.parse().unwrap(),
                 direction,
-                &world,
+                world,
             )
             .await
             .unwrap();
@@ -342,7 +343,7 @@ pub async fn insert_to_inventory(
                 inventory_type,
                 item_name.clone(),
                 item_count,
-                &world,
+                world,
             )
             .await
             .unwrap();
@@ -383,7 +384,7 @@ pub async fn remove_from_inventory(
                 inventory_type,
                 item_name.clone(),
                 item_count,
-                &world,
+                world,
             )
             .await
             .unwrap();

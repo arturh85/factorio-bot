@@ -23,7 +23,7 @@ use crate::types::{
     AreaFilter, Direction, FactorioEntity, FactorioForce, FactorioTile, InventoryResponse, Pos,
     Position, Rect, RequestEntity,
 };
-use miette::{Result, IntoDiagnostic};
+use miette::{IntoDiagnostic, Result};
 
 const RCON_INTERFACE: &str = "botbridge";
 
@@ -125,11 +125,7 @@ impl FactorioRcon {
             info!("<cyan>rcon</>  ⮜ <green>{}</>", command);
         }
         // let started = Instant::now();
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .into_diagnostic()?;
+        let mut conn = self.pool.get().await.into_diagnostic()?;
         let result = conn
             .cmd(&String::from(command).add("\n"))
             .await
@@ -203,12 +199,7 @@ impl FactorioRcon {
         Ok(())
     }
 
-    pub async fn cheat_item(
-        &self,
-        player_id: u32,
-        item_name: &str,
-        item_count: u32,
-    ) -> Result<()> {
+    pub async fn cheat_item(&self, player_id: u32, item_name: &str, item_count: u32) -> Result<()> {
         self.remote_call(
             "cheat_item",
             vec![
@@ -313,8 +304,7 @@ impl FactorioRcon {
             json = String::from("[]");
         }
         if &json[0..1] == "[" {
-            Ok(serde_json::from_str(json.as_str())
-                .into_diagnostic()?)
+            Ok(serde_json::from_str(json.as_str()).into_diagnostic()?)
         } else {
             Err(RconError { message: json }.into())
         }
@@ -356,8 +346,7 @@ impl FactorioRcon {
         }
         let json = lines.unwrap().pop().unwrap();
         if &json[0..1] == "{" {
-            Ok(serde_json::from_str(json.as_str())
-                .into_diagnostic()?)
+            Ok(serde_json::from_str(json.as_str()).into_diagnostic()?)
         } else {
             Err(RconError { message: json }.into())
         }
@@ -392,8 +381,7 @@ impl FactorioRcon {
         if json == "{}" {
             json = String::from("[]");
         }
-        Ok(serde_json::from_str(json.as_str())
-            .into_diagnostic()?)
+        Ok(serde_json::from_str(json.as_str()).into_diagnostic()?)
     }
 
     pub async fn store_map_data(&self, key: &str, value: Value) -> Result<()> {
@@ -460,8 +448,7 @@ impl FactorioRcon {
                 if result == "{}" {
                     result = String::from("[]");
                 }
-                return Ok(serde_json::from_str(result.as_str())
-                    .into_diagnostic()?);
+                return serde_json::from_str(result.as_str()).into_diagnostic();
             }
             if wait_start.elapsed() > Duration::from_secs(60) {
                 return Err(RconTimeout {}.into());
@@ -565,8 +552,7 @@ impl FactorioRcon {
         if json == "{}" {
             json = String::from("[]");
         }
-        Ok(serde_json::from_str(json.as_str())
-            .into_diagnostic()?)
+        Ok(serde_json::from_str(json.as_str()).into_diagnostic()?)
     }
 
     pub async fn player_force(&self) -> Result<FactorioForce> {
@@ -575,8 +561,7 @@ impl FactorioRcon {
             return Err(RconUnexpectedEmptyResponse {}.into());
         }
         let json = lines.unwrap().pop().unwrap();
-        Ok(serde_json::from_str(json.as_str())
-            .into_diagnostic()?)
+        Ok(serde_json::from_str(json.as_str()).into_diagnostic()?)
     }
 
     pub async fn place_entity(
@@ -861,8 +846,7 @@ impl FactorioRcon {
         if json == "{}" {
             json = String::from("[]");
         }
-        Ok(serde_json::from_str(json.as_str())
-            .into_diagnostic()?)
+        Ok(serde_json::from_str(json.as_str()).into_diagnostic()?)
     }
 
     pub async fn parse_map_exchange_string(
@@ -918,8 +902,7 @@ impl FactorioRcon {
         if json == "{}" {
             json = String::from("[]");
         }
-        Ok(serde_json::from_str(json.as_str())
-            .into_diagnostic()?)
+        Ok(serde_json::from_str(json.as_str()).into_diagnostic()?)
     }
 
     async fn async_request_player_path(

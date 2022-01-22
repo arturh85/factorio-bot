@@ -1,33 +1,23 @@
 use crate::error::{ErrorResponse, RestApiResult};
 use async_std::sync::{Arc, RwLock};
 use factorio_bot_core::process::process_control::InstanceState;
-use factorio_bot_core::types::{AreaFilter, FactorioEntity};
+use factorio_bot_core::types::{
+    AreaFilter, Direction, FactorioEntity, FactorioItemPrototype, FactorioPlayer, FactorioTile,
+    InventoryResponse, PlaceEntityResult, Position, RequestEntity,
+};
+use num_traits::cast::FromPrimitive;
 use rocket::serde::json::Json;
 use rocket::State;
+use std::collections::HashMap;
+use std::time::Duration;
 
-#[derive(FromForm, Debug, JsonSchema)]
-pub struct FindEntitiesQueryParams {
-    /// w/h e.g. 2,3
-    area: Option<String>,
-    /// x/y e.g. 2,3
-    position: Option<String>,
-    /// radius to search in
-    radius: Option<f64>,
-    /// name to search for
-    name: Option<String>,
-    /// entity type to search for, see http://...
-    entity_type: Option<String>,
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationResult {
+    pub success: bool,
 }
 
-/// Finds entities in given area
-#[openapi(tag = "Query")]
-#[get("/testFindEntities?<info..>")]
-pub async fn test(info: FindEntitiesQueryParams) -> RestApiResult<String> {
-    info!("find entities called with {:?}", info);
-    Ok(Json("test".into()))
-}
-
-/// Finds entities in given area
+/// Finds entities in given area/radius
 #[openapi(tag = "Query")]
 #[get("/findEntities?<area>&<position>&<radius>&<name>&<entity_type>")]
 pub async fn find_entities(
@@ -66,313 +56,385 @@ pub async fn find_entities(
     }
 }
 
-//
-// #[derive(Deserialize)]
-// #[serde(rename_all = "camelCase")]
-// pub struct PlanPathQueryParams {
-//     entity_name: String,
-//     entity_type: String,
-//     underground_entity_name: String,
-//     underground_entity_type: String,
-//     underground_max: u8,
-//     from_position: String,
-//     to_position: String,
-//     to_direction: u8,
-// }
-//
-// pub async fn plan_path(
-//     rcon: web::Data<Arc<FactorioRcon>>,
-//     world: web::Data<Arc<FactorioWorld>>,
-//     info: actix_web::web::Query<PlanPathQueryParams>,
-// ) -> Result<Json<Vec<FactorioEntity>>, ActixAnyhowError> {
-//     Ok(Json(
-//         rcon.plan_path(
-//             &world,
-//             &info.entity_name.clone(),
-//             &info.entity_type.clone(),
-//             &info.underground_entity_name.clone(),
-//             &info.underground_entity_type.clone(),
-//             info.underground_max,
-//             &info.from_position.parse()?,
-//             &info.to_position.parse()?,
-//             Direction::from_u8(info.to_direction).unwrap(),
-//         )
-//         .await?,
-//     ))
-// }
-//
-// #[derive(Deserialize)]
-// #[serde(rename_all = "camelCase")]
-// pub struct FindTilesQueryParams {
-//     area: Option<String>,
-//     position: Option<String>,
-//     radius: Option<f64>,
-//     name: Option<String>,
-// }
-// // #[get("/findTiles?<area>&<position>&<radius>&<name>")]
-// pub async fn find_tiles(
-//     rcon: web::Data<Arc<FactorioRcon>>,
-//     info: actix_web::web::Query<FindTilesQueryParams>,
-// ) -> Result<Json<Vec<FactorioTile>>, ActixAnyhowError> {
-//     let area_filter = match &info.area {
-//         Some(area) => AreaFilter::Rect(area.parse()?),
-//         None => {
-//             if let Some(position) = &info.position {
-//                 AreaFilter::PositionRadius((position.parse()?, info.radius))
-//             } else {
-//                 return Err(ActixAnyhowError::from(anyhow!(
-//                     "area or position + optional radius needed"
-//                 )));
-//             }
-//         }
-//     };
-//     Ok(Json(
-//         rcon.find_tiles_filtered(&area_filter, info.name.clone())
-//             .await?,
-//     ))
-// }
-//
-// #[derive(Deserialize)]
-// #[serde(rename_all = "camelCase")]
-// pub struct InventoryContentsAtQueryParams {
-//     query: String,
-// }
-// // #[get("/inventoryContentsAt?<query>")]
-// pub async fn inventory_contents_at(
-//     rcon: web::Data<Arc<FactorioRcon>>,
-//     info: actix_web::web::Query<InventoryContentsAtQueryParams>,
-// ) -> Result<Json<Vec<Option<InventoryResponse>>>, ActixAnyhowError> {
-//     let parts: Vec<&str> = info.query.split(';').collect();
-//     let entities: Vec<RequestEntity> = parts
-//         .iter()
-//         .map(|part| {
-//             let parts: Vec<&str> = part.split('@').collect();
-//             RequestEntity {
-//                 name: String::from(parts[0]),
-//                 position: parts[1].parse().unwrap(),
-//             }
-//         })
-//         .collect();
-//     Ok(Json(rcon.inventory_contents_at(entities).await?))
-// }
-//
-// #[derive(Deserialize)]
-// #[serde(rename_all = "camelCase")]
-// pub struct MovePlayerQueryParams {
-//     goal: String,
-//     radius: Option<f64>,
-// }
-// // #[get("/<player_id>/move?<goal>&<radius>")]
-// pub async fn move_player(
-//     info: actix_web::web::Query<MovePlayerQueryParams>,
-//     path: PathInfo<u32>,
-//     rcon: web::Data<Arc<FactorioRcon>>,
-//     world: web::Data<Arc<FactorioWorld>>,
-// ) -> Result<Json<FactorioPlayer>, ActixAnyhowError> {
-//     let player_id = *path;
-//     let goal: Position = info.goal.parse()?;
-//     rcon.move_player(&world, player_id, &goal, info.radius)
-//         .await?;
-//     let player = world.players.get(&player_id);
-//     match player {
-//         Some(player) => Ok(Json(player.clone())),
-//         None => Err(ActixAnyhowError::from(anyhow!("player not found"))),
-//     }
-// }
-//
-// // #[get("/<player_id>/playerInfo")]
-// pub async fn player_info(
-//     path: PathInfo<u32>,
-//     world: web::Data<Arc<FactorioWorld>>,
-// ) -> Result<Json<FactorioPlayer>, ActixAnyhowError> {
-//     let player_id = *path;
-//
-//     let player = world.players.get(&player_id);
-//     match player {
-//         Some(player) => Ok(Json(player.clone())),
-//         None => Err(ActixAnyhowError::from(anyhow!("player not found"))),
-//     }
-// }
-//
-// #[derive(Deserialize)]
-// #[serde(rename_all = "camelCase")]
-// pub struct PlaceEntityQueryParams {
-//     item: String,
-//     position: String,
-//     direction: u8,
-// }
-//
-// // #[get("/<player_id>/placeEntity?<item>&<position>&<direction>")]
-// pub async fn place_entity(
-//     path: PathInfo<u32>,
-//     info: actix_web::web::Query<PlaceEntityQueryParams>,
-//     rcon: web::Data<Arc<FactorioRcon>>,
-//     world: web::Data<Arc<FactorioWorld>>,
-// ) -> Result<Json<PlaceEntityResult>, ActixAnyhowError> {
-//     let player_id = *path;
-//     let entity = rcon
-//         .place_entity(
-//             player_id,
-//             info.item.clone(),
-//             info.position.parse()?,
-//             info.direction,
-//             &world,
-//         )
-//         .await?;
-//     async_std::task::sleep(Duration::from_millis(50)).await;
-//     let player = world.players.get(&player_id);
-//     match player {
-//         Some(player) => Ok(Json(PlaceEntityResult {
-//             entity,
-//             player: player.clone(),
-//         })),
-//         None => Err(ActixAnyhowError::from(anyhow!("player not found"))),
-//     }
-// }
-//
-// #[derive(Deserialize)]
-// #[serde(rename_all = "camelCase")]
-// pub struct CheatItemQueryParams {
-//     name: String,
-//     count: u32,
-// }
-// // #[get("/<player_id>/cheatItem?<name>&<count>")]
-// #[allow(clippy::too_many_arguments)]
-// pub async fn cheat_item(
-//     path: PathInfo<u32>,
-//     info: actix_web::web::Query<CheatItemQueryParams>,
-//     world: web::Data<Arc<FactorioWorld>>,
-//     rcon: web::Data<Arc<FactorioRcon>>,
-// ) -> Result<Json<FactorioPlayer>, ActixAnyhowError> {
-//     let player_id = *path;
-//     rcon.cheat_item(player_id, &info.name, info.count).await?;
-//     async_std::task::sleep(Duration::from_millis(50)).await;
-//     let player = world.players.get(&player_id);
-//     match player {
-//         Some(player) => Ok(Json(player.clone())),
-//         None => Err(ActixAnyhowError::from(anyhow!("player not found"))),
-//     }
-// }
-//
-// #[derive(Deserialize)]
-// #[serde(rename_all = "camelCase")]
-// pub struct CheatTechnologyQueryParams {
-//     tech: String,
-// }
-//
-// // #[get("/cheatTechnology?<tech>")]
-// pub async fn cheat_technology(
-//     info: actix_web::web::Query<CheatTechnologyQueryParams>,
-//     rcon: web::Data<Arc<FactorioRcon>>,
-// ) -> Result<Json<Value>, ActixAnyhowError> {
-//     rcon.cheat_technology(&info.tech).await?;
-//     Ok(Json(json!({"status": "ok"})))
-// }
-//
-// // #[get("/cheatAllTechnologies")]
-// pub async fn cheat_all_technologies(
-//     rcon: web::Data<Arc<FactorioRcon>>,
-// ) -> Result<Json<Value>, ActixAnyhowError> {
-//     rcon.cheat_all_technologies().await?;
-//     Ok(Json(json!({"status": "ok"})))
-// }
-//
-// #[derive(Deserialize)]
-// #[serde(rename_all = "camelCase")]
-// pub struct InsertToInventoryQueryParams {
-//     entity_name: String,
-//     entity_position: String,
-//     inventory_type: u32,
-//     item_name: String,
-//     item_count: u32,
-// }
-// // #[get("/<player_id>/insertToInventory?<entity_name>&<entity_position>&<inventory_type>&<item_name>&<item_count>")]
-// #[allow(clippy::too_many_arguments)]
-// pub async fn insert_to_inventory(
-//     info: actix_web::web::Query<InsertToInventoryQueryParams>,
-//     path: PathInfo<u32>,
-//     world: web::Data<Arc<FactorioWorld>>,
-//     rcon: web::Data<Arc<FactorioRcon>>,
-// ) -> Result<Json<FactorioPlayer>, ActixAnyhowError> {
-//     let player_id = *path;
-//     rcon.insert_to_inventory(
-//         player_id,
-//         info.entity_name.clone(),
-//         info.entity_position.parse()?,
-//         info.inventory_type,
-//         info.item_name.clone(),
-//         info.item_count,
-//         &world,
-//     )
-//     .await?;
-//     async_std::task::sleep(Duration::from_millis(50)).await;
-//     let player = world.players.get(&player_id);
-//     match player {
-//         Some(player) => Ok(Json(player.clone())),
-//         None => Err(ActixAnyhowError::from(anyhow!("player not found"))),
-//     }
-// }
-//
-// #[derive(Deserialize)]
-// #[serde(rename_all = "camelCase")]
-// pub struct RemoveFromInventoryQueryParams {
-//     entity_name: String,
-//     entity_position: String,
-//     inventory_type: u32,
-//     item_name: String,
-//     item_count: u32,
-// }
-//
-// // #[get(
-// //     "/<player_id>/removeFromInventory?<entity_name>&<entity_position>&<inventory_type>&<item_name>&<item_count>"
-// // )]
-// // #[allow(clippy::too_many_arguments)]
-// pub async fn remove_from_inventory(
-//     path: PathInfo<u32>,
-//     info: actix_web::web::Query<RemoveFromInventoryQueryParams>,
-//     rcon: web::Data<Arc<FactorioRcon>>,
-//     world: web::Data<Arc<FactorioWorld>>,
-// ) -> Result<Json<FactorioPlayer>, ActixAnyhowError> {
-//     let player_id = *path;
-//     rcon.remove_from_inventory(
-//         player_id,
-//         info.entity_name.clone(),
-//         info.entity_position.parse()?,
-//         info.inventory_type,
-//         info.item_name.clone(),
-//         info.item_count,
-//         &world,
-//     )
-//     .await?;
-//     async_std::task::sleep(Duration::from_millis(50)).await;
-//     let player = world.players.get(&player_id);
-//     match player {
-//         Some(player) => Ok(Json(player.clone())),
-//         None => Err(ActixAnyhowError::from(anyhow!("player not found"))),
-//     }
-// }
-//
-// // #[get("/players")]
-// pub async fn all_players(
-//     world: web::Data<Arc<FactorioWorld>>,
-// ) -> Result<Json<Vec<FactorioPlayer>>, ActixAnyhowError> {
-//     let mut all_players: Vec<FactorioPlayer> = Vec::new();
-//     for player in world.players.iter() {
-//         all_players.push(player.clone());
-//     }
-//     Ok(Json(all_players))
-// }
-//
-// // #[get("/itemPrototypes")]
-// pub async fn item_prototypes(
-//     world: web::Data<Arc<FactorioWorld>>,
-// ) -> Result<Json<HashMap<String, FactorioItemPrototype>>, ActixAnyhowError> {
-//     let mut data: HashMap<String, FactorioItemPrototype> = HashMap::new();
-//     for item_prototype in world.item_prototypes.iter() {
-//         data.insert(item_prototype.name.clone(), item_prototype.clone());
-//     }
-//     Ok(Json(data))
-// }
+/// Plan path from one position to another
+#[openapi(tag = "Query")]
+#[get("/planPath?<entity_name>&<entity_type>&<underground_entity_name>&<underground_entity_type>&<underground_max>&<from_position>&<to_position>&<to_direction>")]
+pub async fn plan_path(
+    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    entity_name: String,
+    entity_type: String,
+    underground_entity_name: String,
+    underground_entity_type: String,
+    underground_max: u8,
+    from_position: String,
+    to_position: String,
+    to_direction: u8,
+) -> RestApiResult<Vec<FactorioEntity>> {
+    let instance_state = instance_state.read().await;
+    if let Some(instance_state) = &*instance_state {
+        Ok(Json(
+            instance_state
+                .rcon
+                .plan_path(
+                    &instance_state.world.as_ref().unwrap().clone(),
+                    &entity_name,
+                    &entity_type,
+                    &underground_entity_name,
+                    &underground_entity_type,
+                    underground_max,
+                    &from_position.parse().unwrap(),
+                    &to_position.parse().unwrap(),
+                    Direction::from_u8(to_direction).unwrap(),
+                )
+                .await
+                .unwrap(),
+        ))
+    } else {
+        Err(ErrorResponse::new("not started".into(), 2))
+    }
+}
+
+/// Finds tiles in given area/radius
+#[openapi(tag = "Query")]
+#[get("/findTiles?<area>&<position>&<radius>&<name>")]
+pub async fn find_tiles(
+    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    area: Option<String>,
+    position: Option<String>,
+    radius: Option<f64>,
+    name: Option<String>,
+) -> RestApiResult<Vec<FactorioTile>> {
+    let area_filter = match &area {
+        Some(area) => AreaFilter::Rect(area.parse().unwrap()),
+        None => {
+            if let Some(position) = &position {
+                AreaFilter::PositionRadius((position.parse().unwrap(), radius))
+            } else {
+                return Err(ErrorResponse::new(
+                    "area or position + optional radius needed".into(),
+                    2,
+                ));
+            }
+        }
+    };
+
+    let instance_state = instance_state.read().await;
+    if let Some(instance_state) = &*instance_state {
+        Ok(Json(
+            instance_state
+                .rcon
+                .find_tiles_filtered(&area_filter, name)
+                .await
+                .unwrap(),
+        ))
+    } else {
+        Err(ErrorResponse::new("not started".into(), 2))
+    }
+}
+
+/// List inventory contents at position
+#[openapi(tag = "Query")]
+#[get("/inventoryContentsAt?<query>")]
+pub async fn inventory_contents_at(
+    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    query: String,
+) -> RestApiResult<Vec<Option<InventoryResponse>>> {
+    let parts: Vec<&str> = query.split(';').collect();
+    let entities: Vec<RequestEntity> = parts
+        .iter()
+        .map(|part| {
+            let parts: Vec<&str> = part.split('@').collect();
+            RequestEntity {
+                name: String::from(parts[0]),
+                position: parts[1].parse().unwrap(),
+            }
+        })
+        .collect();
+
+    let instance_state = instance_state.read().await;
+    if let Some(instance_state) = &*instance_state {
+        Ok(Json(
+            instance_state
+                .rcon
+                .inventory_contents_at(entities)
+                .await
+                .unwrap(),
+        ))
+    } else {
+        Err(ErrorResponse::new("not started".into(), 2))
+    }
+}
+
+/// Move player to position
+#[openapi(tag = "Control")]
+#[get("/movePlayer?<player_id>&<goal>&<radius>")]
+pub async fn move_player(
+    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    player_id: u32,
+    goal: String,
+    radius: Option<f64>,
+) -> RestApiResult<FactorioPlayer> {
+    let goal: Position = goal.parse().unwrap();
+
+    let instance_state = instance_state.read().await;
+    if let Some(instance_state) = &*instance_state {
+        let world = &instance_state.world.as_ref().unwrap().clone();
+        instance_state
+            .rcon
+            .move_player(world, player_id, &goal, radius)
+            .await
+            .unwrap();
+
+        let player = world.players.get(&player_id);
+        match player {
+            Some(player) => Ok(Json(player.clone())),
+            None => Err(ErrorResponse::new("player not found".into(), 2)),
+        }
+    } else {
+        Err(ErrorResponse::new("not started".into(), 2))
+    }
+}
+
+/// Player Information
+#[openapi(tag = "Query")]
+#[get("/playerInfo?<player_id>")]
+pub async fn player_info(
+    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    player_id: u32,
+) -> RestApiResult<FactorioPlayer> {
+    let instance_state = instance_state.read().await;
+    if let Some(instance_state) = &*instance_state {
+        let player = instance_state
+            .world
+            .as_ref()
+            .unwrap()
+            .players
+            .get(&player_id);
+        match player {
+            Some(player) => Ok(Json(player.clone())),
+            None => Err(ErrorResponse::new("player not found".into(), 2)),
+        }
+    } else {
+        Err(ErrorResponse::new("not started".into(), 2))
+    }
+}
+
+/// Place entity by given player
+#[openapi(tag = "Place")]
+#[get("/placeEntity?<player_id>&<item>&<position>&<direction>")]
+pub async fn place_entity(
+    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    player_id: u32,
+    item: String,
+    position: String,
+    direction: u8,
+) -> RestApiResult<PlaceEntityResult> {
+    let instance_state = instance_state.read().await;
+    if let Some(instance_state) = &*instance_state {
+        let world = &instance_state.world.as_ref().unwrap().clone();
+        let entity = instance_state
+            .rcon
+            .place_entity(
+                player_id,
+                item.clone(),
+                position.parse().unwrap(),
+                direction,
+                &world,
+            )
+            .await
+            .unwrap();
+        async_std::task::sleep(Duration::from_millis(50)).await;
+        let player = world.players.get(&player_id);
+        match player {
+            Some(player) => Ok(Json(PlaceEntityResult {
+                entity,
+                player: player.clone(),
+            })),
+            None => Err(ErrorResponse::new("player not found".into(), 2)),
+        }
+    } else {
+        Err(ErrorResponse::new("not started".into(), 2))
+    }
+}
+
+/// Cheat items and give them to player
+#[openapi(tag = "Cheat")]
+#[get("/cheatItem?<name>&<count>&<player_id>")]
+pub async fn cheat_item(
+    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    name: String,
+    count: u32,
+    player_id: u32,
+) -> RestApiResult<FactorioPlayer> {
+    let instance_state = instance_state.read().await;
+    if let Some(instance_state) = &*instance_state {
+        let world = &instance_state.world.as_ref().unwrap().clone();
+        instance_state
+            .rcon
+            .cheat_item(player_id, &name, count)
+            .await
+            .unwrap();
+        async_std::task::sleep(Duration::from_millis(50)).await;
+        let player = world.players.get(&player_id);
+        match player {
+            Some(player) => Ok(Json(player.clone())),
+            None => Err(ErrorResponse::new("player not found".into(), 2)),
+        }
+    } else {
+        Err(ErrorResponse::new("not started".into(), 2))
+    }
+}
+
+/// Cheat Technology
+#[openapi(tag = "Cheat")]
+#[get("/cheatTechnology?<tech>")]
+pub async fn cheat_technology(
+    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    tech: String,
+) -> RestApiResult<OperationResult> {
+    let instance_state = instance_state.read().await;
+    if let Some(instance_state) = &*instance_state {
+        instance_state.rcon.cheat_technology(&tech).await.unwrap();
+        Ok(Json(OperationResult { success: true }))
+    } else {
+        Err(ErrorResponse::new("not started".into(), 2))
+    }
+}
+
+/// Cheat Technology
+#[openapi(tag = "Cheat")]
+#[get("/cheatAllTechnologies")]
+pub async fn cheat_all_technologies(
+    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+) -> RestApiResult<OperationResult> {
+    let instance_state = instance_state.read().await;
+    if let Some(instance_state) = &*instance_state {
+        instance_state.rcon.cheat_all_technologies().await.unwrap();
+        Ok(Json(OperationResult { success: true }))
+    } else {
+        Err(ErrorResponse::new("not started".into(), 2))
+    }
+}
+
+/// Insert items into inventory
+#[openapi(tag = "Inventory")]
+#[get(
+    "/insertToInventory?<player_id>&<entity_name>&<entity_position>&<inventory_type>&<item_name>&<item_count>"
+)]
+pub async fn insert_to_inventory(
+    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    player_id: u32,
+    entity_name: String,
+    entity_position: String,
+    inventory_type: u32,
+    item_name: String,
+    item_count: u32,
+) -> RestApiResult<FactorioPlayer> {
+    let instance_state = instance_state.read().await;
+    if let Some(instance_state) = &*instance_state {
+        let world = &instance_state.world.as_ref().unwrap().clone();
+        instance_state
+            .rcon
+            .insert_to_inventory(
+                player_id,
+                entity_name.clone(),
+                entity_position.parse().unwrap(),
+                inventory_type,
+                item_name.clone(),
+                item_count,
+                &world,
+            )
+            .await
+            .unwrap();
+        async_std::task::sleep(Duration::from_millis(50)).await;
+        let player = world.players.get(&player_id);
+        match player {
+            Some(player) => Ok(Json(player.clone())),
+            None => Err(ErrorResponse::new("player not found".into(), 2)),
+        }
+    } else {
+        Err(ErrorResponse::new("not started".into(), 2))
+    }
+}
+
+/// Remove items from inventory
+#[openapi(tag = "Inventory")]
+#[get(
+"/removeToInventory?<player_id>&<entity_name>&<entity_position>&<inventory_type>&<item_name>&<item_count>"
+)]
+pub async fn remove_from_inventory(
+    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    player_id: u32,
+    entity_name: String,
+    entity_position: String,
+    inventory_type: u32,
+    item_name: String,
+    item_count: u32,
+) -> RestApiResult<FactorioPlayer> {
+    let instance_state = instance_state.read().await;
+    if let Some(instance_state) = &*instance_state {
+        let world = &instance_state.world.as_ref().unwrap().clone();
+        instance_state
+            .rcon
+            .remove_from_inventory(
+                player_id,
+                entity_name.clone(),
+                entity_position.parse().unwrap(),
+                inventory_type,
+                item_name.clone(),
+                item_count,
+                &world,
+            )
+            .await
+            .unwrap();
+        async_std::task::sleep(Duration::from_millis(50)).await;
+        let player = world.players.get(&player_id);
+        match player {
+            Some(player) => Ok(Json(player.clone())),
+            None => Err(ErrorResponse::new("player not found".into(), 2)),
+        }
+    } else {
+        Err(ErrorResponse::new("not started".into(), 2))
+    }
+}
+
+/// List all connected Players
+#[openapi(tag = "Query")]
+#[get("/allPlayers")]
+pub async fn all_players(
+    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+) -> RestApiResult<Vec<FactorioPlayer>> {
+    let instance_state = instance_state.read().await;
+    if let Some(instance_state) = &*instance_state {
+        let mut all_players: Vec<FactorioPlayer> = Vec::new();
+        let world = &instance_state.world.as_ref().unwrap().clone();
+        for player in world.players.iter() {
+            all_players.push(player.clone());
+        }
+        Ok(Json(all_players))
+    } else {
+        Err(ErrorResponse::new("not started".into(), 2))
+    }
+}
+
+/// List all ItemPrototypes
+#[openapi(tag = "Query")]
+#[get("/itemPrototypes")]
+pub async fn item_prototypes(
+    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+) -> RestApiResult<HashMap<String, FactorioItemPrototype>> {
+    let instance_state = instance_state.read().await;
+    if let Some(instance_state) = &*instance_state {
+        let world = &instance_state.world.as_ref().unwrap().clone();
+        let mut data: HashMap<String, FactorioItemPrototype> = HashMap::new();
+        for item_prototype in world.item_prototypes.iter() {
+            data.insert(item_prototype.name.clone(), item_prototype.clone());
+        }
+        Ok(Json(data))
+    } else {
+        Err(ErrorResponse::new("not started".into(), 2))
+    }
+}
 //
 // // #[get("/entityPrototypes")]
 // pub async fn entity_prototypes(

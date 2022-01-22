@@ -15,6 +15,7 @@ use crate::process::io_utils::{extract_archive, symlink};
 use crate::process::output_reader::read_output;
 use crate::process::process_control::{await_lock, FactorioStartCondition};
 use miette::{Result, IntoDiagnostic};
+use crate::constants::{MAP_GEN_SETTINGS_FILENAME, MAP_SETTINGS_FILENAME, MODS_FOLDERNAME, SERVER_SETTINGS_FILENAME};
 
 #[cfg(not(debug_assertions))]
 pub const MODS_CONTENT: include_dir::Dir = include_dir!("mods");
@@ -60,11 +61,11 @@ pub async fn setup_factorio_instance(
         extract_archive(factorio_archive_path, instance_path, workspace_path)?;
     }
     #[allow(unused_mut)]
-    let mut workspace_mods_path = workspace_path.join(PathBuf::from("mods"));
+    let mut workspace_mods_path = workspace_path.join(PathBuf::from(MODS_FOLDERNAME));
     if !workspace_mods_path.exists() {
         #[cfg(debug_assertions)]
         {
-            workspace_mods_path = PathBuf::from("../../mods");
+            workspace_mods_path = PathBuf::from(format!("../../{}", MODS_FOLDERNAME));
         }
         #[cfg(not(debug_assertions))]
         {
@@ -76,7 +77,7 @@ pub async fn setup_factorio_instance(
             }
         }
         if !workspace_mods_path.exists() {
-            workspace_mods_path = PathBuf::from("mods");
+            workspace_mods_path = PathBuf::from(MODS_FOLDERNAME);
             if !workspace_mods_path.exists() {
                 return Err(MissingModsFolder {}.into());
             }
@@ -97,7 +98,7 @@ pub async fn setup_factorio_instance(
 
     let workspace_mods_path = std::fs::canonicalize(workspace_mods_path)
         .into_diagnostic()?;
-    let mods_path = instance_path.join(PathBuf::from("mods"));
+    let mods_path = instance_path.join(PathBuf::from(MODS_FOLDERNAME));
     if !mods_path.exists() {
         if !silent {
             info!("Creating Symlink for <bright-blue>{:?}</>", &mods_path);
@@ -126,7 +127,7 @@ pub async fn setup_factorio_instance(
     //     }
     // }
     if is_server {
-        let server_settings_path = instance_path.join(PathBuf::from("server-settings.json"));
+        let server_settings_path = instance_path.join(PathBuf::from(SERVER_SETTINGS_FILENAME));
         if !server_settings_path.exists() {
             let server_settings_data = include_bytes!("../data/server-settings.json");
             let mut outfile = fs::File::create(&server_settings_path)
@@ -232,9 +233,9 @@ pub async fn setup_factorio_instance(
                 args.push(seed);
             }
             let map_gen_settings_path =
-                format!("{}/map-gen-settings.json", instance_path.to_str().unwrap());
+                format!("{}/{}", instance_path.to_str().unwrap(), MAP_GEN_SETTINGS_FILENAME);
             let map_settings_path =
-                format!("{}/map-settings.json", instance_path.to_str().unwrap());
+                format!("{}/{}", instance_path.to_str().unwrap(), MAP_SETTINGS_FILENAME);
             if map_exchange_string.is_some() {
                 args.push("--map-gen-settings");
                 args.push(&map_gen_settings_path);
@@ -353,7 +354,7 @@ pub async fn update_map_gen_settings(
         return Err(FactorioSavesNotFound {}.into());
     }
     let saves_level_path = saves_path.join(PathBuf::from("level.zip"));
-    let server_settings_path = instance_path.join(PathBuf::from("server-settings.json"));
+    let server_settings_path = instance_path.join(PathBuf::from(SERVER_SETTINGS_FILENAME));
     if !server_settings_path.exists() {
         error!(
             "server settings missing at <bright-blue>{:?}</>",
@@ -365,7 +366,7 @@ pub async fn update_map_gen_settings(
     let mut logger = Logger::new();
     if !silent {
         logger.loading(
-            "Updating <bright-blue>map-settings.json</> and <bright-blue>map-gen-settings.json</>",
+            format!("Updating <bright-blue>{}</> and <bright-blue>{}</>", MAP_SETTINGS_FILENAME, MAP_GEN_SETTINGS_FILENAME),
         );
     }
     let args = &[
@@ -401,20 +402,18 @@ pub async fn update_map_gen_settings(
         FactorioStartCondition::Initialized,
     )
     .await?;
-    let map_gen_settings_filename = "map-gen-settings.json";
-    let map_settings_filename = "map-settings.json";
-    rcon.parse_map_exchange_string(map_gen_settings_filename, map_exchange_string)
+    rcon.parse_map_exchange_string(MAP_GEN_SETTINGS_FILENAME, map_exchange_string)
         .await?;
     child
         .kill()
         .into_diagnostic()?;
     let target_map_gen_settings_path =
-        instance_path.join(PathBuf::from_str(map_gen_settings_filename).unwrap());
+        instance_path.join(PathBuf::from_str(MAP_GEN_SETTINGS_FILENAME).unwrap());
     let target_map_settings_path =
-        instance_path.join(PathBuf::from_str(map_settings_filename).unwrap());
+        instance_path.join(PathBuf::from_str(MAP_SETTINGS_FILENAME).unwrap());
     let script_output_path = instance_path.join(PathBuf::from_str("script-output").unwrap());
     let source_map_gen_settings_path =
-        script_output_path.join(PathBuf::from_str(map_gen_settings_filename).unwrap());
+        script_output_path.join(PathBuf::from_str(MAP_GEN_SETTINGS_FILENAME).unwrap());
     let value: Value = read_to_value(&source_map_gen_settings_path)?;
     write_value_to(&value["map_settings"], &target_map_settings_path)?;
     write_value_to(&value["map_gen_settings"], &target_map_gen_settings_path)?;
@@ -423,7 +422,7 @@ pub async fn update_map_gen_settings(
 
     if !silent {
         logger.success(
-            "Updated <bright-blue>map-settings.json</> and <bright-blue>map-gen-settings.json</>",
+            format!("Updated <bright-blue>{}</> and <bright-blue>{}</>", MAP_SETTINGS_FILENAME, MAP_GEN_SETTINGS_FILENAME),
         );
     }
     Ok(())

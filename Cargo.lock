@@ -1455,6 +1455,7 @@ dependencies = [
  "async-std",
  "factorio-bot-core",
  "miette",
+ "num-traits 0.2.14",
  "okapi",
  "parking_lot",
  "rocket",

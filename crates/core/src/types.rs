@@ -15,7 +15,7 @@ use crate::errors::RectInvalid;
 use crate::factorio::entity_graph::QuadTreeRect;
 use crate::factorio::util::{add_to_rect, add_to_rect_turned, calculate_distance, rect_floor_ceil};
 use crate::num_traits::FromPrimitive;
-use miette::{Result, IntoDiagnostic};
+use miette::{IntoDiagnostic, Result};
 use rlua::{Context, MultiValue};
 
 pub type FactorioInventory = HashMap<String, u32>;
@@ -64,7 +64,7 @@ pub struct FactorioProduct {
     pub probability: Box<R64>,
 }
 
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FactorioPlayer {
     pub player_id: u32,
@@ -101,7 +101,7 @@ pub struct RequestEntity {
     pub position: Position,
 }
 
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct InventoryResponse {
     pub name: String,
@@ -274,12 +274,8 @@ impl FromStr for Position {
             .into());
         }
         Ok(Position::new(
-            parts[0]
-                .parse()
-                .into_diagnostic()?,
-            parts[1]
-                .parse()
-                .into_diagnostic()?,
+            parts[0].parse().into_diagnostic()?,
+            parts[1].parse().into_diagnostic()?,
         ))
     }
 }
@@ -355,7 +351,7 @@ impl FromStr for Rect {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FactorioTile {
     pub name: String,
@@ -655,7 +651,7 @@ impl From<factorio_blueprint::objects::Position> for Position {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FactorioItemPrototype {
     pub name: String,
@@ -805,13 +801,14 @@ pub struct FactorioResult {
     pub output: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaceEntityResult {
     pub player: FactorioPlayer,
     pub entity: FactorioEntity,
 }
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]
+
+#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaceEntitiesResult {
     pub player: FactorioPlayer,

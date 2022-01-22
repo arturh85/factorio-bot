@@ -1,8 +1,7 @@
 use std::path::PathBuf;
+use factorio_bot_core::constants::WORKSPACE_FOLDERNAME;
 
 pub const APP_SETTINGS_FILENAME: &str = "AppSettings.toml";
-// pub const MODS_FOLDERNAME: &str = "mods";
-pub const WORKSPACE_FOLDERNAME: &str = "workspace";
 
 pub fn app_data_dir() -> PathBuf {
   tauri::api::path::local_data_dir()

@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::thread;
 use std::thread::{sleep, JoinHandle};
 use std::time::{Duration, Instant};
+use crate::constants::SERVER_SETTINGS_FILENAME;
 
 pub struct InstanceState {
     pub world: Option<Arc<FactorioWorld>>,
@@ -247,7 +248,7 @@ pub async fn start_factorio_server(
         // return Err(anyhow!("failed to find factorio saves/level.zip"));
         return Err(FactorioSavesNotFound {}.into());
     }
-    let server_settings_path = instance_path.join(PathBuf::from("server-settings.json"));
+    let server_settings_path = instance_path.join(PathBuf::from(SERVER_SETTINGS_FILENAME));
     if !server_settings_path.exists() {
         error!(
             "server settings missing at <bright-blue>{:?}</>",

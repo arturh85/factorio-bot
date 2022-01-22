@@ -26,3 +26,4 @@ pub mod factorio;
 pub mod process;
 pub mod settings;
 pub mod types;
+pub mod constants;

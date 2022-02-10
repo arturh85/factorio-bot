@@ -1,15 +1,18 @@
 use crate::error::{ErrorResponse, RestApiResult};
-use async_std::sync::{Arc, RwLock};
+
 use factorio_bot_core::process::process_control::InstanceState;
 use factorio_bot_core::types::{
-    AreaFilter, Direction, FactorioEntity, FactorioItemPrototype, FactorioPlayer, FactorioTile,
-    InventoryResponse, PlaceEntityResult, Position, RequestEntity,
+    AreaFilter, Direction, FactorioEntity, FactorioEntityPrototype, FactorioItemPrototype,
+    FactorioPlayer, FactorioTile, InventoryResponse, PlaceEntityResult, Position, RequestEntity,
 };
 use num_traits::cast::FromPrimitive;
 use rocket::serde::json::Json;
 use rocket::State;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::RwLock;
+use tokio::time::sleep;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -244,7 +247,7 @@ pub async fn place_entity(
             )
             .await
             .unwrap();
-        async_std::task::sleep(Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(50)).await;
         let player = world.players.get(&player_id);
         match player {
             Some(player) => Ok(Json(PlaceEntityResult {
@@ -275,7 +278,7 @@ pub async fn cheat_item(
             .cheat_item(player_id, &name, count)
             .await
             .unwrap();
-        async_std::task::sleep(Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(50)).await;
         let player = world.players.get(&player_id);
         match player {
             Some(player) => Ok(Json(player.clone())),
@@ -347,7 +350,7 @@ pub async fn insert_to_inventory(
             )
             .await
             .unwrap();
-        async_std::task::sleep(Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(50)).await;
         let player = world.players.get(&player_id);
         match player {
             Some(player) => Ok(Json(player.clone())),
@@ -388,7 +391,7 @@ pub async fn remove_from_inventory(
             )
             .await
             .unwrap();
-        async_std::task::sleep(Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(50)).await;
         let player = world.players.get(&player_id);
         match player {
             Some(player) => Ok(Json(player.clone())),
@@ -436,39 +439,56 @@ pub async fn item_prototypes(
         Err(ErrorResponse::new("not started".into(), 2))
     }
 }
-//
-// // #[get("/entityPrototypes")]
-// pub async fn entity_prototypes(
-//     world: web::Data<Arc<FactorioWorld>>,
-// ) -> Result<Json<HashMap<String, FactorioEntityPrototype>>, ActixAnyhowError> {
-//     let mut data: HashMap<String, FactorioEntityPrototype> = HashMap::new();
-//     for prototype in world.entity_prototypes.iter() {
-//         data.insert(prototype.name.clone(), prototype.clone());
-//     }
-//     Ok(Json(data))
-// }
-//
-// // #[get("/serverSave")]
-// pub async fn server_save(
-//     rcon: web::Data<Arc<FactorioRcon>>,
-// ) -> Result<Json<Value>, ActixAnyhowError> {
-//     rcon.server_save().await?;
-//     Ok(Json(json!({"status": "ok"})))
-// }
-//
-// #[derive(Deserialize)]
-// #[serde(rename_all = "camelCase")]
-// pub struct AddResearchQueryParams {
-//     tech: String,
-// }
-// // #[get("/addResearch?<tech>")]
-// pub async fn add_research(
-//     info: actix_web::web::Query<AddResearchQueryParams>,
-//     rcon: web::Data<Arc<FactorioRcon>>,
-// ) -> Result<Json<Value>, ActixAnyhowError> {
-//     rcon.add_research(&info.tech).await?;
-//     Ok(Json(json!({"status": "ok"})))
-// }
+
+/// List all EntityPrototypes
+#[openapi(tag = "Query")]
+#[get("/entityPrototypes")]
+pub async fn entity_prototypes(
+    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+) -> RestApiResult<HashMap<String, FactorioEntityPrototype>> {
+    let instance_state = instance_state.read().await;
+    if let Some(instance_state) = &*instance_state {
+        let world = &instance_state.world.as_ref().unwrap().clone();
+        let mut data: HashMap<String, FactorioEntityPrototype> = HashMap::new();
+        for prototype in world.entity_prototypes.iter() {
+            data.insert(prototype.name.clone(), prototype.clone());
+        }
+        Ok(Json(data))
+    } else {
+        Err(ErrorResponse::new("not started".into(), 2))
+    }
+}
+
+/// Server Save
+#[openapi(tag = "Admin")]
+#[get("/serverSave")]
+pub async fn server_save(
+    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+) -> RestApiResult<OperationResult> {
+    let instance_state = instance_state.read().await;
+    if let Some(instance_state) = &*instance_state {
+        instance_state.rcon.server_save().await.unwrap();
+        Ok(Json(OperationResult { success: true }))
+    } else {
+        Err(ErrorResponse::new("not started".into(), 2))
+    }
+}
+
+/// Add Research to Queue
+#[openapi(tag = "Research")]
+#[get("/addResearch?<tech>")]
+pub async fn add_research(
+    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    tech: String,
+) -> RestApiResult<OperationResult> {
+    let instance_state = instance_state.read().await;
+    if let Some(instance_state) = &*instance_state {
+        instance_state.rcon.add_research(&tech).await.unwrap();
+        Ok(Json(OperationResult { success: true }))
+    } else {
+        Err(ErrorResponse::new("not started".into(), 2))
+    }
+}
 //
 // #[derive(Deserialize)]
 // #[serde(rename_all = "camelCase")]
@@ -481,7 +501,7 @@ pub async fn item_prototypes(
 //     rcon: web::Data<Arc<FactorioRcon>>,
 //     data: Json<Value>,
 //     info: actix_web::web::Query<StoreMapDataQueryParams>,
-// ) -> Result<Json<Value>, ActixAnyhowError> {
+// ) -> RestApiResult<OperationResult> {
 //     rcon.store_map_data(&info.key, data.into_inner()).await?;
 //     Ok(Json(json!({"status": "ok"})))
 // }

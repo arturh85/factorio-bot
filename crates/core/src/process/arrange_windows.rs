@@ -1,4 +1,5 @@
 use miette::Result;
+use tokio::time::sleep;
 
 /// arrange factorio windows to fill the primary display
 pub async fn arrange_windows(_client_count: u8) -> Result<()> {
@@ -9,7 +10,7 @@ pub async fn arrange_windows(_client_count: u8) -> Result<()> {
             EnumWindows, GetSystemMetrics, GetWindowTextW, MoveWindow, SM_CXMAXIMIZED,
             SM_CYMAXIMIZED,
         };
-        async_std::task::sleep(std::time::Duration::from_secs(_client_count as u64)).await; // wait for window to be visible, hopefully
+        sleep(std::time::Duration::from_secs(_client_count as u64)).await; // wait for window to be visible, hopefully
         static mut HWNDS: Vec<HWND> = Vec::new();
         extern "system" fn enum_window(window: HWND, _: LPARAM) -> BOOL {
             unsafe {

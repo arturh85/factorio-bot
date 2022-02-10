@@ -1,3 +1,4 @@
+use crate::constants::SERVER_SETTINGS_FILENAME;
 use crate::errors::*;
 use crate::factorio::rcon::{FactorioRcon, RconSettings};
 use crate::factorio::world::FactorioWorld;
@@ -5,8 +6,7 @@ use crate::process::arrange_windows::arrange_windows;
 use crate::process::instance_setup::setup_factorio_instance;
 use crate::process::output_reader::read_output;
 use crate::settings::AppSettings;
-use async_std::task;
-use miette::{Result, IntoDiagnostic};
+use miette::{IntoDiagnostic, Result};
 use paris::Logger;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::thread;
 use std::thread::{sleep, JoinHandle};
 use std::time::{Duration, Instant};
-use crate::constants::SERVER_SETTINGS_FILENAME;
+use tokio::task;
 
 pub struct InstanceState {
     pub world: Option<Arc<FactorioWorld>>,
@@ -397,10 +397,7 @@ pub async fn start_factorio_client(
         instance_name
     );
     let mut log_file = match write_logs {
-        true => Some(
-            File::create(log_filename)
-                .into_diagnostic()?,
-        ),
+        true => Some(File::create(log_filename).into_diagnostic()?),
         false => None,
     };
     // let handle = thread::spawn(move || {
@@ -417,8 +414,7 @@ pub async fn start_factorio_client(
     // });
     let is_client = server_host.is_some();
     let (tx, rx) = channel();
-    tx.send(())
-        .into_diagnostic()?;
+    tx.send(()).into_diagnostic()?;
     std::thread::spawn(move || {
         task::spawn(async move {
             let mut initialized = false;
@@ -449,7 +445,6 @@ pub async fn start_factorio_client(
             }
         });
     });
-    tx.send(())
-        .into_diagnostic()?;
+    tx.send(()).into_diagnostic()?;
     Ok(child)
 }

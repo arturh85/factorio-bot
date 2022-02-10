@@ -425,7 +425,7 @@ pub struct FactorioGraphic {
                      //picspec.filename..":"..picspec.width..":"..picspec.height..":"..shiftx..":"..shifty..":"..xx..":"..yy..":"..scale
 }
 
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FactorioFluidBoxPrototype {
     pub pipe_connections: Box<Option<Vec<FactorioFluidBoxConnection>>>,
@@ -472,14 +472,14 @@ pub struct FactorioFluidBoxPrototype {
 //     None,
 // }
 
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FactorioFluidBoxConnection {
     pub max_underground_distance: Option<u32>,
     pub connection_type: String,
     pub positions: Vec<Position>,
 }
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FactorioEntityPrototype {
     pub name: String,
@@ -487,9 +487,9 @@ pub struct FactorioEntityPrototype {
     pub collision_mask: Option<Vec<String>>,
     pub collision_box: Rect,
     pub mine_result: Option<BTreeMap<String, u32>>,
-    pub mining_time: Option<R64>,
-    pub mining_speed: Option<R64>,
-    pub crafting_speed: Option<R64>,
+    pub mining_time: Option<f64>,
+    pub mining_speed: Option<f64>,
+    pub crafting_speed: Option<f64>,
     pub max_underground_distance: Option<u8>,
     pub fluidbox_prototypes: Option<Vec<FactorioFluidBoxPrototype>>,
 }

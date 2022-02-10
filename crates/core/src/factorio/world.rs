@@ -5,11 +5,11 @@ use crate::types::{
     FactorioPlayer, FactorioRecipe, FactorioTile, PlayerChangedDistanceEvent,
     PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent,
 };
-use async_std::sync::Mutex;
 use dashmap::DashMap;
 use image::RgbaImage;
 use miette::Result;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 pub struct FactorioWorld {
     pub players: DashMap<u32, FactorioPlayer>,
@@ -82,10 +82,7 @@ impl FactorioWorld {
         Ok(())
     }
 
-    pub fn player_changed_distance(
-        &self,
-        event: PlayerChangedDistanceEvent,
-    ) -> Result<()> {
+    pub fn player_changed_distance(&self, event: PlayerChangedDistanceEvent) -> Result<()> {
         let player = if self.players.contains_key(&event.player_id) {
             let existing_player = self.players.get(&event.player_id).unwrap();
             FactorioPlayer {
@@ -115,10 +112,7 @@ impl FactorioWorld {
         Ok(())
     }
 
-    pub fn player_changed_position(
-        &self,
-        event: PlayerChangedPositionEvent,
-    ) -> Result<()> {
+    pub fn player_changed_position(&self, event: PlayerChangedPositionEvent) -> Result<()> {
         let player = if self.players.contains_key(&event.player_id) {
             let existing_player = self.players.get(&event.player_id).unwrap();
             FactorioPlayer {

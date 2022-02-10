@@ -1,11 +1,3 @@
-use async_std::sync::{Arc, Mutex};
-use async_std::task;
-use std::cmp::Ordering;
-use std::fs::read_to_string;
-use std::path::Path;
-use std::thread::JoinHandle;
-use std::time::Instant;
-
 use crate::planner::Planner;
 use factorio_bot_core::factorio::rcon::{FactorioRcon, RconSettings};
 use factorio_bot_core::factorio::util::calculate_distance;
@@ -14,7 +6,15 @@ use factorio_bot_core::process::instance_setup::setup_factorio_instance;
 use factorio_bot_core::process::process_control::{start_factorio_server, FactorioStartCondition};
 use factorio_bot_core::settings::AppSettings;
 use factorio_bot_core::types::{AreaFilter, FactorioEntity, Position};
-use miette::{Result, IntoDiagnostic};
+use miette::{IntoDiagnostic, Result};
+use std::cmp::Ordering;
+use std::fs::read_to_string;
+use std::path::Path;
+use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::Instant;
+use tokio::sync::Mutex;
+use tokio::task;
 
 #[derive(Debug, Copy, Clone)]
 pub enum RollSeedLimit {
@@ -79,13 +79,11 @@ pub async fn roll_seed(
         let roll = roll.clone();
         let lua_path_str = format!("plans/{}.lua", plan_name);
         let lua_path = Path::new(&lua_path_str);
-        let lua_path = std::fs::canonicalize(lua_path)
-            .into_diagnostic()?;
+        let lua_path = std::fs::canonicalize(lua_path).into_diagnostic()?;
         if !lua_path.exists() {
             panic!("plan {} not found at {}", plan_name, lua_path_str);
         }
-        let lua_code = read_to_string(lua_path)
-            .into_diagnostic()?;
+        let lua_code = read_to_string(lua_path).into_diagnostic()?;
         join_handles.push(std::thread::spawn(move || {
             task::spawn(async move {
                 while match limit {

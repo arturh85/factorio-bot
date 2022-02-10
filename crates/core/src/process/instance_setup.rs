@@ -1,4 +1,3 @@
-use async_std::fs::create_dir;
 use paris::Logger;
 use serde_json::Value;
 use std::fs;
@@ -8,14 +7,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 
+use crate::constants::{
+    MAP_GEN_SETTINGS_FILENAME, MAP_SETTINGS_FILENAME, MODS_FOLDERNAME, SERVER_SETTINGS_FILENAME,
+};
 use crate::errors::*;
 use crate::factorio::rcon::RconSettings;
 use crate::factorio::util::{read_to_value, write_value_to};
 use crate::process::io_utils::{extract_archive, symlink};
 use crate::process::output_reader::read_output;
 use crate::process::process_control::{await_lock, FactorioStartCondition};
-use miette::{Result, IntoDiagnostic};
-use crate::constants::{MAP_GEN_SETTINGS_FILENAME, MAP_SETTINGS_FILENAME, MODS_FOLDERNAME, SERVER_SETTINGS_FILENAME};
+use miette::{IntoDiagnostic, Result};
+use tokio::fs::create_dir;
 
 #[cfg(not(debug_assertions))]
 pub const MODS_CONTENT: include_dir::Dir = include_dir!("mods");
@@ -50,13 +52,9 @@ pub async fn setup_factorio_instance(
         if !silent {
             info!("Creating <bright-blue>{:?}</>", &instance_path);
         }
-        create_dir(instance_path)
-            .await
-            .into_diagnostic()?;
+        create_dir(instance_path).await.into_diagnostic()?;
     }
-    let readdir = instance_path
-        .read_dir()
-        .into_diagnostic()?;
+    let readdir = instance_path.read_dir().into_diagnostic()?;
     if readdir.count() == 0 {
         extract_archive(factorio_archive_path, instance_path, workspace_path)?;
     }
@@ -69,8 +67,7 @@ pub async fn setup_factorio_instance(
         }
         #[cfg(not(debug_assertions))]
         {
-            std::fs::create_dir_all(&workspace_mods_path)
-                .into_diagnostic()?;
+            std::fs::create_dir_all(&workspace_mods_path).into_diagnostic()?;
             if let Err(err) = MODS_CONTENT.extract(workspace_mods_path.clone()) {
                 error!("failed to extract static mods content: {:?}", err);
                 return Err(ModExtractFailed {}.into());
@@ -87,8 +84,7 @@ pub async fn setup_factorio_instance(
     {
         let data_plans_path = workspace_path.join(PathBuf::from("plans"));
         if !data_plans_path.exists() {
-            std::fs::create_dir_all(&data_plans_path)
-                .into_diagnostic()?;
+            std::fs::create_dir_all(&data_plans_path).into_diagnostic()?;
             if let Err(err) = PLANS_CONTENT.extract(data_plans_path.clone()) {
                 error!("failed to extract static plans content: {:?}", err);
                 return Err(PlansExtractFailed {}.into());
@@ -96,8 +92,7 @@ pub async fn setup_factorio_instance(
         }
     }
 
-    let workspace_mods_path = std::fs::canonicalize(workspace_mods_path)
-        .into_diagnostic()?;
+    let workspace_mods_path = std::fs::canonicalize(workspace_mods_path).into_diagnostic()?;
     let mods_path = instance_path.join(PathBuf::from(MODS_FOLDERNAME));
     if !mods_path.exists() {
         if !silent {
@@ -107,8 +102,7 @@ pub async fn setup_factorio_instance(
     }
     let instance_data_path = instance_path.join(PathBuf::from("data"));
     if !instance_data_path.exists() && workspace_data_path.exists() {
-        let workspace_data_path = std::fs::canonicalize(workspace_data_path)
-            .into_diagnostic()?;
+        let workspace_data_path = std::fs::canonicalize(workspace_data_path).into_diagnostic()?;
         if !silent {
             info!(
                 "Creating Symlink for <bright-blue>{:?}</>",
@@ -130,15 +124,12 @@ pub async fn setup_factorio_instance(
         let server_settings_path = instance_path.join(PathBuf::from(SERVER_SETTINGS_FILENAME));
         if !server_settings_path.exists() {
             let server_settings_data = include_bytes!("../data/server-settings.json");
-            let mut outfile = fs::File::create(&server_settings_path)
-                .into_diagnostic()?;
+            let mut outfile = fs::File::create(&server_settings_path).into_diagnostic()?;
             if !silent {
                 info!("Creating <bright-blue>{:?}</>", &server_settings_path);
             }
             // io::copy(&mut template_file, &mut outfile)?;
-            outfile
-                .write_all(server_settings_data)
-                .into_diagnostic()?;
+            outfile.write_all(server_settings_data).into_diagnostic()?;
         }
 
         let saves_path = instance_path.join(PathBuf::from("saves"));
@@ -146,9 +137,7 @@ pub async fn setup_factorio_instance(
             if !silent {
                 info!("Creating <bright-blue>{:?}</>", &saves_path);
             }
-            create_dir(&saves_path)
-                .await
-                .into_diagnostic()?;
+            create_dir(&saves_path).await.into_diagnostic()?;
         }
 
         let saves_level_path = saves_path.join(PathBuf::from("level.zip"));
@@ -232,10 +221,16 @@ pub async fn setup_factorio_instance(
                 args.push("--map-gen-seed");
                 args.push(seed);
             }
-            let map_gen_settings_path =
-                format!("{}/{}", instance_path.to_str().unwrap(), MAP_GEN_SETTINGS_FILENAME);
-            let map_settings_path =
-                format!("{}/{}", instance_path.to_str().unwrap(), MAP_SETTINGS_FILENAME);
+            let map_gen_settings_path = format!(
+                "{}/{}",
+                instance_path.to_str().unwrap(),
+                MAP_GEN_SETTINGS_FILENAME
+            );
+            let map_settings_path = format!(
+                "{}/{}",
+                instance_path.to_str().unwrap(),
+                MAP_SETTINGS_FILENAME
+            );
             if map_exchange_string.is_some() {
                 args.push("--map-gen-settings");
                 args.push(&map_gen_settings_path);
@@ -274,34 +269,24 @@ pub async fn setup_factorio_instance(
         let player_data_path = instance_path.join(PathBuf::from("player-data.json"));
         if !player_data_path.exists() {
             let player_data = include_bytes!("../data/player-data.json");
-            let mut outfile = fs::File::create(&player_data_path)
-                .into_diagnostic()?;
-            outfile
-                .write_all(player_data)
-                .into_diagnostic()?;
+            let mut outfile = fs::File::create(&player_data_path).into_diagnostic()?;
+            outfile.write_all(player_data).into_diagnostic()?;
             if !silent {
                 info!("Created <bright-blue>{:?}</>", &player_data_path);
             }
         }
         let mut value: Value = read_to_value(&player_data_path)?;
         value["service-username"] = Value::from(instance_name);
-        let player_data_file = File::create(&player_data_path)
-            .into_diagnostic()?;
-        serde_json::to_writer_pretty(player_data_file, &value)
-            .into_diagnostic()?;
+        let player_data_file = File::create(&player_data_path).into_diagnostic()?;
+        serde_json::to_writer_pretty(player_data_file, &value).into_diagnostic()?;
 
         let config_path = instance_path.join(PathBuf::from("config"));
         if !config_path.exists() {
-            create_dir(&config_path)
-                .await
-                .into_diagnostic()?;
+            create_dir(&config_path).await.into_diagnostic()?;
             let config_ini_data = include_bytes!("../data/config.ini");
             let config_ini_path = config_path.join(PathBuf::from("config.ini"));
-            let mut outfile = fs::File::create(&config_ini_path)
-                .into_diagnostic()?;
-            outfile
-                .write_all(config_ini_data)
-                .into_diagnostic()?;
+            let mut outfile = fs::File::create(&config_ini_path).into_diagnostic()?;
+            outfile.write_all(config_ini_data).into_diagnostic()?;
             if !silent {
                 info!("Created <bright-blue>{:?}</>", &config_ini_path);
             }
@@ -365,9 +350,10 @@ pub async fn update_map_gen_settings(
     await_lock(instance_path.join(PathBuf::from(".lock")), silent).await?;
     let mut logger = Logger::new();
     if !silent {
-        logger.loading(
-            format!("Updating <bright-blue>{}</> and <bright-blue>{}</>", MAP_SETTINGS_FILENAME, MAP_GEN_SETTINGS_FILENAME),
-        );
+        logger.loading(format!(
+            "Updating <bright-blue>{}</> and <bright-blue>{}</>",
+            MAP_SETTINGS_FILENAME, MAP_GEN_SETTINGS_FILENAME
+        ));
     }
     let args = &[
         "--start-server",
@@ -404,9 +390,7 @@ pub async fn update_map_gen_settings(
     .await?;
     rcon.parse_map_exchange_string(MAP_GEN_SETTINGS_FILENAME, map_exchange_string)
         .await?;
-    child
-        .kill()
-        .into_diagnostic()?;
+    child.kill().into_diagnostic()?;
     let target_map_gen_settings_path =
         instance_path.join(PathBuf::from_str(MAP_GEN_SETTINGS_FILENAME).unwrap());
     let target_map_settings_path =
@@ -421,9 +405,10 @@ pub async fn update_map_gen_settings(
         .unwrap_or_else(|_| panic!("failed to delete {:?}", &source_map_gen_settings_path));
 
     if !silent {
-        logger.success(
-            format!("Updated <bright-blue>{}</> and <bright-blue>{}</>", MAP_SETTINGS_FILENAME, MAP_GEN_SETTINGS_FILENAME),
-        );
+        logger.success(format!(
+            "Updated <bright-blue>{}</> and <bright-blue>{}</>",
+            MAP_SETTINGS_FILENAME, MAP_GEN_SETTINGS_FILENAME
+        ));
     }
     Ok(())
 }

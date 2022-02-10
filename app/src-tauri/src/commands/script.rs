@@ -1,12 +1,13 @@
 #![allow(clippy::module_name_repetitions)]
 use crate::commands::ERR_TO_STRING;
-use async_std::sync::{Arc, RwLock};
 use factorio_bot_core::process::process_control::InstanceState;
 use factorio_bot_core::settings::AppSettings;
 use factorio_bot_core::types::PrimeVueTreeNode;
 use factorio_bot_lua::planner::Planner;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tauri::State;
+use tokio::sync::RwLock;
 
 #[tauri::command]
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

@@ -1,13 +1,14 @@
-use async_std::sync::{Arc, RwLock};
 use factorio_bot_core::process::process_control::InstanceState;
 use factorio_bot_core::settings::AppSettings;
 use miette::Result;
 use rocket::data::{Limits, ToByteUnit};
 use rocket::http::Status;
+use rocket::response::content::Html;
 use rocket::response::status;
 use rocket::Request;
-use rocket::response::content::Html;
 use rocket_okapi::swagger_ui::*;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[catch(default)]
 fn default_catcher(status: Status, req: &Request<'_>) -> status::Custom<String> {
@@ -19,7 +20,6 @@ fn default_catcher(status: Status, req: &Request<'_>) -> status::Custom<String> 
 fn general_not_found() -> String {
     "Not found".into()
 }
-
 
 #[get("/")]
 fn index() -> Html<&'static str> {
@@ -37,13 +37,13 @@ pub async fn start(
     rocket::custom(figment)
         .manage(app_settings)
         .manage(instance_state)
+        .mount("/", rocket::routes![index])
         .mount(
             "/",
-            rocket::routes![index],
-        )
-        .mount(
-            "/",
-            rocket_okapi::routes_with_openapi![crate::rest_api::find_entities, crate::rest_api::plan_path],
+            rocket_okapi::routes_with_openapi![
+                crate::rest_api::find_entities,
+                crate::rest_api::plan_path
+            ],
         )
         .mount(
             "/swagger-ui/",

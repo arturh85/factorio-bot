@@ -4,10 +4,11 @@
   clippy::cast_sign_loss
 )]
 use crate::constants;
-use async_std::sync::{Arc, RwLock};
 use factorio_bot_core::process::process_control::{start_factorio, InstanceState};
 use factorio_bot_core::settings::AppSettings;
+use std::sync::Arc;
 use tauri::{AppHandle, Manager, State, Wry};
+use tokio::sync::RwLock;
 
 #[tauri::command]
 pub async fn start_instances(

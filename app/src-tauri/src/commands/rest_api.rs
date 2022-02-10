@@ -3,13 +3,14 @@
   clippy::cast_possible_truncation,
   clippy::cast_sign_loss
 )]
-use async_std::sync::{Arc, RwLock};
-use async_std::task::JoinHandle;
 use factorio_bot_core::process::process_control::InstanceState;
 use factorio_bot_core::settings::AppSettings;
 use factorio_bot_restapi::webserver::start;
 use miette::Result;
+use std::sync::Arc;
 use tauri::State;
+use tokio::sync::RwLock;
+use tokio::task::JoinHandle;
 
 #[tauri::command]
 pub async fn start_restapi(
@@ -23,7 +24,7 @@ pub async fn start_restapi(
   let app_settings = app_settings.inner().clone();
   let instance_state = instance_state.inner().clone();
   let webserver = start(app_settings, instance_state);
-  let handle = async_std::task::spawn(webserver);
+  let handle = tokio::task::spawn(webserver);
   let mut restapi_handle = restapi_handle.write().await;
   *restapi_handle = Some(handle);
   Ok(())
@@ -38,11 +39,10 @@ pub async fn stop_restapi(
   }
   let mut restapi_handle = restapi_handle.write().await;
   if let Some(handle) = restapi_handle.take() {
-    handle.cancel().await;
+    handle.abort();
   }
   Ok(())
 }
-
 
 #[tauri::command]
 pub async fn is_restapi_started(

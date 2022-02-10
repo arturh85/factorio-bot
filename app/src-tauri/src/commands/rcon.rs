@@ -1,8 +1,9 @@
 #![allow(clippy::module_name_repetitions)]
 use crate::commands::ERR_TO_STRING;
-use async_std::sync::{Arc, RwLock};
 use factorio_bot_core::process::process_control::InstanceState;
+use std::sync::Arc;
 use tauri::State;
+use tokio::sync::RwLock;
 
 #[tauri::command]
 pub async fn execute_rcon(

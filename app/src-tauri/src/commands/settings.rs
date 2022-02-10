@@ -1,9 +1,10 @@
 #![allow(clippy::module_name_repetitions)]
 use crate::commands::ERR_TO_STRING;
 use crate::constants::app_settings_path;
-use async_std::sync::{Arc, RwLock};
 use factorio_bot_core::settings::AppSettings;
+use std::sync::Arc;
 use tauri::State;
+use tokio::sync::RwLock;
 
 #[tauri::command]
 

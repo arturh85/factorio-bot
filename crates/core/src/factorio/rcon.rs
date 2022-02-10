@@ -24,6 +24,7 @@ use crate::types::{
     Position, Rect, RequestEntity,
 };
 use miette::{IntoDiagnostic, Result};
+use tokio::time::sleep;
 
 const RCON_INTERFACE: &str = "botbridge";
 
@@ -415,7 +416,7 @@ impl FactorioRcon {
     ) -> Result<()> {
         let wait_start = Instant::now();
         loop {
-            async_std::task::sleep(Duration::from_millis(50)).await;
+            sleep(Duration::from_millis(50)).await;
             if let Some(result) = world.actions.get(&action_id) {
                 if &result[..] == "ok" {
                     world.actions.remove(&action_id);
@@ -440,7 +441,7 @@ impl FactorioRcon {
     ) -> Result<Vec<Position>> {
         let wait_start = Instant::now();
         loop {
-            async_std::task::sleep(Duration::from_millis(50)).await;
+            sleep(Duration::from_millis(50)).await;
             if let Some(result) = world.path_requests.get(&request_id) {
                 // info!("action result: <bright-blue>{}</>", result);
                 let mut result = result.clone();

@@ -31,6 +31,8 @@ jobs:
           key: ${{ runner.os }}-modules-${{ hashFiles('**/yarn.lock') }}
       - name: ⚡ install tauri bundler
         run: cargo install tauri-bundler --force
+      - name: ⚡ install tarpaulin code coverage analyser
+        run: cargo install cargo-tarpaulin
       - name: ⚡ install webkit2gtk (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
         run: |
@@ -46,6 +48,8 @@ jobs:
         run: cd app; yarn build:web
       - name: ✅ run rust tests
         run: cd app; yarn cargo:test
+      - name: ✅ run rust test coverage
+        run: cargo tarpaulin -v
       - name: 🚧 build rust
         run: cd app; yarn tauri:build
       - name: ✅ run rust lint

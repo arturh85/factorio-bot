@@ -1,1 +1,1 @@
-os.exit(1)
+print("test")

@@ -1,5 +1,4 @@
 #![allow(clippy::module_name_repetitions)]
-use crate::commands::ERR_TO_STRING;
 use factorio_bot_core::process::process_control::InstanceState;
 use factorio_bot_core::settings::AppSettings;
 use factorio_bot_core::types::PrimeVueTreeNode;
@@ -14,7 +13,7 @@ use tokio::sync::RwLock;
 pub async fn execute_script(
   app_settings: State<'_, Arc<RwLock<AppSettings>>>,
   instance_state: State<'_, Arc<RwLock<Option<InstanceState>>>>,
-  code: String,
+  path: String,
 ) -> Result<(String, String), String> {
   if let Some(instance_state) = &*instance_state.read().await {
     if let Some(world) = &instance_state.world {
@@ -22,9 +21,55 @@ pub async fn execute_script(
       let world = world.clone();
       let rcon = instance_state.rcon.clone();
       let mut planner = Planner::new(world, Some(rcon));
-      let (stdout, stderr) = planner
-        .plan(code, app_settings.read().await.client_count as u32)
-        .map_err(ERR_TO_STRING)?;
+      let bot_count = app_settings.read().await.client_count as u32;
+
+      let app_settings = &app_settings.read().await;
+      let workspace_path = app_settings.workspace_path.to_string();
+      let workspace_path = Path::new(&workspace_path);
+      let workspace_plans_path = prepare_workspace_scripts(workspace_path)?;
+      if path.contains("..") {
+        return Err("invalid path".into());
+      }
+
+      let path = PathBuf::from(&path[1..]);
+      let dir_path = workspace_plans_path.join(&path);
+      if !dir_path.exists() {
+        return Err("path not found".into());
+      }
+      if !dir_path.is_file() {
+        return Err("path not directory".into());
+      }
+      let lua_code =
+        std::fs::read_to_string(dir_path).map_err(|e| String::from("error: ") + &e.to_string())?;
+      let (stdout, stderr) = std::thread::spawn(move || planner.plan(lua_code, bot_count))
+        .join()
+        .unwrap()
+        .unwrap();
+      return Ok((stdout, stderr));
+    }
+  }
+  warn!("execute_script called without running instance");
+  Err("execute_script called without world instance".into())
+}
+
+#[tauri::command]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+pub async fn execute_code(
+  app_settings: State<'_, Arc<RwLock<AppSettings>>>,
+  instance_state: State<'_, Arc<RwLock<Option<InstanceState>>>>,
+  lua_code: String,
+) -> Result<(String, String), String> {
+  if let Some(instance_state) = &*instance_state.read().await {
+    if let Some(world) = &instance_state.world {
+      world.entity_graph.connect().unwrap();
+      let world = world.clone();
+      let rcon = instance_state.rcon.clone();
+      let mut planner = Planner::new(world, Some(rcon));
+      let bot_count = app_settings.read().await.client_count as u32;
+      let (stdout, stderr) = std::thread::spawn(move || planner.plan(lua_code, bot_count))
+        .join()
+        .unwrap()
+        .unwrap();
       return Ok((stdout, stderr));
     }
   }

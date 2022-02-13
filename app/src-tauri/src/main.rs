@@ -47,6 +47,7 @@ async fn main() -> Result<()> {
       crate::commands::load_scripts_in_directory,
       crate::commands::execute_rcon,
       crate::commands::execute_script,
+      crate::commands::execute_code,
       crate::commands::update_settings,
       crate::commands::load_settings,
       crate::commands::save_settings,

@@ -1,31 +1,22 @@
 <script setup lang="ts">
 import {computed} from 'vue';
 import * as ansiHTML from 'ansi-html';
-import {useScriptStore} from '../store/scriptStore';
+import {useScriptStore} from '@/store/scriptStore';
 import {useToast} from 'primevue/usetoast';
-import Editor from '@/components/Editor.vue'
 import ScriptTree from '@/components/ScriptTree.vue'
 import Splitter from 'primevue/splitter';
 import SplitterPanel from 'primevue/splitterpanel';
 import Button from 'primevue/button';
 
-const onResize = () => {
-
-}
-
-
 const scriptStore = useScriptStore()
 const toast = useToast();
 
-const code = computed(() => scriptStore.getCode)
-const updateCode = (code: string) => {
-  scriptStore.setCode(code);
-}
+const activeScriptPath = computed(() => scriptStore.getActiveScriptPath)
 const stdout = computed(() => scriptStore.getStdout)
 const stderr = computed(() => scriptStore.getStderr)
 const execute = async () => {
   try {
-    await scriptStore.execute()
+    await scriptStore.executeScript()
   } catch (err) {
     if (err instanceof Error) {
       toast.add({severity: 'error', summary: 'Failed to execute script', detail: err.message, life: 10000});
@@ -42,7 +33,7 @@ const loadScriptFile = (path: string) => scriptStore.loadScriptFile(path)
     <div class="p-col-12">
       <div class="card" style="height: 100%">
         <h5>
-          Lua Script
+          Lua Script {{ activeScriptPath }}
           <Button @click="execute()"
                   :label="isExecuting ? 'Running ...' : 'Run'"
                   :disabled="isExecuting">
@@ -54,19 +45,12 @@ const loadScriptFile = (path: string) => scriptStore.loadScriptFile(path)
             <ScriptTree @select="loadScriptFile($event)"></ScriptTree>
           </SplitterPanel>
           <SplitterPanel :size="80">
-            <Splitter style="height: 100%" layout="vertical" @resizeend="onResize()">
-              <SplitterPanel>
-                <Editor class="editor" :value="code" theme="vs-dark" @change="updateCode"></Editor>
-              </SplitterPanel>
-              <SplitterPanel>
                 <div class="outputs">
                   <pre v-for="(line, idx) in stderr.split('\n')" :key="idx" class="stderr"
                        :innerHTML="ansiHTML(line)"></pre>
                   <pre v-for="(line, idx) in stdout.split('\n')" :key="idx" class="stdout"
                        :innerHTML="ansiHTML(line)"></pre>
                 </div>
-              </SplitterPanel>
-            </Splitter>
           </SplitterPanel>
         </Splitter>
       </div>

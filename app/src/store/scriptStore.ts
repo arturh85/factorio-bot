@@ -12,6 +12,7 @@ export const useScriptStore = defineStore({
         stdout: '',
         stderr: '',
 
+        activeScriptPath: '',
         loadingScriptsInDirectory: false
     }),
     getters: {
@@ -29,6 +30,9 @@ export const useScriptStore = defineStore({
         },
         getLoadingScriptsInDirectory(): boolean {
             return this.loadingScriptsInDirectory
+        },
+        getActiveScriptPath(): string {
+            return this.activeScriptPath
         }
     },
     actions: {
@@ -45,6 +49,7 @@ export const useScriptStore = defineStore({
         },
         async loadScriptFile(path: string): Promise<string> {
             try {
+                this.activeScriptPath = path
                 const result = await invoke('load_script', {path}) as string
                 this.code = result
                 return result
@@ -56,7 +61,7 @@ export const useScriptStore = defineStore({
         setCode(code: string) {
             this.code = code
         },
-        async execute() {
+        async executeCode() {
             if(!this.code) {
                 throw new Error('no code to execute?')
             }
@@ -65,7 +70,7 @@ export const useScriptStore = defineStore({
             this.error = false
             this.executing = true
             try {
-                const outputs = await invoke('execute_script', {code: this.code}) as any
+                const outputs = await invoke('execute_code', {luaCode: this.code}) as any
                 this.stdout = outputs[0]
                 this.stderr = outputs[1]
                 this.executing = false
@@ -75,7 +80,29 @@ export const useScriptStore = defineStore({
                 this.executing = false
                 this.success = true
                 this.error = true
-                throw new Error(err)
+                throw new Error(err as string)
+            }
+        },
+        async executeScript() {
+            if(!this.activeScriptPath) {
+                throw new Error('no script to execute?')
+            }
+            this.stdout = ''
+            this.stderr = ''
+            this.error = false
+            this.executing = true
+            try {
+                const outputs = await invoke('execute_script', {path: this.activeScriptPath}) as any
+                this.stdout = outputs[0]
+                this.stderr = outputs[1]
+                this.executing = false
+                this.success = true
+            } catch(err) {
+                console.error('failed to execute script', err)
+                this.executing = false
+                this.success = true
+                this.error = true
+                throw new Error(err as string)
             }
         }
     }

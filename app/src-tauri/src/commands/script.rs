@@ -1,4 +1,5 @@
 #![allow(clippy::module_name_repetitions)]
+use crate::commands::ERR_TO_STRING;
 use factorio_bot_core::process::process_control::InstanceState;
 use factorio_bot_core::settings::AppSettings;
 use factorio_bot_core::types::PrimeVueTreeNode;
@@ -43,8 +44,8 @@ pub async fn execute_script(
         std::fs::read_to_string(dir_path).map_err(|e| String::from("error: ") + &e.to_string())?;
       let (stdout, stderr) = std::thread::spawn(move || planner.plan(lua_code, bot_count))
         .join()
-        .unwrap()
-        .unwrap();
+        .map_err(|e| String::from("error: ") + &*format!("{:?}", e))?
+        .map_err(ERR_TO_STRING)?;
       return Ok((stdout, stderr));
     }
   }

@@ -1144,6 +1144,9 @@ function on_player_changed_position(event)
 		}))
 	end
 end
+function to_i64(a)
+	return math.min(a, 18446744073709541614)
+end
 
 function on_player_changed_distance(event)
 	for idx, player in pairs(game.players) do
@@ -1152,9 +1155,9 @@ function on_player_changed_distance(event)
 			buildDistance = player.build_distance,
 			reachDistance = player.reach_distance,
 			dropItemDistance = player.drop_item_distance,
-			itemPickupDistance = math.ceil(player.item_pickup_distance),
-			lootPickupDistance = math.ceil(player.loot_pickup_distance),
-			resourceReachDistance = math.ceil(player.resource_reach_distance),
+			itemPickupDistance = to_i64(math.ceil(player.item_pickup_distance)),
+			lootPickupDistance = to_i64(math.ceil(player.loot_pickup_distance)),
+			resourceReachDistance = to_i64(math.ceil(player.resource_reach_distance)),
 		}))
 	end
 end

@@ -30,6 +30,7 @@ fn app_settings() -> Result<AppSettings> {
 #[tokio::main]
 async fn main() -> Result<()> {
   color_eyre::install().unwrap();
+  console_subscriber::init();
   handle_cli().await;
   std::fs::create_dir_all(constants::app_data_dir()).into_diagnostic()?;
   std::fs::create_dir_all(constants::app_workspace_path()).into_diagnostic()?;

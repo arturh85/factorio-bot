@@ -50,7 +50,6 @@ impl Planner {
     }
 
     pub fn plan(&mut self, lua_code: String, bot_count: u32) -> Result<(String, String)> {
-        info!("execute lua code with {bot_count} bots: \n{lua_code}");
         let mut stdout = BufferRedirect::stdout().into_diagnostic()?;
         let mut stderr = BufferRedirect::stderr().into_diagnostic()?;
         let all_bots = self.initiate_missing_players_with_default_inventory(bot_count);

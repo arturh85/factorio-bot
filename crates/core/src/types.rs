@@ -73,9 +73,9 @@ pub struct FactorioPlayer {
     pub build_distance: u32,          // for place_entity
     pub reach_distance: u32,          // for insert_to_inventory
     pub drop_item_distance: u32,      // remove_from_inventory
-    pub item_pickup_distance: u32,    // not in use, for picking up items from the ground
-    pub loot_pickup_distance: u32, // not in use, for picking up items from the ground automatically
-    pub resource_reach_distance: u32, // for mine
+    pub item_pickup_distance: u64,    // not in use, for picking up items from the ground
+    pub loot_pickup_distance: u64, // not in use, for picking up items from the ground automatically
+    pub resource_reach_distance: u64, // for mine
 }
 
 impl Default for FactorioPlayer {
@@ -822,9 +822,9 @@ pub struct PlayerChangedDistanceEvent {
     pub build_distance: u32,
     pub reach_distance: u32,
     pub drop_item_distance: u32,
-    pub item_pickup_distance: u32,
-    pub loot_pickup_distance: u32,
-    pub resource_reach_distance: u32,
+    pub item_pickup_distance: u64,
+    pub loot_pickup_distance: u64,
+    pub resource_reach_distance: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]

@@ -415,35 +415,33 @@ pub async fn start_factorio_client(
     let is_client = server_host.is_some();
     let (tx, rx) = channel();
     tx.send(()).into_diagnostic()?;
-    std::thread::spawn(move || {
-        task::spawn(async move {
-            let mut initialized = false;
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    // wait for factorio init before sending confirmation
-                    if !initialized && line.contains("my_client_id") {
-                        initialized = true;
-                        rx.recv().unwrap();
-                        rx.recv().unwrap();
-                    }
-                    log_file.iter_mut().for_each(|log_file| {
-                        // filter out 6.6 million lines like 6664601 / 6665150...
-                        if initialized || !line.contains(" / ") {
-                            log_file
-                                .write_all(line.as_bytes())
-                                .expect("failed to write log file");
-                            log_file.write_all(b"\n").expect("failed to write log file");
-                        }
-                    });
-                    if is_client && !line.contains(" / ") && !line.starts_with('§') {
-                        info!("<cyan>{}</>⮞ <magenta>{}</>", &log_instance_name, line);
-                    }
-                } else {
-                    error!("failed to read client log");
-                    break;
+    task::spawn(async move {
+        let mut initialized = false;
+        for line in reader.lines() {
+            if let Ok(line) = line {
+                // wait for factorio init before sending confirmation
+                if !initialized && line.contains("my_client_id") {
+                    initialized = true;
+                    rx.recv().unwrap();
+                    rx.recv().unwrap();
                 }
+                log_file.iter_mut().for_each(|log_file| {
+                    // filter out 6.6 million lines like 6664601 / 6665150...
+                    if initialized || !line.contains(" / ") {
+                        log_file
+                            .write_all(line.as_bytes())
+                            .expect("failed to write log file");
+                        log_file.write_all(b"\n").expect("failed to write log file");
+                    }
+                });
+                if is_client && !line.contains(" / ") && !line.starts_with('§') {
+                    info!("<cyan>{}</>⮞ <magenta>{}</>", &log_instance_name, line);
+                }
+            } else {
+                error!("failed to read client log");
+                break;
             }
-        });
+        }
     });
     tx.send(()).into_diagnostic()?;
     Ok(child)

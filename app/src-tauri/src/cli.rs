@@ -1,14 +1,14 @@
-use clap::{App, Arg};
+use clap::{Arg, Command};
 use factorio_bot_core::process::process_control::start_factorio;
 use factorio_bot_core::settings::APP_SETTINGS_DEFAULT;
 
 pub async fn handle_cli() {
-  let matches = App::new("factorio-bot")
+  let matches = Command::new("factorio-bot")
     .version(env!("CARGO_PKG_VERSION"))
     .author("Artur Hallmann <arturh@arturh.de>")
     .about("Bot for Factorio")
     .subcommand(
-      App::new("rcon")
+      Command::new("rcon")
         .arg(Arg::new("command").required(true).last(true))
         .arg(
           Arg::new("server")
@@ -21,7 +21,7 @@ pub async fn handle_cli() {
         .about("send given rcon command"),
     )
     .subcommand(
-      App::new("roll-seed")
+      Command::new("roll-seed")
         .arg(
           Arg::new("map")
             .long("map")
@@ -69,7 +69,7 @@ pub async fn handle_cli() {
         .about("roll good seed for given map-exchange-string based on heuristics"),
     )
     .subcommand(
-      App::new("plan")
+      Command::new("plan")
         .arg(
           Arg::new("map")
             .long("map")
@@ -101,7 +101,7 @@ pub async fn handle_cli() {
         .about("plan graph"),
     )
     .subcommand(
-      App::new("start")
+      Command::new("start")
         .about("start the factorio server and clients + web server")
         .arg(
           Arg::new("clients")

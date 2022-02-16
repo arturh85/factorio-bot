@@ -1,3 +1,6 @@
+[![codecov](https://codecov.io/gh/arturh85/factorio-bot-tauri/branch/master/graph/badge.svg?token=Q4I23JAT9A)](https://codecov.io/gh/arturh85/factorio-bot-tauri)
+[![actions](https://github.com/arturh85/factorio-bot-tauri/actions/workflows/tauri-test.yml/badge.svg)](https://github.com/arturh85/factorio-bot-tauri/actions)
+
 # Factorio Bot
 
 - [User Guide](https://arturh85.github.io/factorio-bot-tauri/book/)

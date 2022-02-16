@@ -21,7 +21,7 @@ serde = { version = "^1.0", features = [ "derive" ] }
 #tauri = { version = "1.0.0-beta.8", features = ["dialog-all", "dialog-open", "fs-read-binary-file", "fs-read-dir", "fs-read-text-file", "fs-write-file", "shell-execute", "shell-open"] }
 tauri = { version = "1.0.0-rc.0", features = ["api-all"] }
 toml = "^0.5"
-clap = "^3.0"
+clap = "^3.1"
 open = "^2.0"
 paris = { version = "^1.5", features = ["timestamps", "macros"] }
 color-eyre = "^0.6"

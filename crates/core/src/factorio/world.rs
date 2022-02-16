@@ -271,6 +271,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::redundant_clone)]
     fn test_tile_boundaries_0() {
         let world = FactorioWorld {
             players: Default::default(),

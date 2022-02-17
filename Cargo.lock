@@ -1508,7 +1508,7 @@ dependencies = [
  "typescript-definitions",
  "unicode-segmentation",
  "wildmatch",
- "windows-sys 0.30.0",
+ "windows-sys",
  "xz2",
  "zip",
 ]
@@ -2191,7 +2191,7 @@ dependencies = [
  "indexmap",
  "slab",
  "tokio",
- "tokio-util",
+ "tokio-util 0.6.9",
  "tracing",
 ]
 
@@ -2924,7 +2924,7 @@ dependencies = [
  "mime",
  "spin",
  "tokio",
- "tokio-util",
+ "tokio-util 0.6.9",
  "version_check",
 ]
 
@@ -3491,7 +3491,7 @@ dependencies = [
  "libc",
  "redox_syscall 0.2.10",
  "smallvec 1.8.0",
- "windows-sys 0.32.0",
+ "windows-sys",
 ]
 
 [[package]]
@@ -4412,7 +4412,7 @@ dependencies = [
  "time 0.2.27",
  "tokio",
  "tokio-stream",
- "tokio-util",
+ "tokio-util 0.6.9",
  "ubyte",
  "version_check",
  "yansi",
@@ -4928,9 +4928,9 @@ checksum = "ae1a47186c03a32177042e55dbc5fd5aee900b8e0069a8d70fba96a9375cd012"
 
 [[package]]
 name = "sha2"
-version = "0.10.1"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99c3bd8169c58782adad9290a9af5939994036b76187f7b4f0e6de91dbbfc0ec"
+checksum = "55deaec60f81eefe3cce0dc50bda92d6d8e88f2a27df7c5033b42afeb1ed2676"
 dependencies = [
  "cfg-if 1.0.0",
  "cpufeatures",
@@ -5799,6 +5799,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-util"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64910e1b9c1901aaf5375561e35b9c057d95ff41a44ede043a03e09279eabaf1"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "futures-sink",
+ "log",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "toml"
 version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5839,7 +5853,7 @@ dependencies = [
  "prost-derive",
  "tokio",
  "tokio-stream",
- "tokio-util",
+ "tokio-util 0.6.9",
  "tower",
  "tower-layer",
  "tower-service",
@@ -5861,9 +5875,9 @@ dependencies = [
 
 [[package]]
 name = "tower"
-version = "0.4.11"
+version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5651b5f6860a99bd1adb59dbfe1db8beb433e73709d9032b413a77e2fb7c066a"
+checksum = "9a89fd63ad6adf737582df5db40d286574513c69a11dac5214dc3b5603d6713e"
 dependencies = [
  "futures-core",
  "futures-util",
@@ -5873,8 +5887,7 @@ dependencies = [
  "rand 0.8.5",
  "slab",
  "tokio",
- "tokio-stream",
- "tokio-util",
+ "tokio-util 0.7.0",
  "tower-layer",
  "tower-service",
  "tracing",
@@ -6473,19 +6486,6 @@ checksum = "944c545fcae9dd66488308f8b69aa3ba34f53714416ecfcdcbbfa4b6821e27c6"
 dependencies = [
  "windows_quote",
  "windows_reader",
-]
-
-[[package]]
-name = "windows-sys"
-version = "0.30.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "030b7ff91626e57a05ca64a07c481973cbb2db774e4852c9c7ca342408c6a99a"
-dependencies = [
- "windows_aarch64_msvc 0.30.0",
- "windows_i686_gnu 0.30.0",
- "windows_i686_msvc 0.30.0",
- "windows_x86_64_gnu 0.30.0",
- "windows_x86_64_msvc 0.30.0",
 ]
 
 [[package]]

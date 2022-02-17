@@ -28,7 +28,7 @@ color-eyre = "^0.6"
 port_scanner = "*"
 miette = {version = "^3.3", features = ["fancy"] }
 thiserror = "^1.0"
-parking_lot = "^0.11"
+parking_lot = "^0.12"
 console-subscriber = "^0.1"
 
 [build-dependencies]

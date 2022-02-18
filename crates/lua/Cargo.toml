@@ -3,6 +3,9 @@ name = "factorio-bot-lua"
 version = "0.0.0"
 authors = ["Artur Hallmann <arturh@arturh.de>"]
 edition = "2021"
+publish = false
+release = false
+
 
 [dependencies]
 factorio-bot-core = { path = "../core" }

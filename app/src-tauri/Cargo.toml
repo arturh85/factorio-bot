@@ -1,13 +1,13 @@
 [package]
 name = "factorio-bot"
-version = "0.2.1-dev"
+version = "0.2.1"
 description = "a cross-platform factorio bot platform"
 authors = [ "Artur Hallmann <arturh@arturh.de>" ]
 license = "MIT"
 repository = ""
 default-run = "factorio-bot"
 edition = "2021"
-
+publish = false
 
 [dependencies]
 serde_json = "^1.0"

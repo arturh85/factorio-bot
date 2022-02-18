@@ -69,13 +69,15 @@ Goals / Use Cases:
 - `cd app/`
 - `yarn` or `npm i`
 
-## Cargo dependencies
-
+### Cargo dependencies
 - `cargo install tauri-cli`
+
+### Optional tools
 - `cargo install mdbook`
+- `cargo install cargo-release`
  
 
-## Development Usage
+### Commands
 
 - `npm start` starts the application while watching for changes 
 

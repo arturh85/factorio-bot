@@ -2,7 +2,7 @@ name: "publish"
 on:
   push:
     branches:
-      - 'tags/v**'
+      - 'tags/factorio-bot-v**'
 
 jobs:
   create-github-release:

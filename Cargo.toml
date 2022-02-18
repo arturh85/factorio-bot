@@ -5,6 +5,13 @@ members = [
 ]
 resolver = "2"
 
+[workspace.metadata.release]
+tag-name = "release-v{{version}}"
+shared-version = true
+consolidate-commits = true
+consolidate-pushes = true
+publish = false
+
 [profile.release]
 panic = "abort"
 codegen-units = 1

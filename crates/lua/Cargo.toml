@@ -3,8 +3,10 @@ name = "factorio-bot-lua"
 version = "0.2.3"
 authors = ["Artur Hallmann <arturh@arturh.de>"]
 edition = "2021"
-publish = false
+
+[package.metadata.release]
 tag = false
+publish = false
 push = false
 
 [dependencies]

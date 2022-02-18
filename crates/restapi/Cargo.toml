@@ -3,14 +3,15 @@ name = "factorio-bot-restapi"
 version = "0.2.3"
 authors = ["Artur Hallmann <arturh@arturh.de>"]
 edition = "2021"
-publish = false
+
+[package.metadata.release]
 tag = false
+publish = false
 push = false
 
 [dependencies]
 factorio-bot-core = { path = "../core" }
 parking_lot = "^0.12"
-
 rocket = { version = "0.5.0-rc.1", default-features = false, features = ["json"] }
 rocket_okapi = { version = "0.7.0-alpha-1" }
 okapi = { version = "0.6.0-alpha-1" }

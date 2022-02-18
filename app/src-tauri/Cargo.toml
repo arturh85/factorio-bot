@@ -9,9 +9,7 @@ default-run = "factorio-bot"
 edition = "2021"
 
 [package.metadata.release]
-tag = false
 publish = false
-push = false
 
 [dependencies]
 serde_json = "^1.0"

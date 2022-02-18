@@ -4,6 +4,8 @@ version = "0.2.2"
 authors = ["Artur Hallmann <arturh@arturh.de>"]
 edition = "2021"
 publish = false
+tag = false
+push = false
 
 [dependencies]
 rand = "^0.8"

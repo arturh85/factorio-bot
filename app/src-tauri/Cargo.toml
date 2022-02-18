@@ -10,6 +10,7 @@ edition = "2021"
 
 [package.metadata.release]
 publish = false
+tag-name = "init-v{{version}}"
 
 [dependencies]
 serde_json = "^1.0"

@@ -6,6 +6,7 @@ edition = "2021"
 
 [package.metadata.release]
 tag = false
+push = false
 publish = false
 
 [dependencies]

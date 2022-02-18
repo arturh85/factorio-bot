@@ -2,7 +2,7 @@ name: "publish"
 on:
   push:
     tags:
-      - 'factorio-bot-v**'
+      - 'init-v**'
 
 jobs:
   create-github-release:

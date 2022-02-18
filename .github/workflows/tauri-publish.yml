@@ -1,8 +1,8 @@
 name: "publish"
 on:
   push:
-    branches:
-      - 'tags/factorio-bot-v**'
+    tags:
+      - 'factorio-bot-v**'
 
 jobs:
   create-github-release:

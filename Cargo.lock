@@ -1540,7 +1540,7 @@ dependencies = [
 
 [[package]]
 name = "factorio-bot-restapi"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "factorio-bot-core",
  "miette",

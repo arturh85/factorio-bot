@@ -1,5 +1,5 @@
-use crate::factorio::entity_graph::EntityGraph;
-use crate::factorio::flow_graph::FlowGraph;
+use crate::graph::entity_graph::EntityGraph;
+use crate::graph::flow_graph::FlowGraph;
 use crate::types::{
     FactorioEntity, FactorioEntityPrototype, FactorioForce, FactorioGraphic, FactorioItemPrototype,
     FactorioPlayer, FactorioRecipe, FactorioTile, PlayerChangedDistanceEvent,

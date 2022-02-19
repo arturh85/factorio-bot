@@ -1,16 +1,16 @@
-use crate::factorio::entity_graph::{EntityGraph, EntityNode, QuadTreeRect};
 use crate::factorio::util::{add_to_rect, format_dotgraph};
+use crate::graph::entity_graph::{EntityGraph, EntityNode, QuadTreeRect};
 use crate::num_traits::FromPrimitive;
 use crate::types::{
     Direction, EntityName, EntityType, FactorioEntity, FactorioEntityPrototype, FactorioRecipe,
     Position, Rect,
 };
 use aabb_quadtree::{ItemId, QuadTree};
-use parking_lot::{RwLock, RwLockReadGuard};
 use dashmap::DashMap;
 use euclid::{TypedPoint2D, TypedSize2D};
 use miette::Result;
 use num_traits::ToPrimitive;
+use parking_lot::{RwLock, RwLockReadGuard};
 use petgraph::dot::{Config, Dot};
 use petgraph::graph::NodeIndex;
 use petgraph::stable_graph::StableGraph;

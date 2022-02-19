@@ -12,8 +12,8 @@ use serde_json::Value;
 use typescript_definitions::TypeScriptify;
 
 use crate::errors::RectInvalid;
-use crate::factorio::entity_graph::QuadTreeRect;
 use crate::factorio::util::{add_to_rect, add_to_rect_turned, calculate_distance, rect_floor_ceil};
+use crate::graph::entity_graph::QuadTreeRect;
 use crate::num_traits::FromPrimitive;
 use miette::{IntoDiagnostic, Result};
 use rlua::{Context, MultiValue};

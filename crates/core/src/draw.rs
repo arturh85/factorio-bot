@@ -1,23 +1,18 @@
 use imageproc::drawing::{draw_hollow_rect_mut, draw_line_segment_mut, Canvas};
 
-use crate::factorio::entity_graph::{BlockedQuadTree, ResourceQuadTree};
 use crate::factorio::util::{
     scaled_draw_rect, vector_add, vector_multiply, vector_normalize, vector_substract,
 };
+use crate::graph::entity_graph::{BlockedQuadTree, ResourceQuadTree};
 use crate::types::{Position, Rect};
 use parking_lot::RwLockReadGuard;
 use std::collections::HashMap;
 
 //Hallo Welt!
 
-#[allow(clippy::clone_on_copy,clippy::cast_lossless)]
-pub fn arrow_mut<C>(
-    canvas: &mut C,
-    start: (f32, f32),
-    end: (f32, f32),
-    color: C::Pixel,
-    size: f64,
-) where
+#[allow(clippy::clone_on_copy, clippy::cast_lossless)]
+pub fn arrow_mut<C>(canvas: &mut C, start: (f32, f32), end: (f32, f32), color: C::Pixel, size: f64)
+where
     C: Canvas,
     C::Pixel: 'static,
 {
@@ -33,8 +28,18 @@ pub fn arrow_mut<C>(
         let vv = vector_substract(&end_position, &vector_multiply(&u, h));
         let v1 = vector_add(&vv, &vw);
         let v2 = vector_substract(&vv, &vw);
-        draw_line_segment_mut(canvas, end.clone(), (v1.x() as f32, v1.y() as f32), color.clone());
-        draw_line_segment_mut(canvas, end.clone(), (v2.x() as f32, v2.y() as f32), color.clone());
+        draw_line_segment_mut(
+            canvas,
+            end.clone(),
+            (v1.x() as f32, v1.y() as f32),
+            color.clone(),
+        );
+        draw_line_segment_mut(
+            canvas,
+            end.clone(),
+            (v2.x() as f32, v2.y() as f32),
+            color.clone(),
+        );
         draw_line_segment_mut(
             canvas,
             (v1.x() as f32, v1.y() as f32),
@@ -44,7 +49,7 @@ pub fn arrow_mut<C>(
     }
 }
 
-#[allow(clippy::clone_on_copy,clippy::cast_lossless)]
+#[allow(clippy::clone_on_copy, clippy::cast_lossless)]
 pub fn draw_blocked_rects_mut<C>(
     canvas: &mut C,
     blocked: RwLockReadGuard<BlockedQuadTree>,

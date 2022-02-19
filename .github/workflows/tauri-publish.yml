@@ -2,7 +2,7 @@ name: "publish"
 on:
   push:
     tags:
-      - 'init-v**'
+      - 'v**'
 
 jobs:
   create-github-release:
@@ -130,7 +130,6 @@ jobs:
           iconPath: "../public/logo.png"
           configPath: "tauri.conf.json"
           projectPath: "./app"
-          npmScript: "dummy" # dummy script because already build & moved
 
       - name: 🚚 move build back so it can be cached
         run: mv app/src-tauri/target/ target/

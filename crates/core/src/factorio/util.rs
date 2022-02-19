@@ -1,5 +1,5 @@
 use crate::errors::{RconNoPathFound, RconSourcePositionBlocked, RconTargetPositionBlocked};
-use crate::factorio::entity_graph::QuadTreeRect;
+use crate::graph::entity_graph::QuadTreeRect;
 use crate::types::{
     Direction, FactorioEntity, FactorioEntityPrototype, FactorioTile, Pos, Position, Rect,
 };

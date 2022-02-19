@@ -4,9 +4,9 @@ use std::sync::Arc;
 use dashmap::DashMap;
 
 use crate::draw::{draw_blocked_rects_mut, draw_resource_rects_mut};
-use crate::factorio::entity_graph::EntityGraph;
 use crate::factorio::util::{add_to_rect, rect_fields};
 use crate::factorio::world::FactorioWorld;
+use crate::graph::entity_graph::EntityGraph;
 use crate::types::{
     Direction, EntityName, FactorioItemPrototype, FactorioRecipe, FactorioTile, Position, Rect,
 };

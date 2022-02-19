@@ -1,0 +1,4 @@
+pre-release-hook = ["git", "cliff", "-o", "CHANGELOG.md"]
+consolidate-commits = true
+consolidate-pushes = true
+allow-branch = ["master"]

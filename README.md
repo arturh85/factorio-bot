@@ -75,6 +75,7 @@ Goals / Use Cases:
 ### Optional tools
 - `cargo install mdbook`
 - `cargo install cargo-release`
+- `cargo install git-cliff`
  
 
 ### Commands

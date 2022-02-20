@@ -130,6 +130,7 @@ jobs:
           iconPath: "../public/logo.png"
           configPath: "tauri.conf.json"
           projectPath: "./app"
+          tauriScript: "npm run dummy"
 
       - name: 🚚 move build back so it can be cached
         run: mv app/src-tauri/target/ target/

@@ -1467,7 +1467,7 @@ dependencies = [
 
 [[package]]
 name = "factorio-bot"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "clap",
  "color-eyre",
@@ -1493,7 +1493,7 @@ dependencies = [
 
 [[package]]
 name = "factorio-bot-core"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "aabb-quadtree",
  "async-trait",
@@ -1550,7 +1550,7 @@ dependencies = [
 
 [[package]]
 name = "factorio-bot-lua"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "dashmap",
  "factorio-bot-core",
@@ -1574,7 +1574,7 @@ dependencies = [
 
 [[package]]
 name = "factorio-bot-restapi"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "factorio-bot-core",
  "miette",

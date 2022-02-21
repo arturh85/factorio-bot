@@ -26,5 +26,5 @@ num-traits = "^0.2"
 paris = { version = "^1.5", features = ["timestamps", "macros"] }
 petgraph = { version = "^0.6", features = ["all"] } # upgrade to 0.6 failed because of ptree
 rand = "^0.8"
-miette = {version = "^4.0", features = ["fancy"] }
+miette = {version = "^4.1", features = ["fancy"] }
 thiserror = "^1.0"

@@ -56,7 +56,7 @@ toml = "^0.5"
 schemars = { version = "0.8", features = ["preserve_order"] }
 rlua = "^0.17" # cannot update to 0.18 because rlua-async 0.4 depends on 0.17
 rlua_serde = "^0.4"
-miette = {version = "^4.0", features = ["fancy"] }
+miette = {version = "^4.1", features = ["fancy"] }
 thiserror = "^1.0"
 #
 #[target.'cfg(unix)'.dependencies]

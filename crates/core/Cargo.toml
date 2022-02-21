@@ -38,7 +38,7 @@ noisy_float = { version = "^0.2", features = ["serde"] }
 typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"]}
 enum-primitive-derive = "^0.2"
 unicode-segmentation = "^1.9"
-strum = "^0.23"
+strum = "^0.24"
 strum_macros = "^0.23"
 aabb-quadtree = "^0.2"
 dashmap = "^5.0"

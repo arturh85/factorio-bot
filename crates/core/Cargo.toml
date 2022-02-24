@@ -62,7 +62,7 @@ thiserror = "^1.0"
 #[target.'cfg(unix)'.dependencies]
 #
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "^0.32", features = [
+windows-sys = { version = "^0.33", features = [
     "Win32_Foundation",
     "Win32_System_SystemInformation",
     "Win32_System_ProcessStatus",

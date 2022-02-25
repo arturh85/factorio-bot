@@ -20,7 +20,7 @@ config = "^0.12"
 pathfinding = "^3.0"
 parking_lot = "^0.12"
 paris = { version = "^1.5", features = ["timestamps", "macros"] }
-color-eyre = "^0.6.0"
+color-eyre = "^0.6.1"
 petgraph = { version = "^0.6", features = ["all"] } # upgrade to 0.6 failed because of ptree
 indicatif = "^0.16"
 err-derive = "^0.3"

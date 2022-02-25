@@ -17,7 +17,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: ⚡ install NodeJS 16
-        uses: actions/setup-node@v2
+        uses: actions/setup-node@v3
         with:
           node-version: 16
       - name: 🦠 extract version from app/src-tauri/Cargo.toml to package.json & tauri.conf.json & ENV
@@ -80,7 +80,7 @@ jobs:
       - name: 🔥 checkout code
         uses: actions/checkout@v2
       - name: ⚡ install NodeJS 16
-        uses: actions/setup-node@v2
+        uses: actions/setup-node@v3
         with:
           node-version: 16
       - name: ⚡ install Rust stable

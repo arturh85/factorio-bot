@@ -4183,10 +4183,10 @@ primeicons@5.0.0:
   resolved "https://registry.yarnpkg.com/primeicons/-/primeicons-5.0.0.tgz#73a0b6028a77c58a9eeb331ad13aaf085e8451ee"
   integrity sha512-heygWF0X5HFI1otlZE62pp6ye7sZ8om78J9au2BRkg8O7Y8AHTZ9qKMRzchZUHLe8zUAvdi6hZzzm9XxgwIExw==
 
-primevue@3.12.0:
-  version "3.12.0"
-  resolved "https://registry.yarnpkg.com/primevue/-/primevue-3.12.0.tgz#22812a1cb6b8770a680c245a65e56552ee9f8ee8"
-  integrity sha512-vwYoaJVKqbLWGIOKoDbbgLijyllXw69wiPXGW1DNXVBtWo3d0ko4H7CjikRGVDuq5OtDO13p/mTOW26EnlPfUQ==
+primevue@3.12.1:
+  version "3.12.1"
+  resolved "https://registry.yarnpkg.com/primevue/-/primevue-3.12.1.tgz#7479902ff8c290759fd7726fd03f63ee2a032654"
+  integrity sha512-un9yTbWU/mNbBLmihBzz82jvZGpiuFSA9lef9X4hz8DzM2sYfkHpT/3uTflLEuGKC8JUCFegAnBxubSpQ6YOtA==
 
 promise@^7.0.1:
   version "7.3.1"

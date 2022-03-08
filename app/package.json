@@ -28,7 +28,7 @@
     "dummy": "true"
   },
   "dependencies": {
-    "@tauri-apps/api": "1.0.0-rc.1",
+    "@tauri-apps/api": "1.0.0-rc.2",
     "@vueuse/core": "7.7.1",
     "ansi-html": "0.0.9",
     "pinia": "2.0.11",

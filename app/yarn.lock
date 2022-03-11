@@ -1582,18 +1582,24 @@
     vscode-languageserver-textdocument "^1.0.1"
     vscode-uri "^2.1.2"
 
-"@vueuse/core@7.7.1":
-  version "7.7.1"
-  resolved "https://registry.yarnpkg.com/@vueuse/core/-/core-7.7.1.tgz#fc284f4103de73c7fb79bc06579d8066790db511"
-  integrity sha512-PRRgbATMpoeUmkCEBtUeJgOwtew8s+4UsEd+Pm7MhkjL2ihCNrSqxNVtM6NFE4uP2sWnkGcZpCjPuNSxowJ1Ow==
+"@vueuse/core@8.0.0":
+  version "8.0.0"
+  resolved "https://registry.yarnpkg.com/@vueuse/core/-/core-8.0.0.tgz#71c13c1e0c0d6a196f6c049fd431ba314f782f89"
+  integrity sha512-CU8oQhTaAQ4+9IlEHnaGk88qQ2fSvALHixWZhfyA2j18G42XeyJz3V0FmnBMWZUwd7VRSHJZFbGziZ6o5npNow==
   dependencies:
-    "@vueuse/shared" "7.7.1"
+    "@vueuse/metadata" "8.0.0"
+    "@vueuse/shared" "8.0.0"
     vue-demi "*"
 
-"@vueuse/shared@7.7.1":
-  version "7.7.1"
-  resolved "https://registry.yarnpkg.com/@vueuse/shared/-/shared-7.7.1.tgz#77e312de7275380efce86b0079bd7938791a076b"
-  integrity sha512-rN2qd22AUl7VdBxihagWyhUNHCyVk9IpvBTTfHoLH9G7rGE552X1f+zeCfehuno0zXif13jPw+icW/wn2a0rnQ==
+"@vueuse/metadata@8.0.0":
+  version "8.0.0"
+  resolved "https://registry.yarnpkg.com/@vueuse/metadata/-/metadata-8.0.0.tgz#8f8676e9a3d6872c9a41583d9a3e67f3604114d7"
+  integrity sha512-23R9pqgfJnfmUnGCOtaDkwaNYEAO7N6whvaAFAs5D5xHXgqAj+z/tLhwQzSJw/ZzJGUb8W5L+VgP9S7SL35riw==
+
+"@vueuse/shared@8.0.0":
+  version "8.0.0"
+  resolved "https://registry.yarnpkg.com/@vueuse/shared/-/shared-8.0.0.tgz#2b452362c797dadb8d85ed169e386262a390e28c"
+  integrity sha512-HUIFZ5Vc3aGvIzDQJJhg2+Ok5xvNuwxoz5HrOr/M765wlj357WiMYzhU2XGljL6IcmK29SP/1Jb4Fra7A4PBCw==
   dependencies:
     vue-demi "*"
 

@@ -16,7 +16,7 @@ export default defineConfig({
     ],
     test: {
         reporters: ['junit'],
-        outputFile: 'coverage/junit.xml'
+        outputFile: 'coverage.xml'
     },
     resolve: {
         alias: {

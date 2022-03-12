@@ -54,7 +54,7 @@ jobs:
         uses: codecov/codecov-action@v2
         with:
           fail_ci_if_error: true
-          files: ./app/coverage/junit.xml,./cobertura.xml,./target/tarpaulin/coverage.json
+          files: ./app/coverage.xml,./cobertura.xml,./target/tarpaulin/coverage.json
       - name: 🚧 build rust
         run: cd app; yarn tauri:build
       - name: ✅ run rust lint

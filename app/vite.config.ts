@@ -1,4 +1,4 @@
-import {defineConfig} from 'vite';
+import { defineConfig } from 'vitest/config'
 import vue from '@vitejs/plugin-vue';
 import visualizer from 'rollup-plugin-visualizer'
 
@@ -14,6 +14,10 @@ export default defineConfig({
             brotliSize: true
         })
     ],
+    test: {
+        reporters: ['junit'],
+        outputFile: 'coverage/junit.xml'
+    },
     resolve: {
         alias: {
             '@': path.resolve(__dirname, './src')

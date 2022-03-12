@@ -9,11 +9,10 @@
     "sourceMap": true,
     "lib": ["esnext", "dom"],
     "types": [
+      "vitest/globals",
       "vite/client",
-      "jest",
       "vue",
       "vuetify",
-      "@types/jest",
       "@types/lodash.cloneDeep",
       "@types/googlemaps"
     ],

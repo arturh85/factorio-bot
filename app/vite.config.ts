@@ -15,8 +15,9 @@ export default defineConfig({
         })
     ],
     test: {
-        reporters: ['junit'],
-        outputFile: 'coverage.xml'
+        coverage: {
+            reporter: ['cobertura']
+        }
     },
     resolve: {
         alias: {

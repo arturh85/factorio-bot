@@ -25,8 +25,8 @@ petgraph = { version = "^0.6", features = ["all"] } # upgrade to 0.6 failed beca
 indicatif = "^0.16"
 err-derive = "^0.3"
 wildmatch = "^2.1"
-image = "^0.23"
-imageproc = "^0.22"
+image = "^0.24"
+imageproc = { git = "https://github.com/image-rs/imageproc", branch = "master"} # change back to normal if > 0.22
 rusttype = "^0.9"
 factorio-blueprint = "^0.3"
 include_dir = "^0.7.2"

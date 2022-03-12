@@ -54,8 +54,7 @@ jobs:
         uses: codecov/codecov-action@v2
         with:
           fail_ci_if_error: true
-          directory: app/coverage
-          files: ./junit.xml
+          files: ./app/coverage/junit.xml
       - name: 🚧 build rust
         run: cd app; yarn tauri:build
       - name: ✅ run rust lint

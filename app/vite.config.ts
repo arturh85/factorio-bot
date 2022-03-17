@@ -16,7 +16,7 @@ export default defineConfig({
     ],
     test: {
         coverage: {
-            reporter: ['cobertura']
+            reporter: ['html-spa', 'cobertura']
         }
     },
     resolve: {

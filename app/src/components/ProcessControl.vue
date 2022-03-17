@@ -43,7 +43,9 @@ const startInstances = async() => {
     await instanceStore.startInstances()
     toast.add({severity:'success', summary: 'Started!', life: 1000});
   } catch(err) {
-    toast.add({severity:'error', summary: 'Failed to start instances', detail:err.message, life: 10000});
+    if (err instanceof Error) {
+      toast.add({severity: 'error', summary: 'Failed to start instances', detail: err.message, life: 10000});
+    }
   }
 }
 const stopInstances = async() => {
@@ -51,7 +53,9 @@ const stopInstances = async() => {
     await instanceStore.stopInstances()
     toast.add({severity:'success', summary: 'Stopped!', life: 1000});
   } catch(err) {
-    toast.add({severity:'error', summary: 'Failed to stop instances', detail:err.message, life: 10000});
+    if (err instanceof Error) {
+      toast.add({severity: 'error', summary: 'Failed to stop instances', detail: err.message, life: 10000});
+    }
   }
 }
 </script>

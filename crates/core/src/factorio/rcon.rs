@@ -66,10 +66,7 @@ impl bb8::ManageConnection for ConnectionManager {
             .await
     }
 
-    async fn is_valid(
-        &self,
-        _conn: &mut bb8::PooledConnection<'_, Self>,
-    ) -> Result<(), Self::Error> {
+    async fn is_valid(&self, _conn: &mut Self::Connection) -> Result<(), Self::Error> {
         Ok(())
     }
 

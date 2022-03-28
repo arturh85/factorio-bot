@@ -52,6 +52,7 @@ jobs:
       - name: 📦 Upload to codecov.io (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
         uses: codecov/codecov-action@v2
+        continue-on-error: true
         with:
           fail_ci_if_error: true
           files: ./app/coverage/cobertura-coverage.xml,./cobertura.xml,./target/tarpaulin/coverage.json

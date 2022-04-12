@@ -189,7 +189,7 @@ jobs:
 
       - name: 📦 deploy public to gh-pages (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
-        uses: peaceiris/actions-gh-pages@fb2c292cba55a2fbfcf55daec80ead70af7a5cab
+        uses: peaceiris/actions-gh-pages@8a7e1fb6f4e3a35650f6e4d1d6b6e4229c790c4e
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_branch: gh-pages

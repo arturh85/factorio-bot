@@ -56,7 +56,7 @@ toml = "^0.5"
 schemars = { version = "0.8", features = ["preserve_order"] }
 rlua = "^0.19"
 rlua_serde = { git = "https://github.com/creepinson/rlua_serde" }
-miette = {version = "^4.4", features = ["fancy"] }
+miette = {version = "^4.5", features = ["fancy"] }
 thiserror = "^1.0"
 #
 #[target.'cfg(unix)'.dependencies]

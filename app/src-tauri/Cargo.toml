@@ -36,7 +36,7 @@ console-subscriber = "^0.1"
 [build-dependencies]
 typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"] }
 factorio-bot-core = { path = "../../crates/core" }
-tauri-build = { version = "1.0.0-rc.5", features = [] }
+tauri-build = { version = "1.0.0-rc.7", features = [] }
 serde = { version = "^1.0", features = [ "derive" ] }
 
 [features]

@@ -37,7 +37,7 @@
     "primeicons": "5.0.0",
     "primevue": "3.12.6",
     "vue": "3.2.33",
-    "vue-router": "4.0.14"
+    "vue-router": "4.0.15"
   },
   "devDependencies": {
     "@tauri-apps/cli": "1.0.0-rc.9",

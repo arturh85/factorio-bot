@@ -28,7 +28,7 @@ open = "^2.1"
 paris = { version = "^1.5", features = ["timestamps", "macros"] }
 color-eyre = "^0.6"
 port_scanner = "*"
-miette = {version = "^4.6", features = ["fancy"] }
+miette = {version = "^4.7", features = ["fancy"] }
 thiserror = "^1.0"
 parking_lot = "^0.12"
 console-subscriber = "^0.1"

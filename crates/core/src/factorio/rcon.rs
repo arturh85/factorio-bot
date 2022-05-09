@@ -379,7 +379,7 @@ impl FactorioRcon {
         if json == "{}" {
             json = String::from("[]");
         }
-        Ok(serde_json::from_str(json.as_str()).into_diagnostic()?)
+        serde_json::from_str(json.as_str()).into_diagnostic()
     }
 
     pub async fn store_map_data(&self, key: &str, value: Value) -> Result<()> {
@@ -550,7 +550,7 @@ impl FactorioRcon {
         if json == "{}" {
             json = String::from("[]");
         }
-        Ok(serde_json::from_str(json.as_str()).into_diagnostic()?)
+        serde_json::from_str(json.as_str()).into_diagnostic()
     }
 
     pub async fn player_force(&self) -> Result<FactorioForce> {
@@ -559,7 +559,7 @@ impl FactorioRcon {
             return Err(RconUnexpectedEmptyResponse {}.into());
         }
         let json = lines.unwrap().pop().unwrap();
-        Ok(serde_json::from_str(json.as_str()).into_diagnostic()?)
+        serde_json::from_str(json.as_str()).into_diagnostic()
     }
 
     pub async fn place_entity(
@@ -844,7 +844,7 @@ impl FactorioRcon {
         if json == "{}" {
             json = String::from("[]");
         }
-        Ok(serde_json::from_str(json.as_str()).into_diagnostic()?)
+        serde_json::from_str(json.as_str()).into_diagnostic()
     }
 
     pub async fn parse_map_exchange_string(
@@ -900,7 +900,7 @@ impl FactorioRcon {
         if json == "{}" {
             json = String::from("[]");
         }
-        Ok(serde_json::from_str(json.as_str()).into_diagnostic()?)
+        serde_json::from_str(json.as_str()).into_diagnostic()
     }
 
     async fn async_request_player_path(

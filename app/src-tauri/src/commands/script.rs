@@ -116,7 +116,7 @@ pub async fn load_scripts_in_directory(
           .to_str()
           .unwrap()
           .to_string()
-          .replace("\\", "/"),
+          .replace('\\', "/"),
         label: entry.file_name().to_str().unwrap().to_string(),
         leaf: !file_type.is_dir(),
         children: vec![],

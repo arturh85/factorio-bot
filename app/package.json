@@ -36,7 +36,7 @@
     "primeflex": "3.2.0",
     "primeicons": "5.0.0",
     "primevue": "3.12.6",
-    "vue": "3.2.35",
+    "vue": "3.2.36",
     "vue-router": "4.0.15"
   },
   "devDependencies": {
@@ -45,7 +45,7 @@
     "@typescript-eslint/eslint-plugin": "5.25.0",
     "@typescript-eslint/parser": "5.25.0",
     "@vitejs/plugin-vue": "2.3.3",
-    "@vue/compiler-sfc": "3.2.35",
+    "@vue/compiler-sfc": "3.2.36",
     "c8": "7.11.3",
     "concurrently": "7.2.1",
     "cross-env": "7.0.3",

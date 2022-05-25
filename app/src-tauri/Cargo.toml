@@ -21,7 +21,7 @@ factorio-bot-core = { path = "../../crates/core" }
 factorio-bot-restapi = { path = "../../crates/restapi" }
 factorio-bot-lua = { path = "../../crates/lua" }
 serde = { version = "^1.0", features = [ "derive" ] }
-tauri = { version = "1.0.0-rc.12", features = ["api-all"] }
+tauri = { version = "1.0.0-rc.13", features = ["api-all"] }
 toml = "^0.5"
 clap = "^3.1"
 open = "^2.1"
@@ -36,7 +36,7 @@ console-subscriber = "^0.1"
 [build-dependencies]
 typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"] }
 factorio-bot-core = { path = "../../crates/core" }
-tauri-build = { version = "1.0.0-rc.10", features = [] }
+tauri-build = { version = "1.0.0-rc.11", features = [] }
 serde = { version = "^1.0", features = [ "derive" ] }
 
 [features]

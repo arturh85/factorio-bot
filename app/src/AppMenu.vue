@@ -6,9 +6,11 @@
 
 <script setup lang="ts">
 import AppSubmenu from './AppSubmenu.vue';
+import {PropType} from 'vue';
+import {DashboardMenu} from '@/models/dashboard';
 
 defineProps({
-  model: Array
+  model: Array as PropType<DashboardMenu[]>,
 })
 
 const emit = defineEmits(['menuitem-click']);
@@ -17,7 +19,3 @@ function onMenuItemClick(event: any) {
     emit('menuitem-click', event);
 }
 </script>
-
-<style scoped>
-
-</style>

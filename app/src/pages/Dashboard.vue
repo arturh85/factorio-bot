@@ -14,7 +14,7 @@ const clients = ref([] as MyFactorioClient[]);
 const updateClients = () => {
   let newClients = [];
   if (appStore.settings) {
-    for (let i = 0; i < appStore.settings.client_count; i++) {
+    for (let i = 0; i < appStore.settings.factorio.client_count; i++) {
       newClients.push({
         name: 'client' + (i + 1),
         status: 'not_initialized'

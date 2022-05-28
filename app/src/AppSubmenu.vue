@@ -33,9 +33,10 @@
 </template>
 
 <script setup lang="ts">
-import {ref} from 'vue';
+import {PropType, ref} from 'vue';
+import {DashboardMenu} from '@/models/dashboard';
 defineProps({
-  items: Array,
+  items:  Array as PropType<DashboardMenu[]>,
   root: {
     type: Boolean,
     default: false
@@ -45,7 +46,7 @@ defineProps({
 const emit = defineEmits(['menuitem-click']);
 const activeIndex = ref(null as number | null)
 
-function onMenuItemClick(event: CustomEvent<void>, item: any, index: number) {
+function onMenuItemClick(event: Event, item: DashboardMenu, index: number) {
   if (item.disabled) {
     event.preventDefault();
     return;
@@ -68,7 +69,7 @@ function onMenuItemClick(event: CustomEvent<void>, item: any, index: number) {
   });
 }
 
-function visible(item: Element) {
+function visible(item: any) {
   return (typeof item.visible === 'function' ? item.visible() : item.visible !== false);
 }
 </script>

@@ -5,7 +5,7 @@
     </button>
 
     <div class="layout-topbar-actions" v-if="settings">
-      <span>Factorio {{ settings.factorio_version }}</span> with <strong>{{ settings.client_count }} Clients</strong>
+      <span>Factorio</span> with <strong>{{ settings?.factorio.client_count }} Clients</strong>
       &nbsp;
       <ProcessControl/>
     </div>

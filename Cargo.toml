@@ -9,5 +9,5 @@ resolver = "2"
 panic = "abort"
 codegen-units = 1
 lto = true
-incremental = false
+incremental = true
 opt-level = "s" # "s": optimize for binary size

@@ -47,6 +47,7 @@ const onNodeSelect = async(node: PrimeVueTreeNode) => {
 
 <template>
   <Tree selectionMode="single"
+        v-if="nodes"
         :value="nodes"
         @nodeSelect="onNodeSelect"
         @nodeExpand="onNodeExpand"

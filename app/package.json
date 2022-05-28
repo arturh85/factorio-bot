@@ -6,7 +6,7 @@
     "start": "npm run tauri:serve",
     "test:unit": "vitest",
     "test:coverage": "vitest run --coverage",
-    "lint": "tsc --noEmit && eslint src/",
+    "lint": "tsc --noEmit && vue-tsc --noEmit && eslint src/",
     "serve": "vite --port 8080",
     "native:serve": "cross-env VITE_HTTP_HANDLER=NATIVE vite --port 8080",
     "native:start": "tauri dev",

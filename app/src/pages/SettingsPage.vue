@@ -89,7 +89,7 @@ async function selectWorkspacePath() {
     throw new Error('missing settings')
   }
   const newPath = await open({
-    defaultPath: isWorkspacePathValid.value ? appStore.settings.workspace_path : undefined,
+    defaultPath: isWorkspacePathValid.value ? appStore.settings.factorio.workspace_path : undefined,
     directory: true,
     multiple: false
   })
@@ -103,7 +103,7 @@ async function selectFactorioArchivePath() {
     throw new Error('missing settings')
   }
   const newPath = await open({
-    defaultPath: isFactorioArchivePathValid.value ? appStore.settings.factorio_archive_path : undefined,
+    defaultPath: isFactorioArchivePathValid.value ? appStore.settings.factorio.factorio_archive_path : undefined,
     directory: false,
     multiple: false
   })
@@ -136,19 +136,19 @@ const isPortAvaiable = computed(() => restApiStore.isPortAvailable)
 if (appStore.settings) {
   watch(() => appStore.getWorkspacePath, async () => {
     if (appStore.settings) {
-      isWorkspacePathValid.value = await testIsWorkspacePathValid(appStore.settings.workspace_path)
+      isWorkspacePathValid.value = await testIsWorkspacePathValid(appStore.settings.factorio.workspace_path)
     }
   })
   watch(() => appStore.getFactorioArchivePath, async () => {
     if (appStore.settings) {
-      isFactorioArchivePathValid.value = await testIsFactorioArchivePathValid(appStore.settings.factorio_archive_path)
+      isFactorioArchivePathValid.value = await testIsFactorioArchivePathValid(appStore.settings.factorio.factorio_archive_path)
     }
   })
-  testIsWorkspacePathValid(appStore.settings.workspace_path).then(valid => isWorkspacePathValid.value = valid)
-  testIsFactorioArchivePathValid(appStore.settings.factorio_archive_path).then(valid => isFactorioArchivePathValid.value = valid)
+  testIsWorkspacePathValid(appStore.settings.factorio.workspace_path).then(valid => isWorkspacePathValid.value = valid)
+  testIsFactorioArchivePathValid(appStore.settings.factorio.factorio_archive_path).then(valid => isFactorioArchivePathValid.value = valid)
 }
 
-const openInBrowser = (url: string, event: CustomEvent) => {
+const openInBrowser = (url: string, event: Event) => {
   appStore.openInBrowser(url);
   if (event) {
     event.preventDefault()

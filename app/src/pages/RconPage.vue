@@ -13,7 +13,9 @@ const execute = async(command: string) => {
   try {
     await rconStore.execute(command)
   } catch(err) {
-    toast.add({severity:'error', summary: 'Failed to execute rcon', detail:err.message, life: 10000});
+    if (err instanceof Error) {
+      toast.add({severity: 'error', summary: 'Failed to execute rcon', detail: err.message, life: 10000});
+    }
   }
 }
 const isExecuting = computed(() => rconStore.isExecuting)

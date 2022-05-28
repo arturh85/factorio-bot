@@ -43,6 +43,7 @@ import {useInstanceStore} from '@/store/instanceStore';
 import {computed, onBeforeUpdate, onMounted, ref} from 'vue';
 import {onBeforeRouteLeave} from 'vue-router';
 import {useToast} from 'primevue/usetoast';
+import {DashboardMenu} from "@/models/dashboard";
 
 const layoutMode = ref('static')
 const layoutColorMode = ref('dark')
@@ -62,7 +63,7 @@ const menu = ref([
       // {label: 'Instances', icon: 'pi pi-fw pi-circle-off', to: '/instances'},
       // {label: 'REST API Docs', icon: 'pi pi-fw pi-question-circle', to: '/restApiDocss'},
       // {label: 'LUA API Docs', icon: 'pi pi-fw pi-question-circle', to: '/luaApiDocss'}
-    ]
+    ] as DashboardMenu[]
 )
 
 onBeforeRouteLeave(() => {
@@ -177,14 +178,14 @@ onMounted(async () => {
   await appStore.maximizeWindow()
   const settings = await appStore.loadSettings()
   if (settings) {
-    if (settings.enable_restapi) {
+    if (settings.gui.enable_restapi) {
       const restApiStore = useRestApiStore()
       await restApiStore.init()
       if (!restApiStore.started) {
         await restApiStore.startRestApi()
       }
     }
-    if (!started && settings.enable_autostart) {
+    if (!started && settings.gui.enable_autostart) {
       await instanceStore.startInstances();
     }
   }

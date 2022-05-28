@@ -19,11 +19,9 @@ export const useAppStore = defineStore({
         return null
       }
     },
-    getRecreateLevel(): boolean | null {
+    getRecreateLevel(): boolean | undefined {
       if (this.settings) {
         return this.settings.factorio.recreate
-      } else {
-        return null
       }
     },
     getEnableRestapi(): boolean | null {

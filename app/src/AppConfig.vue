@@ -94,7 +94,7 @@ const d_layoutColorMode = ref(props.layoutColorMode)
 
 const outsideClickListener = ref(null as any)
 
-function toggleConfigurator(event: CustomEvent<void>) {
+function toggleConfigurator(event: Event) {
   active.value = !active.value;
   event.preventDefault();
 
@@ -104,7 +104,7 @@ function toggleConfigurator(event: CustomEvent<void>) {
     unbindOutsideClickListener();
 }
 
-function hideConfigurator(event: CustomEvent<void>) {
+function hideConfigurator(event: Event) {
   active.value = false;
   unbindOutsideClickListener();
   event.preventDefault();
@@ -121,12 +121,12 @@ function changeRipple() {
 }
 
 const emit = defineEmits(['layout-change', 'layout-color-change']);
-function changeLayout(event: CustomEvent<void>, layoutMode: string) {
+function changeLayout(event: Event, layoutMode: string) {
   emit('layout-change', layoutMode);
   event.preventDefault();
 }
 
-function changeLayoutColor(event: CustomEvent<void>, layoutColor: string) {
+function changeLayoutColor(event: Event, layoutColor: string) {
   emit('layout-color-change', layoutColor);
   event.preventDefault();
 }

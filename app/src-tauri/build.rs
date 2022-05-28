@@ -1,7 +1,7 @@
 use factorio_bot_core::settings::*;
 use factorio_bot_core::types::*;
 
-#[cfg(feature = "factorio_bot_restapi")]
+#[cfg(feature = "rest")]
 use factorio_bot_restapi::settings::RestApiSettings;
 use std::fs;
 use typescript_definitions::TypeScriptifyTrait;
@@ -57,8 +57,7 @@ fn typescriptify() {
   output += &FactorioResult::type_script_ify();
   output += &PrimeVueTreeNode::type_script_ify();
   output += &FactorioSettings::type_script_ify();
-  #[cfg(feature = "factorio_bot_restapi")]
-  {
+  if cfg!(feature = "rest") {
     output += &RestApiSettings::type_script_ify();
   }
 

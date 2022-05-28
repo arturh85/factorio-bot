@@ -5,7 +5,7 @@
 )]
 use crate::settings::AppSettings;
 use factorio_bot_core::process::process_control::InstanceState;
-#[cfg(feature = "factorio_bot_restapi")]
+#[cfg(feature = "rest")]
 use factorio_bot_restapi::webserver::start;
 use miette::Result;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ pub async fn start_restapi(
   instance_state: State<'_, Arc<RwLock<Option<InstanceState>>>>,
   restapi_handle: State<'_, RwLock<Option<JoinHandle<Result<()>>>>>,
 ) -> Result<(), String> {
-  #[cfg(feature = "factorio_bot_restapi")]
+  #[cfg(feature = "rest")]
   {
     if restapi_handle.read().await.is_some() {
       return Result::Err("already started".into());

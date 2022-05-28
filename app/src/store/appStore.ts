@@ -40,7 +40,7 @@ export const useAppStore = defineStore({
     },
     getRestapiPort(): number | null {
       if (this.settings) {
-        return this.settings.restapi.port
+        return this.settings.restapi?.port
       } else {
         return null
       }
@@ -127,11 +127,13 @@ export const useAppStore = defineStore({
     async updateRestapiPort(restapiPort: number) {
       if (this.settings !== null) {
         const restApiStore = useRestApiStore()
-        const changed = this.settings.restapi.port != restapiPort
+        const changed = this.settings.restapi?.port != restapiPort
         if (changed && (restApiStore.starting || restApiStore.started)) {
           await restApiStore.stopRestApi()
         }
-        this.settings.restapi.port = restapiPort
+        if (this.settings.restapi) {
+          this.settings.restapi.port = restapiPort
+        }
         await this._updateSettings()
         if (changed) {
           await restApiStore.startRestApi()

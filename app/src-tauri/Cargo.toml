@@ -42,6 +42,7 @@ serde = { version = "^1.0", features = [ "derive" ] }
 
 [features]
 default = ["gui", "rest"]
+custom-protocol = []
 gui = ["tauri/custom-protocol", "tauri", "tauri-build"]
 rest = ["factorio-bot-restapi"]
 

@@ -57,7 +57,8 @@ fn typescriptify() {
   output += &FactorioResult::type_script_ify();
   output += &PrimeVueTreeNode::type_script_ify();
   output += &FactorioSettings::type_script_ify();
-  if cfg!(feature = "rest") {
+  #[cfg(feature = "rest")]
+  {
     output += &RestApiSettings::type_script_ify();
   }
 

@@ -1,22 +1,21 @@
-use factorio_bot_core::settings::*;
-use factorio_bot_core::types::*;
-
-#[cfg(feature = "rest")]
-use factorio_bot_restapi::settings::RestApiSettings;
-use std::fs;
-use typescript_definitions::TypeScriptifyTrait;
-
-const TYPESCRIPT_SETTINGS_PATH: &str = "../src/models/types.ts";
-
 fn main() {
-  typescriptify();
   #[cfg(feature = "gui")]
   {
+    typescriptify();
     tauri_build::build();
   }
 }
 
+#[cfg(feature = "gui")]
 fn typescriptify() {
+  const TYPESCRIPT_SETTINGS_PATH: &str = "../src/models/types.ts";
+
+  use factorio_bot_core::settings::*;
+  use factorio_bot_core::types::*;
+  use factorio_bot_restapi::settings::RestApiSettings;
+  use std::fs;
+  use typescript_definitions::TypeScriptifyTrait;
+
   let existing =
     std::fs::read_to_string(TYPESCRIPT_SETTINGS_PATH).expect("types.ts does not exist?");
   let lines: Vec<&str> = existing.split('\n').collect();

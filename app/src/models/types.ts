@@ -154,4 +154,3 @@ export type FactorioItemPrototype = { name: string; itemType: string; stackSize:
 export type FactorioResult = { success: boolean; output: string [] };
 export type PrimeVueTreeNode = { key: string; label: string; leaf: boolean; children: PrimeVueTreeNode [] };
 export type FactorioSettings = { client_count: number; factorio_archive_path: string; map_exchange_string: string; rcon_pass: string; rcon_port: number; recreate: boolean; restapi_port: number; seed: string; workspace_path: string };
-export type RestApiSettings = { port: number };

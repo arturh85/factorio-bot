@@ -1,5 +1,7 @@
 use factorio_bot_core::settings::*;
 use factorio_bot_core::types::*;
+
+#[cfg(feature = "factorio_bot_restapi")]
 use factorio_bot_restapi::settings::RestApiSettings;
 use std::fs;
 use typescript_definitions::TypeScriptifyTrait;
@@ -8,7 +10,10 @@ const TYPESCRIPT_SETTINGS_PATH: &str = "../src/models/types.ts";
 
 fn main() {
   typescriptify();
-  tauri_build::build();
+  #[cfg(feature = "gui")]
+  {
+    tauri_build::build();
+  }
 }
 
 fn typescriptify() {
@@ -52,7 +57,10 @@ fn typescriptify() {
   output += &FactorioResult::type_script_ify();
   output += &PrimeVueTreeNode::type_script_ify();
   output += &FactorioSettings::type_script_ify();
-  output += &RestApiSettings::type_script_ify();
+  #[cfg(feature = "factorio_bot_restapi")]
+  {
+    output += &RestApiSettings::type_script_ify();
+  }
 
   output = output.replace("DateTime<Utc>", "String");
   output = output.replace("DateTime<    Utc>", "String");

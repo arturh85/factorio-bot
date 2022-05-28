@@ -18,10 +18,10 @@ config = "^0.13"
 typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"] }
 tokio = { version = "^1.18", features = ["full", "tracing"] }
 factorio-bot-core = { path = "../../crates/core" }
-factorio-bot-restapi = { path = "../../crates/restapi" }
+factorio-bot-restapi = { path = "../../crates/restapi", optional = true }
 factorio-bot-lua = { path = "../../crates/lua" }
 serde = { version = "^1.0", features = [ "derive" ] }
-tauri = { version = "1.0.0-rc.14", features = ["api-all"] }
+tauri = { version = "1.0.0-rc.14", features = ["api-all"], optional = true }
 toml = "^0.5"
 clap = "^3.1"
 open = "^2.1"
@@ -36,13 +36,15 @@ console-subscriber = "^0.1"
 [build-dependencies]
 typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"] }
 factorio-bot-core = { path = "../../crates/core" }
-factorio-bot-restapi = { path = "../../crates/restapi" }
-tauri-build = { version = "1.0.0-rc.12", features = [] }
+factorio-bot-restapi = { path = "../../crates/restapi", optional = true }
+tauri-build = { version = "1.0.0-rc.12", features = [], optional = true }
 serde = { version = "^1.0", features = [ "derive" ] }
 
 [features]
-default = [ "custom-protocol" ]
-custom-protocol = [ "tauri/custom-protocol" ]
+default = ["gui", "rest"]
+gui = ["tauri/custom-protocol", "tauri", "tauri-build"]
+rest = ["factorio-bot-restapi"]
+
 
 [[bin]]
 name = "factorio-bot"

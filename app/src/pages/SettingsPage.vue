@@ -114,13 +114,16 @@ async function selectFactorioArchivePath() {
 
 async function testIsWorkspacePathValid(path: string) {
   if (await appStore.fileExists(path)) {
-    try {
-      await readDir(path);
-      return true
-    } catch (err) {
-      return false
-    }
+    // try {
+    //   await readDir(path)
+    //   return true
+    // } catch (err) {
+    //   console.error('testIsWorkspacePathValid failed for', path, 'because of:', err)
+    //   return false
+    // }
+    return true
   } else {
+    console.error('testIsWorkspacePathValid failed for', path, 'because it does not exist')
     return false
   }
 }

@@ -11,10 +11,7 @@
     "types": [
       "vitest/globals",
       "vite/client",
-      "vue",
-      "vuetify",
-      "@types/lodash.cloneDeep",
-      "@types/googlemaps"
+      "vue"
     ],
     "plugins": [{ "name": "@vuedx/typescript-plugin-vue" }],
     "resolveJsonModule": true,

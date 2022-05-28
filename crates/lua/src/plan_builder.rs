@@ -1,7 +1,7 @@
 use factorio_bot_core::errors::PlayerMissingItem;
-use factorio_bot_core::factorio::task_graph::{MineTarget, PositionRadius, TaskGraph};
 use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::graph::task_graph::{MineTarget, PositionRadius, TaskGraph};
 use factorio_bot_core::types::{
     FactorioEntity, FactorioPlayer, PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent,
     Position,

@@ -4,8 +4,8 @@
   clippy::cast_sign_loss
 )]
 use crate::constants;
+use crate::settings::AppSettings;
 use factorio_bot_core::process::process_control::{start_factorio, InstanceState};
-use factorio_bot_core::settings::AppSettings;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State, Wry};
 use tokio::sync::RwLock;
@@ -24,14 +24,14 @@ pub async fn start_instances(
   let workspace_path = constants::app_workspace_path();
   std::fs::create_dir_all(&workspace_path).map_err(|e| String::from("error: ") + &e.to_string())?;
 
-  let map_exchange_string = app_settings.map_exchange_string.to_string();
-  let seed = app_settings.seed.to_string();
+  let map_exchange_string = app_settings.factorio.map_exchange_string.to_string();
+  let seed = app_settings.factorio.seed.to_string();
 
   let started_instance_state = start_factorio(
-    &app_settings,
+    &app_settings.factorio,
     None,
-    app_settings.client_count as u8,
-    app_settings.recreate,
+    app_settings.factorio.client_count as u8,
+    app_settings.factorio.recreate,
     if map_exchange_string.is_empty() {
       None
     } else {

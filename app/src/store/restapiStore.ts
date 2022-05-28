@@ -37,7 +37,7 @@ export const useRestApiStore = defineStore({
                 throw new Error('already started')
             }
             const appStore = useAppStore()
-            this.portAvailable = await invoke('is_port_available', {port: appStore.settings?.restapi_port })
+            this.portAvailable = await invoke('is_port_available', {port: appStore.settings?.restapi.port })
             if (!this.portAvailable) {
                 return
             }

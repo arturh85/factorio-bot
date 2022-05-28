@@ -6,12 +6,14 @@
 #[macro_use]
 extern crate paris;
 
+mod cli;
 mod commands;
 mod constants;
+mod settings;
 
-use factorio_bot::cli::handle_cli;
+use crate::cli::handle_cli;
+use crate::settings::AppSettings;
 use factorio_bot_core::process::process_control::InstanceState;
-use factorio_bot_core::settings::AppSettings;
 use miette::{IntoDiagnostic, Result};
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -20,9 +22,9 @@ use tokio::task::JoinHandle;
 
 fn app_settings() -> Result<AppSettings> {
   let mut app_settings = AppSettings::load(constants::app_settings_path())?;
-  if app_settings.workspace_path == "" {
+  if app_settings.factorio.workspace_path == "" {
     let s: String = constants::app_workspace_path().to_str().unwrap().into();
-    app_settings.workspace_path = Cow::from(s);
+    app_settings.factorio.workspace_path = Cow::from(s);
   }
   Ok(app_settings)
 }

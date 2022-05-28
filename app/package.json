@@ -6,7 +6,7 @@
     "start": "npm run tauri:serve",
     "test:unit": "vitest",
     "test:coverage": "vitest run --coverage",
-    "lint": "eslint",
+    "lint": "tsc --noEmit && eslint src/",
     "serve": "vite --port 8080",
     "native:serve": "cross-env VITE_HTTP_HANDLER=NATIVE vite --port 8080",
     "native:start": "tauri dev",
@@ -23,12 +23,12 @@
     "cargo:docs": "cd .. && cargo doc --all --no-deps && cd docs && mdbook watch",
     "changelog:install": "cargo install git-cliff",
     "changelog:update": "cd .. && git cliff --output CHANGELOG.md",
-    "deps:update": "npm-check-updates -u && yarn && npm run cargo:update",
     "version:update-from-cargo": "node update-package-version.js",
     "checksum:update": "node update-checksum.js",
     "dummy": "true"
   },
   "dependencies": {
+    "@babel/types": "^7.18.2",
     "@tauri-apps/api": "1.0.0-rc.6",
     "ansi-html": "0.0.9",
     "pinia": "2.0.14",

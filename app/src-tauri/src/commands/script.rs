@@ -1,7 +1,7 @@
 #![allow(clippy::module_name_repetitions)]
 use crate::commands::ERR_TO_STRING;
+use crate::settings::AppSettings;
 use factorio_bot_core::process::process_control::InstanceState;
-use factorio_bot_core::settings::AppSettings;
 use factorio_bot_core::types::PrimeVueTreeNode;
 use factorio_bot_lua::planner::Planner;
 use std::path::{Path, PathBuf};
@@ -22,10 +22,10 @@ pub async fn execute_script(
       let world = world.clone();
       let rcon = instance_state.rcon.clone();
       let mut planner = Planner::new(world, Some(rcon));
-      let bot_count = app_settings.read().await.client_count as u32;
 
       let app_settings = &app_settings.read().await;
-      let workspace_path = app_settings.workspace_path.to_string();
+      let bot_count = app_settings.factorio.client_count as u32;
+      let workspace_path = app_settings.factorio.workspace_path.to_string();
       let workspace_path = Path::new(&workspace_path);
       let workspace_plans_path = prepare_workspace_scripts(workspace_path)?;
       if path.contains("..") {
@@ -66,7 +66,7 @@ pub async fn execute_code(
       let world = world.clone();
       let rcon = instance_state.rcon.clone();
       let mut planner = Planner::new(world, Some(rcon));
-      let bot_count = app_settings.read().await.client_count as u32;
+      let bot_count = app_settings.read().await.factorio.client_count as u32;
       let (stdout, stderr) = std::thread::spawn(move || planner.plan(lua_code, bot_count))
         .join()
         .unwrap()
@@ -84,7 +84,7 @@ pub async fn load_scripts_in_directory(
   path: String,
 ) -> Result<Vec<PrimeVueTreeNode>, String> {
   let app_settings = &app_settings.read().await;
-  let workspace_path = app_settings.workspace_path.to_string();
+  let workspace_path = app_settings.factorio.workspace_path.to_string();
   let workspace_path = Path::new(&workspace_path);
   let workspace_plans_path = prepare_workspace_scripts(workspace_path)?;
 
@@ -132,7 +132,7 @@ pub async fn load_script(
   path: String,
 ) -> Result<String, String> {
   let app_settings = &app_settings.read().await;
-  let workspace_path = app_settings.workspace_path.to_string();
+  let workspace_path = app_settings.factorio.workspace_path.to_string();
   let workspace_path = Path::new(&workspace_path);
   let workspace_plans_path = prepare_workspace_scripts(workspace_path)?;
   if path.contains("..") {

@@ -4,7 +4,7 @@ use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::process::instance_setup::setup_factorio_instance;
 use factorio_bot_core::process::process_control::{start_factorio_server, FactorioStartCondition};
-use factorio_bot_core::settings::AppSettings;
+use factorio_bot_core::settings::FactorioSettings;
 use factorio_bot_core::types::{AreaFilter, FactorioEntity, Position};
 use miette::{IntoDiagnostic, Result};
 use std::cmp::Ordering;
@@ -23,7 +23,7 @@ pub enum RollSeedLimit {
 }
 
 pub async fn roll_seed(
-    settings: AppSettings,
+    settings: FactorioSettings,
     map_exchange_string: String,
     limit: RollSeedLimit,
     parallel: u8,

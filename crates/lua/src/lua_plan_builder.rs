@@ -1,6 +1,6 @@
 use crate::plan_builder::PlanBuilder;
-use factorio_bot_core::factorio::task_graph::{PositionRadius, TaskGraph};
 use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::graph::task_graph::{PositionRadius, TaskGraph};
 use factorio_bot_core::types::Position;
 use parking_lot::RwLock;
 use rlua::{Context, Table};

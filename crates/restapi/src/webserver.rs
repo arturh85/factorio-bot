@@ -1,5 +1,5 @@
+use crate::settings::RestApiSettings;
 use factorio_bot_core::process::process_control::InstanceState;
-use factorio_bot_core::settings::AppSettings;
 use miette::Result;
 use rocket::data::{Limits, ToByteUnit};
 use rocket::http::Status;
@@ -27,15 +27,16 @@ fn index() -> Html<&'static str> {
 }
 
 pub async fn start(
-    app_settings: Arc<RwLock<AppSettings>>,
+    settings: RestApiSettings,
     instance_state: Arc<RwLock<Option<InstanceState>>>,
 ) -> Result<()> {
-    let port = app_settings.read().await.restapi_port;
+    println!("starting restapi");
+    let port = settings.port;
     let figment = rocket::Config::figment()
         .merge(("port", port))
         .merge(("limits", Limits::new().limit("json", 2.mebibytes())));
     rocket::custom(figment)
-        .manage(app_settings)
+        .manage(Arc::new(RwLock::new(settings)))
         .manage(instance_state)
         .mount("/", rocket::routes![index])
         .mount(

@@ -27,4 +27,6 @@ pub mod factorio;
 pub mod graph;
 pub mod process;
 pub mod settings;
+// #[cfg(test)] not possible because lua crate needs this
+pub mod test_utils;
 pub mod types;

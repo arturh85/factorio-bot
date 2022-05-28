@@ -34,7 +34,7 @@ export const useInstanceStore = defineStore({
                 throw new Error('already started')
             } else {
                 const appStore = useAppStore()
-                if (!appStore.settings?.factorio_archive_path) {
+                if (!appStore.settings?.factorio.factorio_archive_path) {
                     throw new Error('please set factorio archieve path under settings first')
                 }
             }

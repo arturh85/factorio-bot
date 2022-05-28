@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import {computed} from 'vue';
-import * as ansiHTML from 'ansi-html';
+import ansiHTML from 'ansi-html';
 import {useScriptStore} from '@/store/scriptStore';
 import {useToast} from 'primevue/usetoast';
 import ScriptTree from '@/components/ScriptTree.vue'

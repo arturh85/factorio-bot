@@ -1,13 +1,12 @@
 #![allow(clippy::module_name_repetitions)]
 use crate::commands::ERR_TO_STRING;
 use crate::constants::app_settings_path;
-use factorio_bot_core::settings::AppSettings;
+use crate::settings::AppSettings;
 use std::sync::Arc;
 use tauri::State;
 use tokio::sync::RwLock;
 
 #[tauri::command]
-
 pub async fn load_settings(
   app_settings: State<'_, Arc<RwLock<AppSettings>>>,
 ) -> Result<AppSettings, String> {

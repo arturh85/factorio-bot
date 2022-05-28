@@ -9,11 +9,11 @@ use crate::lua_rcon::create_lua_rcon;
 use crate::lua_world::create_lua_world;
 
 use factorio_bot_core::factorio::rcon::{FactorioRcon, RconSettings};
-use factorio_bot_core::factorio::task_graph::TaskGraph;
 use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::graph::task_graph::TaskGraph;
 use factorio_bot_core::process::instance_setup::setup_factorio_instance;
 use factorio_bot_core::process::process_control::{start_factorio_server, FactorioStartCondition};
-use factorio_bot_core::settings::AppSettings;
+use factorio_bot_core::settings::FactorioSettings;
 use factorio_bot_core::types::{EntityName, PlayerChangedMainInventoryEvent};
 use gag::BufferRedirect;
 use itertools::Itertools;
@@ -131,7 +131,7 @@ impl Planner {
 }
 
 pub async fn start_factorio_and_plan_graph(
-    settings: AppSettings,
+    settings: FactorioSettings,
     map_exchange_string: Option<String>,
     seed: Option<String>,
     plan_name: &str,
@@ -310,7 +310,7 @@ pub fn execute_plan(
 
 #[cfg(test)]
 mod tests {
-    use factorio_bot_core::factorio::tests::{draw_world, fixture_world};
+    use factorio_bot_core::test_utils::{draw_world, fixture_world};
 
     use super::*;
 

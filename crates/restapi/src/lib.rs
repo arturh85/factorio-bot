@@ -1,5 +1,6 @@
 pub mod error;
 pub mod rest_api;
+pub mod settings;
 pub mod webserver;
 
 extern crate miette;

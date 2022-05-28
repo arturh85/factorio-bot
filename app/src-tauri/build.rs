@@ -1,5 +1,6 @@
 use factorio_bot_core::settings::*;
 use factorio_bot_core::types::*;
+use factorio_bot_restapi::settings::RestApiSettings;
 use std::fs;
 use typescript_definitions::TypeScriptifyTrait;
 
@@ -50,7 +51,8 @@ fn typescriptify() {
   output += &FactorioItemPrototype::type_script_ify();
   output += &FactorioResult::type_script_ify();
   output += &PrimeVueTreeNode::type_script_ify();
-  output += &AppSettings::type_script_ify();
+  output += &FactorioSettings::type_script_ify();
+  output += &RestApiSettings::type_script_ify();
 
   output = output.replace("DateTime<Utc>", "String");
   output = output.replace("DateTime<    Utc>", "String");

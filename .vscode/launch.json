@@ -101,6 +101,25 @@
         {
             "type": "lldb",
             "request": "launch",
+            "name": "Debug unit tests in library 'factorio-bot-lua'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=factorio-bot-lua"
+                ],
+                "filter": {
+                    "name": "factorio-bot-lua",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
             "name": "Debug unit tests in library 'factorio-bot-restapi'",
             "cargo": {
                 "args": [

@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use factorio_bot_core::constants::WORKSPACE_FOLDERNAME;
+use std::path::PathBuf;
 
 pub const APP_SETTINGS_FILENAME: &str = "AppSettings.toml";
 

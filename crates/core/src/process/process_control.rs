@@ -5,7 +5,7 @@ use crate::factorio::world::FactorioWorld;
 use crate::process::arrange_windows::arrange_windows;
 use crate::process::instance_setup::setup_factorio_instance;
 use crate::process::output_reader::read_output;
-use crate::settings::AppSettings;
+use crate::settings::FactorioSettings;
 use miette::{IntoDiagnostic, Result};
 use paris::Logger;
 use std::fs::File;
@@ -29,7 +29,7 @@ pub struct InstanceState {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn start_factorio(
-    settings: &AppSettings,
+    settings: &FactorioSettings,
     server_host: Option<&str>,
     client_count: u8,
     recreate: bool,
@@ -326,7 +326,7 @@ pub fn report_child_death(mut child: Child) -> JoinHandle<ExitStatus> {
 }
 
 pub async fn start_factorio_client(
-    settings: &AppSettings,
+    settings: &FactorioSettings,
     instance_name: String,
     server_host: Option<&str>,
     write_logs: bool,

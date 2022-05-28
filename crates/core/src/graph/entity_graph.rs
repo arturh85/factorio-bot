@@ -6,10 +6,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use aabb_quadtree::{ItemId, QuadTree};
-use parking_lot::{RwLock, RwLockReadGuard};
 use dashmap::DashMap;
 use euclid::{TypedPoint2D, TypedRect, TypedSize2D};
 use factorio_blueprint::{BlueprintCodec, Container};
+use parking_lot::{RwLock, RwLockReadGuard};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableGraph;
 use petgraph::visit::{Bfs, EdgeRef};
@@ -168,11 +168,7 @@ impl EntityGraph {
         patches
     }
 
-    pub fn add_tiles(
-        &self,
-        tiles: Vec<FactorioTile>,
-        _clear_rect: Option<Rect>,
-    ) -> Result<()> {
+    pub fn add_tiles(&self, tiles: Vec<FactorioTile>, _clear_rect: Option<Rect>) -> Result<()> {
         let mut tree = self.tile_tree.write();
         let mut blocked = self.blocked_tree.write();
         for tile in tiles {
@@ -207,11 +203,7 @@ impl EntityGraph {
         self.add(entities, None)
     }
 
-    pub fn add(
-        &self,
-        entities: Vec<FactorioEntity>,
-        _clear_rect: Option<Rect>,
-    ) -> Result<()> {
+    pub fn add(&self, entities: Vec<FactorioEntity>, _clear_rect: Option<Rect>) -> Result<()> {
         let mut resource_tree = self.resource_tree.write();
         for entity in &entities {
             if entity.entity_type == EntityType::Resource.to_string() {
@@ -956,7 +948,7 @@ pub type ResourceQuadTree = QuadTree<String, Rect, [(ItemId, QuadTreeRect); 4]>;
 
 #[cfg(test)]
 mod tests {
-    use crate::factorio::tests::entity_graph_from;
+    use crate::test_utils::entity_graph_from;
 
     use super::*;
 

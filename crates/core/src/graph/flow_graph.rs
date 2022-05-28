@@ -679,7 +679,7 @@ pub type FlowQuadTree = QuadTree<NodeIndex, Rect, [(ItemId, QuadTreeRect); 4]>;
 
 #[cfg(test)]
 mod tests {
-    use crate::factorio::tests::entity_graph_from;
+    use crate::test_utils::entity_graph_from;
 
     use super::*;
 

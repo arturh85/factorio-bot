@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import {AppSettings} from '@/models/types';
+import {AppSettings} from '@/models/settings';
 import {invoke} from '@tauri-apps/api/tauri';
 import {useRestApiStore} from '@/store/restapiStore';
 
@@ -14,63 +14,63 @@ export const useAppStore = defineStore({
     },
     getWorkspacePath(): string | null {
       if (this.settings) {
-        return this.settings.workspace_path
+        return this.settings.factorio.workspace_path
       } else {
         return null
       }
     },
     getRecreateLevel(): boolean | null {
       if (this.settings) {
-        return this.settings.recreate
+        return this.settings.factorio.recreate
       } else {
         return null
       }
     },
     getEnableRestapi(): boolean | null {
       if (this.settings) {
-        return this.settings.enable_restapi
+        return this.settings.gui.enable_restapi
       } else {
         return null
       }
     },
     getEnableAutostart(): boolean | null {
       if (this.settings) {
-        return this.settings.enable_autostart
+        return this.settings.gui.enable_autostart
       } else {
         return null
       }
     },
     getRestapiPort(): number | null {
       if (this.settings) {
-        return this.settings.restapi_port
+        return this.settings.restapi.port
       } else {
         return null
       }
     },
     getFactorioArchivePath(): string | null {
       if (this.settings) {
-        return this.settings.factorio_archive_path
+        return this.settings.factorio.factorio_archive_path
       } else {
         return null
       }
     },
     getClientCount(): number | null {
       if (this.settings) {
-        return this.settings.client_count
+        return this.settings.factorio.client_count
       } else {
         return null
       }
     },
     getMapExchangeString(): string | null {
       if (this.settings) {
-        return this.settings.map_exchange_string
+        return this.settings.factorio.map_exchange_string
       } else {
         return null
       }
     },
     getSeed(): string | null {
       if (this.settings) {
-        return this.settings.seed
+        return this.settings.factorio.seed
       } else {
         return null
       }
@@ -92,48 +92,48 @@ export const useAppStore = defineStore({
     },
     async updateWorkspacePath(workspacePath: string) {
       if (this.settings !== null) {
-        this.settings.workspace_path = workspacePath
+        this.settings.factorio.workspace_path = workspacePath
         await this._updateSettings()
       }
     },
     async updateFactorioArchivePath(factorioArchivePath: string) {
       if (this.settings !== null) {
-        this.settings.factorio_archive_path = factorioArchivePath
+        this.settings.factorio.factorio_archive_path = factorioArchivePath
         await this._updateSettings()
       }
     },
     async updateRecreateLevel(recreateLevel: boolean) {
       if (this.settings !== null) {
-        this.settings.recreate = recreateLevel
+        this.settings.factorio.recreate = recreateLevel
         await this._updateSettings()
       }
     },
     async updateEnableRestApi(enableRestapi: boolean) {
       if (this.settings !== null) {
         const restApiStore = useRestApiStore()
-        if (this.settings.enable_restapi && !enableRestapi) {
+        if (this.settings.gui.enable_restapi && !enableRestapi) {
           await restApiStore.stopRestApi()
-        } else if (!this.settings.enable_restapi && enableRestapi) {
+        } else if (!this.settings.gui.enable_restapi && enableRestapi) {
           await restApiStore.startRestApi()
         }
-        this.settings.enable_restapi = enableRestapi
+        this.settings.gui.enable_restapi = enableRestapi
         await this._updateSettings()
       }
     },
     async updateEnableAutostart(enableAutostart: boolean) {
       if (this.settings !== null) {
-        this.settings.enable_autostart = enableAutostart
+        this.settings.gui.enable_autostart = enableAutostart
         await this._updateSettings()
       }
     },
     async updateRestapiPort(restapiPort: number) {
       if (this.settings !== null) {
         const restApiStore = useRestApiStore()
-        const changed = this.settings.restapi_port != restapiPort
+        const changed = this.settings.restapi.port != restapiPort
         if (changed && (restApiStore.starting || restApiStore.started)) {
           await restApiStore.stopRestApi()
         }
-        this.settings.restapi_port = restapiPort
+        this.settings.restapi.port = restapiPort
         await this._updateSettings()
         if (changed) {
           await restApiStore.startRestApi()
@@ -145,19 +145,19 @@ export const useAppStore = defineStore({
     },
     async updateClientCount(clientCount: number) {
       if (this.settings !== null) {
-        this.settings.client_count = clientCount
+        this.settings.factorio.client_count = clientCount
         await this._updateSettings()
       }
     },
     async updateMapExchangeString(maxExchangeString: string) {
       if (this.settings !== null) {
-        this.settings.map_exchange_string = maxExchangeString
+        this.settings.factorio.map_exchange_string = maxExchangeString
         await this._updateSettings()
       }
     },
     async updateSeed(seed: string) {
       if (this.settings !== null) {
-        this.settings.seed = seed
+        this.settings.factorio.seed = seed
         await this._updateSettings()
       }
     }

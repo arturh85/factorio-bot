@@ -1,7 +1,8 @@
 use clap::{Arg, Command};
 use factorio_bot_core::process::process_control::start_factorio;
-use factorio_bot_core::settings::APP_SETTINGS_DEFAULT;
+use factorio_bot_core::settings::FACTORIO_SETTINGS_DEFAULT;
 
+#[allow(clippy::module_name_repetitions, clippy::too_many_lines)]
 pub async fn handle_cli() {
   let matches = Command::new("factorio-bot")
     .version(env!("CARGO_PKG_VERSION"))
@@ -159,7 +160,7 @@ pub async fn handle_cli() {
     // let websocket_server = FactorioWebSocketServer { listeners: vec![] }.start();
 
     let instance_state = start_factorio(
-      &APP_SETTINGS_DEFAULT,
+      &FACTORIO_SETTINGS_DEFAULT,
       server_host,
       clients,
       recreate,

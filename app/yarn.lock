@@ -1712,10 +1712,10 @@ rollup-plugin-visualizer@5.6.0:
     source-map "^0.7.3"
     yargs "^17.3.1"
 
-rollup@2.75.2:
-  version "2.75.2"
-  resolved "https://registry.yarnpkg.com/rollup/-/rollup-2.75.2.tgz#ffea7f4d5f5724093c46b4bf735a5dfa191092f7"
-  integrity sha512-0bBYRpkC5CSYii46y8BJ38IGVjz7cx0xoJZ44o/QPlpBtkdl1/pRhbD7/A+sX4Zf9X1fu0mBxFo76GZmy/4bFw==
+rollup@2.75.3:
+  version "2.75.3"
+  resolved "https://registry.yarnpkg.com/rollup/-/rollup-2.75.3.tgz#11bd3e8ace526911feea8af17f2a286fbfdb4cf8"
+  integrity sha512-YA29fLU6MAYSaDxIQYrGGOcbXlDmG96h0krGGYObroezcQ0KgEPM3+7MtKD/qeuUbFuAJXvKZee5dA1dpwq1PQ==
   optionalDependencies:
     fsevents "~2.3.2"
 

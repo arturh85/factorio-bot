@@ -82,6 +82,10 @@ Goals / Use Cases:
 
 - `npm start` starts the application while watching for changes 
 
+## Useful links
+
+- [Factorio Docs: Console](https://wiki.factorio.com/Console)
+
 ## Contribute
 
 Send me your Pull Requests :)

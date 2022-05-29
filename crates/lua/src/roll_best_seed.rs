@@ -23,7 +23,7 @@ pub enum RollSeedLimit {
 }
 
 pub async fn roll_seed(
-    settings: FactorioSettings,
+    settings: &FactorioSettings,
     map_exchange_string: String,
     limit: RollSeedLimit,
     parallel: u8,
@@ -32,8 +32,8 @@ pub async fn roll_seed(
 ) -> Result<Option<(u32, f64)>> {
     let roll: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
     let best_seed_with_score: Arc<Mutex<Option<(u32, f64)>>> = Arc::new(Mutex::new(None));
-    let workspace_path: Arc<String> = Arc::new(settings.workspace_path.into());
-    let factorio_archive_path: Arc<String> = Arc::new(settings.factorio_archive_path.into());
+    let workspace_path: Arc<String> = Arc::new(settings.workspace_path.to_string());
+    let factorio_archive_path: Arc<String> = Arc::new(settings.factorio_archive_path.to_string());
     let map_exchange_string = Arc::new(map_exchange_string);
 
     let mut join_handles: Vec<JoinHandle<()>> = vec![];

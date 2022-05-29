@@ -1,4 +1,3 @@
-use config::Config;
 use rcon::Connection;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -19,6 +18,7 @@ use crate::factorio::util::{
 };
 use crate::factorio::world::FactorioWorld;
 use crate::num_traits::FromPrimitive;
+use crate::settings::FactorioSettings;
 use crate::types::{
     AreaFilter, Direction, FactorioEntity, FactorioForce, FactorioTile, InventoryResponse, Pos,
     Position, Rect, RequestEntity,
@@ -83,12 +83,10 @@ pub struct RconSettings {
 }
 
 impl RconSettings {
-    pub fn new_from_config(settings: &Config, server_host: Option<&str>) -> RconSettings {
-        let rcon_port: u16 = settings.get("rcon_port").unwrap();
-        let rcon_pass: String = settings.get("rcon_pass").unwrap();
+    pub fn new_from_config(settings: &FactorioSettings, server_host: Option<&str>) -> RconSettings {
         RconSettings {
-            port: rcon_port,
-            pass: rcon_pass,
+            port: settings.rcon_port as u16,
+            pass: settings.rcon_pass.to_string(),
             host: server_host.map(|s| s.into()),
         }
     }

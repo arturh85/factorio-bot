@@ -1,9 +1,10 @@
+use crate::constants;
 use factorio_bot_core::settings::{FactorioSettings, FACTORIO_SETTINGS_DEFAULT};
-
 #[cfg(feature = "rest")]
 use factorio_bot_restapi::settings::{RestApiSettings, RESTAPI_SETTINGS_DEFAULT};
 use miette::{IntoDiagnostic, Result};
 use serde_json::Value;
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 #[allow(clippy::module_name_repetitions)]
@@ -51,6 +52,7 @@ impl AppSettings {
     }
   }
 
+  #[allow(dead_code)]
   pub fn save(file_path: PathBuf, app_settings: &AppSettings) -> Result<()> {
     let file_contents = ::toml::to_string(app_settings).into_diagnostic()?;
     ::std::fs::write(file_path, file_contents).into_diagnostic()?;
@@ -69,4 +71,14 @@ impl AppSettings {
       }
     }
   }
+}
+
+#[allow(clippy::module_name_repetitions)]
+pub fn load_app_settings() -> Result<AppSettings> {
+  let mut app_settings = AppSettings::load(constants::app_settings_path())?;
+  if app_settings.factorio.workspace_path == "" {
+    let s: String = constants::app_workspace_path().to_str().unwrap().into();
+    app_settings.factorio.workspace_path = Cow::from(s);
+  }
+  Ok(app_settings)
 }

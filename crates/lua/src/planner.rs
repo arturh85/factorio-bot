@@ -131,7 +131,7 @@ impl Planner {
 }
 
 pub async fn start_factorio_and_plan_graph(
-    settings: FactorioSettings,
+    settings: &FactorioSettings,
     map_exchange_string: Option<String>,
     seed: Option<String>,
     plan_name: &str,

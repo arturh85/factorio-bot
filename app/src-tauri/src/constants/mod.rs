@@ -4,7 +4,7 @@ use std::path::PathBuf;
 pub const APP_SETTINGS_FILENAME: &str = "AppSettings.toml";
 
 pub fn app_data_dir() -> PathBuf {
-  tauri::api::path::local_data_dir()
+  dirs_next::data_local_dir()
     .expect("no local data directory available")
     .join(format!(
       "{}{}",

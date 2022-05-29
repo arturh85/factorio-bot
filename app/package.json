@@ -27,7 +27,7 @@
     "dummy": "true"
   },
   "dependencies": {
-    "@babel/types": "7.18.2",
+    "@babel/types": "7.18.4",
     "@tauri-apps/api": "1.0.0-rc.6",
     "ansi-html": "0.0.9",
     "pinia": "2.0.14",

@@ -42,7 +42,7 @@ serde = { version = "^1.0", features = [ "derive" ] }
 
 [features]
 default = ["gui", "rest"]
-custom-protocol = []
+custom-protocol = [] # required because of [tauri_cli] Command `cargo  build --features=custom-protocol --release`
 gui = ["tauri/custom-protocol", "tauri", "tauri-build"]
 rest = ["factorio-bot-restapi"]
 

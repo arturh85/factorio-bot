@@ -1,5 +1,5 @@
 use config::Config;
-use rcon::{AsyncStdStream, Connection};
+use rcon::Connection;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::ops::Add;
@@ -24,6 +24,7 @@ use crate::types::{
     Position, Rect, RequestEntity,
 };
 use miette::{IntoDiagnostic, Result};
+use tokio::net::TcpStream;
 use tokio::time::sleep;
 
 const RCON_INTERFACE: &str = "botbridge";
@@ -56,7 +57,7 @@ impl ConnectionManager {
 
 #[async_trait]
 impl bb8::ManageConnection for ConnectionManager {
-    type Connection = rcon::Connection<AsyncStdStream>;
+    type Connection = rcon::Connection<TcpStream>;
     type Error = rcon::Error;
 
     async fn connect(&self) -> Result<Self::Connection, Self::Error> {

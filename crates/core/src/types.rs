@@ -7,7 +7,6 @@ use euclid::{TypedPoint2D, TypedSize2D};
 use factorio_blueprint::objects::Entity;
 use noisy_float::prelude::*;
 use num_traits::ToPrimitive;
-use pathfinding::utils::absdiff;
 use serde_json::Value;
 use typescript_definitions::TypeScriptify;
 
@@ -149,7 +148,7 @@ pub struct Pos(pub i32, pub i32);
 
 impl Pos {
     pub fn distance(&self, other: &Pos) -> u32 {
-        (absdiff(self.0, other.0) + absdiff(self.1, other.1)) as u32
+        (self.0.abs_diff(other.0) + self.1.abs_diff(other.1)) as u32
     }
 }
 

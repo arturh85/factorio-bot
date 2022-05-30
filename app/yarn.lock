@@ -1634,10 +1634,10 @@ prettier@2.6.2:
   resolved "https://registry.yarnpkg.com/prettier/-/prettier-2.6.2.tgz#e26d71a18a74c3d0f0597f55f01fb6c06c206032"
   integrity sha512-PkUpF+qoXTqhOeWL9fu7As8LXsIUZ1WYaJiY/a7McAQzxjk82OF0tibkFXVCDImZtWxbvojFjerkiLb0/q8mew==
 
-primeflex@3.2.0:
-  version "3.2.0"
-  resolved "https://registry.yarnpkg.com/primeflex/-/primeflex-3.2.0.tgz#cccd020294a22962c5d72a7db873648ad35b7f6f"
-  integrity sha512-GjVNrp2k/MbO/vqs0wYUjsM6ejexymbGmtEzFpib5JEuwhL6HVJoxr3tmuAaL8RnOWNOPecVFauF2RqP2UXOhw==
+primeflex@3.2.1:
+  version "3.2.1"
+  resolved "https://registry.yarnpkg.com/primeflex/-/primeflex-3.2.1.tgz#dc557b7e895dd0496a3681fb0d8841d2ddca5abf"
+  integrity sha512-sGDJ4mh2fG19xa1yc4IPGSQ8MUMyu5nU+tYnl27AFuFHhX8XwEA7fWCtWyBbclclVhXtre+Kf9WobWPnfxWAEQ==
 
 primeicons@5.0.0:
   version "5.0.0"

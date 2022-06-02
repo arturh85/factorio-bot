@@ -20,7 +20,8 @@ typescript-definitions = { git = "https://github.com/ufoscout/typescript-definit
 tokio = { version = "^1.18", features = ["full", "tracing"] }
 factorio-bot-core = { path = "../../crates/core" }
 factorio-bot-restapi = { path = "../../crates/restapi", optional = true }
-factorio-bot-lua = { path = "../../crates/lua" }
+factorio-bot-scripting-lua = { path = "../../crates/scripting_lua", optional = true }
+factorio-bot-scripting-rhai = { path = "../../crates/scripting_rhai", optional = true }
 serde = { version = "^1.0", features = [ "derive" ] }
 tauri = { version = "1.0.0-rc.14", features = ["api-all"], optional = true }
 toml = "^0.5"
@@ -34,6 +35,9 @@ thiserror = "^1.0"
 async-trait = "0.1.53"
 parking_lot = "^0.12"
 console-subscriber = "^0.1"
+tui = { version = "0.18", optional = true }
+crossterm = "0.23"
+repl-rs = { version = "0.2.6", optional = true }
 
 [build-dependencies]
 typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"] }
@@ -43,10 +47,13 @@ tauri-build = { version = "1.0.0-rc.12", features = [], optional = true }
 serde = { version = "^1.0", features = [ "derive" ] }
 
 [features]
-default = ["gui", "rest"]
-custom-protocol = [] # required because of [tauri_cli] Command `cargo  build --features=custom-protocol --release`
-gui = ["tauri/custom-protocol", "tauri", "tauri-build"]
-rest = ["factorio-bot-restapi"]
+default = ["gui", "restapi", "lua", "repl"]
+custom-protocol = ["tauri/custom-protocol", "dep:tauri-build"] # required because of [tauri_cli] Command `cargo  build --features=custom-protocol --release`
+gui = ["custom-protocol"]
+restapi = ["factorio-bot-restapi"]
+rhai = ["factorio-bot-scripting-rhai"]
+lua = ["factorio-bot-scripting-lua"]
+repl = ["repl-rs"]
 
 
 [[bin]]

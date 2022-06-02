@@ -3,6 +3,7 @@
   all(not(debug_assertions), target_os = "windows"),
   windows_subsystem = "windows"
 )]
+#[allow(unused_imports)]
 #[macro_use]
 extern crate paris;
 
@@ -10,67 +11,37 @@ mod cli;
 #[cfg(feature = "gui")]
 mod commands;
 mod constants;
+#[cfg(feature = "gui")]
+mod gui;
+#[cfg(feature = "repl")]
+mod repl;
+mod scripting;
 mod settings;
 
 use clap::Command;
 use miette::{IntoDiagnostic, Result};
 
-#[cfg(feature = "gui")]
-#[allow(clippy::items_after_statements)]
-async fn start_gui() -> Result<()> {
-  use crate::settings::load_app_settings;
-  use factorio_bot_core::process::process_control::InstanceState;
-  use std::sync::Arc;
-  use tokio::sync::RwLock;
-  use tokio::task::JoinHandle;
+pub const APP_NAME: &str = "factorio-bot";
+pub const APP_AUTHOR: &str = "Artur Hallmann <arturh@arturh.de>";
+pub const APP_ABOUT: &str = "Bot for Factorio";
 
-  let instance_state: Option<InstanceState> = None;
-  let restapi_handle: Option<JoinHandle<Result<()>>> = None;
-  let app_settings = load_app_settings()?;
-  tauri::Builder::default()
-    .invoke_handler(tauri::generate_handler![
-      crate::commands::is_restapi_started,
-      crate::commands::is_instance_started,
-      crate::commands::is_port_available,
-      crate::commands::load_script,
-      crate::commands::load_scripts_in_directory,
-      crate::commands::execute_rcon,
-      crate::commands::execute_script,
-      crate::commands::execute_code,
-      crate::commands::update_settings,
-      crate::commands::load_settings,
-      crate::commands::save_settings,
-      crate::commands::start_instances,
-      crate::commands::stop_instances,
-      crate::commands::start_restapi,
-      crate::commands::stop_restapi,
-      crate::commands::maximize_window,
-      crate::commands::file_exists,
-      crate::commands::open_in_browser,
-    ])
-    .manage(Arc::new(RwLock::new(app_settings)))
-    .manage(Arc::new(RwLock::new(instance_state)))
-    .manage(RwLock::new(restapi_handle))
-    .run(tauri::generate_context!())
-    .into_diagnostic()
-}
-
+#[allow(unreachable_code, clippy::needless_return)]
 #[tokio::main]
 async fn main() -> Result<()> {
-  color_eyre::install().unwrap();
-  console_subscriber::init();
+  color_eyre::install().unwrap(); // colored panics
+  console_subscriber::init(); // needed for tokio console: https://github.com/tokio-rs/console
   std::fs::create_dir_all(constants::app_data_dir()).into_diagnostic()?;
   std::fs::create_dir_all(constants::app_workspace_path()).into_diagnostic()?;
-  let mut command = Command::new("factorio-bot")
+  let mut app = Command::new(APP_NAME)
     .version(env!("CARGO_PKG_VERSION"))
-    .author("Artur Hallmann <arturh@arturh.de>")
-    .about("Bot for Factorio");
+    .author(APP_AUTHOR)
+    .about(APP_ABOUT);
   let subcommands = cli::subcommands();
   for subcommand in &subcommands {
-    command = command.subcommand(subcommand.build_command());
+    app = app.subcommand(subcommand.build_command());
   }
-  let matches = command.get_matches();
-  for subcommand in subcommands {
+  let matches = app.get_matches();
+  for subcommand in &subcommands {
     if let Some(matches) = matches.subcommand_matches(&subcommand.name()) {
       subcommand.run(matches).await?;
       return Ok(());
@@ -78,12 +49,26 @@ async fn main() -> Result<()> {
   }
   #[cfg(feature = "gui")]
   {
-    start_gui().await.expect("failed to start gui");
-    Ok(())
+    #[cfg(feature = "repl")]
+    {
+      tokio::task::spawn(gui::start());
+      return repl::start();
+    }
+    #[cfg(not(feature = "repl"))]
+    {
+      return gui::start().await;
+    }
   }
   #[cfg(not(feature = "gui"))]
   {
-    info!("you can use -h/--help to list all possible commands");
-    return Err(miette::Error::msg("missing subcommand"));
+    #[cfg(feature = "repl")]
+    {
+      return repl::start();
+    }
+    #[cfg(not(feature = "repl"))]
+    {
+      info!("you can use -h/--help to list all possible commands");
+      return Err(miette::Error::msg("missing subcommand"));
+    }
   }
 }

@@ -5,15 +5,13 @@ use factorio_bot_core::factorio::rcon::{FactorioRcon, RconSettings};
 use factorio_bot_core::settings::FACTORIO_SETTINGS_DEFAULT;
 use miette::Result;
 
-pub struct RollSeed {}
-
-#[allow(dead_code)]
 pub fn build() -> Box<dyn ExecutableCommand> {
-  Box::new(RollSeed {})
+  Box::new(ThisCommand {})
 }
+struct ThisCommand {}
 
 #[async_trait]
-impl ExecutableCommand for RollSeed {
+impl ExecutableCommand for ThisCommand {
   fn name(&self) -> &str {
     "rcon"
   }

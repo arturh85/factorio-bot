@@ -16,8 +16,8 @@ pub use script::*;
 mod rcon;
 pub use rcon::*;
 
-mod rest_api;
-pub use rest_api::*;
+mod restapi;
+pub use restapi::*;
 
 const ERR_TO_STRING: fn(miette::Report) -> String =
   |e| String::from("error: ") + &*format!("{:?}", e);

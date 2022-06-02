@@ -5,15 +5,13 @@ use clap::{Arg, ArgMatches, Command};
 use factorio_bot_core::process::process_control::start_factorio;
 use miette::Result;
 
-struct Start {}
-
-#[allow(dead_code)]
 pub fn build() -> Box<dyn ExecutableCommand> {
-  Box::new(Start {})
+  Box::new(ThisCommand {})
 }
+struct ThisCommand {}
 
 #[async_trait]
-impl ExecutableCommand for Start {
+impl ExecutableCommand for ThisCommand {
   fn name(&self) -> &str {
     "start"
   }

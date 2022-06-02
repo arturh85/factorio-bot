@@ -1,0 +1,15 @@
+[package]
+name = "factorio-bot-scripting-rhai"
+version = "0.2.9"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+factorio-bot-core = { path = "../core" }
+rhai = {version = "1.7.0", features = ["serde"]}
+serde = "^1.0"
+serde_derive = "^1.0"
+serde_json = "^1.0"
+gag = "^1.0"
+miette = {version = "^4.7", features = ["fancy"] }

@@ -1,9 +1,10 @@
 #![allow(clippy::module_name_repetitions)]
 use crate::commands::ERR_TO_STRING;
+use crate::scripting::run_script;
 use crate::settings::AppSettings;
-use factorio_bot_core::process::process_control::InstanceState;
+use factorio_bot_core::plan::planner::Planner;
+use factorio_bot_core::process::process_control::FactorioInstance;
 use factorio_bot_core::types::PrimeVueTreeNode;
-use factorio_bot_lua::planner::Planner;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::State;
@@ -13,7 +14,7 @@ use tokio::sync::RwLock;
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub async fn execute_script(
   app_settings: State<'_, Arc<RwLock<AppSettings>>>,
-  instance_state: State<'_, Arc<RwLock<Option<InstanceState>>>>,
+  instance_state: State<'_, Arc<RwLock<Option<FactorioInstance>>>>,
   path: String,
 ) -> Result<(String, String), String> {
   if let Some(instance_state) = &*instance_state.read().await {
@@ -32,6 +33,14 @@ pub async fn execute_script(
         return Err("invalid path".into());
       }
 
+      let language = match Path::new(&path).extension().unwrap().to_str().unwrap() {
+        "lua" => Some("lua"),
+        "rhai" => Some("rhai"),
+        _ => None,
+      };
+      if language.is_none() {
+        return Err("unknown scripting file extension".into());
+      }
       let path = PathBuf::from(&path[1..]);
       let dir_path = workspace_plans_path.join(&path);
       if !dir_path.exists() {
@@ -40,12 +49,12 @@ pub async fn execute_script(
       if !dir_path.is_file() {
         return Err("path not directory".into());
       }
-      let lua_code =
-        std::fs::read_to_string(dir_path).map_err(|e| String::from("error: ") + &e.to_string())?;
-      let (stdout, stderr) = std::thread::spawn(move || planner.plan(lua_code, bot_count))
-        .join()
-        .map_err(|e| String::from("error: ") + &*format!("{:?}", e))?
-        .map_err(ERR_TO_STRING)?;
+      let code = std::fs::read_to_string(dir_path).map_err(|e| format!("error: {}", e))?;
+      let (stdout, stderr) =
+        std::thread::spawn(move || run_script(&mut planner, language.unwrap(), &code, bot_count))
+          .join()
+          .map_err(|e| format!("error: {:?}", e))?
+          .map_err(ERR_TO_STRING)?;
       return Ok((stdout, stderr));
     }
   }
@@ -57,8 +66,9 @@ pub async fn execute_script(
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub async fn execute_code(
   app_settings: State<'_, Arc<RwLock<AppSettings>>>,
-  instance_state: State<'_, Arc<RwLock<Option<InstanceState>>>>,
-  lua_code: String,
+  instance_state: State<'_, Arc<RwLock<Option<FactorioInstance>>>>,
+  language: String,
+  code: String,
 ) -> Result<(String, String), String> {
   if let Some(instance_state) = &*instance_state.read().await {
     if let Some(world) = &instance_state.world {
@@ -67,10 +77,11 @@ pub async fn execute_code(
       let rcon = instance_state.rcon.clone();
       let mut planner = Planner::new(world, Some(rcon));
       let bot_count = app_settings.read().await.factorio.client_count as u32;
-      let (stdout, stderr) = std::thread::spawn(move || planner.plan(lua_code, bot_count))
-        .join()
-        .unwrap()
-        .unwrap();
+      let (stdout, stderr) =
+        std::thread::spawn(move || run_script(&mut planner, &language, &code, bot_count))
+          .join()
+          .unwrap()
+          .unwrap();
       return Ok((stdout, stderr));
     }
   }
@@ -101,9 +112,7 @@ pub async fn load_scripts_in_directory(
     return Err("path not directory".into());
   }
 
-  let readdir = dir_path
-    .read_dir()
-    .map_err(|e| String::from("error: ") + &e.to_string())?;
+  let readdir = dir_path.read_dir().map_err(|e| format!("error: {}", e))?;
 
   let result = readdir
     .filter(|entry| entry.is_ok() && entry.as_ref().unwrap().file_type().is_ok())
@@ -147,7 +156,7 @@ pub async fn load_script(
   if !dir_path.is_file() {
     return Err("path not directory".into());
   }
-  std::fs::read_to_string(dir_path).map_err(|e| String::from("error: ") + &e.to_string())
+  std::fs::read_to_string(dir_path).map_err(|e| format!("error: {}", e))
 }
 
 fn prepare_workspace_scripts(workspace_path: &Path) -> Result<PathBuf, String> {
@@ -160,8 +169,7 @@ fn prepare_workspace_scripts(workspace_path: &Path) -> Result<PathBuf, String> {
     }
     #[cfg(not(debug_assertions))]
     {
-      std::fs::create_dir_all(&workspace_plans_path)
-        .map_err(|e| String::from("error: ") + &e.to_string())?;
+      std::fs::create_dir_all(&workspace_plans_path).map_err(|e| format!("error: {}", e))?;
       if let Err(err) = factorio_bot_core::process::instance_setup::PLANS_CONTENT
         .extract(workspace_plans_path.clone())
       {

@@ -2,18 +2,18 @@ use crate::cli::ExecutableCommand;
 use crate::settings::load_app_settings;
 use async_trait::async_trait;
 use clap::{Arg, ArgMatches, Command};
-use factorio_bot_lua::roll_best_seed::{roll_seed, RollSeedLimit};
+
+#[cfg(feature = "lua")]
+use factorio_bot_scripting_lua::roll_best_seed::{roll_seed, RollSeedLimit};
 use miette::{IntoDiagnostic, Result};
 
-pub struct RollSeed {}
-
-#[allow(dead_code)]
 pub fn build() -> Box<dyn ExecutableCommand> {
-  Box::new(RollSeed {})
+  Box::new(ThisCommand {})
 }
+struct ThisCommand {}
 
 #[async_trait]
-impl ExecutableCommand for RollSeed {
+impl ExecutableCommand for ThisCommand {
   fn name(&self) -> &str {
     "roll-seed"
   }

@@ -6,6 +6,7 @@ export const useScriptStore = defineStore({
     id: 'script',
     state: () => ({
         code: '',
+        language: 'lua',
         executing: false,
         success: false,
         error: false,
@@ -70,7 +71,7 @@ export const useScriptStore = defineStore({
             this.error = false
             this.executing = true
             try {
-                const outputs = await invoke('execute_code', {luaCode: this.code}) as any
+                const outputs = await invoke('execute_code', {code: this.code, language: this.language}) as string[]
                 this.stdout = outputs[0]
                 this.stderr = outputs[1]
                 this.executing = false

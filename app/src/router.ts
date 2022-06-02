@@ -50,6 +50,11 @@ const routes = [
         path: '/instances',
         name: 'instances',
         component: () => import('./pages/GameInstances.vue')
+    },
+    {
+        path: '/taskGraph',
+        name: 'taskGraph',
+        component: () => import('./pages/TaskGraphPage.vue')
     }
 ];
 

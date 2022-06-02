@@ -1,6 +1,6 @@
 use crate::constants;
 use factorio_bot_core::settings::{FactorioSettings, FACTORIO_SETTINGS_DEFAULT};
-#[cfg(feature = "rest")]
+#[cfg(feature = "restapi")]
 use factorio_bot_restapi::settings::{RestApiSettings, RESTAPI_SETTINGS_DEFAULT};
 use miette::{IntoDiagnostic, Result};
 use serde_json::Value;
@@ -22,14 +22,14 @@ pub struct GuiSettings {
 )]
 pub struct AppSettings {
   pub factorio: FactorioSettings,
-  #[cfg(feature = "rest")]
+  #[cfg(feature = "restapi")]
   pub restapi: RestApiSettings,
   pub gui: GuiSettings,
 }
 
 pub const APP_SETTINGS_DEFAULT: AppSettings = AppSettings {
   factorio: FACTORIO_SETTINGS_DEFAULT,
-  #[cfg(feature = "rest")]
+  #[cfg(feature = "restapi")]
   restapi: RESTAPI_SETTINGS_DEFAULT,
   gui: GUI_SETTINGS_DEFAULT,
 };

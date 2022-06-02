@@ -25,6 +25,7 @@ pub mod draw;
 pub mod errors;
 pub mod factorio;
 pub mod graph;
+pub mod plan;
 pub mod process;
 pub mod settings;
 // #[cfg(test)] not possible because lua crate needs this

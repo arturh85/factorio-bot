@@ -1,7 +1,8 @@
-use crate::planner::Planner;
+use crate::lua_runner::run_lua;
 use factorio_bot_core::factorio::rcon::{FactorioRcon, RconSettings};
 use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_core::process::instance_setup::setup_factorio_instance;
 use factorio_bot_core::process::process_control::{start_factorio_server, FactorioStartCondition};
 use factorio_bot_core::settings::FactorioSettings;
@@ -130,7 +131,7 @@ pub async fn roll_seed(
                     //     seed,
                     //     roll_started.elapsed()
                     // );
-                    match score_seed(rcon, world, seed, lua_code.as_str(), bot_count)
+                    match score_seed(rcon, world, seed, lua_code.to_string(), bot_count)
                         .await {
                         Ok(score) => {
                             let mut best_seed_with_score = best_seed_with_score.lock().await;
@@ -185,14 +186,13 @@ pub async fn score_seed(
     rcon: Arc<FactorioRcon>,
     world: Arc<FactorioWorld>,
     _seed: u32,
-    lua_code: &str,
+    lua_code: String,
     bot_count: u32,
 ) -> Result<f64> {
-    let lua_code = lua_code.to_string();
     let _rcon = rcon.clone();
     let planner = std::thread::spawn::<_, Result<Planner>>(move || {
         let mut planner = Planner::new(world, Some(_rcon.clone()));
-        planner.plan(lua_code, bot_count)?;
+        run_lua(&mut planner, &lua_code, bot_count)?;
         Ok(planner)
     })
     .join()

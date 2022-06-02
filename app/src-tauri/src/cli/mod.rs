@@ -1,7 +1,15 @@
+#[cfg(feature = "lua")]
 mod plan;
+#[cfg(debug_assertions)]
+mod playground;
 mod rcon;
+#[cfg(feature = "repl")]
+mod repl;
+#[cfg(feature = "lua")]
 mod roll_seed;
 mod start;
+#[cfg(feature = "tui")]
+mod tui;
 
 use async_trait::async_trait;
 use clap::{ArgMatches, Command};
@@ -16,9 +24,17 @@ pub trait ExecutableCommand {
 
 pub fn subcommands() -> Vec<Box<dyn ExecutableCommand>> {
   vec![
-    // plan::build(),
-    // rcon::build(),
-    // roll_seed::build(),
+    rcon::build(),
+    #[cfg(feature = "lua")]
+    plan::build(),
+    #[cfg(feature = "lua")]
+    roll_seed::build(),
+    #[cfg(debug_assertions)]
+    playground::build(),
+    #[cfg(feature = "tui")]
+    tui::build(),
+    #[cfg(feature = "repl")]
+    repl::build(),
     start::build(),
   ]
 }

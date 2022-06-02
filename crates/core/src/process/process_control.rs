@@ -20,11 +20,27 @@ use std::thread::{sleep, JoinHandle};
 use std::time::{Duration, Instant};
 use tokio::task;
 
-pub struct InstanceState {
+pub struct FactorioInstance {
     pub world: Option<Arc<FactorioWorld>>,
     pub rcon: Arc<FactorioRcon>,
     pub server_process: Option<Child>,
     pub client_processes: Vec<Child>,
+}
+
+impl FactorioInstance {
+    pub fn stop(&mut self) -> Result<()> {
+        for child in &mut self.client_processes {
+            if child.kill().is_err() {
+                error!("failed to kill client");
+            }
+        }
+        if let Some(server) = self.server_process.as_mut() {
+            if server.kill().is_err() {
+                error!("failed to kill server");
+            }
+        }
+        Ok(())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -38,7 +54,7 @@ pub async fn start_factorio(
     // websocket_server: Option<Addr<FactorioWebSocketServer>>,
     write_logs: bool,
     silent: bool,
-) -> Result<InstanceState> {
+) -> Result<FactorioInstance> {
     let mut world: Option<Arc<FactorioWorld>> = None;
     let rcon_settings =
         RconSettings::new(settings.rcon_port as u16, &settings.rcon_pass, server_host);
@@ -136,7 +152,7 @@ pub async fn start_factorio(
         rcon.silent_print("").await.unwrap();
     }
     arrange_windows(client_count).await?;
-    Ok(InstanceState {
+    Ok(FactorioInstance {
         client_processes: client_children,
         server_process: server_child,
         world,

@@ -1,6 +1,6 @@
 use crate::error::{ErrorResponse, RestApiResult};
 
-use factorio_bot_core::process::process_control::InstanceState;
+use factorio_bot_core::process::process_control::FactorioInstance;
 use factorio_bot_core::types::{
     AreaFilter, Direction, FactorioEntity, FactorioEntityPrototype, FactorioItemPrototype,
     FactorioPlayer, FactorioTile, InventoryResponse, PlaceEntityResult, Position, RequestEntity,
@@ -29,7 +29,7 @@ pub async fn find_entities(
     radius: Option<f64>,
     name: Option<String>,
     entity_type: Option<String>,
-    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    instance_state: &State<Arc<RwLock<Option<FactorioInstance>>>>,
 ) -> RestApiResult<Vec<FactorioEntity>> {
     let area_filter = match &area {
         Some(area) => AreaFilter::Rect(area.parse().unwrap()),
@@ -64,7 +64,7 @@ pub async fn find_entities(
 #[get("/planPath?<entity_name>&<entity_type>&<underground_entity_name>&<underground_entity_type>&<underground_max>&<from_position>&<to_position>&<to_direction>")]
 #[allow(clippy::too_many_arguments)]
 pub async fn plan_path(
-    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    instance_state: &State<Arc<RwLock<Option<FactorioInstance>>>>,
     entity_name: String,
     entity_type: String,
     underground_entity_name: String,
@@ -102,7 +102,7 @@ pub async fn plan_path(
 #[openapi(tag = "Query")]
 #[get("/findTiles?<area>&<position>&<radius>&<name>")]
 pub async fn find_tiles(
-    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    instance_state: &State<Arc<RwLock<Option<FactorioInstance>>>>,
     area: Option<String>,
     position: Option<String>,
     radius: Option<f64>,
@@ -140,7 +140,7 @@ pub async fn find_tiles(
 #[openapi(tag = "Query")]
 #[get("/inventoryContentsAt?<query>")]
 pub async fn inventory_contents_at(
-    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    instance_state: &State<Arc<RwLock<Option<FactorioInstance>>>>,
     query: String,
 ) -> RestApiResult<Vec<Option<InventoryResponse>>> {
     let parts: Vec<&str> = query.split(';').collect();
@@ -173,7 +173,7 @@ pub async fn inventory_contents_at(
 #[openapi(tag = "Control")]
 #[get("/movePlayer?<player_id>&<goal>&<radius>")]
 pub async fn move_player(
-    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    instance_state: &State<Arc<RwLock<Option<FactorioInstance>>>>,
     player_id: u32,
     goal: String,
     radius: Option<f64>,
@@ -203,7 +203,7 @@ pub async fn move_player(
 #[openapi(tag = "Query")]
 #[get("/playerInfo?<player_id>")]
 pub async fn player_info(
-    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    instance_state: &State<Arc<RwLock<Option<FactorioInstance>>>>,
     player_id: u32,
 ) -> RestApiResult<FactorioPlayer> {
     let instance_state = instance_state.read().await;
@@ -227,7 +227,7 @@ pub async fn player_info(
 #[openapi(tag = "Place")]
 #[get("/placeEntity?<player_id>&<item>&<position>&<direction>")]
 pub async fn place_entity(
-    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    instance_state: &State<Arc<RwLock<Option<FactorioInstance>>>>,
     player_id: u32,
     item: String,
     position: String,
@@ -265,7 +265,7 @@ pub async fn place_entity(
 #[openapi(tag = "Cheat")]
 #[get("/cheatItem?<name>&<count>&<player_id>")]
 pub async fn cheat_item(
-    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    instance_state: &State<Arc<RwLock<Option<FactorioInstance>>>>,
     name: String,
     count: u32,
     player_id: u32,
@@ -293,7 +293,7 @@ pub async fn cheat_item(
 #[openapi(tag = "Cheat")]
 #[get("/cheatTechnology?<tech>")]
 pub async fn cheat_technology(
-    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    instance_state: &State<Arc<RwLock<Option<FactorioInstance>>>>,
     tech: String,
 ) -> RestApiResult<OperationResult> {
     let instance_state = instance_state.read().await;
@@ -309,7 +309,7 @@ pub async fn cheat_technology(
 #[openapi(tag = "Cheat")]
 #[get("/cheatAllTechnologies")]
 pub async fn cheat_all_technologies(
-    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    instance_state: &State<Arc<RwLock<Option<FactorioInstance>>>>,
 ) -> RestApiResult<OperationResult> {
     let instance_state = instance_state.read().await;
     if let Some(instance_state) = &*instance_state {
@@ -326,7 +326,7 @@ pub async fn cheat_all_technologies(
     "/insertToInventory?<player_id>&<entity_name>&<entity_position>&<inventory_type>&<item_name>&<item_count>"
 )]
 pub async fn insert_to_inventory(
-    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    instance_state: &State<Arc<RwLock<Option<FactorioInstance>>>>,
     player_id: u32,
     entity_name: String,
     entity_position: String,
@@ -367,7 +367,7 @@ pub async fn insert_to_inventory(
 "/removeToInventory?<player_id>&<entity_name>&<entity_position>&<inventory_type>&<item_name>&<item_count>"
 )]
 pub async fn remove_from_inventory(
-    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    instance_state: &State<Arc<RwLock<Option<FactorioInstance>>>>,
     player_id: u32,
     entity_name: String,
     entity_position: String,
@@ -406,7 +406,7 @@ pub async fn remove_from_inventory(
 #[openapi(tag = "Query")]
 #[get("/allPlayers")]
 pub async fn all_players(
-    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    instance_state: &State<Arc<RwLock<Option<FactorioInstance>>>>,
 ) -> RestApiResult<Vec<FactorioPlayer>> {
     let instance_state = instance_state.read().await;
     if let Some(instance_state) = &*instance_state {
@@ -425,7 +425,7 @@ pub async fn all_players(
 #[openapi(tag = "Query")]
 #[get("/itemPrototypes")]
 pub async fn item_prototypes(
-    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    instance_state: &State<Arc<RwLock<Option<FactorioInstance>>>>,
 ) -> RestApiResult<HashMap<String, FactorioItemPrototype>> {
     let instance_state = instance_state.read().await;
     if let Some(instance_state) = &*instance_state {
@@ -444,7 +444,7 @@ pub async fn item_prototypes(
 #[openapi(tag = "Query")]
 #[get("/entityPrototypes")]
 pub async fn entity_prototypes(
-    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    instance_state: &State<Arc<RwLock<Option<FactorioInstance>>>>,
 ) -> RestApiResult<HashMap<String, FactorioEntityPrototype>> {
     let instance_state = instance_state.read().await;
     if let Some(instance_state) = &*instance_state {
@@ -463,7 +463,7 @@ pub async fn entity_prototypes(
 #[openapi(tag = "Admin")]
 #[get("/serverSave")]
 pub async fn server_save(
-    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    instance_state: &State<Arc<RwLock<Option<FactorioInstance>>>>,
 ) -> RestApiResult<OperationResult> {
     let instance_state = instance_state.read().await;
     if let Some(instance_state) = &*instance_state {
@@ -478,7 +478,7 @@ pub async fn server_save(
 #[openapi(tag = "Research")]
 #[get("/addResearch?<tech>")]
 pub async fn add_research(
-    instance_state: &State<Arc<RwLock<Option<InstanceState>>>>,
+    instance_state: &State<Arc<RwLock<Option<FactorioInstance>>>>,
     tech: String,
 ) -> RestApiResult<OperationResult> {
     let instance_state = instance_state.read().await;

@@ -2,18 +2,17 @@ use crate::cli::ExecutableCommand;
 use crate::settings::load_app_settings;
 use async_trait::async_trait;
 use clap::{Arg, ArgMatches, Command};
-use factorio_bot_lua::planner::start_factorio_and_plan_graph;
+#[cfg(feature = "lua")]
+use factorio_bot_scripting_lua::lua_runner::start_factorio_and_plan_graph;
 use miette::Result;
 
-pub struct Plan {}
-
-#[allow(dead_code)]
 pub fn build() -> Box<dyn ExecutableCommand> {
-  Box::new(Plan {})
+  Box::new(ThisCommand {})
 }
+struct ThisCommand {}
 
 #[async_trait]
-impl ExecutableCommand for Plan {
+impl ExecutableCommand for ThisCommand {
   fn name(&self) -> &str {
     "plan"
   }
@@ -55,19 +54,26 @@ impl ExecutableCommand for Plan {
     let seed = matches
       .value_of("seed")
       .map(std::string::ToString::to_string);
-    let name = matches.value_of("name").unwrap().to_string();
+    let name = matches
+      .value_of("name")
+      .expect("required arg name missing")
+      .to_string();
     let map_exchange_string = matches
       .value_of("map")
       .map(std::string::ToString::to_string);
-    let bot_count = matches.value_of("clients").unwrap().parse().unwrap();
-    let _graph = start_factorio_and_plan_graph(
-      &app_settings.factorio,
-      map_exchange_string,
-      seed,
-      &name,
-      bot_count,
-    )
-    .await;
+    let bot_count: u32 = matches.value_of("clients").unwrap().parse().unwrap();
+
+    #[cfg(feature = "lua")]
+    {
+      let _graph = start_factorio_and_plan_graph(
+        &app_settings.factorio,
+        map_exchange_string,
+        seed,
+        &name,
+        bot_count,
+      )
+      .await;
+    }
     Ok(())
   }
 }

@@ -1,5 +1,5 @@
 use crate::settings::RestApiSettings;
-use factorio_bot_core::process::process_control::InstanceState;
+use factorio_bot_core::process::process_control::FactorioInstance;
 use miette::Result;
 use rocket::data::{Limits, ToByteUnit};
 use rocket::http::Status;
@@ -28,7 +28,7 @@ fn index() -> Html<&'static str> {
 
 pub async fn start(
     settings: RestApiSettings,
-    instance_state: Arc<RwLock<Option<InstanceState>>>,
+    instance_state: Arc<RwLock<Option<FactorioInstance>>>,
 ) -> Result<()> {
     println!("starting restapi");
     let port = settings.port;

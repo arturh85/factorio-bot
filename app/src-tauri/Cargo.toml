@@ -32,7 +32,7 @@ color-eyre = "^0.6"
 port_scanner = "*"
 miette = {version = "^4.7", features = ["fancy"] }
 thiserror = "^1.0"
-async-trait = "0.1.53"
+async-trait = "0.1.56"
 parking_lot = "^0.12"
 console-subscriber = "^0.1"
 tui = { version = "0.18", optional = true }

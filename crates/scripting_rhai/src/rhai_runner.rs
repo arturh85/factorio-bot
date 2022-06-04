@@ -1,10 +1,20 @@
 use factorio_bot_core::plan::planner::Planner;
 use gag::BufferRedirect;
 // use itertools::Itertools;
+use factorio_bot_core::plan::plan_builder::PlanBuilder;
 use miette::{IntoDiagnostic, Result};
-use rhai::Engine;
+use rhai::{Engine, Scope};
 use std::io::Read;
 use std::sync::Arc;
+
+#[derive(Clone)]
+struct MyTest {}
+impl MyTest {
+    #[allow(dead_code)]
+    pub fn my_func(&mut self) {
+        println!("my_func called");
+    }
+}
 
 pub fn run_rhai(
     planner: &mut Planner,
@@ -13,15 +23,25 @@ pub fn run_rhai(
 ) -> Result<(String, String)> {
     let mut stdout = BufferRedirect::stdout().into_diagnostic()?;
     let mut stderr = BufferRedirect::stderr().into_diagnostic()?;
-    let _all_bots = planner.initiate_missing_players_with_default_inventory(bot_count);
-    planner.plan_world = Arc::new((*planner.real_world).clone());
+    let all_bots = planner.initiate_missing_players_with_default_inventory(bot_count);
+    planner.update_plan_world();
+    let plan_builder = Arc::new(PlanBuilder::new(
+        planner.graph.clone(),
+        planner.plan_world.clone(),
+    ));
+    let mut engine = Engine::new();
+    engine.register_type::<MyTest>();
+    // engine.register_type_with_name::<PlanBuilder>("PlanBuilder");
 
-    // Create an 'Engine'
-    let engine = Engine::new();
-
-    // Run the script - prints "42"
-    engine.run(rhai_code).unwrap();
-
+    let mut scope = Scope::new();
+    scope.set_value("all_bots", all_bots);
+    scope.set_value("world", planner.plan_world.clone());
+    scope.set_value("plan", plan_builder);
+    scope.set_value("myTest", MyTest {});
+    if let Some(rcon) = planner.rcon.as_ref() {
+        scope.set_value("rcon", rcon.clone());
+    }
+    engine.run_with_scope(&mut scope, rhai_code).unwrap();
     let mut stdout_str = String::new();
     let mut stderr_str = String::new();
     stdout.read_to_string(&mut stdout_str).into_diagnostic()?;
@@ -43,7 +63,7 @@ mod tests {
         run_rhai(
             &mut planner,
             r##"
-print("hello world")
+debug(myTest);
         "##,
             bot_count,
         )

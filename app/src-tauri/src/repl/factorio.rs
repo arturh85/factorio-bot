@@ -2,69 +2,57 @@ use crate::repl::{Context, ExecutableReplCommand};
 use crate::settings::load_app_settings;
 use async_trait::async_trait;
 use factorio_bot_core::process::process_control::{start_factorio, FactorioInstance};
-use miette::{IntoDiagnostic, Result};
+use miette::Result;
 use parking_lot::RwLock;
-use repl_rs::{Command, Convert, Parameter, Value};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
-pub struct Factorio {}
+pub struct ThisCommand {}
 
 #[allow(dead_code)]
 pub fn build() -> Box<dyn ExecutableReplCommand> {
-  Box::new(Factorio {})
+  Box::new(ThisCommand {})
 }
 
 #[async_trait]
-impl ExecutableReplCommand for Factorio {
-  fn build_command(&self) -> Result<Command<Context, repl_rs::Error>> {
-    let command = Command::new("factorio", run)
-      .with_parameter(
-        Parameter::new("action")
-          .set_required(true)
-          .into_diagnostic()?,
-      )
-      .into_diagnostic()?
-      .with_help("start or stop factorio instances");
-    Ok(command)
+impl ExecutableReplCommand for ThisCommand {
+  fn commands(&self) -> Vec<String> {
+    vec!["factorio start".to_string(), "factorio stop".to_string()]
   }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn run(args: HashMap<String, Value>, context: &mut Context) -> repl_rs::Result<Option<String>> {
-  let action: String = args["action"].convert()?;
-  match action.as_str() {
-    "start" => {
-      {
-        let instance_state = context.instance_state.read();
-        if instance_state.is_some() {
-          return Ok(Some("failed: already started".into()));
+  fn run(&self, args: Vec<&str>, context: &Context) -> Result<()> {
+    match *args.get(1).unwrap_or(&"") {
+      "start" => {
+        {
+          let instance_state = context.instance_state.read();
+          if instance_state.is_some() {
+            error!("failed: already started");
+            return Ok(());
+          }
+          drop(instance_state);
         }
-        drop(instance_state);
+        let instance_state = context.instance_state.clone();
+        std::thread::spawn(move || {
+          let rt = Runtime::new().unwrap();
+          rt.block_on(do_start_factorio(instance_state)).unwrap();
+        });
       }
-      let instance_state = context.instance_state.clone();
-      std::thread::spawn(move || {
-        let rt = Runtime::new().unwrap();
-        rt.block_on(do_start_factorio(instance_state)).unwrap();
-      });
-      Ok(None)
-    }
-    "stop" => {
-      info!("stop called");
-      {
-        let instance_state = context.instance_state.read();
-        if instance_state.is_none() {
-          return Ok(Some("failed: not started".into()));
+      "stop" => {
+        {
+          let instance_state = context.instance_state.read();
+          if instance_state.is_none() {
+            error!("failed: not started");
+            return Ok(());
+          }
+          drop(instance_state);
         }
-        drop(instance_state);
+        let mut instance_state = context.instance_state.write();
+        instance_state.as_mut().unwrap().stop().unwrap();
+        *instance_state = None;
+        info!("stopped");
       }
-      let mut instance_state = context.instance_state.write();
-      instance_state.as_mut().unwrap().stop().unwrap();
-      *instance_state = None;
-      Ok(None)
-    }
-    _ => Ok(Some("invalid command, use one of start, stop".to_string())),
+      _ => error!("invalid command, use one of start, stop"),
+    };
+    Ok(())
   }
 }
 

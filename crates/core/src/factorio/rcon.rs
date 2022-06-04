@@ -1,11 +1,3 @@
-use rcon::Connection;
-use serde_json::Value;
-use std::collections::HashMap;
-use std::ops::Add;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use unicode_segmentation::UnicodeSegmentation;
-
 use crate::errors::{
     RconError, RconNoWaterFound, RconPlayerBlockesAllPlacement, RconPlayerBlockesPlacement,
     RconPlayerNotFound, RconRadiusLimitReached, RconTimeout, RconUnexpectedEmptyResponse,
@@ -24,8 +16,15 @@ use crate::types::{
     Position, Rect, RequestEntity,
 };
 use miette::{IntoDiagnostic, Result};
+use rcon::Connection;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::ops::Add;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::time::sleep;
+use unicode_segmentation::UnicodeSegmentation;
 
 const RCON_INTERFACE: &str = "botbridge";
 
@@ -35,70 +34,7 @@ pub struct FactorioRcon {
     silent: bool,
 }
 
-unsafe impl Send for FactorioRcon {}
-
-unsafe impl Sync for FactorioRcon {}
-
-pub struct ConnectionManager {
-    address: String,
-    pass: String,
-}
-
-unsafe impl Sync for ConnectionManager {}
-
-impl ConnectionManager {
-    pub fn new<S: Into<String>>(address: S, pass: S) -> Self {
-        ConnectionManager {
-            address: address.into(),
-            pass: pass.into(),
-        }
-    }
-}
-
-#[async_trait]
-impl bb8::ManageConnection for ConnectionManager {
-    type Connection = rcon::Connection<TcpStream>;
-    type Error = rcon::Error;
-
-    async fn connect(&self) -> Result<Self::Connection, Self::Error> {
-        Connection::builder()
-            .enable_factorio_quirks(true)
-            .connect(&self.address, &self.pass)
-            .await
-    }
-
-    async fn is_valid(&self, _conn: &mut Self::Connection) -> Result<(), Self::Error> {
-        Ok(())
-    }
-
-    fn has_broken(&self, _conn: &mut Self::Connection) -> bool {
-        false
-    }
-}
-
-pub struct RconSettings {
-    pub port: u16,
-    pub pass: String,
-    pub host: Option<String>,
-}
-
-impl RconSettings {
-    pub fn new_from_config(settings: &FactorioSettings, server_host: Option<&str>) -> RconSettings {
-        RconSettings {
-            port: settings.rcon_port as u16,
-            pass: settings.rcon_pass.to_string(),
-            host: server_host.map(|s| s.into()),
-        }
-    }
-    pub fn new(rcon_port: u16, rcon_pass: &str, server_host: Option<&str>) -> RconSettings {
-        RconSettings {
-            port: rcon_port,
-            pass: rcon_pass.into(),
-            host: server_host.map(|s| s.into()),
-        }
-    }
-}
-
+#[cfg_attr(test, mockall::automock)]
 impl FactorioRcon {
     pub async fn new(settings: &RconSettings, silent: bool) -> Result<Self> {
         let address = format!(
@@ -150,7 +86,7 @@ impl FactorioRcon {
     async fn remote_call(
         &self,
         function_name: &str,
-        args: Vec<&str>,
+        args: Vec<String>,
     ) -> Result<Option<Vec<String>>> {
         let mut arg_string: String = args.join(", ");
         if !arg_string.is_empty() {
@@ -186,12 +122,12 @@ impl FactorioRcon {
     }
 
     pub async fn whoami(&self, name: &str) -> Result<()> {
-        self.remote_call("whoami", vec![&str_to_lua(name)]).await?;
+        self.remote_call("whoami", vec![str_to_lua(name)]).await?;
         Ok(())
     }
 
     pub async fn add_research(&self, technology_name: &str) -> Result<()> {
-        self.remote_call("add_research", vec![&str_to_lua(technology_name)])
+        self.remote_call("add_research", vec![str_to_lua(technology_name)])
             .await?;
         Ok(())
     }
@@ -200,9 +136,9 @@ impl FactorioRcon {
         self.remote_call(
             "cheat_item",
             vec![
-                &player_id.to_string(),
-                &str_to_lua(item_name),
-                &item_count.to_string(),
+                player_id.to_string(),
+                str_to_lua(item_name),
+                item_count.to_string(),
             ],
         )
         .await?;
@@ -210,7 +146,7 @@ impl FactorioRcon {
     }
 
     pub async fn cheat_technology(&self, technology_name: &str) -> Result<()> {
-        self.remote_call("cheat_technology", vec![&str_to_lua(technology_name)])
+        self.remote_call("cheat_technology", vec![str_to_lua(technology_name)])
             .await?;
         Ok(())
     }
@@ -281,14 +217,14 @@ impl FactorioRcon {
             .remote_call(
                 "place_blueprint",
                 vec![
-                    &player_id.to_string(),
-                    &str_to_lua(&blueprint),
-                    &position.x().to_string(),
-                    &position.y().to_string(),
-                    &direction.to_string(),
-                    &force_build.to_string(),
-                    &only_ghosts.to_string(),
-                    &vec_to_lua(inventory_player_ids),
+                    player_id.to_string(),
+                    str_to_lua(&blueprint),
+                    position.x().to_string(),
+                    position.y().to_string(),
+                    direction.to_string(),
+                    force_build.to_string(),
+                    only_ghosts.to_string(),
+                    vec_to_lua(inventory_player_ids),
                 ],
             )
             .await?;
@@ -331,10 +267,10 @@ impl FactorioRcon {
             .remote_call(
                 "revive_ghost",
                 vec![
-                    &player_id.to_string(),
-                    &str_to_lua(name),
-                    &position.x().to_string(),
-                    &position.y().to_string(),
+                    player_id.to_string(),
+                    str_to_lua(name),
+                    position.x().to_string(),
+                    position.y().to_string(),
                 ],
             )
             .await?;
@@ -361,12 +297,12 @@ impl FactorioRcon {
             .remote_call(
                 "cheat_blueprint",
                 vec![
-                    &player_id.to_string(),
-                    &str_to_lua(&blueprint),
-                    &position.x().to_string(),
-                    &position.y().to_string(),
-                    &direction.to_string(),
-                    &force_build.to_string(),
+                    player_id.to_string(),
+                    str_to_lua(&blueprint),
+                    position.x().to_string(),
+                    position.y().to_string(),
+                    direction.to_string(),
+                    force_build.to_string(),
                 ],
             )
             .await?;
@@ -384,7 +320,7 @@ impl FactorioRcon {
     pub async fn store_map_data(&self, key: &str, value: Value) -> Result<()> {
         self.remote_call(
             "store_map_data",
-            vec![&str_to_lua(key), &value_to_lua(&value)],
+            vec![str_to_lua(key), value_to_lua(&value)],
         )
         .await?;
         Ok(())
@@ -392,7 +328,7 @@ impl FactorioRcon {
 
     pub async fn retrieve_map_data(&self, key: &str) -> Result<Option<Value>> {
         let lines = self
-            .remote_call("retrieve_map_data", vec![&str_to_lua(key)])
+            .remote_call("retrieve_map_data", vec![str_to_lua(key)])
             .await?;
         if lines.is_none() {
             return Ok(None);
@@ -539,7 +475,7 @@ impl FactorioRcon {
             .collect();
 
         let lines = self
-            .remote_call("inventory_contents_at", vec![&vec_to_lua(positions)])
+            .remote_call("inventory_contents_at", vec![vec_to_lua(positions)])
             .await?;
         if lines.is_none() {
             return Err(RconUnexpectedEmptyResponse {}.into());
@@ -587,10 +523,10 @@ impl FactorioRcon {
             .remote_call(
                 "place_entity",
                 vec![
-                    &player_id.to_string(),
-                    &str_to_lua(&item_name),
-                    &position_to_lua(&entity_position),
-                    &direction.to_string(),
+                    player_id.to_string(),
+                    str_to_lua(&item_name),
+                    position_to_lua(&entity_position),
+                    direction.to_string(),
                 ],
             )
             .await?;
@@ -626,10 +562,10 @@ impl FactorioRcon {
                                 .remote_call(
                                     "place_entity",
                                     vec![
-                                        &player_id.to_string(),
-                                        &str_to_lua(&item_name),
-                                        &position_to_lua(&entity_position),
-                                        &direction.to_string(),
+                                        player_id.to_string(),
+                                        str_to_lua(&item_name),
+                                        position_to_lua(&entity_position),
+                                        direction.to_string(),
                                     ],
                                 )
                                 .await?;
@@ -704,11 +640,11 @@ impl FactorioRcon {
             .remote_call(
                 "insert_to_inventory",
                 vec![
-                    &player_id,
-                    &str_to_lua(&entity_name),
-                    &position_to_lua(&entity_position),
-                    &inventory_type.to_string(),
-                    &hashmap_to_lua(items),
+                    player_id,
+                    str_to_lua(&entity_name),
+                    position_to_lua(&entity_position),
+                    inventory_type.to_string(),
+                    hashmap_to_lua(items),
                 ],
             )
             .await?;
@@ -753,11 +689,11 @@ impl FactorioRcon {
             .remote_call(
                 "remove_from_inventory",
                 vec![
-                    &player_id,
-                    &str_to_lua(&entity_name),
-                    &position_to_lua(&entity_position),
-                    &inventory_type.to_string(),
-                    &hashmap_to_lua(items),
+                    player_id,
+                    str_to_lua(&entity_name),
+                    position_to_lua(&entity_position),
+                    inventory_type.to_string(),
+                    hashmap_to_lua(items),
                 ],
             )
             .await?;
@@ -830,10 +766,7 @@ impl FactorioRcon {
             args.insert(String::from("type"), str_to_lua(&entity_type));
         }
         let result = self
-            .remote_call(
-                "find_entities_filtered",
-                vec![hashmap_to_lua(args).as_str()],
-            )
+            .remote_call("find_entities_filtered", vec![hashmap_to_lua(args)])
             .await?;
         if result.is_none() {
             return Err(RconUnexpectedEmptyResponse {}.into());
@@ -854,7 +787,7 @@ impl FactorioRcon {
         let result = self
             .remote_call(
                 "parse_map_exchange_string",
-                vec![&str_to_lua(name), &str_to_lua(map_exchange_string)],
+                vec![str_to_lua(name), str_to_lua(map_exchange_string)],
             )
             .await?;
         if result.is_some() {
@@ -889,7 +822,7 @@ impl FactorioRcon {
             args.insert(String::from("name"), str_to_lua(&name));
         }
         let result = self
-            .remote_call("find_tiles_filtered", vec![hashmap_to_lua(args).as_str()])
+            .remote_call("find_tiles_filtered", vec![hashmap_to_lua(args)])
             .await?;
         if result.is_none() {
             return Err(RconUnexpectedEmptyResponse {}.into());
@@ -915,7 +848,7 @@ impl FactorioRcon {
         let result = self
             .remote_call(
                 "async_request_player_path",
-                vec![&player_id.to_string(), &position_to_lua(goal), &radius],
+                vec![player_id.to_string(), position_to_lua(goal), radius],
             )
             .await?;
         if result.is_none() {
@@ -941,7 +874,7 @@ impl FactorioRcon {
         let result = self
             .remote_call(
                 "async_request_path",
-                vec![&position_to_lua(start), &position_to_lua(goal), &radius],
+                vec![position_to_lua(start), position_to_lua(goal), radius],
             )
             .await?;
         if result.is_none() {
@@ -1063,7 +996,7 @@ impl FactorioRcon {
         let result = self
             .remote_call(
                 "action_start_walk_waypoints",
-                vec![&action_id, &player_id, &format!("{{ {} }}", waypoints)],
+                vec![action_id, player_id, format!("{{ {} }}", waypoints)],
             )
             .await?;
         if let Some(result) = result {
@@ -1089,11 +1022,11 @@ impl FactorioRcon {
             .remote_call(
                 "action_start_mining",
                 vec![
-                    &action_id,
-                    &player_id,
-                    &str_to_lua(name),
-                    &position_to_lua(position),
-                    &count.to_string(),
+                    action_id,
+                    player_id,
+                    str_to_lua(name),
+                    position_to_lua(position),
+                    count.to_string(),
                 ],
             )
             .await?;
@@ -1154,12 +1087,7 @@ impl FactorioRcon {
         let result = self
             .remote_call(
                 "action_start_crafting",
-                vec![
-                    &action_id,
-                    &player_id,
-                    &str_to_lua(recipe),
-                    &count.to_string(),
-                ],
+                vec![action_id, player_id, str_to_lua(recipe), count.to_string()],
             )
             .await?;
         if result.is_some() {
@@ -1218,5 +1146,69 @@ impl FactorioRcon {
                 .collect());
         }
         Err(RconNoWaterFound {}.into())
+    }
+}
+
+unsafe impl Send for FactorioRcon {}
+
+unsafe impl Sync for FactorioRcon {}
+
+pub struct ConnectionManager {
+    address: String,
+    pass: String,
+}
+
+unsafe impl Sync for ConnectionManager {}
+
+impl ConnectionManager {
+    pub fn new<S: Into<String>>(address: S, pass: S) -> Self {
+        ConnectionManager {
+            address: address.into(),
+            pass: pass.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl bb8::ManageConnection for ConnectionManager {
+    type Connection = rcon::Connection<TcpStream>;
+    type Error = rcon::Error;
+
+    async fn connect(&self) -> Result<Self::Connection, Self::Error> {
+        Connection::builder()
+            .enable_factorio_quirks(true)
+            .connect(&self.address, &self.pass)
+            .await
+    }
+
+    async fn is_valid(&self, _conn: &mut Self::Connection) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn has_broken(&self, _conn: &mut Self::Connection) -> bool {
+        false
+    }
+}
+
+pub struct RconSettings {
+    pub port: u16,
+    pub pass: String,
+    pub host: Option<String>,
+}
+
+impl RconSettings {
+    pub fn new_from_config(settings: &FactorioSettings, server_host: Option<&str>) -> RconSettings {
+        RconSettings {
+            port: settings.rcon_port as u16,
+            pass: settings.rcon_pass.to_string(),
+            host: server_host.map(|s| s.into()),
+        }
+    }
+    pub fn new(rcon_port: u16, rcon_pass: &str, server_host: Option<&str>) -> RconSettings {
+        RconSettings {
+            port: rcon_port,
+            pass: rcon_pass.into(),
+            host: server_host.map(|s| s.into()),
+        }
     }
 }

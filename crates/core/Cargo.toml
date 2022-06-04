@@ -19,6 +19,7 @@ serde_json = "^1.0"
 config = "^0.13"
 pathfinding = "^3.0"
 parking_lot = "^0.12"
+futures = "0.3.21"
 paris = { version = "^1.5", features = ["timestamps", "macros"] }
 color-eyre = "^0.6.1"
 petgraph = { version = "^0.6", features = ["all"] }
@@ -74,3 +75,8 @@ windows-sys = { version = "^0.36", features = [
 serde = { version = "^1.0", features = [ "derive" ] }
 config_struct = "^0.5"
 toml = "*"
+
+
+[dev-dependencies]
+mockall = "0.11.1"
+mockall_double = "0.3.0"

@@ -1,25 +1,20 @@
 use crate::repl::{Context, ExecutableReplCommand};
 use async_trait::async_trait;
 use miette::Result;
-use repl_rs::{Command, Value};
-use std::collections::HashMap;
 
-pub struct Quit {}
+pub struct ThisCommand {}
 
 #[allow(dead_code)]
 pub fn build() -> Box<dyn ExecutableReplCommand> {
-  Box::new(Quit {})
+  Box::new(ThisCommand {})
 }
 
 #[async_trait]
-impl ExecutableReplCommand for Quit {
-  fn build_command(&self) -> Result<Command<Context, repl_rs::Error>> {
-    let command = Command::new("q", run).with_help("quit");
-    Ok(command)
+impl ExecutableReplCommand for ThisCommand {
+  fn commands(&self) -> Vec<String> {
+    vec!["exit".to_string(), "quit".to_string()]
   }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn run(_args: HashMap<String, Value>, _context: &mut Context) -> repl_rs::Result<Option<String>> {
-  std::process::exit(0);
+  fn run(&self, _args: Vec<&str>, _context: &Context) -> Result<()> {
+    std::process::exit(0);
+  }
 }

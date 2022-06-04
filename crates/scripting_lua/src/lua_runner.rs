@@ -15,7 +15,6 @@ use rlua_async::ChunkExt;
 use std::fs::read_to_string;
 use std::io::{stdout, Read, Write};
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Instant;
 use tokio::runtime::Runtime;
 
@@ -23,7 +22,7 @@ pub fn run_lua(planner: &mut Planner, lua_code: &str, bot_count: u32) -> Result<
     let mut stdout = BufferRedirect::stdout().into_diagnostic()?;
     let mut stderr = BufferRedirect::stderr().into_diagnostic()?;
     let all_bots = planner.initiate_missing_players_with_default_inventory(bot_count);
-    planner.plan_world = Arc::new((*planner.real_world).clone());
+    planner.update_plan_world();
     let lua = Lua::new();
     if let Err(err) = lua.context::<_, rlua::Result<()>>(|ctx| {
         let world = create_lua_world(ctx, planner.plan_world.clone())?;
@@ -210,6 +209,7 @@ pub async fn start_factorio_and_plan_graph(
 mod tests {
     use factorio_bot_core::test_utils::{draw_world, fixture_world};
     use serial_test::serial;
+    use std::sync::Arc;
 
     use super::*;
 
@@ -242,7 +242,6 @@ mod tests {
     #[test]
     #[serial]
     fn test_mining() {
-        let bot_count = 2;
         let world = Arc::new(fixture_world());
         let mut planner = Planner::new(world, None);
         run_lua(
@@ -254,7 +253,7 @@ mod tests {
     end
     plan.groupEnd()
         "##,
-            bot_count,
+            2,
         )
         .unwrap();
         let graph = planner.graph();
@@ -277,31 +276,6 @@ mod tests {
     5 -> 6 [ label = "3" ]
     6 -> 7 [ label = "0" ]
     7 -> 1 [ label = "0" ]
-}
-"#,
-        );
-    }
-    #[test]
-    #[serial]
-    fn test_play() {
-        let bot_count = 4;
-        let world = Arc::new(fixture_world());
-        let mut planner = Planner::new(world, None);
-        run_lua(
-            &mut planner,
-            r##"
-rcon.print("hello world");
-        "##,
-            bot_count,
-        )
-        .unwrap();
-        let graph = planner.graph();
-        assert_eq!(
-            graph.graphviz_dot(),
-            r#"digraph {
-    0 [ label = "Process Start" ]
-    1 [ label = "Process End" ]
-    0 -> 1 [ label = "0" ]
 }
 "#,
         );

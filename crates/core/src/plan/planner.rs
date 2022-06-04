@@ -1,3 +1,4 @@
+#[cfg_attr(test, mockall_double::double)]
 use crate::factorio::rcon::FactorioRcon;
 use crate::factorio::world::FactorioWorld;
 use crate::graph::task_graph::TaskGraph;
@@ -29,6 +30,9 @@ impl Planner {
         let plan_world = (*self.real_world).clone();
         self.plan_world = Arc::new(plan_world);
         self.graph = Arc::new(RwLock::new(TaskGraph::new()));
+    }
+    pub fn update_plan_world(&mut self) {
+        self.plan_world = Arc::new((*self.real_world).clone());
     }
 
     pub fn world(&self) -> Arc<FactorioWorld> {

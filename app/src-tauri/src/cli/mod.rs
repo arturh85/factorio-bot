@@ -8,8 +8,6 @@ mod repl;
 #[cfg(feature = "lua")]
 mod roll_seed;
 mod start;
-#[cfg(feature = "tui")]
-mod tui;
 
 use async_trait::async_trait;
 use clap::{ArgMatches, Command};
@@ -31,8 +29,6 @@ pub fn subcommands() -> Vec<Box<dyn ExecutableCommand>> {
     roll_seed::build(),
     #[cfg(debug_assertions)]
     playground::build(),
-    #[cfg(feature = "tui")]
-    tui::build(),
     #[cfg(feature = "repl")]
     repl::build(),
     start::build(),

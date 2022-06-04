@@ -11,6 +11,7 @@ use num_traits::ToPrimitive;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct PlanBuilder {
     graph: Arc<RwLock<TaskGraph>>,
     world: Arc<FactorioWorld>,
@@ -27,7 +28,7 @@ impl PlanBuilder {
             .world
             .players
             .get(&player_id)
-            .expect("invalid player id");
+            .unwrap_or_else(|| panic!("invalid player id: {}", player_id));
         let distance = calculate_distance(&player.position, &position).ceil();
         let reach_distance = player.resource_reach_distance as f64;
         if distance > reach_distance {

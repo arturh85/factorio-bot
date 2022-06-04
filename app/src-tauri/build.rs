@@ -4,6 +4,18 @@ fn main() {
     typescriptify();
     tauri_build::build();
   }
+  #[cfg(windows)]
+  {
+    let mut res = winres::WindowsResource::new();
+    res.set("ProductName", "Factorio-Bot");
+    res.set("FileDescription", "Factorio-Bot");
+    res.set("Version", env!("CARGO_PKG_VERSION"));
+    res.set("LegalCopyright", "Copyright (C) 2022");
+    // res.set_icon("assets/nu_logo.ico");
+    res
+      .compile()
+      .expect("Failed to run the Windows resource compiler (rc.exe)");
+  }
 }
 
 #[cfg(feature = "gui")]

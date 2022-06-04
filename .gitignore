@@ -7,3 +7,5 @@ backend/tests/world.png
 /frontend/yarn-error.log
 /docs/index.html
 /tree.txt
+/resource.rc
+/.vscode/settings.json

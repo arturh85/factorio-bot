@@ -30,4 +30,4 @@ miette = {version = "^4.7", features = ["fancy"] }
 thiserror = "^1.0"
 
 [dev-dependencies]
-serial_test = "0.6.0"
+serial_test = "0.7.0"

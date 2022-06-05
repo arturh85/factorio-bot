@@ -1358,19 +1358,17 @@ dependencies = [
  "color-eyre",
  "config 0.13.0",
  "console-subscriber",
- "crossterm",
  "dirs-next",
  "factorio-bot-core",
  "factorio-bot-restapi",
  "factorio-bot-scripting-lua",
  "factorio-bot-scripting-rhai",
  "miette",
- "nu-ansi-term",
  "open",
  "paris",
  "parking_lot 0.12.0",
  "port_scanner",
- "reedline",
+ "reedline-repl-rs",
  "serde 1.0.136",
  "serde_json",
  "tauri",
@@ -1379,7 +1377,6 @@ dependencies = [
  "tokio",
  "toml 0.5.8",
  "typescript-definitions",
- "winapi-util",
  "winres",
 ]
 
@@ -1406,6 +1403,7 @@ dependencies = [
  "imageproc",
  "include_dir",
  "indicatif",
+ "interactive_process",
  "itertools",
  "miette",
  "mockall",
@@ -2485,6 +2483,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "interactive_process"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5bea3f0b65ff4df5241d0d586df4ab529b7584ee9ada2ad163ab756032733b9"
+
+[[package]]
 name = "io-lifetimes"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3071,6 +3075,19 @@ name = "new_debug_unreachable"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4a24736216ec316047a1fc4252e27dabb04218aa4a3f37c6e7ddbf1f9782b54"
+
+[[package]]
+name = "nix"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c3728fec49d363a50a8828a190b379a446cc5cf085c06259bbbeb34447e4ec7"
+dependencies = [
+ "bitflags",
+ "cc",
+ "cfg-if 1.0.0",
+ "libc",
+ "memoffset",
+]
 
 [[package]]
 name = "nodrop"
@@ -4381,6 +4398,20 @@ dependencies = [
  "strum_macros 0.24.0",
  "unicode-segmentation",
  "unicode-width",
+]
+
+[[package]]
+name = "reedline-repl-rs"
+version = "0.1.0"
+source = "git+https://github.com/arturh85/reedline-repl-rs#28225a025b545d11f7b3403f7217f5457f477fcb"
+dependencies = [
+ "crossterm",
+ "nix",
+ "nu-ansi-term",
+ "reedline",
+ "regex",
+ "winapi-util",
+ "yansi",
 ]
 
 [[package]]
@@ -7180,9 +7211,9 @@ dependencies = [
 
 [[package]]
 name = "yansi"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9fc79f4a1e39857fc00c3f662cbf2651c771f00e9c15fe2abc341806bd46bd71"
+checksum = "09041cd90cf85f7f8b2df60c646f853b7f535ce68f85244eb6731cf89fa498ec"
 
 [[package]]
 name = "zip"

@@ -114,7 +114,7 @@ pub async fn roll_seed(
                     )
                     .await
                     .expect("failed to setup instance");
-                    let (world, rcon, mut child) = start_factorio_server(
+                    let (world, rcon, child) = start_factorio_server(
                         &workspace_path,
                         &rcon_settings,
                         Some(factorio_port),
@@ -158,7 +158,7 @@ pub async fn roll_seed(
                                   roll,seed, err);
                         }
                     }
-                    child.kill().expect("failed to kill child");
+                    child.close().kill().expect("failed to kill child");
                 }
             });
         }));

@@ -90,6 +90,11 @@ impl ExecutableCommand for ThisCommand {
     .await
     .expect("failed to start factorio");
 
+    #[cfg(feature = "repl")]
+    {
+      crate::repl::start().unwrap();
+    }
+
     // FIXME: watch children die?
 
     if let Some(_world) = &instance_state.world {

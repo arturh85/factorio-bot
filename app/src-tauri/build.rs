@@ -84,6 +84,9 @@ fn typescriptify() {
   while output.contains("  ") {
     output = output.replace("  ", " ");
   }
-  output = output.replace("\n\n", "\n");
+  for _ in 0..5 {
+    output = output.replace("\n\n", "\n");
+    output = output.replace("\r\n\r\n", "\r\n");
+  }
   fs::write(TYPESCRIPT_SETTINGS_PATH, output).expect("failed to write typescript types");
 }

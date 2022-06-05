@@ -53,6 +53,15 @@ impl FactorioRcon {
         })
     }
 
+    pub async fn initialize_server(&self) -> Result<()> {
+        self.silent_print("").await.expect("failed to silent print");
+        self.whoami("server").await.expect("failed to whoami");
+        self.send("/silent-command game.surfaces[1].always_day=true")
+            .await
+            .expect("always day");
+        Ok(())
+    }
+
     pub async fn send(&self, command: &str) -> Result<Option<Vec<String>>> {
         if !self.silent {
             info!("<cyan>rcon</>  ⮜ <green>{}</>", command);

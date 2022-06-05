@@ -2,16 +2,16 @@ use paris::Logger;
 use serde_json::Value;
 use std::fs;
 use std::fs::{read_to_string, File};
-use std::io::{BufReader, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::str::FromStr;
 
 use crate::constants::{
     MAP_GEN_SETTINGS_FILENAME, MAP_SETTINGS_FILENAME, MODS_FOLDERNAME, SERVER_SETTINGS_FILENAME,
 };
 use crate::errors::*;
-use crate::factorio::rcon::RconSettings;
+use crate::factorio::rcon::{FactorioRcon, RconSettings};
 use crate::factorio::util::{read_to_value, write_value_to};
 use crate::process::io_utils::{extract_archive, symlink};
 use crate::process::output_reader::read_output;
@@ -367,30 +367,23 @@ pub async fn update_map_gen_settings(
         "--server-settings",
         server_settings_path.to_str().unwrap(),
     ];
-    let mut child = Command::new(&factorio_binary_path)
-        .args(args)
-        // .stdout(Stdio::from(outputs))
-        // .stderr(Stdio::from(errors))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("failed to start server");
-    let stdout = child.stdout.take().unwrap();
-    let reader = BufReader::new(stdout);
     let log_path = workspace_path.join(PathBuf::from_str("server-log.txt").unwrap());
-    let (_, rcon) = read_output(
-        reader,
-        rcon_settings,
+    let mut command = Command::new(&factorio_binary_path);
+    command.args(args);
+    let (_, proc) = read_output(
+        command,
         log_path,
-        // None,
         false,
         true,
         FactorioStartCondition::Initialized,
-    )
-    .await?;
+    )?;
+    let rcon = FactorioRcon::new(rcon_settings, silent)
+        .await
+        .expect("failed to rcon");
+    rcon.initialize_server().await?;
     rcon.parse_map_exchange_string(MAP_GEN_SETTINGS_FILENAME, map_exchange_string)
         .await?;
-    child.kill().into_diagnostic()?;
+    proc.close().kill().into_diagnostic()?;
     let target_map_gen_settings_path =
         instance_path.join(PathBuf::from_str(MAP_GEN_SETTINGS_FILENAME).unwrap());
     let target_map_settings_path =

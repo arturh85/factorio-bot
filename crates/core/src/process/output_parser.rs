@@ -10,7 +10,7 @@ use crate::types::{
     FactorioItemPrototype, FactorioRecipe, FactorioTile, PlayerChangedDistanceEvent,
     PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent, Pos, Position, Rect,
 };
-use miette::{Result, IntoDiagnostic};
+use miette::{IntoDiagnostic, Result};
 
 pub struct OutputParser {
     world: Arc<FactorioWorld>,
@@ -18,7 +18,7 @@ pub struct OutputParser {
 }
 
 impl OutputParser {
-    pub async fn parse(&mut self, _tick: u64, action: &str, rest: &str) -> Result<()> {
+    pub fn parse(&mut self, _tick: u64, action: &str, rest: &str) -> Result<()> {
         match action {
             "entities" => {
                 let colon_pos = rest.find(':').unwrap();
@@ -148,12 +148,8 @@ impl OutputParser {
                     let action_status = &rest[0..pos];
                     let rest = &rest[pos + 1..];
                     let action_id: u32 = match rest.find(' ') {
-                        Some(pos) => (&rest[0..pos])
-                            .parse()
-                            .into_diagnostic()?,
-                        None => rest
-                            .parse()
-                            .into_diagnostic()?,
+                        Some(pos) => (&rest[0..pos]).parse().into_diagnostic()?,
+                        None => rest.parse().into_diagnostic()?,
                     };
                     let result = match action_status {
                         "ok" => "ok",
@@ -168,18 +164,14 @@ impl OutputParser {
             }
             "on_script_path_request_finished" => {
                 let parts: Vec<&str> = rest.split('#').collect();
-                let id: u32 = parts[0]
-                    .parse()
-                    .into_diagnostic()?;
+                let id: u32 = parts[0].parse().into_diagnostic()?;
                 self.world.path_requests.insert(id, String::from(parts[1]));
             }
             "STATIC_DATA_END" => {
                 // handled by OutputReader
             }
             "on_player_left_game" => {
-                let player_id: u32 = rest
-                    .parse()
-                    .into_diagnostic()?;
+                let player_id: u32 = rest.parse().into_diagnostic()?;
                 self.world.remove_player(player_id)?;
                 // if let Some(websocket_server) = self.websocket_server.as_ref() {
                 //     websocket_server
@@ -217,8 +209,8 @@ impl OutputParser {
                 self.world.on_some_entity_deleted(entity)?;
             }
             "on_player_main_inventory_changed" => {
-                let event: PlayerChangedMainInventoryEvent = serde_json::from_str(rest)
-                    .into_diagnostic()?;
+                let event: PlayerChangedMainInventoryEvent =
+                    serde_json::from_str(rest).into_diagnostic()?;
                 let _player_id = event.player_id;
                 self.world.player_changed_main_inventory(event)?;
                 // if let Some(websocket_server) = self.websocket_server.as_ref() {
@@ -230,8 +222,8 @@ impl OutputParser {
                 // }
             }
             "on_player_changed_position" => {
-                let event: PlayerChangedPositionEvent = serde_json::from_str(rest)
-                    .into_diagnostic()?;
+                let event: PlayerChangedPositionEvent =
+                    serde_json::from_str(rest).into_diagnostic()?;
                 let _player_id = event.player_id;
                 self.world.player_changed_position(event)?;
                 // if let Some(websocket_server) = self.websocket_server.as_ref() {
@@ -243,8 +235,8 @@ impl OutputParser {
                 // }
             }
             "on_player_changed_distance" => {
-                let event: PlayerChangedDistanceEvent = serde_json::from_str(rest)
-                    .into_diagnostic()?;
+                let event: PlayerChangedDistanceEvent =
+                    serde_json::from_str(rest).into_diagnostic()?;
                 let _player_id = event.player_id;
                 self.world.player_changed_distance(event)?;
                 // if let Some(websocket_server) = self.websocket_server.as_ref() {

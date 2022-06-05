@@ -73,17 +73,13 @@ pub async fn stop_instances(
   instance_state: State<'_, Arc<RwLock<Option<FactorioInstance>>>>,
 ) -> Result<(), String> {
   let mut instance_state = instance_state.write().await;
-  let result: Result<(), String> = match instance_state.as_mut() {
-    None => Err("not started".into()),
-    Some(instance_state) => {
-      instance_state.stop().unwrap();
-      app_handle
-        .emit_all("instances_stopped", true)
-        .map_err(|e| format!("error: {}", e))?;
-      Ok(())
-    }
-  };
-  result?;
+  if instance_state.is_none() {
+    return Err("not started".into());
+  }
+  instance_state.take().unwrap().stop().unwrap();
+  app_handle
+    .emit_all("instances_stopped", true)
+    .map_err(|e| format!("error: {}", e))?;
   *instance_state = None;
   Ok(())
 }

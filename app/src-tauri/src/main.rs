@@ -49,15 +49,7 @@ async fn main() -> Result<()> {
   }
   #[cfg(feature = "gui")]
   {
-    #[cfg(feature = "repl")]
-    {
-      tokio::task::spawn(gui::start());
-      return repl::start();
-    }
-    #[cfg(not(feature = "repl"))]
-    {
-      return gui::start().await;
-    }
+    return gui::start().await;
   }
   #[cfg(not(feature = "gui"))]
   {

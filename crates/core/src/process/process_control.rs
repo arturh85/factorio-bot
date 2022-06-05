@@ -6,36 +6,37 @@ use crate::process::arrange_windows::arrange_windows;
 use crate::process::instance_setup::setup_factorio_instance;
 use crate::process::output_reader::read_output;
 use crate::settings::FactorioSettings;
+use interactive_process::InteractiveProcess;
 use miette::{IntoDiagnostic, Result};
 use paris::Logger;
+use parking_lot::Mutex;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus};
 use std::str::FromStr;
 use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::thread;
 use std::thread::{sleep, JoinHandle};
 use std::time::{Duration, Instant};
-use tokio::task;
 
 pub struct FactorioInstance {
     pub world: Option<Arc<FactorioWorld>>,
     pub rcon: Arc<FactorioRcon>,
-    pub server_process: Option<Child>,
-    pub client_processes: Vec<Child>,
+    pub server_process: Option<InteractiveProcess>,
+    pub client_processes: Vec<InteractiveProcess>,
 }
 
 impl FactorioInstance {
-    pub fn stop(&mut self) -> Result<()> {
-        for child in &mut self.client_processes {
-            if child.kill().is_err() {
+    pub fn stop(mut self) -> Result<()> {
+        for child in self.client_processes {
+            if child.close().kill().is_err() {
                 error!("failed to kill client");
             }
         }
-        if let Some(server) = self.server_process.as_mut() {
-            if server.kill().is_err() {
+        if let Some(server) = self.server_process.take() {
+            if server.close().kill().is_err() {
                 error!("failed to kill server");
             }
         }
@@ -217,7 +218,7 @@ pub async fn start_factorio_server(
     write_logs: bool,
     silent: bool,
     wait_until: FactorioStartCondition,
-) -> Result<(Arc<FactorioWorld>, Arc<FactorioRcon>, Child)> {
+) -> Result<(Arc<FactorioWorld>, Arc<FactorioRcon>, InteractiveProcess)> {
     let workspace_path = Path::new(&workspace_path);
     if !workspace_path.exists() {
         error!(
@@ -290,31 +291,19 @@ pub async fn start_factorio_server(
             &instance_path, &args
         );
     }
-    let mut child = Command::new(&factorio_binary_path)
-        .args(args)
-        // .stdout(Stdio::from(outputs))
-        // .stderr(Stdio::from(errors))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("failed to start server");
-
-    let stdout = child.stdout.take().unwrap();
-    let reader = BufReader::new(stdout);
+    let mut command = Command::new(&factorio_binary_path);
+    command.args(args);
     let log_path = workspace_path.join(PathBuf::from_str("server-log.txt").unwrap());
-    let (world, rcon) = read_output(
-        reader,
-        rcon_settings,
-        log_path,
-        // websocket_server,
-        write_logs,
-        silent,
-        wait_until,
-    )
-    .await?;
+    let (world, proc) = read_output(command, log_path, write_logs, silent, wait_until)?;
+    let rcon = Arc::new(
+        FactorioRcon::new(rcon_settings, silent)
+            .await
+            .expect("failed to rcon"),
+    );
+    rcon.initialize_server().await?;
     // await for factorio to start before returning
 
-    Ok((world, rcon, child))
+    Ok((world, rcon, proc))
 }
 // let handle = thread::spawn(move || {
 //     let exit_code = child.wait().expect("failed to wait for client");
@@ -347,7 +336,7 @@ pub async fn start_factorio_client(
     server_host: Option<&str>,
     write_logs: bool,
     silent: bool,
-) -> Result<Child> {
+) -> Result<InteractiveProcess> {
     let workspace_path: String = settings.workspace_path.to_string();
     let workspace_path = Path::new(&workspace_path);
     if !workspace_path.exists() {
@@ -397,25 +386,21 @@ pub async fn start_factorio_client(
         &instance_name, &instance_path, &args
     );
 
-    let mut child = Command::new(&factorio_binary_path)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("failed to start client");
+    let mut command = Command::new(&factorio_binary_path);
+    command.args(args);
     let instance_name = instance_name;
     let log_instance_name = instance_name.clone();
-    let stdout = child.stdout.take().unwrap();
-    let reader = BufReader::new(stdout);
+    // let stdout = child.stdout.take().unwrap();
+    // let reader = BufReader::new(stdout);
     let log_filename = format!(
         "{}/{}-log.txt",
         workspace_path.to_str().unwrap(),
         instance_name
     );
-    let mut log_file = match write_logs {
+    let log_file: Arc<Mutex<Option<File>>> = Arc::new(Mutex::new(match write_logs {
         true => Some(File::create(log_filename).into_diagnostic()?),
         false => None,
-    };
+    }));
     // let handle = thread::spawn(move || {
     //     let exit_code = child.wait().expect("failed to wait for client");
     //     if let Some(code) = exit_code.code() {
@@ -429,36 +414,38 @@ pub async fn start_factorio_client(
     //     exit_code
     // });
     let is_client = server_host.is_some();
+
+    let initialized = Mutex::new(false);
     let (tx, rx) = channel();
     tx.send(()).into_diagnostic()?;
-    task::spawn(async move {
-        let mut initialized = false;
-        for line in reader.lines() {
-            if let Ok(line) = line {
-                // wait for factorio init before sending confirmation
-                if !initialized && line.contains("my_client_id") {
-                    initialized = true;
-                    rx.recv().unwrap();
-                    rx.recv().unwrap();
-                }
-                log_file.iter_mut().for_each(|log_file| {
-                    // filter out 6.6 million lines like 6664601 / 6665150...
-                    if initialized || !line.contains(" / ") {
-                        log_file
-                            .write_all(line.as_bytes())
-                            .expect("failed to write log file");
-                        log_file.write_all(b"\n").expect("failed to write log file");
-                    }
-                });
-                if is_client && !line.contains(" / ") && !line.starts_with('§') {
-                    info!("<cyan>{}</>⮞ <magenta>{}</>", &log_instance_name, line);
-                }
-            } else {
-                error!("failed to read client log");
-                break;
+
+    let proc = InteractiveProcess::new(command, move |line| {
+        if let Ok(line) = line {
+            let mut initialized = initialized.lock();
+            // wait for factorio init before sending confirmation
+            if !*initialized && line.contains("my_client_id") {
+                *initialized = true;
+                rx.recv().unwrap();
+                rx.recv().unwrap();
             }
+            let mut log_file = log_file.lock();
+            log_file.iter_mut().for_each(|log_file| {
+                // filter out 6.6 million lines like 6664601 / 6665150...
+                if *initialized || !line.contains(" / ") {
+                    log_file
+                        .write_all(line.as_bytes())
+                        .expect("failed to write log file");
+                    log_file.write_all(b"\n").expect("failed to write log file");
+                }
+            });
+            if is_client && !line.contains(" / ") && !line.starts_with('§') {
+                info!("<cyan>{}</>⮞ <magenta>{}</>", &log_instance_name, line);
+            }
+        } else {
+            error!("failed to read client log");
         }
-    });
+    })
+    .unwrap();
     tx.send(()).into_diagnostic()?;
-    Ok(child)
+    Ok(proc)
 }

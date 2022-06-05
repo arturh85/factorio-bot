@@ -95,7 +95,7 @@ pub async fn start_factorio_and_plan_graph(
     .await
     .expect("failed to initially setup instance");
 
-    let (world, rcon, mut child) = start_factorio_server(
+    let (world, rcon, child) = start_factorio_server(
         &settings.workspace_path,
         &rcon_settings,
         None,
@@ -201,7 +201,7 @@ pub async fn start_factorio_and_plan_graph(
         }
     };
 
-    child.kill().expect("failed to kill child");
+    child.close().kill().expect("failed to kill child");
     Ok(graph)
 }
 
@@ -246,13 +246,13 @@ mod tests {
         let mut planner = Planner::new(world, None);
         run_lua(
             &mut planner,
-            r##"
+            r#"
     plan.groupStart("Mine Stuff")
     for idx,playerId in pairs(all_bots) do
         plan.mine(playerId, {x=idx * 10,y=43}, "rock-huge", 1)
     end
     plan.groupEnd()
-        "##,
+        "#,
             2,
         )
         .unwrap();

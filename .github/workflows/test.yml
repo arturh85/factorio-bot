@@ -54,7 +54,7 @@ jobs:
         uses: codecov/codecov-action@v3
         continue-on-error: true
         with:
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           files: ./app/coverage/cobertura-coverage.xml,./cobertura.xml,./target/tarpaulin/coverage.json
       - name: 🚧 build rust
         run: cd app; yarn tauri:build

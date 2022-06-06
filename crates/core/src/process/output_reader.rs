@@ -1,8 +1,7 @@
-use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Arc;
+use std::{fs::File, sync::Arc};
 
 // use crate::factorio::ws::FactorioWebSocketServer;
 // use tokio::sync::mpsc::channel;
@@ -10,7 +9,7 @@ use std::sync::Arc;
 use crate::factorio::world::FactorioWorld;
 use crate::process::output_parser::OutputParser;
 use crate::process::process_control::FactorioStartCondition;
-use interactive_process::InteractiveProcess;
+use crate::process::InteractiveProcess;
 use miette::{IntoDiagnostic, Result};
 use parking_lot::Mutex;
 use std::sync::mpsc::channel;
@@ -35,7 +34,7 @@ pub fn read_output(
     tx2.send(()).into_diagnostic()?;
     let initialized = Mutex::new(false);
     let _output_parser = output_parser.clone();
-    let proc = InteractiveProcess::new(cmd, move|line| {
+    let proc = InteractiveProcess::new_with_stderr(cmd, move|line| {
         match line {
             Ok(line) => {
                 let mut initialized = initialized.lock();
@@ -117,7 +116,16 @@ pub fn read_output(
                 }
             }
             Err(err) => {
-                error!("<red>failed to read server log: {}</>", err);
+                error!("<red>failed to read server stdout: {:?}</>", err);
+            }
+        };
+    }, move|line| {
+        match line {
+            Ok(line) => {
+                warn!("<cyan>server</>⮞ <red>{}</>", line);
+            },
+            Err(err) => {
+                error!("<red>failed to read server stderr: {:?}</>", err);
             }
         };
     })

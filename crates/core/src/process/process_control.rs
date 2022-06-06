@@ -5,8 +5,8 @@ use crate::factorio::world::FactorioWorld;
 use crate::process::arrange_windows::arrange_windows;
 use crate::process::instance_setup::setup_factorio_instance;
 use crate::process::output_reader::read_output;
+use crate::process::InteractiveProcess;
 use crate::settings::FactorioSettings;
-use interactive_process::InteractiveProcess;
 use miette::{IntoDiagnostic, Result};
 use paris::Logger;
 use parking_lot::Mutex;
@@ -423,32 +423,48 @@ pub async fn start_factorio_client(
     let (tx, rx) = channel();
     tx.send(()).into_diagnostic()?;
 
-    let proc = InteractiveProcess::new(command, move |line| {
-        if let Ok(line) = line {
-            let mut initialized = initialized.lock();
-            // wait for factorio init before sending confirmation
-            if !*initialized && line.contains("my_client_id") {
-                *initialized = true;
-                rx.recv().unwrap();
-                rx.recv().unwrap();
-            }
-            let mut log_file = log_file.lock();
-            log_file.iter_mut().for_each(|log_file| {
-                // filter out 6.6 million lines like 6664601 / 6665150...
-                if *initialized || !line.contains(" / ") {
-                    log_file
-                        .write_all(line.as_bytes())
-                        .expect("failed to write log file");
-                    log_file.write_all(b"\n").expect("failed to write log file");
+    let proc = InteractiveProcess::new_with_stderr(
+        command,
+        move |line| {
+            match line {
+                Ok(line) => {
+                    let mut initialized = initialized.lock();
+                    // wait for factorio init before sending confirmation
+                    if !*initialized && line.contains("my_client_id") {
+                        *initialized = true;
+                        rx.recv().unwrap();
+                        rx.recv().unwrap();
+                    }
+                    let mut log_file = log_file.lock();
+                    log_file.iter_mut().for_each(|log_file| {
+                        // filter out 6.6 million lines like 6664601 / 6665150...
+                        if *initialized || !line.contains(" / ") {
+                            log_file
+                                .write_all(line.as_bytes())
+                                .expect("failed to write log file");
+                            log_file.write_all(b"\n").expect("failed to write log file");
+                        }
+                    });
+                    if is_client && !line.contains(" / ") && !line.starts_with('§') {
+                        info!("<cyan>{}</>⮞ <magenta>{}</>", &log_instance_name, line);
+                    }
                 }
-            });
-            if is_client && !line.contains(" / ") && !line.starts_with('§') {
-                info!("<cyan>{}</>⮞ <magenta>{}</>", &log_instance_name, line);
-            }
-        } else {
-            error!("failed to read client log");
-        }
-    })
+                Err(err) => {
+                    error!("<red>failed to read client stdout: {:?}</>", err);
+                }
+            };
+        },
+        move |line| {
+            match line {
+                Ok(line) => {
+                    warn!("<cyan>client</>⮞ <red>{}</>", line);
+                }
+                Err(err) => {
+                    error!("<red>failed to read client stderr: {:?}</>", err);
+                }
+            };
+        },
+    )
     .unwrap();
     tx.send(()).into_diagnostic()?;
     Ok(proc)

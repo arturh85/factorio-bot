@@ -1,4 +1,3 @@
-
 pub const WORKSPACE_FOLDERNAME: &str = "workspace";
 pub const MODS_FOLDERNAME: &str = "mods";
 pub const SERVER_SETTINGS_FILENAME: &str = "server-settings.json";

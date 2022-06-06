@@ -38,7 +38,7 @@ pub fn start() -> Result<()> {
   let mut repl: Repl<Context, reedline_repl_rs::Error> = Repl::new(context)
     .with_name(APP_NAME)
     .with_prompt(&PROMPT)
-    .with_history(constants::app_data_dir().join("repl_history"))
+    .with_history(constants::app_data_dir().join("repl_history"), 50)
     .with_version(env!("CARGO_PKG_VERSION"))
     .with_description(APP_ABOUT);
   for subcommand in subcommands() {
@@ -53,6 +53,7 @@ pub fn start() -> Result<()> {
   }
   Ok(())
 }
+
 fn get_runtime_handle() -> (Handle, Option<Runtime>) {
   if let Ok(h) = Handle::try_current() {
     (h, None)

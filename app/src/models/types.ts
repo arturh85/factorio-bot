@@ -63,17 +63,11 @@ export enum Technologies {
  rocketSilo = "rocket-silo",
 }
 export type FactorioPlayerById = { [playerIdString: string]: FactorioPlayer };
-
 export type FactorioRecipeByName = { [name: string]: FactorioRecipe };
-
 export type FactorioTechnologyByName = { [name: string]: FactorioTechnology };
-
 export type FactorioEntityPrototypeByName = { [name: string]: FactorioEntityPrototype };
-
 export type FactorioItemPrototypeByName = { [name: string]: FactorioItemPrototype };
-
 export type FactorioInventory = { [name: string]: number };
-
 export type StarterMinerFurnace = {
  minerPosition: Position
  minerType: string

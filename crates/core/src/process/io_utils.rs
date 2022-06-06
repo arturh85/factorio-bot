@@ -1,5 +1,5 @@
 use indicatif::HumanDuration;
-use miette::{IntoDiagnostic, Result};
+use miette::{IntoDiagnostic, miette, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -79,8 +79,11 @@ pub fn extract_archive(
     target_directory: &Path,
     workspace_path: &Path,
 ) -> Result<()> {
-    let started = Instant::now();
+    if archive.is_empty() {
+        return Err(miette!("archive may not be empty"));
+    }
     let workspace_data_path = workspace_path.join(PathBuf::from("data"));
+    let started = Instant::now();
 
     #[cfg(windows)]
     {
@@ -148,51 +151,38 @@ pub fn extract_archive(
         use std::fs::File;
         use std::str::FromStr;
         let archive_path = PathBuf::from_str(archive).into_diagnostic()?;
-        let tar_path = archive_path.with_extension("");
-        if !tar_path.exists() {
-            let mut logger = Logger::new();
+        let mut logger = Logger::new();
+        let extracted_path = workspace_path.join(PathBuf::from("factorio"));
+        if !extracted_path.exists() {
             logger.loading(format!(
-                "Uncompressing <bright-blue>{}</> to <magenta>{}</> ...",
+                "Uncompressing xz2 <bright-blue>{}</> to <magenta>{}</> ...",
                 &archive_path.to_str().unwrap(),
-                tar_path.to_str().unwrap()
+                workspace_path.to_str().unwrap()
             ));
-
-            let tar_gz = File::open(&archive_path).into_diagnostic()?;
-            let tar = xz2::read::XzDecoder::new(tar_gz);
+            let tar_xz = File::open(&archive_path).into_diagnostic()?;
+            let tar = xz2::read::XzDecoder::new(tar_xz);
             let mut archive = tar::Archive::new(tar);
-            archive.unpack(&tar_path).expect("failed to decompress xz");
+            archive.unpack(&workspace_path).expect("failed to decompress xz");
             logger.success(format!(
-                "Uncompressed <bright-blue>{}</> to <magenta>{}</>",
+                "Uncompressed tar <bright-blue>{}</> to <magenta>{}</>",
                 &archive_path.to_str().unwrap(),
-                tar_path.to_str().unwrap()
+                workspace_path.to_str().unwrap()
             ));
         }
-        let mut logger = Logger::new();
-        logger.loading(format!(
-            "Extracting <bright-blue>{}</> to <magenta>{}</> ...",
-            &tar_path.to_str().unwrap(),
-            workspace_path.to_str().unwrap()
-        ));
-        // FIXME: what did this do ...?
-        // let mut archive = archiver_rs::Tar::open(&tar_path).unwrap();
-        // archive.extract(workspace_path).expect("failed to extract");
-        logger.success("Extraction finished");
-
-        let extracted_path = workspace_path.join(PathBuf::from("factorio"));
         if extracted_path.exists() {
-            std::fs::remove_dir(&target_directory).expect("failed to delete empty folder");
-            std::fs::rename(&extracted_path, target_directory).expect("failed to rename");
+            // fs::remove_dir(&target_directory).expect("failed to delete empty folder");
+            fs::rename(&extracted_path, target_directory).expect("failed to rename");
             success!("Renamed {:?} to {:?}", &extracted_path, target_directory);
         } else {
             error!("Failed to find {:?}", &extracted_path);
         }
-
         let instance_data_path = target_directory.join(PathBuf::from("data"));
         if !workspace_data_path.exists() {
             fs::rename(&instance_data_path, &workspace_data_path).into_diagnostic()?;
         } else {
-            std::fs::remove_dir_all(&instance_data_path).expect("failed to delete data folder");
+            fs::remove_dir_all(&instance_data_path).expect("failed to delete data folder");
         }
+        symlink(&workspace_data_path, &instance_data_path)?;
     }
     info!(
         "Extracting took <yellow>{}</>",

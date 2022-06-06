@@ -1,6 +1,7 @@
 mod factorio;
 mod quit;
 mod rcon;
+#[cfg(any(feature = "lua", feature = "rhai"))]
 mod run;
 
 use crate::{constants, APP_ABOUT, APP_NAME};
@@ -18,6 +19,7 @@ const PROMPT: &str = "repl";
 pub fn subcommands() -> Vec<Box<dyn ExecutableReplCommand>> {
   vec![
     factorio::build(),
+    #[cfg(any(feature = "lua", feature = "rhai"))]
     run::build(),
     rcon::build(),
     quit::build(),

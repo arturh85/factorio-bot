@@ -16,7 +16,7 @@ use crate::factorio::util::{read_to_value, write_value_to};
 use crate::process::io_utils::{extract_archive, symlink};
 use crate::process::output_reader::read_output;
 use crate::process::process_control::{await_lock, FactorioStartCondition};
-use miette::{IntoDiagnostic, Result};
+use miette::{IntoDiagnostic, miette, Result};
 use tokio::fs::create_dir;
 
 #[cfg(not(debug_assertions))]
@@ -37,6 +37,12 @@ pub async fn setup_factorio_instance(
     seed: Option<String>,
     silent: bool,
 ) -> Result<()> {
+    if workspace_path_str.is_empty() {
+        return Err(miette!("no workspace configured"));
+    }
+    if factorio_archive_path.is_empty() {
+        return Err(miette!("no factorio archive configured"));
+    }
     let workspace_path = Path::new(&workspace_path_str);
     if !workspace_path.exists() {
         error!(
@@ -92,7 +98,7 @@ pub async fn setup_factorio_instance(
         }
     }
 
-    let workspace_mods_path = std::fs::canonicalize(workspace_mods_path).into_diagnostic()?;
+    let workspace_mods_path = fs::canonicalize(workspace_mods_path).into_diagnostic()?;
     let mods_path = instance_path.join(PathBuf::from(MODS_FOLDERNAME));
     if !mods_path.exists() {
         if !silent {
@@ -102,7 +108,7 @@ pub async fn setup_factorio_instance(
     }
     let instance_data_path = instance_path.join(PathBuf::from("data"));
     if !instance_data_path.exists() && workspace_data_path.exists() {
-        let workspace_data_path = std::fs::canonicalize(workspace_data_path).into_diagnostic()?;
+        let workspace_data_path = fs::canonicalize(workspace_data_path).into_diagnostic()?;
         if !silent {
             info!(
                 "Creating Symlink for <bright-blue>{:?}</>",
@@ -124,7 +130,7 @@ pub async fn setup_factorio_instance(
         let server_settings_path = instance_path.join(PathBuf::from(SERVER_SETTINGS_FILENAME));
         if !server_settings_path.exists() {
             let server_settings_data = include_bytes!("../data/server-settings.json");
-            let mut outfile = fs::File::create(&server_settings_path).into_diagnostic()?;
+            let mut outfile = File::create(&server_settings_path).into_diagnostic()?;
             if !silent {
                 info!("Creating <bright-blue>{:?}</>", &server_settings_path);
             }
@@ -189,7 +195,7 @@ pub async fn setup_factorio_instance(
                     silent,
                 )
                 .await?;
-                fs::File::create(&map_exchange_string_path)
+                File::create(&map_exchange_string_path)
                     .into_diagnostic()?
                     .write_all(map_exchange_string.as_ref())
                     .into_diagnostic()?;
@@ -197,7 +203,7 @@ pub async fn setup_factorio_instance(
         }
 
         if saves_level_path.exists() && recreate_save {
-            std::fs::remove_file(&saves_level_path).unwrap_or_else(|_| {
+            fs::remove_file(&saves_level_path).unwrap_or_else(|_| {
                 panic!("failed to delete {}", &saves_level_path.to_str().unwrap())
             });
         }
@@ -269,7 +275,7 @@ pub async fn setup_factorio_instance(
         let player_data_path = instance_path.join(PathBuf::from("player-data.json"));
         if !player_data_path.exists() {
             let player_data = include_bytes!("../data/player-data.json");
-            let mut outfile = fs::File::create(&player_data_path).into_diagnostic()?;
+            let mut outfile = File::create(&player_data_path).into_diagnostic()?;
             outfile.write_all(player_data).into_diagnostic()?;
             if !silent {
                 info!("Created <bright-blue>{:?}</>", &player_data_path);
@@ -285,7 +291,7 @@ pub async fn setup_factorio_instance(
             create_dir(&config_path).await.into_diagnostic()?;
             let config_ini_data = include_bytes!("../data/config.ini");
             let config_ini_path = config_path.join(PathBuf::from("config.ini"));
-            let mut outfile = fs::File::create(&config_ini_path).into_diagnostic()?;
+            let mut outfile = File::create(&config_ini_path).into_diagnostic()?;
             outfile.write_all(config_ini_data).into_diagnostic()?;
             if !silent {
                 info!("Created <bright-blue>{:?}</>", &config_ini_path);

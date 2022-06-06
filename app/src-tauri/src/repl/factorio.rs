@@ -109,7 +109,7 @@ impl ExecutableReplCommand for ThisCommand {
             }
             drop(instance_state);
           }
-          info!("Hint: press CTRL+Z if you loose the ability to type");
+          print_hint();
           let instance_state = context.instance_state.clone();
           std::thread::spawn(move || {
             let rt = Runtime::new().unwrap();
@@ -126,6 +126,11 @@ impl ExecutableReplCommand for ThisCommand {
           })
           .join()
           .unwrap();
+          // repeat hint because beginning of output might not be
+          // visible in verbose mode any more
+          if verbose {
+            print_hint();
+          }
         }
         "stop" => {
           {
@@ -146,6 +151,10 @@ impl ExecutableReplCommand for ThisCommand {
       Ok(None)
     }
   }
+}
+
+fn print_hint() {
+  info!("Hint: press CTRL+Z if you loose the ability to type");
 }
 
 async fn do_start_factorio(
@@ -176,7 +185,10 @@ async fn do_start_factorio(
       drop(instance_state);
       Ok(None)
     }
-    Err(_err) => todo!(),
+    Err(err) => {
+      error!("failed to start factorio: {:?}", err);
+      Ok(None)
+    },
   }
   // Ok(Some("successfully started!".into()))
 }

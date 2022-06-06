@@ -29,7 +29,7 @@ impl OutputParser {
                 if entities == "{}" {
                     entities = "[]"
                 }
-                let entities: Vec<FactorioEntity> = serde_json::from_str(entities).unwrap();
+                let entities: Vec<FactorioEntity> = serde_json::from_str(entities).into_diagnostic()?;
                 self.world.update_chunk_entities(entities)?;
             }
             "tiles" => {

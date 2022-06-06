@@ -5,7 +5,7 @@ use std::borrow::Cow;
 )]
 #[allow(non_camel_case_types)]
 pub struct FactorioSettings {
-    pub client_count: u32,
+    pub client_count: u8,
     pub factorio_archive_path: Cow<'static, str>,
     pub map_exchange_string: Cow<'static, str>,
     pub rcon_pass: Cow<'static, str>,

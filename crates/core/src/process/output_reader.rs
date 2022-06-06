@@ -52,11 +52,11 @@ pub fn read_output(
                 {
                     *initialized = true;
                     output_parser.lock().on_init().unwrap();
-                    if let Err(err) = rx2.recv() {
-                        error!("recv error 1: {:?} ", err);
+                    if let Err(_err) = rx2.recv() {
+                        // error!("recv error 1: {:?} ", err);
                     }
-                    if let Err(err) = rx2.recv() {
-                        error!("recv error 1: {:?} ", err);
+                    if let Err(_err) = rx2.recv() {
+                        // error!("recv error 1: {:?} ", err);
                     }
                 }
                 // filter out 6 million lines like 6664601 / 6665150

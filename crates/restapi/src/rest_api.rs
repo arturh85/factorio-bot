@@ -3,7 +3,8 @@ use crate::error::{ErrorResponse, RestApiResult};
 use factorio_bot_core::process::process_control::FactorioInstance;
 use factorio_bot_core::types::{
     AreaFilter, Direction, FactorioEntity, FactorioEntityPrototype, FactorioItemPrototype,
-    FactorioPlayer, FactorioTile, InventoryResponse, PlaceEntityResult, Position, RequestEntity,
+    FactorioPlayer, FactorioTile, InventoryResponse, PlaceEntityResult, PlayerId, Position,
+    RequestEntity,
 };
 use num_traits::cast::FromPrimitive;
 use rocket::serde::json::Json;
@@ -174,7 +175,7 @@ pub async fn inventory_contents_at(
 #[get("/movePlayer?<player_id>&<goal>&<radius>")]
 pub async fn move_player(
     instance_state: &State<Arc<RwLock<Option<FactorioInstance>>>>,
-    player_id: u32,
+    player_id: PlayerId,
     goal: String,
     radius: Option<f64>,
 ) -> RestApiResult<FactorioPlayer> {
@@ -204,7 +205,7 @@ pub async fn move_player(
 #[get("/playerInfo?<player_id>")]
 pub async fn player_info(
     instance_state: &State<Arc<RwLock<Option<FactorioInstance>>>>,
-    player_id: u32,
+    player_id: PlayerId,
 ) -> RestApiResult<FactorioPlayer> {
     let instance_state = instance_state.read().await;
     if let Some(instance_state) = &*instance_state {
@@ -228,7 +229,7 @@ pub async fn player_info(
 #[get("/placeEntity?<player_id>&<item>&<position>&<direction>")]
 pub async fn place_entity(
     instance_state: &State<Arc<RwLock<Option<FactorioInstance>>>>,
-    player_id: u32,
+    player_id: PlayerId,
     item: String,
     position: String,
     direction: u8,
@@ -268,7 +269,7 @@ pub async fn cheat_item(
     instance_state: &State<Arc<RwLock<Option<FactorioInstance>>>>,
     name: String,
     count: u32,
-    player_id: u32,
+    player_id: PlayerId,
 ) -> RestApiResult<FactorioPlayer> {
     let instance_state = instance_state.read().await;
     if let Some(instance_state) = &*instance_state {
@@ -327,7 +328,7 @@ pub async fn cheat_all_technologies(
 )]
 pub async fn insert_to_inventory(
     instance_state: &State<Arc<RwLock<Option<FactorioInstance>>>>,
-    player_id: u32,
+    player_id: PlayerId,
     entity_name: String,
     entity_position: String,
     inventory_type: u32,
@@ -368,7 +369,7 @@ pub async fn insert_to_inventory(
 )]
 pub async fn remove_from_inventory(
     instance_state: &State<Arc<RwLock<Option<FactorioInstance>>>>,
-    player_id: u32,
+    player_id: PlayerId,
     entity_name: String,
     entity_position: String,
     inventory_type: u32,

@@ -1,6 +1,6 @@
 use factorio_bot_core::factorio::rcon::FactorioRcon;
 use factorio_bot_core::factorio::world::FactorioWorld;
-use factorio_bot_core::types::{AreaFilter, Position, RequestEntity};
+use factorio_bot_core::types::{AreaFilter, PlayerId, Position, RequestEntity};
 use rlua::{Context, Table};
 use rlua_async::ContextExt;
 use std::sync::Arc;
@@ -90,7 +90,7 @@ pub fn create_lua_rcon(
     map_table.set(
         "cheatItem",
         ctx.create_async_function_mut::<_, _, _, _>(
-            move |_ctx, (player_id, name, count): (u32, String, u32)| {
+            move |_ctx, (player_id, name, count): (PlayerId, String, u32)| {
                 let _rcon = rcon.clone();
                 async move {
                     _rcon
@@ -117,7 +117,7 @@ pub fn create_lua_rcon(
                 force_build,
                 only_ghosts,
                 helper_player_ids,
-            ): (u32, String, Table, u8, bool, bool, Vec<u32>)| {
+            ): (PlayerId, String, Table, u8, bool, bool, Vec<PlayerId>)| {
                 let _rcon = rcon.clone();
                 let _world = world.clone();
                 let position =
@@ -147,7 +147,7 @@ pub fn create_lua_rcon(
         ctx.create_async_function_mut::<_, _, _, _>(
             move |_ctx,
                   (player_id, blueprint, position, direction, force_build): (
-                u32,
+                PlayerId,
                 String,
                 Table,
                 u8,
@@ -171,7 +171,7 @@ pub fn create_lua_rcon(
     map_table.set(
         "reviveGhost",
         ctx.create_async_function_mut::<_, _, _, _>(
-            move |_ctx, (player_id, name, position): (u32, String, Table)| {
+            move |_ctx, (player_id, name, position): (PlayerId, String, Table)| {
                 let _rcon = rcon.clone();
                 let _world = world.clone();
                 let position =
@@ -191,7 +191,7 @@ pub fn create_lua_rcon(
     map_table.set(
         "move",
         ctx.create_async_function_mut::<_, _, _, _>(
-            move |_ctx, (player_id, position, radius): (u32, Table, Option<f64>)| {
+            move |_ctx, (player_id, position, radius): (PlayerId, Table, Option<f64>)| {
                 let _rcon = rcon.clone();
                 let _world = world.clone();
                 let position =
@@ -212,7 +212,7 @@ pub fn create_lua_rcon(
     map_table.set(
         "mine",
         ctx.create_async_function_mut::<_, _, _, _>(
-            move |_ctx, (player_id, name, position, count): (u32, String, Table, Option<u32>)| {
+            move |_ctx, (player_id, name, position, count): (PlayerId, String, Table, Option<u32>)| {
                 let _rcon = rcon.clone();
                 let _world = world.clone();
                 let position =
@@ -239,7 +239,7 @@ pub fn create_lua_rcon(
     map_table.set(
         "craft",
         ctx.create_async_function_mut::<_, _, _, _>(
-            move |_ctx, (player_id, name, count): (u32, String, Option<u32>)| {
+            move |_ctx, (player_id, name, count): (PlayerId, String, Option<u32>)| {
                 let _rcon = rcon.clone();
                 let _world = world.clone();
                 async move {
@@ -284,7 +284,7 @@ pub fn create_lua_rcon(
     map_table.set(
         "placeEntity",
         ctx.create_async_function_mut::<_, _, _, _>(
-            move |_ctx, (player_id, name, position, direction): (u32, String, Table, u8)| {
+            move |_ctx, (player_id, name, position, direction): (PlayerId, String, Table, u8)| {
                 let _rcon = rcon.clone();
                 let _world = world.clone();
                 let position =
@@ -307,7 +307,7 @@ pub fn create_lua_rcon(
         ctx.create_async_function_mut::<_, _, _, _>(
             move |_ctx,
                   (player_id, entity_name, position, inventory_type, item_name, item_count): (
-                u32,
+                PlayerId,
                 String,
                 Table,
                 u32,
@@ -344,7 +344,7 @@ pub fn create_lua_rcon(
         ctx.create_async_function_mut::<_, _, _, _>(
             move |_ctx,
                   (player_id, entity_name, position, inventory_type, item_name, item_count): (
-                u32,
+                PlayerId,
                 String,
                 Table,
                 u32,

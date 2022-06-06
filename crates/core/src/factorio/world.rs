@@ -3,7 +3,7 @@ use crate::graph::flow_graph::FlowGraph;
 use crate::types::{
     FactorioEntity, FactorioEntityPrototype, FactorioForce, FactorioGraphic, FactorioItemPrototype,
     FactorioPlayer, FactorioRecipe, FactorioTile, PlayerChangedDistanceEvent,
-    PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent,
+    PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent, PlayerId,
 };
 use dashmap::DashMap;
 use image::RgbaImage;
@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub struct FactorioWorld {
-    pub players: DashMap<u32, FactorioPlayer>,
+    pub players: DashMap<PlayerId, FactorioPlayer>,
     pub forces: DashMap<String, FactorioForce>,
     pub graphics: DashMap<String, FactorioGraphic>,
     pub recipes: Arc<DashMap<String, FactorioRecipe>>,
@@ -77,7 +77,7 @@ impl FactorioWorld {
         Ok(())
     }
 
-    pub fn remove_player(&self, player_id: u32) -> Result<()> {
+    pub fn remove_player(&self, player_id: PlayerId) -> Result<()> {
         self.players.remove(&player_id);
         Ok(())
     }
@@ -237,7 +237,7 @@ impl FactorioWorld {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let forces: DashMap<String, FactorioForce> = DashMap::new();
-        let players: DashMap<u32, FactorioPlayer> = DashMap::new();
+        let players: DashMap<PlayerId, FactorioPlayer> = DashMap::new();
         let graphics: DashMap<String, FactorioGraphic> = DashMap::new();
         let image_cache: DashMap<String, Box<RgbaImage>> = DashMap::new();
         let item_prototypes: DashMap<String, FactorioItemPrototype> = DashMap::new();

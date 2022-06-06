@@ -92,7 +92,7 @@ impl ExecutableCommand for ThisCommand {
 
     #[cfg(feature = "repl")]
     {
-      crate::repl::start().unwrap();
+      crate::repl::start()?;
     }
 
     // FIXME: watch children die?

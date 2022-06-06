@@ -63,10 +63,13 @@ pub struct FactorioProduct {
     pub probability: Box<R64>,
 }
 
+pub type PlayerId = u8;
+pub type ActionId = u32;
+
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FactorioPlayer {
-    pub player_id: u32,
+    pub player_id: PlayerId,
     pub position: Position,
     pub main_inventory: BTreeMap<String, u32>,
     pub build_distance: u32,          // for place_entity
@@ -817,7 +820,7 @@ pub struct PlaceEntitiesResult {
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerChangedDistanceEvent {
-    pub player_id: u32,
+    pub player_id: PlayerId,
     pub build_distance: u32,
     pub reach_distance: u32,
     pub drop_item_distance: u32,
@@ -829,21 +832,21 @@ pub struct PlayerChangedDistanceEvent {
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerChangedPositionEvent {
-    pub player_id: u32,
+    pub player_id: PlayerId,
     pub position: Position,
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerChangedMainInventoryEvent {
-    pub player_id: u32,
+    pub player_id: PlayerId,
     pub main_inventory: BTreeMap<String, u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerLeftEvent {
-    pub player_id: u32,
+    pub player_id: PlayerId,
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]

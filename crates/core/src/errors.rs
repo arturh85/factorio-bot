@@ -1,3 +1,4 @@
+use crate::types::PlayerId;
 use miette::Diagnostic;
 use thiserror::Error;
 
@@ -84,7 +85,7 @@ pub struct FactorioAlreadyStarted {}
     help("provide correct player id")
 )]
 pub struct RconPlayerNotFound {
-    pub player_id: u32,
+    pub player_id: PlayerId,
 }
 
 #[derive(Error, Debug, Diagnostic)]
@@ -162,6 +163,6 @@ pub struct RectInvalid {
 #[error("player does not have item in inventory")]
 #[diagnostic(code(factorio::workspace::not_found), help("fix logic"))]
 pub struct PlayerMissingItem {
-    pub player_id: u32,
+    pub player_id: PlayerId,
     pub item: String,
 }

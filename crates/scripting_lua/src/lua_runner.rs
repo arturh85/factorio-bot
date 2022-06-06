@@ -18,7 +18,7 @@ use std::path::Path;
 use std::time::Instant;
 use tokio::runtime::Runtime;
 
-pub fn run_lua(planner: &mut Planner, lua_code: &str, bot_count: u32) -> Result<(String, String)> {
+pub fn run_lua(planner: &mut Planner, lua_code: &str, bot_count: u8) -> Result<(String, String)> {
     let mut stdout = BufferRedirect::stdout().into_diagnostic()?;
     let mut stderr = BufferRedirect::stderr().into_diagnostic()?;
     let all_bots = planner.initiate_missing_players_with_default_inventory(bot_count);
@@ -75,7 +75,7 @@ pub async fn start_factorio_and_plan_graph(
     map_exchange_string: Option<String>,
     seed: Option<String>,
     plan_name: &str,
-    bot_count: u32,
+    bot_count: u8,
 ) -> Result<TaskGraph> {
     let started = Instant::now();
     let instance_name = "plan";
@@ -208,13 +208,11 @@ pub async fn start_factorio_and_plan_graph(
 #[cfg(test)]
 mod tests {
     use factorio_bot_core::test_utils::{draw_world, fixture_world};
-    use serial_test::serial;
     use std::sync::Arc;
 
     use super::*;
 
     #[test]
-    #[serial]
     fn test_draw_world() {
         let world = Arc::new(fixture_world());
         draw_world(world);
@@ -224,7 +222,6 @@ mod tests {
     // ! > The rust test cases use std::io::set_print to redirect stdout. You can get around this
     // ! > though by using the --nocapture argument when running your tests.
     // #[test]
-    // #[serial]
     // fn test_logging_world() {
     //     let world = Arc::new(fixture_world());
     //     let mut planner = Planner::new(world, None);
@@ -240,7 +237,6 @@ mod tests {
     // }
 
     #[test]
-    #[serial]
     fn test_mining() {
         let world = Arc::new(fixture_world());
         let mut planner = Planner::new(world, None);

@@ -1,14 +1,19 @@
 use indicatif::HumanDuration;
-use miette::{Result, IntoDiagnostic};
+use miette::{IntoDiagnostic, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 #[cfg(target_os = "windows")]
 pub async fn kill_process(process_name: &str) -> Result<()> {
-    use windows_sys::Win32::Foundation::{CloseHandle};
-    use windows_sys::Win32::System::ProcessStatus::{K32EnumProcesses, K32EnumProcessModules, K32GetModuleBaseNameW};
-    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::ProcessStatus::{
+        K32EnumProcessModules, K32EnumProcesses, K32GetModuleBaseNameW,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, TerminateProcess, PROCESS_QUERY_INFORMATION, PROCESS_TERMINATE,
+        PROCESS_VM_READ,
+    };
 
     let mut kill_list: Vec<u32> = vec![];
     const PROCESSES_SIZE: usize = 10240;
@@ -17,17 +22,21 @@ pub async fn kill_process(process_name: &str) -> Result<()> {
     unsafe {
         K32EnumProcesses(&mut processes[0], PROCESSES_SIZE as u32, &mut process_count);
         for process_id in processes.iter().take(process_count as usize) {
-            let process_handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, *process_id);
+            let process_handle =
+                OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, *process_id);
             let mut module = 0isize;
             let mut cb_needed = 0u32;
-            if K32EnumProcessModules(process_handle, &mut module, 4,
-                                       &mut cb_needed) > 0 {
+            if K32EnumProcessModules(process_handle, &mut module, 4, &mut cb_needed) > 0 {
                 let mut text: [u16; 512] = [0; 512];
-                let len = K32GetModuleBaseNameW(process_handle, module, text.as_mut_ptr(),
-                                                (text.len()/4).try_into().unwrap() );
+                let len = K32GetModuleBaseNameW(
+                    process_handle,
+                    module,
+                    text.as_mut_ptr(),
+                    (text.len() / 4).try_into().unwrap(),
+                );
                 let name = String::from_utf16_lossy(&text[..len as usize]);
                 if name.eq(process_name) {
-                    info!("killing process {process_id}: \"{name}\"");
+                    warn!("killing process {process_id}: \"{name}\"");
                     kill_list.push(*process_id);
                 }
             }
@@ -46,8 +55,7 @@ pub async fn kill_process(process_name: &str) -> Result<()> {
 pub fn symlink(original: &Path, link: &Path) -> Result<()> {
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(original, link)
-            .into_diagnostic()?;
+        std::os::unix::fs::symlink(original, link).into_diagnostic()?;
     }
     #[cfg(windows)]
     {
@@ -77,26 +85,18 @@ pub fn extract_archive(
     #[cfg(windows)]
     {
         use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-        let file = fs::File::open(archive)
-            .into_diagnostic()?;
+        let file = fs::File::open(archive).into_diagnostic()?;
         info!(
             "Extracting <bright-blue>{}</> to <magenta>{}</>",
             &archive,
             target_directory.to_str().unwrap()
         );
 
-        let mut archive = zip::ZipArchive::new(file)
-            .into_diagnostic()?;
+        let mut archive = zip::ZipArchive::new(file).into_diagnostic()?;
 
         let mut files: Vec<String> = vec![];
         for i in 0..archive.len() {
-            files.push(
-                archive
-                    .by_index(i)
-                    .into_diagnostic()?
-                    .name()
-                    .into(),
-            );
+            files.push(archive.by_index(i).into_diagnostic()?.name().into());
         }
         if workspace_data_path.exists() {
             files = files
@@ -121,13 +121,11 @@ pub fn extract_archive(
             let output_path = PathBuf::from(target_directory).join(PathBuf::from(output_path));
 
             if (&*file).ends_with('/') {
-                fs::create_dir_all(&output_path)
-                    .into_diagnostic()?;
+                fs::create_dir_all(&output_path).into_diagnostic()?;
             } else {
                 if let Some(p) = output_path.parent() {
                     if !p.exists() {
-                        fs::create_dir_all(&p)
-                            .into_diagnostic()?;
+                        fs::create_dir_all(&p).into_diagnostic()?;
                     }
                 }
 
@@ -139,8 +137,7 @@ pub fn extract_archive(
         }
         if !workspace_data_path.exists() {
             let instance_data_path = target_directory.join(PathBuf::from("data"));
-            fs::rename(&instance_data_path, &workspace_data_path)
-                .into_diagnostic()?;
+            fs::rename(&instance_data_path, &workspace_data_path).into_diagnostic()?;
         }
         bar.finish();
     }
@@ -150,8 +147,7 @@ pub fn extract_archive(
         use paris::Logger;
         use std::fs::File;
         use std::str::FromStr;
-        let archive_path = PathBuf::from_str(archive)
-            .into_diagnostic()?;
+        let archive_path = PathBuf::from_str(archive).into_diagnostic()?;
         let tar_path = archive_path.with_extension("");
         if !tar_path.exists() {
             let mut logger = Logger::new();
@@ -161,8 +157,7 @@ pub fn extract_archive(
                 tar_path.to_str().unwrap()
             ));
 
-            let tar_gz = File::open(&archive_path)
-                .into_diagnostic()?;
+            let tar_gz = File::open(&archive_path).into_diagnostic()?;
             let tar = xz2::read::XzDecoder::new(tar_gz);
             let mut archive = tar::Archive::new(tar);
             archive.unpack(&tar_path).expect("failed to decompress xz");
@@ -194,8 +189,7 @@ pub fn extract_archive(
 
         let instance_data_path = target_directory.join(PathBuf::from("data"));
         if !workspace_data_path.exists() {
-            fs::rename(&instance_data_path, &workspace_data_path)
-                .into_diagnostic()?;
+            fs::rename(&instance_data_path, &workspace_data_path).into_diagnostic()?;
         } else {
             std::fs::remove_dir_all(&instance_data_path).expect("failed to delete data folder");
         }

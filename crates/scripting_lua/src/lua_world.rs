@@ -1,5 +1,5 @@
 use factorio_bot_core::factorio::world::FactorioWorld;
-use factorio_bot_core::types::{Position, Rect};
+use factorio_bot_core::types::{PlayerId, Position, Rect};
 use rlua::{Context, Table};
 use std::sync::Arc;
 
@@ -19,7 +19,7 @@ pub fn create_lua_world(ctx: Context, _world: Arc<FactorioWorld>) -> rlua::Resul
     map_table.set(
         "player",
         ctx.create_function(
-            move |ctx, player_id: u32| match world.players.get(&player_id) {
+            move |ctx, player_id: PlayerId| match world.players.get(&player_id) {
                 Some(player) => Ok(rlua_serde::to_value(ctx, player.clone())),
                 None => Err(rlua::Error::RuntimeError("player not found".into())),
             },
@@ -49,7 +49,7 @@ pub fn create_lua_world(ctx: Context, _world: Arc<FactorioWorld>) -> rlua::Resul
     let world = _world;
     map_table.set(
         "inventory",
-        ctx.create_function(move |_ctx, (player_id, item_name): (u32, String)| {
+        ctx.create_function(move |_ctx, (player_id, item_name): (PlayerId, String)| {
             match world.players.get(&player_id) {
                 Some(player) => match player.main_inventory.get(&item_name) {
                     Some(cnt) => Ok(*cnt),

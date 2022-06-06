@@ -142,11 +142,13 @@ pub async fn start_factorio(
         .await?;
         // report_child_death(child);
         client_children.push(child);
-        success!(
-            "Started <bright-blue>{}</> in <yellow>{:?}</>",
-            &instance_name,
-            started.elapsed()
-        );
+        if !silent {
+            success!(
+                "Started <bright-blue>{}</> in <yellow>{:?}</>",
+                &instance_name,
+                started.elapsed()
+            );
+        }
         rcon.whoami(&instance_name).await.unwrap();
         // Execute a dummy command to silence the warning about "using commands will
         // disable achievements". If we don't do this, the first command will be lost
@@ -381,10 +383,12 @@ pub async fn start_factorio_client(
         // "--low-vram",
         "--disable-audio",
     ];
-    info!(
-        "Starting <bright-blue>{}</> at {:?} with {:?}",
-        &instance_name, &instance_path, &args
-    );
+    if !silent {
+        info!(
+            "Starting <bright-blue>{}</> at {:?} with {:?}",
+            &instance_name, &instance_path, &args
+        );
+    }
 
     let mut command = Command::new(&factorio_binary_path);
     command.args(args);

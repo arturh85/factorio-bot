@@ -8,7 +8,7 @@ use crate::factorio::world::FactorioWorld;
 use crate::types::{
     ChunkPosition, FactorioEntity, FactorioEntityPrototype, FactorioForce, FactorioGraphic,
     FactorioItemPrototype, FactorioRecipe, FactorioTile, PlayerChangedDistanceEvent,
-    PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent, Pos, Position, Rect,
+    PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent, PlayerId, Pos, Position, Rect,
 };
 use miette::{IntoDiagnostic, Result};
 
@@ -171,7 +171,7 @@ impl OutputParser {
                 // handled by OutputReader
             }
             "on_player_left_game" => {
-                let player_id: u32 = rest.parse().into_diagnostic()?;
+                let player_id: PlayerId = rest.parse().into_diagnostic()?;
                 self.world.remove_player(player_id)?;
                 // if let Some(websocket_server) = self.websocket_server.as_ref() {
                 //     websocket_server

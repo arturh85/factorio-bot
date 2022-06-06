@@ -17,7 +17,7 @@ async fn execute(planner: &Planner) -> Result<()> {
 }
 
 #[allow(dead_code)]
-async fn execute_single(_planner: &Planner, _player_id: u32) {
+async fn execute_single(_planner: &Planner, _player_id: u8) {
     _planner
         .rcon
         .as_ref()

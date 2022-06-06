@@ -2,6 +2,7 @@ use crate::cli::ExecutableCommand;
 use crate::settings::load_app_settings;
 use async_trait::async_trait;
 use clap::{Arg, ArgMatches, Command};
+use factorio_bot_core::types::PlayerId;
 #[cfg(feature = "lua")]
 use factorio_bot_scripting_lua::lua_runner::start_factorio_and_plan_graph;
 use miette::Result;
@@ -61,7 +62,7 @@ impl ExecutableCommand for ThisCommand {
     let map_exchange_string = matches
       .value_of("map")
       .map(std::string::ToString::to_string);
-    let bot_count: u32 = matches.value_of("clients").unwrap().parse().unwrap();
+    let bot_count: PlayerId = matches.value_of("clients").unwrap().parse().unwrap();
 
     #[cfg(feature = "lua")]
     {

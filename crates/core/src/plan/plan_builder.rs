@@ -4,7 +4,7 @@ use crate::factorio::world::FactorioWorld;
 use crate::graph::task_graph::{MineTarget, PositionRadius, TaskGraph};
 use crate::types::{
     FactorioEntity, FactorioPlayer, PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent,
-    Position,
+    PlayerId, Position,
 };
 use miette::Result;
 use num_traits::ToPrimitive;
@@ -22,7 +22,13 @@ impl PlanBuilder {
         PlanBuilder { graph, world }
     }
 
-    pub fn mine(&self, player_id: u32, position: Position, name: &str, count: u32) -> Result<()> {
+    pub fn mine(
+        &self,
+        player_id: PlayerId,
+        position: Position,
+        name: &str,
+        count: u32,
+    ) -> Result<()> {
         let mut graph = self.graph.write();
         let player = self
             .world
@@ -73,7 +79,7 @@ impl PlanBuilder {
         Ok(())
     }
 
-    fn distance(&self, player_id: u32, position: &Position) -> f64 {
+    fn distance(&self, player_id: PlayerId, position: &Position) -> f64 {
         calculate_distance(
             &self.world.players.get(&player_id).unwrap().position,
             position,
@@ -81,14 +87,14 @@ impl PlanBuilder {
         .ceil()
     }
 
-    fn player(&self, player_id: u32) -> FactorioPlayer {
+    fn player(&self, player_id: PlayerId) -> FactorioPlayer {
         self.world
             .players
             .get(&player_id)
             .expect("failed to find player")
             .clone()
     }
-    // fn inventory(&self, player_id: u32, name: &str) -> u32 {
+    // fn inventory(&self, player_id: PlayerId, name: &str) -> u32 {
     //     *self
     //         .player(player_id)
     //         .main_inventory
@@ -96,7 +102,7 @@ impl PlanBuilder {
     //         .unwrap_or(&0)
     // }
 
-    pub fn add_walk(&self, player_id: u32, goal: PositionRadius) -> Result<()> {
+    pub fn add_walk(&self, player_id: PlayerId, goal: PositionRadius) -> Result<()> {
         let distance = self.distance(player_id, &goal.position);
         let mut graph = self.graph.write();
         self.world
@@ -108,7 +114,7 @@ impl PlanBuilder {
         Ok(())
     }
 
-    pub fn add_place(&mut self, player_id: u32, entity: FactorioEntity) -> Result<()> {
+    pub fn add_place(&mut self, player_id: PlayerId, entity: FactorioEntity) -> Result<()> {
         let player = self.player(player_id);
         let distance = calculate_distance(&player.position, &entity.position);
         let build_distance = player.build_distance as f64;

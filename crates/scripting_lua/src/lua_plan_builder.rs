@@ -1,7 +1,7 @@
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::graph::task_graph::{PositionRadius, TaskGraph};
 use factorio_bot_core::plan::plan_builder::PlanBuilder;
-use factorio_bot_core::types::Position;
+use factorio_bot_core::types::{PlayerId, Position};
 use parking_lot::RwLock;
 use rlua::{Context, Table};
 use std::sync::Arc;
@@ -18,7 +18,7 @@ pub fn create_lua_plan_builder(
     map_table.set(
         "mine",
         ctx.create_function(
-            move |_ctx, (player_id, position, name, count): (u32, Table, String, u32)| {
+            move |_ctx, (player_id, position, name, count): (PlayerId, Table, String, u32)| {
                 plan_builder
                     .mine(
                         player_id,
@@ -35,7 +35,7 @@ pub fn create_lua_plan_builder(
     map_table.set(
         "walk",
         ctx.create_function(
-            move |_ctx, (player_id, position, radius): (u32, Table, f64)| {
+            move |_ctx, (player_id, position, radius): (PlayerId, Table, f64)| {
                 plan_builder
                     .add_walk(
                         player_id,

@@ -17,25 +17,38 @@ factorio-bot-core = { path = "../../crates/core" }
 factorio-bot-restapi = { path = "../../crates/restapi", optional = true }
 factorio-bot-scripting-lua = { path = "../../crates/scripting_lua", optional = true }
 factorio-bot-scripting-rhai = { path = "../../crates/scripting_rhai", optional = true }
+# gui
 tauri = { version = "1.0.0-rc.14", features = ["api-all"], optional = true }
-serde = { version = "^1.0", features = [ "derive" ] }
-serde_json = "^1.0"
-config = "^0.13"
-dirs-next = "2.0.0"
-typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"] }
+
+# async
 tokio = { version = "^1.19", features = ["full", "tracing"] }
 console-subscriber = "^0.1"
+async-trait = "0.1.56"
+
+# serializing / deserializing
+serde = { version = "^1.0", features = [ "derive" ] }
+serde_json = "^1.0"
+typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"] }
+config = "^0.13"
 toml = "^0.5"
+
+# cli
 clap = "^3.1"
-open = "^2.1"
+
+# repl
+reedline-repl-rs = { version = "0.2.0", optional = true }
+
+# logs
 paris = { version = "^1.5", features = ["timestamps", "macros"] }
 color-eyre = "^0.6"
-port_scanner = "*"
 miette = {version = "^4.7", features = ["fancy"] }
 thiserror = "^1.0"
-async-trait = "0.1.56"
+
+# utils
+open = "^2.1"
+dirs-next = "2.0.0"
+port_scanner = "*"
 parking_lot = "^0.12"
-reedline-repl-rs = { git = "https://github.com/arturh85/reedline-repl-rs", optional = true }
 
 [build-dependencies]
 typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"] }

@@ -1,6 +1,6 @@
 use crate::factorio::util::format_dotgraph;
 use crate::num_traits::FromPrimitive;
-use crate::types::{Direction, FactorioEntity, Position};
+use crate::types::{Direction, FactorioEntity, PlayerId, Position};
 use noisy_float::types::{r64, R64};
 use num_traits::ToPrimitive;
 use petgraph::algo::astar;
@@ -18,7 +18,7 @@ pub struct TaskGraph {
     pub start_node: NodeIndex,
     pub end_node: NodeIndex,
     pub cursor: NodeIndex,
-    groups: Vec<HashMap<u32, NodeIndex>>,
+    groups: Vec<HashMap<PlayerId, NodeIndex>>,
 }
 
 impl TaskGraph {
@@ -47,7 +47,7 @@ impl TaskGraph {
         self.inner.add_edge(self.cursor, self.end_node, 0.);
     }
 
-    fn add_to_group(&mut self, player_id: u32, node: NodeIndex, cost: f64) {
+    fn add_to_group(&mut self, player_id: PlayerId, node: NodeIndex, cost: f64) {
         let mut cursor = self.cursor;
         if let Some(group) = self.groups.last_mut() {
             if let Some(player_cursor) = group.get(&player_id) {
@@ -92,17 +92,17 @@ impl TaskGraph {
         self.inner.add_edge(self.cursor, self.end_node, 0.);
     }
 
-    pub fn add_mine_node(&mut self, player_id: u32, cost: f64, target: MineTarget) {
+    pub fn add_mine_node(&mut self, player_id: PlayerId, cost: f64, target: MineTarget) {
         let node = self.inner.add_node(TaskNode::new_mine(player_id, target));
         self.add_to_group(player_id, node, cost);
     }
 
-    pub fn add_walk_node(&mut self, player_id: u32, cost: f64, target: PositionRadius) {
+    pub fn add_walk_node(&mut self, player_id: PlayerId, cost: f64, target: PositionRadius) {
         let node = self.inner.add_node(TaskNode::new_walk(player_id, target));
         self.add_to_group(player_id, node, cost);
     }
 
-    pub fn add_place_node(&mut self, player_id: u32, cost: f64, entity: FactorioEntity) {
+    pub fn add_place_node(&mut self, player_id: PlayerId, cost: f64, entity: FactorioEntity) {
         let node = self.inner.add_node(TaskNode::new_place(player_id, entity));
         self.add_to_group(player_id, node, cost);
     }
@@ -235,19 +235,19 @@ pub enum TaskData {
 #[derive(Default, Clone)]
 pub struct TaskNode {
     pub name: String,
-    pub player_id: Option<u32>,
+    pub player_id: Option<PlayerId>,
     pub data: Option<TaskData>,
 }
 
 impl TaskNode {
-    pub fn new(player_id: Option<u32>, name: &str, data: Option<TaskData>) -> TaskNode {
+    pub fn new(player_id: Option<PlayerId>, name: &str, data: Option<TaskData>) -> TaskNode {
         TaskNode {
             name: name.into(),
             player_id,
             data,
         }
     }
-    pub fn new_craft(player_id: u32, item: InventoryItem) -> TaskNode {
+    pub fn new_craft(player_id: PlayerId, item: InventoryItem) -> TaskNode {
         TaskNode::new(
             Some(player_id),
             &*format!(
@@ -262,14 +262,14 @@ impl TaskNode {
             Some(TaskData::Craft(item)),
         )
     }
-    pub fn new_walk(player_id: u32, target: PositionRadius) -> TaskNode {
+    pub fn new_walk(player_id: PlayerId, target: PositionRadius) -> TaskNode {
         TaskNode::new(
             Some(player_id),
             &*format!("Walk to {}", target.position),
             Some(TaskData::Walk(target)),
         )
     }
-    pub fn new_mine(player_id: u32, target: MineTarget) -> TaskNode {
+    pub fn new_mine(player_id: PlayerId, target: MineTarget) -> TaskNode {
         TaskNode::new(
             Some(player_id),
             &*format!(
@@ -284,7 +284,7 @@ impl TaskNode {
             Some(TaskData::Mine(target)),
         )
     }
-    pub fn new_place(player_id: u32, entity: FactorioEntity) -> TaskNode {
+    pub fn new_place(player_id: PlayerId, entity: FactorioEntity) -> TaskNode {
         TaskNode::new(
             Some(player_id),
             &*format!(
@@ -297,7 +297,7 @@ impl TaskNode {
         )
     }
     pub fn new_insert_to_inventory(
-        player_id: u32,
+        player_id: PlayerId,
         location: InventoryLocation,
         item: InventoryItem,
     ) -> TaskNode {

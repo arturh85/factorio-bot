@@ -6,7 +6,7 @@ use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_core::process::instance_setup::setup_factorio_instance;
 use factorio_bot_core::process::process_control::{start_factorio_server, FactorioStartCondition};
 use factorio_bot_core::settings::FactorioSettings;
-use factorio_bot_core::types::{AreaFilter, FactorioEntity, Position};
+use factorio_bot_core::types::{AreaFilter, FactorioEntity, PlayerId, Position};
 use miette::{IntoDiagnostic, Result};
 use std::cmp::Ordering;
 use std::fs::read_to_string;
@@ -29,7 +29,7 @@ pub async fn roll_seed(
     limit: RollSeedLimit,
     parallel: u8,
     plan_name: String,
-    bot_count: u32,
+    bot_count: PlayerId,
 ) -> Result<Option<(u32, f64)>> {
     let roll: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
     let best_seed_with_score: Arc<Mutex<Option<(u32, f64)>>> = Arc::new(Mutex::new(None));
@@ -187,7 +187,7 @@ pub async fn score_seed(
     world: Arc<FactorioWorld>,
     _seed: u32,
     lua_code: String,
-    bot_count: u32,
+    bot_count: PlayerId,
 ) -> Result<f64> {
     let _rcon = rcon.clone();
     let planner = std::thread::spawn::<_, Result<Planner>>(move || {

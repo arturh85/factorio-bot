@@ -42,9 +42,9 @@ impl Planner {
         self.graph.read().clone()
     }
 
-    pub fn initiate_missing_players_with_default_inventory(&mut self, bot_count: u32) -> Vec<u32> {
-        let mut player_ids: Vec<u32> = vec![];
-        for player_id in 1u32..=bot_count {
+    pub fn initiate_missing_players_with_default_inventory(&mut self, bot_count: u8) -> Vec<u8> {
+        let mut player_ids: Vec<u8> = vec![];
+        for player_id in 1u8..=bot_count {
             player_ids.push(player_id);
             // initialize missing players with default inventory
             if self.real_world.players.get(&player_id).is_none() {

@@ -12,8 +12,8 @@ use crate::factorio::world::FactorioWorld;
 use crate::num_traits::FromPrimitive;
 use crate::settings::FactorioSettings;
 use crate::types::{
-    AreaFilter, Direction, FactorioEntity, FactorioForce, FactorioTile, InventoryResponse, Pos,
-    Position, Rect, RequestEntity,
+    ActionId, AreaFilter, Direction, FactorioEntity, FactorioForce, FactorioTile,
+    InventoryResponse, PlayerId, Pos, Position, Rect, RequestEntity,
 };
 use miette::{IntoDiagnostic, Result};
 use rcon::Connection;
@@ -141,7 +141,12 @@ impl FactorioRcon {
         Ok(())
     }
 
-    pub async fn cheat_item(&self, player_id: u32, item_name: &str, item_count: u32) -> Result<()> {
+    pub async fn cheat_item(
+        &self,
+        player_id: PlayerId,
+        item_name: &str,
+        item_count: u32,
+    ) -> Result<()> {
         self.remote_call(
             "cheat_item",
             vec![
@@ -168,13 +173,13 @@ impl FactorioRcon {
     #[allow(clippy::too_many_arguments)]
     pub async fn place_blueprint(
         &self,
-        player_id: u32,
+        player_id: PlayerId,
         blueprint: String,
         position: &Position,
         direction: u8,
         force_build: bool,
         only_ghosts: bool,
-        inventory_player_ids: Vec<u32>,
+        inventory_player_ids: Vec<u8>,
         world: &Arc<FactorioWorld>,
     ) -> Result<Vec<FactorioEntity>> {
         let player = world.players.get(&player_id);
@@ -254,7 +259,7 @@ impl FactorioRcon {
 
     pub async fn revive_ghost(
         &self,
-        player_id: u32,
+        player_id: PlayerId,
         name: &str,
         position: &Position,
         world: &Arc<FactorioWorld>,
@@ -296,7 +301,7 @@ impl FactorioRcon {
 
     pub async fn cheat_blueprint(
         &self,
-        player_id: u32,
+        player_id: PlayerId,
         blueprint: String,
         position: &Position,
         direction: u8,
@@ -353,7 +358,7 @@ impl FactorioRcon {
     async fn sleep_for_action_result(
         &self,
         world: &Arc<FactorioWorld>,
-        action_id: u32,
+        action_id: ActionId,
     ) -> Result<()> {
         let wait_start = Instant::now();
         loop {
@@ -401,12 +406,12 @@ impl FactorioRcon {
     pub async fn move_player(
         &self,
         world: &Arc<FactorioWorld>,
-        player_id: u32,
+        player_id: PlayerId,
         goal: &Position,
         radius: Option<f64>,
     ) -> Result<()> {
         let mut next_action_id = world.as_ref().next_action_id.lock().await;
-        let action_id: u32 = *next_action_id;
+        let action_id: ActionId = *next_action_id;
         *next_action_id = (*next_action_id + 1) % 1000;
         drop(next_action_id);
 
@@ -420,7 +425,7 @@ impl FactorioRcon {
     pub async fn player_mine(
         &self,
         world: &Arc<FactorioWorld>,
-        player_id: u32,
+        player_id: PlayerId,
         name: &str,
         position: &Position,
         count: u32,
@@ -431,7 +436,7 @@ impl FactorioRcon {
         }
         let player = player.unwrap();
         let mut next_action_id = world.as_ref().next_action_id.lock().await;
-        let action_id: u32 = *next_action_id;
+        let action_id: ActionId = *next_action_id;
         *next_action_id = (*next_action_id + 1) % 1000;
         drop(next_action_id);
         let resource_reach_distance = player.resource_reach_distance as f64;
@@ -450,12 +455,12 @@ impl FactorioRcon {
     pub async fn player_craft(
         &self,
         world: &Arc<FactorioWorld>,
-        player_id: u32,
+        player_id: PlayerId,
         recipe: &str,
         count: u32,
     ) -> Result<()> {
         let mut next_action_id = world.as_ref().next_action_id.lock().await;
-        let action_id: u32 = *next_action_id;
+        let action_id: ActionId = *next_action_id;
         *next_action_id = (*next_action_id + 1) % 1000;
         drop(next_action_id);
         self.action_start_crafting(action_id, player_id, recipe, count)
@@ -508,7 +513,7 @@ impl FactorioRcon {
 
     pub async fn place_entity(
         &self,
-        player_id: u32,
+        player_id: PlayerId,
         item_name: String,
         entity_position: Position,
         direction: u8,
@@ -619,7 +624,7 @@ impl FactorioRcon {
     #[allow(clippy::too_many_arguments)]
     pub async fn insert_to_inventory(
         &self,
-        player_id: u32,
+        player_id: PlayerId,
         entity_name: String,
         entity_position: Position,
         inventory_type: u32,
@@ -669,7 +674,7 @@ impl FactorioRcon {
     #[allow(clippy::too_many_arguments)]
     pub async fn remove_from_inventory(
         &self,
-        player_id: u32,
+        player_id: PlayerId,
         entity_name: String,
         entity_position: Position,
         inventory_type: u32,
@@ -846,7 +851,7 @@ impl FactorioRcon {
 
     async fn async_request_player_path(
         &self,
-        player_id: u32,
+        player_id: PlayerId,
         goal: &Position,
         radius: Option<f64>,
     ) -> Result<u32> {
@@ -912,7 +917,7 @@ impl FactorioRcon {
     pub async fn player_path(
         &self,
         world: &Arc<FactorioWorld>,
-        player_id: u32,
+        player_id: PlayerId,
         goal: &Position,
         radius: Option<f64>,
     ) -> Result<Vec<Position>> {
@@ -990,8 +995,8 @@ impl FactorioRcon {
 
     pub async fn action_start_walk_waypoints(
         &self,
-        action_id: u32,
-        player_id: u32,
+        action_id: ActionId,
+        player_id: PlayerId,
         waypoints: Vec<Position>,
     ) -> Result<()> {
         // set_waypoints(action_id, player_id, waypoints)
@@ -1019,8 +1024,8 @@ impl FactorioRcon {
 
     pub async fn action_start_mining(
         &self,
-        action_id: u32,
-        player_id: u32,
+        action_id: ActionId,
+        player_id: PlayerId,
         name: &str,
         position: &Position,
         count: u32,
@@ -1086,8 +1091,8 @@ impl FactorioRcon {
 
     pub async fn action_start_crafting(
         &self,
-        action_id: u32,
-        player_id: u32,
+        action_id: ActionId,
+        player_id: PlayerId,
         recipe: &str,
         count: u32,
     ) -> Result<()> {

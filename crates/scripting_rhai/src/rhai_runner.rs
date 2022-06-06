@@ -16,11 +16,7 @@ impl MyTest {
     }
 }
 
-pub fn run_rhai(
-    planner: &mut Planner,
-    rhai_code: &str,
-    bot_count: u32,
-) -> Result<(String, String)> {
+pub fn run_rhai(planner: &mut Planner, rhai_code: &str, bot_count: u8) -> Result<(String, String)> {
     let mut stdout = BufferRedirect::stdout().into_diagnostic()?;
     let mut stderr = BufferRedirect::stderr().into_diagnostic()?;
     let all_bots = planner.initiate_missing_players_with_default_inventory(bot_count);

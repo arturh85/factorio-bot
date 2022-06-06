@@ -1,1 +1,2 @@
-pub mod rhai_runner;
+mod rhai_runner;
+pub use rhai_runner::*;

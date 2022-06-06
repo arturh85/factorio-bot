@@ -15,6 +15,7 @@ mod constants;
 mod gui;
 #[cfg(feature = "repl")]
 mod repl;
+#[cfg(any(feature = "rhai", feature = "lua"))]
 mod scripting;
 mod settings;
 
@@ -59,8 +60,9 @@ async fn main() -> Result<()> {
     }
     #[cfg(not(feature = "repl"))]
     {
+      use miette::miette;
       info!("you can use -h/--help to list all possible commands");
-      return Err(miette::Error::msg("missing subcommand"));
+      return Err(miette!("missing subcommand"));
     }
   }
 }

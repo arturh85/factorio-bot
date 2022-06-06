@@ -26,7 +26,7 @@ pub async fn execute_script(
       let app_settings = &app_settings.read().await;
       let bot_count = app_settings.factorio.client_count;
       let (stdout, stderr) =
-        std::thread::spawn(move || run_script_file(&mut planner, &path[1..], bot_count))
+        std::thread::spawn(move || run_script_file(&mut planner, &path[1..], bot_count, true))
           .join()
           .map_err(|e| format!("error: {:?}", e))?
           .map_err(ERR_TO_STRING)?;
@@ -53,7 +53,7 @@ pub async fn execute_code(
       let mut planner = Planner::new(world, Some(rcon));
       let bot_count = app_settings.read().await.factorio.client_count;
       let (stdout, stderr) =
-        std::thread::spawn(move || run_script(&mut planner, &language, &code, bot_count))
+        std::thread::spawn(move || run_script(&mut planner, &language, &code, bot_count, true))
           .join()
           .unwrap()
           .unwrap();

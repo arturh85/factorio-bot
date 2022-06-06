@@ -192,7 +192,7 @@ pub async fn score_seed(
     let _rcon = rcon.clone();
     let planner = std::thread::spawn::<_, Result<Planner>>(move || {
         let mut planner = Planner::new(world, Some(_rcon.clone()));
-        run_lua(&mut planner, &lua_code, bot_count)?;
+        run_lua(&mut planner, &lua_code, bot_count, false)?;
         Ok(planner)
     })
     .join()

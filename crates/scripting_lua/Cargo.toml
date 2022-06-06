@@ -11,6 +11,7 @@ publish = false
 
 [dependencies]
 factorio-bot-core = { path = "../core" }
+factorio-bot-scripting = { path = "../scripting" }
 parking_lot = "^0.12"
 tokio = { version = "^1.19", features = ["full", "tracing"] }
 serde = "^1.0"

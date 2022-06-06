@@ -1,10 +1,8 @@
-use factorio_bot_core::plan::planner::Planner;
-use gag::BufferRedirect;
-// use itertools::Itertools;
 use factorio_bot_core::plan::plan_builder::PlanBuilder;
-use miette::{IntoDiagnostic, Result};
+use factorio_bot_core::plan::planner::Planner;
+use factorio_bot_scripting::{buffers_to_string, redirect_buffers};
+use miette::Result;
 use rhai::{Engine, Scope};
-use std::io::Read;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -16,9 +14,13 @@ impl MyTest {
     }
 }
 
-pub fn run_rhai(planner: &mut Planner, rhai_code: &str, bot_count: u8) -> Result<(String, String)> {
-    let mut stdout = BufferRedirect::stdout().into_diagnostic()?;
-    let mut stderr = BufferRedirect::stderr().into_diagnostic()?;
+pub fn run_rhai(
+    planner: &mut Planner,
+    rhai_code: &str,
+    bot_count: u8,
+    redirect: bool,
+) -> Result<(String, String)> {
+    let buffers = redirect_buffers(redirect);
     let all_bots = planner.initiate_missing_players_with_default_inventory(bot_count);
     planner.update_plan_world();
     let plan_builder = Arc::new(PlanBuilder::new(
@@ -38,11 +40,7 @@ pub fn run_rhai(planner: &mut Planner, rhai_code: &str, bot_count: u8) -> Result
         scope.set_value("rcon", rcon.clone());
     }
     engine.run_with_scope(&mut scope, rhai_code).unwrap();
-    let mut stdout_str = String::new();
-    let mut stderr_str = String::new();
-    stdout.read_to_string(&mut stdout_str).into_diagnostic()?;
-    stderr.read_to_string(&mut stderr_str).into_diagnostic()?;
-    Ok((stdout_str, stderr_str))
+    buffers_to_string(buffers)
 }
 
 #[cfg(test)]
@@ -62,6 +60,7 @@ mod tests {
 debug(myTest);
         "##,
             bot_count,
+            false,
         )
         .unwrap();
         let graph = planner.graph();

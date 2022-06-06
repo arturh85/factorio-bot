@@ -15,8 +15,8 @@ tag-name = "v{{version}}"
 [dependencies]
 factorio-bot-core = { path = "../../crates/core" }
 factorio-bot-restapi = { path = "../../crates/restapi", optional = true }
-factorio-bot-scripting-lua = { path = "../../crates/scripting_lua", optional = true }
 factorio-bot-scripting-rhai = { path = "../../crates/scripting_rhai", optional = true }
+factorio-bot-scripting-lua = { path = "../../crates/scripting_lua", optional = true }
 # gui
 tauri = { version = "1.0.0-rc.14", features = ["api-all"], optional = true }
 
@@ -64,9 +64,9 @@ winres = "0.1.12"
 default = ["gui", "restapi", "lua", "repl"]
 custom-protocol = ["tauri/custom-protocol", "dep:tauri-build"] # required because of hard coded [tauri_cli] Command `cargo  build --features=custom-protocol --release`
 gui = ["custom-protocol"]
-restapi = ["factorio-bot-restapi"]
-rhai = ["factorio-bot-scripting-rhai"]
-lua = ["factorio-bot-scripting-lua"]
+restapi = ["dep:factorio-bot-restapi"]
+rhai = ["dep:factorio-bot-scripting-rhai"]
+lua = ["dep:factorio-bot-scripting-lua"]
 repl = ["dep:reedline-repl-rs"]
 
 

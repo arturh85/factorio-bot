@@ -78,7 +78,6 @@ impl ExecutableReplCommand for ThisCommand {
       let action: &str = matches.value_of("action").unwrap();
       match action {
         "start" => {
-          info!("Hint: press CTRL+Z once if you loose the ability to type");
           let app_settings = load_app_settings().unwrap();
           let clients: u8 = if let Some(clients) = matches.value_of("clients") {
             clients.parse().expect("failed to parse clients")
@@ -110,6 +109,7 @@ impl ExecutableReplCommand for ThisCommand {
             }
             drop(instance_state);
           }
+          info!("Hint: press CTRL+Z if you loose the ability to type");
           let instance_state = context.instance_state.clone();
           std::thread::spawn(move || {
             let rt = Runtime::new().unwrap();

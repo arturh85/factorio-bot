@@ -7,7 +7,7 @@ use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_core::process::instance_setup::setup_factorio_instance;
 use factorio_bot_core::process::process_control::{start_factorio_server, FactorioStartCondition};
 use factorio_bot_core::settings::FactorioSettings;
-use gag::BufferRedirect;
+use factorio_bot_scripting::{buffers_to_string, redirect_buffers};
 use itertools::Itertools;
 use miette::{IntoDiagnostic, Result};
 use rlua::{Lua, Variadic};
@@ -18,9 +18,13 @@ use std::path::Path;
 use std::time::Instant;
 use tokio::runtime::Runtime;
 
-pub fn run_lua(planner: &mut Planner, lua_code: &str, bot_count: u8) -> Result<(String, String)> {
-    let mut stdout = BufferRedirect::stdout().into_diagnostic()?;
-    let mut stderr = BufferRedirect::stderr().into_diagnostic()?;
+pub fn run_lua(
+    planner: &mut Planner,
+    lua_code: &str,
+    bot_count: u8,
+    redirect: bool,
+) -> Result<(String, String)> {
+    let buffers = redirect_buffers(redirect);
     let all_bots = planner.initiate_missing_players_with_default_inventory(bot_count);
     planner.update_plan_world();
     let lua = Lua::new();
@@ -63,13 +67,10 @@ pub fn run_lua(planner: &mut Planner, lua_code: &str, bot_count: u8) -> Result<(
     }) {
         error!("{}", err)
     }
-    let mut stdout_str = String::new();
-    let mut stderr_str = String::new();
-    stdout.read_to_string(&mut stdout_str).into_diagnostic()?;
-    stderr.read_to_string(&mut stderr_str).into_diagnostic()?;
-    Ok((stdout_str, stderr_str))
+    buffers_to_string(buffers)
 }
 
+#[allow(dead_code)]
 pub async fn start_factorio_and_plan_graph(
     settings: &FactorioSettings,
     map_exchange_string: Option<String>,
@@ -121,7 +122,7 @@ pub async fn start_factorio_and_plan_graph(
         }
         let lua_code = read_to_string(lua_path).into_diagnostic()?;
         match std::thread::spawn(move || {
-            if let Err(err) = run_lua(&mut planner, &lua_code, bot_count) {
+            if let Err(err) = run_lua(&mut planner, &lua_code, bot_count, false) {
                 Err(err)
             } else {
                 Ok(planner)
@@ -250,6 +251,7 @@ mod tests {
     plan.groupEnd()
         "#,
             2,
+            false,
         )
         .unwrap();
         let graph = planner.graph();

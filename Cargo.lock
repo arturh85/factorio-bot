@@ -1469,11 +1469,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "factorio-bot-scripting"
+version = "0.2.9"
+dependencies = [
+ "factorio-bot-core",
+ "gag",
+ "miette",
+]
+
+[[package]]
 name = "factorio-bot-scripting-lua"
 version = "0.2.9"
 dependencies = [
  "dashmap",
  "factorio-bot-core",
+ "factorio-bot-scripting",
  "gag",
  "itertools",
  "miette",
@@ -1497,7 +1507,7 @@ name = "factorio-bot-scripting-rhai"
 version = "0.2.9"
 dependencies = [
  "factorio-bot-core",
- "gag",
+ "factorio-bot-scripting",
  "miette",
  "rhai",
  "serde 1.0.136",

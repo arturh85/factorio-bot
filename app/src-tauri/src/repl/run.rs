@@ -45,19 +45,30 @@ impl ExecutableReplCommand for ThisCommand {
           let instance_state = instance_state.read();
           if let Some(instance_state) = instance_state.as_ref() {
             let app_settings = load_app_settings().unwrap();
-
             let rcon_settings = RconSettings::new(
               app_settings.factorio.rcon_port as u16,
               &app_settings.factorio.rcon_pass,
               None,
             );
-            if let Err(err) = handle.block_on(async {
-              let rcon = FactorioRcon::new(&rcon_settings, false).await.unwrap();
-              let mut planner =
-                Planner::new(instance_state.world.clone().unwrap(), Some(Arc::new(rcon)));
-              run_script_file(&mut planner, &filename, bot_count)
-            }) {
-              error!("failed to execute {}: {:?}", filename, err);
+            let world = instance_state.world.clone();
+            if let Err(err) = std::thread::spawn(move || {
+              handle.spawn(async move {
+                let rcon = Arc::new(FactorioRcon::new(&rcon_settings, false).await.unwrap());
+                let mut planner = Planner::new(world.unwrap(), Some(rcon));
+                if let Err(err) = std::thread::spawn(move || {
+                  if let Err(err) = run_script_file(&mut planner, &filename, bot_count, false) {
+                    error!("failed to execute: {:?}", err);
+                  }
+                })
+                .join()
+                {
+                  error!("failed to execute: {:?}", err);
+                }
+              })
+            })
+            .join()
+            {
+              error!("failed to execute: {:?}", err);
             }
           }
         })

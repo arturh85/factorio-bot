@@ -4409,9 +4409,9 @@ dependencies = [
 
 [[package]]
 name = "reedline-repl-rs"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c32c4473aaed57d1061eba257dede98cc66b7c8e569d0e5d75def62dd5cee9c3"
+checksum = "5a1d1f14b8f3dd3d4b550ef4d06bae72cc00e4006e0f94d2c9ee7fa590b9a839"
 dependencies = [
  "clap",
  "crossterm",

@@ -36,7 +36,7 @@ toml = "^0.5"
 clap = "^3.1"
 
 # repl
-reedline-repl-rs = { version = "0.2.2", optional = true }
+reedline-repl-rs = { version = "0.2.3", optional = true }
 
 # logs
 paris = { version = "^1.5", features = ["timestamps", "macros"] }

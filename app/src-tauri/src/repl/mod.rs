@@ -14,8 +14,6 @@ use reedline_repl_rs::Repl;
 use std::sync::Arc;
 use tokio::runtime::{Handle, Runtime};
 
-const PROMPT: &str = "repl";
-
 pub fn subcommands() -> Vec<Box<dyn ExecutableReplCommand>> {
   vec![
     factorio::build(),
@@ -39,10 +37,19 @@ pub fn start() -> Result<()> {
   };
   let mut repl: Repl<Context, reedline_repl_rs::Error> = Repl::new(context)
     .with_name(APP_NAME)
-    .with_prompt(&PROMPT)
+    .with_prompt("repl")
     .with_history(constants::app_data_dir().join("repl_history"), 50)
     .with_version(env!("CARGO_PKG_VERSION"))
-    .with_description(APP_ABOUT);
+    .with_description(APP_ABOUT)
+    .with_on_after_command(|context: &mut Context| {
+      let instance_state = context.instance_state.read();
+      let prompt = if instance_state.is_some() {
+        "repl [running]"
+      } else {
+        "repl"
+      };
+      Ok(Some(prompt.to_string()))
+    });
   for subcommand in subcommands() {
     let command = subcommand.build_command();
     let callback = subcommand.build_callback();

@@ -33,9 +33,10 @@ toml = "^0.5"
 
 # cli
 clap = {version = "^3.1", optional = true }
+clap_complete = {version = "^3.1", optional = true }
 
 # repl
-reedline-repl-rs = { version = "1.0.1", optional = true }
+reedline-repl-rs = { version = "1.0.2", optional = true }
 
 # logs
 paris = { version = "^1.5", features = ["timestamps", "macros"] }
@@ -63,7 +64,7 @@ winres = "0.1.12"
 default = ["gui", "restapi", "lua", "repl", "cli", "tokio-console"]
 custom-protocol = ["tauri/custom-protocol", "dep:tauri-build"] # required because of hard coded [tauri_cli] Command `cargo  build --features=custom-protocol --release`
 gui = ["custom-protocol"]
-cli = ["dep:clap"]
+cli = ["dep:clap", "dep:clap_complete"]
 restapi = ["dep:factorio-bot-restapi"]
 rhai = ["dep:factorio-bot-scripting-rhai"]
 lua = ["dep:factorio-bot-scripting-lua"]

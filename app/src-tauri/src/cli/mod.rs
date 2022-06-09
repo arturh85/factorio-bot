@@ -11,9 +11,11 @@ mod start;
 
 use crate::context::Context;
 use crate::{APP_ABOUT, APP_AUTHOR, APP_NAME};
-use clap::{ArgMatches, Command};
+use clap::{Arg, ArgMatches, Command};
+use clap_complete::{generate, Generator, Shell};
 use miette::Result;
 use std::future::Future;
+use std::io;
 use std::pin::Pin;
 
 pub fn subcommands() -> Vec<Box<dyn Subcommand>> {
@@ -35,12 +37,23 @@ pub async fn start(mut context: Context) -> Result<Option<Command<'static>>> {
   let mut app = Command::new(APP_NAME)
     .version(env!("CARGO_PKG_VERSION"))
     .author(APP_AUTHOR)
-    .about(APP_ABOUT);
+    .about(APP_ABOUT)
+    .arg(
+      Arg::new("generator")
+        .long("generate")
+        .possible_values(Shell::possible_values()),
+    );
   let subcommands = subcommands();
   for subcommand in &subcommands {
     app = app.subcommand(subcommand.build_command());
   }
   let matches = app.clone().get_matches();
+  if let Ok(generator) = matches.value_of_t::<Shell>("generator") {
+    eprintln!("Generating completion file for {}...", generator);
+    let mut app = app.clone();
+    print_completions(generator, &mut app);
+    return Ok(None);
+  }
   for subcommand in &subcommands {
     if let Some(matches) = matches.subcommand_matches(&subcommand.name()) {
       let callback = subcommand.build_callback();
@@ -49,6 +62,10 @@ pub async fn start(mut context: Context) -> Result<Option<Command<'static>>> {
     }
   }
   Ok(Some(app))
+}
+
+fn print_completions<G: Generator>(gen: G, cmd: &mut Command) {
+  generate(gen, cmd, cmd.get_name().to_string(), &mut io::stdout());
 }
 
 pub trait Subcommand {

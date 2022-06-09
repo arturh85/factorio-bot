@@ -550,6 +550,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap_complete"
+version = "3.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da92e6facd8d73c22745a5d3cbb59bdf8e46e3235c923e516527d8e81eec14a4"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "clap_lex"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1335,6 +1344,7 @@ name = "factorio-bot"
 version = "0.2.9"
 dependencies = [
  "clap",
+ "clap_complete",
  "color-eyre",
  "config 0.13.0",
  "console-subscriber",
@@ -4366,9 +4376,9 @@ dependencies = [
 
 [[package]]
 name = "reedline-repl-rs"
-version = "1.0.1"
+version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d27dda34367b2c7afb46a51c557cd500f471cc7c135d1bbba929c06bffce14c3"
+checksum = "2a82ee3209046ff272bd79fe1311ed82823102f741f3130be9dc82ef77d492b3"
 dependencies = [
  "clap",
  "crossterm",

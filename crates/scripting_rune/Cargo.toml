@@ -1,5 +1,5 @@
 [package]
-name = "factorio-bot-scripting-rhai"
+name = "factorio-bot-scripting-rune"
 version = "0.2.9"
 edition = "2021"
 
@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 factorio-bot-core = { path = "../core" }
 factorio-bot-scripting = { path = "../scripting" }
-rhai = {version = "1.7.0", features = ["serde", "metadata", "debugging", "sync"]}
+rune = {version = "0.10.3", features = []}
 serde = "^1.0"
 serde_derive = "^1.0"
 serde_json = "^1.0"

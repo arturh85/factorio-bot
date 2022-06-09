@@ -1,5 +1,6 @@
 use crate::error::handle_rhai_err;
 use crate::rhai_plan_builder::RhaiPlanBuilder;
+use crate::rhai_rcon::RhaiRcon;
 use factorio_bot_core::plan::plan_builder::PlanBuilder;
 use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_core::types::{PlayerId, Position};
@@ -23,7 +24,18 @@ pub async fn run_rhai<'a>(
         planner.plan_world.clone(),
     ));
     let mut engine = Engine::new();
+    engine.on_print(|text| info!("{}", text));
+    engine.on_debug(|text, source, pos| {
+        if let Some(source) = source {
+            info!("{} @ {:?} | {}", source, pos, text);
+        } else if pos.is_none() {
+            info!("{}", text);
+        } else {
+            info!("{:?} | {}", pos, text);
+        }
+    });
     RhaiPlanBuilder::register(&mut engine);
+    RhaiRcon::register(&mut engine);
     engine
         .register_type::<PlayerId>()
         .register_type::<Position>()
@@ -35,7 +47,7 @@ pub async fn run_rhai<'a>(
         .push("world", planner.plan_world.clone())
         .push("plan", RhaiPlanBuilder::new(plan_builder));
     if let Some(rcon) = planner.rcon.as_ref() {
-        scope.push("rcon", rcon.clone());
+        scope.push("rcon", RhaiRcon::new(rcon.clone()));
     }
     if let Err(err) = engine.run_with_scope(&mut scope, code) {
         handle_rhai_err(*err, code, filename)?;

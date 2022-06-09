@@ -8,12 +8,13 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
 pub type SharedJoinShandle<T> = Arc<RwLock<Option<JoinHandle<T>>>>;
+pub type SharedRestApiHandle = SharedJoinShandle<Result<()>>;
 
 #[derive(Clone)]
 pub struct Context {
   pub instance_state: SharedFactorioInstance,
   pub app_settings: SharedAppSettings,
-  pub restapi_handle: SharedJoinShandle<Result<()>>,
+  pub restapi_handle: SharedRestApiHandle,
 }
 
 impl Context {

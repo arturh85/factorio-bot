@@ -39,7 +39,8 @@ pub async fn start(mut context: Context) -> Result<Option<Command<'static>>> {
     .author(APP_AUTHOR)
     .about(APP_ABOUT)
     .arg(
-      Arg::new("generator")
+      Arg::new("shell")
+        .help("generate shell-completion script")
         .long("generate")
         .possible_values(Shell::possible_values()),
     );
@@ -48,9 +49,8 @@ pub async fn start(mut context: Context) -> Result<Option<Command<'static>>> {
     app = app.subcommand(subcommand.build_command());
   }
   let matches = app.clone().get_matches();
-  if let Ok(generator) = matches.value_of_t::<Shell>("generator") {
+  if let Ok(generator) = matches.value_of_t::<Shell>("shell") {
     eprintln!("Generating completion file for {}...", generator);
-    let mut app = app.clone();
     print_completions(generator, &mut app);
     return Ok(None);
   }

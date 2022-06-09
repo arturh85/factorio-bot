@@ -3,14 +3,13 @@
   clippy::cast_possible_truncation,
   clippy::cast_sign_loss
 )]
+use crate::context::SharedJoinShandle;
 use crate::settings::SharedAppSettings;
 use factorio_bot_core::process::process_control::SharedFactorioInstance;
 #[cfg(feature = "restapi")]
 use factorio_bot_restapi::webserver::start;
 use miette::Result;
 use tauri::State;
-use tokio::sync::RwLock;
-use tokio::task::JoinHandle;
 
 #[allow(unused_variables)]
 #[allow(clippy::unused_async)]
@@ -18,7 +17,7 @@ use tokio::task::JoinHandle;
 pub async fn start_restapi(
   app_settings: State<'_, SharedAppSettings>,
   instance_state: State<'_, SharedFactorioInstance>,
-  restapi_handle: State<'_, RwLock<Option<JoinHandle<Result<()>>>>>,
+  restapi_handle: State<'_, SharedJoinShandle<Result<()>>>,
 ) -> Result<(), String> {
   #[cfg(feature = "restapi")]
   {
@@ -42,7 +41,7 @@ pub async fn start_restapi(
 
 #[tauri::command]
 pub async fn stop_restapi(
-  restapi_handle: State<'_, RwLock<Option<JoinHandle<Result<()>>>>>,
+  restapi_handle: State<'_, SharedJoinShandle<Result<()>>>,
 ) -> Result<(), String> {
   if restapi_handle.read().await.is_none() {
     return Err("not started".into());
@@ -56,7 +55,7 @@ pub async fn stop_restapi(
 
 #[tauri::command]
 pub async fn is_restapi_started(
-  restapi_handle: State<'_, RwLock<Option<JoinHandle<Result<()>>>>>,
+  restapi_handle: State<'_, SharedJoinShandle<Result<()>>>,
 ) -> Result<bool, String> {
   Ok(restapi_handle.read().await.is_some())
 }

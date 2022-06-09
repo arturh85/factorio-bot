@@ -4,6 +4,8 @@ use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_scripting_lua::run_lua;
 #[cfg(feature = "rhai")]
 use factorio_bot_scripting_rhai::run_rhai;
+#[cfg(feature = "rune")]
+use factorio_bot_scripting_rune::run_rune;
 use miette::{miette, IntoDiagnostic};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -19,6 +21,8 @@ pub async fn run_script(
   match language {
     #[cfg(feature = "lua")]
     "lua" => run_lua(planner, code, filename, bot_count, redirect).await,
+    #[cfg(feature = "rune")]
+    "rune" => run_rune(planner, code, filename, bot_count, redirect).await,
     #[cfg(feature = "rhai")]
     "rhai" => run_rhai(planner, code, filename, bot_count, redirect)
       .await
@@ -72,6 +76,7 @@ pub fn language_by_filename(filename: &str) -> Option<&'static str> {
   match Path::new(filename).extension()?.to_str()? {
     "lua" => Some("lua"),
     "rhai" => Some("rhai"),
+    "rn" => Some("rune"),
     _ => None,
   }
 }

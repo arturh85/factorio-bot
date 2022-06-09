@@ -22,7 +22,6 @@ pub struct FactorioWorld {
     pub actions: DashMap<u32, String>,
     pub path_requests: DashMap<u32, String>,
     pub next_action_id: Mutex<u32>,
-
     pub entity_graph: Arc<EntityGraph>,
     pub flow_graph: Arc<FlowGraph>,
 }
@@ -55,6 +54,10 @@ impl Clone for FactorioWorld {
 }
 
 impl FactorioWorld {
+    pub fn dump(&self, _save_path: Option<&str>) -> Result<()> {
+        Ok(())
+    }
+
     pub fn update_entity_prototypes(
         &self,
         entity_prototypes: Vec<FactorioEntityPrototype>,

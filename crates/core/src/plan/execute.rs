@@ -1,7 +1,8 @@
+use crate::graph::task_graph::TaskData;
 use crate::plan::planner::Planner;
-use crate::types::Position;
 use futures::future::join_all;
 use miette::Result;
+use petgraph::visit::EdgeRef;
 
 #[allow(dead_code)]
 async fn execute(planner: &Planner) -> Result<()> {
@@ -16,21 +17,55 @@ async fn execute(planner: &Planner) -> Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
-async fn execute_single(_planner: &Planner, _player_id: u8) {
-    _planner
-        .rcon
-        .as_ref()
-        .unwrap()
-        .player_mine(
-            &_planner.real_world,
-            _player_id,
-            "rock-single",
-            &Position::new(1.0, 1.0),
-            1,
-        )
-        .await
-        .unwrap();
+#[allow(dead_code, clippy::await_holding_lock)]
+async fn execute_single(planner: &Planner, player_id: u8) {
+    let graph = planner.graph.read();
+    let mut cursor = graph.start_node;
+
+    while cursor != graph.end_node {
+        let node = graph
+            .node_weight(cursor)
+            .expect("NodeIndices should all be valid");
+        if let Some(data) = &node.data {
+            match data {
+                TaskData::Mine(target) => {
+                    planner
+                        .rcon
+                        .as_ref()
+                        .expect("Rcon Connection failed")
+                        .player_mine(
+                            &planner.real_world,
+                            player_id,
+                            &target.name,
+                            &target.position,
+                            target.count,
+                        )
+                        .await
+                        .expect("Failed to mine");
+                }
+                TaskData::Walk(_) => {}
+                TaskData::Craft(_) => {}
+                TaskData::InsertToInventory(_, _) => {}
+                TaskData::RemoveFromInventory(_, _) => {}
+                TaskData::PlaceEntity(_) => {}
+            }
+        }
+
+        let cursor_copy = cursor;
+        for edge in graph.edges_directed(cursor, petgraph::Direction::Outgoing) {
+            let target_idx = edge.target();
+            let target = graph
+                .node_weight(target_idx)
+                .expect("NodeIndices should all be valid");
+            if target.player_id.is_none() || target.player_id.unwrap() == player_id {
+                cursor = target_idx;
+            }
+        }
+        if cursor == cursor_copy {
+            error!("no change in cursor!?");
+            break;
+        }
+    }
 }
 
 #[cfg(test)]

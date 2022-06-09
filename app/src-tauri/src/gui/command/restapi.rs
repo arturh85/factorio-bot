@@ -3,12 +3,11 @@
   clippy::cast_possible_truncation,
   clippy::cast_sign_loss
 )]
-use crate::settings::AppSettings;
-use factorio_bot_core::process::process_control::FactorioInstance;
+use crate::settings::SharedAppSettings;
+use factorio_bot_core::process::process_control::SharedFactorioInstance;
 #[cfg(feature = "restapi")]
 use factorio_bot_restapi::webserver::start;
 use miette::Result;
-use std::sync::Arc;
 use tauri::State;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
@@ -17,8 +16,8 @@ use tokio::task::JoinHandle;
 #[allow(clippy::unused_async)]
 #[tauri::command]
 pub async fn start_restapi(
-  app_settings: State<'_, Arc<RwLock<AppSettings>>>,
-  instance_state: State<'_, Arc<RwLock<Option<FactorioInstance>>>>,
+  app_settings: State<'_, SharedAppSettings>,
+  instance_state: State<'_, SharedFactorioInstance>,
   restapi_handle: State<'_, RwLock<Option<JoinHandle<Result<()>>>>>,
 ) -> Result<(), String> {
   #[cfg(feature = "restapi")]

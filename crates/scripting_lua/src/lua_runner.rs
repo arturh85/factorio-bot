@@ -15,12 +15,14 @@ use rlua_async::ChunkExt;
 use std::fs::read_to_string;
 use std::io::{stdout, Read, Write};
 use std::path::Path;
+use std::thread;
 use std::time::Instant;
 use tokio::runtime::Runtime;
 
-pub fn run_lua(
+pub async fn run_lua(
     planner: &mut Planner,
     lua_code: &str,
+    _filename: Option<&str>,
     bot_count: u8,
     redirect: bool,
 ) -> Result<(String, String)> {
@@ -60,13 +62,24 @@ pub fn run_lua(
             let rcon = create_lua_rcon(ctx, rcon.clone(), planner.real_world.clone())?;
             globals.set("rcon", rcon)?;
         }
-        let chunk = ctx.load(lua_code);
-        let rt = Runtime::new().unwrap();
-        rt.block_on(chunk.exec_async(ctx))?;
         Ok(())
     }) {
         error!("{}", err)
     }
+
+    let lua_code = lua_code.to_string();
+    thread::spawn(move || {
+        if let Err(err) = lua.context::<_, rlua::Result<()>>(|ctx| {
+            let chunk = ctx.load(&lua_code);
+            let rt = Runtime::new().unwrap();
+            rt.block_on(chunk.exec_async(ctx))?;
+            Ok(())
+        }) {
+            error!("{}", err)
+        }
+    })
+    .join()
+    .unwrap();
     buffers_to_string(buffers)
 }
 
@@ -121,16 +134,19 @@ pub async fn start_factorio_and_plan_graph(
             panic!("plan {} not found at {}", plan_name, lua_path_str);
         }
         let lua_code = read_to_string(lua_path).into_diagnostic()?;
-        match std::thread::spawn(move || {
-            if let Err(err) = run_lua(&mut planner, &lua_code, bot_count, false) {
-                Err(err)
-            } else {
-                Ok(planner)
-            }
-        })
-        .join()
-        .unwrap()
+        match if let Err(err) = run_lua(
+            &mut planner,
+            &lua_code,
+            Some(&lua_path_str),
+            bot_count,
+            false,
+        )
+        .await
         {
+            Err(err)
+        } else {
+            Ok(planner)
+        } {
             Ok(_planner) => planner = _planner,
             Err(err) => {
                 error!("executation failed: {:?}", err);
@@ -150,7 +166,7 @@ pub async fn start_factorio_and_plan_graph(
                 stdout().flush().into_diagnostic()?;
                 continue;
             }
-        }
+        };
         let world = planner.world();
         let graph = planner.graph();
         // for player in world.players.iter() {
@@ -237,8 +253,8 @@ mod tests {
     //     assert!(stdout.contains("teststring"));
     // }
 
-    #[test]
-    fn test_mining() {
+    #[tokio::test]
+    async fn test_mining() {
         let world = Arc::new(fixture_world());
         let mut planner = Planner::new(world, None);
         run_lua(
@@ -250,10 +266,12 @@ mod tests {
     end
     plan.groupEnd()
         "#,
+            None,
             2,
             false,
         )
-        .unwrap();
+        .await
+        .expect("run_lua failed");
         let graph = planner.graph();
         assert_eq!(
             graph.graphviz_dot(),

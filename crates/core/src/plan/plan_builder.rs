@@ -114,7 +114,7 @@ impl PlanBuilder {
         Ok(())
     }
 
-    pub fn add_place(&mut self, player_id: PlayerId, entity: FactorioEntity) -> Result<()> {
+    pub fn add_place(&self, player_id: PlayerId, entity: FactorioEntity) -> Result<()> {
         let player = self.player(player_id);
         let distance = calculate_distance(&player.position, &entity.position);
         let build_distance = player.build_distance as f64;

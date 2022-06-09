@@ -7,8 +7,8 @@
            v-show="isSidebarVisible()">
         <div class="layout-logo">
           <router-link to="/">
-            <img alt="Logo" src="./assets/logo.png" :width="100"/>
-            <h2>Factorio Bot Platform</h2>
+            <img alt="Logo" src="./assets/logo.png" :width="250"/>
+
           </router-link>
         </div>
 

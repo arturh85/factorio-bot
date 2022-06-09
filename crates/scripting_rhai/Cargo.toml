@@ -8,8 +8,10 @@ edition = "2021"
 [dependencies]
 factorio-bot-core = { path = "../core" }
 factorio-bot-scripting = { path = "../scripting" }
-rhai = {version = "1.7.0", features = ["serde"]}
+rhai = {version = "1.7.0", features = ["serde", "metadata", "debugging", "sync"]}
 serde = "^1.0"
 serde_derive = "^1.0"
 serde_json = "^1.0"
 miette = {version = "^4.7", features = ["fancy"] }
+tokio = "1"
+thiserror = "1"

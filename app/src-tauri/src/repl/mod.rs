@@ -1,82 +1,89 @@
-mod factorio;
+mod dump;
+mod factorio_instance_control;
+mod get_setting;
+#[cfg(all(debug_assertions, feature = "gui"))]
+mod gui;
 mod quit;
-mod rcon;
+mod rcon_send;
 #[cfg(any(feature = "lua", feature = "rhai"))]
-mod run;
+mod run_script;
+mod set_setting;
 
-use crate::{constants, APP_ABOUT, APP_NAME};
-use async_trait::async_trait;
-use clap::{ArgMatches, Command};
-use factorio_bot_core::process::process_control::FactorioInstance;
-use miette::{IntoDiagnostic, Result};
-use parking_lot::RwLock;
-use reedline_repl_rs::Repl;
-use std::sync::Arc;
-use tokio::runtime::{Handle, Runtime};
+use crate::context::Context;
+use crate::{paths, APP_ABOUT, APP_NAME};
+use miette::{miette, IntoDiagnostic};
+use reedline_repl_rs::{yansi::Paint, Repl};
+use std::fmt;
 
-pub fn subcommands() -> Vec<Box<dyn ExecutableReplCommand>> {
+fn subcommands() -> Vec<Box<dyn Subcommand>> {
   vec![
-    factorio::build(),
+    factorio_instance_control::build(),
+    #[cfg(all(debug_assertions, feature = "gui"))]
+    gui::build(),
     #[cfg(any(feature = "lua", feature = "rhai"))]
-    run::build(),
-    rcon::build(),
+    run_script::build(),
+    rcon_send::build(),
+    set_setting::build(),
+    get_setting::build(),
     quit::build(),
+    dump::build(),
   ]
 }
 
-pub struct Context {
-  pub instance_state: Arc<RwLock<Option<FactorioInstance>>>,
-  pub handle: Handle,
-}
-pub fn start() -> Result<()> {
-  let (handle, _) = get_runtime_handle();
-  let instance_state: Arc<RwLock<Option<FactorioInstance>>> = Arc::new(RwLock::new(None));
-  let context = Context {
-    instance_state: instance_state.clone(),
-    handle,
-  };
-  let mut repl: Repl<Context, reedline_repl_rs::Error> = Repl::new(context)
+pub async fn start(context: Context) -> miette::Result<()> {
+  let instance_state = context.instance_state.clone();
+  let mut repl: Repl<Context, Error> = Repl::new(context)
     .with_name(APP_NAME)
-    .with_prompt("repl")
-    .with_history(constants::app_data_dir().join("repl_history"), 50)
-    .with_version(env!("CARGO_PKG_VERSION"))
     .with_description(APP_ABOUT)
-    .with_on_after_command(|context: &mut Context| {
-      let instance_state = context.instance_state.read();
-      let prompt = if instance_state.is_some() {
-        "repl [running]"
-      } else {
-        "repl"
-      };
-      Ok(Some(prompt.to_string()))
-    });
+    .with_version(env!("CARGO_PKG_VERSION"))
+    .with_prompt("repl")
+    .with_history(paths::data_local_dir().join("repl_history"), 50)
+    .with_on_after_command_async(|context| Box::pin(update_prompt(context)));
   for subcommand in subcommands() {
-    let command = subcommand.build_command();
-    let callback = subcommand.build_callback();
-    repl = repl.add_command(command, callback);
+    repl = subcommand.build_command(repl);
   }
-  repl.run().into_diagnostic()?;
-  let mut instance_state = instance_state.write();
+  repl.run_async().await.into_diagnostic()?;
+  let mut instance_state = instance_state.write().await;
   if let Some(instance_state) = instance_state.take() {
     instance_state.stop()?;
   }
   Ok(())
 }
 
-fn get_runtime_handle() -> (Handle, Option<Runtime>) {
-  if let Ok(h) = Handle::try_current() {
-    (h, None)
-  } else {
-    let rt = Runtime::new().unwrap();
-    (rt.handle().clone(), Some(rt))
-  }
+async fn update_prompt(context: &mut Context) -> Result<Option<String>> {
+  let instance_state = context.instance_state.read().await;
+  let mut prompt = "repl".to_string();
+  if instance_state.is_some() {
+    prompt += &Box::new(Paint::blue(" [running]").bold()).to_string();
+  };
+  Ok(Some(prompt))
 }
 
-#[async_trait]
-pub trait ExecutableReplCommand {
+pub trait Subcommand {
   fn name(&self) -> &str;
-  fn build_command(&self) -> Command<'static>;
-  fn build_callback(
-    &self,
-  ) -> fn(&ArgMatches, &mut Context) -> std::result::Result<Option<String>, reedline_repl_rs::Error>;
+  fn build_command(&self, repl: Repl<Context, Error>) -> Repl<Context, Error>;
+}
+
+pub struct Error(miette::Error);
+pub type Result<T> = std::result::Result<T, Error>;
+
+impl From<reedline_repl_rs::Error> for Error {
+  fn from(e: reedline_repl_rs::Error) -> Self {
+    Self(miette!(e.to_string()))
+  }
+}
+impl From<miette::Error> for Error {
+  fn from(e: miette::Error) -> Self {
+    Self(e)
+  }
+}
+impl fmt::Display for Error {
+  fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    write!(f, "{}", self.0)
+  }
+}
+impl fmt::Debug for Error {
+  fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    write!(f, "{}", self.0)
+  }
 }

@@ -107,6 +107,9 @@ impl TaskGraph {
         self.add_to_group(player_id, node, cost);
     }
 
+    pub fn node_weight(&self, idx: NodeIndex) -> Option<&TaskNode> {
+        self.inner.node_weight(idx)
+    }
     pub fn weight(&self, start: NodeIndex, goal: NodeIndex) -> R64 {
         let (weight, _) = self.astar(start, goal).expect("failed to find path");
         r64(weight)

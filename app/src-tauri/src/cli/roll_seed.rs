@@ -1,19 +1,13 @@
-use crate::cli::ExecutableCommand;
+use crate::cli::{Subcommand, SubcommandCallback};
 use crate::settings::load_app_settings;
-use async_trait::async_trait;
 use clap::{Arg, ArgMatches, Command};
 
+use crate::context::Context;
 #[cfg(feature = "lua")]
 use factorio_bot_scripting_lua::roll_best_seed::{roll_seed, RollSeedLimit};
 use miette::{IntoDiagnostic, Result};
 
-pub fn build() -> Box<dyn ExecutableCommand> {
-  Box::new(ThisCommand {})
-}
-struct ThisCommand {}
-
-#[async_trait]
-impl ExecutableCommand for ThisCommand {
+impl Subcommand for ThisCommand {
   fn name(&self) -> &str {
     "roll-seed"
   }
@@ -65,39 +59,49 @@ impl ExecutableCommand for ThisCommand {
       )
       .about("roll good seed for given map-exchange-string based on heuristics")
   }
-  async fn run(&self, matches: &ArgMatches) -> Result<()> {
-    let app_settings = load_app_settings()?;
-    if let Some((seed, score)) = roll_seed(
-      &app_settings.factorio,
-      matches.value_of("map").expect("map required!").into(),
-      match matches.value_of("rolls") {
-        Some(s) => RollSeedLimit::Rolls(s.parse().into_diagnostic()?),
-        None => RollSeedLimit::Seconds(
-          matches
-            .value_of("seconds")
-            .unwrap()
-            .parse()
-            .into_diagnostic()?,
-        ),
-      },
-      matches
-        .value_of("parallel")
-        .unwrap()
-        .parse()
-        .into_diagnostic()?,
-      matches.value_of("name").unwrap().into(),
-      matches
-        .value_of("clients")
-        .unwrap()
-        .parse()
-        .into_diagnostic()?,
-    )
-    .await?
-    {
-      println!("Best Seed: {} with Score {}", seed, score);
-    } else {
-      eprintln!("no seed found");
-    }
-    Ok(())
+
+  fn build_callback(&self) -> SubcommandCallback {
+    |args, context| Box::pin(run(args, context))
   }
+}
+
+async fn run(matches: ArgMatches, _context: &mut Context) -> Result<()> {
+  let app_settings = load_app_settings()?;
+  if let Some((seed, score)) = roll_seed(
+    &app_settings.factorio,
+    matches.value_of("map").expect("map required!").into(),
+    match matches.value_of("rolls") {
+      Some(s) => RollSeedLimit::Rolls(s.parse().into_diagnostic()?),
+      None => RollSeedLimit::Seconds(
+        matches
+          .value_of("seconds")
+          .unwrap()
+          .parse()
+          .into_diagnostic()?,
+      ),
+    },
+    matches
+      .value_of("parallel")
+      .unwrap()
+      .parse()
+      .into_diagnostic()?,
+    matches.value_of("name").unwrap().into(),
+    matches
+      .value_of("clients")
+      .unwrap()
+      .parse()
+      .into_diagnostic()?,
+  )
+  .await?
+  {
+    println!("Best Seed: {} with Score {}", seed, score);
+  } else {
+    eprintln!("no seed found");
+  }
+  Ok(())
+}
+
+struct ThisCommand {}
+pub fn build() -> Box<dyn Subcommand> {
+  Box::new(ThisCommand {})
 }

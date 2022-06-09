@@ -1,17 +1,11 @@
-use crate::cli::ExecutableCommand;
+use crate::cli::{Subcommand, SubcommandCallback};
+use crate::context::Context;
 use crate::settings::load_app_settings;
-use async_trait::async_trait;
 use clap::{Arg, ArgMatches, Command};
 use factorio_bot_core::process::process_control::start_factorio;
 use miette::Result;
 
-pub fn build() -> Box<dyn ExecutableCommand> {
-  Box::new(ThisCommand {})
-}
-struct ThisCommand {}
-
-#[async_trait]
-impl ExecutableCommand for ThisCommand {
+impl Subcommand for ThisCommand {
   fn name(&self) -> &str {
     "start"
   }
@@ -62,44 +56,52 @@ impl ExecutableCommand for ThisCommand {
       .about("start given number of clients after server start")
   }
 
-  async fn run(&self, matches: &ArgMatches) -> Result<()> {
-    let app_settings = load_app_settings()?;
-    let clients: u8 = matches.value_of("clients").unwrap().parse().unwrap();
-    let write_logs: bool = matches.is_present("logs");
-    let seed = matches
-      .value_of("seed")
-      .map(std::string::ToString::to_string);
-    let map_exchange_string = matches
-      .value_of("map")
-      .map(std::string::ToString::to_string);
-    let recreate = matches.is_present("new");
-    let server_host = matches.value_of("server");
-    // let websocket_server = FactorioWebSocketServer { listeners: vec![] }.start();
-
-    let instance_state = start_factorio(
-      &app_settings.factorio,
-      server_host,
-      clients,
-      recreate,
-      map_exchange_string,
-      seed,
-      // Some(websocket_server.clone()),
-      write_logs,
-      false,
-    )
-    .await
-    .expect("failed to start factorio");
-
-    #[cfg(feature = "repl")]
-    {
-      crate::repl::start()?;
-    }
-
-    // FIXME: watch children die?
-
-    if let Some(_world) = &instance_state.world {
-      // start_webserver(rcon, websocket_server, open_browser, world).await;
-    }
-    Ok(())
+  fn build_callback(&self) -> SubcommandCallback {
+    |args, context| Box::pin(run(args, context))
   }
+}
+
+async fn run(matches: ArgMatches, _context: &mut Context) -> Result<()> {
+  let app_settings = load_app_settings()?;
+  let clients: u8 = matches.value_of("clients").unwrap().parse().unwrap();
+  let write_logs: bool = matches.is_present("logs");
+  let seed = matches
+    .value_of("seed")
+    .map(std::string::ToString::to_string);
+  let map_exchange_string = matches
+    .value_of("map")
+    .map(std::string::ToString::to_string);
+  let recreate = matches.is_present("new");
+  let server_host = matches.value_of("server");
+  // let websocket_server = FactorioWebSocketServer { listeners: vec![] }.start();
+  let instance_state = start_factorio(
+    &app_settings.factorio,
+    server_host,
+    clients,
+    recreate,
+    map_exchange_string,
+    seed,
+    // Some(websocket_server.clone()),
+    write_logs,
+    false,
+  )
+  .await
+  .expect("failed to start factorio");
+
+  #[cfg(feature = "repl")]
+  {
+    // crate::repl::start().await?;
+  }
+
+  // FIXME: watch children die?
+
+  if let Some(_world) = &instance_state.world {
+    // start_webserver(rcon, websocket_server, open_browser, world).await;
+  }
+  Ok(())
+}
+
+struct ThisCommand {}
+pub fn build() -> Box<dyn Subcommand> {
+  Box::new(ThisCommand {})
 }

@@ -22,8 +22,7 @@ tauri = { version = "1.0.0-rc.14", features = ["api-all"], optional = true }
 
 # async
 tokio = { version = "^1.19", features = ["full", "tracing"] }
-console-subscriber = "^0.1"
-async-trait = "0.1.56"
+console-subscriber = { version = "^0.1", optional = true }
 
 # serializing / deserializing
 serde = { version = "^1.0", features = [ "derive" ] }
@@ -33,10 +32,10 @@ config = "^0.13"
 toml = "^0.5"
 
 # cli
-clap = "^3.1"
+clap = {version = "^3.1", optional = true }
 
 # repl
-reedline-repl-rs = { version = "0.2.3", optional = true }
+reedline-repl-rs = { version = "1.0.1", optional = true }
 
 # logs
 paris = { version = "^1.5", features = ["timestamps", "macros"] }
@@ -61,14 +60,15 @@ serde = { version = "^1.0", features = [ "derive" ] }
 winres = "0.1.12"
 
 [features]
-default = ["gui", "restapi", "lua", "repl"]
+default = ["gui", "restapi", "lua", "repl", "cli", "tokio-console"]
 custom-protocol = ["tauri/custom-protocol", "dep:tauri-build"] # required because of hard coded [tauri_cli] Command `cargo  build --features=custom-protocol --release`
 gui = ["custom-protocol"]
+cli = ["dep:clap"]
 restapi = ["dep:factorio-bot-restapi"]
 rhai = ["dep:factorio-bot-scripting-rhai"]
 lua = ["dep:factorio-bot-scripting-lua"]
-repl = ["dep:reedline-repl-rs"]
-
+repl = ["reedline-repl-rs/async"]
+tokio-console = ["dep:console-subscriber"]
 
 [[bin]]
 name = "factorio-bot"

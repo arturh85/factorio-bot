@@ -190,13 +190,8 @@ pub async fn score_seed(
     bot_count: PlayerId,
 ) -> Result<f64> {
     let _rcon = rcon.clone();
-    let planner = std::thread::spawn::<_, Result<Planner>>(move || {
-        let mut planner = Planner::new(world, Some(_rcon.clone()));
-        run_lua(&mut planner, &lua_code, bot_count, false)?;
-        Ok(planner)
-    })
-    .join()
-    .unwrap()?;
+    let mut planner = Planner::new(world, Some(_rcon.clone()));
+    run_lua(&mut planner, &lua_code, None, bot_count, false).await?;
     let mut score = 0.0;
 
     let weight = planner.graph().shortest_path();

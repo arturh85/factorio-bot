@@ -1,28 +1,33 @@
 use crate::context::Context;
 use crate::repl::{Error, Subcommand};
-use reedline_repl_rs::clap::{ArgMatches, Command};
+use reedline_repl_rs::clap::{Arg, ArgMatches, Command};
 use reedline_repl_rs::Repl;
 
 impl Subcommand for ThisCommand {
   fn name(&self) -> &str {
-    "quit"
+    "get"
   }
 
   fn build_command(&self, repl: Repl<Context, Error>) -> Repl<Context, Error> {
     repl.with_command_async(
-      Command::new(self.name()).about("stop all running instances and quit"),
+      Command::new(self.name()).about("get setting by key").arg(
+        Arg::new("key")
+          .required(true)
+          .help("dotted path to setting"),
+      ),
       |args, context| Box::pin(run(args, context)),
     )
   }
 }
 
 #[allow(clippy::unused_async)]
-async fn run(_matches: ArgMatches, context: &mut Context) -> Result<Option<String>, Error> {
-  let mut instance_state = context.instance_state.write().await;
-  if let Some(instance_state) = instance_state.take() {
-    instance_state.stop().expect("failed to stop");
-  }
-  std::process::exit(0);
+async fn run(matches: ArgMatches, _context: &mut Context) -> Result<Option<String>, Error> {
+  let _key = matches
+    .value_of("key")
+    .expect("Required value validated by clap")
+    .to_string();
+
+  Ok(None)
 }
 
 struct ThisCommand {}

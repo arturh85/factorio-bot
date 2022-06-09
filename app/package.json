@@ -17,7 +17,7 @@
     "test:ci": "npm run lint && npm run test:unit && npm run tauri:build && npm run cargo:test && npm run cargo:clippy",
     "cargo:clippy": "cd .. && cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated",
     "cargo:test": "cd .. && cargo test",
-    "cargo:build": "cd .. && cargo build && cargo build --no-default-features",
+    "cargo:build": "cd .. && cargo build --all-features && cargo build --no-default-features",
     "cargo:tree": "cd .. && cargo tree --charset ascii > tree.txt",
     "cargo:docs": "cd .. && cargo doc --all --no-deps && cd docs && mdbook watch",
     "changelog:update": "cd .. && git cliff --output CHANGELOG.md",

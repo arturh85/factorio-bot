@@ -1,4 +1,4 @@
-use crate::constants;
+use crate::paths;
 use factorio_bot_core::settings::{FactorioSettings, FACTORIO_SETTINGS_DEFAULT};
 #[cfg(feature = "restapi")]
 use factorio_bot_restapi::settings::{RestApiSettings, RESTAPI_SETTINGS_DEFAULT};
@@ -6,6 +6,8 @@ use miette::{IntoDiagnostic, Result};
 use serde_json::Value;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[allow(clippy::module_name_repetitions)]
 #[derive(
@@ -27,6 +29,10 @@ pub struct AppSettings {
   pub gui: GuiSettings,
 }
 
+#[allow(clippy::module_name_repetitions)]
+pub type SharedAppSettings = Arc<RwLock<AppSettings>>;
+
+#[allow(dead_code)]
 pub const APP_SETTINGS_DEFAULT: AppSettings = AppSettings {
   factorio: FACTORIO_SETTINGS_DEFAULT,
   #[cfg(feature = "restapi")]
@@ -34,12 +40,17 @@ pub const APP_SETTINGS_DEFAULT: AppSettings = AppSettings {
   gui: GUI_SETTINGS_DEFAULT,
 };
 
+#[allow(dead_code)]
 pub const GUI_SETTINGS_DEFAULT: GuiSettings = GuiSettings {
   enable_autostart: false,
   enable_restapi: false,
 };
 
 impl AppSettings {
+  pub fn into_shared(self) -> SharedAppSettings {
+    Arc::new(RwLock::new(self))
+  }
+  #[allow(dead_code)]
   pub fn load(file_path: PathBuf) -> Result<AppSettings> {
     if Path::exists(&file_path) {
       let file_contents = ::std::fs::read_to_string(file_path).into_diagnostic()?;
@@ -73,11 +84,11 @@ impl AppSettings {
   }
 }
 
-#[allow(clippy::module_name_repetitions)]
+#[allow(clippy::module_name_repetitions, unused)]
 pub fn load_app_settings() -> Result<AppSettings> {
-  let mut app_settings = AppSettings::load(constants::app_settings_path())?;
+  let mut app_settings = AppSettings::load(paths::settings_file())?;
   if app_settings.factorio.workspace_path == "" {
-    let s: String = constants::app_workspace_path().to_str().unwrap().into();
+    let s: String = paths::workspace_dir().to_str().unwrap().into();
     app_settings.factorio.workspace_path = Cow::from(s);
   }
   Ok(app_settings)

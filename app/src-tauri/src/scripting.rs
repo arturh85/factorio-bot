@@ -5,25 +5,29 @@ use factorio_bot_scripting_lua::run_lua;
 #[cfg(feature = "rhai")]
 use factorio_bot_scripting_rhai::run_rhai;
 use miette::{miette, IntoDiagnostic};
+use std::fs;
 use std::path::{Path, PathBuf};
 
-pub fn run_script(
+pub async fn run_script(
   planner: &mut Planner,
   language: &str,
   code: &str,
+  filename: Option<&str>,
   bot_count: u8,
   redirect: bool,
 ) -> miette::Result<(String, String)> {
   match language {
     #[cfg(feature = "lua")]
-    "lua" => run_lua(planner, code, bot_count, redirect),
+    "lua" => run_lua(planner, code, filename, bot_count, redirect).await,
     #[cfg(feature = "rhai")]
-    "rhai" => run_rhai(planner, code, bot_count, redirect),
+    "rhai" => run_rhai(planner, code, filename, bot_count, redirect)
+      .await
+      .map(|n| n.0),
     _ => Err(miette!(format!("unknown language: \"{}\"", language))),
   }
 }
 
-pub fn run_script_file(
+pub async fn run_script_file(
   planner: &mut Planner,
   path: &str,
   bot_count: u8,
@@ -41,19 +45,27 @@ pub fn run_script_file(
   if language.is_none() {
     return Err(miette!("unknown scripting file extension"));
   }
-  let path = PathBuf::from(path);
-  let dir_path = workspace_plans_path.join(&path);
-  if !dir_path.exists() {
+  let pathbuf = PathBuf::from(path);
+  let file_path = workspace_plans_path.join(&pathbuf);
+  if !file_path.exists() {
     return Err(miette!(format!(
       "path not found: {}",
-      dir_path.as_os_str().to_str().unwrap().replace('\\', "/")
+      file_path.as_os_str().to_str().unwrap().replace('\\', "/")
     )));
   }
-  if !dir_path.is_file() {
+  if !file_path.is_file() {
     return Err(miette!("path not a file"));
   }
-  let code = std::fs::read_to_string(dir_path).into_diagnostic()?;
-  run_script(planner, language.unwrap(), &code, bot_count, redirect)
+  let code = fs::read_to_string(file_path).into_diagnostic()?;
+  run_script(
+    planner,
+    language.unwrap(),
+    &code,
+    Some(path),
+    bot_count,
+    redirect,
+  )
+  .await
 }
 
 pub fn language_by_filename(filename: &str) -> Option<&'static str> {
@@ -87,10 +99,10 @@ pub fn prepare_workspace_scripts(workspace_path: &Path) -> Result<PathBuf, Strin
     }
     if !workspace_plans_path.exists() {
       return Err(format!(
-        "missing scripts/ folder from working directory: {:?}",
+        "Missing scripts/ folder from working directory: {:?}",
         workspace_plans_path
       ));
     }
   }
-  Ok(workspace_plans_path)
+  Ok(fs::canonicalize(workspace_plans_path).expect("Failed to canonicalize workspace_plans_path"))
 }

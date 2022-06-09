@@ -11,7 +11,7 @@ fn main() {
     res.set("FileDescription", "Factorio-Bot");
     res.set("Version", env!("CARGO_PKG_VERSION"));
     res.set("LegalCopyright", "Copyright (C) 2022");
-    // res.set_icon("assets/nu_logo.ico");
+    res.set_icon("icons/icon.ico");
     res
       .compile()
       .expect("Failed to run the Windows resource compiler (rc.exe)");

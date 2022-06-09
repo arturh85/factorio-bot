@@ -1,5 +1,5 @@
 pub mod error;
-pub mod rest_api;
+pub mod restapi;
 pub mod settings;
 pub mod webserver;
 

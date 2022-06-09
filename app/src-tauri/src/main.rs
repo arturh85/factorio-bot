@@ -7,62 +7,62 @@
 #[macro_use]
 extern crate paris;
 
+#[cfg(feature = "cli")]
 mod cli;
-#[cfg(feature = "gui")]
-mod commands;
-mod constants;
+mod context;
 #[cfg(feature = "gui")]
 mod gui;
+mod paths;
 #[cfg(feature = "repl")]
 mod repl;
 #[cfg(any(feature = "rhai", feature = "lua"))]
 mod scripting;
 mod settings;
 
-use clap::Command;
-use miette::{IntoDiagnostic, Result};
+use context::Context;
+use miette::Result;
 
 pub const APP_NAME: &str = "factorio-bot";
 pub const APP_AUTHOR: &str = "Artur Hallmann <arturh@arturh.de>";
 pub const APP_ABOUT: &str = "Bot for Factorio";
 
-#[allow(unreachable_code, clippy::needless_return)]
+#[allow(unreachable_code, unused_variables)]
 #[tokio::main]
 async fn main() -> Result<()> {
-  color_eyre::install().unwrap(); // colored panics
-  console_subscriber::init(); // needed for tokio console: https://github.com/tokio-rs/console
-  std::fs::create_dir_all(constants::app_data_dir()).into_diagnostic()?;
-  std::fs::create_dir_all(constants::app_workspace_path()).into_diagnostic()?;
-  let mut app = Command::new(APP_NAME)
-    .version(env!("CARGO_PKG_VERSION"))
-    .author(APP_AUTHOR)
-    .about(APP_ABOUT);
-  let subcommands = cli::subcommands();
-  for subcommand in &subcommands {
-    app = app.subcommand(subcommand.build_command());
-  }
-  let matches = app.get_matches();
-  for subcommand in &subcommands {
-    if let Some(matches) = matches.subcommand_matches(&subcommand.name()) {
-      subcommand.run(matches).await?;
+  let context = Context::new()?;
+
+  #[cfg(feature = "cli")]
+  {
+    let app = cli::start(context.clone()).await?;
+    if app.is_none() {
+      // happens when subcommand successfully executes
       return Ok(());
+    }
+    #[cfg(all(not(feature = "gui"), not(feature = "repl")))]
+    {
+      app
+        .expect("checked before")
+        .print_help()
+        .expect("failed to print_help");
+      return Err(miette::miette!("missing subcommand"));
     }
   }
   #[cfg(feature = "gui")]
   {
-    return gui::start().await;
+    gui::start(context.clone())?;
   }
   #[cfg(not(feature = "gui"))]
   {
     #[cfg(feature = "repl")]
     {
-      return repl::start();
+      repl::start(context.clone()).await?;
     }
-    #[cfg(not(feature = "repl"))]
+    #[cfg(all(not(feature = "cli"), not(feature = "repl")))]
     {
-      use miette::miette;
-      info!("you can use -h/--help to list all possible commands");
-      return Err(miette!("missing subcommand"));
+      return Err(miette::miette!(
+        "select at least one feature of cli, repl, gui"
+      ));
     }
   }
+  Ok(())
 }

@@ -20,6 +20,9 @@ use std::sync::Arc;
 use std::thread;
 use std::thread::{sleep, JoinHandle};
 use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
+
+pub type SharedFactorioInstance = Arc<RwLock<Option<FactorioInstance>>>;
 
 pub struct FactorioInstance {
     pub world: Option<Arc<FactorioWorld>>,
@@ -29,6 +32,9 @@ pub struct FactorioInstance {
 }
 
 impl FactorioInstance {
+    pub fn new_shared() -> SharedFactorioInstance {
+        Arc::new(RwLock::new(None))
+    }
     pub fn stop(mut self) -> Result<()> {
         for child in self.client_processes {
             if child.close().kill().is_err() {
@@ -188,7 +194,7 @@ pub async fn await_lock(lock_path: PathBuf, silent: bool) -> Result<()> {
                     }
                 } else {
                     logger.done();
-                    error!("Factorio instance already running!");
+                    warn!("Factorio instance already running!");
                     #[cfg(windows)]
                     {
                         crate::process::io_utils::kill_process("factorio.exe").await?;

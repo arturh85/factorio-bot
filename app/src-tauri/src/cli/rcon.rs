@@ -1,17 +1,11 @@
-use crate::cli::ExecutableCommand;
-use async_trait::async_trait;
+use crate::cli::{Subcommand, SubcommandCallback};
+use crate::context::Context;
 use clap::{Arg, ArgMatches, Command};
 use factorio_bot_core::factorio::rcon::{FactorioRcon, RconSettings};
 use factorio_bot_core::settings::FACTORIO_SETTINGS_DEFAULT;
 use miette::Result;
 
-pub fn build() -> Box<dyn ExecutableCommand> {
-  Box::new(ThisCommand {})
-}
-struct ThisCommand {}
-
-#[async_trait]
-impl ExecutableCommand for ThisCommand {
+impl Subcommand for ThisCommand {
   fn name(&self) -> &str {
     "rcon"
   }
@@ -29,12 +23,21 @@ impl ExecutableCommand for ThisCommand {
       .about("send given rcon command")
   }
 
-  async fn run(&self, matches: &ArgMatches) -> Result<()> {
-    let command = matches.value_of("command").unwrap();
-    let server_host = matches.value_of("server");
-    let rcon_settings = RconSettings::new_from_config(&FACTORIO_SETTINGS_DEFAULT, server_host);
-    let rcon = FactorioRcon::new(&rcon_settings, false).await.unwrap();
-    rcon.send(command).await.unwrap();
-    Ok(())
+  fn build_callback(&self) -> SubcommandCallback {
+    |args, context| Box::pin(run(args, context))
   }
+}
+
+async fn run(matches: ArgMatches, _context: &mut Context) -> Result<()> {
+  let command = matches.value_of("command").unwrap();
+  let server_host = matches.value_of("server");
+  let rcon_settings = RconSettings::new_from_config(&FACTORIO_SETTINGS_DEFAULT, server_host);
+  let rcon = FactorioRcon::new(&rcon_settings, false).await.unwrap();
+  rcon.send(command).await.unwrap();
+  Ok(())
+}
+
+struct ThisCommand {}
+pub fn build() -> Box<dyn Subcommand> {
+  Box::new(ThisCommand {})
 }

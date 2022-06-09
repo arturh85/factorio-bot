@@ -30,7 +30,7 @@
     "@babel/types": "7.18.4",
     "@tauri-apps/api": "1.0.0-rc.6",
     "ansi-html": "0.0.9",
-    "monaco-editor": "0.29.x",
+    "monaco-editor": "0.33.0",
     "pinia": "2.0.14",
     "primeflex": "3.2.1",
     "primeicons": "5.0.0",

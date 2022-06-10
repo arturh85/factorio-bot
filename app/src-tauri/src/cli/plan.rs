@@ -2,10 +2,10 @@ use crate::cli::{Subcommand, SubcommandCallback};
 use crate::context::Context;
 use crate::settings::load_app_settings;
 use clap::{Arg, ArgMatches, Command};
+use factorio_bot_core::miette::Result;
 use factorio_bot_core::types::PlayerId;
 #[cfg(feature = "lua")]
 use factorio_bot_scripting_lua::lua_runner::start_factorio_and_plan_graph;
-use miette::Result;
 
 impl Subcommand for ThisCommand {
   fn name(&self) -> &str {
@@ -56,10 +56,8 @@ async fn run(matches: ArgMatches, _context: &mut Context) -> Result<()> {
   let name = matches
     .value_of("name")
     .expect("required arg name missing")
-    .to_string();
-  let map_exchange_string = matches
-    .value_of("map")
-    .map(std::string::ToString::to_string);
+    .to_owned();
+  let map_exchange_string = matches.value_of("map").map(std::borrow::ToOwned::to_owned);
   let bot_count: PlayerId = matches.value_of("clients").unwrap().parse().unwrap();
   #[cfg(feature = "lua")]
   {

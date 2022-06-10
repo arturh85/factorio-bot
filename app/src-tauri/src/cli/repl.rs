@@ -2,7 +2,7 @@ use crate::cli::{Subcommand, SubcommandCallback};
 use crate::context::Context;
 use crate::repl;
 use clap::{ArgMatches, Command};
-use miette::Result;
+use factorio_bot_core::miette::Result;
 
 impl Subcommand for ThisCommand {
   fn name(&self) -> &str {

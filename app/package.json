@@ -17,11 +17,10 @@
     "test:ci": "npm run lint && npm run test:unit && npm run tauri:build && npm run cargo:test && npm run cargo:clippy",
     "cargo:clippy": "cd .. && cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated",
     "cargo:test": "cd .. && cargo test",
-    "cargo:build": "cd .. && cargo build --all-features && cargo build --no-default-features",
     "cargo:tree": "cd .. && cargo tree --charset ascii > tree.txt",
     "cargo:docs": "cd .. && cargo doc --all --no-deps && cd docs && mdbook watch",
     "changelog:update": "cd .. && git cliff --output CHANGELOG.md",
-    "precommit:check": "npm run lint && npm run test:coverage && npm run cargo:clippy && npm run cargo:test && npm run cargo:build",
+    "precommit:check": "npm run lint && npm run test:coverage && npm run cargo:clippy && npm run cargo:test && cd .. && cargo build --all-features && cargo build --no-default-features",
     "version:update-from-cargo": "node update-package-version.js",
     "checksum:update": "node update-checksum.js",
     "dummy": "true"
@@ -29,6 +28,7 @@
   "dependencies": {
     "@babel/types": "7.18.4",
     "@tauri-apps/api": "1.0.0-rc.6",
+    "@vueuse/core": "^8.6.0",
     "ansi-html": "0.0.9",
     "monaco-editor": "0.33.0",
     "pinia": "2.0.14",

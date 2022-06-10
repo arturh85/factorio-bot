@@ -5,7 +5,10 @@
 )]
 use crate::paths;
 use crate::settings::SharedAppSettings;
-use factorio_bot_core::process::process_control::{start_factorio, SharedFactorioInstance};
+use factorio_bot_core::paris::error;
+use factorio_bot_core::process::process_control::{
+  FactorioInstance, FactorioParams, SharedFactorioInstance,
+};
 use tauri::{AppHandle, Manager, State, Wry};
 
 #[tauri::command]
@@ -25,21 +28,19 @@ pub async fn start_instances(
   let map_exchange_string = app_settings.factorio.map_exchange_string.to_string();
   let seed = app_settings.factorio.seed.to_string();
 
-  let started_instance_state = start_factorio(
-    &app_settings.factorio,
-    None,
-    app_settings.factorio.client_count as u8,
-    app_settings.factorio.recreate,
-    if map_exchange_string.is_empty() {
+  let params = FactorioParams {
+    client_count: app_settings.factorio.client_count as u8,
+    recreate: app_settings.factorio.recreate,
+    seed: if seed.is_empty() { None } else { Some(seed) },
+    map_exchange_string: if map_exchange_string.is_empty() {
       None
     } else {
       Some(map_exchange_string)
     },
-    if seed.is_empty() { None } else { Some(seed) },
-    true,
-    false,
-  )
-  .await;
+    ..FactorioParams::default()
+  };
+
+  let started_instance_state = FactorioInstance::start(&app_settings.factorio, params).await;
 
   match started_instance_state {
     Ok(started_instance_state) => {

@@ -1,7 +1,7 @@
 use crate::paths;
 use crate::settings::{load_app_settings, SharedAppSettings};
+use factorio_bot_core::miette::{IntoDiagnostic, Result};
 use factorio_bot_core::process::process_control::{FactorioInstance, SharedFactorioInstance};
-use miette::{IntoDiagnostic, Result};
 use std::fs::create_dir_all;
 use std::sync::Arc;
 use tokio::sync::RwLock;

@@ -43,7 +43,7 @@ impl InteractiveProcess {
     /// process.
     pub fn new<T>(command: Command, line_callback: T) -> Result<Self>
     where
-        T: Fn(Result<String>) + Send + 'static,
+        T: FnMut(Result<String>) + Send + 'static,
     {
         Self::new_with_exit_callback::<T, T, _>(command, line_callback, None, || ())
     }
@@ -60,8 +60,8 @@ impl InteractiveProcess {
         stderr_callback: E,
     ) -> Result<Self>
     where
-        T: Fn(Result<String>) + Send + 'static,
-        E: Fn(Result<String>) + Send + 'static,
+        T: FnMut(Result<String>) + Send + 'static,
+        E: FnMut(Result<String>) + Send + 'static,
     {
         Self::new_with_exit_callback(command, stdout_callback, Some(stderr_callback), || ())
     }
@@ -70,13 +70,13 @@ impl InteractiveProcess {
     /// no-argument closure is provided which is called when the client exits.
     pub fn new_with_exit_callback<T, E, S>(
         mut command: Command,
-        stdout_callback: T,
+        mut stdout_callback: T,
         stderr_callback: Option<E>,
         exit_callback: S,
-    ) -> std::io::Result<Self>
+    ) -> Result<Self>
     where
-        T: Fn(Result<String>) + Send + 'static,
-        E: Fn(Result<String>) + Send + 'static,
+        T: FnMut(Result<String>) + Send + 'static,
+        E: FnMut(Result<String>) + Send + 'static,
         S: Fn() + Send + 'static,
     {
         let mut child = command
@@ -113,7 +113,7 @@ impl InteractiveProcess {
             exit_callback();
         });
 
-        if let Some(stderr_callback) = stderr_callback {
+        if let Some(mut stderr_callback) = stderr_callback {
             let stderr = stderr.expect("Previously set so should not fail");
             thread::spawn(move || {
                 for line in BufReader::new(stderr).lines() {

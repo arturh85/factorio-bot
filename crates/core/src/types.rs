@@ -3,7 +3,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use euclid::{TypedPoint2D, TypedSize2D};
+use euclid::{Point2D as TypedPoint2D, Size2D as TypedSize2D};
 use factorio_blueprint::objects::Entity;
 use noisy_float::prelude::*;
 use num_traits::ToPrimitive;
@@ -514,7 +514,7 @@ pub struct FactorioEntity {
     pub ghost_type: Option<String>, // only type = entity-ghost
 }
 
-impl aabb_quadtree::Spatial<Rect> for FactorioEntity {
+impl crate::aabb_quadtree::Spatial<Rect> for FactorioEntity {
     fn aabb(&self) -> QuadTreeRect {
         self.bounding_box.clone().into()
     }

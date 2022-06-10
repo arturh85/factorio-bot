@@ -9,10 +9,6 @@ edition = "2021"
 factorio-bot-core = { path = "../core" }
 factorio-bot-scripting = { path = "../scripting" }
 rune = {version = "0.12.0", features = []}
-serde = "^1.0"
-serde_derive = "^1.0"
-serde_json = "^1.0"
-miette = {version = "^4.7", features = ["fancy"] }
-tokio = "1"
-thiserror = "1"
-paris = { version = "^1.5", features = ["timestamps", "macros"] }
+
+[dev-dependencies]
+tokio = { version = "^1.19", features = ["full", "tracing"] }

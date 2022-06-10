@@ -1,5 +1,6 @@
 #![allow(clippy::module_name_repetitions)]
 use crate::gui::ERR_TO_STRING;
+use factorio_bot_core::paris::warn;
 use factorio_bot_core::process::process_control::SharedFactorioInstance;
 use tauri::State;
 

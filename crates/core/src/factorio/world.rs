@@ -210,8 +210,8 @@ impl FactorioWorld {
     }
 
     #[allow(clippy::map_clone)]
-    pub fn update_chunk_entities(&self, entities: Vec<FactorioEntity>) -> Result<()> {
-        self.entity_graph.add(entities, None)?; // FIXME: add clear rect
+    pub fn update_chunk_entities(&self, _entities: Vec<FactorioEntity>) -> Result<()> {
+        // self.entity_graph.add(entities, None)?; // FIXME: add clear rect
         Ok(())
     }
 

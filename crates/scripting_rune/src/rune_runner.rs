@@ -1,8 +1,9 @@
 use crate::rune_plan_builder::RunePlanBuilder;
+use factorio_bot_core::miette::{miette, Result};
+use factorio_bot_core::paris::info;
 use factorio_bot_core::plan::plan_builder::PlanBuilder;
 use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_scripting::{buffers_to_string, redirect_buffers};
-use miette::{miette, Result};
 use rune::runtime::VmError;
 use rune::termcolor::{ColorChoice, StandardStream};
 use rune::{Context, ContextError, Diagnostics, Source, Sources, Vm};

@@ -3,9 +3,10 @@ use crate::repl::{Error, Subcommand};
 use crate::scripting::run_script_file;
 use crate::settings::load_app_settings;
 use factorio_bot_core::factorio::rcon::{FactorioRcon, RconSettings};
+use factorio_bot_core::miette::IntoDiagnostic;
+use factorio_bot_core::paris::error;
 use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_core::types::PlayerId;
-use miette::IntoDiagnostic;
 use reedline_repl_rs::clap::{Arg, ArgMatches, Command};
 use reedline_repl_rs::Repl;
 use std::sync::Arc;
@@ -17,13 +18,13 @@ impl Subcommand for ThisCommand {
 
   fn build_command(&self, repl: Repl<Context, Error>) -> Repl<Context, Error> {
     // let app_settings = load_app_settings().expect("failed to load settings");
-    // let workspace_path = app_settings.factorio.workspace_path.to_string();
+    // let workspace_path = app_settings.factorio.workspace_path.to_owned();
     // let workspace_path = Path::new(&workspace_path);
     // let dir =
     //   std::fs::read_dir(prepare_workspace_scripts(workspace_path).expect("failed to prepare"))
     //     .expect("failed to read script dir");
     // let entries: Vec<String> = dir
-    //   .map(|entry| entry.unwrap().file_name().to_str().unwrap().to_string())
+    //   .map(|entry| entry.unwrap().file_name().to_str().unwrap().to_owned())
     //   .collect();
     repl.with_command_async(
       Command::new(self.name())
@@ -48,7 +49,7 @@ impl Subcommand for ThisCommand {
 }
 
 async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String>, Error> {
-  let filename = matches.value_of("filename").unwrap().to_string();
+  let filename = matches.value_of("filename").unwrap().to_owned();
   let bot_count: PlayerId = matches
     .value_of("bots")
     .expect("Has default value")

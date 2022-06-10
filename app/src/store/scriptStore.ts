@@ -1,6 +1,7 @@
 import {defineStore} from 'pinia'
 import {invoke} from '@tauri-apps/api/tauri';
 import {PrimeVueTreeNode} from '@/models/types';
+import {languageFromPath} from '@/utils';
 
 export const useScriptStore = defineStore({
     id: 'script',
@@ -22,6 +23,9 @@ export const useScriptStore = defineStore({
         },
         getCode(): string {
             return this.code
+        },
+        getLanguage(): string {
+            return this.language
         },
         getStdout(): string {
             return this.stdout
@@ -53,14 +57,16 @@ export const useScriptStore = defineStore({
                 this.activeScriptPath = path
                 const result = await invoke('load_script', {path}) as string
                 this.code = result
+                this.language = languageFromPath(path)
                 return result
             } catch(err) {
                 console.error('failed', err)
                 throw err
             }
         },
-        setCode(code: string) {
+        async setCode(code: string) {
             this.code = code
+            await invoke('save_script', {code: this.code, path: this.activeScriptPath})
         },
         async executeCode() {
             if(!this.code) {

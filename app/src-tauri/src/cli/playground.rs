@@ -1,7 +1,8 @@
 use crate::cli::{Subcommand, SubcommandCallback};
 use crate::context::Context;
 use clap::{ArgMatches, Command};
-use miette::Result;
+use factorio_bot_core::miette::Result;
+use factorio_bot_core::paris::info;
 
 impl Subcommand for ThisCommand {
   fn name(&self) -> &str {

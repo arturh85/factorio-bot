@@ -3,9 +3,9 @@ use crate::settings::load_app_settings;
 use clap::{Arg, ArgMatches, Command};
 
 use crate::context::Context;
+use factorio_bot_core::miette::{IntoDiagnostic, Result};
 #[cfg(feature = "lua")]
 use factorio_bot_scripting_lua::roll_best_seed::{roll_seed, RollSeedLimit};
-use miette::{IntoDiagnostic, Result};
 
 impl Subcommand for ThisCommand {
   fn name(&self) -> &str {
@@ -68,7 +68,7 @@ impl Subcommand for ThisCommand {
 async fn run(matches: ArgMatches, _context: &mut Context) -> Result<()> {
   let app_settings = load_app_settings()?;
   if let Some((seed, score)) = roll_seed(
-    &app_settings.factorio,
+    app_settings.factorio.clone(),
     matches.value_of("map").expect("map required!").into(),
     match matches.value_of("rolls") {
       Some(s) => RollSeedLimit::Rolls(s.parse().into_diagnostic()?),

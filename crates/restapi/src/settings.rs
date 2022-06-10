@@ -5,4 +5,8 @@ pub struct RestApiSettings {
     pub port: i64,
 }
 
-pub const RESTAPI_SETTINGS_DEFAULT: RestApiSettings = RestApiSettings { port: 7492 };
+impl Default for RestApiSettings {
+    fn default() -> Self {
+        RestApiSettings { port: 7492 }
+    }
+}

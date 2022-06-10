@@ -3,6 +3,7 @@ use crate::plan::planner::Planner;
 use futures::future::join_all;
 use miette::Result;
 use petgraph::visit::EdgeRef;
+use petgraph::Direction;
 
 #[allow(dead_code)]
 async fn execute(planner: &Planner) -> Result<()> {
@@ -52,7 +53,7 @@ async fn execute_single(planner: &Planner, player_id: u8) {
         }
 
         let cursor_copy = cursor;
-        for edge in graph.edges_directed(cursor, petgraph::Direction::Outgoing) {
+        for edge in graph.edges_directed(cursor, Direction::Outgoing) {
             let target_idx = edge.target();
             let target = graph
                 .node_weight(target_idx)

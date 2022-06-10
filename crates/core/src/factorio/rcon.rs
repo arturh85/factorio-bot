@@ -16,6 +16,7 @@ use crate::types::{
     InventoryResponse, PlayerId, Pos, Position, Rect, RequestEntity,
 };
 use miette::{IntoDiagnostic, Result};
+use paris::info;
 use rcon::Connection;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -29,7 +30,6 @@ use unicode_segmentation::UnicodeSegmentation;
 const RCON_INTERFACE: &str = "botbridge";
 
 pub struct FactorioRcon {
-    // conn: Mutex<Connection>,
     pool: bb8::Pool<ConnectionManager>,
     silent: bool,
 }
@@ -53,6 +53,7 @@ impl FactorioRcon {
         })
     }
 
+    /// Executes a couple of commands that need to be send to a newly started factorio server
     pub async fn initialize_server(&self) -> Result<()> {
         self.silent_print("").await.expect("failed to silent print");
         self.whoami("server").await.expect("failed to whoami");
@@ -62,6 +63,7 @@ impl FactorioRcon {
         Ok(())
     }
 
+    /// Sends raw command to factorio server
     pub async fn send(&self, command: &str) -> Result<Option<Vec<String>>> {
         if !self.silent {
             info!("<cyan>rcon</>  ⮜ <green>{}</>", command);
@@ -84,7 +86,7 @@ impl FactorioRcon {
             Ok(Some(
                 result[0..result.len() - 1]
                     .split('\n')
-                    .map(|str| str.to_string())
+                    .map(|str| str.to_owned())
                     .collect(),
             ))
         } else {
@@ -92,6 +94,7 @@ impl FactorioRcon {
         }
     }
 
+    /// Calls a lua function exported by BotBridge
     async fn remote_call(
         &self,
         function_name: &str,
@@ -108,39 +111,47 @@ impl FactorioRcon {
         .await
     }
 
-    pub async fn print(&self, str: &str) -> Result<()> {
-        self.send(&format!("/c print({})", str_to_lua(str))).await?;
-        Ok(())
-    }
-
+    /// Take a screenshot -> but where?
     pub async fn screenshot(&self, width: i16, height: i16, depth: i8) -> Result<()> {
         self.send(&format!("/screenshot {} {} {}", width, height, depth))
             .await?;
         Ok(())
     }
 
+    /// Print given message to all Clients as Chat Message from Server loudly using /c
+    pub async fn print(&self, message: &str) -> Result<()> {
+        self.send(&format!("/c print({})", str_to_lua(message)))
+            .await?;
+        Ok(())
+    }
+
+    /// Print given message to all Clients as Chat Message from Server silenty using /silent-command
     pub async fn silent_print(&self, str: &str) -> Result<()> {
         self.send(&format!("/silent-command print({})", str_to_lua(str)))
             .await?;
         Ok(())
     }
 
+    /// Save the current game on server
     pub async fn server_save(&self) -> Result<()> {
         self.send("/server-save").await?;
         Ok(())
     }
 
+    /// Starts initial discovery process for "server"
     pub async fn whoami(&self, name: &str) -> Result<()> {
         self.remote_call("whoami", vec![str_to_lua(name)]).await?;
         Ok(())
     }
 
+    /// Adds research to the queue
     pub async fn add_research(&self, technology_name: &str) -> Result<()> {
         self.remote_call("add_research", vec![str_to_lua(technology_name)])
             .await?;
         Ok(())
     }
 
+    /// Cheats in an Item in given quantity to given player
     pub async fn cheat_item(
         &self,
         player_id: PlayerId,
@@ -1211,18 +1222,18 @@ pub struct RconSettings {
 }
 
 impl RconSettings {
-    pub fn new_from_config(settings: &FactorioSettings, server_host: Option<&str>) -> RconSettings {
+    pub fn new_from_config(settings: &FactorioSettings, server_host: Option<String>) -> RconSettings {
         RconSettings {
             port: settings.rcon_port as u16,
             pass: settings.rcon_pass.to_string(),
-            host: server_host.map(|s| s.into()),
+            host: server_host,
         }
     }
-    pub fn new(rcon_port: u16, rcon_pass: &str, server_host: Option<&str>) -> RconSettings {
+    pub fn new(rcon_port: u16, rcon_pass: &str, server_host: Option<String>) -> RconSettings {
         RconSettings {
             port: rcon_port,
-            pass: rcon_pass.into(),
-            host: server_host.map(|s| s.into()),
+            pass: rcon_pass.to_owned(),
+            host: server_host,
         }
     }
 }

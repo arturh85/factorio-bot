@@ -2,6 +2,7 @@
 #[cfg(any(feature = "rhai", feature = "lua"))]
 use crate::scripting::{prepare_workspace_scripts, run_script, run_script_file};
 use crate::settings::SharedAppSettings;
+use factorio_bot_core::paris::warn;
 use factorio_bot_core::process::process_control::SharedFactorioInstance;
 use factorio_bot_core::types::PrimeVueTreeNode;
 use tauri::State;
@@ -121,7 +122,7 @@ pub async fn load_scripts_in_directory(
             .unwrap()
             .to_string()
             .replace('\\', "/"),
-          label: entry.file_name().to_str().unwrap().to_string(),
+          label: entry.file_name().to_str().unwrap().to_owned(),
           leaf: !file_type.is_dir(),
           children: vec![],
         }
@@ -161,6 +162,40 @@ pub async fn load_script(
       return Err("path not directory".into());
     }
     std::fs::read_to_string(dir_path).map_err(|e| format!("error: {}", e))
+  }
+  #[cfg(not(any(feature = "rhai", feature = "lua")))]
+  {
+    Ok(String::new())
+  }
+}
+
+#[allow(unused_variables)]
+#[tauri::command]
+pub async fn save_script(
+  app_settings: State<'_, SharedAppSettings>,
+  path: String,
+  code: String,
+) -> Result<(), String> {
+  #[cfg(any(feature = "rhai", feature = "lua"))]
+  {
+    use std::path::{Path, PathBuf};
+    let app_settings = &app_settings.read().await;
+    let workspace_path = app_settings.factorio.workspace_path.to_string();
+    let workspace_path = Path::new(&workspace_path);
+    let workspace_plans_path = prepare_workspace_scripts(workspace_path)?;
+    if path.contains("..") {
+      return Err("invalid path".into());
+    }
+
+    let path = PathBuf::from(&path[1..]);
+    let dir_path = workspace_plans_path.join(&path);
+    if !dir_path.exists() {
+      return Err("path not found".into());
+    }
+    if !dir_path.is_file() {
+      return Err("path not directory".into());
+    }
+    std::fs::write(dir_path, code).map_err(|e| format!("error: {}", e))
   }
   #[cfg(not(any(feature = "rhai", feature = "lua")))]
   {

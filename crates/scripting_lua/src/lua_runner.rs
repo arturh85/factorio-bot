@@ -1,23 +1,23 @@
 use crate::lua_plan_builder::create_lua_plan_builder;
 use crate::lua_rcon::create_lua_rcon;
 use crate::lua_world::create_lua_world;
-use factorio_bot_core::factorio::rcon::RconSettings;
 use factorio_bot_core::graph::task_graph::TaskGraph;
+use factorio_bot_core::miette::{IntoDiagnostic, Result};
+use factorio_bot_core::paris::{error, info, warn};
 use factorio_bot_core::plan::planner::Planner;
-use factorio_bot_core::process::instance_setup::setup_factorio_instance;
-use factorio_bot_core::process::process_control::{start_factorio_server, FactorioStartCondition};
+use factorio_bot_core::process::process_control::{FactorioInstance, FactorioParams, FactorioStartCondition};
+use factorio_bot_core::rlua;
+use factorio_bot_core::rlua::{Lua, Variadic};
 use factorio_bot_core::settings::FactorioSettings;
+use factorio_bot_core::tokio::runtime::Runtime;
 use factorio_bot_scripting::{buffers_to_string, redirect_buffers};
 use itertools::Itertools;
-use miette::{IntoDiagnostic, Result};
-use rlua::{Lua, Variadic};
 use rlua_async::ChunkExt;
 use std::fs::read_to_string;
 use std::io::{stdout, Read, Write};
 use std::path::Path;
 use std::thread;
 use std::time::Instant;
-use tokio::runtime::Runtime;
 
 pub async fn run_lua(
     planner: &mut Planner,
@@ -67,7 +67,7 @@ pub async fn run_lua(
         error!("{}", err)
     }
 
-    let lua_code = lua_code.to_string();
+    let lua_code = lua_code.to_owned();
     thread::spawn(move || {
         if let Err(err) = lua.context::<_, rlua::Result<()>>(|ctx| {
             let chunk = ctx.load(&lua_code);
@@ -93,31 +93,16 @@ pub async fn start_factorio_and_plan_graph(
 ) -> Result<TaskGraph> {
     let started = Instant::now();
     let instance_name = "plan";
-    let rcon_settings = RconSettings::new(settings.rcon_port as u16, &settings.rcon_pass, None);
-    setup_factorio_instance(
-        &settings.workspace_path,
-        &settings.factorio_archive_path,
-        &rcon_settings,
-        None,
-        instance_name,
-        true,
-        true,
-        map_exchange_string,
+    let params = FactorioParams {
         seed,
-        true,
-    )
-    .await
-    .expect("failed to initially setup instance");
-
-    let (world, rcon, child) = start_factorio_server(
-        &settings.workspace_path,
-        &rcon_settings,
-        None,
-        instance_name,
-        // None,
-        false,
-        true,
-        FactorioStartCondition::DiscoveryComplete,
+        map_exchange_string,
+        instance_name: Some(instance_name.to_owned()),
+        wait_until: FactorioStartCondition::DiscoveryComplete,
+        ..FactorioParams::default()
+    };
+    let instance = FactorioInstance::start(
+        settings,
+        params,
     )
     .await
     .expect("failed to start");
@@ -126,7 +111,10 @@ pub async fn start_factorio_and_plan_graph(
     info!("start took <yellow>{:?}</>", started.elapsed());
     let graph = loop {
         let started = Instant::now();
-        let mut planner = Planner::new(world.clone(), Some(rcon.clone()));
+        let mut planner = Planner::new(
+            instance.world.clone().expect("world missing").clone(),
+            Some(instance.rcon.clone()),
+        );
         let lua_path_str = format!("plans/{}.lua", plan_name);
         let lua_path = Path::new(&lua_path_str);
         let lua_path = std::fs::canonicalize(lua_path).into_diagnostic()?;
@@ -218,7 +206,7 @@ pub async fn start_factorio_and_plan_graph(
         }
     };
 
-    child.close().kill().expect("failed to kill child");
+    instance.stop().expect("failed to kill child");
     Ok(graph)
 }
 

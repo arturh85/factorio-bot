@@ -1,9 +1,10 @@
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::graph::task_graph::{PositionRadius, TaskGraph};
+use factorio_bot_core::parking_lot::RwLock;
 use factorio_bot_core::plan::plan_builder::PlanBuilder;
+use factorio_bot_core::rlua;
+use factorio_bot_core::rlua::{Context, Table};
 use factorio_bot_core::types::{PlayerId, Position};
-use parking_lot::RwLock;
-use rlua::{Context, Table};
 use std::sync::Arc;
 
 pub fn create_lua_plan_builder(

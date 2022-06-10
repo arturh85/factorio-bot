@@ -1,8 +1,8 @@
-import {FactorioSettings, RestApiSettings} from '@/models/types';
+import {FactorioSettings} from '@/models/types';
 
 export type AppSettings = {
     gui: GuiSettings,
-    restapi: RestApiSettings,
+    restapi: any,
     factorio: FactorioSettings,
 }
 

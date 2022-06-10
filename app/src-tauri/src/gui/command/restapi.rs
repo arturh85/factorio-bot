@@ -5,10 +5,10 @@
 )]
 use crate::context::SharedJoinShandle;
 use crate::settings::SharedAppSettings;
+use factorio_bot_core::miette::Result;
 use factorio_bot_core::process::process_control::SharedFactorioInstance;
 #[cfg(feature = "restapi")]
-use factorio_bot_restapi::webserver::start;
-use miette::Result;
+use factorio_bot_restapi::webserver;
 use tauri::State;
 
 #[allow(unused_variables)]
@@ -27,7 +27,7 @@ pub async fn start_restapi(
     let app_settings = app_settings.inner().clone();
     let instance_state = instance_state.inner().clone();
     let app_settings = app_settings.read().await;
-    let webserver = start(app_settings.restapi.clone(), instance_state);
+    let webserver = webserver::start(app_settings.restapi.clone(), instance_state);
     let handle = tokio::task::spawn(webserver);
     let mut restapi_handle = restapi_handle.write().await;
     *restapi_handle = Some(handle);

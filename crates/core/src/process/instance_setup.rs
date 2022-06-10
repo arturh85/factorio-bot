@@ -11,12 +11,12 @@ use crate::constants::{
     MAP_GEN_SETTINGS_FILENAME, MAP_SETTINGS_FILENAME, MODS_FOLDERNAME, SERVER_SETTINGS_FILENAME,
 };
 use crate::errors::*;
-use crate::factorio::rcon::{FactorioRcon, RconSettings};
+use crate::factorio::rcon::RconSettings;
 use crate::factorio::util::{read_to_value, write_value_to};
-use crate::process::io_utils::{extract_archive, symlink};
+use crate::process::io_utils::{await_lock, extract_archive, symlink};
 use crate::process::output_reader::read_output;
-use crate::process::process_control::{await_lock, FactorioStartCondition};
-use miette::{IntoDiagnostic, miette, Result};
+use crate::process::process_control::FactorioStartCondition;
+use miette::{miette, IntoDiagnostic, Result};
 use tokio::fs::create_dir;
 
 #[cfg(not(debug_assertions))]
@@ -376,17 +376,15 @@ pub async fn update_map_gen_settings(
     let log_path = workspace_path.join(PathBuf::from_str("server-log.txt").unwrap());
     let mut command = Command::new(&factorio_binary_path);
     command.args(args);
-    let (_, proc) = read_output(
+    let (_, proc, rcon) = read_output(
         command,
         log_path,
+        rcon_settings,
         false,
         true,
         FactorioStartCondition::Initialized,
-    )?;
-    let rcon = FactorioRcon::new(rcon_settings, silent)
-        .await
-        .expect("failed to rcon");
-    rcon.initialize_server().await?;
+    )
+    .await?;
     rcon.parse_map_exchange_string(MAP_GEN_SETTINGS_FILENAME, map_exchange_string)
         .await?;
     proc.close().kill().into_diagnostic()?;

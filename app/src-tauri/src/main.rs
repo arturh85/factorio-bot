@@ -3,10 +3,6 @@
   all(not(debug_assertions), target_os = "windows"),
   windows_subsystem = "windows"
 )]
-#[allow(unused_imports)]
-#[macro_use]
-extern crate paris;
-
 #[cfg(feature = "cli")]
 mod cli;
 mod context;
@@ -15,12 +11,12 @@ mod gui;
 mod paths;
 #[cfg(feature = "repl")]
 mod repl;
-#[cfg(any(feature = "rhai", feature = "lua"))]
+#[cfg(any(feature = "rhai", feature = "lua", feature = "rune"))]
 mod scripting;
 mod settings;
 
 use context::Context;
-use miette::Result;
+use factorio_bot_core::miette::Result;
 
 pub const APP_NAME: &str = "factorio-bot";
 pub const APP_AUTHOR: &str = "Artur Hallmann <arturh@arturh.de>";
@@ -44,7 +40,7 @@ async fn main() -> Result<()> {
         .expect("checked before")
         .print_help()
         .expect("failed to print_help");
-      return Err(miette::miette!("missing subcommand"));
+      return Err(factorio_bot_core::miette::miette!("missing subcommand"));
     }
   }
   #[cfg(feature = "gui")]
@@ -59,7 +55,7 @@ async fn main() -> Result<()> {
     }
     #[cfg(all(not(feature = "cli"), not(feature = "repl")))]
     {
-      return Err(miette::miette!(
+      return Err(factorio_bot_core::miette::miette!(
         "select at least one feature of cli, repl, gui"
       ));
     }

@@ -336,7 +336,7 @@ pub fn handle_rhai_err(
     rhai_code: &str,
     filename: Option<&str>,
 ) -> miette::Result<()> {
-    let src = NamedSource::new(filename.unwrap_or("unknown"), rhai_code.to_string());
+    let src = NamedSource::new(filename.unwrap_or("unknown"), rhai_code.to_owned());
     let default_span = (0, 0).into();
     match err {
         EvalAltResult::ErrorFunctionNotFound(message, pos) => Err(ErrorFunctionNotFound {

@@ -13,7 +13,7 @@ use crate::context::Context;
 use crate::{APP_ABOUT, APP_AUTHOR, APP_NAME};
 use clap::{Arg, ArgMatches, Command};
 use clap_complete::{generate, Generator, Shell};
-use miette::Result;
+use factorio_bot_core::miette::Result;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
@@ -49,9 +49,9 @@ pub async fn start(mut context: Context) -> Result<Option<Command<'static>>> {
     app = app.subcommand(subcommand.build_command());
   }
   let matches = app.clone().get_matches();
-  if let Ok(generator) = matches.value_of_t::<Shell>("shell") {
-    eprintln!("Generating completion file for {}...", generator);
-    print_completions(generator, &mut app);
+  if let Ok(shell) = matches.value_of_t::<Shell>("shell") {
+    eprintln!("Generating completion file for {}...", shell);
+    print_completions(shell, &mut app);
     return Ok(None);
   }
   for subcommand in &subcommands {
@@ -65,7 +65,7 @@ pub async fn start(mut context: Context) -> Result<Option<Command<'static>>> {
 }
 
 fn print_completions<G: Generator>(gen: G, cmd: &mut Command) {
-  generate(gen, cmd, cmd.get_name().to_string(), &mut io::stdout());
+  generate(gen, cmd, cmd.get_name().to_owned(), &mut io::stdout());
 }
 
 pub trait Subcommand {

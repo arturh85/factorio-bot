@@ -19,7 +19,6 @@ serde_json = "^1.0"
 config = "^0.13"
 pathfinding = "^3.0"
 parking_lot = "^0.12"
-futures = "0.3.21"
 paris = { version = "^1.5", features = ["timestamps", "macros"] }
 color-eyre = "^0.6.1"
 petgraph = { version = "^0.6", features = ["all"] }
@@ -41,12 +40,12 @@ enum-primitive-derive = "^0.2"
 unicode-segmentation = "^1.9"
 strum = "^0.24"
 strum_macros = "^0.24"
-aabb-quadtree = "^0.2"
 dashmap = "^5.3"
-euclid = "^0.19" # aabb-quadtree 0.2 depends on euclid 0.19
+euclid = "^0.22.7"
 smallvec = "*"
 base64 = "^0.13"
 ptree = "^0.4"
+fnv = "^1.0.7"
 itertools = "^0.10"
 human-sort = "^0.2"
 flate2 = "^1.0"
@@ -59,6 +58,7 @@ rlua = "^0.19"
 rlua_serde = { git = "https://github.com/creepinson/rlua_serde" } # fork which is compatible with rlua 0.19
 miette = {version = "^4.7", features = ["fancy"] }
 thiserror = "^1.0"
+futures = "0.3.21"
 #
 #[target.'cfg(unix)'.dependencies]
 #

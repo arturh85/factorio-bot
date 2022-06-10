@@ -1,4 +1,6 @@
 use crate::settings::load_app_settings;
+use factorio_bot_core::miette;
+use factorio_bot_core::miette::{miette, IntoDiagnostic};
 use factorio_bot_core::plan::planner::Planner;
 #[cfg(feature = "lua")]
 use factorio_bot_scripting_lua::run_lua;
@@ -6,7 +8,6 @@ use factorio_bot_scripting_lua::run_lua;
 use factorio_bot_scripting_rhai::run_rhai;
 #[cfg(feature = "rune")]
 use factorio_bot_scripting_rune::run_rune;
-use miette::{miette, IntoDiagnostic};
 use std::fs;
 use std::path::{Path, PathBuf};
 

@@ -1,7 +1,8 @@
 use factorio_bot_core::factorio::rcon::FactorioRcon;
 use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::rlua;
+use factorio_bot_core::rlua::{Context, Table};
 use factorio_bot_core::types::{AreaFilter, PlayerId, Position, RequestEntity};
-use rlua::{Context, Table};
 use rlua_async::ContextExt;
 use std::sync::Arc;
 

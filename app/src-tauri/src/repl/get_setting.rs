@@ -25,7 +25,7 @@ async fn run(matches: ArgMatches, _context: &mut Context) -> Result<Option<Strin
   let _key = matches
     .value_of("key")
     .expect("Required value validated by clap")
-    .to_string();
+    .to_owned();
 
   Ok(None)
 }

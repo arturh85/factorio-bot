@@ -1,13 +1,40 @@
 [workspace]
 members = [
     "app/src-tauri",
-    "crates/*"
+    "crates/core",
+    "crates/restapi",
+    "crates/scripting",
+    "crates/scripting_rhai",
+    "crates/scripting_rune",
+    "crates/scripting_lua",
 ]
 resolver = "2"
 
+# https://doc.rust-lang.org/cargo/reference/profiles.html
+# 0: no optimizations
+# 1: basic optimizations
+# 2: some optimizations
+# 3: all optimizations
+# "s": optimize for binary size
+# "z": optimize for binary size, but also turn off loop vectorization.
+
+# defaults: https://doc.rust-lang.org/cargo/reference/profiles.html#release
 [profile.release]
 panic = "abort"
 codegen-units = 1
 lto = true
 incremental = true
-opt-level = "s" # "s": optimize for binary size
+opt-level = "s"
+
+
+# defaults: https://doc.rust-lang.org/cargo/reference/profiles.html#dev
+[profile.dev]
+incremental = true
+opt-level = 0
+
+
+# override the optimization level of dependencies.
+# You can use that feature to optimize all dependencies for size while keeping the top crate unoptimized and debugger friendly.
+[profile.dev.package."*"]
+opt-level = "z"
+debug = false

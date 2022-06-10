@@ -1,2 +1,5 @@
 [build]
 rustflags = ["--cfg", "tokio_unstable"] # for tokio-console
+
+[alias]     # command aliases
+repl = "run --no-default-features --features repl,lua,tokio-console"

@@ -1,28 +1,33 @@
 mod dump;
-mod factorio_instance_control;
+mod factorio_control;
 mod get_setting;
 #[cfg(all(debug_assertions, feature = "gui"))]
 mod gui;
 mod quit;
 mod rcon_send;
-#[cfg(any(feature = "lua", feature = "rhai"))]
+#[cfg(feature = "restapi")]
+mod restapi_control;
+#[cfg(any(feature = "lua", feature = "rhai", feature = "rune"))]
 mod run_script;
 mod set_setting;
 
 use crate::context::Context;
 use crate::{paths, APP_ABOUT, APP_NAME};
-use miette::{miette, IntoDiagnostic};
+use factorio_bot_core::miette;
+use factorio_bot_core::miette::{miette, IntoDiagnostic};
 use reedline_repl_rs::{yansi::Paint, Repl};
 use std::fmt;
 
 fn subcommands() -> Vec<Box<dyn Subcommand>> {
   vec![
-    factorio_instance_control::build(),
+    factorio_control::build(),
     #[cfg(all(debug_assertions, feature = "gui"))]
     gui::build(),
-    #[cfg(any(feature = "lua", feature = "rhai"))]
+    #[cfg(any(feature = "lua", feature = "rhai", feature = "rune"))]
     run_script::build(),
     rcon_send::build(),
+    #[cfg(feature = "restapi")]
+    restapi_control::build(),
     set_setting::build(),
     get_setting::build(),
     quit::build(),
@@ -52,7 +57,7 @@ pub async fn start(context: Context) -> miette::Result<()> {
 
 async fn update_prompt(context: &mut Context) -> Result<Option<String>> {
   let instance_state = context.instance_state.read().await;
-  let mut prompt = "repl".to_string();
+  let mut prompt = "repl".to_owned();
   if instance_state.is_some() {
     prompt += &Box::new(Paint::blue(" [running]").bold()).to_string();
   };

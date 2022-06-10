@@ -1,7 +1,6 @@
 use factorio_bot_core::constants::WORKSPACE_FOLDERNAME;
 use std::path::PathBuf;
 
-#[allow(dead_code)]
 pub const APP_SETTINGS_FILENAME: &str = "AppSettings.toml";
 
 pub fn data_local_dir() -> PathBuf {
@@ -14,7 +13,6 @@ pub fn data_local_dir() -> PathBuf {
     ))
 }
 
-#[allow(dead_code)]
 pub fn settings_file() -> PathBuf {
   data_local_dir().join(APP_SETTINGS_FILENAME)
 }

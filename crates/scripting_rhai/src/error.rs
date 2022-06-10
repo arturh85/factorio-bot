@@ -1,11 +1,11 @@
+use factorio_bot_core::miette::{Diagnostic, NamedSource, SourceSpan};
+use factorio_bot_core::thiserror::Error;
 use factorio_bot_scripting::line_offset;
-use miette::{Diagnostic, NamedSource, SourceSpan};
 use rhai::{EvalAltResult, Position};
-use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, Box<EvalAltResult>>;
 
-pub fn to_rhai_error(err: miette::Report) -> Box<EvalAltResult> {
+pub fn to_rhai_error(err: factorio_bot_core::miette::Report) -> Box<EvalAltResult> {
     Box::new(EvalAltResult::ErrorSystem(err.to_string(), err.into()))
 }
 
@@ -336,7 +336,7 @@ pub fn handle_rhai_err(
     rhai_code: &str,
     filename: Option<&str>,
 ) -> miette::Result<()> {
-    let src = NamedSource::new(filename.unwrap_or("unknown"), rhai_code.to_string());
+    let src = NamedSource::new(filename.unwrap_or("unknown"), rhai_code.to_owned());
     let default_span = (0, 0).into();
     match err {
         EvalAltResult::ErrorFunctionNotFound(message, pos) => Err(ErrorFunctionNotFound {

@@ -2,8 +2,8 @@ use crate::cli::{Subcommand, SubcommandCallback};
 use crate::context::Context;
 use crate::settings::load_app_settings;
 use clap::{Arg, ArgMatches, Command};
-use factorio_bot_core::process::process_control::start_factorio;
-use miette::Result;
+use factorio_bot_core::miette::Result;
+use factorio_bot_core::process::process_control::{FactorioInstance, FactorioParams};
 
 impl Subcommand for ThisCommand {
   fn name(&self) -> &str {
@@ -74,19 +74,19 @@ async fn run(matches: ArgMatches, _context: &mut Context) -> Result<()> {
   let recreate = matches.is_present("new");
   let server_host = matches.value_of("server");
   // let websocket_server = FactorioWebSocketServer { listeners: vec![] }.start();
-  let instance_state = start_factorio(
-    &app_settings.factorio,
-    server_host,
-    clients,
-    recreate,
-    map_exchange_string,
+
+  let params = FactorioParams {
     seed,
-    // Some(websocket_server.clone()),
+    server_host: server_host.map(std::borrow::ToOwned::to_owned),
+    client_count: clients,
+    recreate,
     write_logs,
-    false,
-  )
-  .await
-  .expect("failed to start factorio");
+    map_exchange_string,
+    ..FactorioParams::default()
+  };
+  let instance_state = FactorioInstance::start(&app_settings.factorio, params)
+    .await
+    .expect("failed to start factorio");
 
   #[cfg(feature = "repl")]
   {

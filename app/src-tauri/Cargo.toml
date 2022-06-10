@@ -13,13 +13,16 @@ publish = false
 tag-name = "v{{version}}"
 
 [dependencies]
+# workspace
 factorio-bot-core = { path = "../../crates/core" }
 factorio-bot-restapi = { path = "../../crates/restapi", optional = true }
 factorio-bot-scripting-rune = { path = "../../crates/scripting_rune", optional = true }
 factorio-bot-scripting-rhai = { path = "../../crates/scripting_rhai", optional = true }
 factorio-bot-scripting-lua = { path = "../../crates/scripting_lua", optional = true }
+
 # gui
-tauri = { version = "1.0.0-rc.14", features = ["api-all"], optional = true }
+tauri = { version = "^1.0.0-rc.14", features = [], optional = true }
+open = "^2.1" #
 
 # async
 tokio = { version = "^1.19", features = ["full", "tracing"] }
@@ -27,9 +30,6 @@ console-subscriber = { version = "^0.1", optional = true }
 
 # serializing / deserializing
 serde = { version = "^1.0", features = [ "derive" ] }
-serde_json = "^1.0"
-typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"] }
-config = "^0.13"
 toml = "^0.5"
 
 # cli
@@ -37,19 +37,12 @@ clap = {version = "^3.1", optional = true }
 clap_complete = {version = "^3.1", optional = true }
 
 # repl
-reedline-repl-rs = { version = "1.0.2", optional = true }
+reedline-repl-rs = { version = "^1.0.2", optional = true }
 
-# logs
-paris = { version = "^1.5", features = ["timestamps", "macros"] }
-color-eyre = "^0.6"
-miette = {version = "^4.7", features = ["fancy"] }
-thiserror = "^1.0"
-
-# utils
-open = "^3.0"
-dirs-next = "2.0.0"
-port_scanner = "*"
-parking_lot = "^0.12"
+# other
+color-eyre = "^0.6" # colorful human oriented error reports via panics
+dirs-next = "^2.0.0" # platform-specific standard locations of directories for config, cache and other
+port_scanner = "^0.1.5" # scan available port on localhost
 
 [build-dependencies]
 typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"] }
@@ -59,11 +52,13 @@ tauri-build = { version = "1.0.0-rc.12", features = [], optional = true }
 serde = { version = "^1.0", features = [ "derive" ] }
 
 [target.'cfg(windows)'.build-dependencies]
-winres = "0.1.12"
+winres = "^0.1.12"
+
 
 [features]
-default = ["gui", "restapi", "lua", "cli", "repl"]
-custom-protocol = ["tauri/custom-protocol", "dep:tauri-build"] # required because of hard coded [tauri_cli] Command `cargo  build --features=custom-protocol --release`
+default = ["gui", "restapi", "repl", "cli", "lua"]
+# name "custom-protocol" is required because of hardcoded tauri_cli `cargo  build --features=custom-protocol --release`
+custom-protocol = ["tauri/custom-protocol", "dep:tauri-build"]
 gui = ["custom-protocol"]
 cli = ["dep:clap", "dep:clap_complete"]
 restapi = ["dep:factorio-bot-restapi"]
@@ -74,5 +69,6 @@ repl = ["reedline-repl-rs/async"]
 tokio-console = ["dep:console-subscriber"]
 
 [[bin]]
-name = "factorio-bot"
+name = "factorio-bot" # overwrite binary name
 path = "src/main.rs"
+

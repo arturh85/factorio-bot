@@ -1398,6 +1398,40 @@ function rcon_player_info(player_id)
 	rcon.print(game.table_to_json(serialize_player(player)))
 end
 
+function dotted_path_get(tbl, path)
+	local dot_pos = path:find(".")
+
+	if dot_pos == nil then
+		local array_pos = path:find("[")
+		if dot_pos == nil then
+			tbl[path] = value
+		end
+		return tbl[path]
+	else
+		local left = path:sub(1, dot_pos - 1)
+		local right = path:sub(dot_pos + 1)
+		if tbl[left] == nil then
+			return nil
+		end
+		return dotted_path_get(tbl[left], right)
+	end
+end
+
+function dotted_path_set(tbl, path, value)
+	local dot_pos = path:find(".")
+	if dot_pos == nil then
+
+	else
+		local left = path:sub(1, dot_pos - 1)
+		local right = path:sub(dot_pos + 1)
+		if tbl[left] == nil then
+			tbl[left] = {}
+		end
+		dotted_path_set(tbl[left], right, value)
+	end
+end
+
+
 function rcon_store_map_data(key, value)
 	if global.p["map_data"] == nil then
 		global.p["map_data"] = {}

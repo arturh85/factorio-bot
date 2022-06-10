@@ -4,6 +4,7 @@ use crate::factorio::world::FactorioWorld;
 use crate::graph::task_graph::TaskGraph;
 use crate::types::{EntityName, PlayerChangedMainInventoryEvent};
 use parking_lot::RwLock;
+use petgraph::Direction;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -93,7 +94,7 @@ pub fn execute_plan(
         // for edge in incoming {
         //     let target = edge.target();
         // }
-        let outgoing = plan.edges_directed(pointer, petgraph::Direction::Outgoing);
+        let outgoing = plan.edges_directed(pointer, Direction::Outgoing);
         for _edge in outgoing {
             // queue.do_send(Push::new(edge.target()));
         }

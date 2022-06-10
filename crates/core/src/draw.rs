@@ -62,7 +62,7 @@ pub fn draw_blocked_rects_mut<C>(
     C::Pixel: 'static,
 {
     for (minable, rect, _id) in blocked.query(bounding_box.clone().into()) {
-        if let Some(draw_rect) = scaled_draw_rect(bounding_box, rect, scaling_factor.clone()) {
+        if let Some(draw_rect) = scaled_draw_rect(bounding_box, *rect, scaling_factor.clone()) {
             draw_hollow_rect_mut(
                 canvas,
                 draw_rect,
@@ -89,7 +89,7 @@ pub fn draw_resource_rects_mut<C>(
     C::Pixel: 'static,
 {
     for (name, rect, _id) in resources.query(bounding_box.clone().into()) {
-        if let Some(draw_rect) = scaled_draw_rect(bounding_box, rect, scaling_factor.clone()) {
+        if let Some(draw_rect) = scaled_draw_rect(bounding_box, *rect, scaling_factor.clone()) {
             draw_hollow_rect_mut(
                 canvas,
                 draw_rect,

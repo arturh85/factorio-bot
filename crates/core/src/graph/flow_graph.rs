@@ -1,3 +1,4 @@
+use crate::aabb_quadtree::{ItemId, QuadTree};
 use crate::factorio::util::{add_to_rect, format_dotgraph};
 use crate::graph::entity_graph::{EntityGraph, EntityNode, QuadTreeRect};
 use crate::num_traits::FromPrimitive;
@@ -5,11 +6,11 @@ use crate::types::{
     Direction, EntityName, EntityType, FactorioEntity, FactorioEntityPrototype, FactorioRecipe,
     Position, Rect,
 };
-use aabb_quadtree::{ItemId, QuadTree};
 use dashmap::DashMap;
-use euclid::{TypedPoint2D, TypedSize2D};
+use euclid::{Point2D as TypedPoint2D, Size2D as TypedSize2D};
 use miette::Result;
 use num_traits::ToPrimitive;
+use paris::warn;
 use parking_lot::{RwLock, RwLockReadGuard};
 use petgraph::dot::{Config, Dot};
 use petgraph::graph::NodeIndex;
@@ -63,7 +64,6 @@ impl FlowGraph {
                 32,
                 128,
                 32,
-                8,
             )),
             inner: RwLock::new(FlowGraphInner::new()),
         }
@@ -675,7 +675,7 @@ pub type FlowGraphInner = StableGraph<FlowNode, FlowEdge>;
 pub type FlowRate = (String, f64);
 pub type FlowRates = Vec<FlowRate>;
 
-pub type FlowQuadTree = QuadTree<NodeIndex, Rect, [(ItemId, QuadTreeRect); 4]>;
+pub type FlowQuadTree = QuadTree<NodeIndex, Rect>;
 
 #[cfg(test)]
 mod tests {

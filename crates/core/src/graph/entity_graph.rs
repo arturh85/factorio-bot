@@ -5,9 +5,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use aabb_quadtree::{ItemId, QuadTree};
+use crate::aabb_quadtree::{ItemId, QuadTree};
 use dashmap::DashMap;
-use euclid::{TypedPoint2D, TypedRect, TypedSize2D};
+use euclid::{Point2D as TypedPoint2D, Rect as TypedRect, Size2D as TypedSize2D};
 use factorio_blueprint::{BlueprintCodec, Container};
 use parking_lot::{RwLock, RwLockReadGuard};
 use petgraph::graph::{EdgeIndex, NodeIndex};
@@ -23,6 +23,7 @@ use crate::types::{
     FactorioTile, Pos, Position, Rect, ResourcePatch,
 };
 use miette::Result;
+use paris::error;
 
 pub struct EntityGraph {
     entity_graph: RwLock<EntityGraphInner>,
@@ -78,10 +79,10 @@ impl EntityGraph {
             entity_prototypes,
             recipes,
             entity_graph: RwLock::new(EntityGraphInner::new()),
-            entity_tree: RwLock::new(QuadTree::new(max_area, false, 32, 128, 128, 8)),
-            blocked_tree: RwLock::new(QuadTree::new(max_area, true, 8, 64, 1024, 8)),
-            resource_tree: RwLock::new(QuadTree::new(max_area, true, 8, 64, 1024, 8)),
-            tile_tree: RwLock::new(QuadTree::new(max_area, false, 32, 128, 128, 8)),
+            entity_tree: RwLock::new(QuadTree::new(max_area, false, 32, 128, 128)),
+            blocked_tree: RwLock::new(QuadTree::new(max_area, true, 8, 64, 1024)),
+            resource_tree: RwLock::new(QuadTree::new(max_area, true, 8, 64, 1024)),
+            tile_tree: RwLock::new(QuadTree::new(max_area, false, 32, 128, 128)),
             entity_nodes: DashMap::new(),
             resources: DashMap::new(),
         }
@@ -169,7 +170,7 @@ impl EntityGraph {
     }
 
     pub fn add_tiles(&self, tiles: Vec<FactorioTile>, _clear_rect: Option<Rect>) -> Result<()> {
-        let mut tree = self.tile_tree.write();
+        let _tree = self.tile_tree.write();
         let mut blocked = self.blocked_tree.write();
         for tile in tiles {
             let rect: QuadTreeRect = add_to_rect(
@@ -181,7 +182,7 @@ impl EntityGraph {
                 let minable = false; // player_collidable tiles like water are not minable
                 blocked.insert_with_box(minable, rect);
             }
-            tree.insert_with_box(tile, rect);
+            // tree.insert_with_box(tile, rect);
         }
         Ok(())
     }
@@ -941,10 +942,10 @@ impl EntityNode {
 pub type EntityGraphInner = StableGraph<EntityNode, f64>;
 
 pub type QuadTreeRect = TypedRect<f32, Rect>;
-pub type BlockedQuadTree = QuadTree<bool, Rect, [(ItemId, QuadTreeRect); 4]>;
-pub type EntityQuadTree = QuadTree<FactorioEntity, Rect, [(ItemId, QuadTreeRect); 4]>;
-pub type TileQuadTree = QuadTree<FactorioTile, Rect, [(ItemId, QuadTreeRect); 4]>;
-pub type ResourceQuadTree = QuadTree<String, Rect, [(ItemId, QuadTreeRect); 4]>;
+pub type BlockedQuadTree = QuadTree<bool, Rect>;
+pub type EntityQuadTree = QuadTree<FactorioEntity, Rect>;
+pub type TileQuadTree = QuadTree<FactorioTile, Rect>;
+pub type ResourceQuadTree = QuadTree<String, Rect>;
 
 #[cfg(test)]
 mod tests {

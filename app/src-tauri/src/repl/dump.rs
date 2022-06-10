@@ -1,5 +1,6 @@
 use crate::context::Context;
 use crate::repl::{Error, Subcommand};
+use factorio_bot_core::paris::error;
 use reedline_repl_rs::clap::{Arg, ArgMatches, Command, PossibleValue};
 use reedline_repl_rs::Repl;
 
@@ -35,7 +36,7 @@ async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String
   let command = matches
     .value_of("type")
     .expect("Has default value")
-    .to_string();
+    .to_owned();
   let save_path = matches.value_of("save");
 
   let instance_state = context.instance_state.read().await;

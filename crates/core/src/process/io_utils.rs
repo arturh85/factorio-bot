@@ -1,8 +1,11 @@
 use indicatif::HumanDuration;
-use miette::{IntoDiagnostic, miette, Result};
-use std::fs;
+use miette::{miette, IntoDiagnostic, Result};
+use paris::Logger;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::process::{Child, ExitStatus};
+use std::thread::{sleep, JoinHandle};
+use std::time::{Duration, Instant};
+use std::{fs, thread};
 
 #[cfg(target_os = "windows")]
 pub async fn kill_process(process_name: &str) -> Result<()> {
@@ -162,7 +165,9 @@ pub fn extract_archive(
             let tar_xz = File::open(&archive_path).into_diagnostic()?;
             let tar = xz2::read::XzDecoder::new(tar_xz);
             let mut archive = tar::Archive::new(tar);
-            archive.unpack(&workspace_path).expect("failed to decompress xz");
+            archive
+                .unpack(&workspace_path)
+                .expect("failed to decompress xz");
             logger.success(format!(
                 "Uncompressed tar <bright-blue>{}</> to <magenta>{}</>",
                 &archive_path.to_str().unwrap(),
@@ -189,4 +194,57 @@ pub fn extract_archive(
         HumanDuration(started.elapsed())
     );
     Ok(())
+}
+
+pub async fn await_lock(lock_path: PathBuf, silent: bool) -> Result<()> {
+    if lock_path.exists() {
+        match std::fs::remove_file(&lock_path) {
+            Ok(_) => {}
+            Err(_) => {
+                let mut logger = Logger::new();
+                if !silent {
+                    logger.loading("Waiting for .lock to disappear");
+                }
+                let started = Instant::now();
+                for _ in 0..1000 {
+                    sleep(Duration::from_millis(1));
+                    if std::fs::remove_file(&lock_path).is_ok() {
+                        break;
+                    }
+                }
+                if !lock_path.exists() {
+                    if !silent {
+                        logger.success(format!(
+                            "Successfully awaited .lock in <yellow>{:?}</>",
+                            started.elapsed()
+                        ));
+                    }
+                } else {
+                    logger.done();
+                    warn!("Factorio instance already running!");
+                    #[cfg(windows)]
+                    {
+                        kill_process("factorio.exe").await?;
+                    }
+                    #[cfg(unix)]
+                    {
+                        return Err(FactorioAlreadyStarted {}.into());
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn report_child_death(mut child: Child) -> JoinHandle<ExitStatus> {
+    thread::spawn(move || {
+        let exit_code = child.wait().expect("failed to wait for child to end");
+        if let Some(code) = exit_code.code() {
+            error!("<red>server stopped</> with exit code <yellow>{}</>", code);
+        } else {
+            error!("<red>server stopped</> without exit code");
+        }
+        exit_code
+    })
 }

@@ -1,7 +1,7 @@
 pub mod command;
 
 use crate::context::Context;
-use miette::{IntoDiagnostic, Result};
+use factorio_bot_core::miette::{IntoDiagnostic, Report, Result};
 
 #[allow(clippy::items_after_statements)]
 pub fn start(context: Context) -> Result<()> {
@@ -13,6 +13,7 @@ pub fn start(context: Context) -> Result<()> {
       crate::gui::command::is_restapi_started,
       crate::gui::command::is_instance_started,
       crate::gui::command::is_port_available,
+      crate::gui::command::save_script,
       crate::gui::command::load_script,
       crate::gui::command::load_scripts_in_directory,
       crate::gui::command::execute_rcon,
@@ -35,5 +36,4 @@ pub fn start(context: Context) -> Result<()> {
   Ok(())
 }
 
-pub const ERR_TO_STRING: fn(miette::Report) -> String =
-  |e| String::from("error: ") + &*format!("{:?}", e);
+pub const ERR_TO_STRING: fn(Report) -> String = |e| String::from("error: ") + &*format!("{:?}", e);

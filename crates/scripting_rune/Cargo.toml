@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 factorio-bot-core = { path = "../core" }
 factorio-bot-scripting = { path = "../scripting" }
-rune = {version = "0.10.3", features = []}
+rune = {version = "0.12.0", features = []}
 serde = "^1.0"
 serde_derive = "^1.0"
 serde_json = "^1.0"

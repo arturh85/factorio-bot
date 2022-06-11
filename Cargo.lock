@@ -4767,9 +4767,9 @@ dependencies = [
 
 [[package]]
 name = "rune"
-version = "0.10.3"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28510f345acbbd49f99f40be0a966caaf15b68c98ce438ea0dacdf202e504566"
+checksum = "9e417065787a6600d0471be2e04c845377268020624fdb107a61a36be3c4725f"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -4778,7 +4778,6 @@ dependencies = [
  "futures-util",
  "hashbrown 0.11.2",
  "itoa 0.4.8",
- "log",
  "num",
  "num-bigint",
  "pin-project",
@@ -4788,14 +4787,15 @@ dependencies = [
  "serde_bytes",
  "smallvec 1.8.0",
  "thiserror",
+ "tracing",
  "twox-hash",
 ]
 
 [[package]]
 name = "rune-macros"
-version = "0.10.3"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9cc1145c1c5af2bd268f6e69e7605b5a546ebedacb84ffacbbc4fccf46496d4"
+checksum = "0dba487cb48f418e152c748ecac22b67674e0642f1f1b49efe9f72341e628713"
 dependencies = [
  "proc-macro2 1.0.39",
  "quote 1.0.15",

@@ -99,7 +99,7 @@ pub fn prepare_workspace_scripts(workspace_path: &Path) -> Result<PathBuf, Strin
       if let Err(err) = factorio_bot_core::process::instance_setup::PLANS_CONTENT
         .extract(workspace_plans_path.clone())
       {
-        factorio_bot_core::miette::error!("failed to extract static mods content: {:?}", err);
+        factorio_bot_core::paris::error!("failed to extract static mods content: {:?}", err);
         return Err("failed to extract mods content to workspace".into());
       }
     }

@@ -27,6 +27,7 @@ pub struct FactorioInstance {
     pub server_process: Option<InteractiveProcess>,
     pub client_processes: Vec<InteractiveProcess>,
 
+    pub silent: Arc<parking_lot::RwLock<bool>>,
     pub server_host: Option<String>,
     pub server_port: Option<u16>,
     pub rcon_port: u16,
@@ -76,7 +77,8 @@ impl FactorioInstance {
         params: FactorioParams,
     ) -> Result<FactorioInstance> {
         let mut world: Option<Arc<FactorioWorld>> = None;
-        let instance_name = params.instance_name.unwrap_or_else(||"server".to_owned());
+        let silent = Arc::new(parking_lot::RwLock::new(params.silent));
+        let instance_name = params.instance_name.unwrap_or_else(|| "server".to_owned());
         let rcon_settings = RconSettings::new(
             settings.rcon_port as u16,
             &settings.rcon_pass,
@@ -132,7 +134,7 @@ impl FactorioInstance {
                     &instance_name,
                     // websocket_server,
                     params.write_logs,
-                    params.silent,
+                    silent.clone(),
                     params.wait_until,
                 )
                 .await?;
@@ -149,7 +151,7 @@ impl FactorioInstance {
                 rcon
             }
             Some(_) => Arc::new(
-                FactorioRcon::new(&rcon_settings, params.silent)
+                FactorioRcon::new(&rcon_settings, silent.clone())
                     .await
                     .expect("failed to connect"),
             ),
@@ -162,7 +164,7 @@ impl FactorioInstance {
                 instance_name.clone(),
                 params.server_host.clone(),
                 params.write_logs,
-                params.silent,
+                true,
             )
             .await?;
             // report_child_death(child);
@@ -183,6 +185,7 @@ impl FactorioInstance {
         Ok(FactorioInstance {
             client_processes: client_children,
             server_process: server_child,
+            silent,
             world,
             rcon,
             map_exchange_string: params.map_exchange_string,
@@ -201,7 +204,7 @@ impl FactorioInstance {
         factorio_port: Option<u16>,
         instance_name: &str,
         write_logs: bool,
-        silent: bool,
+        silent: Arc<parking_lot::RwLock<bool>>,
         wait_until: FactorioStartCondition,
     ) -> Result<(
         Arc<FactorioWorld>,
@@ -231,8 +234,9 @@ impl FactorioInstance {
         } else {
             "bin/x64/factorio"
         };
+        let current_silent = *silent.read();
         let factorio_binary_path = instance_path.join(PathBuf::from(binary));
-        io_utils::await_lock(instance_path.join(PathBuf::from(".lock")), silent).await?;
+        io_utils::await_lock(instance_path.join(PathBuf::from(".lock")), current_silent).await?;
 
         if !factorio_binary_path.exists() {
             error!(
@@ -277,7 +281,7 @@ impl FactorioInstance {
             "--server-settings",
             server_settings_path.to_str().unwrap(),
         ];
-        if !silent {
+        if !current_silent {
             info!(
                 "Starting <bright-blue>server</> at {:?} with {:?}",
                 &instance_path, &args
@@ -292,7 +296,7 @@ impl FactorioInstance {
             log_path,
             rcon_settings,
             write_logs,
-            silent,
+            silent.clone(),
             wait_until,
         )
         .await?;
@@ -343,7 +347,9 @@ impl FactorioInstance {
         io_utils::await_lock(instance_path.join(PathBuf::from(".lock")), silent).await?;
         let args = &[
             "--mp-connect",
-            &server_host.clone().unwrap_or_else(||"localhost".to_owned()),
+            &server_host
+                .clone()
+                .unwrap_or_else(|| "localhost".to_owned()),
             "--graphics-quality",
             "low",
             // "--force-graphics-preset", "very-low",

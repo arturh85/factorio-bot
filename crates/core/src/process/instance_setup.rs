@@ -6,6 +6,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use crate::constants::{
     MAP_GEN_SETTINGS_FILENAME, MAP_SETTINGS_FILENAME, MODS_FOLDERNAME, SERVER_SETTINGS_FILENAME,
@@ -17,6 +18,7 @@ use crate::process::io_utils::{await_lock, extract_archive, symlink};
 use crate::process::output_reader::read_output;
 use crate::process::process_control::FactorioStartCondition;
 use miette::{miette, IntoDiagnostic, Result};
+use parking_lot::RwLock;
 use tokio::fs::create_dir;
 
 #[cfg(not(debug_assertions))]
@@ -381,7 +383,7 @@ pub async fn update_map_gen_settings(
         log_path,
         rcon_settings,
         false,
-        true,
+        Arc::new(RwLock::new(true)),
         FactorioStartCondition::Initialized,
     )
     .await?;

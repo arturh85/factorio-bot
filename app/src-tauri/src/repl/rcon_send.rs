@@ -1,7 +1,5 @@
 use crate::context::Context;
 use crate::repl::{Error, Subcommand};
-use crate::settings::load_app_settings;
-use factorio_bot_core::factorio::rcon::{FactorioRcon, RconSettings};
 use factorio_bot_core::paris::error;
 use reedline_repl_rs::clap::{Arg, ArgMatches, Command};
 use reedline_repl_rs::Repl;
@@ -29,14 +27,8 @@ async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String
   if instance_state.is_some() {
     let instance_state = context.instance_state.clone();
     let instance_state = instance_state.read().await;
-    if let Some(_instance_state) = instance_state.as_ref() {
-      let app_settings = load_app_settings().unwrap();
-      let rcon_settings = RconSettings::new(
-        app_settings.factorio.rcon_port as u16,
-        &app_settings.factorio.rcon_pass,
-        None,
-      );
-      let rcon = FactorioRcon::new(&rcon_settings, false).await.unwrap();
+    if let Some(instance_state) = instance_state.as_ref() {
+      let rcon = instance_state.rcon.clone();
       rcon.send(&command).await?;
     }
   } else {

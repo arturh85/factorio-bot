@@ -21,6 +21,11 @@ impl Subcommand for ThisCommand {
         KeyCode::Char('s'),
         ReedlineEvent::ExecuteHostCommand("factorio status".to_owned()),
       )
+      .with_keybinding(
+        KeyModifiers::CONTROL,
+        KeyCode::Char('k'),
+        ReedlineEvent::ExecuteHostCommand("factorio toggle-verbose".to_owned()),
+      )
       .with_command_async(
         Command::new(self.name())
           .about("start/stop factorio")
@@ -30,6 +35,7 @@ impl Subcommand for ThisCommand {
               .possible_values(vec![
                 PossibleValue::new("start").help("starts factorio"),
                 PossibleValue::new("status").help("show status of factorio processes"),
+                PossibleValue::new("toggle-verbose").help("toggle verbosity of factorio process"),
                 PossibleValue::new("add").help("start additional clients"),
                 PossibleValue::new("stop").help("stops factorio"),
               ])
@@ -94,7 +100,7 @@ fn print_hint() {
 }
 
 #[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
-async fn start(
+async fn subcommand_start(
   context: &mut Context,
   clients: u8,
   write_logs: bool,
@@ -146,11 +152,16 @@ async fn start(
   Ok(None)
 }
 
-async fn status(context: &mut Context) -> Result<Option<String>, Error> {
+async fn subcommand_status(context: &mut Context) -> Result<Option<String>, Error> {
   let instance_state = context.instance_state.read().await;
   if let Some(instance_state) = instance_state.as_ref() {
     info!(
-      "started with {} clients @ Port {} with RCON {}",
+      "started {} with {} clients @ Port {} with RCON {}",
+      if *instance_state.silent.read() {
+        "silently"
+      } else {
+        "verbosely"
+      },
       instance_state.client_count,
       instance_state.server_port.unwrap_or(0),
       instance_state.rcon_port
@@ -162,7 +173,7 @@ async fn status(context: &mut Context) -> Result<Option<String>, Error> {
   Ok(None)
 }
 
-async fn add(context: &mut Context) -> Result<Option<String>, Error> {
+async fn subcommand_add(context: &mut Context) -> Result<Option<String>, Error> {
   let instance_state = context.instance_state.write().await;
   if instance_state.is_none() {
     error!("failed: not started");
@@ -171,7 +182,7 @@ async fn add(context: &mut Context) -> Result<Option<String>, Error> {
   Ok(None)
 }
 
-async fn stop(context: &mut Context) -> Result<Option<String>, Error> {
+async fn subcommand_stop(context: &mut Context) -> Result<Option<String>, Error> {
   let mut instance_state = context.instance_state.write().await;
   if instance_state.is_none() {
     error!("failed: not started");
@@ -179,6 +190,23 @@ async fn stop(context: &mut Context) -> Result<Option<String>, Error> {
   }
   instance_state.take().expect("Already checked").stop()?;
   info!("successfully stopped");
+  Ok(None)
+}
+
+async fn subcommand_toggle_verbose(context: &mut Context) -> Result<Option<String>, Error> {
+  let instance_state = context.instance_state.read().await;
+  if let Some(instance_state) = instance_state.as_ref() {
+    let mut silent = instance_state.silent.write();
+    *silent = !*silent;
+    if *silent {
+      info!("verbose mode enabled");
+    } else {
+      info!("silent mode enabled");
+    }
+  } else {
+    error!("failed: not started");
+    return Ok(None);
+  }
   Ok(None)
 }
 
@@ -212,7 +240,7 @@ async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String
       let wait_until_finished = matches.is_present("wait_until_finished");
       let recreate = matches.is_present("new");
       drop(app_settings);
-      start(
+      subcommand_start(
         context,
         clients,
         write_logs,
@@ -224,9 +252,10 @@ async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String
       )
       .await?
     }
-    "status" => status(context).await?,
-    "add" => add(context).await?,
-    "stop" => stop(context).await?,
+    "status" => subcommand_status(context).await?,
+    "toggle-verbose" => subcommand_toggle_verbose(context).await?,
+    "add" => subcommand_add(context).await?,
+    "stop" => subcommand_stop(context).await?,
     _ => panic!("Should be prevented by clap"),
   };
   Ok(None)

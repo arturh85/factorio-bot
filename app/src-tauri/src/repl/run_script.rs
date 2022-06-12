@@ -1,15 +1,12 @@
 use crate::context::Context;
 use crate::repl::{Error, Subcommand};
 use crate::scripting::run_script_file;
-use crate::settings::load_app_settings;
-use factorio_bot_core::factorio::rcon::{FactorioRcon, RconSettings};
 use factorio_bot_core::miette::IntoDiagnostic;
 use factorio_bot_core::paris::error;
 use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_core::types::PlayerId;
 use reedline_repl_rs::clap::{Arg, ArgMatches, Command};
 use reedline_repl_rs::Repl;
-use std::sync::Arc;
 
 impl Subcommand for ThisCommand {
   fn name(&self) -> &str {
@@ -60,15 +57,10 @@ async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String
     let instance_state = context.instance_state.clone();
     let instance_state = instance_state.read().await;
     if let Some(instance_state) = instance_state.as_ref() {
-      let app_settings = load_app_settings().unwrap();
-      let rcon_settings = RconSettings::new(
-        app_settings.factorio.rcon_port as u16,
-        &app_settings.factorio.rcon_pass,
-        None,
+      let mut planner = Planner::new(
+        instance_state.world.clone().unwrap(),
+        Some(instance_state.rcon.clone()),
       );
-      let world = instance_state.world.clone();
-      let rcon = Arc::new(FactorioRcon::new(&rcon_settings, false).await.unwrap());
-      let mut planner = Planner::new(world.unwrap(), Some(rcon));
       if let Err(err) = run_script_file(&mut planner, &filename, bot_count, false).await {
         error!("failed to execute: {:?}", err);
       }

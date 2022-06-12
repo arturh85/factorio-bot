@@ -17,6 +17,7 @@ use crate::types::{
 };
 use miette::{IntoDiagnostic, Result};
 use paris::info;
+use parking_lot::RwLock;
 use rcon::Connection;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -31,12 +32,12 @@ const RCON_INTERFACE: &str = "botbridge";
 
 pub struct FactorioRcon {
     pool: bb8::Pool<ConnectionManager>,
-    silent: bool,
+    silent: Arc<RwLock<bool>>,
 }
 
 #[cfg_attr(test, mockall::automock)]
 impl FactorioRcon {
-    pub async fn new(settings: &RconSettings, silent: bool) -> Result<Self> {
+    pub async fn new(settings: &RconSettings, silent: Arc<RwLock<bool>>) -> Result<Self> {
         let address = format!(
             "{}:{}",
             settings.host.clone().unwrap_or_else(|| "127.0.0.1".into()),
@@ -65,7 +66,8 @@ impl FactorioRcon {
 
     /// Sends raw command to factorio server
     pub async fn send(&self, command: &str) -> Result<Option<Vec<String>>> {
-        if !self.silent {
+        let silent = *self.silent.read();
+        if !silent {
             info!("<cyan>rcon</>  ⮜ <green>{}</>", command);
         }
         // let started = Instant::now();
@@ -77,7 +79,7 @@ impl FactorioRcon {
         drop(conn);
         // info!("send took {} ms", started.elapsed().as_millis());
         if !result.is_empty() {
-            if !self.silent {
+            if !silent {
                 info!(
                     "<cyan>rcon</>  ⮞ <green>{}</>",
                     &result[0..result.len() - 1]
@@ -1222,7 +1224,10 @@ pub struct RconSettings {
 }
 
 impl RconSettings {
-    pub fn new_from_config(settings: &FactorioSettings, server_host: Option<String>) -> RconSettings {
+    pub fn new_from_config(
+        settings: &FactorioSettings,
+        server_host: Option<String>,
+    ) -> RconSettings {
         RconSettings {
             port: settings.rcon_port as u16,
             pass: settings.rcon_pass.to_string(),

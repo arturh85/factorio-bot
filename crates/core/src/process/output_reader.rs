@@ -12,7 +12,7 @@ use crate::process::output_parser::OutputParser;
 use crate::process::process_control::FactorioStartCondition;
 use crate::process::InteractiveProcess;
 use miette::{IntoDiagnostic, Result};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::sync::mpsc;
 
 pub async fn read_output(
@@ -20,7 +20,7 @@ pub async fn read_output(
     log_path: PathBuf,
     rcon_settings: &RconSettings,
     write_logs: bool,
-    silent: bool,
+    silent: Arc<RwLock<bool>>,
     wait_until: FactorioStartCondition,
 ) -> Result<(Arc<FactorioWorld>, InteractiveProcess, FactorioRcon)> {
     let log_file = Mutex::new(match write_logs {
@@ -33,11 +33,13 @@ pub async fn read_output(
     let (tx2, rx2) = mpsc::channel();
     let initialized = Mutex::new(false);
     let _world = output_parser.world();
+    let _silent = silent.clone();
     let proc = InteractiveProcess::new_with_stderr(
         cmd,
         move |line| {
             match line {
                 Ok(line) => {
+                    let silent = *silent.read();
                     let mut initialized = initialized.lock();
                     // after we receive this line we can connect via rcon
                     if !*initialized && line.contains("my_client_id") {
@@ -130,7 +132,7 @@ pub async fn read_output(
         },
     ).into_diagnostic()?;
     rx1.recv().into_diagnostic()?;
-    let rcon = FactorioRcon::new(rcon_settings, silent)
+    let rcon = FactorioRcon::new(rcon_settings, _silent)
         .await
         .expect("failed to rcon");
     rcon.initialize_server().await?;

@@ -3,7 +3,9 @@ use crate::context::Context;
 use clap::{Arg, ArgMatches, Command};
 use factorio_bot_core::factorio::rcon::{FactorioRcon, RconSettings};
 use factorio_bot_core::miette::Result;
+use factorio_bot_core::parking_lot::RwLock;
 use factorio_bot_core::settings::FactorioSettings;
+use std::sync::Arc;
 
 impl Subcommand for ThisCommand {
   fn name(&self) -> &str {
@@ -34,7 +36,9 @@ async fn run(matches: ArgMatches, _context: &mut Context) -> Result<()> {
     .value_of("server")
     .map(std::borrow::ToOwned::to_owned);
   let rcon_settings = RconSettings::new_from_config(&FactorioSettings::default(), server_host);
-  let rcon = FactorioRcon::new(&rcon_settings, false).await.unwrap();
+  let rcon = FactorioRcon::new(&rcon_settings, Arc::new(RwLock::new(false)))
+    .await
+    .unwrap();
   rcon.send(command).await.unwrap();
   Ok(())
 }

@@ -1,6 +1,5 @@
 use crate::cli::{Subcommand, SubcommandCallback};
 use crate::context::Context;
-use crate::settings::load_app_settings;
 use clap::{Arg, ArgMatches, Command};
 use factorio_bot_core::miette::Result;
 use factorio_bot_core::types::PlayerId;
@@ -48,8 +47,8 @@ impl Subcommand for ThisCommand {
   }
 }
 
-async fn run(matches: ArgMatches, _context: &mut Context) -> Result<()> {
-  let app_settings = load_app_settings()?;
+async fn run(matches: ArgMatches, context: &mut Context) -> Result<()> {
+  let app_settings = context.app_settings.read().await;
   let seed = matches
     .value_of("seed")
     .map(std::string::ToString::to_string);

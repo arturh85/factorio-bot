@@ -8,7 +8,7 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9536968b165175bcf8cd3d004e042f4bbb71e06d1b7914ff9ebef3ed8a9ad21"
 dependencies = [
- "euclid",
+ "euclid 0.19.9",
  "fnv",
  "smallvec 0.6.14",
 ]
@@ -1320,6 +1320,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "euclid"
+version = "0.22.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b52c2ef4a78da0ba68fbe1fd920627411096d2ac478f7f4c9f3a54ba6705bade"
+dependencies = [
+ "num-traits 0.2.14",
+]
+
+[[package]]
 name = "euclid_macros"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1386,7 +1395,7 @@ dependencies = [
  "factorio-bot-scripting-rhai",
  "factorio-bot-scripting-rune",
  "miette",
- "open",
+ "open 3.0.1",
  "paris",
  "parking_lot 0.12.0",
  "port_scanner",
@@ -1416,7 +1425,7 @@ dependencies = [
  "dashmap",
  "enum-primitive-derive",
  "err-derive",
- "euclid",
+ "euclid 0.22.7",
  "factorio-blueprint",
  "flate2",
  "futures",
@@ -3454,6 +3463,16 @@ checksum = "5a82915836ef43159bb6a3c64d884c42329ccd0b8afdca737cf1e3dd701709dc"
 dependencies = [
  "pathdiff",
  "winapi",
+]
+
+[[package]]
+name = "open"
+version = "3.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "360bcc8316bf6363aa3954c3ccc4de8add167b087e0259190a043c9514f910fe"
+dependencies = [
+ "pathdiff",
+ "windows-sys 0.36.0",
 ]
 
 [[package]]
@@ -5689,7 +5708,7 @@ dependencies = [
  "notify-rust",
  "objc",
  "once_cell",
- "open",
+ "open 2.1.0",
  "os_info",
  "os_pipe",
  "percent-encoding",

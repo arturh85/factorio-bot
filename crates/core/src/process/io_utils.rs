@@ -150,7 +150,6 @@ pub fn extract_archive(
 
     #[cfg(unix)]
     {
-        use paris::Logger;
         use std::fs::File;
         use std::str::FromStr;
         let archive_path = PathBuf::from_str(archive).into_diagnostic()?;
@@ -228,7 +227,7 @@ pub async fn await_lock(lock_path: PathBuf, silent: bool) -> Result<()> {
                     }
                     #[cfg(unix)]
                     {
-                        return Err(FactorioAlreadyStarted {}.into());
+                        return Err(crate::errors::FactorioAlreadyStarted {}.into());
                     }
                 }
             }

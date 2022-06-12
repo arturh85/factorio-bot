@@ -28,7 +28,7 @@
   "dependencies": {
     "@babel/types": "7.18.4",
     "@tauri-apps/api": "1.0.0-rc.6",
-    "@vueuse/core": "^8.6.0",
+    "@vueuse/core": "8.6.0",
     "ansi-html": "0.0.9",
     "monaco-editor": "0.33.0",
     "pinia": "2.0.14",

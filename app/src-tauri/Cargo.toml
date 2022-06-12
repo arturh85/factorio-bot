@@ -22,7 +22,7 @@ factorio-bot-scripting-lua = { path = "../../crates/scripting_lua", optional = t
 
 # gui
 tauri = { version = "^1.0.0-rc.14", features = [], optional = true }
-open = "^2.1" #
+open = "^3.0" #
 
 # async
 tokio = { version = "^1.19", features = ["full", "tracing"] }

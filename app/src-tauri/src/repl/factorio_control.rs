@@ -9,6 +9,24 @@ use reedline_repl_rs::clap::{Arg, ArgMatches, Command, PossibleValue};
 use reedline_repl_rs::crossterm::event::{KeyCode, KeyModifiers};
 use reedline_repl_rs::reedline::ReedlineEvent;
 use reedline_repl_rs::Repl;
+use std::str::FromStr;
+use strum::EnumMessage;
+use strum::IntoEnumIterator;
+
+#[derive(EnumString, EnumMessage, EnumIter, IntoStaticStr)]
+#[strum(serialize_all = "kebab-case")]
+enum Action {
+  #[strum(message = "starts factorio")]
+  Start,
+  #[strum(message = "stops factorio")]
+  Stop,
+  #[strum(message = "show status of factorio processes")]
+  Status,
+  #[strum(message = "toggle verbosity of factorio process")]
+  ToggleVerbose,
+  #[strum(message = "start additional clients")]
+  Add,
+}
 
 impl Subcommand for ThisCommand {
   fn name(&self) -> &str {
@@ -31,21 +49,17 @@ impl Subcommand for ThisCommand {
           .about("start/stop factorio")
           .arg(
             Arg::new("action")
-              .default_value("start")
-              .possible_values(vec![
-                PossibleValue::new("start").help("starts factorio"),
-                PossibleValue::new("status").help("show status of factorio processes"),
-                PossibleValue::new("toggle-verbose").help("toggle verbosity of factorio process"),
-                PossibleValue::new("add").help("start additional clients"),
-                PossibleValue::new("stop").help("stops factorio"),
-              ])
+              .default_value(Action::Start.into())
+              .possible_values(Action::iter().map(|action| {
+                let message = action.get_message().unwrap();
+                PossibleValue::new(action.into()).help(message)
+              }))
               .help("either start or stop factorio server"),
           )
           .arg(
             Arg::new("clients")
               .short('c')
               .long("clients")
-              .default_value("1")
               .help("number of clients to start in addition to the server"),
           )
           .arg(
@@ -88,14 +102,6 @@ impl Subcommand for ThisCommand {
           ),
         |args, context| Box::pin(run(args, context)),
       )
-  }
-}
-
-/// Print hint for Windows users because their cursor input is lost
-fn print_hint() {
-  #[cfg(windows)]
-  {
-    info!("Hint: press CTRL+Z if you loose the ability to type");
   }
 }
 
@@ -210,20 +216,11 @@ async fn subcommand_toggle_verbose(context: &mut Context) -> Result<Option<Strin
   Ok(None)
 }
 
-fn config_fallback(value: Option<&str>, config: &str) -> Option<String> {
-  if let Some(str) = value {
-    Some(str.to_owned())
-  } else if config.is_empty() {
-    None
-  } else {
-    Some(config.to_owned())
-  }
-}
-
 async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String>, Error> {
-  let action: &str = matches.value_of("action").expect("Has default value");
+  let action =
+    Action::from_str(matches.value_of("action").expect("Has default value")).into_diagnostic()?;
   match action {
-    "start" => {
+    Action::Start => {
       let app_settings = context.app_settings.read().await;
       let clients: u8 = if let Some(clients) = matches.value_of("clients") {
         clients.parse().into_diagnostic()?
@@ -252,13 +249,30 @@ async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String
       )
       .await?
     }
-    "status" => subcommand_status(context).await?,
-    "toggle-verbose" => subcommand_toggle_verbose(context).await?,
-    "add" => subcommand_add(context).await?,
-    "stop" => subcommand_stop(context).await?,
-    _ => panic!("Should be prevented by clap"),
+    Action::Status => subcommand_status(context).await?,
+    Action::ToggleVerbose => subcommand_toggle_verbose(context).await?,
+    Action::Add => subcommand_add(context).await?,
+    Action::Stop => subcommand_stop(context).await?,
   };
   Ok(None)
+}
+
+fn config_fallback(value: Option<&str>, config: &str) -> Option<String> {
+  if let Some(str) = value {
+    Some(str.to_owned())
+  } else if config.is_empty() {
+    None
+  } else {
+    Some(config.to_owned())
+  }
+}
+
+/// Print hint for Windows users because their cursor input is lost
+fn print_hint() {
+  #[cfg(windows)]
+  {
+    info!("Hint: press CTRL+Z if you loose the ability to type");
+  }
 }
 
 struct ThisCommand {}

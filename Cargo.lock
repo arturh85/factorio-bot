@@ -1336,6 +1336,8 @@ dependencies = [
  "port_scanner",
  "reedline-repl-rs",
  "serde 1.0.136",
+ "strum",
+ "strum_macros",
  "tauri",
  "tauri-build",
  "tokio",

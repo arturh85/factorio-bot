@@ -14,6 +14,9 @@ mod repl;
 #[cfg(any(feature = "rhai", feature = "lua", feature = "rune"))]
 mod scripting;
 mod settings;
+#[allow(unused_imports)]
+#[macro_use]
+extern crate strum_macros;
 
 use context::Context;
 use factorio_bot_core::miette::Result;

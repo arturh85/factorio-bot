@@ -43,6 +43,8 @@ reedline-repl-rs = { version = "^1.0.2", optional = true }
 color-eyre = "^0.6" # colorful human oriented error reports via panics
 dirs-next = "^2.0.0" # platform-specific standard locations of directories for config, cache and other
 port_scanner = "^0.1.5" # scan available port on localhost
+strum = "^0.24"
+strum_macros = "^0.24"
 
 [build-dependencies]
 typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"] }

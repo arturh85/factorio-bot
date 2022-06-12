@@ -1,10 +1,22 @@
 use crate::context::Context;
 use crate::repl::{Error, Subcommand};
-use factorio_bot_core::miette::Result;
+use factorio_bot_core::miette::{IntoDiagnostic, Result};
 use factorio_bot_core::paris::{error, info};
 use factorio_bot_restapi::webserver;
 use reedline_repl_rs::clap::{Arg, ArgMatches, Command, PossibleValue};
 use reedline_repl_rs::Repl;
+use std::str::FromStr;
+use strum::EnumMessage;
+use strum::IntoEnumIterator;
+
+#[derive(EnumString, EnumMessage, EnumIter, IntoStaticStr)]
+#[strum(serialize_all = "kebab-case")]
+enum Action {
+  #[strum(message = "starts restapi")]
+  Start,
+  #[strum(message = "stops restapi")]
+  Stop,
+}
 
 impl Subcommand for ThisCommand {
   fn name(&self) -> &str {
@@ -14,11 +26,11 @@ impl Subcommand for ThisCommand {
     repl.with_command_async(
       Command::new(self.name()).about("start/stop restapi").arg(
         Arg::new("action")
-          .default_value("start")
-          .possible_values(vec![
-            PossibleValue::new("start").help("starts restapi"),
-            PossibleValue::new("stop").help("stops restapi"),
-          ])
+          .default_value(Action::Start.into())
+          .possible_values(Action::iter().map(|action| {
+            let message = action.get_message().unwrap();
+            PossibleValue::new(action.into()).help(message)
+          }))
           .help("either start or stop restapi server"),
       ),
       |args, context| Box::pin(run(args, context)),
@@ -27,9 +39,10 @@ impl Subcommand for ThisCommand {
 }
 
 async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String>, Error> {
-  let action: &str = matches.value_of("action").expect("Has default value");
+  let action =
+    Action::from_str(matches.value_of("action").expect("Has default value")).into_diagnostic()?;
   match action {
-    "start" => {
+    Action::Start => {
       let app_settings = context.app_settings.read().await;
       let instance_state = context.instance_state.clone();
       let webserver = webserver::start(app_settings.restapi.clone(), instance_state);
@@ -37,7 +50,7 @@ async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String
       let mut restapi_handle = context.restapi_handle.write().await;
       *restapi_handle = Some(handle);
     }
-    "stop" => {
+    Action::Stop => {
       let mut handle = context.restapi_handle.write().await;
       if handle.is_none() {
         error!("failed: not started");
@@ -46,7 +59,6 @@ async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String
       handle.take().expect("Already checked").abort();
       info!("successfully stopped");
     }
-    _ => error!("invalid command, use one of start, stop"),
   };
   Ok(None)
 }

@@ -46,7 +46,7 @@ miette = {version = "^4.7", features = ["fancy"] }
 thiserror = "^1.0"
 
 # utils
-open = "^2.1"
+open = "^3.0"
 dirs-next = "2.0.0"
 port_scanner = "*"
 parking_lot = "^0.12"

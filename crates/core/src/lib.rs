@@ -5,7 +5,7 @@ extern crate enum_primitive_derive;
 #[macro_use]
 extern crate serde_derive;
 #[macro_use]
-extern crate strum_macros;
+extern crate strum;
 
 #[allow(unused_imports)]
 #[macro_use]

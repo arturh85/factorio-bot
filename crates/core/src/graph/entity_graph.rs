@@ -1,19 +1,4 @@
-use petgraph::dot::{Config, Dot};
-use std::collections::HashMap;
-use std::ops::Deref;
-use std::str::FromStr;
-use std::sync::Arc;
-use std::time::Instant;
-
 use crate::aabb_quadtree::{ItemId, QuadTree};
-use dashmap::DashMap;
-use euclid::{Point2D as TypedPoint2D, Rect as TypedRect, Size2D as TypedSize2D};
-use factorio_blueprint::{BlueprintCodec, Container};
-use parking_lot::{RwLock, RwLockReadGuard};
-use petgraph::graph::{EdgeIndex, NodeIndex};
-use petgraph::stable_graph::StableGraph;
-use petgraph::visit::{Bfs, EdgeRef};
-
 use crate::factorio::util::{
     add_to_rect, bounding_box, format_dotgraph, move_position, rect_fields, rect_floor,
 };
@@ -22,8 +7,25 @@ use crate::types::{
     Direction, EntityName, EntityType, FactorioEntity, FactorioEntityPrototype, FactorioRecipe,
     FactorioTile, Pos, Position, Rect, ResourcePatch,
 };
+use dashmap::DashMap;
+use euclid::{Point2D as TypedPoint2D, Rect as TypedRect, Size2D as TypedSize2D};
+use factorio_blueprint::{BlueprintCodec, Container};
 use miette::Result;
 use paris::error;
+use parking_lot::{RwLock, RwLockReadGuard};
+use petgraph::dot::{Config, Dot};
+use petgraph::graph::{EdgeIndex, NodeIndex};
+use petgraph::stable_graph::StableGraph;
+use petgraph::visit::{Bfs, EdgeRef};
+use serde::de::{MapAccess, Visitor};
+use serde::ser::SerializeStruct;
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::HashMap;
+use std::fmt;
+use std::ops::Deref;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Instant;
 
 pub struct EntityGraph {
     entity_graph: RwLock<EntityGraphInner>,
@@ -35,34 +37,6 @@ pub struct EntityGraph {
     recipes: Arc<DashMap<String, FactorioRecipe>>,
     resources: DashMap<String, Vec<Pos>>,
     resource_tree: RwLock<ResourceQuadTree>,
-}
-
-impl Clone for EntityGraph {
-    fn clone(&self) -> Self {
-        EntityGraph {
-            entity_graph: RwLock::new(self.entity_graph.read().clone()),
-            blocked_tree: RwLock::new(self.blocked_tree.read().clone()),
-            entity_tree: RwLock::new(self.entity_tree.read().clone()),
-            tile_tree: RwLock::new(self.tile_tree.read().clone()),
-            entity_nodes: self.entity_nodes.clone(),
-            entity_prototypes: Arc::new((*self.entity_prototypes).clone()),
-            recipes: Arc::new((*self.recipes).clone()),
-            resources: self.resources.clone(),
-            resource_tree: RwLock::new(self.resource_tree.read().clone()),
-        }
-    }
-
-    fn clone_from(&mut self, source: &Self) {
-        self.entity_graph = RwLock::new(source.entity_graph.read().clone());
-        self.blocked_tree = RwLock::new(source.blocked_tree.read().clone());
-        self.entity_tree = RwLock::new(source.entity_tree.read().clone());
-        self.tile_tree = RwLock::new(source.tile_tree.read().clone());
-        self.entity_nodes = source.entity_nodes.clone();
-        self.entity_prototypes = Arc::new((*source.entity_prototypes).clone());
-        self.recipes = Arc::new((*source.recipes).clone());
-        self.resources = source.resources.clone();
-        self.resource_tree = RwLock::new(source.resource_tree.read().clone());
-    }
 }
 
 impl EntityGraph {
@@ -79,10 +53,10 @@ impl EntityGraph {
             entity_prototypes,
             recipes,
             entity_graph: RwLock::new(EntityGraphInner::new()),
-            entity_tree: RwLock::new(QuadTree::new(max_area, false, 32, 128, 128)),
-            blocked_tree: RwLock::new(QuadTree::new(max_area, true, 8, 64, 1024)),
-            resource_tree: RwLock::new(QuadTree::new(max_area, true, 8, 64, 1024)),
-            tile_tree: RwLock::new(QuadTree::new(max_area, false, 32, 128, 128)),
+            entity_tree: RwLock::new(QuadTree::new(max_area, false, 32, 128, 128, 8)),
+            blocked_tree: RwLock::new(QuadTree::new(max_area, true, 8, 64, 1024, 8)),
+            resource_tree: RwLock::new(QuadTree::new(max_area, true, 8, 64, 1024, 8)),
+            tile_tree: RwLock::new(QuadTree::new(max_area, false, 32, 128, 128, 8)),
             entity_nodes: DashMap::new(),
             resources: DashMap::new(),
         }
@@ -170,7 +144,7 @@ impl EntityGraph {
     }
 
     pub fn add_tiles(&self, tiles: Vec<FactorioTile>, _clear_rect: Option<Rect>) -> Result<()> {
-        let _tree = self.tile_tree.write();
+        let mut tree = self.tile_tree.write();
         let mut blocked = self.blocked_tree.write();
         for tile in tiles {
             let rect: QuadTreeRect = add_to_rect(
@@ -182,7 +156,7 @@ impl EntityGraph {
                 let minable = false; // player_collidable tiles like water are not minable
                 blocked.insert_with_box(minable, rect);
             }
-            // tree.insert_with_box(tile, rect);
+            tree.insert_with_box(tile, rect);
         }
         Ok(())
     }
@@ -881,7 +855,239 @@ impl EntityGraph {
     }
 }
 
-#[derive(Clone)]
+impl Serialize for EntityGraph {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("EntityGraph", 9)?;
+        state.serialize_field("entity_graph", &*self.entity_graph.read())?;
+        state.serialize_field("blocked_tree", &*self.blocked_tree.read())?;
+        state.serialize_field("entity_tree", &*self.entity_tree.read())?;
+        state.serialize_field("tile_tree", &*self.tile_tree.read())?;
+        state.serialize_field("entity_nodes", &self.entity_nodes)?;
+        state.serialize_field("entity_prototypes", &*self.entity_prototypes)?;
+        state.serialize_field("recipes", &*self.recipes)?;
+        state.serialize_field("resources", &self.resources)?;
+        state.serialize_field("resource_tree", &*self.resource_tree.read())?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for EntityGraph {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        enum Field {
+            EntityGraph,
+            BlockedTree,
+            EntityTree,
+            TileTree,
+            EntityNodes,
+            EntityPrototypes,
+            Recipes,
+            Resources,
+            ResourceTree,
+        }
+
+        // This part could also be generated independently by:
+        //
+        //    #[derive(Deserialize)]
+        //    #[serde(field_identifier, rename_all = "lowercase")]
+        //    enum Field { Secs, Nanos }
+        impl<'de> Deserialize<'de> for Field {
+            fn deserialize<D>(deserializer: D) -> Result<Field, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                struct FieldVisitor;
+
+                impl<'de> Visitor<'de> for FieldVisitor {
+                    type Value = Field;
+
+                    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                        formatter.write_str("`secs` or `nanos`")
+                    }
+
+                    fn visit_str<E>(self, value: &str) -> Result<Field, E>
+                    where
+                        E: de::Error,
+                    {
+                        match value {
+                            "entity_graph" => Ok(Field::EntityGraph),
+                            "blocked_tree" => Ok(Field::BlockedTree),
+                            "entity_tree" => Ok(Field::EntityTree),
+                            "tile_tree" => Ok(Field::TileTree),
+                            "entity_nodes" => Ok(Field::EntityNodes),
+                            "entity_prototypes" => Ok(Field::EntityPrototypes),
+                            "recipes" => Ok(Field::Recipes),
+                            "resources" => Ok(Field::Resources),
+                            "resource_tree" => Ok(Field::ResourceTree),
+                            _ => Err(de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+
+                deserializer.deserialize_identifier(FieldVisitor)
+            }
+        }
+
+        struct EntityGraphVisitor;
+
+        impl<'de> Visitor<'de> for EntityGraphVisitor {
+            type Value = EntityGraph;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("struct FactorioWorld")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<Self::Value, V::Error>
+            where
+                V: MapAccess<'de>,
+            {
+                let mut entity_graph = None;
+                let mut blocked_tree = None;
+                let mut entity_tree = None;
+                let mut tile_tree = None;
+                let mut entity_nodes = None;
+                let mut entity_prototypes = None;
+                let mut recipes = None;
+                let mut resources = None;
+                let mut resource_tree = None;
+
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::EntityGraph => {
+                            if entity_graph.is_some() {
+                                return Err(de::Error::duplicate_field("entity_graph"));
+                            }
+                            entity_graph = Some(map.next_value()?);
+                        }
+                        Field::BlockedTree => {
+                            if blocked_tree.is_some() {
+                                return Err(de::Error::duplicate_field("blocked_tree"));
+                            }
+                            blocked_tree = Some(map.next_value()?);
+                        }
+                        Field::EntityTree => {
+                            if entity_tree.is_some() {
+                                return Err(de::Error::duplicate_field("entity_tree"));
+                            }
+                            entity_tree = Some(map.next_value()?);
+                        }
+                        Field::TileTree => {
+                            if tile_tree.is_some() {
+                                return Err(de::Error::duplicate_field("tile_tree"));
+                            }
+                            tile_tree = Some(map.next_value()?);
+                        }
+                        Field::EntityNodes => {
+                            if entity_nodes.is_some() {
+                                return Err(de::Error::duplicate_field("entity_nodes"));
+                            }
+                            entity_nodes = Some(map.next_value()?);
+                        }
+                        Field::EntityPrototypes => {
+                            if entity_prototypes.is_some() {
+                                return Err(de::Error::duplicate_field("entity_prototypes"));
+                            }
+                            entity_prototypes = Some(map.next_value()?);
+                        }
+                        Field::Recipes => {
+                            if recipes.is_some() {
+                                return Err(de::Error::duplicate_field("recipes"));
+                            }
+                            recipes = Some(map.next_value()?);
+                        }
+                        Field::Resources => {
+                            if resources.is_some() {
+                                return Err(de::Error::duplicate_field("resources"));
+                            }
+                            resources = Some(map.next_value()?);
+                        }
+                        Field::ResourceTree => {
+                            if resource_tree.is_some() {
+                                return Err(de::Error::duplicate_field("resource_tree"));
+                            }
+                            resource_tree = Some(map.next_value()?);
+                        }
+                    }
+                }
+                let entity_graph =
+                    entity_graph.ok_or_else(|| de::Error::missing_field("entity_graph"))?;
+                let blocked_tree =
+                    blocked_tree.ok_or_else(|| de::Error::missing_field("blocked_tree"))?;
+                let entity_tree =
+                    entity_tree.ok_or_else(|| de::Error::missing_field("entity_tree"))?;
+                let tile_tree = tile_tree.ok_or_else(|| de::Error::missing_field("tile_tree"))?;
+                let entity_nodes =
+                    entity_nodes.ok_or_else(|| de::Error::missing_field("entity_nodes"))?;
+                let entity_prototypes = entity_prototypes
+                    .ok_or_else(|| de::Error::missing_field("entity_prototypes"))?;
+                let recipes = recipes.ok_or_else(|| de::Error::missing_field("recipes"))?;
+                let resources = resources.ok_or_else(|| de::Error::missing_field("resources"))?;
+                let resource_tree =
+                    resource_tree.ok_or_else(|| de::Error::missing_field("resource_tree"))?;
+
+                Ok(EntityGraph {
+                    entity_graph: RwLock::new(entity_graph),
+                    blocked_tree: RwLock::new(blocked_tree),
+                    entity_tree: RwLock::new(entity_tree),
+                    tile_tree: RwLock::new(tile_tree),
+                    entity_nodes,
+                    entity_prototypes: Arc::new(entity_prototypes),
+                    recipes: Arc::new(recipes),
+                    resources,
+                    resource_tree: RwLock::new(resource_tree),
+                })
+            }
+        }
+
+        const FIELDS: &[&str] = &[
+            "entity_graph",
+            "blocked_tree",
+            "entity_tree",
+            "tile_tree",
+            "entity_nodes",
+            "entity_prototypes",
+            "recipes",
+            "resources",
+            "resource_tree",
+        ];
+        deserializer.deserialize_struct("EntityGraph", FIELDS, EntityGraphVisitor)
+    }
+}
+
+impl Clone for EntityGraph {
+    fn clone(&self) -> Self {
+        EntityGraph {
+            entity_graph: RwLock::new(self.entity_graph.read().clone()),
+            blocked_tree: RwLock::new(self.blocked_tree.read().clone()),
+            entity_tree: RwLock::new(self.entity_tree.read().clone()),
+            tile_tree: RwLock::new(self.tile_tree.read().clone()),
+            entity_nodes: self.entity_nodes.clone(),
+            entity_prototypes: Arc::new((*self.entity_prototypes).clone()),
+            recipes: Arc::new((*self.recipes).clone()),
+            resources: self.resources.clone(),
+            resource_tree: RwLock::new(self.resource_tree.read().clone()),
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        self.entity_graph = RwLock::new(source.entity_graph.read().clone());
+        self.blocked_tree = RwLock::new(source.blocked_tree.read().clone());
+        self.entity_tree = RwLock::new(source.entity_tree.read().clone());
+        self.tile_tree = RwLock::new(source.tile_tree.read().clone());
+        self.entity_nodes = source.entity_nodes.clone();
+        self.entity_prototypes = Arc::new((*source.entity_prototypes).clone());
+        self.recipes = Arc::new((*source.recipes).clone());
+        self.resources = source.resources.clone();
+        self.resource_tree = RwLock::new(source.resource_tree.read().clone());
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct EntityNode {
     pub bounding_box: Rect,
     pub position: Position,
@@ -942,10 +1148,10 @@ impl EntityNode {
 pub type EntityGraphInner = StableGraph<EntityNode, f64>;
 
 pub type QuadTreeRect = TypedRect<f32, Rect>;
-pub type BlockedQuadTree = QuadTree<bool, Rect>;
-pub type EntityQuadTree = QuadTree<FactorioEntity, Rect>;
-pub type TileQuadTree = QuadTree<FactorioTile, Rect>;
-pub type ResourceQuadTree = QuadTree<String, Rect>;
+pub type BlockedQuadTree = QuadTree<bool, Rect, [(ItemId, QuadTreeRect); 4]>;
+pub type EntityQuadTree = QuadTree<FactorioEntity, Rect, [(ItemId, QuadTreeRect); 4]>;
+pub type TileQuadTree = QuadTree<FactorioTile, Rect, [(ItemId, QuadTreeRect); 4]>;
+pub type ResourceQuadTree = QuadTree<String, Rect, [(ItemId, QuadTreeRect); 4]>;
 
 #[cfg(test)]
 mod tests {

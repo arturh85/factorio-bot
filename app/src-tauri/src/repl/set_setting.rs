@@ -3,6 +3,20 @@ use crate::repl::{Error, Subcommand};
 use reedline_repl_rs::clap::{Arg, ArgMatches, Command};
 use reedline_repl_rs::Repl;
 
+#[allow(clippy::unused_async)]
+async fn run(matches: ArgMatches, _context: &mut Context) -> Result<Option<String>, Error> {
+  let _key = matches
+    .value_of("key")
+    .expect("Required value validated by clap")
+    .to_owned();
+  let _value = matches
+    .value_of("key")
+    .expect("Required value validated by clap")
+    .to_owned();
+
+  Ok(None)
+}
+
 impl Subcommand for ThisCommand {
   fn name(&self) -> &str {
     "set"
@@ -20,20 +34,6 @@ impl Subcommand for ThisCommand {
       |args, context| Box::pin(run(args, context)),
     )
   }
-}
-
-#[allow(clippy::unused_async)]
-async fn run(matches: ArgMatches, _context: &mut Context) -> Result<Option<String>, Error> {
-  let _key = matches
-    .value_of("key")
-    .expect("Required value validated by clap")
-    .to_owned();
-  let _value = matches
-    .value_of("key")
-    .expect("Required value validated by clap")
-    .to_owned();
-
-  Ok(None)
 }
 
 struct ThisCommand {}

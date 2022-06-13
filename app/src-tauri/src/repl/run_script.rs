@@ -8,6 +8,32 @@ use factorio_bot_core::types::PlayerId;
 use reedline_repl_rs::clap::{Arg, ArgMatches, Command};
 use reedline_repl_rs::Repl;
 
+async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String>, Error> {
+  let filename = matches.value_of("filename").unwrap().to_owned();
+  let bot_count: PlayerId = matches
+    .value_of("bots")
+    .expect("Has default value")
+    .parse()
+    .into_diagnostic()?;
+  let instance_state = context.instance_state.read().await;
+  if instance_state.is_some() {
+    let instance_state = context.instance_state.clone();
+    let instance_state = instance_state.read().await;
+    if let Some(instance_state) = instance_state.as_ref() {
+      let mut planner = Planner::new(
+        instance_state.world.clone().unwrap(),
+        Some(instance_state.rcon.clone()),
+      );
+      if let Err(err) = run_script_file(&mut planner, &filename, bot_count, false).await {
+        error!("failed to execute: {:?}", err);
+      }
+    }
+  } else {
+    error!("failed: not started");
+  }
+  Ok(None)
+}
+
 impl Subcommand for ThisCommand {
   fn name(&self) -> &str {
     "run"
@@ -43,32 +69,6 @@ impl Subcommand for ThisCommand {
       |args, context| Box::pin(run(args, context)),
     )
   }
-}
-
-async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String>, Error> {
-  let filename = matches.value_of("filename").unwrap().to_owned();
-  let bot_count: PlayerId = matches
-    .value_of("bots")
-    .expect("Has default value")
-    .parse()
-    .into_diagnostic()?;
-  let instance_state = context.instance_state.read().await;
-  if instance_state.is_some() {
-    let instance_state = context.instance_state.clone();
-    let instance_state = instance_state.read().await;
-    if let Some(instance_state) = instance_state.as_ref() {
-      let mut planner = Planner::new(
-        instance_state.world.clone().unwrap(),
-        Some(instance_state.rcon.clone()),
-      );
-      if let Err(err) = run_script_file(&mut planner, &filename, bot_count, false).await {
-        error!("failed to execute: {:?}", err);
-      }
-    }
-  } else {
-    error!("failed: not started");
-  }
-  Ok(None)
 }
 
 struct ThisCommand {}

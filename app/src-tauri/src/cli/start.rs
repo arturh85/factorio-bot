@@ -3,7 +3,10 @@ use crate::context::Context;
 use crate::settings::load_app_settings;
 use clap::{Arg, ArgMatches, Command};
 use factorio_bot_core::miette::Result;
-use factorio_bot_core::process::process_control::{FactorioInstance, FactorioParams};
+use factorio_bot_core::paris::info;
+use factorio_bot_core::process::process_control::{
+  FactorioInstance, FactorioParams, FactorioStartCondition,
+};
 
 impl Subcommand for ThisCommand {
   fn name(&self) -> &str {
@@ -82,6 +85,7 @@ async fn run(matches: ArgMatches, _context: &mut Context) -> Result<()> {
     recreate,
     write_logs,
     map_exchange_string,
+    wait_until: FactorioStartCondition::DiscoveryComplete,
     ..FactorioParams::default()
   };
   let instance_state = FactorioInstance::start(&app_settings.factorio, params)
@@ -96,6 +100,7 @@ async fn run(matches: ArgMatches, _context: &mut Context) -> Result<()> {
   // FIXME: watch children die?
 
   if let Some(_world) = &instance_state.world {
+    info!("started!");
     // start_webserver(rcon, websocket_server, open_browser, world).await;
   }
   Ok(())

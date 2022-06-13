@@ -21,7 +21,7 @@ pathfinding = "^3.0"
 parking_lot = "^0.12"
 paris = { version = "^1.5", features = ["timestamps", "macros"] }
 color-eyre = "^0.6.1"
-petgraph = { version = "^0.6", features = ["all"] }
+petgraph = { version = "^0.6", features = ["serde-1"] }
 indicatif = "^0.16"
 err-derive = "^0.3"
 wildmatch = "^2.1"
@@ -38,11 +38,10 @@ noisy_float = { version = "^0.2", features = ["serde"] }
 typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"]}
 enum-primitive-derive = "^0.2"
 unicode-segmentation = "^1.9"
-strum = "^0.24"
-strum_macros = "^0.24"
-dashmap = "^5.3"
-euclid = "^0.22.7"
-smallvec = "*"
+strum = { version = "^0.24", features = ["derive"] }
+dashmap = {version = "^5.3", features = ["serde"] }
+euclid = {version = "^0.22.7", features = ["serde"] }
+smallvec = { version = "1.8.0", features = ["serde"] }
 base64 = "^0.13"
 ptree = "^0.4"
 fnv = "^1.0.7"

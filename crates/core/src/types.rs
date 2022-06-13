@@ -146,7 +146,7 @@ impl std::fmt::Display for Position {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct Pos(pub i32, pub i32);
 
 impl Pos {
@@ -179,7 +179,7 @@ impl From<&Pos> for Position {
     }
 }
 
-#[derive(Primitive, Clone, Copy, Debug, PartialEq)]
+#[derive(Primitive, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Direction {
     North = 0,
     NorthEast = 1,
@@ -694,7 +694,7 @@ pub enum EntityName {
     Pumpjack,
 }
 
-#[derive(EnumString, Display, Debug, PartialEq, Clone)]
+#[derive(EnumString, Display, Debug, PartialEq, Clone, Serialize, Deserialize)]
 #[strum(serialize_all = "kebab-case")]
 pub enum EntityType {
     AssemblingMachine,

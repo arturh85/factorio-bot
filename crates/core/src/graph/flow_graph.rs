@@ -64,6 +64,7 @@ impl FlowGraph {
                 32,
                 128,
                 32,
+                8,
             )),
             inner: RwLock::new(FlowGraphInner::new()),
         }
@@ -675,7 +676,7 @@ pub type FlowGraphInner = StableGraph<FlowNode, FlowEdge>;
 pub type FlowRate = (String, f64);
 pub type FlowRates = Vec<FlowRate>;
 
-pub type FlowQuadTree = QuadTree<NodeIndex, Rect>;
+pub type FlowQuadTree = QuadTree<NodeIndex, Rect, [(ItemId, QuadTreeRect); 4]>;
 
 #[cfg(test)]
 mod tests {

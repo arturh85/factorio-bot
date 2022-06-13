@@ -1,4 +1,5 @@
 #![warn(clippy::all, clippy::pedantic)]
+// Remove console window opening on windows
 #![cfg_attr(
   all(not(debug_assertions), target_os = "windows"),
   windows_subsystem = "windows"
@@ -14,9 +15,6 @@ mod repl;
 #[cfg(any(feature = "rhai", feature = "lua", feature = "rune"))]
 mod scripting;
 mod settings;
-#[allow(unused_imports)]
-#[macro_use]
-extern crate strum_macros;
 
 use context::Context;
 use factorio_bot_core::miette::Result;

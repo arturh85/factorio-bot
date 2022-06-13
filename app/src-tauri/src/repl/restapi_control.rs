@@ -6,8 +6,32 @@ use factorio_bot_restapi::webserver;
 use reedline_repl_rs::clap::{Arg, ArgMatches, Command, PossibleValue};
 use reedline_repl_rs::Repl;
 use std::str::FromStr;
-use strum::EnumMessage;
-use strum::IntoEnumIterator;
+use strum::{EnumIter, EnumMessage, EnumString, IntoEnumIterator, IntoStaticStr};
+
+async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String>, Error> {
+  let action =
+    Action::from_str(matches.value_of("action").expect("Has default value")).into_diagnostic()?;
+  match action {
+    Action::Start => {
+      let app_settings = context.app_settings.read().await;
+      let instance_state = context.instance_state.clone();
+      let webserver = webserver::start(app_settings.restapi.clone(), instance_state);
+      let handle = tokio::task::spawn(webserver);
+      let mut restapi_handle = context.restapi_handle.write().await;
+      *restapi_handle = Some(handle);
+    }
+    Action::Stop => {
+      let mut handle = context.restapi_handle.write().await;
+      if handle.is_none() {
+        error!("failed: not started");
+        return Ok(None);
+      }
+      handle.take().expect("Already checked").abort();
+      info!("successfully stopped");
+    }
+  };
+  Ok(None)
+}
 
 #[derive(EnumString, EnumMessage, EnumIter, IntoStaticStr)]
 #[strum(serialize_all = "kebab-case")]
@@ -36,31 +60,6 @@ impl Subcommand for ThisCommand {
       |args, context| Box::pin(run(args, context)),
     )
   }
-}
-
-async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String>, Error> {
-  let action =
-    Action::from_str(matches.value_of("action").expect("Has default value")).into_diagnostic()?;
-  match action {
-    Action::Start => {
-      let app_settings = context.app_settings.read().await;
-      let instance_state = context.instance_state.clone();
-      let webserver = webserver::start(app_settings.restapi.clone(), instance_state);
-      let handle = tokio::task::spawn(webserver);
-      let mut restapi_handle = context.restapi_handle.write().await;
-      *restapi_handle = Some(handle);
-    }
-    Action::Stop => {
-      let mut handle = context.restapi_handle.write().await;
-      if handle.is_none() {
-        error!("failed: not started");
-        return Ok(None);
-      }
-      handle.take().expect("Already checked").abort();
-      info!("successfully stopped");
-    }
-  };
-  Ok(None)
 }
 
 struct ThisCommand {}

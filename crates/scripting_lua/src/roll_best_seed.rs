@@ -182,7 +182,7 @@ pub async fn score_seed(
     run_lua(&mut planner, &lua_code, None, bot_count, false).await?;
     let mut score = 0.0;
 
-    let weight = planner.graph().shortest_path();
+    let weight = planner.graph().shortest_path().expect("no path found");
     score -= weight;
     let center = Position::new(0., 0.);
     let resources = vec![

@@ -13,7 +13,7 @@ import 'primeicons/primeicons.css';
 import './assets/layout/layout.scss';
 import './assets/layout/flags/flags.css';
 
-// import './plugins/configure-ynetwork';
+import './plugins/configure-ynetwork';
 import App from './App.vue';
 
 router.beforeEach(function(to, from, next) {

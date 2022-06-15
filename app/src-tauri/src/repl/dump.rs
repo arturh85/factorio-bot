@@ -1,5 +1,6 @@
 use crate::context::Context;
 use crate::repl::{Error, Subcommand};
+use clap::builder::PossibleValuesParser;
 use factorio_bot_core::miette::{IntoDiagnostic, Result};
 use factorio_bot_core::paris::error;
 use reedline_repl_rs::clap::{Arg, ArgMatches, Command, PossibleValue};
@@ -50,10 +51,10 @@ impl Subcommand for ThisCommand {
         .arg(
           Arg::new("type")
             .default_value(DumpType::World.into())
-            .possible_values(DumpType::iter().map(|action| {
+            .value_parser(PossibleValuesParser::new(DumpType::iter().map(|action| {
               let message = action.get_message().unwrap();
               PossibleValue::new(action.into()).help(message)
-            }))
+            })))
             .help("type of information to dump"),
         )
         .arg(

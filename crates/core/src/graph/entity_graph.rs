@@ -8,7 +8,7 @@ use crate::types::{
     FactorioTile, Pos, Position, Rect, ResourcePatch,
 };
 use dashmap::DashMap;
-use euclid::{Point2D as TypedPoint2D, Rect as TypedRect, Size2D as TypedSize2D};
+use euclid::{Point2D, Rect as EuclidRect, Size2D};
 use factorio_blueprint::{BlueprintCodec, Container};
 use miette::Result;
 use paris::error;
@@ -45,10 +45,7 @@ impl EntityGraph {
         entity_prototypes: Arc<DashMap<String, FactorioEntityPrototype>>,
         recipes: Arc<DashMap<String, FactorioRecipe>>,
     ) -> Self {
-        let max_area = QuadTreeRect::new(
-            TypedPoint2D::new(-5120., -5120.),
-            TypedSize2D::new(10240., 10240.),
-        );
+        let max_area = QuadTreeRect::new(Point2D::new(-5120., -5120.), Size2D::new(10240., 10240.));
         EntityGraph {
             entity_prototypes,
             recipes,
@@ -1147,7 +1144,7 @@ impl EntityNode {
 
 pub type EntityGraphInner = StableGraph<EntityNode, f64>;
 
-pub type QuadTreeRect = TypedRect<f32, Rect>;
+pub type QuadTreeRect = EuclidRect<f32, Rect>;
 pub type BlockedQuadTree = QuadTree<bool, Rect, [(ItemId, QuadTreeRect); 4]>;
 pub type EntityQuadTree = QuadTree<FactorioEntity, Rect, [(ItemId, QuadTreeRect); 4]>;
 pub type TileQuadTree = QuadTree<FactorioTile, Rect, [(ItemId, QuadTreeRect); 4]>;

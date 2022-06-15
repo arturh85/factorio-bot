@@ -1,5 +1,6 @@
 use crate::context::Context;
 use crate::repl::{Error, Subcommand};
+use clap::builder::PossibleValuesParser;
 use factorio_bot_core::miette::{IntoDiagnostic, Result};
 use factorio_bot_core::paris::{error, info};
 use factorio_bot_core::process::process_control::{
@@ -105,6 +106,17 @@ async fn subcommand_start(
   Ok(None)
 }
 
+async fn subcommand_stop(context: &mut Context) -> Result<Option<String>, Error> {
+  let mut instance_state = context.instance_state.write().await;
+  if instance_state.is_none() {
+    error!("failed: not started");
+    return Ok(None);
+  }
+  instance_state.take().expect("Already checked").stop()?;
+  info!("successfully stopped");
+  Ok(None)
+}
+
 async fn subcommand_status(context: &mut Context) -> Result<Option<String>, Error> {
   let instance_state = context.instance_state.read().await;
   if let Some(instance_state) = instance_state.as_ref() {
@@ -133,17 +145,6 @@ async fn subcommand_add(context: &mut Context) -> Result<Option<String>, Error> 
     return Ok(None);
   }
   error!("not implemented");
-  Ok(None)
-}
-
-async fn subcommand_stop(context: &mut Context) -> Result<Option<String>, Error> {
-  let mut instance_state = context.instance_state.write().await;
-  if instance_state.is_none() {
-    error!("failed: not started");
-    return Ok(None);
-  }
-  instance_state.take().expect("Already checked").stop()?;
-  info!("successfully stopped");
   Ok(None)
 }
 
@@ -219,10 +220,10 @@ impl Subcommand for ThisCommand {
           .arg(
             Arg::new("action")
               .default_value(Action::Start.into())
-              .possible_values(Action::iter().map(|action| {
+              .value_parser(PossibleValuesParser::new(Action::iter().map(|action| {
                 let message = action.get_message().unwrap();
                 PossibleValue::new(action.into()).help(message)
-              }))
+              })))
               .help("what action to take"),
           )
           .arg(

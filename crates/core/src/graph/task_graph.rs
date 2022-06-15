@@ -3,6 +3,7 @@ use crate::num_traits::FromPrimitive;
 use crate::types::{Direction, FactorioEntity, PlayerId, Position};
 use noisy_float::types::{r64, R64};
 use num_traits::ToPrimitive;
+use parking_lot::RwLock;
 use petgraph::algo::astar;
 use petgraph::dot::{Config, Dot};
 use petgraph::graph::{DefaultIx, EdgeIndex, NodeIndex};
@@ -11,6 +12,7 @@ use petgraph::Directed;
 use ptree::graph::print_graph;
 use serde::__private::Formatter;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct TaskGraph {
@@ -25,8 +27,8 @@ impl TaskGraph {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let mut graph = TaskGraphInner::new();
-        let start_node = graph.add_node(TaskNode::new(None, "Process Start", None));
-        let end_node = graph.add_node(TaskNode::new(None, "Process End", None));
+        let start_node = graph.add_node(TaskNode::new(None, "Process Start", None, 0.));
+        let end_node = graph.add_node(TaskNode::new(None, "Process End", None, 0.));
         let cursor = start_node;
         graph.add_edge(start_node, end_node, 0.);
         TaskGraph {
@@ -64,14 +66,14 @@ impl TaskGraph {
     pub fn group_start(&mut self, label: &str) {
         let group_start =
             self.inner
-                .add_node(TaskNode::new(None, &format!("Start: {}", label), None));
+                .add_node(TaskNode::new(None, &format!("Start: {}", label), None, 0.));
         self.add_to_cursor(group_start);
         self.groups.push(HashMap::new());
     }
 
     pub fn group_end(&mut self) {
         let group = self.groups.pop().expect("no open group");
-        let group_end = self.inner.add_node(TaskNode::new(None, "End", None));
+        let group_end = self.inner.add_node(TaskNode::new(None, "End", None, 0.));
         if group.is_empty() {
             self.inner.add_edge(self.cursor, group_end, 0.);
         } else {
@@ -93,17 +95,23 @@ impl TaskGraph {
     }
 
     pub fn add_mine_node(&mut self, player_id: PlayerId, cost: f64, target: MineTarget) {
-        let node = self.inner.add_node(TaskNode::new_mine(player_id, target));
+        let node = self
+            .inner
+            .add_node(TaskNode::new_mine(player_id, target, cost));
         self.add_to_group(player_id, node, cost);
     }
 
     pub fn add_walk_node(&mut self, player_id: PlayerId, cost: f64, target: PositionRadius) {
-        let node = self.inner.add_node(TaskNode::new_walk(player_id, target));
+        let node = self
+            .inner
+            .add_node(TaskNode::new_walk(player_id, target, cost));
         self.add_to_group(player_id, node, cost);
     }
 
     pub fn add_place_node(&mut self, player_id: PlayerId, cost: f64, entity: FactorioEntity) {
-        let node = self.inner.add_node(TaskNode::new_place(player_id, entity));
+        let node = self
+            .inner
+            .add_node(TaskNode::new_place(player_id, entity, cost));
         self.add_to_group(player_id, node, cost);
     }
 
@@ -118,18 +126,22 @@ impl TaskGraph {
     pub fn node_indices(&self) -> NodeIndices<TaskNode, DefaultIx> {
         self.inner.node_indices()
     }
-    pub fn shortest_path(&self) -> f64 {
+
+    pub fn shortest_path(&self) -> Option<f64> {
         let process_start = self.inner.node_indices().next().unwrap();
         let process_end = self.inner.node_indices().last().unwrap();
-        let (weight, _) = self
-            .astar(process_start, process_end)
-            .expect("no path found");
-        weight
+        self.shortest_path_between(process_start, process_end)
     }
+
+    pub fn shortest_path_between(&self, start: NodeIndex, end: NodeIndex) -> Option<f64> {
+        let (weight, _) = self.astar(start, end)?;
+        Some(weight)
+    }
+
     pub fn add_group_start_node(&mut self, parent: NodeIndex, label: &str) -> NodeIndex {
-        let start = self
-            .inner
-            .add_node(TaskNode::new(None, &format!("Start: {}", label), None));
+        let start =
+            self.inner
+                .add_node(TaskNode::new(None, &format!("Start: {}", label), None, 0.));
         self.inner.add_edge(parent, start, 0.);
 
         start
@@ -235,22 +247,36 @@ pub enum TaskData {
     PlaceEntity(FactorioEntity),
 }
 
-#[derive(Default, Clone)]
+pub enum TaskStatus {
+    Planned(f64),
+    Running(u32, u32),
+    Success(f64, u32),
+    Failed(u32, u32, String),
+}
+
+#[derive(Clone)]
 pub struct TaskNode {
     pub name: String,
     pub player_id: Option<PlayerId>,
     pub data: Option<TaskData>,
+    pub status: Arc<RwLock<TaskStatus>>,
 }
 
 impl TaskNode {
-    pub fn new(player_id: Option<PlayerId>, name: &str, data: Option<TaskData>) -> TaskNode {
+    pub fn new(
+        player_id: Option<PlayerId>,
+        name: &str,
+        data: Option<TaskData>,
+        cost: f64,
+    ) -> TaskNode {
         TaskNode {
             name: name.into(),
             player_id,
             data,
+            status: Arc::new(RwLock::new(TaskStatus::Planned(cost))),
         }
     }
-    pub fn new_craft(player_id: PlayerId, item: InventoryItem) -> TaskNode {
+    pub fn new_craft(player_id: PlayerId, item: InventoryItem, cost: f64) -> TaskNode {
         TaskNode::new(
             Some(player_id),
             &*format!(
@@ -263,16 +289,18 @@ impl TaskNode {
                 }
             ),
             Some(TaskData::Craft(item)),
+            cost,
         )
     }
-    pub fn new_walk(player_id: PlayerId, target: PositionRadius) -> TaskNode {
+    pub fn new_walk(player_id: PlayerId, target: PositionRadius, cost: f64) -> TaskNode {
         TaskNode::new(
             Some(player_id),
             &*format!("Walk to {}", target.position),
             Some(TaskData::Walk(target)),
+            cost,
         )
     }
-    pub fn new_mine(player_id: PlayerId, target: MineTarget) -> TaskNode {
+    pub fn new_mine(player_id: PlayerId, target: MineTarget, cost: f64) -> TaskNode {
         TaskNode::new(
             Some(player_id),
             &*format!(
@@ -285,9 +313,10 @@ impl TaskNode {
                 }
             ),
             Some(TaskData::Mine(target)),
+            cost,
         )
     }
-    pub fn new_place(player_id: PlayerId, entity: FactorioEntity) -> TaskNode {
+    pub fn new_place(player_id: PlayerId, entity: FactorioEntity, cost: f64) -> TaskNode {
         TaskNode::new(
             Some(player_id),
             &*format!(
@@ -297,12 +326,14 @@ impl TaskNode {
                 Direction::from_u8(entity.direction).unwrap()
             ),
             Some(TaskData::PlaceEntity(entity)),
+            cost,
         )
     }
     pub fn new_insert_to_inventory(
         player_id: PlayerId,
         location: InventoryLocation,
         item: InventoryItem,
+        cost: f64,
     ) -> TaskNode {
         TaskNode::new(
             Some(player_id),
@@ -311,6 +342,7 @@ impl TaskNode {
                 &item.name, &item.count, location.entity_name, location.position
             ),
             Some(TaskData::InsertToInventory(location, item)),
+            cost,
         )
     }
 }

@@ -52,9 +52,9 @@ const routes = [
         component: () => import('./pages/GameInstances.vue')
     },
     {
-        path: '/taskGraph',
-        name: 'taskGraph',
-        component: () => import('./pages/TaskGraphPage.vue')
+        path: '/tasks',
+        name: 'tasks',
+        component: () => import('./pages/TasksPage.vue')
     }
 ];
 

@@ -9,4 +9,4 @@ extern crate rocket;
 #[macro_use]
 extern crate rocket_okapi;
 #[macro_use]
-extern crate serde_derive;
+extern crate serde;

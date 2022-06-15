@@ -11,7 +11,7 @@ mod start;
 
 use crate::context::Context;
 use crate::{APP_ABOUT, APP_AUTHOR, APP_NAME};
-use clap::{Arg, ArgMatches, Command};
+use clap::{value_parser, Arg, ArgMatches, Command};
 use clap_complete::{generate, Generator, Shell};
 use factorio_bot_core::miette::Result;
 use std::future::Future;
@@ -42,7 +42,7 @@ pub async fn start(mut context: Context) -> Result<Option<Command<'static>>> {
       Arg::new("shell")
         .help("generate shell-completion script")
         .long("generate")
-        .possible_values(Shell::possible_values()),
+        .value_parser(value_parser!(Shell)),
     );
   let subcommands = subcommands();
   for subcommand in &subcommands {

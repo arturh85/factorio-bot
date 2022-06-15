@@ -5,7 +5,9 @@ use factorio_bot_core::graph::task_graph::TaskGraph;
 use factorio_bot_core::miette::{IntoDiagnostic, Result};
 use factorio_bot_core::paris::{error, info, warn};
 use factorio_bot_core::plan::planner::Planner;
-use factorio_bot_core::process::process_control::{FactorioInstance, FactorioParams, FactorioStartCondition};
+use factorio_bot_core::process::process_control::{
+    FactorioInstance, FactorioParams, FactorioStartCondition,
+};
 use factorio_bot_core::rlua;
 use factorio_bot_core::rlua::{Lua, Variadic};
 use factorio_bot_core::settings::FactorioSettings;
@@ -100,12 +102,9 @@ pub async fn start_factorio_and_plan_graph(
         wait_until: FactorioStartCondition::DiscoveryComplete,
         ..FactorioParams::default()
     };
-    let instance = FactorioInstance::start(
-        settings,
-        params,
-    )
-    .await
-    .expect("failed to start");
+    let instance = FactorioInstance::start(settings, params)
+        .await
+        .expect("failed to start");
 
     // Use asynchronous stdin
     info!("start took <yellow>{:?}</>", started.elapsed());
@@ -220,8 +219,19 @@ mod tests {
     #[test]
     fn test_draw_world() {
         let world = Arc::new(fixture_world());
-        draw_world(world);
+        draw_world(world, "tests/world.png");
     }
+
+    // #[test]
+    // fn test_dumped_world() {
+    // use factorio_bot_core::factorio::world::FactorioWorld;
+    // use factorio_bot_core::serde_json;
+    //     let world: FactorioWorld =
+    //         serde_json::from_str(include_str!("../tests/dump.json")).unwrap();
+    //     let world = Arc::new(world);
+    //     draw_world(world, "tests/dump.png");
+    // }
+
     // ! gag does not work properly with test runners: https://crates.io/crates/gag
     // ! > Won't work in rust test cases.
     // ! > The rust test cases use std::io::set_print to redirect stdout. You can get around this

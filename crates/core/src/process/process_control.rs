@@ -280,6 +280,7 @@ impl FactorioInstance {
             &rcon_settings.pass,
             "--server-settings",
             server_settings_path.to_str().unwrap(),
+            "--disable-prototype-history", // Disables tracking which mod created/changed what prototype. Mainly for faster startup during development.
         ];
         if !current_silent {
             info!(
@@ -358,6 +359,7 @@ impl FactorioInstance {
             // "--gfx-safe-mode",
             // "--low-vram",
             "--disable-audio",
+            "--disable-prototype-history", // Disables tracking which mod created/changed what prototype. Mainly for faster startup during development.
         ];
         if !silent {
             info!(

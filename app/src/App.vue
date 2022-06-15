@@ -57,7 +57,7 @@ const menu = ref([
       {label: 'RCON', icon: 'pi pi-fw pi-cog', to: '/rcon'},
       {label: 'LUA Script', icon: 'pi pi-fw pi-cog', to: '/script'},
       // {label: 'Mods', icon: 'pi pi-fw pi-th-large', to: '/factorioMods'},
-      {label: 'Tasks', icon: 'pi pi-fw pi-sitemap', to: '/taskGraph'},
+      {label: 'Tasks', icon: 'pi pi-fw pi-sitemap', to: '/tasks'},
       // {label: 'Entities', icon: 'pi pi-fw pi-sitemap', to: '/workspace'},
       // {label: 'Map', icon: 'pi pi-fw pi-map-marker', to: '/workspace'},
       // {label: 'Instances', icon: 'pi pi-fw pi-circle-off', to: '/instances'},

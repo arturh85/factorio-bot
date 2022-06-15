@@ -10,7 +10,6 @@ use crate::graph::entity_graph::EntityGraph;
 use crate::types::{
     Direction, EntityName, FactorioItemPrototype, FactorioRecipe, FactorioTile, Position, Rect,
 };
-// #[cfg(test)]
 use crate::types::{FactorioEntity, FactorioEntityPrototype};
 use image::RgbaImage;
 use imageproc::drawing::draw_hollow_rect_mut;
@@ -25,14 +24,10 @@ pub fn entity_graph_from(entities: Vec<FactorioEntity>) -> Result<EntityGraph> {
 }
 
 pub fn fixture_entity_prototypes() -> DashMap<String, FactorioEntityPrototype> {
-    let prototypes: HashMap<String, FactorioEntityPrototype> =
+    let prototypes: DashMap<String, FactorioEntityPrototype> =
         serde_json::from_str(include_str!("../tests/entity-prototype-fixtures.json"))
             .expect("failed to parse fixture");
-    let dashmap: DashMap<String, FactorioEntityPrototype> = DashMap::new();
-    for prototype in prototypes {
-        dashmap.insert(prototype.0, prototype.1);
-    }
-    dashmap
+    prototypes
 }
 
 pub fn fixture_item_prototypes() -> DashMap<String, FactorioItemPrototype> {
@@ -152,55 +147,59 @@ pub fn fixture_world() -> FactorioWorld {
     world
 }
 
-pub fn draw_world(world: Arc<FactorioWorld>) {
+pub fn draw_world(world: Arc<FactorioWorld>, save_path: &str) {
     let image_width = 500.;
     let image_height = 500.;
     let bb_width = 200.;
     let bb_height = 200.;
     let mut buffer: RgbaImage = image::ImageBuffer::new(image_width as u32, image_height as u32);
     for (_x, _y, pixel) in buffer.enumerate_pixels_mut() {
-        *pixel = image::Rgba([255, 255, 255, 255u8]);
+        *pixel = image::Rgba([255, 255, 255, 255u8]); // white
     }
     let bounding_box = Rect::from_wh(bb_width, bb_height);
     let scaling_factor = image_width / bb_width;
     let resource_colors: HashMap<&str, image::Rgba<_>> = [
-        ("iron-ore", image::Rgba([0u8, 140u8, 255u8, 255u8])),
-        ("copper-ore", image::Rgba([255u8, 55u8, 0u8, 255u8])),
-        ("coal", image::Rgba([0u8, 0u8, 0u8, 255u8])),
-        ("stone", image::Rgba([150u8, 100u8, 80u8, 255u8])),
-        ("uranium-ore", image::Rgba([100u8, 180u8, 0u8, 255u8])),
-        ("crude-oil", image::Rgba([255u8, 0u8, 255u8, 255u8])),
+        ("iron-ore", image::Rgba([0u8, 110u8, 255u8, 255u8])), // blue
+        ("copper-ore", image::Rgba([255u8, 55u8, 0u8, 255u8])), // orange
+        ("coal", image::Rgba([0u8, 0u8, 0u8, 255u8])),         // black
+        ("stone", image::Rgba([150u8, 100u8, 80u8, 255u8])),   // brown
+        ("uranium-ore", image::Rgba([100u8, 180u8, 0u8, 255u8])), // fancy green
+        ("crude-oil", image::Rgba([255u8, 0u8, 255u8, 255u8])), // magenta
     ]
     .iter()
     .cloned()
     .collect();
+    // draw resources
     draw_resource_rects_mut(
         &mut buffer,
         world.entity_graph.resource_tree(),
         &bounding_box,
         scaling_factor,
         resource_colors,
-        image::Rgba([255u8, 0u8, 0u8, 255u8]),
+        image::Rgba([255u8, 0u8, 255u8, 255u8]), // magenta
     );
+    // draw blocked
     draw_blocked_rects_mut(
         &mut buffer,
         world.entity_graph.blocked_tree(),
         &bounding_box,
         scaling_factor,
-        image::Rgba([76u8, 175u8, 80u8, 255u8]),
-        image::Rgba([255u8, 0u8, 0u8, 255u8]),
+        image::Rgba([76u8, 175u8, 80u8, 255u8]),  // green
+        image::Rgba([93u8, 247u8, 255u8, 255u8]), // cyan
     );
+    // draw thick vertical black line through the center
     draw_hollow_rect_mut(
         &mut buffer,
         imageproc::rect::Rect::at((image_width / 2. - 1.) as i32, 0)
             .of_size(2, image_height as u32),
-        image::Rgba([0u8, 0u8, 0u8, 255u8]),
+        image::Rgba([0u8, 0u8, 0u8, 255u8]), // black
     );
+    // draw thick horizontal black line through the center
     draw_hollow_rect_mut(
         &mut buffer,
         imageproc::rect::Rect::at(0, (image_height / 2. - 1.) as i32)
             .of_size(image_width as u32, 2),
-        image::Rgba([0u8, 0u8, 0u8, 255u8]),
+        image::Rgba([0u8, 0u8, 0u8, 255u8]), // black
     );
-    buffer.save("tests/world.png").unwrap();
+    buffer.save(save_path).unwrap();
 }

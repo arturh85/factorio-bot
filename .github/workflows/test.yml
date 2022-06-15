@@ -28,8 +28,8 @@ jobs:
         with:
           path: '**/node_modules'
           key: ${{ runner.os }}-modules-${{ hashFiles('**/yarn.lock') }}
-      - name: ⚡ install tauri bundler
-        run: cargo install tauri-bundler --force
+      - name: ⚡ install tauri cli
+        run: cargo install tauri-cli --version "^1.0.0"
       - name: ⚡ install tarpaulin code coverage analyser (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
         run: cargo install cargo-tarpaulin

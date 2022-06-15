@@ -93,8 +93,8 @@ jobs:
         with:
           path: '**/node_modules'
           key: ${{ runner.os }}-modules-${{ hashFiles('**/yarn.lock') }}
-      - name: ⚡ install cargo tauri-bundler
-        run: cargo install tauri-bundler --force
+      - name: ⚡ install cargo tauri-cli
+        run: cargo install tauri-cli --version "^1.0.0"
       - name: ⚡ install apt webkit2gtk (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
         run: |

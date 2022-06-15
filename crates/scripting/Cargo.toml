@@ -11,5 +11,4 @@ publish = false
 
 [dependencies]
 factorio-bot-core = { path = "../core" }
-miette = {version = "^4.7", features = ["fancy"] }
 gag = "^1.0"

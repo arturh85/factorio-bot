@@ -5,13 +5,13 @@
 //!
 //! As the name implies, the tree is a mapping from axis-aligned-bounding-box => object.
 
-use euclid::{Point2D as TypedPoint2D, Rect as TypedRect, Size2D as TypedSize2D};
+use euclid::{Point2D, Rect as EuclidRect, Size2D};
 use fnv::FnvHashMap;
 use smallvec::{Array, SmallVec};
 use std::cmp::Ord;
 
-type Rect<S> = TypedRect<f32, S>;
-type Point<S> = TypedPoint2D<f32, S>;
+type Rect<S> = EuclidRect<f32, S>;
+type Point<S> = Point2D<f32, S>;
 
 /// An object that has a bounding box.
 ///
@@ -540,7 +540,7 @@ impl<S> Spatial<S> for Rect<S> {
 
 impl<S> Spatial<S> for Point<S> {
     fn aabb(&self) -> Rect<S> {
-        Rect::new(*self, TypedSize2D::new(0.0, 0.0))
+        Rect::new(*self, Size2D::new(0.0, 0.0))
     }
 }
 

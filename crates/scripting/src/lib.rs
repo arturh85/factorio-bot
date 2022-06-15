@@ -1,5 +1,5 @@
+use factorio_bot_core::miette::{IntoDiagnostic, Result};
 use gag::BufferRedirect;
-use miette::{IntoDiagnostic, Result};
 use std::io::Read;
 
 pub fn redirect_buffers(redirect: bool) -> Option<(BufferRedirect, BufferRedirect)> {

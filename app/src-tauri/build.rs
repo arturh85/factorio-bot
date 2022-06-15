@@ -6,6 +6,7 @@ fn main() {
   }
   #[cfg(windows)]
   {
+    // set .exe file properties
     let mut res = winres::WindowsResource::new();
     res.set("ProductName", "Factorio-Bot");
     res.set("FileDescription", "Factorio-Bot");

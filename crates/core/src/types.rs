@@ -3,7 +3,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use euclid::{Point2D as TypedPoint2D, Size2D as TypedSize2D};
+use euclid::{Point2D, Size2D};
 use factorio_blueprint::objects::Entity;
 use noisy_float::prelude::*;
 use num_traits::ToPrimitive;
@@ -155,15 +155,15 @@ impl Pos {
     }
 }
 
-impl From<TypedPoint2D<f32, Rect>> for Position {
-    fn from(typed: TypedPoint2D<f32, Rect>) -> Position {
-        Position::new(typed.x as f64, typed.y as f64)
+impl From<Point2D<f32, Rect>> for Position {
+    fn from(point: Point2D<f32, Rect>) -> Position {
+        Position::new(point.x as f64, point.y as f64)
     }
 }
 
-impl From<Position> for TypedPoint2D<f32, Rect> {
-    fn from(typed: Position) -> TypedPoint2D<f32, Rect> {
-        TypedPoint2D::new(typed.x() as f32, typed.y() as f32)
+impl From<Position> for Point2D<f32, Rect> {
+    fn from(pos: Position) -> Point2D<f32, Rect> {
+        Point2D::new(pos.x() as f32, pos.y() as f32)
     }
 }
 
@@ -331,7 +331,7 @@ impl Into<QuadTreeRect> for Rect {
     fn into(self) -> QuadTreeRect {
         QuadTreeRect::new(
             self.left_top.clone().into(),
-            TypedSize2D::new(self.width() as f32, self.height() as f32),
+            Size2D::new(self.width() as f32, self.height() as f32),
         )
     }
 }

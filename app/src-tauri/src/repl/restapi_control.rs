@@ -1,5 +1,6 @@
 use crate::context::Context;
 use crate::repl::{Error, Subcommand};
+use clap::builder::PossibleValuesParser;
 use factorio_bot_core::miette::{IntoDiagnostic, Result};
 use factorio_bot_core::paris::{error, info};
 use factorio_bot_restapi::webserver;
@@ -51,10 +52,10 @@ impl Subcommand for ThisCommand {
       Command::new(self.name()).about("start/stop restapi").arg(
         Arg::new("action")
           .default_value(Action::Start.into())
-          .possible_values(Action::iter().map(|action| {
+          .value_parser(PossibleValuesParser::new(Action::iter().map(|action| {
             let message = action.get_message().unwrap();
             PossibleValue::new(action.into()).help(message)
-          }))
+          })))
           .help("either start or stop restapi server"),
       ),
       |args, context| Box::pin(run(args, context)),

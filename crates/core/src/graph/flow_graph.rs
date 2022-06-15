@@ -7,7 +7,7 @@ use crate::types::{
     Position, Rect,
 };
 use dashmap::DashMap;
-use euclid::{Point2D as TypedPoint2D, Size2D as TypedSize2D};
+use euclid::{Point2D, Size2D};
 use miette::Result;
 use num_traits::ToPrimitive;
 use paris::warn;
@@ -56,10 +56,7 @@ impl FlowGraph {
             recipes: entity_graph.recipes(),
             entity_graph,
             flow_tree: RwLock::new(FlowQuadTree::new(
-                QuadTreeRect::new(
-                    TypedPoint2D::new(-5120., -5120.),
-                    TypedSize2D::new(10240., 10240.),
-                ),
+                QuadTreeRect::new(Point2D::new(-5120., -5120.), Size2D::new(10240., 10240.)),
                 true,
                 32,
                 128,

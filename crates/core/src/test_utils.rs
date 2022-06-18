@@ -119,7 +119,7 @@ pub fn fixture_world() -> FactorioWorld {
     spawn_trees(&mut entities, 100, Position::new(-20., -20.));
     spawn_ore(
         &mut entities,
-        add_to_rect(&Rect::from_wh(10., 10.), &Position::new(0., 0.)),
+        add_to_rect(&Rect::from_wh(10., 10.), &Position::new(-40., 40.)),
         &EntityName::IronOre.to_string(),
     );
     spawn_ore(

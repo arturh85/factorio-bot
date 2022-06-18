@@ -21,7 +21,9 @@ pub async fn run_script(
 ) -> miette::Result<(String, String)> {
   match language {
     #[cfg(feature = "lua")]
-    "lua" => run_lua(planner, code, filename, bot_count, redirect).await,
+    "lua" => run_lua(planner, code, filename, bot_count, redirect)
+      .await
+      .map(|n| n.1),
     #[cfg(feature = "rune")]
     "rune" => run_rune(planner, code, filename, bot_count, redirect).await,
     #[cfg(feature = "rhai")]

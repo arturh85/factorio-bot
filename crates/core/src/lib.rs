@@ -22,6 +22,7 @@ pub use num_traits;
 pub use parking_lot;
 pub use petgraph;
 pub use rand;
+pub use regex;
 pub use rlua;
 pub use rlua_serde;
 pub use serde;

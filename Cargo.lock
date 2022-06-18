@@ -1420,6 +1420,7 @@ dependencies = [
  "ptree",
  "rand 0.8.5",
  "rcon",
+ "regex",
  "rlua",
  "rlua_serde",
  "runas",
@@ -1449,7 +1450,7 @@ dependencies = [
  "factorio-bot-core",
  "miette",
  "num-traits 0.2.15",
- "okapi 0.6.0-alpha-1",
+ "okapi",
  "rocket",
  "rocket_okapi",
  "schemars",
@@ -1475,7 +1476,9 @@ dependencies = [
  "factorio-bot-core",
  "factorio-bot-scripting",
  "itertools",
+ "miette",
  "rlua-async",
+ "rlua_serde",
  "tokio",
 ]
 
@@ -3274,17 +3277,6 @@ dependencies = [
 
 [[package]]
 name = "okapi"
-version = "0.6.0-alpha-1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb085e00daf8d75b9dbf0ffdb4738e69503e28898d9641fa8bdc6ad536c7bcf4"
-dependencies = [
- "schemars",
- "serde 1.0.137",
- "serde_json",
-]
-
-[[package]]
-name = "okapi"
 version = "0.7.0-rc.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce66b6366e049880a35c378123fddb630b1a1a3c37fa1ca70caaf4a09f6e2893"
@@ -4400,7 +4392,7 @@ checksum = "489f4f5b120762f7974e65b919fc462d0660fd8b839026d8985b850fe5acccb0"
 dependencies = [
  "either",
  "log",
- "okapi 0.7.0-rc.1",
+ "okapi",
  "rocket",
  "rocket_okapi_codegen",
  "schemars",

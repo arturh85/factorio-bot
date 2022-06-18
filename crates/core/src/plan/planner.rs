@@ -19,6 +19,7 @@ pub struct Planner {
 impl Planner {
     pub fn new(world: Arc<FactorioWorld>, rcon: Option<Arc<FactorioRcon>>) -> Planner {
         let plan_world = (*world).clone();
+
         Planner {
             graph: Arc::new(RwLock::new(TaskGraph::new())),
             rcon,

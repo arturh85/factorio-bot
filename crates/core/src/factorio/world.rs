@@ -459,10 +459,10 @@ impl Clone for FactorioWorld {
     fn clone(&self) -> Self {
         let entity_prototypes = Arc::new((*self.entity_prototypes).clone());
         let recipes = Arc::new((*self.recipes).clone());
-        let entity_graph = Arc::new(EntityGraph::new(entity_prototypes.clone(), recipes.clone()));
-
+        let entity_graph = Arc::new((*self.entity_graph).clone());
+        let _entity_graph = entity_graph.clone();
         FactorioWorld {
-            entity_graph: entity_graph.clone(),
+            entity_graph,
             recipes,
             entity_prototypes,
             players: self.players.clone(),
@@ -473,7 +473,7 @@ impl Clone for FactorioWorld {
             actions: self.actions.clone(),
             path_requests: self.path_requests.clone(),
             next_action_id: Mutex::new(0),
-            flow_graph: Arc::new(FlowGraph::new(entity_graph)),
+            flow_graph: Arc::new(FlowGraph::new(_entity_graph)),
         }
     }
 

@@ -99,6 +99,13 @@ impl EntityGraph {
         let resource = self.resources.get(resource_name);
         if resource.is_none() {
             warn!("no resource patch found for '{}'", resource_name);
+            warn!(
+                "available resource paths '{:?}'",
+                self.resources
+                    .iter()
+                    .map(|f| f.key().to_string())
+                    .collect::<Vec<_>>()
+            );
             return vec![];
         }
         for point in resource.unwrap().iter() {
@@ -522,6 +529,7 @@ impl EntityGraph {
         let tree = self.entity_tree.read();
         let mut edges_to_add: Vec<(NodeIndex, NodeIndex, f64)> = vec![];
         let nodes: Vec<NodeIndex> = self.entity_graph.read().node_indices().collect();
+        println!("connecting {} nodes", nodes.len());
         for node_index in nodes {
             let inner = self.entity_graph.read();
             let node_index = node_index;

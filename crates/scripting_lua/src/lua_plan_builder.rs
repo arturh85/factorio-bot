@@ -4,7 +4,7 @@ use factorio_bot_core::parking_lot::RwLock;
 use factorio_bot_core::plan::plan_builder::PlanBuilder;
 use factorio_bot_core::rlua;
 use factorio_bot_core::rlua::{Context, Table};
-use factorio_bot_core::types::{PlayerId, Position};
+use factorio_bot_core::types::{FactorioEntity, PlayerId, Position};
 use std::sync::Arc;
 
 pub fn create_lua_plan_builder(
@@ -26,6 +26,28 @@ pub fn create_lua_plan_builder(
                         Position::new(position.get("x").unwrap(), position.get("y").unwrap()),
                         name.as_str(),
                         count,
+                    )
+                    .unwrap();
+                Ok(())
+            },
+        )?,
+    )?;
+    let plan_builder = _plan_builder.clone();
+    map_table.set(
+        "place",
+        ctx.create_function(
+            move |_ctx, (player_id, position, name): (PlayerId, Table, String)| {
+                plan_builder
+                    .add_place(
+                        player_id,
+                        FactorioEntity {
+                            name,
+                            position: Position::new(
+                                position.get("x").unwrap(),
+                                position.get("y").unwrap(),
+                            ),
+                            ..Default::default()
+                        },
                     )
                     .unwrap();
                 Ok(())

@@ -14,6 +14,8 @@ factorio-bot-core = { path = "../core" }
 factorio-bot-scripting = { path = "../scripting" }
 itertools = "^0.10"
 rlua-async = "^0.5"
+rlua_serde = { git = "https://github.com/creepinson/rlua_serde" } # fork which is compatible with rlua 0.19
+miette = {version = "^4.7", features = ["fancy"] }
 
 [dev-dependencies]
 tokio = { version = "^1.19", features = ["full", "tracing"] }

@@ -2,18 +2,18 @@ use crate::lua_plan_builder::create_lua_plan_builder;
 use crate::lua_rcon::create_lua_rcon;
 use crate::lua_world::create_lua_world;
 use factorio_bot_core::graph::task_graph::TaskGraph;
-use factorio_bot_core::miette::{IntoDiagnostic, Result};
 use factorio_bot_core::paris::{error, info, warn};
 use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_core::process::process_control::{
     FactorioInstance, FactorioParams, FactorioStartCondition,
 };
-use factorio_bot_core::rlua;
 use factorio_bot_core::rlua::{Lua, Variadic};
 use factorio_bot_core::settings::FactorioSettings;
 use factorio_bot_core::tokio::runtime::Runtime;
+use factorio_bot_core::{rlua, serde_json};
 use factorio_bot_scripting::{buffers_to_string, redirect_buffers};
 use itertools::Itertools;
+use miette::{IntoDiagnostic, Result};
 use rlua_async::ChunkExt;
 use std::fs::read_to_string;
 use std::io::{stdout, Read, Write};
@@ -24,10 +24,10 @@ use std::time::Instant;
 pub async fn run_lua(
     planner: &mut Planner,
     lua_code: &str,
-    _filename: Option<&str>,
+    filename: Option<&str>,
     bot_count: u8,
     redirect: bool,
-) -> Result<(String, String)> {
+) -> Result<(Option<serde_json::Value>, (String, String))> {
     let buffers = redirect_buffers(redirect);
     let all_bots = planner.initiate_missing_players_with_default_inventory(bot_count);
     planner.update_plan_world();
@@ -36,6 +36,7 @@ pub async fn run_lua(
         let world = create_lua_world(ctx, planner.plan_world.clone())?;
         let plan = create_lua_plan_builder(ctx, planner.graph.clone(), planner.plan_world.clone())?;
         let globals = ctx.globals();
+        globals.set("all_bot_count", all_bots.len())?;
         globals.set("all_bots", all_bots)?;
         globals.set("world", world)?;
         globals.set(
@@ -66,23 +67,28 @@ pub async fn run_lua(
         }
         Ok(())
     }) {
-        error!("{}", err)
+        error!("error setting up context: {}", err)
     }
 
     let lua_code = lua_code.to_owned();
-    thread::spawn(move || {
-        if let Err(err) = lua.context::<_, rlua::Result<()>>(|ctx| {
+    let filename = filename.unwrap_or("unknown").to_owned();
+    let result = thread::spawn(move || {
+        match lua.context::<_, rlua::Result<Option<serde_json::Value>>>(|ctx| {
             let chunk = ctx.load(&lua_code);
             let rt = Runtime::new().unwrap();
             rt.block_on(chunk.exec_async(ctx))?;
-            Ok(())
+            let result: Option<rlua::Value> = ctx.globals().get("result")?;
+
+            Ok(result.map(|r| rlua_serde::from_value(r).unwrap()))
         }) {
-            error!("{}", err)
+            Ok(result) => Ok(result),
+            Err(err) => Err(crate::error::to_lua_error(err, &filename, &lua_code)),
         }
     })
     .join()
-    .unwrap();
-    buffers_to_string(buffers)
+    .unwrap()?;
+    let buffers = buffers_to_string(buffers)?;
+    Ok((result, buffers))
 }
 
 #[allow(dead_code)]
@@ -211,6 +217,7 @@ pub async fn start_factorio_and_plan_graph(
 
 #[cfg(test)]
 mod tests {
+    use factorio_bot_core::serde_json::json;
     use factorio_bot_core::test_utils::{draw_world, fixture_world};
     use std::sync::Arc;
 
@@ -255,17 +262,11 @@ mod tests {
     async fn test_mining() {
         let world = Arc::new(fixture_world());
         let mut planner = Planner::new(world, None);
-        run_lua(
+        let (_result, _) = run_lua(
             &mut planner,
-            r#"
-    plan.groupStart("Mine Stuff")
-    for idx,playerId in pairs(all_bots) do
-        plan.mine(playerId, {x=idx * 10,y=43}, "rock-huge", 1)
-    end
-    plan.groupEnd()
-        "#,
-            None,
-            2,
+            include_str!("../tests/script.lua"),
+            Some("../tests/script.lua"),
+            1,
             false,
         )
         .await
@@ -276,22 +277,73 @@ mod tests {
             r#"digraph {
     0 [ label = "Process Start" ]
     1 [ label = "Process End" ]
-    2 [ label = "Start: Mine Stuff" ]
-    3 [ label = "Walk to [10, 43]" ]
-    4 [ label = "Mining rock-huge" ]
-    5 [ label = "Walk to [20, 43]" ]
-    6 [ label = "Mining rock-huge" ]
-    7 [ label = "End" ]
+    2 [ label = "Start: Build Starter Miner/Furnace" ]
+    3 [ label = "Walk to [-36, 36]" ]
+    4 [ label = "Place burner-mining-drill at [-36, 36] (North)" ]
+    5 [ label = "Place stone-furnace at [-36, 34] (North)" ]
+    6 [ label = "End" ]
     0 -> 2 [ label = "0" ]
-    2 -> 3 [ label = "45" ]
-    2 -> 5 [ label = "48" ]
-    3 -> 4 [ label = "3" ]
-    4 -> 7 [ label = "3" ]
-    5 -> 6 [ label = "3" ]
-    6 -> 7 [ label = "0" ]
-    7 -> 1 [ label = "0" ]
+    2 -> 3 [ label = "51" ]
+    3 -> 4 [ label = "1" ]
+    4 -> 5 [ label = "1" ]
+    5 -> 6 [ label = "0" ]
+    6 -> 1 [ label = "0" ]
 }
 "#,
         );
+    }
+
+    #[tokio::test]
+    async fn test_free_rect_from_center() {
+        result_test(
+            1,
+            r#"
+result = world.findFreeResourceRect("iron-ore", 2, 2, {x=0,y=0})
+"#,
+            json!({
+                "leftTop": {"x": -36.0, "y": 36.0},
+                "rightBottom": {"x": -34.0, "y": 38.0}
+            }),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_free_rect_from_top() {
+        result_test(
+            1,
+            r#"
+result = world.findFreeResourceRect("iron-ore", 2, 2, {x=0,y=-200})
+"#,
+            json!({
+                "leftTop": {"x": -37.0, "y": 35.0},
+                "rightBottom": {"x": -35.0, "y": 37.0}
+            }),
+        )
+        .await
+    }
+
+    async fn _graph_test(bot_count: u8, code: &str, expected: &str) {
+        let world = Arc::new(fixture_world());
+        let mut planner = Planner::new(world, None);
+        let (_, _) = run_lua(&mut planner, code, None, bot_count, false)
+            .await
+            .expect("run_lua failed");
+
+        let graph = planner.graph();
+        assert_eq!(graph.graphviz_dot(), expected,);
+    }
+
+    async fn result_test(bot_count: u8, code: &str, expected: serde_json::Value) {
+        let world = Arc::new(fixture_world());
+        let mut planner = Planner::new(world, None);
+        let (result, _) = run_lua(&mut planner, code, None, bot_count, false)
+            .await
+            .expect("run_lua failed");
+
+        let actual = serde_json::to_string(&result.expect("no result found")).unwrap();
+        let expected = serde_json::to_string(&expected).unwrap();
+
+        assert_eq!(actual, expected);
     }
 }

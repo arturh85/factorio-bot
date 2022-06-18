@@ -12,6 +12,36 @@ blueprints = {
     MinerLine = "0eNqdl11v2yAUhv9KxLWdBPBH7MtN603Vq3ZSt2ma/MEyJAwIcFcr8n8vcapoWjztwJWFDQ+Hw3l5zQm1YmTacOlQfUI9s53h2nElUY0e1Wg6Vm9+Oadtvdv9bDqnDFdLd7vt1LB74ez3Ln24+/rhy2d83368e+0n3d4PzyhBVjY6dSo9Gt6f4a+oLhM0oZrgOUFNa5UYHUvP3TSXR1Q7M7IE8U5Ji+pvJ2T5UTbiPNRNmvmAuGODB8tmOLeYYJ0zvEsHLv34tDdcCOTRXPbMT4bn7wli0nHH2QW4NKYfchxaZnyH/6ASpJXll2Qs4eNtvizAP/00PTd+1PKVzMkNnVzpzjTSamVc2jLhbrH0Hbv/G5utYGlo0Pm/gi5W6Flw0AQSdB6MxRBsEbuBOWQDyyvdDo0Q6XUOrQS7ZZN3tl/BvEI7BKcgg6SgCsZSCBbvY8ssg5QZxsFhF6Cww0WXg7jRqitB6chiC/kAKWQcLr8DKCtFMLcEcSOVh/fr0sPh2sOgsxiHq6+CcEm0+m7jXqs3Eu98BGR94TLEIB8hNBwMchKSRWecgjKeR2cc5FUkXIoY5C+kDAeDHIZEiBLkASRclBhkAjRelQWkRmi8KitIjVASeayW68cqjRAjyFdo+F8oBhkLzaN3sALtYIQKQYZAw1VIVhzM34eWK1T9x60vQaLxJP/ugWw3nxojps2TUv79CzP2UkwHnJVZVRYl3hd5Mc9vau2sKw=="
 }
 
+
+
+
+function buildStarterMinerFurnace(bot, ore, count)
+    local rect = world.findFreeResourceRect(ore, 2*count, 2, {x=0,y=0})
+    dump(rect.leftTop, "leftTop")
+    dump(rect.rightBottom, "rightBottom")
+
+    --    local anchor = rect.topLeft
+
+    --    if count > #bots then
+    --        for idx, bot in pairs(bots) do
+    --            plan.place(bot, {x=anchor.x + ((idx - 1) * 2), y=anchor.y}, "burner-mining-drill")
+    --        end
+    --
+    --    else
+    --
+    --    end
+
+end
+
+
+
+-- Milestone 1: Research Automation
+-- Sub Target 1: Mine Iron & Copper
+-- Sub Target 2: Build Power Production near Water
+-- Sub Target 3: Build Science Facilities
+
+
+
 function dump(tbl, label)
     print("dumping " .. label)
     for k,v in pairs(tbl) do
@@ -19,6 +49,7 @@ function dump(tbl, label)
     end
     print("------------")
 end
+
 
 --local recipe = world.recipe("inserter")
 --print("recipe: " .. tostring(recipe))
@@ -40,23 +71,6 @@ function mine_with_bots(bots, search_center, name, type)
     plan.groupEnd()
 end
 
-function buildStarterMinerFurnace(bots, ore, count)
-    local rect = world.findFreeResourceRect(ore, 2*count, 2, {x=0,y=0})
-    dump(rect.leftTop, "leftTop")
-    dump(rect.rightBottom, "rightBottom")
-
---    local anchor = rect.topLeft
-
---    if count > #bots then
---        for idx, bot in pairs(bots) do
---            plan.place(bot, {x=anchor.x + ((idx - 1) * 2), y=anchor.y}, "burner-mining-drill")
---        end
---
---    else
---
---    end
-
-end
 
 function build_starter_base(bots)
     buildStarterMinerFurnace(bots, "iron-ore", 2)
@@ -68,11 +82,11 @@ function build_starter_base(bots)
     --    build_starter_science()
 end
 
-print("start script")
-mine_with_bots(all_bots, {x=0,y=0}, "rock-huge", nil)
-mine_with_bots(all_bots, {x=0,y=0}, nil, "tree")
-build_starter_base(all_bots)
-print("end script")
+--print("start script")
+--mine_with_bots(all_bots, {x=0,y=0}, "rock-huge", nil)
+--mine_with_bots(all_bots, {x=0,y=0}, nil, "tree")
+--build_starter_base(all_bots)
+--print("end script")
 --mine_with_bots(bots, {0,0}, nil, "tree")
 --build_starter_base()
 --research("automation")
@@ -82,3 +96,35 @@ print("end script")
 
 
 
+
+if table.getn(all_bots) == 1 then
+    -- place burner-mining-drill & stone-furnace @ iron-ore field
+    buildStarterMinerFurnace(all_bots[1], "iron-ore", 1)
+    -- loop get min 2x coal from rocks or coal ore -> place in iron burner-mining-drill & stone-furnace -> get all iron-plate until enough for second burner-mining-drill
+
+    -- if not already get enough stone from rocks or stone ore for second burner-mining-drill
+    -- craft second burner-mining-drill
+    -- place stone burner-mining-drill
+    -- loop get min 2x coal -> place in iron burner-mining-drill & stone-furnace -> get all iron-plate until enough for third burner-mining-drill
+    -- loop get min 1x coal -> place in stone burner-mining-drill -> get all stone until enough for 2 more burner-mining-drill
+    -- craft 2 more burner-mining-drill
+    -- place coal burner-mining-drill loop with 2 elements & insert wood
+
+    -- (build burner-mining-drill & stone-furnace @ copper-ore field)
+elseif table.getn(all_bots) == 2 then
+    -- first bot =>
+    -- place burner-mining-drill & stone-furnace @ iron-ore field
+    -- loop get min 2x coal from rocks or coal ore -> place in iron burner-mining-drill & stone-furnace -> get all iron-plate until enough for second burner-mining-drill
+    -- second bot =>
+    -- place burner-mining-drill @ stone field
+    -- loop get min 1x coal from rocks or coal ore -> place in stone burner-mining-drill
+elseif table.getn(all_bots) == 3 then
+    -- first bot =>
+    -- place burner-mining-drill & stone-furnace @ iron-ore field
+    -- loop get min 2x coal from rocks or coal ore -> place in iron burner-mining-drill & stone-furnace -> get all iron-plate until enough for second burner-mining-drill
+    -- second bot =>
+    -- give burner-mining-drill to third bot
+    -- third bot =>
+    -- wait for second bot to give BMD
+    -- place coal burner-mining-drill loop with 2 elements & insert wood
+end

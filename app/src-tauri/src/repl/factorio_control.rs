@@ -1,12 +1,13 @@
 use crate::context::Context;
 use crate::repl::{Error, Subcommand};
-use clap::builder::PossibleValuesParser;
 use factorio_bot_core::miette::{IntoDiagnostic, Result};
 use factorio_bot_core::paris::{error, info};
 use factorio_bot_core::process::process_control::{
   FactorioInstance, FactorioParams, FactorioStartCondition,
 };
-use reedline_repl_rs::clap::{Arg, ArgMatches, Command, PossibleValue};
+use reedline_repl_rs::clap::{
+  builder::PossibleValuesParser, Arg, ArgMatches, Command, PossibleValue,
+};
 use reedline_repl_rs::crossterm::event::{KeyCode, KeyModifiers};
 use reedline_repl_rs::reedline::ReedlineEvent;
 use reedline_repl_rs::Repl;

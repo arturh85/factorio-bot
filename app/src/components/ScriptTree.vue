@@ -10,8 +10,7 @@ const scriptStore = useScriptStore()
 const loadingScriptsInDirectory = computed(() => scriptStore.getLoadingScriptsInDirectory)
 
 onMounted(async() => {
-  const realNodes = await scriptStore.loadScriptsInDirectory('/')
-  nodes.value = realNodes
+  nodes.value = await scriptStore.loadScriptsInDirectory('/')
 })
 
 const emit = defineEmits(['select']);

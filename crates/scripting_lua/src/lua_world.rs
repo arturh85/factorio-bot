@@ -1,5 +1,4 @@
 use factorio_bot_core::factorio::world::FactorioWorld;
-use factorio_bot_core::paris::info;
 use factorio_bot_core::rlua;
 use factorio_bot_core::rlua::{Context, Table};
 use factorio_bot_core::rlua_serde;
@@ -34,9 +33,7 @@ pub fn create_lua_world(ctx: Context, _world: Arc<FactorioWorld>) -> rlua::Resul
         "findFreeResourceRect",
         ctx.create_function(
             move |_ctx, (ore_name, width, height, near): (String, u32, u32, Table)| {
-                info!("entity graph {:?}", *world.entity_graph.inner_graph());
                 let patches = world.entity_graph.resource_patches(ore_name.as_str());
-
                 let near = Position::new(near.get("x").unwrap(), near.get("y").unwrap());
                 for patch in patches {
                     let rect = patch.find_free_rect(width, height, &near);

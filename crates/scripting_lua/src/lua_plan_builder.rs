@@ -13,6 +13,7 @@ pub fn create_lua_plan_builder(
     world: Arc<FactorioWorld>,
 ) -> rlua::Result<Table> {
     let map_table = ctx.create_table()?;
+    let _world = world.clone();
     let _plan_builder = Arc::new(PlanBuilder::new(graph, world));
 
     let plan_builder = _plan_builder.clone();
@@ -33,24 +34,23 @@ pub fn create_lua_plan_builder(
         )?,
     )?;
     let plan_builder = _plan_builder.clone();
+    // let world = _world.clone();
+    let world = _world;
     map_table.set(
         "place",
         ctx.create_function(
             move |_ctx, (player_id, position, name): (PlayerId, Table, String)| {
-                plan_builder
-                    .add_place(
-                        player_id,
-                        FactorioEntity {
-                            name,
-                            position: Position::new(
-                                position.get("x").unwrap(),
-                                position.get("y").unwrap(),
-                            ),
-                            ..Default::default()
-                        },
-                    )
-                    .unwrap();
-                Ok(())
+                let entity = FactorioEntity::from_prototype(
+                    &name,
+                    Position::new(position.get("x").unwrap(), position.get("y").unwrap()),
+                    None,
+                    None,
+                    None,
+                    world.entity_prototypes.clone(),
+                )
+                .expect("failed to build entity");
+                let entity = plan_builder.add_place(player_id, entity).unwrap();
+                Ok(entity)
             },
         )?,
     )?;

@@ -93,6 +93,38 @@ impl EntityGraph {
         }
     }
 
+    pub fn find_entities_in_radius(
+        &self,
+        search_center: Position,
+        radius: f64,
+        search_name: Option<String>,
+        search_type: Option<String>,
+    ) -> Vec<FactorioEntity> {
+        let tree = self.entity_tree.read();
+        let rect = QuadTreeRect::new(
+            Position::new(search_center.x - radius, search_center.y - radius).into(),
+            Size2D::new(2. * radius as f32, 2. * radius as f32),
+        );
+        let mut entities = vec![];
+        for (entity, _rect, _item_id) in tree.query(rect) {
+            if let Some(search_name) = search_name.as_ref() {
+                if entity.name != *search_name {
+                    continue;
+                }
+            }
+            if let Some(search_type) = search_type.as_ref() {
+                if entity.entity_type != *search_type {
+                    continue;
+                }
+            }
+            if entity.position.distance(&search_center) > radius {
+                continue;
+            }
+            entities.push(entity.clone())
+        }
+        entities
+    }
+
     pub fn resource_patches(&self, resource_name: &str) -> Vec<ResourcePatch> {
         let mut patches: Vec<ResourcePatch> = vec![];
         let mut positions_by_id: HashMap<Pos, Option<u32>> = HashMap::new();
@@ -235,22 +267,24 @@ impl EntityGraph {
             }
 
             if let Ok(entity_type) = EntityType::from_str(&entity.entity_type) {
-                match entity_type {
-                    EntityType::Furnace
-                    | EntityType::Inserter
-                    | EntityType::Boiler
-                    | EntityType::Lab
-                    | EntityType::OffshorePump
-                    | EntityType::MiningDrill
-                    | EntityType::StorageTank
-                    | EntityType::Container
-                    | EntityType::Splitter
-                    | EntityType::TransportBelt
-                    | EntityType::UndergroundBelt
-                    | EntityType::Pipe
-                    | EntityType::PipeToGround
-                    | EntityType::LogisticContainer
-                    | EntityType::AssemblingMachine => {
+                match (entity.name.as_str(), &entity_type) {
+                    (_, EntityType::Furnace)
+                    | (_, EntityType::Inserter)
+                    | (_, EntityType::Boiler)
+                    | (_, EntityType::Lab)
+                    | (_, EntityType::OffshorePump)
+                    | (_, EntityType::MiningDrill)
+                    | (_, EntityType::StorageTank)
+                    | (_, EntityType::Container)
+                    | (_, EntityType::Splitter)
+                    | (_, EntityType::TransportBelt)
+                    | (_, EntityType::UndergroundBelt)
+                    | (_, EntityType::Pipe)
+                    | (_, EntityType::PipeToGround)
+                    | (_, EntityType::LogisticContainer)
+                    | (_, EntityType::AssemblingMachine)
+                    | ("rock-big", _)
+                    | ("rock-huge", _) => {
                         if let Some(entity_id) = self.entity_at(&entity.position) {
                             let tree = self.entity_tree.read();
                             let block = tree.get(entity_id).unwrap();

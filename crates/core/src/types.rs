@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::ops::Sub;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -133,6 +134,12 @@ impl From<&Pos> for ChunkPosition {
 pub struct Position {
     pub x: f64,
     pub y: f64,
+}
+
+impl Position {
+    pub fn distance(&self, other: &Position) -> f64 {
+        self.x.sub(other.x).abs() + self.y.sub(other.y).abs()
+    }
 }
 
 impl std::fmt::Display for Position {
@@ -525,24 +532,50 @@ impl FactorioEntity {
         entity: Entity,
         prototypes: Arc<DashMap<String, FactorioEntityPrototype>>,
     ) -> Result<Self> {
-        let prototype = prototypes.get(&entity.name).unwrap();
         let position: Position = entity.position.into();
-        let direction = entity.direction.map(|d| d % 8).unwrap_or(0);
-        Ok(FactorioEntity {
-            bounding_box: add_to_rect_turned(
-                &prototype.collision_box,
-                &position,
-                Direction::from_u8(direction).unwrap(),
-            ),
+        let direction: Option<Direction> = entity
+            .direction
+            .map(|d| Direction::from_u8(d % 8).expect("should always work"));
+        Self::from_prototype(
+            &*entity.name,
             position,
             direction,
-            name: entity.name.clone(),
-            entity_type: prototype.entity_type.clone(),
-            pickup_position: entity.pickup_position.map(|p| p.into()),
-            drop_position: entity.drop_position.map(|p| p.into()),
-            recipe: entity.recipe.clone(),
-            ..Default::default()
-        })
+            entity.pickup_position.map(|p| p.into()),
+            entity.drop_position.map(|p| p.into()),
+            prototypes,
+        )
+    }
+
+    pub fn from_prototype(
+        name: &str,
+        position: Position,
+        direction: Option<Direction>,
+        pickup_position: Option<Position>,
+        drop_position: Option<Position>,
+        prototypes: Arc<DashMap<String, FactorioEntityPrototype>>,
+    ) -> Result<Self> {
+        let direction = direction.unwrap_or(Direction::North);
+        if let Some(prototype) = prototypes.get(name) {
+            Ok(FactorioEntity {
+                bounding_box: add_to_rect_turned(&prototype.collision_box, &position, direction),
+                position,
+                direction: direction.to_u8().unwrap(),
+                name: name.to_owned(),
+                entity_type: prototype.entity_type.clone(),
+                pickup_position,
+                drop_position,
+                ..Default::default()
+            })
+        } else {
+            Ok(FactorioEntity {
+                position,
+                direction: direction.to_u8().unwrap(),
+                name: name.to_owned(),
+                pickup_position,
+                drop_position,
+                ..Default::default()
+            })
+        }
     }
     pub fn new_transport_belt(position: &Position, direction: Direction) -> FactorioEntity {
         FactorioEntity {
@@ -614,6 +647,15 @@ impl FactorioEntity {
             entity_type: EntityType::Tree.to_string(),
             position: position.clone(),
             bounding_box: add_to_rect(&Rect::from_wh(0.8, 0.8), position),
+            ..Default::default()
+        }
+    }
+    pub fn new_rock(position: &Position, name: &str) -> FactorioEntity {
+        FactorioEntity {
+            name: name.to_owned(),
+            entity_type: EntityType::SimpleEntity.to_string(),
+            position: position.clone(),
+            bounding_box: add_to_rect(&Rect::from_wh(1.2, 1.2), position),
             ..Default::default()
         }
     }

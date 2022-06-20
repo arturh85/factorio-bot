@@ -239,7 +239,7 @@ impl FactorioWorld {
     }
 
     pub fn dump(&self, save_path: Option<&str>) -> Result<()> {
-        let content = serde_json::to_string(self).into_diagnostic()?;
+        let content = serde_json::to_string_pretty(self).into_diagnostic()?;
         if let Some(save_path) = save_path {
             fs::write(save_path, &content).into_diagnostic()?;
         } else {

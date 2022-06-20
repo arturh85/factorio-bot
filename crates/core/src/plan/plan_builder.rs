@@ -114,7 +114,7 @@ impl PlanBuilder {
         Ok(())
     }
 
-    pub fn add_place(&self, player_id: PlayerId, entity: FactorioEntity) -> Result<()> {
+    pub fn add_place(&self, player_id: PlayerId, entity: FactorioEntity) -> Result<FactorioEntity> {
         let player = self.player(player_id);
         let distance = calculate_distance(&player.position, &entity.position);
         let build_distance = player.build_distance as f64;
@@ -141,8 +141,8 @@ impl PlanBuilder {
                 player_id,
                 main_inventory: inventory,
             })?;
-        self.world.on_some_entity_created(entity)?;
-        Ok(())
+        self.world.on_some_entity_created(entity.clone())?;
+        Ok(entity)
     }
 
     pub fn group_start(&self, label: &str) {

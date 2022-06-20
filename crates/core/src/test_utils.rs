@@ -76,6 +76,31 @@ pub fn spawn_trees(entities: &mut Vec<FactorioEntity>, count: u32, around: Posit
         y += dy;
     }
 }
+pub fn spawn_rocks(entities: &mut Vec<FactorioEntity>, count: u32, around: Position, name: &str) {
+    let a_x = around.x() as i32;
+    let a_y = around.y() as i32;
+    let mut x = 0;
+    let mut y = 0;
+    let mut t;
+    let mut dx = 0;
+    let mut dy = -1;
+    for _ in 0..count * 100 {
+        entities.push(FactorioEntity::new_rock(
+            &Position::new((a_x + x) as f64, (a_y + y) as f64),
+            name,
+        ));
+        if entities.len() >= count as usize {
+            break;
+        }
+        if (x == y) || ((x < 0) && (x == -y)) || ((x > 0) && (x == 1 - y)) {
+            t = dx;
+            dx = -dy;
+            dy = t;
+        }
+        x += dx;
+        y += dy;
+    }
+}
 
 pub fn spawn_ore(entities: &mut Vec<FactorioEntity>, rect: Rect, resource_name: &str) {
     for pos in rect_fields(&rect) {
@@ -116,6 +141,8 @@ pub fn fixture_world() -> FactorioWorld {
     let mut entities: Vec<FactorioEntity> = vec![];
     let mut tiles: Vec<FactorioTile> = vec![];
 
+    spawn_rocks(&mut entities, 3, Position::new(20., 20.), "rock-huge");
+    spawn_rocks(&mut entities, 2, Position::new(40., 30.), "rock-big");
     spawn_trees(&mut entities, 100, Position::new(-20., -20.));
     spawn_ore(
         &mut entities,

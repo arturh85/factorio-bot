@@ -18,6 +18,8 @@ pub async fn run_rune(
 ) -> Result<(String, String)> {
     info!("rune");
     let buffers = redirect_buffers(redirect);
+    let stdout = String::new();
+    let stderr = String::new();
     let _all_bots = planner.initiate_missing_players_with_default_inventory(bot_count);
     planner.update_plan_world();
     let plan_builder = Arc::new(PlanBuilder::new(
@@ -92,8 +94,8 @@ pub async fn run_rune(
     // if let Err(err) = engine.run_with_scope(&mut scope, code) {
     // handle_rhai_err(*err, code, filename)?;
     // }
-    // Ok((buffers_to_string(buffers)?, scope))
-    buffers_to_string(buffers)
+    // Ok((buffers_to_string(&stdout, &stderr, buffers)?, scope))
+    buffers_to_string(&stdout, &stderr, buffers)
 }
 
 #[cfg(test)]

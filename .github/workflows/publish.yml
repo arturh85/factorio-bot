@@ -102,7 +102,7 @@ jobs:
           sudo apt-get install -y webkit2gtk-4.0 libgtksourceview-3.0-dev
       - name: ⚡ install cargo mdbook (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
-        run: cargo install mdbook --force
+        run: cargo install mdbook mdbook-mermaid
       - name: ⚡ install NodeJS dependencies
         run: cd app; yarn
       - name: 🦠 extract version from app/src-tauri/Cargo.toml to package.json & tauri.conf.json & ENV

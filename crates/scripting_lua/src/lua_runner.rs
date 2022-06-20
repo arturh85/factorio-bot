@@ -3,6 +3,7 @@ use crate::lua_rcon::create_lua_rcon;
 use crate::lua_world::create_lua_world;
 use factorio_bot_core::graph::task_graph::TaskGraph;
 use factorio_bot_core::paris::{error, info, warn};
+use factorio_bot_core::parking_lot::Mutex;
 use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_core::process::process_control::{
     FactorioInstance, FactorioParams, FactorioStartCondition,
@@ -18,6 +19,7 @@ use rlua_async::ChunkExt;
 use std::fs::read_to_string;
 use std::io::{stdout, Read, Write};
 use std::path::Path;
+use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
@@ -29,6 +31,8 @@ pub async fn run_lua(
     redirect: bool,
 ) -> Result<(Option<serde_json::Value>, (String, String))> {
     let buffers = redirect_buffers(redirect);
+    let stdout = Arc::new(Mutex::new(String::new()));
+    let stderr = Arc::new(Mutex::new(String::new()));
     let all_bots = planner.initiate_missing_players_with_default_inventory(bot_count);
     planner.update_plan_world();
     let lua = Lua::new();
@@ -39,24 +43,38 @@ pub async fn run_lua(
         globals.set("all_bot_count", all_bots.len())?;
         globals.set("all_bots", all_bots)?;
         globals.set("world", world)?;
+        let _stdout = stdout.clone();
         globals.set(
             "print",
-            ctx.create_function(|_, strings: Variadic<String>| {
+            ctx.create_function(move |_, strings: Variadic<String>| {
                 info!("<cyan>lua</>   ⮞ {}", strings.iter().join(" "));
+                let mut stdout = _stdout.lock();
+                *stdout += &strings.iter().join(" ");
+                *stdout += "\n";
                 Ok(())
             })?,
         )?;
+        let _stderr = stderr.clone();
         globals.set(
             "print_err",
-            ctx.create_function(|_, strings: Variadic<String>| {
+            ctx.create_function(move |_, strings: Variadic<String>| {
                 error!("<cyan>lua</>   ⮞ {}", strings.iter().join(" "));
+                let mut stderr = _stderr.lock();
+                *stderr += "ERROR: ";
+                *stderr += &strings.iter().join(" ");
+                *stderr += "\n";
                 Ok(())
             })?,
         )?;
+        let _stdout = stdout.clone();
         globals.set(
             "print_warn",
-            ctx.create_function(|_, strings: Variadic<String>| {
+            ctx.create_function(move |_, strings: Variadic<String>| {
                 warn!("<cyan>lua</>   ⮞ {}", strings.iter().join(" "));
+                let mut stdout = _stdout.lock();
+                *stdout += "WARN: ";
+                *stdout += &strings.iter().join(" ");
+                *stdout += "\n";
                 Ok(())
             })?,
         )?;
@@ -87,7 +105,9 @@ pub async fn run_lua(
     })
     .join()
     .unwrap()?;
-    let buffers = buffers_to_string(buffers)?;
+    let stdout = stdout.lock().to_owned();
+    let stderr = stderr.lock().to_owned();
+    let buffers = buffers_to_string(&stdout, &stderr, buffers)?;
     Ok((result, buffers))
 }
 
@@ -217,17 +237,13 @@ pub async fn start_factorio_and_plan_graph(
 
 #[cfg(test)]
 mod tests {
+    use factorio_bot_core::gantt_mermaid::to_mermaid_gantt;
     use factorio_bot_core::serde_json::json;
     use factorio_bot_core::test_utils::{draw_world, fixture_world};
     use std::sync::Arc;
+    use tokio::fs;
 
     use super::*;
-
-    #[test]
-    fn test_draw_world() {
-        let world = Arc::new(fixture_world());
-        draw_world(world, "tests/world.png");
-    }
 
     // #[test]
     // fn test_dumped_world() {
@@ -259,38 +275,82 @@ mod tests {
     // }
 
     #[tokio::test]
-    async fn test_mining() {
+    async fn test_script() {
         let world = Arc::new(fixture_world());
-        let mut planner = Planner::new(world, None);
-        let (_result, _) = run_lua(
-            &mut planner,
-            include_str!("../tests/script.lua"),
-            Some("../tests/script.lua"),
-            1,
-            false,
-        )
-        .await
-        .expect("run_lua failed");
-        let graph = planner.graph();
-        assert_eq!(
-            graph.graphviz_dot(),
-            r#"digraph {
-    0 [ label = "Process Start" ]
-    1 [ label = "Process End" ]
-    2 [ label = "Start: Build Starter Miner/Furnace" ]
-    3 [ label = "Walk to [-36, 36]" ]
-    4 [ label = "Place burner-mining-drill at [-36, 36] (North)" ]
-    5 [ label = "Place stone-furnace at [-36, 34] (North)" ]
-    6 [ label = "End" ]
-    0 -> 2 [ label = "0" ]
-    2 -> 3 [ label = "51" ]
-    3 -> 4 [ label = "1" ]
-    4 -> 5 [ label = "1" ]
-    5 -> 6 [ label = "0" ]
-    6 -> 1 [ label = "0" ]
-}
-"#,
-        );
+        draw_world(world.clone(), "tests/world_start.png");
+
+        for bot_count in 1..=1 {
+            let mut planner = Planner::new(world.clone(), None);
+            let (_result, (stdout, stderr)) = run_lua(
+                &mut planner,
+                include_str!("../tests/script.lua"),
+                Some("../tests/script.lua"),
+                bot_count,
+                false,
+            )
+            .await
+            .expect("run_lua failed");
+            let graph = planner.graph();
+
+            fs::write(
+                format!(
+                    "{}/tests/task_graph-{}.dot",
+                    env!("CARGO_MANIFEST_DIR"),
+                    bot_count
+                ),
+                graph.graphviz_dot(),
+            )
+            .await
+            .expect("failed to write");
+
+            let mut bot_ids = Vec::new();
+            for i in 1..=bot_count {
+                bot_ids.push(i);
+            }
+
+            fs::write(
+                format!(
+                    "{}/tests/task_graph-{}.md",
+                    env!("CARGO_MANIFEST_DIR"),
+                    bot_count
+                ),
+                format!("```mermaid\n{}\n```\n", to_mermaid_gantt(&planner, bot_ids)),
+            )
+            .await
+            .expect("failed to write");
+            fs::write(
+                format!(
+                    "{}/tests/stdout-{}.txt",
+                    env!("CARGO_MANIFEST_DIR"),
+                    bot_count
+                ),
+                stdout,
+            )
+            .await
+            .expect("failed to write");
+
+            if !stderr.is_empty() {
+                fs::write(
+                    format!(
+                        "{}/tests/stderr-{}.txt",
+                        env!("CARGO_MANIFEST_DIR"),
+                        bot_count
+                    ),
+                    stderr,
+                )
+                .await
+                .expect("failed to write");
+            }
+
+            draw_world(
+                planner.plan_world.clone(),
+                &format!(
+                    "{}/tests/world_end-{}.png",
+                    env!("CARGO_MANIFEST_DIR"),
+                    bot_count
+                ),
+            );
+        }
     }
 
     #[tokio::test]
@@ -321,17 +381,6 @@ result = world.findFreeResourceRect("iron-ore", 2, 2, {x=0,y=-200})
             }),
         )
         .await
-    }
-
-    async fn _graph_test(bot_count: u8, code: &str, expected: &str) {
-        let world = Arc::new(fixture_world());
-        let mut planner = Planner::new(world, None);
-        let (_, _) = run_lua(&mut planner, code, None, bot_count, false)
-            .await
-            .expect("run_lua failed");
-
-        let graph = planner.graph();
-        assert_eq!(graph.graphviz_dot(), expected,);
     }
 
     async fn result_test(bot_count: u8, code: &str, expected: serde_json::Value) {

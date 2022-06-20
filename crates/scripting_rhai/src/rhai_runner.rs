@@ -18,6 +18,8 @@ pub async fn run_rhai<'a>(
     redirect: bool,
 ) -> Result<((String, String), Scope<'a>)> {
     let buffers = redirect_buffers(redirect);
+    let stdout = String::new();
+    let stderr = String::new();
     let all_bots = planner.initiate_missing_players_with_default_inventory(bot_count);
     planner.update_plan_world();
     let plan_builder = Arc::new(PlanBuilder::new(
@@ -53,7 +55,7 @@ pub async fn run_rhai<'a>(
     if let Err(err) = engine.run_with_scope(&mut scope, code) {
         handle_rhai_err(*err, code, filename)?;
     }
-    Ok((buffers_to_string(buffers)?, scope))
+    Ok((buffers_to_string(&stdout, &stderr, buffers)?, scope))
 }
 
 #[cfg(test)]

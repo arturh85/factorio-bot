@@ -52,7 +52,11 @@ impl RunePlanBuilder {
         self.plan_builder.add_walk(player_id, goal)
     }
 
-    pub fn add_place(&mut self, player_id: PlayerId, entity: FactorioEntity) -> Result<()> {
+    pub fn add_place(
+        &mut self,
+        player_id: PlayerId,
+        entity: FactorioEntity,
+    ) -> Result<FactorioEntity> {
         self.plan_builder.add_place(player_id, entity)
     }
 

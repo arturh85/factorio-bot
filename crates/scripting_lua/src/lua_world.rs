@@ -12,8 +12,8 @@ pub fn create_lua_world(ctx: Context, _world: Arc<FactorioWorld>) -> rlua::Resul
     map_table.set(
         "recipe",
         ctx.create_function(move |ctx, name: String| match world.recipes.get(&name) {
-            Some(recipe) => Ok(rlua_serde::to_value(ctx, recipe.clone())),
-            None => Err(rlua::Error::RuntimeError("recipe not found".into())),
+            Some(recipe) => rlua_serde::to_value(ctx, recipe.clone()),
+            None => Ok(rlua::Value::Nil),
         })?,
     )?;
 
@@ -22,8 +22,8 @@ pub fn create_lua_world(ctx: Context, _world: Arc<FactorioWorld>) -> rlua::Resul
         "player",
         ctx.create_function(
             move |ctx, player_id: PlayerId| match world.players.get(&player_id) {
-                Some(player) => Ok(rlua_serde::to_value(ctx, player.clone())),
-                None => Err(rlua::Error::RuntimeError("player not found".into())),
+                Some(player) => rlua_serde::to_value(ctx, player.clone()),
+                None => Ok(rlua::Value::Nil),
             },
         )?,
     )?;
@@ -42,6 +42,32 @@ pub fn create_lua_world(ctx: Context, _world: Arc<FactorioWorld>) -> rlua::Resul
                     }
                 }
                 Ok(Rect::default())
+            },
+        )?,
+    )?;
+
+    let world = _world.clone();
+    map_table.set(
+        "findEntitiesInRadius",
+        ctx.create_function(
+            move |_ctx,
+                  (search_center, radius, search_name, search_type): (
+                Table,
+                f64,
+                Option<String>,
+                Option<String>,
+            )| {
+                let search_center = Position::new(
+                    search_center.get("x").unwrap(),
+                    search_center.get("y").unwrap(),
+                );
+                let entities = world.entity_graph.find_entities_in_radius(
+                    search_center,
+                    radius,
+                    search_name,
+                    search_type,
+                );
+                Ok(entities)
             },
         )?,
     )?;

@@ -8,3 +8,9 @@ title = "Factorio Bot - User Guide"
 [output.html]
 theme = "src/theme"
 git-repository-url = "https://github.com/arturh85/factorio-bot-tauri"
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
+
+[preprocessor]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"

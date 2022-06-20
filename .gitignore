@@ -6,6 +6,7 @@ backend/tests/world.png
 /Cargo.*
 /frontend/yarn-error.log
 /docs/index.html
+/index.html
 /tree.txt
 /resource.rc
 /.vscode/settings.json

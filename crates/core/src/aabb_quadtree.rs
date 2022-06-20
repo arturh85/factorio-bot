@@ -256,7 +256,7 @@ impl<T, S, A: Array<Item = (ItemId, Rect<S>)>> QuadTree<T, S, A> {
     /// Calls `f` repeatedly for every node in the tree
     /// with these arguments
     ///
-    /// * `&Rect`: The boudning box of that tree node
+    /// * `&Rect`: The bounding box of that tree node
     /// * `usize`: The current depth
     /// * `bool`: True if the node is a leaf-node, False if
     /// the node is a branch node.

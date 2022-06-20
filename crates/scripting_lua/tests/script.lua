@@ -12,34 +12,43 @@ blueprints = {
     MinerLine = "0eNqdl11v2yAUhv9KxLWdBPBH7MtN603Vq3ZSt2ma/MEyJAwIcFcr8n8vcapoWjztwJWFDQ+Hw3l5zQm1YmTacOlQfUI9s53h2nElUY0e1Wg6Vm9+Oadtvdv9bDqnDFdLd7vt1LB74ez3Ln24+/rhy2d83368e+0n3d4PzyhBVjY6dSo9Gt6f4a+oLhM0oZrgOUFNa5UYHUvP3TSXR1Q7M7IE8U5Ji+pvJ2T5UTbiPNRNmvmAuGODB8tmOLeYYJ0zvEsHLv34tDdcCOTRXPbMT4bn7wli0nHH2QW4NKYfchxaZnyH/6ASpJXll2Qs4eNtvizAP/00PTd+1PKVzMkNnVzpzjTSamVc2jLhbrH0Hbv/G5utYGlo0Pm/gi5W6Flw0AQSdB6MxRBsEbuBOWQDyyvdDo0Q6XUOrQS7ZZN3tl/BvEI7BKcgg6SgCsZSCBbvY8ssg5QZxsFhF6Cww0WXg7jRqitB6chiC/kAKWQcLr8DKCtFMLcEcSOVh/fr0sPh2sOgsxiHq6+CcEm0+m7jXqs3Eu98BGR94TLEIB8hNBwMchKSRWecgjKeR2cc5FUkXIoY5C+kDAeDHIZEiBLkASRclBhkAjRelQWkRmi8KitIjVASeayW68cqjRAjyFdo+F8oBhkLzaN3sALtYIQKQYZAw1VIVhzM34eWK1T9x60vQaLxJP/ugWw3nxojps2TUv79CzP2UkwHnJVZVRYl3hd5Mc9vau2sKw=="
 }
 
-
+local starterMiningDrills = {
+    ["iron-ore"] = {},
+    ["copper-ore"] = {},
+    ["stone"] = {},
+    ["coal"] = {},
+}
+local starterFurnaces = {
+    ["iron-ore"] = {},
+    ["copper-ore"] = {},
+    ["stone"] = {},
+}
 
 
 function buildStarterMinerFurnace(bot, ore, count)
-    local rect = world.findFreeResourceRect(ore, 2*count, 2, {x=0,y=0})
-    dump(rect.leftTop, "leftTop")
-    dump(rect.rightBottom, "rightBottom")
+    local player = world.player(bot)
+    local rect = world.findFreeResourceRect(ore, 2*count, 2, player.position)
+    --dump(rect.leftTop, "leftTop")
+    --dump(rect.rightBottom, "rightBottom")
     plan.groupStart("Build Starter Miner/Furnace")
+
+    local inventory = player.mainInventory
+    --dump(player, "player")
+    --dump(inventory, "inventory")
+
+    assert(inventory["burner-mining-drill"] > 0)
+    assert(inventory["stone-furnace"] > 0)
 
     local anchor = rect.leftTop
     for idx=1,count do
-        plan.place(bot, {x=anchor.x + ((idx - 1) * 2), y=anchor.y}, "burner-mining-drill")
-        plan.place(bot, {x=anchor.x + ((idx - 1) * 2), y=anchor.y-2}, "stone-furnace")
+        local miningDrill = plan.place(bot, { x=anchor.x + ((idx - 1) * 2), y=anchor.y}, "burner-mining-drill")
+        table.insert(starterMiningDrills[ore], miningDrill)
+
+        local stoneFurnace = plan.place(bot, { x=anchor.x + ((idx - 1) * 2), y=anchor.y-2}, "stone-furnace")
+        table.insert(starterFurnaces[ore], stoneFurnace)
     end
 
     plan.groupEnd()
-
-    --    local anchor = rect.topLeft
-
-    --    if count > #bots then
-    --        for idx, bot in pairs(bots) do
-    --            plan.place(bot, {x=anchor.x + ((idx - 1) * 2), y=anchor.y}, "burner-mining-drill")
-    --        end
-    --
-    --    else
-    --
-    --    end
-
 end
 
 
@@ -52,11 +61,25 @@ end
 
 
 function dump(tbl, label)
-    print("dumping " .. label)
-    for k,v in pairs(tbl) do
-        print("- " .. tostring(k) .. ": " .. tostring(v))
-    end
+    print("dumping " .. label .. "\n" .. dump_deep(tbl, 0))
     print("------------")
+end
+
+function dump_deep(tbl, lvl)
+    local output = ""
+    for k,v in pairs(tbl) do
+        for i=1,lvl do output = output .. " " end
+
+        if type(v) == "table" then
+            output = output .. ("- " .. tostring(k) .. ":\n")
+            if lvl < 10 then
+                output = output .. dump_deep(v, lvl + 2)
+            end
+        else
+            output = output .. ("- " .. tostring(k) .. ": " .. tostring(v) .. "\n")
+        end
+    end
+    return output
 end
 
 
@@ -68,7 +91,7 @@ end
 --
 --dumpPlayers()
 function mine_with_bots(bots, search_center, name, type)
-    local entities = rcon.findEntitiesInRadius(search_center, 300, name, type)
+    local entities = world.findEntitiesInRadius(search_center, 300, name, type)
     local label = name or type
     if #entities < #bots then
         error("not enough " .. label .. " in radius 300")
@@ -82,7 +105,64 @@ end
 
 
 function build_starter_base(bots)
-    buildStarterMinerFurnace(bots, "iron-ore", 2)
+    if #bots == 1 then
+        local bot_id = bots[1]
+        local player = world.player(bot_id)
+
+        local huge_rocks = world.findEntitiesInRadius(player.position, 100, "rock-huge")
+        if #huge_rocks > 0 then
+            mine_with_bots(bots, player.position, "rock-huge", nil)
+        else
+            local big_rocks = world.findEntitiesInRadius(player.position, 100, "rock-big")
+            if #big_rocks > 0 then
+                mine_with_bots(bots, player.position, "rock-big", nil)
+            end
+        end
+        -- place burner-mining-drill & stone-furnace @ iron-ore field
+        buildStarterMinerFurnace(bot_id, "iron-ore", 1)
+        -- loop get min 2x coal from rocks or coal ore -> place in iron burner-mining-drill & stone-furnace -> get all iron-plate until enough for second burner-mining-drill
+        local recipe_bmd = world.recipe("burner-mining-drill")
+        --dump_recipe(recipe_bmd, 0)
+        local required_iron_plate = required_ingredients(recipe_bmd, "iron-plate", 1)
+        local required_stone_plate = required_ingredients(recipe_bmd, "stone", 1)
+        print("required_iron_plate: " .. tostring(required_iron_plate))
+        print("required_stone_plate: " .. tostring(required_stone_plate))
+
+
+        -- if not already get enough stone from rocks or stone ore for second burner-mining-drill
+        -- craft second burner-mining-drill
+        -- place stone burner-mining-drill
+        -- loop get min 2x coal -> place in iron burner-mining-drill & stone-furnace -> get all iron-plate until enough for third burner-mining-drill
+        -- loop get min 1x coal -> place in stone burner-mining-drill -> get all stone until enough for 2 more burner-mining-drill
+        -- craft 2 more burner-mining-drill
+        -- place coal burner-mining-drill loop with 2 elements & insert wood
+
+        -- (build burner-mining-drill & stone-furnace @ copper-ore field)
+    elseif #bots == 2 then
+        print("not implemented for 2 bots")
+        -- first bot =>
+        -- place burner-mining-drill & stone-furnace @ iron-ore field
+        buildStarterMinerFurnace(all_bots[1], "iron-ore", 1)
+        -- loop get min 2x coal from rocks or coal ore -> place in iron burner-mining-drill & stone-furnace -> get all iron-plate until enough for second burner-mining-drill
+        -- second bot =>
+        -- place burner-mining-drill @ stone field
+        --buildStarterMiner(all_bots[1], "stone", 1)
+        -- loop get min 1x coal from rocks or coal ore -> place in stone burner-mining-drill
+    elseif #bots == 3 then
+        print("not implemented for 3 bots")
+        -- first bot =>
+        -- place burner-mining-drill & stone-furnace @ iron-ore field
+        -- loop get min 2x coal from rocks or coal ore -> place in iron burner-mining-drill & stone-furnace -> get all iron-plate until enough for second burner-mining-drill
+        -- second bot =>
+        -- give burner-mining-drill to third bot
+        -- third bot =>
+        -- wait for second bot to give BMD
+        -- place coal burner-mining-drill loop with 2 elements & insert wood
+    else
+        print("not implemented for " .. str(all_bot_count) .. " bots")
+    end
+
+    -- buildStarterMinerFurnace(bots, "iron-ore", 2)
     --    build_starter_miner_loop("coal", 2)
     --    buildStarterMinerFurnace("iron-ore", 2)
     --    buildStarterMinerFurnace("copper-ore", 2)
@@ -91,57 +171,51 @@ function build_starter_base(bots)
     --    build_starter_science()
 end
 
---print("start script")
+function tableLength(t)
+    local count = 0
+    for _ in pairs(t) do count = count + 1 end
+    return count
+end
+
+function required_ingredients(recipe, search_ingredient, count)
+    local sum = 0
+    for idx,ingredient in pairs(recipe.ingredients) do
+        if ingredient.name == search_ingredient then
+            sum = sum + ingredient.amount * count
+        else
+            local subrecipe = world.recipe(ingredient.name)
+            if subrecipe ~= nil then
+                sum = sum + required_ingredients(subrecipe, search_ingredient, ingredient.amount * count)
+            end
+        end
+    end
+    return sum
+end
+
+function dump_recipe(recipe, level)
+    print("recipe: " .. recipe.name)
+    dump(recipe, "recipe")
+    --print("recipe ")
+    for idx,ingredient in pairs(recipe.ingredients) do
+        print("recipe " .. ingredient.name)
+        local subrecipe = world.recipe(ingredient.name)
+    end
+
+end
+
+
+
+print("start script for " .. tostring(#all_bots) .. " bots")
 --mine_with_bots(all_bots, {x=0,y=0}, "rock-huge", nil)
 --mine_with_bots(all_bots, {x=0,y=0}, nil, "tree")
---build_starter_base(all_bots)
---print("end script")
+build_starter_base(all_bots)
+
+--local entities = world.findEntitiesInRadius({x=0, y=0}, 100)
+--dump(entities, "all entities")
+
 --mine_with_bots(bots, {0,0}, nil, "tree")
 --build_starter_base()
 --research("automation")
 --...
 --start_rocket()
-
-
---function tableLength(t)
---    local count = 0
---    for _ in pairs(t) do count = count + 1 end
---    return count
---end
-
-
-if all_bot_count == 1 then
-    -- place burner-mining-drill & stone-furnace @ iron-ore field
-    buildStarterMinerFurnace(all_bots[1], "iron-ore", 1)
-    -- loop get min 2x coal from rocks or coal ore -> place in iron burner-mining-drill & stone-furnace -> get all iron-plate until enough for second burner-mining-drill
-
-    -- if not already get enough stone from rocks or stone ore for second burner-mining-drill
-    -- craft second burner-mining-drill
-    -- place stone burner-mining-drill
-    -- loop get min 2x coal -> place in iron burner-mining-drill & stone-furnace -> get all iron-plate until enough for third burner-mining-drill
-    -- loop get min 1x coal -> place in stone burner-mining-drill -> get all stone until enough for 2 more burner-mining-drill
-    -- craft 2 more burner-mining-drill
-    -- place coal burner-mining-drill loop with 2 elements & insert wood
-
-    -- (build burner-mining-drill & stone-furnace @ copper-ore field)
-elseif all_bot_count == 2 then
-    print("not implemented for 2 bots")
-    -- first bot =>
-    -- place burner-mining-drill & stone-furnace @ iron-ore field
-    -- loop get min 2x coal from rocks or coal ore -> place in iron burner-mining-drill & stone-furnace -> get all iron-plate until enough for second burner-mining-drill
-    -- second bot =>
-    -- place burner-mining-drill @ stone field
-    -- loop get min 1x coal from rocks or coal ore -> place in stone burner-mining-drill
-elseif all_bot_count == 3 then
-    print("not implemented for 3 bots")
-    -- first bot =>
-    -- place burner-mining-drill & stone-furnace @ iron-ore field
-    -- loop get min 2x coal from rocks or coal ore -> place in iron burner-mining-drill & stone-furnace -> get all iron-plate until enough for second burner-mining-drill
-    -- second bot =>
-    -- give burner-mining-drill to third bot
-    -- third bot =>
-    -- wait for second bot to give BMD
-    -- place coal burner-mining-drill loop with 2 elements & insert wood
-else
-    print("not implemented for " .. str(all_bot_count) .. " bots")
-end
+print("end script")

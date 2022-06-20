@@ -27,22 +27,32 @@ Goals / Use Cases:
 
 ## Features
 - [x] sets up & starts factorio server & configurable number of clients
-- [x] resizes Factorio client windows so the whole screen is equally used
-- [x] integrated lua editor which allows scripting of bots 
+- [x] resizes Factorio client windows so the whole screen is equally used (windows only)
+- [x] integrated [monaco](https://microsoft.github.io/monaco-editor/) lua editor which allows scripting of bots 
 - [x] uses included factorio mod to read factorio instance ...
   - [x] recipes
   - [x] entity prototypes
   - [x] item prototypes
-  - [x] placed entities
+  - [x] entities
+  - [x] resources
 - Build Graphs of:
   - [ ] Entity Connections with distance based weights (currently broken)
   - [ ] Flow Connections with flow rate per second for each belt side/resource (currently broken)
   - [ ] Bot Task Dependencies with time estimate based weights (currently broken)
-- [ ] (optional) REST API Endpoints with OpenAPI specs
+- Example LUA Script which can:
+  - [ ] Plan some task with time estimation
+  - [ ] Find Seed which minimizes execution time
+  - [ ] Research Automation in MM:SS
+- [ ] (optional) REST API Endpoints with OpenAPI specs  (currently broken)
 - [ ] read map contents by chunk for leaflet based Map View (currently broken)
-- [x] use whatever mods you want, configured in central location for all instances
+- [x] use whatever mods you want, configured in central location for all factorio instances
 - [x] should work on Win/Mac/Linux (not tested on Mac)
 - [x] MIT licenced
+
+## Planned Features
+- [ ] Create ZIP from Steam Verson of Factorio
+- [ ] Indicate Client Actions as Drawn Lines / Rectangle in the Factorio Client
+- 
 
 # Installation
 
@@ -67,20 +77,28 @@ Goals / Use Cases:
 - Clone repository `git clone git@github.com:arturh85/factorio-bot-tauri.git`
 - Change directory to app/
 - `cd app/`
-- `yarn` or `npm i`
-
-### Cargo dependencies
-- `cargo install tauri-cli`
-
-### Optional tools
-- `cargo install mdbook`
-- `cargo install cargo-release`
-- `cargo install git-cliff`
- 
+- `yarn` or `npx yarn`
 
 ### Commands
 
-- `npm start` starts the application while watching for changes 
+- `cd app/; npm start` starts the application while watching for changes
+- `cargo repl` starts the repl version of the application which removes most features and builds quicker
+- `cargo nextest` starts rust test runnner
+- `cargo release` increments the version numbers, updates changelog and pushes release 
+- `cd docs; mdbook serve` serves book locally 
+
+
+### Required tools
+- `cargo install tauri-cli`
+
+### Optional tools
+- `cargo install mdbook` 
+- `cargo install mdbook-mermaid` 
+- `cargo install cargo-release`
+- `cargo install git-cliff`
+- `cargo install cargo-nextest`
+ 
+
 
 ## Useful links
 

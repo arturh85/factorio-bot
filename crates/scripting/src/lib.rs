@@ -15,6 +15,8 @@ pub fn redirect_buffers(redirect: bool) -> Option<(BufferRedirect, BufferRedirec
 }
 
 pub fn buffers_to_string(
+    stdout: &str,
+    stderr: &str,
     buffers: Option<(BufferRedirect, BufferRedirect)>,
 ) -> Result<(String, String)> {
     let mut stdout_str = String::new();
@@ -22,6 +24,9 @@ pub fn buffers_to_string(
     if let Some((mut stdout, mut stderr)) = buffers {
         stdout.read_to_string(&mut stdout_str).into_diagnostic()?;
         stderr.read_to_string(&mut stderr_str).into_diagnostic()?;
+    } else {
+        stdout_str = stdout.to_owned();
+        stderr_str = stderr.to_owned();
     }
     Ok((stdout_str, stderr_str))
 }

@@ -5,7 +5,8 @@ use factorio_bot_core::miette::{IntoDiagnostic, Report, Result};
 
 #[allow(clippy::items_after_statements)]
 pub fn start(context: Context) -> Result<()> {
-  let app = tauri::Builder::default()
+  let mut app = tauri::Builder::default()
+    .any_thread()
     .manage(context.app_settings)
     .manage(context.instance_state)
     .manage(context.restapi_handle)
@@ -32,7 +33,12 @@ pub fn start(context: Context) -> Result<()> {
     ])
     .build(tauri::generate_context!())
     .into_diagnostic()?;
-  app.run(|_app, _event| {});
+  loop {
+    let iteration = app.run_iteration();
+    if iteration.window_count == 0 {
+      break;
+    }
+  }
   Ok(())
 }
 

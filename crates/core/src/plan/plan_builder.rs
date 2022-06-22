@@ -29,20 +29,14 @@ impl PlanBuilder {
         name: &str,
         count: u32,
     ) -> Result<()> {
-        let mut graph = self.graph.write();
-        let player = self
-            .world
-            .players
-            .get(&player_id)
-            .unwrap_or_else(|| panic!("invalid player id: {}", player_id));
+        let player = self.player(player_id);
         let distance = calculate_distance(&player.position, &position).ceil();
         let reach_distance = player.resource_reach_distance as f64;
         if distance > reach_distance {
-            graph.add_walk_node(
+            self.add_walk(
                 player_id,
-                distance,
                 PositionRadius::from_position(&position, reach_distance),
-            );
+            )?;
         }
         let mut mining_time = 5.;
         let mut inventory = player.main_inventory.clone();
@@ -61,6 +55,7 @@ impl PlanBuilder {
                 }
             }
         }
+        let mut graph = self.graph.write();
         graph.add_mine_node(
             player_id,
             mining_time,
@@ -104,12 +99,12 @@ impl PlanBuilder {
 
     pub fn add_walk(&self, player_id: PlayerId, goal: PositionRadius) -> Result<()> {
         let distance = self.distance(player_id, &goal.position);
-        let mut graph = self.graph.write();
         self.world
             .player_changed_position(PlayerChangedPositionEvent {
                 player_id,
                 position: goal.position.clone(),
             })?;
+        let mut graph = self.graph.write();
         graph.add_walk_node(player_id, distance, goal);
         Ok(())
     }

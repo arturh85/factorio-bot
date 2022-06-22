@@ -1,16 +1,15 @@
-[![codecov](https://codecov.io/gh/arturh85/factorio-bot-tauri/branch/master/graph/badge.svg?token=Q4I23JAT9A)](https://codecov.io/gh/arturh85/factorio-bot-tauri)
-[![actions](https://github.com/arturh85/factorio-bot-tauri/actions/workflows/test.yml/badge.svg)](https://github.com/arturh85/factorio-bot-tauri/actions)
-
 # Factorio Bot
 
-- [User Guide](https://arturh85.github.io/factorio-bot-tauri/book/)
-- [API Docs](https://arturh85.github.io/factorio-bot-tauri/doc/factorio_bot/)
-- [Frontend Build Statistics](https://arturh85.github.io/factorio-bot-tauri/stats.html)
+[![User Guide](https://img.shields.io/badge/user-guide-green)](https://arturh85.github.io/factorio-bot-tauri/userguide/)
+[![LUA API Docs](https://img.shields.io/badge/lua-apidocs-blue)](https://arturh85.github.io/factorio-bot-tauri/lua/)
+[![MIT License](https://img.shields.io/github/license/arturh85/factorio-bot-tauri)](https://github.com/arturh85/factorio-bot-tauri/blob/master/LICENSE.txt)
+[![GitHub issues](https://img.shields.io/github/issues/arturh85/factorio-bot-tauri)](https://github.com/arturh85/factorio-bot-tauri/issues)
+[![Dev Guide](https://img.shields.io/badge/dev-guide-red)](https://arturh85.github.io/factorio-bot-tauri/devguide/)
 
 # What is it?
 
-Factorio Bot is a bot platform for the game
-[Factorio](https://www.factorio.com) inspired by [factorio-bot](https://github.com/Windfisch/factorio-bot/)
+Factorio Bot is a platform for the game
+[Factorio](https://www.factorio.com) inspired by [factorio-bot](https://github.com/Windfisch/factorio-bot/). It allows scripted execution of a factorio server and multiple clients. 
 
 Goals / Use Cases:
 - TAS (Tool Assisted Speedrun) to beat the world record with many bots which share the workload efficiently
@@ -52,9 +51,8 @@ Goals / Use Cases:
 ## Planned Features
 - [ ] Create ZIP from Steam Verson of Factorio
 - [ ] Indicate Client Actions as Drawn Lines / Rectangle in the Factorio Client
-- 
 
-# Installation
+# Quickstart
 
 - Download the [latest release](https://github.com/arturh85/factorio-bot-tauri/releases) for your Operating System
 - Download [Factorio](https://www.factorio.com) as .zip or .tar.xz (don't use the headless version!)
@@ -62,51 +60,9 @@ Goals / Use Cases:
 - Use the `Start` Button in the top right to start the given number of factorio instances with given seed/map exchange string
 - Select the Script you want to run and execute it
 
-# Technologies used
-
-## Frontend: Vite.js + PrimeVue
-- [Vite.js](https://vitejs.dev/) is a new modern bundler for javascript which is blazing fast and includes many sensible defaults.
-- [Vue.js](https://vuejs.org/) is an incremental frontend framework which is an absolute joy to work with. It has seen very impressive improvements in version 3 including Composition Api, script setup, dynamic css binding and ... .
-- [PrimeVue](https://www.primefaces.org/primevue/) is the a component library for Vue 3. Lots of premade components will make your job as application developer easier and more fun.
-
-## Backend: Rust + Tauri
-- [Tauri](https://tauri.studio/) is a new modern technology to turn your web apps into a desktop app for multiple platforms (Windows, MacOS, Linux, android and ios soon). Tauri apps have very small file size and tiny memory consumption.
-
-## Setup Development Environment 
-- Ready your workspace according to [Tauri Getting Started](https://tauri.studio/en/docs/getting-started/intro/)
-- Clone repository `git clone git@github.com:arturh85/factorio-bot-tauri.git`
-- Change directory to app/
-- `cd app/`
-- `yarn` or `npx yarn`
-
-### Commands
-
-- `cd app/; npm start` starts the application while watching for changes
-- `cargo repl` starts the repl version of the application which removes most features and builds quicker
-- `cargo nextest` starts rust test runnner
-- `cargo release` increments the version numbers, updates changelog and pushes release 
-- `cd docs; mdbook serve` serves book locally 
-
-
-### Required tools
-- `cargo install tauri-cli`
-
-### Optional tools
-- `cargo install mdbook` 
-- `cargo install mdbook-mermaid` 
-- `cargo install cargo-release`
-- `cargo install git-cliff`
-- `cargo install cargo-nextest`
- 
-
-
-## Useful links
-
-- [Factorio Docs: Console](https://wiki.factorio.com/Console)
-
 ## Contribute
 
-Send me your Pull Requests :)
+See the [Dev Guide](https://arturh85.github.io/factorio-bot-tauri/devguide/) and Send me your Pull Requests :)
 
 ## Contact
 

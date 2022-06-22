@@ -4,6 +4,7 @@ fn main() {
     typescriptify();
     tauri_build::build();
   }
+  luaify();
   #[cfg(windows)]
   {
     // set .exe file properties
@@ -18,6 +19,20 @@ fn main() {
       .expect("Failed to run the Windows resource compiler (rc.exe)");
   }
   println!("cargo:rerun-if-changed=../../crates/core/src/types.rs");
+  println!("cargo:rerun-if-changed=../../crates/scripting_lua/src/");
+}
+
+fn luaify() {
+  #[cfg(feature = "lua")]
+  {
+    use factorio_bot_scripting_lua::lua_docs::write_lua_docs;
+    let path = std::path::Path::new(&format!(
+      "{}/../../docs/lua/src/",
+      env!("CARGO_MANIFEST_DIR")
+    ))
+    .to_path_buf();
+    write_lua_docs(path).expect("Failed to write lua docs");
+  }
 }
 
 #[cfg(feature = "gui")]

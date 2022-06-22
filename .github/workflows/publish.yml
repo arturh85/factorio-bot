@@ -113,10 +113,10 @@ jobs:
         run: cd app; yarn test:unit
       - name: 🚧 build javascript
         run: cd app; yarn build:web
+      - name: 🚧 build rust
+        run: cargo build --timings && cd app && yarn tauri:build
       - name: ✅ run rust tests
         run: cd app; yarn cargo:test
-      - name: 🚧 build rust
-        run: cd app; yarn tauri:build
 
       - name: 🚚 move build output to correct folder
         run: mv target/ app/src-tauri/target/
@@ -179,13 +179,22 @@ jobs:
         if: matrix.platform == 'ubuntu-latest'
         run: mkdir public && cargo doc --all --no-deps && mv target/doc public/doc
 
-      - name: 🚧 build mdBook (ubuntu only)
+      - name: 🚧 build user guide (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
-        run: mdbook build docs && mv docs/book public/book && mv index.html public/
+        run: mdbook build docs/userguide && mv docs/userguide/book public/userguide
 
-      - name: 🚚 move app stats.html to gh-pages (ubuntu only)
+      - name: 🚧 build developer guide (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
-        run: mv app/dist/stats.html public/stats.html
+        run: mdbook build docs/devguide && mv docs/devguide/book public/devguide
+
+      - name: 🚧 build lua api docs (ubuntu only)
+        if: matrix.platform == 'ubuntu-latest'
+        uses: docker://anibali/ldoc
+        run: -c docs/lua/config.ld
+
+      - name: 🚚 move lua docs, cargo timings and frontend stats.html to gh-pages (ubuntu only)
+        if: matrix.platform == 'ubuntu-latest'
+        run: mv app/dist/stats.html public/stats.html; mv docs/lua/doc/ public/lua/; mv target/cargo-timings/ public/cargo-timings/
 
       - name: 📦 deploy public to gh-pages (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'

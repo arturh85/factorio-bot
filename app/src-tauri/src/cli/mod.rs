@@ -1,5 +1,3 @@
-#[cfg(feature = "lua")]
-mod plan;
 #[cfg(debug_assertions)]
 mod playground;
 mod rcon;
@@ -21,8 +19,6 @@ use std::pin::Pin;
 pub fn subcommands() -> Vec<Box<dyn Subcommand>> {
   vec![
     rcon::build(),
-    #[cfg(feature = "lua")]
-    plan::build(),
     #[cfg(feature = "lua")]
     roll_seed::build(),
     #[cfg(debug_assertions)]

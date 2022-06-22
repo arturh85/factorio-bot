@@ -49,6 +49,7 @@ dirs-next = "^2.0.0" # platform-specific standard locations of directories for c
 typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"] }
 factorio-bot-core = { path = "../../crates/core" }
 factorio-bot-restapi = { path = "../../crates/restapi", optional = true }
+factorio-bot-scripting-lua = { path = "../../crates/scripting_lua", optional = true }
 tauri-build = { version = "1.0.0", features = [], optional = true }
 serde = { version = "^1.0", features = [ "derive" ] }
 

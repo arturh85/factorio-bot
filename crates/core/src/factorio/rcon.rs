@@ -31,7 +31,7 @@ use unicode_segmentation::UnicodeSegmentation;
 const RCON_INTERFACE: &str = "botbridge";
 
 pub struct FactorioRcon {
-    pool: bb8::Pool<ConnectionManager>,
+    pool: Option<bb8::Pool<ConnectionManager>>,
     silent: Arc<RwLock<bool>>,
 }
 
@@ -45,13 +45,24 @@ impl FactorioRcon {
         );
         let manager = ConnectionManager::new(&address, &settings.pass);
         Ok(FactorioRcon {
-            pool: bb8::Pool::builder()
-                .max_size(15)
-                .build(manager)
-                .await
-                .into_diagnostic()?,
+            pool: Some(
+                bb8::Pool::builder()
+                    .max_size(15)
+                    .build(manager)
+                    .await
+                    .into_diagnostic()?,
+            ),
             silent,
         })
+    }
+
+    /// Create a FactorioRcon instance without any connection which would fail if used
+    /// Why? because LuaRconBuilder requires FactorioRcon which i didnt want to change to an option.
+    pub fn new_empty() -> Self {
+        FactorioRcon {
+            pool: None,
+            silent: Arc::new(RwLock::new(true)),
+        }
     }
 
     /// Executes a couple of commands that need to be send to a newly started factorio server
@@ -71,7 +82,7 @@ impl FactorioRcon {
             info!("<cyan>rcon</>  ⮜ <green>{}</>", command);
         }
         // let started = Instant::now();
-        let mut conn = self.pool.get().await.into_diagnostic()?;
+        let mut conn = self.pool.as_ref().unwrap().get().await.into_diagnostic()?;
         let result = conn
             .cmd(&String::from(command).add("\n"))
             .await
@@ -768,8 +779,8 @@ impl FactorioRcon {
     pub async fn find_entities_filtered(
         &self,
         area_filter: &AreaFilter,
-        name: Option<String>,
-        entity_type: Option<String>,
+        search_name: Option<String>,
+        search_type: Option<String>,
     ) -> Result<Vec<FactorioEntity>> {
         let mut args: HashMap<String, String> = HashMap::new();
         match area_filter {
@@ -786,10 +797,10 @@ impl FactorioRcon {
                 }
             }
         }
-        if let Some(name) = name {
+        if let Some(name) = search_name {
             args.insert(String::from("name"), str_to_lua(&name));
         }
-        if let Some(entity_type) = entity_type {
+        if let Some(entity_type) = search_type {
             args.insert(String::from("type"), str_to_lua(&entity_type));
         }
         let result = self

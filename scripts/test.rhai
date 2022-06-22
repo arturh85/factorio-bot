@@ -1,2 +1,0 @@
-
-print(get_fn_metadata_list());

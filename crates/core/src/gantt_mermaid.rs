@@ -87,8 +87,8 @@ fn duration_to_timestamp(duration: f64) -> String {
     format!("{hours:02}:{minutes:02}:{seconds:02}")
 }
 
-pub fn to_mermaid_gantt(plan: &Planner, bot_ids: Vec<PlayerId>) -> String {
-    let mut builder = MermaidGanttBuilder::new("Example Diagram");
+pub fn to_mermaid_gantt(plan: &Planner, bot_ids: Vec<PlayerId>, title: &str) -> String {
+    let mut builder = MermaidGanttBuilder::new(title);
     let graph = plan.graph.read();
 
     let total_runtime = plan.graph().shortest_path().expect("no path found");
@@ -235,12 +235,12 @@ mod tests {
         // "#,
         //         );
         assert_eq!(
-            to_mermaid_gantt(&planner, all_bots),
+            to_mermaid_gantt(&planner, all_bots, "Example diagram"),
             r#"gantt
-    title Example Diagram
+    title Example diagram
     dateFormat HH:mm:ss
     axisFormat %H:%M:%S
-    test : milestone, m1, 00:03:19,0s
+    test : milestone, m1, 00:03:38,0s
     section Bot 1
     Process Start : 00:00:00,0s
     Start﹕ Mine Stuff : 0s
@@ -248,10 +248,10 @@ mod tests {
     Mining rock-huge : 3s
     End : 3s
     Start﹕ Walk Around Stuff : 0s
-    Walk to [10, 3] : 11s
+    Walk to [10, 3] : 40s
     Walk to [10, 63] : 60s
     Walk to [0, 0] : 64s
-    End : 13s
+    End : 3s
     section Bot 2
     Process Start : 00:00:00,0s
     Start﹕ Mine Stuff : 0s
@@ -259,7 +259,7 @@ mod tests {
     Mining rock-huge : 3s
     End : 0s
     Start﹕ Walk Around Stuff : 0s
-    Walk to [20, 3] : 21s
+    Walk to [20, 3] : 40s
     Walk to [20, 63] : 60s
     Walk to [0, 0] : 67s
     End : 0s

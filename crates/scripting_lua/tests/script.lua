@@ -4,7 +4,6 @@
 -- rcon: LuaFactorioRcon
 -- plan: LuaPlanner
 
-
 blueprints = {
     StarterSteamEngineBoiler = "0eNqdkdEKwjAMRf8lz504nRv0V0Rkm0ECbVrWThxj/242RQXrgz6VhHtPLr0jNKZH3xFH0CNQ6ziA3o8Q6My1mXdx8AgaKKIFBVzbeQoRa5shn4kRJgXEJ7yCzqeDAuRIkfDOWYbhyL1tsBNBmqDAuyAmx/NFAWUiHOQppkl9QDYviK2NydBgGztqM+9MgvVAlSnU9rc8eYpR/BMnSdo9SY0jI5tvOYrVLuUvn35P/utpsUpLS5/6rX4FF+zCIq6qbZ5X1brcyP/fAHsdtKc=",
     StarterScience = "0eNqdlNtuwjAMht/F1w0iPUJfg8tpmtJglWg5VEnYhlDffUlBCKa2jF66tb/f9q/4DI08YmeF9lCfwWnWEW9Ia8U+xj9QlwmcoKa0T0Bwox3UbyFPtJrJmOFPHUINwqOCBDRTMWLOoWqk0C1RjB+ERkIhAvQeAzKwniIka+4q0v49AdReeIGXDobg9KGPqkEbkPPaCXTGhWKjr1ORvFwVw2TZqgg6Frm4dGGNJi0yS74PiBJiq3+00pe1ssVa2U1LaIfWh28j/PzKLwJ/BJL/C1LMQ4obxCkmJUGJ3FvBSWckzg09wSsXO1Y9bpEdvVEsZhLHBWqOpGP8c2yb1WLnlmtuXnJwO76s7UsOTkDoeqmFU0D68FxnLKN0gpA+I2QPhHAFhjNR352tJJaG1xOm8iyuZndxJPz4QusGWLqheZVvq7Ki67Io+/4XVduccQ==",
@@ -32,12 +31,23 @@ function buildStarterMinerFurnace(bot, ore, count)
     --dump(rect.rightBottom, "rightBottom")
     plan.groupStart("Build Starter Miner/Furnace")
 
+
+    ---- loop get min 2x coal from rocks or coal ore -> place in iron burner-mining-drill & stone-furnace -> get all iron-plate until enough for second burner-mining-drill
+    --local recipe_bmd = world.recipe("burner-mining-drill")
+    ----dump_recipe(recipe_bmd, 0)
+    --local required_iron_plate = required_ingredients(recipe_bmd, "iron-plate", 1)
+    --local required_stone_plate = required_ingredients(recipe_bmd, "stone", 1)
+    --print("required_iron_plate: " .. tostring(required_iron_plate))
+    --print("required_stone_plate: " .. tostring(required_stone_plate))
+    --local player = world.player(bots[1])
+    --dump(player.mainInventory, "inventory")
+
     local inventory = player.mainInventory
     --dump(player, "player")
     --dump(inventory, "inventory")
 
-    assert(inventory["burner-mining-drill"] > 0)
-    assert(inventory["stone-furnace"] > 0)
+    assert(inventory["burner-mining-drill"] >= count)
+    assert(inventory["stone-furnace"] >= count)
 
     local anchor = rect.leftTop
     for idx=1,count do
@@ -90,7 +100,7 @@ end
 --end
 --
 --dumpPlayers()
-function mine_with_bots(bots, search_center, name, type)
+function mine_with_bots(bots, search_center, name, type, count)
     local entities = world.findEntitiesInRadius(search_center, 300, name, type)
     local label = name or type
     if #entities < #bots then
@@ -98,35 +108,38 @@ function mine_with_bots(bots, search_center, name, type)
     end
     plan.groupStart("Mine " .. label .. " with " .. tostring(#bots) .. " Bots")
     for idx,playerId in pairs(bots) do
-        plan.mine(playerId, entities[idx].position, entities[idx].name, 1)
+        for i=1, count do
+            local entityIdx = ((idx - 1) * count) + i
+            if entityIdx >= #entities then
+                break
+            end
+            plan.mine(playerId, entities[entityIdx].position, entities[entityIdx].name, 1)
+        end
     end
     plan.groupEnd()
+end
+
+function collectRocks(bots, count)
+    local player = world.player(bots[1])
+    local huge_rocks = world.findEntitiesInRadius(player.position, 100, "rock-huge")
+    if #huge_rocks > 0 then
+        mine_with_bots(bots, player.position, "rock-huge", nil, count)
+    else
+        local big_rocks = world.findEntitiesInRadius(player.position, 100, "rock-big")
+        if #big_rocks > 0 then
+            mine_with_bots(bots, player.position, "rock-big", nil, count)
+        end
+    end
 end
 
 
 function build_starter_base(bots)
     if #bots == 1 then
         local bot_id = bots[1]
-        local player = world.player(bot_id)
+        collectRocks(bots, 3)
 
-        local huge_rocks = world.findEntitiesInRadius(player.position, 100, "rock-huge")
-        if #huge_rocks > 0 then
-            mine_with_bots(bots, player.position, "rock-huge", nil)
-        else
-            local big_rocks = world.findEntitiesInRadius(player.position, 100, "rock-big")
-            if #big_rocks > 0 then
-                mine_with_bots(bots, player.position, "rock-big", nil)
-            end
-        end
         -- place burner-mining-drill & stone-furnace @ iron-ore field
         buildStarterMinerFurnace(bot_id, "iron-ore", 1)
-        -- loop get min 2x coal from rocks or coal ore -> place in iron burner-mining-drill & stone-furnace -> get all iron-plate until enough for second burner-mining-drill
-        local recipe_bmd = world.recipe("burner-mining-drill")
-        --dump_recipe(recipe_bmd, 0)
-        local required_iron_plate = required_ingredients(recipe_bmd, "iron-plate", 1)
-        local required_stone_plate = required_ingredients(recipe_bmd, "stone", 1)
-        print("required_iron_plate: " .. tostring(required_iron_plate))
-        print("required_stone_plate: " .. tostring(required_stone_plate))
 
 
         -- if not already get enough stone from rocks or stone ore for second burner-mining-drill
@@ -219,3 +232,5 @@ build_starter_base(all_bots)
 --...
 --start_rocket()
 print("end script")
+
+--assert(false)

@@ -13,10 +13,39 @@ pub fn create_lua_plan_builder(
     world: Arc<FactorioWorld>,
 ) -> rlua::Result<Table> {
     let map_table = ctx.create_table()?;
+    map_table.set(
+        "__doc__header",
+        String::from(
+            r#"
+--- Plan Builder
+-- Internally holds a graph of Task Nodes which can be grown by using the methods.  
+-- @module plan
+
+local plan = {}
+    "#,
+        ),
+    )?;
+    map_table.set("__doc__footer", String::from(r#"return plan"#))?;
+
     let _world = world.clone();
     let _plan_builder = Arc::new(PlanBuilder::new(graph, world));
 
     let plan_builder = _plan_builder.clone();
+    map_table.set(
+        "__doc_fn_mine",
+        String::from(
+            r#"
+--- adds a MINE node to graph
+-- If required first a WALK node is inserted to walk near the item to mine 
+-- @int player_id id of player
+-- @param position x/y position table
+-- @string name name of item to mine
+-- @int count how many items to mine
+function plan.mine(player_id, position, name, count)
+end
+"#,
+        ),
+    )?;
     map_table.set(
         "mine",
         ctx.create_function(
@@ -37,6 +66,21 @@ pub fn create_lua_plan_builder(
     // let world = _world.clone();
     let world = _world;
     map_table.set(
+        "__doc_fn_place",
+        String::from(
+            r#"
+--- adds a PLACE node to graph
+-- If required first a WALK node is inserted to walk near the item to place 
+-- @int player_id id of player
+-- @param position x/y position table 
+-- @string name name of item to place
+-- @return FactorioEntity table
+function plan.place(player_id, position, name)
+end
+"#,
+        ),
+    )?;
+    map_table.set(
         "place",
         ctx.create_function(
             move |_ctx, (player_id, position, name): (PlayerId, Table, String)| {
@@ -53,6 +97,19 @@ pub fn create_lua_plan_builder(
                 Ok(entity)
             },
         )?,
+    )?;
+    map_table.set(
+        "__doc_fn_walk",
+        String::from(
+            r#"
+--- adds a WALK node to graph
+-- @int player_id id of player
+-- @param position x/y position table 
+-- @int radius how close to walk to
+function plan.walk(player_id, position, radius)
+end
+"#,
+        ),
     )?;
     let plan_builder = _plan_builder.clone();
     map_table.set(
@@ -75,6 +132,19 @@ pub fn create_lua_plan_builder(
     )?;
     let plan_builder = _plan_builder.clone();
     map_table.set(
+        "__doc_fn_groupStart",
+        String::from(
+            r#"
+--- adds a GROUP START node to graph
+-- Groups are used to synchronize bots so their tasks are completed before the next group is started.
+-- Should be closed ith groupEnd. 
+-- @string label label of group
+function plan.groupStart(label)
+end
+"#,
+        ),
+    )?;
+    map_table.set(
         "groupStart",
         ctx.create_function(move |_ctx, label: String| {
             plan_builder.group_start(label.as_str());
@@ -82,6 +152,16 @@ pub fn create_lua_plan_builder(
         })?,
     )?;
     let plan_builder = _plan_builder;
+    map_table.set(
+        "__doc_fn_groupEnd",
+        String::from(
+            r#"
+--- adds a GROUP END node to graph
+function plan.groupEnd()
+end
+"#,
+        ),
+    )?;
     map_table.set(
         "groupEnd",
         ctx.create_function(move |_ctx, ()| {

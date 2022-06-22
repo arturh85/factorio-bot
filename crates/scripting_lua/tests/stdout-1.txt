@@ -1,4 +1,2 @@
 start script for 1 bots
-required_iron_plate: 9
-required_stone_plate: 5
 end script

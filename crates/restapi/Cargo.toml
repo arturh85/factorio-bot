@@ -6,9 +6,8 @@ edition = "2021"
 
 [package.metadata.release]
 tag = false
-publish = false
 push = false
-
+publish = false
 
 [dependencies]
 factorio-bot-core = { path = "../core" }

@@ -3,7 +3,10 @@ name = "factorio-bot-scripting-rune"
 version = "0.2.9"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[package.metadata.release]
+tag = false
+push = false
+publish = false
 
 [dependencies]
 factorio-bot-core = { path = "../core" }

@@ -1,5 +1,19 @@
 # Changelog
-All notable changes to this project will be documented in this file.
+## [unreleased]
+
+### Feature
+
+- REPL Prompt indicates if factorio is running ([f546a60](https://github.com/arturh85/factorio-bot-tauri/commit/f546a6000a68bf76cd58ff44ece08f4cd9ce4d53))
+- World.findEntitiesInRadius implemented ([835ddd2](https://github.com/arturh85/factorio-bot-tauri/commit/835ddd28781a725b89165fcf6db65505ca565ed6))
+- Lua Api Docs generated with LDOC ([abe6359](https://github.com/arturh85/factorio-bot-tauri/commit/abe63599c1ba909bdafc9ec92b4ec5d6b22c9de1))
+
+### Features
+
+- Adjust verbosity of running factorio instance in REPL ([475d4e3](https://github.com/arturh85/factorio-bot-tauri/commit/475d4e340f19dfb1a68f5a835bcc259039848333))
+
+### Milestone
+
+- Working REPL ([0c50586](https://github.com/arturh85/factorio-bot-tauri/commit/0c50586cf747c840912336fed4620c58abad67d2))
 
 ## [0.2.1] - 2021-09-06
 

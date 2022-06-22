@@ -1,5 +1,5 @@
 # Changelog
-## [unreleased]
+## [0.2.10] - 2022-06-22
 
 ### Feature
 

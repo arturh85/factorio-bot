@@ -187,7 +187,7 @@ jobs:
 
       - name: 🚧 build lua api docs (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
-        uses: ./.github/actions/ldoc
+        uses: ./.github/actions/ldoc.yml
         with:
           config-path: docs/lua/config.ld
 

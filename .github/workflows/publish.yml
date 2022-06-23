@@ -117,10 +117,8 @@ jobs:
         run: cargo build --timings && cd app && yarn tauri:build
       - name: ✅ run rust tests
         run: cd app; yarn cargo:test
-
-      - name: 🚚 move build output to correct folder
-        run: mv target/ app/src-tauri/target/
-
+#      - name: 🚚 move build output to correct folder
+#        run: mv target/ app/src-tauri/target/
       - name: 📦️ upload tauri artifacts to release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -132,8 +130,8 @@ jobs:
           projectPath: "./app"
           tauriScript: "npm run dummy"
 
-      - name: 🚚 move build back so it can be cached
-        run: mv app/src-tauri/target/ target/
+#      - name: 🚚 move build back so it can be cached
+#        run: mv app/src-tauri/target/ target/
 
 #      - name: 🚚 move binary for NSIS (windows only)
 #        if: matrix.platform == 'windows-latest'

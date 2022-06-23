@@ -110,7 +110,7 @@ jobs:
       - name: ✅ lint javascript code
         run: cd app; yarn lint
       - name: ✅ run javascript tests
-        run: cd app; yarn test:unit
+        run: cd app; yarn test:coverage
       - name: 🚧 build javascript
         run: cd app; yarn build:web
       - name: 🚧 build rust

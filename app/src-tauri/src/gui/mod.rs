@@ -6,7 +6,6 @@ use factorio_bot_core::miette::{IntoDiagnostic, Report, Result};
 #[allow(clippy::items_after_statements)]
 pub fn start(context: Context) -> Result<()> {
   let mut app = tauri::Builder::default()
-    .any_thread()
     .manage(context.app_settings)
     .manage(context.instance_state)
     .manage(context.restapi_handle)

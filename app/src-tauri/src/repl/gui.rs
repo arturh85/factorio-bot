@@ -5,8 +5,7 @@ use reedline_repl_rs::Repl;
 
 #[allow(clippy::unused_async)]
 async fn run(_matches: ArgMatches, context: &mut Context) -> Result<Option<String>, Error> {
-  let context = context.clone();
-  std::thread::spawn(move || crate::gui::start(context).expect("failed"));
+  crate::gui::start(context.clone()).expect("failed");
   Ok(None)
 }
 

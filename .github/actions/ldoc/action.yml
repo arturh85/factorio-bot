@@ -1,13 +1,12 @@
 name: 'LDOC'
 description: 'Generate Lua Api Docs'
 inputs:
-  config-path:  # path to lua
-    description: 'Who to greet'
+  config-path:
+    description: 'path to config.ld file'
     required: true
-    default: 'World'
 runs:
   using: 'docker'
   image: 'docker://anibali/ldoc'
   args:
-    - -c
+    - '-c'
     - ${{ inputs.config-path }}

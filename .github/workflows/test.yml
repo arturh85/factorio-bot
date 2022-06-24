@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - master
+      - renovate/*
       - feature/*
     tags-ignore:
       - v*

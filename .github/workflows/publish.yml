@@ -135,7 +135,7 @@ jobs:
       # Publish gh-pages
       - name: 📤 Deploy public/ to gh-pages
         if: matrix.platform == 'ubuntu-latest'
-        uses: peaceiris/actions-gh-pages
+        uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_branch: gh-pages
@@ -232,7 +232,7 @@ jobs:
           cd app/scripts; node build-auto-updater-json.js
       # Publish gh-pages
       - name: 📤 Deploy public/ to gh-pages
-        uses: peaceiris/actions-gh-pages
+        uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_branch: gh-pages

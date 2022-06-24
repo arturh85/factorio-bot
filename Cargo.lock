@@ -1372,7 +1372,7 @@ dependencies = [
 
 [[package]]
 name = "factorio-bot"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "clap",
  "clap_complete",
@@ -1399,7 +1399,7 @@ dependencies = [
 
 [[package]]
 name = "factorio-bot-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "base64 0.13.0",
@@ -1459,7 +1459,7 @@ dependencies = [
 
 [[package]]
 name = "factorio-bot-restapi"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "factorio-bot-core",
  "miette",
@@ -1477,7 +1477,7 @@ dependencies = [
 
 [[package]]
 name = "factorio-bot-scripting"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "factorio-bot-core",
  "gag",
@@ -1485,7 +1485,7 @@ dependencies = [
 
 [[package]]
 name = "factorio-bot-scripting-lua"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "factorio-bot-core",
  "factorio-bot-scripting",
@@ -1498,7 +1498,7 @@ dependencies = [
 
 [[package]]
 name = "factorio-bot-scripting-rhai"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "factorio-bot-core",
  "factorio-bot-scripting",
@@ -1510,7 +1510,7 @@ dependencies = [
 
 [[package]]
 name = "factorio-bot-scripting-rune"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "factorio-bot-core",
  "factorio-bot-scripting",

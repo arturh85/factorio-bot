@@ -1,4 +1,4 @@
-//! Source: https://github.com/paulgb/interactive_process
+//! Source: <https://github.com/paulgb/interactive_process>
 //!
 //! `interactive_process` is a lightweight wrapper on [std::process] that provides
 //! an interface for running a process and relaying messages to/from it as

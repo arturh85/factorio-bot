@@ -39,7 +39,7 @@ jobs:
       - name: 🛠️ Install tauri-cli
         run: |
           cargo install tauri-cli
-      - name: 🛠️ Install webkit2gtk for tauri build
+      - name: 🛠️ Install webkit2gtk for tauri-cli
         if: matrix.platform == 'ubuntu-latest'
         run: |
           sudo apt-get update
@@ -135,7 +135,7 @@ jobs:
       # Publish gh-pages
       - name: 📤 Deploy public/ to gh-pages
         if: matrix.platform == 'ubuntu-latest'
-        uses: peaceiris/actions-gh-pages@1304921c60d95a91f76f5fea0ce500280f4a6702
+        uses: peaceiris/actions-gh-pages
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_branch: gh-pages
@@ -209,7 +209,7 @@ jobs:
           prerelease: true
 
   publish-autoupdater-json:
-    name: Update gh-pages with updater signatures
+    name: Publish updater signatures
     runs-on: ubuntu-latest
     needs: build-publish
     steps:
@@ -232,7 +232,7 @@ jobs:
           cd app/scripts; node build-auto-updater-json.js
       # Publish gh-pages
       - name: 📤 Deploy public/ to gh-pages
-        uses: peaceiris/actions-gh-pages@1304921c60d95a91f76f5fea0ce500280f4a6702
+        uses: peaceiris/actions-gh-pages
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_branch: gh-pages

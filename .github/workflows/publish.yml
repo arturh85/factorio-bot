@@ -71,6 +71,7 @@ jobs:
 
   publish-tauri:
     needs: create-github-release
+    name: Build & Publish
     strategy:
       fail-fast: false
       matrix:

@@ -192,9 +192,13 @@ jobs:
           config-path: docs/lua/config.ld
           source-path: docs/lua/src/
 
+      - name: 🚚 DEBUG
+        if: matrix.platform == 'ubuntu-latest'
+        run: ls -lah . && ls -lah lua/ && ls -lah public/
+
       - name: 🚚 move lua docs, cargo timings and frontend stats.html to gh-pages (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
-        run: mv app/dist/stats.html public/stats.html; mv doc/ public/lua/; mv target/cargo-timings/ public/cargo-timings/
+        run: mv app/dist/stats.html public/stats.html; mv doc/ public/lua; mv target/cargo-timings/ public/cargo-timings/
 
       - name: 📦 deploy public to gh-pages (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'

@@ -194,7 +194,7 @@ jobs:
 
       - name: 🚚 DEBUG
         if: matrix.platform == 'ubuntu-latest'
-        run: ls -lah . && ls -lah lua/ && ls -lah public/
+        run: ls -lah . && ls -lah doc/ && ls -lah public/
 
       - name: 🚚 move lua docs, cargo timings and frontend stats.html to gh-pages (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'

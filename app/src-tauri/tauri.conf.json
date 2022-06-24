@@ -51,6 +51,9 @@
     "allowlist": {
       "http": {
         "all": true
+      },
+      "dialog": {
+        "all": true
       }
     },
     "windows": [

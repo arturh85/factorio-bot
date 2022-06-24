@@ -21,7 +21,7 @@ factorio-bot-scripting-rhai = { path = "../../crates/scripting_rhai", optional =
 factorio-bot-scripting-lua = { path = "../../crates/scripting_lua", optional = true }
 
 # gui
-tauri = { version = "1.0.0", features = ["http-all"], optional = true }
+tauri = { version = "1.0.0", features = ["dialog-all", "http-all"], optional = true }
 open = {version = "^3.0", optional = true}
 port_scanner = { version = "^0.1.5", optional = true } # scan available port on localhost
 

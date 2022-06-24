@@ -5,12 +5,17 @@ inputs:
     description: 'path to config.ld file'
     required: true
   source-path:
-    description: 'path to lua source files'
+    description: 'path to lua source directory'
+    required: true
+  output-path:
+    description: 'path to html output directory'
     required: true
 runs:
   using: 'docker'
-  image: 'Dockerfile'
+  image: 'docker://anibali/ldoc:latest'
   args:
+    - '-o'
+    - ${{ inputs.output-path }}c
     - '-c'
     - ${{ inputs.config-path }}
     - ${{ inputs.source-path }}

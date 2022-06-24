@@ -33,33 +33,43 @@ jobs:
           path: '**/node_modules'
           key: ${{ runner.os }}-modules-${{ hashFiles('**/yarn.lock') }}
       - name: 🛠️ install cargo tauri-cli
-        run: cargo install tauri-cli --version "^1.0.0"
-      - name: 🛠️ install webkit2gtk for tauri build (ubuntu only)
+        run: |
+          cargo install tauri-cli
+      - name: 🛠️ install webkit2gtk for tauri build
         if: matrix.platform == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y webkit2gtk-4.0 libgtksourceview-3.0-dev
-      - name: 🛠️ install cargo mdbook with mermaid support (ubuntu only)
+      - name: 🛠️ install cargo mdbook with mermaid support
         if: matrix.platform == 'ubuntu-latest'
-        run: cargo install mdbook mdbook-mermaid
+        run: |
+          cargo install mdbook mdbook-mermaid
 
       # Javascript
       - name: 🛠️ install nodejs dependencies
-        run: cd app; yarn
+        run: |
+          cd app; yarn
       - name: 🦠 update version in package.json & tauri.conf.json
-        run: cd app; node update-package-version.js
+        run: |
+          cd app/scripts; node update-package-version.js
       - name: 🧪 lint javascript code
-        run: cd app; yarn lint
-      - name: 🧪 run javascript tests
-        run: cd app; yarn test:coverage
-      - name: 🏗️ build javascript
-        run: cd app; yarn build:web
+        run: |
+          cd app; yarn lint
+      - name: 🧪 test javascript code
+        run: |
+          cd app; yarn test:coverage
+      - name: 🏗️ build javascript code
+        run: |
+          cd app; yarn build:web
 
       # Rust
-      - name: 🏗️ build rust
-        run: cargo build --timings && cd app && yarn tauri:build
-      - name: 🧪 run rust tests
-        run: cd app; yarn cargo:test
+      - name: 🏗️ build rust code
+        run: |
+          cargo build --timings
+          cd app && yarn tauri:build
+      - name: 🧪 test rust code
+        run: |
+          cd app; yarn cargo:test
 
       # Publish tauri artifacts
       - name: 📤️ upload tauri artifacts to github release
@@ -74,27 +84,42 @@ jobs:
           tauriScript: "npm run dummy"
 
       # Prepare gh-pages
-      - name: 🏗️ build rust docs for gh-pages (ubuntu only)
+      - name: 🏗️ build rust docs
         if: matrix.platform == 'ubuntu-latest'
-        run: mkdir public && cargo doc --all --no-deps && mv target/doc public/doc
-      - name: 🏗️ build user guide (ubuntu only)
+        run: |
+          mkdir public 
+          cargo doc --all --no-deps
+          mv target/doc public/doc
+      - name: 🏗️ build auto-updater json files
         if: matrix.platform == 'ubuntu-latest'
-        run: mdbook build docs/userguide && mv docs/userguide/book public/userguide
-      - name: 🏗️ build developer guide (ubuntu only)
+        run: |
+          mkdir public/updates/
+          cd app/scripts; node build-auto-updater-json.js "${{ needs.create-github-release.outputs.release_body }}"
+      - name: 🏗️ build mdbook "user guide"
         if: matrix.platform == 'ubuntu-latest'
-        run: mdbook build docs/devguide && mv docs/devguide/book public/devguide
-      - name: 🏗️ build lua api docs (ubuntu only)
+        run: |
+          mdbook build docs/userguide
+          mv docs/userguide/book public/userguide
+      - name: 🏗️ build mdbook "developer guide"
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          mdbook build docs/devguide
+          mv docs/devguide/book public/devguide
+      - name: 🏗️ build lua api docs
         if: matrix.platform == 'ubuntu-latest'
         uses: ./.github/actions/ldoc/
         with:
           config-path: docs/lua/config.ld
           source-path: docs/lua/src/
-      - name: 🚚 move generated docs and stats to public/ folder (ubuntu only)
+          output-path: public/lua/
+      - name: 🚚 move generated docs and stats to public/ folder
         if: matrix.platform == 'ubuntu-latest'
-        run: mv app/dist/stats.html public/stats.html; mv doc/ public/lua; mv target/cargo-timings/ public/cargo-timings/
+        run: |
+          mv app/dist/stats.html public/stats.html
+          mv target/cargo-timings/ public/cargo-timings/
 
       # Publish gh-pages
-      - name: 📤 deploy public to gh-pages (ubuntu only)
+      - name: 📤 deploy public/ to gh-pages
         if: matrix.platform == 'ubuntu-latest'
         uses: peaceiris/actions-gh-pages@1304921c60d95a91f76f5fea0ce500280f4a6702
         with:
@@ -108,6 +133,7 @@ jobs:
     runs-on: ubuntu-18.04
     outputs:
       id: ${{ steps.create_release.outputs.id }}
+      release_body: ${{ steps.release.outputs.release_body }}
       upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
       - name: Checkout
@@ -119,7 +145,8 @@ jobs:
         with:
           node-version: 16
       - name: 🦠 update version in package.json & tauri.conf.json
-        run: cd app; node update-package-version.js
+        run: |
+          cd app/scripts; node update-package-version.js
       - name: 🔖 create github draft release
         uses: ncipollo/release-action@v1
         id: create_draft_release

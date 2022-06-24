@@ -36,11 +36,13 @@ jobs:
           path: '**/node_modules'
           key: ${{ runner.os }}-modules-${{ hashFiles('**/yarn.lock') }}
       - name: 🛠️ install tauri cli
-        run: cargo install tauri-cli --version "^1.0.0"
-      - name: 🛠️ install tarpaulin code coverage analyser (ubuntu only)
+        run: |
+          cargo install tauri-cli
+      - name: 🛠️ install tarpaulin code coverage analyser
         if: matrix.platform == 'ubuntu-latest'
-        run: cargo install cargo-tarpaulin
-      - name: 🛠️ install webkit2gtk for tauri build (ubuntu only)
+        run: |
+          cargo install cargo-tarpaulin
+      - name: 🛠️ install webkit2gtk for tauri build
         if: matrix.platform == 'ubuntu-latest'
         run: |
           sudo apt-get update
@@ -48,26 +50,33 @@ jobs:
 
       # Javascript
       - name: 🛠️ install nodejs dependencies
-        run: cd app; yarn
+        run: |
+          cd app; yarn
       - name: 🧪 lint javascript code
-        run: cd app; yarn lint
+        run: |
+          cd app; yarn lint
       - name: 🧪 run javascript tests
-        run: cd app; yarn test:coverage
+        run: |
+          cd app; yarn test:coverage
       - name: 🏗️ build javascript
-        run: cd app; yarn build:web
+        run: |
+          cd app; yarn build:web
 
       # Rust
-      - name: 🧪 run rust tests with coverage (ubuntu only)
+      - name: 🧪 run rust tests with coverage
         if: matrix.platform == 'ubuntu-latest'
-        run: cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out Xml
+        run: |
+          cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out Xml
       - name: 🏗️ build rust
-        run: cd app; yarn tauri:build
+        run: |
+          cd app; yarn tauri:build
       - name: 🧪 run rust lint
         continue-on-error: true
-        run: cd app; yarn cargo:clippy
+        run: |
+          cd app; yarn cargo:clippy
 
       # Upload coverage
-      - name: 📤 upload all coverage reports to codecov.io (ubuntu only)
+      - name: 📤 upload all coverage reports to codecov.io
         if: matrix.platform == 'ubuntu-latest'
         uses: codecov/codecov-action@v3
         continue-on-error: true

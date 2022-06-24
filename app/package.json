@@ -23,8 +23,6 @@
     "cargo:devguide": "cd ../docs/devguide && mdbook serve -o",
     "changelog:update": "cd .. && git cliff --output CHANGELOG.md",
     "precommit:check": "npm run lint && npm run test:coverage && npm run cargo:clippy && npm run cargo:test && cd .. && cargo build --all-features && cargo build --no-default-features",
-    "version:update-from-cargo": "node update-package-version.js",
-    "checksum:update": "node update-checksum.js",
     "dummy": "true"
   },
   "dependencies": {

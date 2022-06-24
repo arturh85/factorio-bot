@@ -46,7 +46,12 @@
       }
     },
     "updater": {
-      "active": false
+      "active": true,
+      "endpoints": [
+        "https://arturh85.github.io/updates/{target}}.json"
+      ],
+      "dialog": true,
+      "pubkey": ""
     },
     "allowlist": {
       "http": {

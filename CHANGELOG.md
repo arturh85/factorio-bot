@@ -1,5 +1,11 @@
 # Changelog
-## [0.2.2] - 2022-06-24
+## [unreleased]
+
+### Feature
+
+- Enabled auto-updater ([3754a57](https://github.com/arturh85/factorio-bot-tauri/commit/3754a57c1c7091ff5beed4767d02572ebf7cef8f))
+
+## [0.2.0] - 2022-06-24
 
 ### Feature
 

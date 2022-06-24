@@ -1,6 +1,6 @@
 [package]
 name = "factorio-bot-scripting-rhai"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 
 [package.metadata.release]

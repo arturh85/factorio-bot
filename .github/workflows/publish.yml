@@ -5,6 +5,104 @@ on:
       - 'v**'
 
 jobs:
+  build-publish:
+    needs: create-github-release
+    name: Build & Publish
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      # Prepare
+      - name: 🔥 checkout code
+        uses: actions/checkout@v3
+      - name: 🛠️ install nodejs 16
+        uses: actions/setup-node@v3
+        with:
+          node-version: 16
+      - name: 🛠️ install rust stable
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v1
+      - uses: actions/cache@v3
+        with:
+          path: '**/node_modules'
+          key: ${{ runner.os }}-modules-${{ hashFiles('**/yarn.lock') }}
+      - name: 🛠️ install cargo tauri-cli
+        run: cargo install tauri-cli --version "^1.0.0"
+      - name: 🛠️ install webkit2gtk for tauri build (ubuntu only)
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y webkit2gtk-4.0 libgtksourceview-3.0-dev
+      - name: 🛠️ install cargo mdbook with mermaid support (ubuntu only)
+        if: matrix.platform == 'ubuntu-latest'
+        run: cargo install mdbook mdbook-mermaid
+
+      # Javascript
+      - name: 🛠️ install nodejs dependencies
+        run: cd app; yarn
+      - name: 🦠 update version in package.json & tauri.conf.json
+        run: cd app; node update-package-version.js
+      - name: 🧪 lint javascript code
+        run: cd app; yarn lint
+      - name: 🧪 run javascript tests
+        run: cd app; yarn test:coverage
+      - name: 🏗️ build javascript
+        run: cd app; yarn build:web
+
+      # Rust
+      - name: 🏗️ build rust
+        run: cargo build --timings && cd app && yarn tauri:build
+      - name: 🧪 run rust tests
+        run: cd app; yarn cargo:test
+
+      # Publish tauri artifacts
+      - name: 📤️ upload tauri artifacts to github release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          releaseId: ${{ needs.create-github-release.outputs.id }}
+          iconPath: "../public/logo.png"
+          configPath: "tauri.conf.json"
+          projectPath: "./app"
+          tauriScript: "npm run dummy"
+
+      # Prepare gh-pages
+      - name: 🏗️ build rust docs for gh-pages (ubuntu only)
+        if: matrix.platform == 'ubuntu-latest'
+        run: mkdir public && cargo doc --all --no-deps && mv target/doc public/doc
+      - name: 🏗️ build user guide (ubuntu only)
+        if: matrix.platform == 'ubuntu-latest'
+        run: mdbook build docs/userguide && mv docs/userguide/book public/userguide
+      - name: 🏗️ build developer guide (ubuntu only)
+        if: matrix.platform == 'ubuntu-latest'
+        run: mdbook build docs/devguide && mv docs/devguide/book public/devguide
+      - name: 🏗️ build lua api docs (ubuntu only)
+        if: matrix.platform == 'ubuntu-latest'
+        uses: ./.github/actions/ldoc/
+        with:
+          config-path: docs/lua/config.ld
+          source-path: docs/lua/src/
+      - name: 🚚 move generated docs and stats to public/ folder (ubuntu only)
+        if: matrix.platform == 'ubuntu-latest'
+        run: mv app/dist/stats.html public/stats.html; mv doc/ public/lua; mv target/cargo-timings/ public/cargo-timings/
+
+      # Publish gh-pages
+      - name: 📤 deploy public to gh-pages (ubuntu only)
+        if: matrix.platform == 'ubuntu-latest'
+        uses: peaceiris/actions-gh-pages@1304921c60d95a91f76f5fea0ce500280f4a6702
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./public
+          force_orphan: true
+
   create-github-release:
     name: Create Github Release
     runs-on: ubuntu-18.04
@@ -16,11 +114,11 @@ jobs:
         uses: actions/checkout@main
         with:
           fetch-depth: 0
-      - name: 🛠️ install NodeJS 16
+      - name: 🛠️ install nodejs 16
         uses: actions/setup-node@v3
         with:
           node-version: 16
-      - name: 🦠 extract version from app/src-tauri/Cargo.toml to package.json & tauri.conf.json & ENV
+      - name: 🦠 update version in package.json & tauri.conf.json
         run: cd app; node update-package-version.js
       - name: 🔖 create github draft release
         uses: ncipollo/release-action@v1
@@ -35,7 +133,7 @@ jobs:
           body: "body filled later"
           draft: true
           prerelease: true
-      - name: Generate a changelog
+      - name: generate changelog
         uses: orhun/git-cliff-action@v1
         id: git-cliff
         with:
@@ -43,7 +141,7 @@ jobs:
           args: -vv --latest --strip header
         env:
           OUTPUT: CHANGES.md
-      - name: Set the release body
+      - name: set the release body to changelog
         id: release
         shell: bash
         run: |
@@ -68,140 +166,3 @@ jobs:
           body: "${{ steps.release.outputs.release_body }}"
           draft: false
           prerelease: true
-
-  publish-tauri:
-    needs: create-github-release
-    name: Build, Test & Publish
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [macos-latest, ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.platform }}
-    steps:
-      - name: 🔥 checkout code
-        uses: actions/checkout@v3
-      - name: 🛠️ install NodeJS 16
-        uses: actions/setup-node@v3
-        with:
-          node-version: 16
-      - name: 🛠️ install Rust stable
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-      - uses: Swatinem/rust-cache@v1
-      - uses: actions/cache@v3
-        with:
-          path: '**/node_modules'
-          key: ${{ runner.os }}-modules-${{ hashFiles('**/yarn.lock') }}
-      - name: 🛠️ install cargo tauri-cli
-        run: cargo install tauri-cli --version "^1.0.0"
-      - name: 🛠️ install apt webkit2gtk (ubuntu only)
-        if: matrix.platform == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y webkit2gtk-4.0 libgtksourceview-3.0-dev
-      - name: 🛠️ install cargo mdbook (ubuntu only)
-        if: matrix.platform == 'ubuntu-latest'
-        run: cargo install mdbook mdbook-mermaid
-      - name: 🛠️ install NodeJS dependencies
-        run: cd app; yarn
-      - name: 🦠 extract version from app/src-tauri/Cargo.toml to package.json & tauri.conf.json & ENV
-        run: cd app; node update-package-version.js
-      - name: 🧪 lint javascript code
-        run: cd app; yarn lint
-      - name: 🧪 run javascript tests
-        run: cd app; yarn test:coverage
-      - name: 🏗️ build javascript
-        run: cd app; yarn build:web
-      - name: 🏗️ build rust
-        run: cargo build --timings && cd app && yarn tauri:build
-      - name: 🧪 run rust tests
-        run: cd app; yarn cargo:test
-#      - name: 🚚 move build output to correct folder
-#        run: mv target/ app/src-tauri/target/
-      - name: 📤️ upload tauri artifacts to release
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          releaseId: ${{ needs.create-github-release.outputs.id }}
-          iconPath: "../public/logo.png"
-          configPath: "tauri.conf.json"
-          projectPath: "./app"
-          tauriScript: "npm run dummy"
-
-#      - name: 🚚 move build back so it can be cached
-#        run: mv app/src-tauri/target/ target/
-
-#      - name: 🚚 move binary for NSIS (windows only)
-#        if: matrix.platform == 'windows-latest'
-#        run: mv app/src-tauri/target/release/deps/factorio_bot.exe .github/chocolatey/factorio-bot.exe
-#      - name: 🏗️ build NSIS installer (windows only)
-#        if: matrix.platform == 'windows-latest'
-#        uses: joncloud/makensis-action@v3.6
-#        with:
-#          script-file: ".github/chocolatey/installer.nsi"
-#          arguments: "/V3"
-
-#      - name: 📤️ upload NSIS installer to release (windows only)
-#        if: matrix.platform == 'windows-latest'
-#        id: upload-release-asset
-#        uses: actions/upload-release-asset@v1
-#        env:
-#          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-#        with:
-#          upload_url: ${{ needs.create-github-release.outputs.upload_url }}
-#          asset_path: ./.github/chocolatey/factorio-bot-installer.exe
-#          asset_name: factorio-bot-installer.exe
-#          asset_content_type: application/octet-stream
-#      - name: 🏗️ calculate checksum for chocolatey (windows only)
-#        if: matrix.platform == 'windows-latest'
-#        run: cd app; yarn checksum:update
-#      - name: 🏗️ build nuget package for chocolatey (windows only)
-#        if: matrix.platform == 'windows-latest'
-#        uses: crazy-max/ghaction-chocolatey@v1
-#        with:
-#          args: pack .github/chocolatey/factorio-bot.nuspec
-#      - name: 🚚 rename nupkg without version in filename (windows only)
-#        if: matrix.platform == 'windows-latest'
-#        run: mv factorio-bot.*.nupkg factorio-bot.nupkg
-#      - name: 📤 publish nuget package to chocolatey (windows only)
-#        if: matrix.platform == 'windows-latest'
-#        uses: crazy-max/ghaction-chocolatey@v1
-#        env:
-#          APIKEY: ${{ secrets.CHOCOLATEY_APIKEY }}
-#        with:
-#          args: push factorio-bot.nupkg --key "${{ env.APIKEY }}" --source https://push.chocolatey.org/
-
-      - name: 🏗️ build rust doc for gh-pages (ubuntu only)
-        if: matrix.platform == 'ubuntu-latest'
-        run: mkdir public && cargo doc --all --no-deps && mv target/doc public/doc
-
-      - name: 🏗️ build user guide (ubuntu only)
-        if: matrix.platform == 'ubuntu-latest'
-        run: mdbook build docs/userguide && mv docs/userguide/book public/userguide
-
-      - name: 🏗️ build developer guide (ubuntu only)
-        if: matrix.platform == 'ubuntu-latest'
-        run: mdbook build docs/devguide && mv docs/devguide/book public/devguide
-
-      - name: 🏗️ build lua api docs (ubuntu only)
-        if: matrix.platform == 'ubuntu-latest'
-        uses: ./.github/actions/ldoc/
-        with:
-          config-path: docs/lua/config.ld
-          source-path: docs/lua/src/
-
-      - name: 🚚 move generated docs and stats to public/ folde (ubuntu only)
-        if: matrix.platform == 'ubuntu-latest'
-        run: mv app/dist/stats.html public/stats.html; mv doc/ public/lua; mv target/cargo-timings/ public/cargo-timings/
-
-      - name: 📤 deploy public to gh-pages (ubuntu only)
-        if: matrix.platform == 'ubuntu-latest'
-        uses: peaceiris/actions-gh-pages@1304921c60d95a91f76f5fea0ce500280f4a6702
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_branch: gh-pages
-          publish_dir: ./public
-          force_orphan: true

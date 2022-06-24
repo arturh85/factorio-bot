@@ -1,6 +1,7 @@
 [package]
 name = "factorio-bot-scripting-rune"
-version = "0.2.8"
+version = "0.2.0"
+authors = ["Artur Hallmann <arturh@arturh.de>"]
 edition = "2021"
 
 [package.metadata.release]

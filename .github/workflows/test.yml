@@ -1,4 +1,4 @@
-name: "tests"
+name: "test"
 on:
   push:
     branches:
@@ -9,22 +9,23 @@ on:
       - v*
 
 jobs:
-  test-tauri:
-    name: Lint, Build & Test
+  test-build:
+    name: Test & Build
     strategy:
       fail-fast: false
       matrix:
         platform: [macos-latest, ubuntu-latest, windows-latest]
-
     runs-on: ${{ matrix.platform }}
+
     steps:
+      # Prepare
       - name: 🔥 checkout code
         uses: actions/checkout@v3
-      - name: 🛠️ install NodeJS 16
+      - name: 🛠️ install nodejs 16
         uses: actions/setup-node@v3
         with:
           node-version: 16
-      - name: 🛠️ install Rust stable
+      - name: 🛠️ install rust stable
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
@@ -39,12 +40,14 @@ jobs:
       - name: 🛠️ install tarpaulin code coverage analyser (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
         run: cargo install cargo-tarpaulin
-      - name: 🛠️ install webkit2gtk (ubuntu only)
+      - name: 🛠️ install webkit2gtk for tauri build (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y webkit2gtk-4.0 libgtksourceview-3.0-dev
-      - name: 🛠️ install app dependencies
+
+      # Javascript
+      - name: 🛠️ install nodejs dependencies
         run: cd app; yarn
       - name: 🧪 lint javascript code
         run: cd app; yarn lint
@@ -52,18 +55,22 @@ jobs:
         run: cd app; yarn test:coverage
       - name: 🏗️ build javascript
         run: cd app; yarn build:web
-      - name: 🧪 run rust test coverage (ubuntu only)
+
+      # Rust
+      - name: 🧪 run rust tests with coverage (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
         run: cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out Xml
-      - name: 📤 Upload to codecov.io (ubuntu only)
+      - name: 🏗️ build rust
+        run: cd app; yarn tauri:build
+      - name: 🧪 run rust lint
+        continue-on-error: true
+        run: cd app; yarn cargo:clippy
+
+      # Upload coverage
+      - name: 📤 upload all coverage reports to codecov.io (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
         uses: codecov/codecov-action@v3
         continue-on-error: true
         with:
           fail_ci_if_error: false
           files: ./app/coverage/cobertura-coverage.xml,./cobertura.xml,./target/tarpaulin/coverage.json
-      - name: 🏗️ build rust
-        run: cd app; yarn tauri:build
-      - name: 🧪 run rust lint
-        continue-on-error: true
-        run: cd app; yarn cargo:clippy

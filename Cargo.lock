@@ -1399,7 +1399,7 @@ dependencies = [
 
 [[package]]
 name = "factorio-bot-core"
-version = "0.2.8"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64 0.13.0",
@@ -1447,6 +1447,7 @@ dependencies = [
  "tar",
  "thiserror",
  "tokio",
+ "toml 0.4.10",
  "toml 0.5.9",
  "typescript-definitions",
  "unicode-segmentation",
@@ -1458,7 +1459,7 @@ dependencies = [
 
 [[package]]
 name = "factorio-bot-restapi"
-version = "0.2.8"
+version = "0.2.0"
 dependencies = [
  "factorio-bot-core",
  "miette",
@@ -1476,7 +1477,7 @@ dependencies = [
 
 [[package]]
 name = "factorio-bot-scripting"
-version = "0.2.8"
+version = "0.2.0"
 dependencies = [
  "factorio-bot-core",
  "gag",
@@ -1484,7 +1485,7 @@ dependencies = [
 
 [[package]]
 name = "factorio-bot-scripting-lua"
-version = "0.2.8"
+version = "0.2.0"
 dependencies = [
  "factorio-bot-core",
  "factorio-bot-scripting",
@@ -1497,7 +1498,7 @@ dependencies = [
 
 [[package]]
 name = "factorio-bot-scripting-rhai"
-version = "0.2.8"
+version = "0.2.0"
 dependencies = [
  "factorio-bot-core",
  "factorio-bot-scripting",
@@ -1509,7 +1510,7 @@ dependencies = [
 
 [[package]]
 name = "factorio-bot-scripting-rune"
-version = "0.2.8"
+version = "0.2.0"
 dependencies = [
  "factorio-bot-core",
  "factorio-bot-scripting",

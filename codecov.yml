@@ -1,5 +1,5 @@
 codecov:
-  require_ci_to_pass: no
+  require_ci_to_pass: false
 
 coverage:
   status:
@@ -7,3 +7,5 @@ coverage:
       default:
         # remove codecov minimum coverage requirements
         target: 0%
+        # Allow the coverage to drop by X%, and posting a success status.
+        threshold: 100%

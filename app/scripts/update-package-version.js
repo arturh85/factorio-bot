@@ -29,6 +29,7 @@ if (matches) {
             console.log('Saved to Github ENV');
         });
     }
+    console.log('::set-output name=package_version::' + version);
 } else {
     console.error('failed to find version in ', cargoTomlPath)
     process.exit(1)

@@ -8,6 +8,10 @@ jobs:
   build-publish:
     needs: create-github-release
     name: Build & Publish
+    outputs:
+      signature: ${{ steps.create_signature.outputs.signature }}
+      release_body: ${{ steps.create_release.outputs.release_body }}
+      package_version: ${{ steps.create_version.outputs.package_version }}
     strategy:
       fail-fast: false
       matrix:
@@ -50,6 +54,7 @@ jobs:
         run: |
           cd app; yarn
       - name: 🦠 Update version in package.json & tauri.conf.json
+        id: create_version
         run: |
           cd app/scripts; node update-package-version.js
       - name: 🧪 Lint javascript code
@@ -66,8 +71,9 @@ jobs:
       - name: 🏗️ Build rust code
         env:
           TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
         run: |
-          cargo build --timings
+          cargo build --release --timings
           cd app && yarn tauri:build
       - name: 🧪 Test rust code
         run: |
@@ -85,6 +91,12 @@ jobs:
           projectPath: "./app"
           tauriScript: "npm run dummy"
 
+      # Output Signature
+      - name: 🏗️ Output Tauri Signature
+        id: create_signature
+        run: |
+          cd app/scripts; node output-signature.js
+
       # Prepare gh-pages
       - name: 🏗️ Build rust docs
         if: matrix.platform == 'ubuntu-latest'
@@ -92,11 +104,6 @@ jobs:
           mkdir public 
           cargo doc --all --no-deps
           mv target/doc public/doc
-      - name: 🏗️ Build auto-updater json files
-        if: matrix.platform == 'ubuntu-latest'
-        run: |
-          mkdir public/updates/
-          cd app/scripts; node build-auto-updater-json.js "${{ needs.create-github-release.outputs.release_body }}"
       - name: 🏗️ Build mdbook "user guide"
         if: matrix.platform == 'ubuntu-latest'
         run: |
@@ -107,13 +114,18 @@ jobs:
         run: |
           mdbook build docs/devguide
           mv docs/devguide/book public/devguide
+      - name: 🏗️ Prepare folder for lua api docs
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          mkdir public/lua/
       - name: 🏗️ Build lua api docs
         if: matrix.platform == 'ubuntu-latest'
+        continue-on-error: true
         uses: ./.github/actions/ldoc/
         with:
           config-path: docs/lua/config.ld
           source-path: docs/lua/src/
-          output-path: public/lua/
+          output-path: ../public/lua/
       - name: 🚚 Move generated docs and stats to public/ folder
         if: matrix.platform == 'ubuntu-latest'
         run: |
@@ -195,3 +207,35 @@ jobs:
           body: "${{ steps.release.outputs.release_body }}"
           draft: false
           prerelease: true
+
+  publish-autoupdater-json:
+    name: Update gh-pages with updater signatures
+    runs-on: ubuntu-latest
+    needs: build-publish
+    steps:
+      - name: 🔥 Checkout code
+        uses: actions/checkout@v3
+      - name: 🛠️ Install nodejs 16
+        uses: actions/setup-node@v3
+        with:
+          node-version: 16
+      - name: 🏗️ Build auto-updater json files
+        env:
+          SIGNATURE_WINDOWS: ${{ needs.build-publish.outputs.windows-latest.signature }}
+          SIGNATURE_LINUX: ${{ needs.build-publish.outputs.ubuntu-latest.signature }}
+          SIGNATURE_MACOS: ${{ needs.build-publish.outputs.macos-latest.signature }}
+          RELEASE_BODY: ${{ needs.build-publish.outputs.ubuntu-latest.release_body }}
+          PACKAGE_VERSION: ${{ needs.build-publish.outputs.ubuntu-latest.package_version }}
+        run: |
+          mkdir public
+          mkdir public/updates/
+          cd app/scripts; node build-auto-updater-json.js
+      # Publish gh-pages
+      - name: 📤 Deploy public/ to gh-pages
+        uses: peaceiris/actions-gh-pages@1304921c60d95a91f76f5fea0ce500280f4a6702
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./public
+          force_orphan: false
+          keep_files: true

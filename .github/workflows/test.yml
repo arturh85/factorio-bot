@@ -35,7 +35,7 @@ jobs:
         with:
           path: '**/node_modules'
           key: ${{ runner.os }}-modules-${{ hashFiles('**/yarn.lock') }}
-      - name: 🛠️ Install tauri cli
+      - name: 🛠️ Install tauri-cli
         run: |
           cargo install tauri-cli
       - name: 🛠️ Install tarpaulin code coverage analyser
@@ -63,11 +63,13 @@ jobs:
           cd app; yarn build:web
 
       # Rust
-      - name: 🧪 Test rust code
+      - name: 🧪 Test rust code with tarpaulin
         if: matrix.platform == 'ubuntu-latest'
         run: |
           cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out Xml
       - name: 🏗️ Build rust code
+        env:
+          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
         run: |
           cd app; yarn tauri:build
       - name: 🧪 Lint rust code

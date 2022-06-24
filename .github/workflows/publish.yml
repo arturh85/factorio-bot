@@ -32,7 +32,7 @@ jobs:
         with:
           path: '**/node_modules'
           key: ${{ runner.os }}-modules-${{ hashFiles('**/yarn.lock') }}
-      - name: 🛠️ Install cargo tauri-cli
+      - name: 🛠️ Install tauri-cli
         run: |
           cargo install tauri-cli
       - name: 🛠️ Install webkit2gtk for tauri build
@@ -40,7 +40,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y webkit2gtk-4.0 libgtksourceview-3.0-dev
-      - name: 🛠️ Install cargo mdbook with mermaid support
+      - name: 🛠️ Install mdbook with mermaid support
         if: matrix.platform == 'ubuntu-latest'
         run: |
           cargo install mdbook mdbook-mermaid
@@ -64,6 +64,8 @@ jobs:
 
       # Rust
       - name: 🏗️ Build rust code
+        env:
+          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
         run: |
           cargo build --timings
           cd app && yarn tauri:build
@@ -130,7 +132,7 @@ jobs:
 
   create-github-release:
     name: Create Github Release
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-latest
     outputs:
       id: ${{ steps.create_release.outputs.id }}
       release_body: ${{ steps.release.outputs.release_body }}

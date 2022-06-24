@@ -187,9 +187,10 @@ jobs:
 
       - name: 🚧 build lua api docs (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
-        uses: ./.github/actions/ldoc
+        uses: ./.github/actions/ldoc/
         with:
           config-path: docs/lua/config.ld
+          source-path: docs/lua/src/
 
       - name: 🚚 move lua docs, cargo timings and frontend stats.html to gh-pages (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'

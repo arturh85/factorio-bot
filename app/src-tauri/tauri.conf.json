@@ -51,7 +51,7 @@
         "https://arturh85.github.io/updates/{target}}.json"
       ],
       "dialog": true,
-      "pubkey": ""
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM4Mjg1OEREM0I5OEJGMTYKUldRV3Y1ZzczVmdvT1BwOXNSN2JzSEgrenIwN0NKUHhnZkZweVkrRkNWMFoyMXd2aEVkK0IxZ1EK"
     },
     "allowlist": {
       "http": {

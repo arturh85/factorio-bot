@@ -2,13 +2,13 @@ name: 'LDOC'
 description: 'Generate Lua Api Docs'
 inputs:
   config-path:
-    description: 'path to config.ld file'
+    description: 'Path to config.ld file'
     required: true
   source-path:
-    description: 'path to lua source directory'
+    description: 'Path to lua source directory'
     required: true
   output-path:
-    description: 'path to html output directory'
+    description: 'Path to html output directory'
     required: true
 runs:
   using: 'docker'

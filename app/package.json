@@ -11,6 +11,7 @@
     "native:serve": "cross-env VITE_HTTP_HANDLER=NATIVE vite --port 8080",
     "native:start": "tauri dev",
     "build:web": "vite build",
+    "tauri:keygen": "tauri signer generate -w factorio-bot-tauri.key",
     "tauri:serve": "concurrently -r -n \"rust,VITE\" -k \"tauri dev\" \"npm run native:serve\"",
     "tauri:serve:release": "concurrently -r -n \"rust,VITE\" -k \"tauri dev --release\" \"npm run native:serve\"",
     "tauri:build": "cross-env VITE_HTTP_HANDLER=NATIVE vite build && tauri build",

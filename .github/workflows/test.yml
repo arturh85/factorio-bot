@@ -52,27 +52,27 @@ jobs:
       - name: 🛠️ Install nodejs dependencies
         run: |
           cd app; yarn
+      - name: 🏗️ Build javascript code
+        run: |
+          cd app; yarn build:web
       - name: 🧪 Lint javascript code
         run: |
           cd app; yarn lint
       - name: 🧪 Test javascript code
         run: |
           cd app; yarn test:coverage
-      - name: 🏗️ Build javascript code
-        run: |
-          cd app; yarn build:web
 
       # Rust
-      - name: 🧪 Test rust code with tarpaulin
-        if: matrix.platform == 'ubuntu-latest'
-        run: |
-          cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out Xml
       - name: 🏗️ Build rust code
         env:
           TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
           TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
         run: |
           cd app; yarn tauri:build
+      - name: 🧪 Test rust code with tarpaulin
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out Xml
       - name: 🧪 Lint rust code
         continue-on-error: true
         run: |
@@ -80,7 +80,7 @@ jobs:
 
       # Upload coverage
       - name: 📤 Upload coverage reports to codecov.io
-        if: matrix.platform == 'ubuntu-latest'
+        if: matrix.platform == 'ubuntu-latest' && github.ref == 'refs/heads/master'
         uses: codecov/codecov-action@v3
         continue-on-error: true
         with:

@@ -130,6 +130,8 @@ jobs:
         if: matrix.platform == 'ubuntu-latest'
         run: |
           ls -alh . && ls -alh public/
+          sudo chown -R $(id -u):$(id -g) public/
+          sudo chown -R $(id -u):$(id -g) doc/
       - name: 🚚 Move generated docs and stats to public/ folder
         if: matrix.platform == 'ubuntu-latest'
         run: |

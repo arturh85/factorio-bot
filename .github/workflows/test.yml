@@ -1,12 +1,8 @@
 name: "test"
 on:
   push:
-    branches:
-      - master
-      - renovate/*
-      - feature/*
     tags-ignore:
-      - v*
+      - 'v**'
 
 jobs:
   test-build:
@@ -40,7 +36,7 @@ jobs:
       - name: 🛠️ Install tauri-cli
         run: |
           cargo install tauri-cli
-      - name: 🛠️ Install tarpaulin code coverage analyser
+      - name: 🛠️ Install tarpaulin (rust code coverage analyser)
         if: matrix.platform == 'ubuntu-latest'
         run: |
           cargo install cargo-tarpaulin
@@ -71,7 +67,7 @@ jobs:
           TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
         run: |
           cd app; yarn tauri:build
-      - name: 🧪 Test rust code with tarpaulin
+      - name: 🧪 Test rust code
         if: matrix.platform == 'ubuntu-latest'
         run: |
           cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out Xml

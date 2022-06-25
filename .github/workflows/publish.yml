@@ -61,12 +61,6 @@ jobs:
       - name: 🏗️ Build javascript code
         run: |
           cd app; yarn build:web
-      - name: 🧪 Test javascript code
-        run: |
-          cd app; yarn test:coverage
-      - name: 🧪 Lint javascript code
-        run: |
-          cd app; yarn lint
 
       # Rust
       - name: 🏗️ Build rust code
@@ -76,9 +70,6 @@ jobs:
         run: |
           cargo build --release --timings
           cd app && yarn tauri:build
-      - name: 🧪 Test rust code
-        run: |
-          cd app; yarn cargo:test
 
       # Output Signature
       - name: 🏗️ Build tauri updater json

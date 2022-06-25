@@ -1,5 +1,6 @@
 const fs = require('fs')
-const updaterPath = '../../public/updates/'
+const updaterPath = '../../updates/'
+const targetPath = '../../target/release/'
 
 // https://tauri.app/v1/guides/distribution/updater/#update-server-json-format
 
@@ -13,29 +14,34 @@ const platforms = {
 }
 
 const sigs = {
-    'darwin-x86_64': process.env.SIGNATURE_MACOS,
-    'linux-x86_64': process.env.SIGNATURE_LINUX,
-    'windows-x86_64': process.env.SIGNATURE_WINDOWS
+    'darwin-x86_64': 'bundle/osx/factorio-bot.app.tar.gz.sig',
+    'linux-x86_64': 'bundle/appimage/factorio-bot_' + version + '_amd64.AppImage.tar.gz.sig',
+    'windows-x86_64': 'bundle/msi/factorio-bot_' + version + '.x64_en-US.msi.zip.sig'
 }
-
-console.log('DEBUG ENV', process.env)
 
 for (let platform of Object.keys(platforms)) {
     const urlFilename = platforms[platform] + '.json';
-    const platformPath = updaterPath + platform
-    const nowStr = new Date().toISOString();
-    const platformJson = {
-        'version': 'v' + version,
-        'notes': releaseBody,
-        'pub_date': nowStr,
-        'platforms': {
-            [platform]: {
-                'signature': sigs[platform],
-                'url': 'https://github.com/arturh85/factorio-bot-tauri/releases/download/v' + version + '/' + urlFilename
+    const signaturePath = targetPath + sigs[platform];
+
+    if (fs.existsSync(signaturePath)) {
+        const signature = fs.readFileSync(signaturePath, {encoding: 'utf8'})
+        const platformPath = updaterPath + platform
+        const nowStr = new Date().toISOString();
+        const platformJson = {
+            'version': 'v' + version,
+            'notes': releaseBody,
+            'pub_date': nowStr,
+            'platforms': {
+                [platform]: {
+                    'signature': signature,
+                    'url': 'https://github.com/arturh85/factorio-bot-tauri/releases/download/v' + version + '/' + urlFilename
+                }
             }
-        }
-    };
-    console.log('write to ', platformPath, platformJson);
-    fs.writeFileSync(platformPath, JSON.stringify(platformJson, null, 2))
+        };
+        console.log('write to ', platformPath, platformJson);
+        fs.writeFileSync(platformPath, JSON.stringify(platformJson, null, 2))
+        break;
+    }
+
 }
 

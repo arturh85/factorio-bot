@@ -93,9 +93,17 @@ jobs:
 
       # Output Signature
       - name: 🏗️ Output Tauri Signature
-        id: create_signature
+        env:
+          RELEASE_BODY: ${{ needs.create-github-release.outputs.release_body }}
+          PACKAGE_VERSION: ${{ needs.create-github-release.outputs.package_version }}
         run: |
-          cd app/scripts; node output-signature.js
+          mkdir updates
+          cd app/scripts; node build-auto-updater
+
+      # Upload updater json
+      - uses: actions/upload-artifact@v3
+        with:
+          path: updates/*
 
       # Prepare gh-pages
       - name: 🏗️ Build rust docs
@@ -225,17 +233,16 @@ jobs:
         uses: actions/setup-node@v3
         with:
           node-version: 16
+      - uses: actions/download-artifact@v3
+        with:
+          path: updates/
       - name: 🏗️ Build auto-updater json files
-        env:
-          SIGNATURE_WINDOWS: ${{ needs.build-publish.windows-latest.outputs.signature }}
-          SIGNATURE_LINUX: ${{ needs.build-publish.ubuntu-latest.outputs.signature }}
-          SIGNATURE_MACOS: ${{ needs.build-publish.macos-latest.outputs.signature }}
-          RELEASE_BODY: ${{ needs.build-publish.ubuntu-latest.outputs.release_body }}
-          PACKAGE_VERSION: ${{ needs.build-publish.ubuntu-latest.outputs.package_version }}
         run: |
+          ls -alh .
+          ls -alh updates/
           mkdir public
-          mkdir public/updates/
-          cd app/scripts; node build-auto-updater-json.js
+          mkdir public/
+          mv updates/ public/
       # Publish gh-pages
       - name: 📤 Deploy public/ to gh-pages
         uses: peaceiris/actions-gh-pages@v3

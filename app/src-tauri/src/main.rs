@@ -12,7 +12,7 @@ mod gui;
 mod paths;
 #[cfg(feature = "repl")]
 mod repl;
-#[cfg(any(feature = "rhai", feature = "lua", feature = "rune"))]
+#[cfg(feature = "lua")]
 mod scripting;
 mod settings;
 

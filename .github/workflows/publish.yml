@@ -9,7 +9,6 @@ jobs:
     needs: create-github-release
     name: Build & Publish
     outputs:
-      signature: ${{ steps.create_signature.outputs.signature }}
       release_body: ${{ needs.create-github-release.outputs.release_body }}
       package_version: ${{ needs.create-github-release.outputs.package_version }}
     strategy:
@@ -48,8 +47,6 @@ jobs:
         if: matrix.platform == 'ubuntu-latest'
         run: |
           cargo install mdbook mdbook-mermaid
-
-      # Javascript
       - name: 🛠️ Install nodejs dependencies
         run: |
           cd app; yarn
@@ -57,15 +54,17 @@ jobs:
         id: create_version
         run: |
           cd app/scripts; node update-package-version.js
-      - name: 🧪 Lint javascript code
-        run: |
-          cd app; yarn lint
-      - name: 🧪 Test javascript code
-        run: |
-          cd app; yarn test:coverage
+
+      # Javascript
       - name: 🏗️ Build javascript code
         run: |
           cd app; yarn build:web
+      - name: 🧪 Test javascript code
+        run: |
+          cd app; yarn test:coverage
+      - name: 🧪 Lint javascript code
+        run: |
+          cd app; yarn lint
 
       # Rust
       - name: 🏗️ Build rust code
@@ -83,14 +82,14 @@ jobs:
       - name: 🏗️ Output Tauri Signature
         env:
           RELEASE_BODY: ${{ needs.create-github-release.outputs.release_body }}
-          PACKAGE_VERSION: ${{ needs.create-github-release.outputs.package_version }}
         run: |
           mkdir updates
           ls -l target/release
           cd app/scripts; node build-auto-updater-json.js
 
       # Upload updater json
-      - uses: actions/upload-artifact@v3
+      - name: Upload updater json to Job for later
+        uses: actions/upload-artifact@v3
         with:
           path: updates/*
 
@@ -218,7 +217,7 @@ jobs:
           prerelease: true
 
   publish-autoupdater-json:
-    name: Publish updater signatures
+    name: Publish updater json files
     runs-on: ubuntu-latest
     needs: build-publish
     steps:
@@ -228,10 +227,11 @@ jobs:
         uses: actions/setup-node@v3
         with:
           node-version: 16
-      - uses: actions/download-artifact@v3
+      - name: 📥 Download update json files from build jobs
+        uses: actions/download-artifact@v3
         with:
           path: updates/
-      - name: 🏗️ Build auto-updater json files
+      - name: 🏗️ Move to public/
         run: |
           ls -alh .
           ls -alh updates/
@@ -239,7 +239,7 @@ jobs:
           mkdir public/
           mv updates/ public/
       # Publish gh-pages
-      - name: 📤 Deploy public/ to gh-pages
+      - name: 📤 Re-Deploy public/ to gh-pages (with keep_files)
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}

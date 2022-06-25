@@ -7,7 +7,7 @@ mod quit;
 mod rcon_send;
 #[cfg(feature = "restapi")]
 mod restapi_control;
-#[cfg(any(feature = "lua", feature = "rhai", feature = "rune"))]
+#[cfg(feature = "lua")]
 mod run_script;
 mod set_setting;
 
@@ -23,7 +23,7 @@ fn subcommands() -> Vec<Box<dyn Subcommand>> {
     factorio_control::build(),
     #[cfg(all(debug_assertions, feature = "gui"))]
     gui::build(),
-    #[cfg(any(feature = "lua", feature = "rhai", feature = "rune"))]
+    #[cfg(feature = "lua")]
     run_script::build(),
     rcon_send::build(),
     #[cfg(feature = "restapi")]

@@ -1,5 +1,5 @@
 #![allow(clippy::module_name_repetitions)]
-#[cfg(any(feature = "rhai", feature = "lua"))]
+#[cfg(feature = "lua")]
 use crate::scripting::{prepare_workspace_scripts, run_script, run_script_file};
 use crate::settings::SharedAppSettings;
 use factorio_bot_core::paris::warn;
@@ -20,7 +20,7 @@ pub async fn execute_script(
 ) -> Result<(String, String), String> {
   if let Some(instance_state) = &*instance_state.read().await {
     if let Some(world) = &instance_state.world {
-      #[cfg(any(feature = "rhai", feature = "lua"))]
+      #[cfg(feature = "lua")]
       {
         use factorio_bot_core::plan::planner::Planner;
         world.entity_graph.connect().unwrap();
@@ -34,7 +34,7 @@ pub async fn execute_script(
           .map_err(|e| format!("error: {:?}", e))?;
         return Ok((stdout, stderr));
       }
-      #[cfg(not(any(feature = "rhai", feature = "lua")))]
+      #[cfg(not(feature = "lua"))]
       {
         return Ok((String::new(), String::new()));
       }
@@ -58,7 +58,7 @@ pub async fn execute_code(
 ) -> Result<(String, String), String> {
   if let Some(instance_state) = &*instance_state.read().await {
     if let Some(world) = &instance_state.world {
-      #[cfg(any(feature = "rhai", feature = "lua"))]
+      #[cfg(feature = "lua")]
       {
         use factorio_bot_core::plan::planner::Planner;
         world.entity_graph.connect().unwrap();
@@ -71,7 +71,7 @@ pub async fn execute_code(
           .map_err(|e| format!("error: {:?}", e))?;
         return Ok((stdout, stderr));
       }
-      #[cfg(not(any(feature = "rhai", feature = "lua")))]
+      #[cfg(not(feature = "lua"))]
       {
         return Ok((String::new(), String::new()));
       }
@@ -87,7 +87,7 @@ pub async fn load_scripts_in_directory(
   app_settings: State<'_, SharedAppSettings>,
   path: String,
 ) -> Result<Vec<PrimeVueTreeNode>, String> {
-  #[cfg(any(feature = "rhai", feature = "lua"))]
+  #[cfg(feature = "lua")]
   {
     use std::path::{Path, PathBuf};
     let app_settings = &app_settings.read().await;
@@ -130,7 +130,7 @@ pub async fn load_scripts_in_directory(
       .collect();
     Ok(result)
   }
-  #[cfg(not(any(feature = "rhai", feature = "lua")))]
+  #[cfg(not(feature = "lua"))]
   {
     Ok(Vec::new())
   }
@@ -142,7 +142,7 @@ pub async fn load_script(
   app_settings: State<'_, SharedAppSettings>,
   path: String,
 ) -> Result<String, String> {
-  #[cfg(any(feature = "rhai", feature = "lua"))]
+  #[cfg(feature = "lua")]
   {
     use std::path::{Path, PathBuf};
     let app_settings = &app_settings.read().await;
@@ -163,7 +163,7 @@ pub async fn load_script(
     }
     std::fs::read_to_string(dir_path).map_err(|e| format!("error: {}", e))
   }
-  #[cfg(not(any(feature = "rhai", feature = "lua")))]
+  #[cfg(not(feature = "lua"))]
   {
     Ok(String::new())
   }
@@ -176,7 +176,7 @@ pub async fn save_script(
   path: String,
   code: String,
 ) -> Result<(), String> {
-  #[cfg(any(feature = "rhai", feature = "lua"))]
+  #[cfg(feature = "lua")]
   {
     use std::path::{Path, PathBuf};
     let app_settings = &app_settings.read().await;
@@ -197,7 +197,7 @@ pub async fn save_script(
     }
     std::fs::write(dir_path, code).map_err(|e| format!("error: {}", e))
   }
-  #[cfg(not(any(feature = "rhai", feature = "lua")))]
+  #[cfg(not(feature = "lua"))]
   {
     Ok(String::new())
   }

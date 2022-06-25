@@ -16,8 +16,8 @@ tag-name = "v{{version}}"
 # workspace
 factorio-bot-core = { path = "../../crates/core" }
 factorio-bot-restapi = { path = "../../crates/restapi", optional = true }
-factorio-bot-scripting-rune = { path = "../../crates/scripting_rune", optional = true }
-factorio-bot-scripting-rhai = { path = "../../crates/scripting_rhai", optional = true }
+#factorio-bot-scripting-rune = { path = "../../crates/scripting_rune", optional = true }
+#factorio-bot-scripting-rhai = { path = "../../crates/scripting_rhai", optional = true }
 factorio-bot-scripting-lua = { path = "../../crates/scripting_lua", optional = true }
 
 # gui
@@ -64,8 +64,8 @@ custom-protocol = ["tauri/custom-protocol"] # custom_protocol disables dev mode
 gui = ["dep:open", "dep:port_scanner", "tauri", "dep:tauri-build"]
 cli = ["dep:clap", "dep:clap_complete"]
 restapi = ["dep:factorio-bot-restapi"]
-rhai = ["dep:factorio-bot-scripting-rhai"]
-rune = ["dep:factorio-bot-scripting-rune"]
+#rhai = ["dep:factorio-bot-scripting-rhai"]
+#rune = ["dep:factorio-bot-scripting-rune"]
 lua = ["dep:factorio-bot-scripting-lua"]
 repl = ["reedline-repl-rs/async"]
 tokio-console = ["dep:console-subscriber"]

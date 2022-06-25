@@ -4,8 +4,8 @@ members = [
     "crates/core",
     "crates/restapi",
     "crates/scripting",
-    "crates/scripting_rhai",
-    "crates/scripting_rune",
+#    "crates/scripting_rhai",
+#    "crates/scripting_rune",
     "crates/scripting_lua",
 ]
 resolver = "2"

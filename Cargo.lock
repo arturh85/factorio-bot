@@ -630,16 +630,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "codespan-reporting"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3538270d33cc669650c4b093848450d380def10c331d38c768e34cac80576e6e"
-dependencies = [
- "termcolor",
- "unicode-width",
-]
-
-[[package]]
 name = "color-eyre"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1382,8 +1372,6 @@ dependencies = [
  "factorio-bot-core",
  "factorio-bot-restapi",
  "factorio-bot-scripting-lua",
- "factorio-bot-scripting-rhai",
- "factorio-bot-scripting-rune",
  "open",
  "port_scanner",
  "reedline-repl-rs",
@@ -1493,28 +1481,6 @@ dependencies = [
  "miette",
  "rlua-async",
  "rlua_serde",
- "tokio",
-]
-
-[[package]]
-name = "factorio-bot-scripting-rhai"
-version = "0.2.14"
-dependencies = [
- "factorio-bot-core",
- "factorio-bot-scripting",
- "miette",
- "rhai",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "factorio-bot-scripting-rune"
-version = "0.2.14"
-dependencies = [
- "factorio-bot-core",
- "factorio-bot-scripting",
- "rune",
  "tokio",
 ]
 
@@ -2165,10 +2131,6 @@ name = "hashbrown"
 version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab5ef0d4909ef3724cc8cce6ccc8572c5c817592e9285f5464f8e86f8bd3726e"
-dependencies = [
- "ahash",
- "serde 1.0.137",
-]
 
 [[package]]
 name = "hashbrown"
@@ -4287,34 +4249,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rhai"
-version = "1.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f06953bb8b9e4307cb7ccc0d9d018e2ddd25a30d32831f631ce4fe8f17671f7"
-dependencies = [
- "ahash",
- "bitflags",
- "instant",
- "num-traits 0.2.15",
- "rhai_codegen",
- "serde 1.0.137",
- "serde_json",
- "smallvec",
- "smartstring",
-]
-
-[[package]]
-name = "rhai_codegen"
-version = "1.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75a39bc2aa9258b282ee5518dac493491a9c4c11a6d7361b9d2644c922fc6488"
-dependencies = [
- "proc-macro2 1.0.39",
- "quote 1.0.18",
- "syn 1.0.96",
-]
-
-[[package]]
 name = "rlua"
 version = "0.19.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4488,43 +4422,6 @@ checksum = "a620b0994a180cdfa25c0439e6d58c0628272571501880d626ffff58e96a0799"
 dependencies = [
  "cc",
  "which",
-]
-
-[[package]]
-name = "rune"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e417065787a6600d0471be2e04c845377268020624fdb107a61a36be3c4725f"
-dependencies = [
- "anyhow",
- "byteorder",
- "codespan-reporting",
- "futures-core",
- "futures-util",
- "hashbrown 0.11.2",
- "itoa 0.4.8",
- "num",
- "num-bigint",
- "pin-project",
- "rune-macros",
- "ryu",
- "serde 1.0.137",
- "serde_bytes",
- "smallvec",
- "thiserror",
- "tracing",
- "twox-hash",
-]
-
-[[package]]
-name = "rune-macros"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0dba487cb48f418e152c748ecac22b67674e0642f1f1b49efe9f72341e628713"
-dependencies = [
- "proc-macro2 1.0.39",
- "quote 1.0.18",
- "syn 1.0.96",
 ]
 
 [[package]]
@@ -4788,15 +4685,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_bytes"
-version = "0.11.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "212e73464ebcde48d723aa02eb270ba62eff38a9b732df31f33f1b4e145f3a54"
-dependencies = [
- "serde 1.0.137",
-]
-
-[[package]]
 name = "serde_derive"
 version = "1.0.137"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5030,18 +4918,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cc88c725d61fc6c3132893370cac4a0200e3fedf5da8331c570664b1987f5ca2"
 dependencies = [
  "serde 1.0.137",
-]
-
-[[package]]
-name = "smartstring"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fb72c633efbaa2dd666986505016c32c3044395ceaf881518399d2f4127ee29"
-dependencies = [
- "autocfg",
- "serde 1.0.137",
- "static_assertions",
- "version_check",
 ]
 
 [[package]]
@@ -5980,16 +5856,6 @@ name = "ttf-parser"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e5d7cd7ab3e47dda6e56542f4bbf3824c15234958c6e1bd6aaa347e93499fdc"
-
-[[package]]
-name = "twox-hash"
-version = "1.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
-dependencies = [
- "cfg-if 1.0.0",
- "static_assertions",
-]
 
 [[package]]
 name = "typenum"

@@ -1,4 +1,10 @@
 # Changelog
+## [unreleased]
+
+### Feature
+
+- Added example.lua ([e20cc88](https://github.com/arturh85/factorio-bot-tauri/commit/e20cc88d0d66ddd58ae664d2209af3233de17994))
+
 ## [0.2.18] - 2022-06-25
 
 ### Fix

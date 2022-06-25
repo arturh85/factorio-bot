@@ -56,7 +56,7 @@ regex = "^1.5"
 schemars = { version = "0.8", features = ["preserve_order"] }
 rlua = "^0.19"
 rlua_serde = { git = "https://github.com/creepinson/rlua_serde" } # fork which is compatible with rlua 0.19
-miette = {version = "^5.0", features = ["fancy"] }
+miette = {version = "^5.1", features = ["fancy"] }
 thiserror = "^1.0"
 futures = "0.3.21"
 #

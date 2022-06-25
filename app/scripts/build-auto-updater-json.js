@@ -7,8 +7,6 @@ const targetPath = '../../target/release/'
 const version = process.env.PACKAGE_VERSION;
 const releaseBody = process.env.RELEASE_BODY;
 
-console.log('DEBUG ENV', process.env)
-
 const platforms = {
     'darwin-x86_64': 'factorio-bot.app.tar.gz',
     'linux-x86_64': 'factorio-bot_' + version + '_amd64.AppImage.tar.gz',

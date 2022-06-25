@@ -84,7 +84,6 @@ jobs:
           RELEASE_BODY: ${{ needs.create-github-release.outputs.release_body }}
         run: |
           mkdir updates
-          ls -l target/release
           cd app/scripts; node build-auto-updater-json.js
 
       # Upload updater json
@@ -227,6 +226,8 @@ jobs:
         uses: actions/setup-node@v3
         with:
           node-version: 16
+
+      # Download update jsons
       - name: 📥 Download update json files from windows
         uses: actions/download-artifact@v3
         with:
@@ -242,16 +243,16 @@ jobs:
         with:
           name: macos-latest
           path: updates-macos/
+
+      # Move update jsons to public/
       - name: 🏗️ Move to public/
         run: |
-          ls -alh updates-windows/
-          ls -alh updates-linux/
-          ls -alh updates-macos/
           mkdir public/
           mkdir public/updates/
           mv updates-windows/* public/updates/
           mv updates-linux/* public/updates/
           mv updates-macos/* public/updates/
+
       # Publish gh-pages
       - name: 📤 Re-Deploy public/ to gh-pages (with keep_files)
         uses: peaceiris/actions-gh-pages@v3

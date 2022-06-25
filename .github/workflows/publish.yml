@@ -91,6 +91,7 @@ jobs:
       - name: 📤️ Upload updater json to Job for later
         uses: actions/upload-artifact@v3
         with:
+          name: ${{ matrix.platform }}
           path: updates/*
 
       # Publish tauri artifacts
@@ -226,15 +227,31 @@ jobs:
         uses: actions/setup-node@v3
         with:
           node-version: 16
-      - name: 📥 Download update json files from build jobs
+      - name: 📥 Download update json files from windows
         uses: actions/download-artifact@v3
         with:
-          path: updates/
+          name: windows-latest
+          path: updates-windows/
+      - name: 📥 Download update json files from linux
+        uses: actions/download-artifact@v3
+        with:
+          name: ubuntu-latest
+          path: updates-linux/
+      - name: 📥 Download update json files from macos
+        uses: actions/download-artifact@v3
+        with:
+          name: macos-latest
+          path: updates-macos/
       - name: 🏗️ Move to public/
         run: |
-          ls -alh updates/
+          ls -alh updates-windows/
+          ls -alh updates-linux/
+          ls -alh updates-macos/
           mkdir public/
-          mv updates/ public/
+          mkdir public/updates/
+          mv updates-windows/* public/updates/
+          mv updates-linux/* public/updates/
+          mv updates-macos/* public/updates/
       # Publish gh-pages
       - name: 📤 Re-Deploy public/ to gh-pages (with keep_files)
         uses: peaceiris/actions-gh-pages@v3

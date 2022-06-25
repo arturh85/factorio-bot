@@ -16,9 +16,9 @@ const platforms = {
 }
 
 const sigs = {
-    'darwin-x86_64': 'bundle/osx/factorio-bot.app.tar.gz.sig',
+    'darwin-x86_64': 'bundle/macos/factorio-bot.app.tar.gz.sig',
     'linux-x86_64': 'bundle/appimage/factorio-bot_' + version + '_amd64.AppImage.tar.gz.sig',
-    'windows-x86_64': 'bundle/msi/factorio-bot_' + version + '.x64_en-US.msi.zip.sig'
+    'windows-x86_64': 'bundle/msi/factorio-bot_' + version + '_x64_en-US.msi.zip.sig'
 }
 
 for (let platform of Object.keys(platforms)) {

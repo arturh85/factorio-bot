@@ -232,9 +232,7 @@ jobs:
           path: updates/
       - name: 🏗️ Move to public/
         run: |
-          ls -alh .
           ls -alh updates/
-          mkdir public
           mkdir public/
           mv updates/ public/
       # Publish gh-pages

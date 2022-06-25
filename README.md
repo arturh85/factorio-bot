@@ -35,14 +35,14 @@ Goals / Use Cases:
   - [x] entities
   - [x] resources
 - Build Graphs of:
-  - [ ] Entity Connections with distance based weights (currently broken)
-  - [ ] Flow Connections with flow rate per second for each belt side/resource (currently broken)
-  - [ ] Bot Task Dependencies with time estimate based weights (currently broken)
+  - [x] Entity Connections with distance based weights
+  - [x] Flow Connections with flow rate per second for each belt side/resource
+  - [x] Bot Task Dependencies with time estimate based weights
 - Example LUA Script which can:
-  - [ ] Plan some task with time estimation
-  - [ ] Find Seed which minimizes execution time
-  - [ ] Research Automation in MM:SS
-- [ ] (optional) REST API Endpoints with OpenAPI specs  (currently broken)
+  - [x] Plan some task with time estimation
+  - [x] Find Seed which minimizes execution time
+  - [ ] Research Automation in MM:SS (work in progress)
+- [x] (optional) REST API Endpoints with OpenAPI specs
 - [ ] read map contents by chunk for leaflet based Map View (currently broken)
 - [x] use whatever mods you want, configured in central location for all factorio instances
 - [x] should work on Win/Mac/Linux (not tested on Mac)

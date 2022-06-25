@@ -168,19 +168,6 @@ jobs:
       - name: 🦠 Update version in package.json & tauri.conf.json
         run: |
           cd app/scripts; node update-package-version.js
-      - name: 🔖 Create github draft release
-        uses: ncipollo/release-action@v1
-        id: create_draft_release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          allowUpdates: true
-          replacesArtifacts: false
-          name: "Factorio Bot v${{ env.PACKAGE_VERSION }}"
-          tag: v${{ env.PACKAGE_VERSION }}
-          body: "body filled later"
-          draft: true
-          prerelease: true
       - name: Generate changelog
         uses: orhun/git-cliff-action@v1
         id: git-cliff

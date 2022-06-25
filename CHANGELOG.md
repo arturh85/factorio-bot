@@ -1,6 +1,12 @@
 # Changelog
 ## [unreleased]
 
+### Documentation
+
+- Style lua docs with auto content width ([6b2fa73](https://github.com/arturh85/factorio-bot-tauri/commit/6b2fa734fbfa2d04e870d38aac561c1f9426c5cf))
+
+## [0.2.15] - 2022-06-25
+
 ### Performance
 
 - Remove unusable rune/rhai scripting support for now ([ef360cd](https://github.com/arturh85/factorio-bot-tauri/commit/ef360cd84772f2610e4c1342479038346a71c005))

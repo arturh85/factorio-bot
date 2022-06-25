@@ -1,4 +1,10 @@
 # Changelog
+## [unreleased]
+
+### Fix
+
+- Publish workflow ([88a42de](https://github.com/arturh85/factorio-bot-tauri/commit/88a42de327334f62d3d90fc16759491105846345))
+
 ## [0.2.16] - 2022-06-25
 
 ### Documentation

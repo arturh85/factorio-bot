@@ -241,6 +241,7 @@ jobs:
           mv updates-windows/* public/updates/
           mv updates-linux/* public/updates/
           mv updates-macos/* public/updates/
+          cd app/scripts; node merge-auto-updater-json.js
 
       # Publish gh-pages
       - name: 📤 Re-Deploy public/ to gh-pages (with keep_files)

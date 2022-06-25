@@ -7,6 +7,8 @@ const targetPath = '../../target/release/'
 const version = process.env.PACKAGE_VERSION;
 const releaseBody = process.env.RELEASE_BODY;
 
+// Note that each platform key is in the OS-ARCH format, where OS is one of linux, darwin or windows, and ARCH is one of x86_64, aarch64, i686 or armv7.
+
 const platforms = {
     'darwin-x86_64': 'factorio-bot.app.tar.gz',
     'linux-x86_64': 'factorio-bot_' + version + '_amd64.AppImage.tar.gz',

@@ -48,7 +48,7 @@
     "updater": {
       "active": true,
       "endpoints": [
-        "https://arturh85.github.io/factorio-bot-tauri/updates/{{target}}.json"
+        "https://arturh85.github.io/factorio-bot-tauri/updates/all.json"
       ],
       "dialog": true,
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZGQUU0MkQxQUU3OUU4OTgKUldTWTZIbXUwVUt1YitBdk1YQkVyREVucU4rMlBnQUFkRzVjNVFSSjNraXJ5bjl5VStIbDU5UnoK"

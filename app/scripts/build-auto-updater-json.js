@@ -42,6 +42,5 @@ for (let platform of Object.keys(platforms)) {
         fs.writeFileSync(platformPath, JSON.stringify(platformJson, null, 2))
         break;
     }
-
 }
 

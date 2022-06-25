@@ -98,7 +98,7 @@ jobs:
           PACKAGE_VERSION: ${{ needs.create-github-release.outputs.package_version }}
         run: |
           mkdir updates
-          cd app/scripts; node build-auto-updater.js
+          cd app/scripts; node build-auto-updater-json.js
 
       # Upload updater json
       - uses: actions/upload-artifact@v3

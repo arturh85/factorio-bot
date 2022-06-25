@@ -122,10 +122,6 @@ jobs:
         run: |
           mdbook build docs/devguide
           mv docs/devguide/book public/devguide
-      - name: 🏗️ Prepare folder for lua api docs
-        if: matrix.platform == 'ubuntu-latest'
-        run: |
-          mkdir public/lua/
       - name: 🏗️ Build lua api docs
         if: matrix.platform == 'ubuntu-latest'
         continue-on-error: true
@@ -133,12 +129,11 @@ jobs:
         with:
           config-path: docs/lua/config.ld
           source-path: docs/lua/src/
-          output-path: ../public/lua/
-      - name: 🏗️ Fix permissions
+      - name: 🏗️ Fix lua api docs permissions & move to public/
         if: matrix.platform == 'ubuntu-latest'
         run: |
-          sudo chown -R $(id -u):$(id -g) public/
           sudo chown -R $(id -u):$(id -g) doc/
+          mv doc/ public/lua/
       - name: 🚚 Move generated docs and stats to public/ folder
         if: matrix.platform == 'ubuntu-latest'
         run: |

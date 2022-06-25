@@ -7,15 +7,10 @@ inputs:
   source-path:
     description: 'Path to lua source directory'
     required: true
-  output-path:
-    description: 'Path to html output directory'
-    required: true
 runs:
   using: 'docker'
   image: 'docker://anibali/ldoc:latest'
   args:
-    - '-o'
-    - ${{ inputs.output-path }}c
     - '-c'
     - ${{ inputs.config-path }}
     - ${{ inputs.source-path }}

@@ -7,6 +7,8 @@ const targetPath = '../../target/release/'
 const version = process.env.PACKAGE_VERSION;
 const releaseBody = process.env.RELEASE_BODY;
 
+console.log('DEBUG ENV', process.env)
+
 const platforms = {
     'darwin-x86_64': 'factorio-bot.app.tar.gz',
     'linux-x86_64': 'factorio-bot_' + version + '_amd64.AppImage.tar.gz',
@@ -20,12 +22,13 @@ const sigs = {
 }
 
 for (let platform of Object.keys(platforms)) {
-    const urlFilename = platforms[platform] + '.json';
+    const urlFilename = platforms[platform];
     const signaturePath = targetPath + sigs[platform];
 
+    console.log('checking', signaturePath)
     if (fs.existsSync(signaturePath)) {
         const signature = fs.readFileSync(signaturePath, {encoding: 'utf8'})
-        const platformPath = updaterPath + platform
+        const platformPath = updaterPath + platform + '.json'
         const nowStr = new Date().toISOString();
         const platformJson = {
             'version': 'v' + version,

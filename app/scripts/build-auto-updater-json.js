@@ -10,7 +10,7 @@ const releaseBody = process.env.RELEASE_BODY;
 const platforms = {
     'darwin-x86_64': 'factorio-bot.app.tar.gz',
     'linux-x86_64': 'factorio-bot_' + version + '_amd64.AppImage.tar.gz',
-    'windows-x86_64': 'factorio-bot_' + version + '.x64.msi.zip'
+    'windows-x86_64': 'factorio-bot_' + version + '_x64_en-US.msi.zip'
 }
 
 const sigs = {

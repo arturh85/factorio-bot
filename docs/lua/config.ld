@@ -17,3 +17,4 @@ file = {'src'}
 no_summary = false
 no_return_or_parms = false
 format = 'markdown'
+style = true

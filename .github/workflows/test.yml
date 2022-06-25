@@ -42,7 +42,7 @@ jobs:
         if: matrix.platform == 'ubuntu-latest'
         run: |
           cargo install cargo-tarpaulin
-      - name: 🛠️ Install webkit2gtk for tauri-cli
+      - name: 🛠️ Install webkit2gtk (for tauri)
         if: matrix.platform == 'ubuntu-latest'
         run: |
           sudo apt-get update

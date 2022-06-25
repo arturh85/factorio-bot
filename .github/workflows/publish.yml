@@ -38,7 +38,7 @@ jobs:
       - name: 🛠️ Install tauri-cli
         run: |
           cargo install tauri-cli
-      - name: 🛠️ Install webkit2gtk for tauri-cli
+      - name: 🛠️ Install webkit2gtk (for tauri)
         if: matrix.platform == 'ubuntu-latest'
         run: |
           sudo apt-get update
@@ -79,7 +79,7 @@ jobs:
           cd app; yarn cargo:test
 
       # Output Signature
-      - name: 🏗️ Output Tauri Signature
+      - name: 🏗️ Build tauri updater json
         env:
           RELEASE_BODY: ${{ needs.create-github-release.outputs.release_body }}
         run: |
@@ -88,7 +88,7 @@ jobs:
           cd app/scripts; node build-auto-updater-json.js
 
       # Upload updater json
-      - name: Upload updater json to Job for later
+      - name: 📤️ Upload updater json to Job for later
         uses: actions/upload-artifact@v3
         with:
           path: updates/*
@@ -124,7 +124,6 @@ jobs:
           mv docs/devguide/book public/devguide
       - name: 🏗️ Build lua api docs
         if: matrix.platform == 'ubuntu-latest'
-        continue-on-error: true
         uses: ./.github/actions/ldoc/
         with:
           config-path: docs/lua/config.ld

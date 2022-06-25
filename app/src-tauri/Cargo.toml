@@ -1,6 +1,6 @@
 [package]
 name = "factorio-bot"
-version = "0.2.13"
+version = "0.2.14"
 description = "a cross-platform factorio bot platform"
 authors = [ "Artur Hallmann <arturh@arturh.de>" ]
 license = "MIT"

@@ -10,6 +10,7 @@ full_description = [[
 [![codecov](https://codecov.io/gh/arturh85/factorio-bot-tauri/branch/master/graph/badge.svg?token=Q4I23JAT9A)](https://codecov.io/gh/arturh85/factorio-bot-tauri)
 [![actions](https://github.com/arturh85/factorio-bot-tauri/actions/workflows/test.yml/badge.svg)](https://github.com/arturh85/factorio-bot-tauri/actions)
 [![Dev Guide](https://img.shields.io/badge/dev-guide-red)](https://arturh85.github.io/factorio-bot-tauri/devguide/)
+[![Github Repo](https://img.shields.io/badge/repo-github-blueviolet)](https://github.com/arturh85/factorio-bot-tauri)
 
 The following documented items are automatically globally available when user lua scripts are run.
 ]]

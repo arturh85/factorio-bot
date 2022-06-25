@@ -4,6 +4,7 @@
 [![MIT License](https://img.shields.io/github/license/arturh85/factorio-bot-tauri)](https://github.com/arturh85/factorio-bot-tauri/blob/master/LICENSE.txt)
 [![GitHub issues](https://img.shields.io/github/issues/arturh85/factorio-bot-tauri)](https://github.com/arturh85/factorio-bot-tauri/issues)
 [![Dev Guide](https://img.shields.io/badge/dev-guide-red)](https://arturh85.github.io/factorio-bot-tauri/devguide/)
+[![Github Repo](https://img.shields.io/badge/repo-github-blueviolet)](https://github.com/arturh85/factorio-bot-tauri)
 
 ## Intro: What is it?
 

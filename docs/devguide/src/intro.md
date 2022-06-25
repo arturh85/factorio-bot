@@ -1,11 +1,13 @@
 # Factorio Bot Developer Guide
 
+
 [![User Guide](https://img.shields.io/badge/user-guide-green)](https://arturh85.github.io/factorio-bot-tauri/userguide/)
 [![LUA API Docs](https://img.shields.io/badge/lua-apidocs-blue)](https://arturh85.github.io/factorio-bot-tauri/lua/)
 [![MIT License](https://img.shields.io/github/license/arturh85/factorio-bot-tauri)](https://github.com/arturh85/factorio-bot-tauri/blob/master/LICENSE.txt)
 [![GitHub issues](https://img.shields.io/github/issues/arturh85/factorio-bot-tauri)](https://github.com/arturh85/factorio-bot-tauri/issues)
 [![codecov](https://codecov.io/gh/arturh85/factorio-bot-tauri/branch/master/graph/badge.svg?token=Q4I23JAT9A)](https://codecov.io/gh/arturh85/factorio-bot-tauri)
 [![actions](https://github.com/arturh85/factorio-bot-tauri/actions/workflows/test.yml/badge.svg)](https://github.com/arturh85/factorio-bot-tauri/actions)
+[![Github Repo](https://img.shields.io/badge/repo-github-blueviolet)](https://github.com/arturh85/factorio-bot-tauri)
 
 ## Intro
 

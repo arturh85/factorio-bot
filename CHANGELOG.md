@@ -1,6 +1,12 @@
 # Changelog
 ## [unreleased]
 
+### Docs
+
+- Updated README ([37268a9](https://github.com/arturh85/factorio-bot-tauri/commit/37268a9f1ce93fe90df9c4912e89c0955066a361))
+
+## [0.2.24] - 2022-06-25
+
 ### Feature
 
 - Add Badges to docs ([40436bd](https://github.com/arturh85/factorio-bot-tauri/commit/40436bd17e90cf1b910b91cdf048b4ead81f0604))

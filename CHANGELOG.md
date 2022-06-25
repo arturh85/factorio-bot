@@ -1,5 +1,5 @@
 # Changelog
-## [unreleased]
+## [0.2.18] - 2022-06-25
 
 ### Fix
 

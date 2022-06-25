@@ -1,6 +1,6 @@
 [package]
 name = "factorio-bot-scripting"
-version = "0.2.18"
+version = "0.2.19"
 authors = ["Artur Hallmann <arturh@arturh.de>"]
 edition = "2021"
 

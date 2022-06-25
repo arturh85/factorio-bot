@@ -1,6 +1,6 @@
 [package]
 name = "factorio-bot-restapi"
-version = "0.2.14"
+version = "0.2.15"
 authors = ["Artur Hallmann <arturh@arturh.de>"]
 edition = "2021"
 

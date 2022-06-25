@@ -1,4 +1,10 @@
 # Changelog
+## [unreleased]
+
+### Performance
+
+- Remove unusable rune/rhai scripting support for now ([ef360cd](https://github.com/arturh85/factorio-bot-tauri/commit/ef360cd84772f2610e4c1342479038346a71c005))
+
 ## [0.2.1] - 2022-06-24
 
 ### Feature

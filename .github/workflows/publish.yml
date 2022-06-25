@@ -79,6 +79,21 @@ jobs:
         run: |
           cd app; yarn cargo:test
 
+      # Output Signature
+      - name: 🏗️ Output Tauri Signature
+        env:
+          RELEASE_BODY: ${{ needs.create-github-release.outputs.release_body }}
+          PACKAGE_VERSION: ${{ needs.create-github-release.outputs.package_version }}
+        run: |
+          mkdir updates
+          ls -l target/release
+          cd app/scripts; node build-auto-updater-json.js
+
+      # Upload updater json
+      - uses: actions/upload-artifact@v3
+        with:
+          path: updates/*
+
       # Publish tauri artifacts
       - name: 📤️ Upload artifacts to Github release
         uses: tauri-apps/tauri-action@v0
@@ -90,20 +105,6 @@ jobs:
           configPath: "tauri.conf.json"
           projectPath: "./app"
           tauriScript: "npm run dummy"
-
-      # Output Signature
-      - name: 🏗️ Output Tauri Signature
-        env:
-          RELEASE_BODY: ${{ needs.create-github-release.outputs.release_body }}
-          PACKAGE_VERSION: ${{ needs.create-github-release.outputs.package_version }}
-        run: |
-          mkdir updates
-          cd app/scripts; node build-auto-updater-json.js
-
-      # Upload updater json
-      - uses: actions/upload-artifact@v3
-        with:
-          path: updates/*
 
       # Prepare gh-pages
       - name: 🏗️ Build rust docs

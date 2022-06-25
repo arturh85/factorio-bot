@@ -1,4 +1,4 @@
-# Factorio Dev Guide
+# Factorio Bot Developer Guide
 
 [![User Guide](https://img.shields.io/badge/user-guide-green)](https://arturh85.github.io/factorio-bot-tauri/userguide/)
 [![LUA API Docs](https://img.shields.io/badge/lua-apidocs-blue)](https://arturh85.github.io/factorio-bot-tauri/lua/)

@@ -225,11 +225,11 @@ jobs:
           node-version: 16
       - name: 🏗️ Build auto-updater json files
         env:
-          SIGNATURE_WINDOWS: ${{ needs.build-publish.outputs.windows-latest.signature }}
-          SIGNATURE_LINUX: ${{ needs.build-publish.outputs.ubuntu-latest.signature }}
-          SIGNATURE_MACOS: ${{ needs.build-publish.outputs.macos-latest.signature }}
-          RELEASE_BODY: ${{ needs.build-publish.outputs.ubuntu-latest.release_body }}
-          PACKAGE_VERSION: ${{ needs.build-publish.outputs.ubuntu-latest.package_version }}
+          SIGNATURE_WINDOWS: ${{ needs.build-publish.windows-latest.outputs.signature }}
+          SIGNATURE_LINUX: ${{ needs.build-publish.ubuntu-latest.outputs.signature }}
+          SIGNATURE_MACOS: ${{ needs.build-publish.macos-latest.outputs.signature }}
+          RELEASE_BODY: ${{ needs.build-publish.ubuntu-latest.outputs.release_body }}
+          PACKAGE_VERSION: ${{ needs.build-publish.ubuntu-latest.outputs.package_version }}
         run: |
           mkdir public
           mkdir public/updates/

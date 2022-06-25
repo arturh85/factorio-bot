@@ -18,8 +18,10 @@ const sigs = {
     'windows-x86_64': process.env.SIGNATURE_WINDOWS
 }
 
+console.log('DEBUG ENV', process.env)
+
 for (let platform of Object.keys(platforms)) {
-    const urlFilename = platforms[platform];
+    const urlFilename = platforms[platform] + '.json';
     const platformPath = updaterPath + platform
     const nowStr = new Date().toISOString();
     const platformJson = {

@@ -1,4 +1,4 @@
-# Factorio User Guide
+# Factorio Bot User Guide
 
 [![LUA API Docs](https://img.shields.io/badge/lua-apidocs-blue)](https://arturh85.github.io/factorio-bot-tauri/lua/)
 [![MIT License](https://img.shields.io/github/license/arturh85/factorio-bot-tauri)](https://github.com/arturh85/factorio-bot-tauri/blob/master/LICENSE.txt)

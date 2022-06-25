@@ -98,7 +98,7 @@ jobs:
           PACKAGE_VERSION: ${{ needs.create-github-release.outputs.package_version }}
         run: |
           mkdir updates
-          cd app/scripts; node build-auto-updater
+          cd app/scripts; node build-auto-updater.js
 
       # Upload updater json
       - uses: actions/upload-artifact@v3
@@ -134,10 +134,9 @@ jobs:
           config-path: docs/lua/config.ld
           source-path: docs/lua/src/
           output-path: ../public/lua/
-      - name: 🏗️ DEBUG
+      - name: 🏗️ Fix permissions
         if: matrix.platform == 'ubuntu-latest'
         run: |
-          ls -alh . && ls -alh public/
           sudo chown -R $(id -u):$(id -g) public/
           sudo chown -R $(id -u):$(id -g) doc/
       - name: 🚚 Move generated docs and stats to public/ folder

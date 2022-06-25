@@ -16,6 +16,7 @@ for (let platform of Object.keys(platforms)) {
     console.log('checking', signaturePath);
     if (fs.existsSync(signaturePath)) {
         signature = fs.readFileSync(signaturePath, {encoding: 'utf8'})
+        console.log('found', signature);
         break;
     }
 }

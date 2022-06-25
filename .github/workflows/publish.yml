@@ -10,8 +10,8 @@ jobs:
     name: Build & Publish
     outputs:
       signature: ${{ steps.create_signature.outputs.signature }}
-      release_body: ${{ steps.create_release.outputs.release_body }}
-      package_version: ${{ steps.create_version.outputs.package_version }}
+      release_body: ${{ needs.create-github-release.outputs.release_body }}
+      package_version: ${{ needs.create-github-release.outputs.package_version }}
     strategy:
       fail-fast: false
       matrix:
@@ -126,6 +126,10 @@ jobs:
           config-path: docs/lua/config.ld
           source-path: docs/lua/src/
           output-path: ../public/lua/
+      - name: 🏗️ DEBUG
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          ls -alh . && ls -alh public/
       - name: 🚚 Move generated docs and stats to public/ folder
         if: matrix.platform == 'ubuntu-latest'
         run: |

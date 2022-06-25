@@ -33,6 +33,7 @@ for (let platform of Object.keys(platforms)) {
             }
         }
     };
+    console.log('write to ', platformPath, platformJson);
     fs.writeFileSync(platformPath, JSON.stringify(platformJson, null, 2))
 }
 

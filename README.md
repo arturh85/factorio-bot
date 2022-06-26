@@ -1,10 +1,10 @@
 # Factorio Bot
 
-[![User Guide](https://img.shields.io/badge/user-guide-green)](https://arturh85.github.io/factorio-bot-tauri/userguide/)
-[![LUA API Docs](https://img.shields.io/badge/lua-apidocs-blue)](https://arturh85.github.io/factorio-bot-tauri/lua/)
-[![MIT License](https://img.shields.io/github/license/arturh85/factorio-bot-tauri)](https://github.com/arturh85/factorio-bot-tauri/blob/master/LICENSE.txt)
-[![GitHub issues](https://img.shields.io/github/issues/arturh85/factorio-bot-tauri)](https://github.com/arturh85/factorio-bot-tauri/issues)
-[![Dev Guide](https://img.shields.io/badge/dev-guide-red)](https://arturh85.github.io/factorio-bot-tauri/devguide/)
+[![User Guide](https://img.shields.io/badge/user-guide-green)](https://arturh85.github.io/factorio-bot/userguide/)
+[![LUA API Docs](https://img.shields.io/badge/lua-apidocs-blue)](https://arturh85.github.io/factorio-bot/lua/)
+[![MIT License](https://img.shields.io/github/license/arturh85/factorio-bot)](https://github.com/arturh85/factorio-bot/blob/master/LICENSE.txt)
+[![GitHub issues](https://img.shields.io/github/issues/arturh85/factorio-bot)](https://github.com/arturh85/factorio-bot/issues)
+[![Dev Guide](https://img.shields.io/badge/dev-guide-red)](https://arturh85.github.io/factorio-bot/devguide/)
 
 # What is it?
 
@@ -54,7 +54,7 @@ Goals / Use Cases:
 
 # Quickstart
 
-- Download the [latest release](https://github.com/arturh85/factorio-bot-tauri/releases) for your Operating System
+- Download the [latest release](https://github.com/arturh85/factorio-bot/releases) for your Operating System
 - Download [Factorio](https://www.factorio.com) as .zip or .tar.xz (don't use the headless version!)
 - Start the application and select your downloaded factorio archive under `Settings`
 - Use the `Start` Button in the top right to start the given number of factorio instances with given seed/map exchange string
@@ -62,7 +62,7 @@ Goals / Use Cases:
 
 ## Contribute
 
-See the [Dev Guide](https://arturh85.github.io/factorio-bot-tauri/devguide/) and Send me your Pull Requests :)
+See the [Dev Guide](https://arturh85.github.io/factorio-bot/devguide/) and Send me your Pull Requests :)
 
 ## Contact
 

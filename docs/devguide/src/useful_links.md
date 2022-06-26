@@ -9,8 +9,8 @@
 - [LDOC](https://stevedonovan.github.io/ldoc/manual/doc.md.html)
 
 ## Statistics
-- [Frontend Build Statistics](https://arturh85.github.io/factorio-bot-tauri/stats.html)
-- [Cargo Build Statistics](https://arturh85.github.io/factorio-bot-tauri/cargo-timings/cargo-timing.html)
+- [Frontend Build Statistics](https://arturh85.github.io/factorio-bot/stats.html)
+- [Cargo Build Statistics](https://arturh85.github.io/factorio-bot/cargo-timings/cargo-timing.html)
 
 ## Rust Internal API 
-- [Rust API Docs](https://arturh85.github.io/factorio-bot-tauri/doc/factorio_bot/)
+- [Rust API Docs](https://arturh85.github.io/factorio-bot/doc/factorio_bot/)

@@ -6,12 +6,12 @@
     <title>factorio-bot</title>
     <owners>Artur Hallmann</owners>
     <authors>Artur Hallmann</authors>
-    <projectUrl>https://arturh85.github.io/factorio-bot-tauri/book/</projectUrl>
-    <iconUrl>https://raw.githubusercontent.com/arturh85/factorio-bot-tauri/master/app/src/assets/logo.png</iconUrl>
-    <licenseUrl>https://raw.githubusercontent.com/arturh85/factorio-bot-tauri/master/LICENSE.txt</licenseUrl>
-    <packageSourceUrl>https://github.com/arturh85/factorio-bot-tauri</packageSourceUrl>
-    <projectSourceUrl>https://github.com/arturh85/factorio-bot-tauri</projectSourceUrl>
-    <bugTrackerUrl>https://github.com/arturh85/factorio-bot-tauri/issues</bugTrackerUrl>
+    <projectUrl>https://arturh85.github.io/factorio-bot/book/</projectUrl>
+    <iconUrl>https://raw.githubusercontent.com/arturh85/factorio-bot/master/app/src/assets/logo.png</iconUrl>
+    <licenseUrl>https://raw.githubusercontent.com/arturh85/factorio-bot/master/LICENSE.txt</licenseUrl>
+    <packageSourceUrl>https://github.com/arturh85/factorio-bot</packageSourceUrl>
+    <projectSourceUrl>https://github.com/arturh85/factorio-bot</projectSourceUrl>
+    <bugTrackerUrl>https://github.com/arturh85/factorio-bot/issues</bugTrackerUrl>
     <tags>tools</tags>
     <summary>Bot Platform for the game factorio</summary>
     <description>Factorio Bot is a bot platform for the game</description>

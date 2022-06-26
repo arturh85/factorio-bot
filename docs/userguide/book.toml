@@ -7,7 +7,7 @@ title = "Factorio Bot - User Guide"
 
 [output.html]
 theme = "src/theme"
-git-repository-url = "https://github.com/arturh85/factorio-bot-tauri"
+git-repository-url = "https://github.com/arturh85/factorio-bot"
 additional-js = ["mermaid.min.js", "mermaid-init.js"]
 
 [preprocessor]

@@ -37,7 +37,7 @@ for (let platform of Object.keys(platforms)) {
             'platforms': {
                 [platform]: {
                     'signature': signature,
-                    'url': 'https://github.com/arturh85/factorio-bot-tauri/releases/download/v' + version + '/' + urlFilename
+                    'url': 'https://github.com/arturh85/factorio-bot/releases/download/v' + version + '/' + urlFilename
                 }
             }
         };

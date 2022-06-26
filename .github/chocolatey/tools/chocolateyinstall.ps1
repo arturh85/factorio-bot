@@ -1,6 +1,6 @@
 ﻿$ErrorActionPreference = 'Stop'; # stop on all errors
 $toolsDir   = "$(Split-Path -parent $MyInvocation.MyCommand.Definition)"
-$url        = 'https://github.com/arturh85/factorio-bot-tauri/releases/download/v__REPLACE_VERSION__/factorio-bot-installer.exe'
+$url        = 'https://github.com/arturh85/factorio-bot/releases/download/v__REPLACE_VERSION__/factorio-bot-installer.exe'
 
 $packageArgs = @{
   packageName   = $env:ChocolateyPackageName

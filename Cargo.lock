@@ -1473,7 +1473,7 @@ dependencies = [
 
 [[package]]
 name = "factorio-bot-scripting-lua"
-version = "0.2.0-dev"
+version = "0.2.1"
 dependencies = [
  "factorio-bot-core",
  "factorio-bot-scripting",

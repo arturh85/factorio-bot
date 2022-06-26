@@ -1,4 +1,10 @@
 # Changelog
+## [0.2.1] - 2022-06-26
+
+### Bug Fixes
+
+- Change Windows subsystem to console to allow access to cli/repl ([0b79c71](https://github.com/arturh85/factorio-bot/commit/0b79c713263ec20525bc5dfecf4a61f27654c5ab))
+
 ## [0.2.0] - 2022-06-26
 
 ### Bug Fixes

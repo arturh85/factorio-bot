@@ -1,5 +1,5 @@
 # cargo-release config: https://github.com/crate-ci/cargo-release/blob/master/docs/reference.md
-pre-release-hook = ["git", "cliff", "-c", "../../cliff.toml", "-o", "../../CHANGELOG.md", "-r", "../../"]
+pre-release-hook = ["git", "cliff", "-c", "../../Cargo.toml", "-o", "../../CHANGELOG.md", "-r", "../../"]
 consolidate-commits = true
 consolidate-pushes = true
 allow-branch = ["master"]

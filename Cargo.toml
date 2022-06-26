@@ -39,19 +39,6 @@ opt-level = 0
 opt-level = "z"
 debug = false
 
-
-
-
-# cargo-release config: https://github.com/crate-ci/cargo-release/blob/master/docs/reference.md
-[workspace.metadata.release]
-pre-release-hook = ["git", "cliff", "-c", "../../cliff.toml", "-o", "../../CHANGELOG.md", "-r", "../../"]
-consolidate-commits = true
-consolidate-pushes = true
-allow-branch = ["master"]
-shared-version = true
-dev-version = true
-dev-version-ext = "dev"
-
 # git-cliff config: https://github.com/orhun/git-cliff#configuration-file
 [workspace.metadata.git-cliff.changelog]
 # changelog header

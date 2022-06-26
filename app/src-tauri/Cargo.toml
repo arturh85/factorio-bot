@@ -11,6 +11,8 @@ edition = "2021"
 [package.metadata.release]
 publish = false
 tag-name = "v{{version}}"
+dev-version = true
+dev-version-ext = "dev"
 
 [dependencies]
 # workspace

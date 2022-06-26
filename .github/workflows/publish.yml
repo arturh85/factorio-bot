@@ -30,7 +30,7 @@ jobs:
         with:
           profile: minimal
           toolchain: stable
-      - name: 💾 Cache Rust dependencies
+      - name: 💾 Cache rust dependencies
         uses: Swatinem/rust-cache@v1
       - name: 💾 Cache javascript dependencies
         uses: actions/cache@v3

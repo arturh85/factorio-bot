@@ -165,7 +165,7 @@ jobs:
         uses: orhun/git-cliff-action@v1
         id: git-cliff
         with:
-          config: cliff.toml
+          config: Cargo.toml
           args: -vv --latest --strip header
         env:
           OUTPUT: CHANGES.md

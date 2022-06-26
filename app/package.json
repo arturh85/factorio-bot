@@ -22,7 +22,7 @@
     "cargo:docs": "cd .. && cargo doc --all --no-deps",
     "cargo:userguide": "cd ../docs/userguide && mdbook serve -o",
     "cargo:devguide": "cd ../docs/devguide && mdbook serve -o",
-    "changelog:update": "cd .. && git cliff --output CHANGELOG.md",
+    "changelog:update": "cd .. && git cliff --output CHANGELOG.md --config Cargo.toml",
     "precommit:check": "npm run lint && npm run test:coverage && npm run cargo:clippy && npm run cargo:test && cd .. && cargo build --all-features && cargo build --no-default-features",
     "dummy": "true"
   },

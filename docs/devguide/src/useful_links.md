@@ -1,5 +1,10 @@
 # Useful Links
 
+Mo## Development
+- [Conventional Commits](https://www.conventionalcommits.org)
+- [The documentation system](https://documentation.divio.com)
+- [cargo-release](https://github.com/crate-ci/cargo-release/blob/master/docs/reference.md)
+
 ## Factorio
 
 - [Factorio Docs: Console](https://wiki.factorio.com/Console)

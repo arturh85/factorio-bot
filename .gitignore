@@ -1,5 +1,6 @@
 target/
 .idea/
+.vscode/
 workspace/
 mods/*/
 backend/tests/world.png

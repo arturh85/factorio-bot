@@ -60,7 +60,7 @@ winres = "^0.1.12"
 [features]
 default = ["gui", "restapi", "repl", "cli", "lua"]
 # name "custom-protocol" is required because of hardcoded tauri_cli `cargo  build --features=custom-protocol --release`
-custom-protocol = ["tauri/custom-protocol"] # custom_protocol disables dev mode
+custom-protocol = ["tauri/custom-protocol", "restapi", "repl", "cli", "lua"] # custom_protocol disables dev mode
 gui = ["dep:open", "dep:port_scanner", "tauri", "dep:tauri-build"]
 cli = ["dep:clap", "dep:clap_complete"]
 restapi = ["dep:factorio-bot-restapi"]

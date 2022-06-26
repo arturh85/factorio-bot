@@ -1,5 +1,0 @@
-pre-release-hook = ["git", "cliff", "-c", "../../cliff.toml", "-o", "../../CHANGELOG.md", "-r", "../../"]
-consolidate-commits = true
-consolidate-pushes = true
-allow-branch = ["master"]
-shared-version = true

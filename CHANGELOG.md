@@ -1,31 +1,25 @@
 # Changelog
 ## [0.2.0] - 2022-06-26
 
-### Docs
+### Bug Fixes
 
-- Updated README ([37268a9](https://github.com/arturh85/factorio-bot/commit/37268a9f1ce93fe90df9c4912e89c0955066a361))
+- Publish workflow ([88a42de](https://github.com/arturh85/factorio-bot/commit/88a42de327334f62d3d90fc16759491105846345))
 
 ### Documentation
 
 - Style lua docs with auto content width ([6b2fa73](https://github.com/arturh85/factorio-bot/commit/6b2fa734fbfa2d04e870d38aac561c1f9426c5cf))
+- Updated README ([37268a9](https://github.com/arturh85/factorio-bot/commit/37268a9f1ce93fe90df9c4912e89c0955066a361))
 
-### Feature
+### Features
 
 - Added Changelogs with git-cliff ([ef78f7b](https://github.com/arturh85/factorio-bot/commit/ef78f7b1657ea07754c49d81d7ebd4773ffd4e11))
 - REPL Prompt indicates if factorio is running ([f546a60](https://github.com/arturh85/factorio-bot/commit/f546a6000a68bf76cd58ff44ece08f4cd9ce4d53))
+- Adjust verbosity of running factorio instance in REPL ([475d4e3](https://github.com/arturh85/factorio-bot/commit/475d4e340f19dfb1a68f5a835bcc259039848333))
 - World.findEntitiesInRadius implemented ([835ddd2](https://github.com/arturh85/factorio-bot/commit/835ddd28781a725b89165fcf6db65505ca565ed6))
 - Lua Api Docs generated with LDOC ([abe6359](https://github.com/arturh85/factorio-bot/commit/abe63599c1ba909bdafc9ec92b4ec5d6b22c9de1))
 - Enabled auto-updater ([3754a57](https://github.com/arturh85/factorio-bot/commit/3754a57c1c7091ff5beed4767d02572ebf7cef8f))
 - Added example.lua ([e20cc88](https://github.com/arturh85/factorio-bot/commit/e20cc88d0d66ddd58ae664d2209af3233de17994))
 - Add Badges to docs ([40436bd](https://github.com/arturh85/factorio-bot/commit/40436bd17e90cf1b910b91cdf048b4ead81f0604))
-
-### Features
-
-- Adjust verbosity of running factorio instance in REPL ([475d4e3](https://github.com/arturh85/factorio-bot/commit/475d4e340f19dfb1a68f5a835bcc259039848333))
-
-### Fix
-
-- Publish workflow ([88a42de](https://github.com/arturh85/factorio-bot/commit/88a42de327334f62d3d90fc16759491105846345))
 
 ### Milestone
 

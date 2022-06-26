@@ -1,6 +1,6 @@
-use crate::lua_plan_builder::create_lua_plan_builder;
-use crate::lua_rcon::create_lua_rcon;
-use crate::lua_world::create_lua_world;
+use crate::wrapper::lua_plan_builder::create_lua_plan_builder;
+use crate::wrapper::lua_rcon::create_lua_rcon;
+use crate::wrapper::lua_world::create_lua_world;
 use factorio_bot_core::factorio::rcon::FactorioRcon;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::plan::planner::Planner;

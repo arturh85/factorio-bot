@@ -1,6 +1,6 @@
-use crate::lua_plan_builder::create_lua_plan_builder;
-use crate::lua_rcon::create_lua_rcon;
-use crate::lua_world::create_lua_world;
+use crate::wrapper::lua_plan_builder::create_lua_plan_builder;
+use crate::wrapper::lua_rcon::create_lua_rcon;
+use crate::wrapper::lua_world::create_lua_world;
 use factorio_bot_core::paris::{error, info, warn};
 use factorio_bot_core::parking_lot::Mutex;
 use factorio_bot_core::plan::planner::Planner;
@@ -181,7 +181,10 @@ mod tests {
                     env!("CARGO_MANIFEST_DIR"),
                     bot_count
                 ),
-                format!("```mermaid\n{}\n```\n", to_mermaid_gantt(&planner, bot_ids, &format!("{} bots", bot_count))),
+                format!(
+                    "```mermaid\n{}\n```\n",
+                    to_mermaid_gantt(&planner, bot_ids, &format!("{} bots", bot_count))
+                ),
             )
             .await
             .expect("failed to write");

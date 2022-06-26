@@ -1,8 +1,9 @@
 #![warn(clippy::all, clippy::pedantic)]
-// Remove console window opening on windows
+// Removed because of CLI/REPL features
+// // Remove console window opening on windows
 #![cfg_attr(
   all(not(debug_assertions), target_os = "windows"),
-  windows_subsystem = "windows"
+  windows_subsystem = "console"
 )]
 #[cfg(feature = "cli")]
 mod cli;
@@ -18,10 +19,9 @@ mod settings;
 
 use context::Context;
 use factorio_bot_core::miette::Result;
-
-pub const APP_NAME: &str = "factorio-bot";
-pub const APP_AUTHOR: &str = "Artur Hallmann <arturh@arturh.de>";
-pub const APP_ABOUT: &str = "Bot for Factorio";
+pub const APP_NAME: &str = env!("CARGO_BIN_NAME");
+pub const APP_AUTHOR: &str = env!("CARGO_PKG_AUTHORS");
+pub const APP_ABOUT: &str = env!("CARGO_PKG_DESCRIPTION");
 
 #[allow(unreachable_code, unused_variables)]
 #[tokio::main]

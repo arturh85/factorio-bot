@@ -1,6 +1,6 @@
 [package]
 name = "factorio-bot-core"
-version = "0.2.0"
+version = "0.2.0-dev"
 authors = ["Artur Hallmann <arturh@arturh.de>"]
 edition = "2021"
 
@@ -68,6 +68,7 @@ windows-sys = { version = "^0.36", features = [
     "Win32_System_SystemInformation",
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
+#    "Win32_System_Console",
     "Win32_UI_WindowsAndMessaging"
 ] }
 

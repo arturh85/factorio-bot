@@ -1,7 +1,7 @@
 {
   "package": {
     "productName": "factorio-bot",
-    "version": "0.0.0"
+    "version": "99.99.99"
   },
   "build": {
     "distDir": "../dist",

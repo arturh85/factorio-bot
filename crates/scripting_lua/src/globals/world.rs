@@ -36,7 +36,7 @@ local world = {}
 --- lookup recipe by name
 -- The name as defined by https://wiki.factorio.com/Materials_and_recipes
 -- @string name name of item to craft
--- @return table FactorioRecipe object
+-- @return `types.FactorioRecipe`
 function world.recipe(name)
 end
 "#,
@@ -58,7 +58,7 @@ end
 --- lookup player by id
 -- The player id will start at 1 and increment.
 -- @int player_id id of player
--- @return table FactorioPlayer object
+-- @return `types.FactorioPlayer`
 function world.player(player_id)
 end
 "#,
@@ -84,8 +84,8 @@ end
 -- @string ore_name name of item to craft
 -- @int width name of item to craft
 -- @int height name of item to craft
--- @param near x/y table
--- @return table FactorioPlayer object
+-- @param near `types.Position`
+-- @return `types.FactorioPlayer`
 function world.find_free_resource_rect(ore_name, width, height, near)
 end
 "#,
@@ -115,11 +115,11 @@ end
             r#"
 --- find entities at given position/radius with optional filters
 -- Sends 
--- @param search_center x/y position table 
+-- @param search_center `types.Position` 
 -- @int radius searches in circular radius around search_center
 -- @string[opt] search_name name of entity to find
 -- @string[opt] search_type type of entity to find
--- @return table list of FactorioEntity objects
+-- @return {`types.FactorioEntity`}
 function world.find_entities_in_radius(search_center, radius, search_name, search_type)
 end
 "#,
@@ -179,7 +179,7 @@ end
 -- The ...
 -- @int player_id id of player
 -- @string item_name name of item
--- @return table list of FactorioEntity objects
+-- @return {`types.FactorioEntity`}
 function world.inventory(player_id, item_name)
 end
 "#,

@@ -33,11 +33,11 @@ local rcon = {}
             r#"
 --- find entities at given position/radius with optional filters
 -- Sends /silent-command remote.call('find_entities_filtered', ...)
--- @param search_center x/y position
+-- @param search_center `types.Position`
 -- @int radius searches in circular radius around search_center
 -- @string[opt] search_name name of entity to find
 -- @string[opt] search_type type of entity to find
--- @return table list of FactorioEntity objects
+-- @return {`types.FactorioEntity`}
 function rcon.find_entities_in_radius(search_center, radius, search_name, search_type)
 end
 "#,
@@ -209,11 +209,11 @@ end
 -- Sends /silent-command remote.call('place_blueprint', ...)
 -- @int player_id id of player to give the item to
 -- @string blueprint blueprint string
--- @param position x/y position
+-- @param position `types.Position`
 -- @int direction rotates the blueprint in given direction
 -- @bool force_build forces the build even if other entities needs to be removed first
 -- @bool only_ghosts only places ghost version of entities
--- @param helper_player_ids array of player ids which may help
+-- @tparam {int} helper_player_ids array of player ids which may help
 function rcon.place_blueprint(player_id, blueprint, position, direction, force_build, only_ghosts, helper_player_ids)
 end
 "#,
@@ -264,7 +264,7 @@ end
 -- Sends /silent-command remote.call('cheat_blueprint', ...)
 -- @int player_id id of player to give the item to
 -- @string blueprint blueprint string
--- @param position x/y position
+-- @param position `types.Position`
 -- @int direction rotates the blueprint in given direction
 -- @bool force_build forces the build even if other entities needs to be removed first
 function rcon.cheat_blueprint(player_id, blueprint, position, direction, force_build)
@@ -306,7 +306,7 @@ end
 -- Sends /silent-command remote.call('revive_ghost', ...)
 -- @int player_id id of player to give the item to
 -- @string name name of entity to revive
--- @param position x/y position
+-- @param position `types.Position`
 function rcon.revive_ghost(player_id, name, position)
 end
 "#,
@@ -339,7 +339,7 @@ end
 --- Move a player to a different position
 -- Sends /silent-command remote.call('action_start_walk_waypoints', ...)
 -- @int player_id id of player to give the item to
--- @param position x/y position
+-- @param position `types.Position`
 -- @int radius radius
 function rcon.move(player_id, position, radius)
 end
@@ -375,7 +375,7 @@ end
 -- Sends /silent-command remote.call('action_start_mining', ...)
 -- @int player_id id of player to give the item to
 -- @string name name of resource to mine
--- @param position x/y position
+-- @param position `types.Position`
 -- @int count how many to mine
 function rcon.mine(player_id, name, position, count)
 end
@@ -447,8 +447,8 @@ end
             r#"
 --- Craft an item with player
 -- Sends /silent-command remote.call('action_start_crafting', ...)
--- @param inventories table of x/y positions to check
--- @return table of inventory contents
+-- @param inventories table list of `types.Position` to check
+-- @return {[string]=int,...}
 function rcon.inventory_contents_at(inventories)
 end
 "#,
@@ -489,9 +489,9 @@ end
 -- Sends /silent-command remote.call('place_entity', ...)
 -- @int player_id id of plaer
 -- @string name name of item to craft
--- @param position  x/y position table
+-- @param position  `types.Position`
 -- @int direction direction of placed entity
--- @return FactorioEntity object
+-- @return `types.FactorioEntity`
 function rcon.place_entity(player_id, name, position, direction)
 end
 "#,
@@ -526,7 +526,7 @@ end
 -- Sends /silent-command remote.call('insert_to_inventory', ...)
 -- @int player_id id of plaer
 -- @string entity_name name entity to insert
--- @param position  x/y position table of inventory
+-- @param position `types.Position` of inventory
 -- @string inventory_type which type of inventory to place in
 -- @string item_name which item to insert
 -- @int item_count how many items to insert
@@ -580,7 +580,7 @@ end
 -- Sends /silent-command remote.call('remove_from_inventory', ...)
 -- @int player_id id of plaer
 -- @string entity_name name entity to remove
--- @param position  x/y position table of inventory
+-- @param position  `types.Position` of inventory
 -- @string inventory_type which type of inventory to remove from
 -- @string item_name which item to remove
 -- @int item_count how many items to remove

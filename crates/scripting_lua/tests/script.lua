@@ -64,7 +64,7 @@ function build_starter_base(bots)
         collect_rocks(bots, 3)
 
         -- place burner-mining-drill & stone-furnace @ iron-ore field
-        build_starter_miner_furnace(bot_id, "iron-ore", 1)
+        build_starter_miner_furnace(bot_id, ENTITIES.IRON_ORE, 1)
 
 
         -- if not already get enough stone from rocks or stone ore for second burner-mining-drill
@@ -80,7 +80,7 @@ function build_starter_base(bots)
         print("not implemented for 2 bots")
         -- first bot =>
         -- place burner-mining-drill & stone-furnace @ iron-ore field
-        build_starter_miner_furnace(all_bots[1], "iron-ore", 1)
+        build_starter_miner_furnace(all_bots[1], ENTITIES.IRON_ORE, 1)
         -- loop get min 2x coal from rocks or coal ore -> place in iron burner-mining-drill & stone-furnace -> get all iron-plate until enough for second burner-mining-drill
         -- second bot =>
         -- place burner-mining-drill @ stone field
@@ -128,6 +128,7 @@ function build_starter_miner_furnace(bot, ore, count)
     --dump(player, "player")
     --dump(inventory, "inventory")
 
+    -- FIXME: get/craft them instead of panicking
     assert(inventory[ENTITIES.BURNER_MINING_DRILL] >= count)
     assert(inventory[ENTITIES.STONE_FURNACE] >= count)
 
@@ -156,7 +157,7 @@ build_starter_base(all_bots)
 -- Sub Target 3: Build Science Facilities
 
 write_file("task_graph-" .. botcnt .. ".dot", plan.task_graph_graphviz())
-write_file("task_graph-" .. botcnt .. ".md", "```mermaid\n" .. plan.task_graph_mermaid(all_bots, botcnt .. " bots") .. "\n```\n")
+write_file("task_graph-" .. botcnt .. ".md", "```mermaid\n" .. plan.task_graph_mermaid_gantt(all_bots, botcnt .. " bots") .. "\n```\n")
 world.draw("world_end-" .. botcnt .. ".png")
 print("end script")
 --assert(false)

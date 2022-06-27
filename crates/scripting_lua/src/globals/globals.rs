@@ -79,9 +79,9 @@ end
         String::from(
             r#"
 --- writes string to file
--- @string source_path path to file
+-- @string target_path path to file
 -- @string contents contenst of file
-function globals.write_file(source_path, contents)
+function globals.write_file(target_path, contents)
 end
 "#,
         ),
@@ -89,8 +89,8 @@ end
     let _cwd = cwd;
     map_table.set(
         "write_file",
-        ctx.create_function(move |_ctx, (source_path, contents): (String, String)| {
-            let content = fs::write(_cwd.join(source_path).to_str().unwrap(), contents)
+        ctx.create_function(move |_ctx, (target_path, contents): (String, String)| {
+            let content = fs::write(_cwd.join(target_path).to_str().unwrap(), contents)
                 .expect("failed to write");
             Ok(content)
         })?,
@@ -170,7 +170,7 @@ end
         String::from(
             r#"
 --- List of Player ids for available bots
-globals.all_bots = {}
+globals.all_bots = nil -- {int}
 "#,
         ),
     )?;

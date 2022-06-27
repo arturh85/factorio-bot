@@ -39,7 +39,7 @@ local plan = {}
 --- adds a MINE node to graph
 -- If required first a WALK node is inserted to walk near the item to mine 
 -- @int player_id id of player
--- @param position x/y position table
+-- @param position `types.Position`
 -- @string name name of item to mine
 -- @int count how many items to mine
 function plan.mine(player_id, position, name, count)
@@ -73,9 +73,9 @@ end
 --- adds a PLACE node to graph
 -- If required first a WALK node is inserted to walk near the item to place 
 -- @int player_id id of player
--- @param position x/y position table 
+-- @param position `types.Position` 
 -- @string name name of item to place
--- @return FactorioEntity table
+-- @return `types.FactorioEntity`
 function plan.place(player_id, position, name)
 end
 "#,
@@ -105,7 +105,7 @@ end
             r#"
 --- adds a WALK node to graph
 -- @int player_id id of player
--- @param position x/y position table 
+-- @param position `types.Position` 
 -- @int radius how close to walk to
 function plan.walk(player_id, position, radius)
 end
@@ -137,6 +137,7 @@ end
         String::from(
             r#"
 --- build graphviz from task graph
+--@return string graphviz string
 function plan.task_graph_graphviz()
 end
 "#,
@@ -151,17 +152,18 @@ end
     )?;
     let graph = _graph;
     map_table.set(
-        "__doc_fn_task_graph_mermaid",
+        "__doc_fn_task_graph_mermaid_gantt",
         String::from(
             r#"
---- build mermaid from task graph
-function plan.task_graph_mermaid()
+--- build mermaid gantt from task graph
+--@return string mermaid string
+function plan.task_graph_mermaid_gantt()
 end
 "#,
         ),
     )?;
     map_table.set(
-        "task_graph_mermaid",
+        "task_graph_mermaid_gantt",
         ctx.create_function(move |_ctx, (bot_ids, title): (Vec<u8>, String)| {
             let graph = graph.read();
             Ok(graph.mermaid_gantt(bot_ids, &title))
@@ -174,7 +176,7 @@ end
             r#"
 --- adds a GROUP START node to graph
 -- Groups are used to synchronize bots so their tasks are completed before the next group is started.
--- Should be closed ith groupEnd. 
+-- Should be closed with `group_end`. 
 -- @string label label of group
 function plan.group_start(label)
 end

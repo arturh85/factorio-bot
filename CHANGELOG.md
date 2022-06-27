@@ -1,4 +1,10 @@
 # Changelog
+## [unreleased]
+
+### Refactor
+
+- Change all lua methods & entities to be snake_case instead of camelCase ([21cebd7](https://github.com/arturh85/factorio-bot/commit/21cebd70e2c00376e91d2c573e9be62936a91f1f))
+
 ## [0.2.1] - 2022-06-26
 
 ### Bug Fixes

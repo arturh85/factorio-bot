@@ -1,0 +1,11 @@
+{
+  "version": "v0.2.3",
+  "notes": "### Documentation\n\n- Add lua docs for Factorio types ([1926c40](https://github.com/arturh85/factorio-bot/commit/1926c40b135140dafb51795ebd76d05ea667a1b1))\n\n",
+  "pub_date": "2022-06-27T20:14:09.325Z",
+  "platforms": {
+    "linux-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTWTZIbXUwVUt1Yi9ZRjRMdUd1M1JGTFFWbk41Y3JFR0pUR3J5eTBESkhETWVDQUJ1UW9zMDVHOUpMTUdtUG9SREZNRnpOd1VQdTN5eFRoU2swRTBCeFlhdzVWa091aXcwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNjU2MzYwODQ5CWZpbGU6L2hvbWUvcnVubmVyL3dvcmsvZmFjdG9yaW8tYm90L2ZhY3RvcmlvLWJvdC90YXJnZXQvcmVsZWFzZS9idW5kbGUvYXBwaW1hZ2UvZmFjdG9yaW8tYm90XzAuMi4zX2FtZDY0LkFwcEltYWdlLnRhci5negpPZEorYVlUNWJQZmdwM0NBTXUrSllSZmlqMXFmM1J5ZXpZNVluNjVQeWhmYWRFTHpjdEdCWHdyNEVOVllqWWdranZOSWVwUkdPVG1yMmlTTE15R2VEUT09Cg==",
+      "url": "https://github.com/arturh85/factorio-bot/releases/download/v0.2.3/factorio-bot_0.2.3_amd64.AppImage.tar.gz"
+    }
+  }
+}

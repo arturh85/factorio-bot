@@ -1,4 +1,5 @@
 use crate::factorio::util::format_dotgraph;
+use crate::gantt_mermaid::MermaidGanttBuilder;
 use crate::num_traits::FromPrimitive;
 use crate::types::{Direction, FactorioEntity, PlayerId, Position};
 use noisy_float::types::{r64, R64};
@@ -8,6 +9,7 @@ use petgraph::algo::astar;
 use petgraph::dot::{Config, Dot};
 use petgraph::graph::{DefaultIx, EdgeIndex, NodeIndex};
 use petgraph::stable_graph::{Edges, NodeIndices, StableGraph};
+use petgraph::visit::EdgeRef;
 use petgraph::Directed;
 use ptree::graph::print_graph;
 use serde::__private::Formatter;
@@ -151,6 +153,79 @@ impl TaskGraph {
     }
     pub fn graphviz_dot(&self) -> String {
         format_dotgraph(Dot::with_config(&self.inner, &[Config::GraphContentOnly]).to_string())
+    }
+
+    pub fn mermaid_gantt(&self, bot_ids: Vec<PlayerId>, title: &str) -> String {
+        let mut builder = MermaidGanttBuilder::new(title);
+        let total_runtime = self.shortest_path().expect("no path found");
+
+        builder = builder.add_milestone("test", "m1", &duration_to_timestamp(total_runtime), 0.);
+        // let milestone_by_index: HashMap<NodeIndex, String> = HashMap::new();
+
+        for player_id in bot_ids {
+            builder = builder.add_section(&format!("Bot {}", player_id));
+            let mut cursor = self.start_node;
+            let mut last_weight: Option<f64> = None;
+
+            while cursor != self.end_node {
+                let node = self
+                    .node_weight(cursor)
+                    .expect("NodeIndices should all be valid");
+
+                let status = node.status.read();
+                match *status {
+                    TaskStatus::Planned(estimated) => {
+                        builder = builder.add_action(
+                            &node.name,
+                            if estimated > 0. {
+                                estimated
+                            } else {
+                                last_weight.unwrap_or(0.)
+                            },
+                            if cursor == self.start_node {
+                                Some("00:00:00")
+                            } else {
+                                None
+                            },
+                        );
+                    }
+                    TaskStatus::Success(estimated, _realtime) => {
+                        builder = builder.add_action(
+                            &node.name,
+                            if estimated > 0. {
+                                estimated
+                            } else {
+                                last_weight.unwrap_or(0.)
+                            },
+                            if cursor == self.start_node {
+                                Some("00:00:00")
+                            } else {
+                                None
+                            },
+                        );
+                    }
+                    _ => {}
+                };
+
+                let cursor_copy = cursor;
+                for edge in self.edges_directed(cursor, petgraph::Direction::Outgoing) {
+                    let target_idx = edge.target();
+                    last_weight = Some(*edge.weight());
+                    let target = self
+                        .node_weight(target_idx)
+                        .expect("NodeIndices should all be valid");
+                    if target.player_id.is_none() || target.player_id.unwrap() == player_id {
+                        cursor = target_idx;
+                    }
+                }
+                if cursor == cursor_copy {
+                    error!("no change in cursor!?");
+                    break;
+                }
+            }
+        }
+
+        builder.build()
     }
 
     pub fn add_node(&mut self, task: TaskNode) -> NodeIndex {
@@ -363,6 +438,15 @@ impl std::fmt::Debug for TaskNode {
 pub struct TaskResult(i32);
 
 pub type TaskGraphInner = StableGraph<TaskNode, f64>;
+
+fn duration_to_timestamp(duration: f64) -> String {
+    let duration = duration as u64;
+    let seconds = duration % 60;
+    let minutes = (duration / 60) % 60;
+    let hours = (duration / 60 / 60) % 60;
+
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
 
 #[cfg(test)]
 mod tests {

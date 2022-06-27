@@ -248,6 +248,39 @@ impl FactorioWorld {
 
         Ok(())
     }
+
+    pub fn dump_entitiy_prototypes(&self, save_path: Option<&str>) -> Result<()> {
+        let content = serde_json::to_string_pretty(&*self.entity_prototypes).into_diagnostic()?;
+        if let Some(save_path) = save_path {
+            fs::write(save_path, &content).into_diagnostic()?;
+        } else {
+            println!("{content}");
+        }
+
+        Ok(())
+    }
+
+    pub fn dump_item_prototypes(&self, save_path: Option<&str>) -> Result<()> {
+        let content = serde_json::to_string_pretty(&self.item_prototypes).into_diagnostic()?;
+        if let Some(save_path) = save_path {
+            fs::write(save_path, &content).into_diagnostic()?;
+        } else {
+            println!("{content}");
+        }
+
+        Ok(())
+    }
+
+    pub fn dump_recipes(&self, save_path: Option<&str>) -> Result<()> {
+        let content = serde_json::to_string_pretty(&*self.recipes).into_diagnostic()?;
+        if let Some(save_path) = save_path {
+            fs::write(save_path, &content).into_diagnostic()?;
+        } else {
+            println!("{content}");
+        }
+
+        Ok(())
+    }
 }
 
 unsafe impl Send for FactorioWorld {}

@@ -27,6 +27,27 @@ async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String
           error!("no factorio world found??");
         }
       }
+      DumpType::EntityPrototypes => {
+        if let Some(world) = instance_state.world.as_ref() {
+          world.dump_entitiy_prototypes(save_path)?;
+        } else {
+          error!("no factorio world found??");
+        }
+      }
+      DumpType::ItemPrototypes => {
+        if let Some(world) = instance_state.world.as_ref() {
+          world.dump_item_prototypes(save_path)?;
+        } else {
+          error!("no factorio world found??");
+        }
+      }
+      DumpType::Recipes => {
+        if let Some(world) = instance_state.world.as_ref() {
+          world.dump_recipes(save_path)?;
+        } else {
+          error!("no factorio world found??");
+        }
+      }
     }
   } else {
     error!("no factorio instance running");
@@ -37,8 +58,14 @@ async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String
 #[derive(EnumString, EnumMessage, EnumIter, IntoStaticStr)]
 #[strum(serialize_all = "kebab-case")]
 enum DumpType {
-  #[strum(message = "dump internal factorio world representation")]
+  #[strum(message = "dump complete internal factorio world representation (very big)")]
   World,
+  #[strum(message = "dump entity prototypes")]
+  EntityPrototypes,
+  #[strum(message = "dump item prototypes")]
+  ItemPrototypes,
+  #[strum(message = "dump recipes")]
+  Recipes,
 }
 
 impl Subcommand for ThisCommand {
@@ -51,7 +78,7 @@ impl Subcommand for ThisCommand {
         .about("dump information")
         .arg(
           Arg::new("type")
-            .default_value(DumpType::World.into())
+            .required(true)
             .value_parser(PossibleValuesParser::new(DumpType::iter().map(|action| {
               let message = action.get_message().unwrap();
               PossibleValue::new(action.into()).help(message)

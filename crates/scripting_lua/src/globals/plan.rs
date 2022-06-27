@@ -27,6 +27,7 @@ local plan = {}
     )?;
     map_table.set("__doc__footer", String::from(r#"return plan"#))?;
 
+    let _graph = graph.clone();
     let _world = world.clone();
     let _plan_builder = Arc::new(PlanBuilder::new(graph, world));
 
@@ -130,22 +131,58 @@ end
             },
         )?,
     )?;
+    let graph = _graph.clone();
+    map_table.set(
+        "__doc_fn_task_graph_graphviz",
+        String::from(
+            r#"
+--- build graphviz from task graph
+function plan.task_graph_graphviz()
+end
+"#,
+        ),
+    )?;
+    map_table.set(
+        "task_graph_graphviz",
+        ctx.create_function(move |_ctx, ()| {
+            let graph = graph.read();
+            Ok(graph.graphviz_dot())
+        })?,
+    )?;
+    let graph = _graph;
+    map_table.set(
+        "__doc_fn_task_graph_mermaid",
+        String::from(
+            r#"
+--- build mermaid from task graph
+function plan.task_graph_mermaid()
+end
+"#,
+        ),
+    )?;
+    map_table.set(
+        "task_graph_mermaid",
+        ctx.create_function(move |_ctx, (bot_ids, title): (Vec<u8>, String)| {
+            let graph = graph.read();
+            Ok(graph.mermaid_gantt(bot_ids, &title))
+        })?,
+    )?;
     let plan_builder = _plan_builder.clone();
     map_table.set(
-        "__doc_fn_groupStart",
+        "__doc_fn_group_start",
         String::from(
             r#"
 --- adds a GROUP START node to graph
 -- Groups are used to synchronize bots so their tasks are completed before the next group is started.
 -- Should be closed ith groupEnd. 
 -- @string label label of group
-function plan.groupStart(label)
+function plan.group_start(label)
 end
 "#,
         ),
     )?;
     map_table.set(
-        "groupStart",
+        "group_start",
         ctx.create_function(move |_ctx, label: String| {
             plan_builder.group_start(label.as_str());
             Ok(())
@@ -153,17 +190,17 @@ end
     )?;
     let plan_builder = _plan_builder;
     map_table.set(
-        "__doc_fn_groupEnd",
+        "__doc_fn_group_end",
         String::from(
             r#"
 --- adds a GROUP END node to graph
-function plan.groupEnd()
+function plan.group_end()
 end
 "#,
         ),
     )?;
     map_table.set(
-        "groupEnd",
+        "group_end",
         ctx.create_function(move |_ctx, ()| {
             plan_builder.group_end();
             Ok(())

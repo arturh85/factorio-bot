@@ -1139,7 +1139,7 @@ function on_player_changed_position(event)
 		local position = player.position
 
 		writeout(event.tick, "on_player_changed_position", game.table_to_json({
-			playerId = player_idx,
+			player_id = player_idx,
 			position = position
 		}))
 	end
@@ -1151,13 +1151,13 @@ end
 function on_player_changed_distance(event)
 	for idx, player in pairs(game.players) do
 		writeout(event.tick, "on_player_changed_distance", game.table_to_json({
-			playerId = idx,
-			buildDistance = player.build_distance,
-			reachDistance = player.reach_distance,
-			dropItemDistance = player.drop_item_distance,
-			itemPickupDistance = to_i64(math.ceil(player.item_pickup_distance)),
-			lootPickupDistance = to_i64(math.ceil(player.loot_pickup_distance)),
-			resourceReachDistance = to_i64(math.ceil(player.resource_reach_distance)),
+			player_id = idx,
+			build_distance = player.build_distance,
+			reach_distance = player.reach_distance,
+			drop_item_distance = player.drop_item_distance,
+			item_pickup_distance = to_i64(math.ceil(player.item_pickup_distance)),
+			loot_pickup_distance = to_i64(math.ceil(player.loot_pickup_distance)),
+			resource_reach_distance = to_i64(math.ceil(player.resource_reach_distance)),
 		}))
 	end
 end
@@ -1174,8 +1174,8 @@ function on_player_main_inventory_changed(event)
 	local player_idx = event.player_index
 	local main_inventory = game.players[player_idx].get_main_inventory()
 	writeout(event.tick, "on_player_main_inventory_changed", game.table_to_json({
-		playerId = player_idx,
-		mainInventory = main_inventory.get_contents()
+		player_id = player_idx,
+		main_inventory = main_inventory.get_contents()
 	}))
 	recent_item_additions[player_idx] = {}
 end

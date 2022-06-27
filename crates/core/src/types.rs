@@ -21,7 +21,7 @@ use rlua::{Context, MultiValue};
 pub type FactorioInventory = HashMap<String, u32>;
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct FactorioRecipe {
     pub name: String,
     pub valid: bool,
@@ -37,7 +37,7 @@ pub struct FactorioRecipe {
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct FactorioBlueprintInfo {
     pub label: String,
     pub blueprint: String,
@@ -48,7 +48,7 @@ pub struct FactorioBlueprintInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct FactorioIngredient {
     pub name: String,
     pub ingredient_type: String,
@@ -56,7 +56,7 @@ pub struct FactorioIngredient {
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct FactorioProduct {
     pub name: String,
     pub product_type: String,
@@ -68,7 +68,7 @@ pub type PlayerId = u8;
 pub type ActionId = u32;
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct FactorioPlayer {
     pub player_id: PlayerId,
     pub position: Position,
@@ -98,14 +98,14 @@ impl Default for FactorioPlayer {
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct RequestEntity {
     pub name: String,
     pub position: Position,
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct InventoryResponse {
     pub name: String,
     pub position: Position,
@@ -114,7 +114,7 @@ pub struct InventoryResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct ChunkPosition {
     pub x: i32,
     pub y: i32,
@@ -130,7 +130,7 @@ impl From<&Pos> for ChunkPosition {
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct Position {
     pub x: f64,
     pub y: f64,
@@ -290,7 +290,7 @@ impl FromStr for Position {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct Rect {
     pub left_top: Position,
     pub right_bottom: Position,
@@ -361,7 +361,7 @@ impl FromStr for Rect {
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct FactorioTile {
     pub name: String,
     pub player_collidable: bool,
@@ -370,14 +370,14 @@ pub struct FactorioTile {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, TypeScriptify, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct FactorioChunk {
     pub entities: Vec<FactorioEntity>,
     // pub tiles: Vec<FactorioTile>,
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct ChunkObject {
     pub name: String,
     pub position: Position,
@@ -388,14 +388,14 @@ pub struct ChunkObject {
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct ChunkResource {
     pub name: String,
     pub position: Position,
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct FactorioTechnology {
     pub name: String,
     pub enabled: bool,
@@ -411,7 +411,7 @@ pub struct FactorioTechnology {
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct FactorioForce {
     pub name: String,
     pub force_id: u32,
@@ -423,7 +423,7 @@ pub struct FactorioForce {
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct FactorioGraphic {
     pub entity_name: String,
     pub image_path: String,
@@ -435,7 +435,7 @@ pub struct FactorioGraphic {
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct FactorioFluidBoxPrototype {
     pub pipe_connections: Box<Option<Vec<FactorioFluidBoxConnection>>>,
     pub production_type: String,
@@ -482,14 +482,14 @@ pub struct FactorioFluidBoxPrototype {
 // }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct FactorioFluidBoxConnection {
     pub max_underground_distance: Option<u32>,
     pub connection_type: String,
     pub positions: Vec<Position>,
 }
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct FactorioEntityPrototype {
     pub name: String,
     pub entity_type: String,
@@ -504,7 +504,7 @@ pub struct FactorioEntityPrototype {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct FactorioEntity {
     pub name: String,
     pub entity_type: String,
@@ -696,7 +696,7 @@ impl From<factorio_blueprint::objects::Position> for Position {
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct FactorioItemPrototype {
     pub name: String,
     pub item_type: String,
@@ -839,28 +839,28 @@ impl ResourcePatch {
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct FactorioResult {
     pub success: bool,
     pub output: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct PlaceEntityResult {
     pub player: FactorioPlayer,
     pub entity: FactorioEntity,
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct PlaceEntitiesResult {
     pub player: FactorioPlayer,
     pub entities: Vec<FactorioEntity>,
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct PlayerChangedDistanceEvent {
     pub player_id: PlayerId,
     pub build_distance: u32,
@@ -872,27 +872,27 @@ pub struct PlayerChangedDistanceEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct PlayerChangedPositionEvent {
     pub player_id: PlayerId,
     pub position: Position,
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct PlayerChangedMainInventoryEvent {
     pub player_id: PlayerId,
     pub main_inventory: BTreeMap<String, u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct PlayerLeftEvent {
     pub player_id: PlayerId,
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct PrimeVueTreeNode {
     pub key: String,
     pub label: String,

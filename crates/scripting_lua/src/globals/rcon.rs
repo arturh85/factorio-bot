@@ -28,7 +28,7 @@ local rcon = {}
     map_table.set("__doc__footer", String::from(r#"return rcon"#))?;
     let rcon = _rcon.clone();
     map_table.set(
-        "__doc_fn_findEntitiesInRadius",
+        "__doc_fn_find_entities_in_radius",
         String::from(
             r#"
 --- find entities at given position/radius with optional filters
@@ -38,13 +38,13 @@ local rcon = {}
 -- @string[opt] search_name name of entity to find
 -- @string[opt] search_type type of entity to find
 -- @return table list of FactorioEntity objects
-function rcon.findEntitiesInRadius(search_center, radius, search_name, search_type)
+function rcon.find_entities_in_radius(search_center, radius, search_name, search_type)
 end
 "#,
         ),
     )?;
     map_table.set(
-        "findEntitiesInRadius",
+        "find_entities_in_radius",
         ctx.create_async_function_mut::<_, _, _, _>(
             move |_ctx,
                   (search_center, radius, search_name, search_type): (
@@ -94,42 +94,46 @@ end
     )?;
     let rcon = _rcon.clone();
     map_table.set(
-        "__doc_fn_addResearch",
+        "__doc_fn_add_research",
         String::from(
             r#"
 --- adds research to queue
 -- Sends /silent-command remote.call('add_research', technology_name)
 -- @string technology_name name of technology to research
-function rcon.addResearch(technology_name)
+function rcon.add_research(technology_name)
 end
 "#,
         ),
     )?;
     map_table.set(
-        "addResearch",
+        "add_research",
         ctx.create_async_function_mut::<_, _, _, _>(move |_ctx, technology_name: String| {
             let _rcon = rcon.clone();
             async move {
-                _rcon.as_ref().add_research(technology_name.as_str()).await.unwrap();
+                _rcon
+                    .as_ref()
+                    .add_research(technology_name.as_str())
+                    .await
+                    .unwrap();
                 Ok(())
             }
         })?,
     )?;
     let rcon = _rcon.clone();
     map_table.set(
-        "__doc_fn_cheatTechnology",
+        "__doc_fn_cheat_technology",
         String::from(
             r#"
 --- CHEATs research
 -- Sends /silent-command remote.call('cheat_technology', technology_name)
 -- @string technology_name name of technology to CHEAT
-function rcon.cheatTechnology(technology_name)
+function rcon.cheat_technology(technology_name)
 end
 "#,
         ),
     )?;
     map_table.set(
-        "cheatTechnology",
+        "cheat_technology",
         ctx.create_async_function_mut::<_, _, _, _>(move |_ctx, technology_name: String| {
             let _rcon = rcon.clone();
             async move {
@@ -144,18 +148,18 @@ end
     )?;
     let rcon = _rcon.clone();
     map_table.set(
-        "__doc_fn_cheatAllTechnologies",
+        "__doc_fn_cheat_all_technologies",
         String::from(
             r#"
 --- CHEATs all research
 -- Sends /silent-command remote.call('cheat_all_technologies')
-function rcon.cheatAllTechnologies()
+function rcon.cheat_all_technologies()
 end
 "#,
         ),
     )?;
     map_table.set(
-        "cheatAllTechnologies",
+        "cheat_all_technologies",
         ctx.create_async_function_mut::<_, _, _, _>(move |_ctx, (): ()| {
             let _rcon = rcon.clone();
             async move {
@@ -166,7 +170,7 @@ end
     )?;
     let rcon = _rcon.clone();
     map_table.set(
-        "__doc_fn_cheatItem",
+        "__doc_fn_cheat_item",
         String::from(
             r#"
 --- CHEATs given item
@@ -174,13 +178,13 @@ end
 -- @int player_id id of player to give the item to
 -- @string name item name
 -- @int count how many items to give player
-function rcon.cheatItem(player_id, name, count)
+function rcon.cheat_item(player_id, name, count)
 end
 "#,
         ),
     )?;
     map_table.set(
-        "cheatItem",
+        "cheat_item",
         ctx.create_async_function_mut::<_, _, _, _>(
             move |_ctx, (player_id, name, count): (PlayerId, String, u32)| {
                 let _rcon = rcon.clone();
@@ -198,7 +202,7 @@ end
     let rcon = _rcon.clone();
     let world = _world.clone();
     map_table.set(
-        "__doc_fn_placeBlueprint",
+        "__doc_fn_place_blueprint",
         String::from(
             r#"
 --- places a whole blueprint
@@ -210,13 +214,13 @@ end
 -- @bool force_build forces the build even if other entities needs to be removed first
 -- @bool only_ghosts only places ghost version of entities
 -- @param helper_player_ids array of player ids which may help
-function rcon.placeBlueprint(player_id, blueprint, position, direction, force_build, only_ghosts, helper_player_ids)
+function rcon.place_blueprint(player_id, blueprint, position, direction, force_build, only_ghosts, helper_player_ids)
 end
 "#,
         ),
     )?;
     map_table.set(
-        "placeBlueprint",
+        "place_blueprint",
         ctx.create_async_function_mut::<_, _, _, _>(
             move |_ctx,
                   (
@@ -253,7 +257,7 @@ end
     )?;
     let rcon = _rcon.clone();
     map_table.set(
-        "__doc_fn_cheatBlueprint",
+        "__doc_fn_cheat_blueprint",
         String::from(
             r#"
 --- CHEATs a whole blueprint
@@ -263,13 +267,13 @@ end
 -- @param position x/y position
 -- @int direction rotates the blueprint in given direction
 -- @bool force_build forces the build even if other entities needs to be removed first
-function rcon.cheatBlueprint(player_id, blueprint, position, direction, force_build)
+function rcon.cheat_blueprint(player_id, blueprint, position, direction, force_build)
 end
 "#,
         ),
     )?;
     map_table.set(
-        "cheatBlueprint",
+        "cheat_blueprint",
         ctx.create_async_function_mut::<_, _, _, _>(
             move |_ctx,
                   (player_id, blueprint, position, direction, force_build): (
@@ -295,7 +299,7 @@ end
     let rcon = _rcon.clone();
     let world = _world.clone();
     map_table.set(
-        "__doc_fn_reviveGhost",
+        "__doc_fn_revive_ghost",
         String::from(
             r#"
 --- CHEATs a whole blueprint
@@ -303,13 +307,13 @@ end
 -- @int player_id id of player to give the item to
 -- @string name name of entity to revive
 -- @param position x/y position
-function rcon.reviveGhost(player_id, name, position)
+function rcon.revive_ghost(player_id, name, position)
 end
 "#,
         ),
     )?;
     map_table.set(
-        "reviveGhost",
+        "revive_ghost",
         ctx.create_async_function_mut::<_, _, _, _>(
             move |_ctx, (player_id, name, position): (PlayerId, String, Table)| {
                 let _rcon = rcon.clone();
@@ -438,20 +442,20 @@ end
     )?;
     let rcon = _rcon.clone();
     map_table.set(
-        "__doc_fn_inventoryContentsAt",
+        "__doc_fn_inventory_contents_at",
         String::from(
             r#"
 --- Craft an item with player
 -- Sends /silent-command remote.call('action_start_crafting', ...)
 -- @param inventories table of x/y positions to check
 -- @return table of inventory contents
-function rcon.inventoryContentsAt(inventories)
+function rcon.inventory_contents_at(inventories)
 end
 "#,
         ),
     )?;
     map_table.set(
-        "inventoryContentsAt",
+        "inventory_contents_at",
         ctx.create_async_function_mut::<_, _, _, _>(move |_ctx, inventories: Table| {
             let _rcon = rcon.clone();
             let request_entities: Vec<RequestEntity> = inventories
@@ -478,7 +482,7 @@ end
     let rcon = _rcon.clone();
     let world = _world.clone();
     map_table.set(
-        "__doc_fn_placeEntity",
+        "__doc_fn_place_entity",
         String::from(
             r#"
 --- Places an item by a player
@@ -488,13 +492,13 @@ end
 -- @param position  x/y position table
 -- @int direction direction of placed entity
 -- @return FactorioEntity object
-function rcon.placeEntity(player_id, name, position, direction)
+function rcon.place_entity(player_id, name, position, direction)
 end
 "#,
         ),
     )?;
     map_table.set(
-        "placeEntity",
+        "place_entity",
         ctx.create_async_function_mut::<_, _, _, _>(
             move |_ctx, (player_id, name, position, direction): (PlayerId, String, Table, u8)| {
                 let _rcon = rcon.clone();
@@ -515,7 +519,7 @@ end
     let rcon = _rcon.clone();
     let world = _world.clone();
     map_table.set(
-        "__doc_fn_insertToInventory",
+        "__doc_fn_insert_to_inventory",
         String::from(
             r#"
 --- Inserts an item into an inventory
@@ -526,13 +530,13 @@ end
 -- @string inventory_type which type of inventory to place in
 -- @string item_name which item to insert
 -- @int item_count how many items to insert
-function rcon.insertToInventory(player_id, entity_name, position, inventory_type, item_name, item_count)
+function rcon.insert_to_inventory(player_id, entity_name, position, inventory_type, item_name, item_count)
 end
 "#,
         ),
     )?;
     map_table.set(
-        "insertToInventory",
+        "insert_to_inventory",
         ctx.create_async_function_mut::<_, _, _, _>(
             move |_ctx,
                   (player_id, entity_name, position, inventory_type, item_name, item_count): (
@@ -569,7 +573,7 @@ end
     let rcon = _rcon;
     let world = _world;
     map_table.set(
-        "__doc_fn_removeFromInventory",
+        "__doc_fn_remove_from_inventory",
         String::from(
             r#"
 --- Removes an item from an inventory
@@ -580,13 +584,13 @@ end
 -- @string inventory_type which type of inventory to remove from
 -- @string item_name which item to remove
 -- @int item_count how many items to remove
-function rcon.removeFromInventory(player_id, entity_name, position, inventory_type, item_name, item_count)
+function rcon.remove_from_inventory(player_id, entity_name, position, inventory_type, item_name, item_count)
 end
 "#,
         ),
     )?;
     map_table.set(
-        "removeFromInventory",
+        "remove_from_inventory",
         ctx.create_async_function_mut::<_, _, _, _>(
             move |_ctx,
                   (player_id, entity_name, position, inventory_type, item_name, item_count): (

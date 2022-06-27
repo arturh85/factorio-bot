@@ -1,10 +1,4 @@
-use crate::graph::task_graph::TaskStatus;
-use crate::plan::planner::Planner;
-use crate::types::PlayerId;
-use petgraph::visit::EdgeRef;
-use petgraph::Direction;
-
-struct MermaidGanttBuilder {
+pub struct MermaidGanttBuilder {
     title: String,
     date_format: String,
     axis_format: String,
@@ -12,7 +6,7 @@ struct MermaidGanttBuilder {
 }
 
 impl MermaidGanttBuilder {
-    fn new(title: &str) -> Self {
+    pub fn new(title: &str) -> Self {
         Self {
             title: title.to_owned(),
             date_format: "HH:mm:ss".to_owned(),
@@ -21,7 +15,7 @@ impl MermaidGanttBuilder {
         }
     }
 
-    fn build(&self) -> String {
+    pub fn build(&self) -> String {
         let mut output = "gantt\n".to_owned();
         output += &format!("    title {}\n", self.title);
         output += &format!("    dateFormat {}\n", self.date_format);
@@ -31,20 +25,26 @@ impl MermaidGanttBuilder {
     }
 
     #[allow(dead_code)]
-    fn date_format(mut self, date_format: &str) -> Self {
+    pub fn date_format(mut self, date_format: &str) -> Self {
         self.date_format = date_format.to_owned();
 
         self
     }
 
     #[allow(dead_code)]
-    fn axis_format(mut self, axis_format: &str) -> Self {
+    pub fn axis_format(mut self, axis_format: &str) -> Self {
         self.axis_format = axis_format.to_owned();
 
         self
     }
 
-    fn add_milestone(mut self, label: &str, name: &str, timestamp: &str, duration: f64) -> Self {
+    pub fn add_milestone(
+        mut self,
+        label: &str,
+        name: &str,
+        timestamp: &str,
+        duration: f64,
+    ) -> Self {
         let label = self.replace_colon(label);
         let name = self.replace_colon(name);
         let line = format!("    {label} : milestone, {name}, {timestamp},{duration}s\n");
@@ -53,7 +53,7 @@ impl MermaidGanttBuilder {
         self
     }
 
-    fn add_section(mut self, label: &str) -> Self {
+    pub fn add_section(mut self, label: &str) -> Self {
         let label = self.replace_colon(label);
         let line = format!("    section {label}\n");
         self.buffer += &line;
@@ -65,7 +65,7 @@ impl MermaidGanttBuilder {
         input.to_owned().replace(':', "﹕")
     }
 
-    fn add_action(mut self, label: &str, duration: f64, timestamp: Option<&str>) -> Self {
+    pub fn add_action(mut self, label: &str, duration: f64, timestamp: Option<&str>) -> Self {
         let label = self.replace_colon(label);
         let line = if let Some(timestamp) = timestamp {
             format!("    {label} : {timestamp},{duration}s\n")
@@ -78,99 +78,14 @@ impl MermaidGanttBuilder {
     }
 }
 
-fn duration_to_timestamp(duration: f64) -> String {
-    let duration = duration as u64;
-    let seconds = duration % 60;
-    let minutes = (duration / 60) % 60;
-    let hours = (duration / 60 / 60) % 60;
-
-    format!("{hours:02}:{minutes:02}:{seconds:02}")
-}
-
-pub fn to_mermaid_gantt(plan: &Planner, bot_ids: Vec<PlayerId>, title: &str) -> String {
-    let mut builder = MermaidGanttBuilder::new(title);
-    let graph = plan.graph.read();
-
-    let total_runtime = plan.graph().shortest_path().expect("no path found");
-
-    builder = builder.add_milestone("test", "m1", &duration_to_timestamp(total_runtime), 0.);
-    // let milestone_by_index: HashMap<NodeIndex, String> = HashMap::new();
-
-    for player_id in bot_ids {
-        builder = builder.add_section(&format!("Bot {}", player_id));
-        let mut cursor = graph.start_node;
-        let mut last_weight: Option<f64> = None;
-
-        while cursor != graph.end_node {
-            let node = graph
-                .node_weight(cursor)
-                .expect("NodeIndices should all be valid");
-
-            let status = node.status.read();
-            match *status {
-                TaskStatus::Planned(estimated) => {
-                    builder = builder.add_action(
-                        &node.name,
-                        if estimated > 0. {
-                            estimated
-                        } else {
-                            last_weight.unwrap_or(0.)
-                        },
-                        if cursor == graph.start_node {
-                            Some("00:00:00")
-                        } else {
-                            None
-                        },
-                    );
-                }
-                TaskStatus::Success(estimated, _realtime) => {
-                    builder = builder.add_action(
-                        &node.name,
-                        if estimated > 0. {
-                            estimated
-                        } else {
-                            last_weight.unwrap_or(0.)
-                        },
-                        if cursor == graph.start_node {
-                            Some("00:00:00")
-                        } else {
-                            None
-                        },
-                    );
-                }
-                _ => {}
-            };
-
-            let cursor_copy = cursor;
-            for edge in graph.edges_directed(cursor, Direction::Outgoing) {
-                let target_idx = edge.target();
-                last_weight = Some(*edge.weight());
-                let target = graph
-                    .node_weight(target_idx)
-                    .expect("NodeIndices should all be valid");
-                if target.player_id.is_none() || target.player_id.unwrap() == player_id {
-                    cursor = target_idx;
-                }
-            }
-            if cursor == cursor_copy {
-                error!("no change in cursor!?");
-                break;
-            }
-        }
-    }
-
-    builder.build()
-}
-
 #[cfg(test)]
 mod tests {
     use crate::graph::task_graph::PositionRadius;
     use crate::plan::plan_builder::PlanBuilder;
+    use crate::plan::planner::Planner;
     use crate::test_utils::fixture_world;
     use crate::types::Position;
     use std::sync::Arc;
-
-    use super::*;
 
     #[tokio::test]
     async fn test_mermaid_gantt() {
@@ -211,7 +126,7 @@ mod tests {
             }
             plan_builder.group_end();
         }
-        // let graph = planner.graph();
+        let graph = planner.graph();
         //         assert_eq!(
         //             graph.graphviz_dot(),
         //             r#"digraph {
@@ -235,7 +150,7 @@ mod tests {
         // "#,
         //         );
         assert_eq!(
-            to_mermaid_gantt(&planner, all_bots, "Example diagram"),
+            graph.mermaid_gantt(all_bots, "Example diagram"),
             r#"gantt
     title Example diagram
     dateFormat HH:mm:ss

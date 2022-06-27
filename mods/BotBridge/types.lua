@@ -44,20 +44,20 @@ function serialize_recipe(recipe)
 end
 
 function serialize_product(product)
-    return table_properties(product, {"name", "type", "amount", "probability"}, {type = "productType"})
+    return table_properties(product, {"name", "type", "amount", "probability"}, {type = "product_type"})
 end
 
 function serialize_ingredient(ingredient)
-    return table_properties(ingredient, {"name", "type", "amount"}, {type = "ingredientType"})
+    return table_properties(ingredient, {"name", "type", "amount"}, {type = "ingredient_type"})
 end
 
 function serialize_item_prototype(item)
     local record = table_properties(
         item,
         {"name", "stack_size", "fuel_value", "type", "speed", "durability"},
-        {type = "itemType", stack_size = "stackSize", fuel_value = "fuelValue" }
+        {type = "item_type", stack_size = "stack_size", fuel_value = "fuel_value" }
     )
-    record.placeResult = item.place_result and item.place_result.name or ""
+    record.place_result = item.place_result and item.place_result.name or ""
     record.group = item.group.name
     record.subgroup = item.subgroup.name
     return record
@@ -73,17 +73,17 @@ function serialize_player(player)
             "loot_pickup_distance", "resource_reach_distance"
         },
         {
-            index = "playerId",
-            build_distance = "buildDistance",
-            reach_distance = "reachDistance",
-            drop_item_distance = "dropItemDistance",
-            item_pickup_distance = "itemPickupDistance",
-            loot_pickup_distance = "lootPickupDistance",
-            resource_reach_distance = "resourceReachDistance"
+            index = "player_id",
+            build_distance = "build_distance",
+            reach_distance = "reach_distance",
+            drop_item_distance = "drop_item_distance",
+            item_pickup_distance = "item_pickup_distance",
+            loot_pickup_distance = "loot_pickup_distance",
+            resource_reach_distance = "resource_reach_distance"
         }
     )
     local main_inventory = player.get_main_inventory()
-    record.mainInventory = main_inventory.get_contents()
+    record.main_inventory = main_inventory.get_contents()
     return record
 end
 
@@ -97,12 +97,12 @@ function serialize_force(force)
     local record = table_properties(
         force,
         {"name", "index", "research_progress"},
-        {index = "forceId", research_progress = "researchProgress"}
+        {index = "force_id", research_progress = "research_progress"}
     )
     if force.current_research ~= nil then
-        record.currentResearch = force.current_research.name
+        record.current_research = force.current_research.name
     else
-        record.currentResearch = nil
+        record.current_research = nil
     end
     local technologies = {}
     for _, v in pairs(force.technologies) do
@@ -116,7 +116,7 @@ function serialize_fluidbox_connection(conn)
     local record = table_properties(
         conn,
         {"positions", "type", "max_underground_distance"},
-        {type = "connectionType", max_underground_distance = "maxUndergroundDistance"}
+        {type = "connection_type", max_underground_distance = "max_underground_distance"}
     )
     return record
 end
@@ -125,7 +125,7 @@ function serialize_fluidbox_prototype(fluidbox)
     local record = table_properties(
         fluidbox,
         {"production_type"},
-        {production_type = "productionType"}
+        {production_type = "production_type"}
     )
 
     local pipe_connections = {}
@@ -135,7 +135,7 @@ function serialize_fluidbox_prototype(fluidbox)
         table.insert(pipe_connections, serialize_fluidbox_connection(v))
     end
     if pipe_connections_found then
-        record.pipeConnections = pipe_connections
+        record.pipe_connections = pipe_connections
     end
     return record
 end
@@ -148,9 +148,9 @@ function serialize_technology(technology)
             "level", "valid", "research_unit_count", "research_unit_energy"
         },
         {
-            index = "forceId",
-            research_unit_count="researchUnitCount",
-            research_unit_energy = "researchUnitEnergy"
+            index = "force_id",
+            research_unit_count = "research_unit_count",
+            research_unit_energy = "research_unit_energy"
         }
     )
     local ingredients = {}
@@ -164,7 +164,7 @@ function serialize_technology(technology)
         end
         table.insert(prerequisites, v.name)
     end
-    record.researchUnitIngredients = ingredients
+    record.research_unit_ingredients = ingredients
     record.prerequisites = prerequisites
     return record
 end
@@ -200,31 +200,31 @@ function serialize_entity_prototype(entity)
         fluidbox_found = true
         table.insert(fluidbox_prototypes, serialize_fluidbox_prototype(v))
     end
-    local record = table_properties(entity, {"name", "type"}, {type = "entityType"})
-    record.miningTime = mining_time
-    record.maxUndergroundDistance = entity.max_underground_distance
-    record.miningSpeed = entity.mining_speed
-    record.craftingSpeed = entity.crafting_speed
-    record.mineResult = mine_result
+    local record = table_properties(entity, {"name", "type"}, {type = "entity_type"})
+    record.mining_time = mining_time
+    record.max_underground_distance = entity.max_underground_distance
+    record.mining_speed = entity.mining_speed
+    record.crafting_speed = entity.crafting_speed
+    record.mine_result = mine_result
     if fluidbox_found then
-        record.fluidboxPrototypes = fluidbox_prototypes
+        record.fluidbox_prototypes = fluidbox_prototypes
     end
-    record.collisionMask = collision_mask
-    record.collisionBox = table_properties(entity.collision_box, {"left_top", "right_bottom"}, {left_top = "leftTop", right_bottom = "rightBottom"})
+    record.collision_mask = collision_mask
+    record.collision_box = table_properties(entity.collision_box, {"left_top", "right_bottom"}, {left_top = "left_top", right_bottom = "right_bottom"})
 
     return record
 end
 
 function serialize_entity(entity)
-    local record = table_properties(entity, {"name", "direction", "type", "position", "drop_position"}, {type = "entityType", drop_position = "dropPosition"})
-    record.boundingBox = table_properties(entity.bounding_box, {"left_top", "right_bottom"}, {left_top = "leftTop", right_bottom = "rightBottom"})
+    local record = table_properties(entity, {"name", "direction", "type", "position", "drop_position"}, {type = "entity_type", drop_position = "drop_position"})
+    record.bounding_box = table_properties(entity.bounding_box, {"left_top", "right_bottom"}, {left_top = "left_top", right_bottom = "right_bottom"})
     local output_inventory = entity.get_output_inventory()
     if output_inventory ~= nil then
-        record.outputInventory = output_inventory.get_contents()
+        record.output_inventory = output_inventory.get_contents()
     end
     local fuel_inventory = entity.get_fuel_inventory()
     if fuel_inventory ~= nil then
-        record.fuelInventory = fuel_inventory.get_contents()
+        record.fuel_inventory = fuel_inventory.get_contents()
     end
 
     if entity.type == "resource" then
@@ -232,8 +232,8 @@ function serialize_entity(entity)
     elseif entity.type == "inserter" then
         record.pickupPosition = entity.pickup_position
     elseif entity.type == "entity-ghost" then
-        record.ghostName = entity.ghost_name
-        record.ghostType = entity.ghost_type
+        record.ghost_name = entity.ghost_name
+        record.ghost_type = entity.ghost_type
         if entity.ghost_type == "assembling-machine" then
             local recipe = entity.get_recipe()
             if recipe ~= nil then
@@ -251,7 +251,7 @@ end
 
 function serialize_tile(tile)
     local record = table_properties(tile, {"name", "position"})
-    record.playerCollidable = tile.collides_with('player-layer')
+    record.player_collidable = tile.collides_with('player-layer')
     return record
 end
 

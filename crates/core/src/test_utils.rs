@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -174,7 +175,7 @@ pub fn fixture_world() -> FactorioWorld {
     world
 }
 
-pub fn draw_world(world: Arc<FactorioWorld>, save_path: &str) {
+pub fn draw_world(world: Arc<FactorioWorld>, cwd: PathBuf, save_path: &str) {
     let image_width = 500.;
     let image_height = 500.;
     let bb_width = 200.;
@@ -228,5 +229,5 @@ pub fn draw_world(world: Arc<FactorioWorld>, save_path: &str) {
             .of_size(image_width as u32, 2),
         image::Rgba([0u8, 0u8, 0u8, 255u8]), // black
     );
-    buffer.save(save_path).unwrap();
+    buffer.save(cwd.join(save_path)).unwrap();
 }

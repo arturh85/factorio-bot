@@ -2,10 +2,16 @@ use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::rlua;
 use factorio_bot_core::rlua::{Context, Table};
 use factorio_bot_core::rlua_serde;
+use factorio_bot_core::test_utils::draw_world;
 use factorio_bot_core::types::{PlayerId, Position, Rect};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-pub fn create_lua_world(ctx: Context, _world: Arc<FactorioWorld>) -> rlua::Result<Table> {
+pub fn create_lua_world(
+    ctx: Context,
+    _world: Arc<FactorioWorld>,
+    cwd: PathBuf,
+) -> rlua::Result<Table> {
     let map_table = ctx.create_table()?;
     map_table.set(
         "__doc__header",
@@ -70,7 +76,7 @@ end
 
     let world = _world.clone();
     map_table.set(
-        "__doc_fn_findFreeResourceRect",
+        "__doc_fn_find_free_resource_rect",
         String::from(
             r#"
 --- find non-blocked rectangle with given resource
@@ -80,13 +86,13 @@ end
 -- @int height name of item to craft
 -- @param near x/y table
 -- @return table FactorioPlayer object
-function world.findFreeResourceRect(ore_name, width, height, near)
+function world.find_free_resource_rect(ore_name, width, height, near)
 end
 "#,
         ),
     )?;
     map_table.set(
-        "findFreeResourceRect",
+        "find_free_resource_rect",
         ctx.create_function(
             move |_ctx, (ore_name, width, height, near): (String, u32, u32, Table)| {
                 let patches = world.entity_graph.resource_patches(ore_name.as_str());
@@ -104,7 +110,7 @@ end
 
     let world = _world.clone();
     map_table.set(
-        "__doc_fn_findEntitiesInRadius",
+        "__doc_fn_find_entities_in_radius",
         String::from(
             r#"
 --- find entities at given position/radius with optional filters
@@ -114,13 +120,13 @@ end
 -- @string[opt] search_name name of entity to find
 -- @string[opt] search_type type of entity to find
 -- @return table list of FactorioEntity objects
-function world.findEntitiesInRadius(search_center, radius, search_name, search_type)
+function world.find_entities_in_radius(search_center, radius, search_name, search_type)
 end
 "#,
         ),
     )?;
     map_table.set(
-        "findEntitiesInRadius",
+        "find_entities_in_radius",
         ctx.create_function(
             move |_ctx,
                   (search_center, radius, search_name, search_type): (
@@ -142,6 +148,26 @@ end
                 Ok(entities)
             },
         )?,
+    )?;
+    let world = _world.clone();
+    map_table.set(
+        "__doc_fn_draw",
+        String::from(
+            r#"
+--- draw world and save as image at given path
+-- Sends 
+-- @string save_path save path 
+function world.draw(save_path)
+end
+"#,
+        ),
+    )?;
+    map_table.set(
+        "draw",
+        ctx.create_function(move |_ctx, save_path: String| {
+            draw_world(world.clone(), cwd.clone(), &save_path);
+            Ok(())
+        })?,
     )?;
 
     let world = _world;

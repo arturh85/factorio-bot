@@ -1,16 +1,17 @@
-use crate::wrapper::lua_plan_builder::create_lua_plan_builder;
-use crate::wrapper::lua_rcon::create_lua_rcon;
-use crate::wrapper::lua_world::create_lua_world;
-use factorio_bot_core::paris::{error, info, warn};
+use crate::globals::create_lua_globals;
+use crate::globals::plan::create_lua_plan_builder;
+use crate::globals::rcon::create_lua_rcon;
+use crate::globals::world::create_lua_world;
+use factorio_bot_core::paris::error;
 use factorio_bot_core::parking_lot::Mutex;
 use factorio_bot_core::plan::planner::Planner;
-use factorio_bot_core::rlua::{Lua, Variadic};
+use factorio_bot_core::rlua::Lua;
 use factorio_bot_core::tokio::runtime::Runtime;
 use factorio_bot_core::{rlua, serde_json};
 use factorio_bot_scripting::{buffers_to_string, redirect_buffers};
-use itertools::Itertools;
 use miette::Result;
 use rlua_async::ChunkExt;
+use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 
@@ -22,53 +23,24 @@ pub async fn run_lua(
     redirect: bool,
 ) -> Result<(Option<serde_json::Value>, (String, String))> {
     let buffers = redirect_buffers(redirect);
-    let stdout = Arc::new(Mutex::new(String::new()));
-    let stderr = Arc::new(Mutex::new(String::new()));
+    let stdout: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let stderr: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let filename = filename.unwrap_or("unknown.lua").to_owned();
+    let cwd = Path::new(&filename)
+        .parent()
+        .expect("failed to find cwd")
+        .canonicalize()
+        .expect("failed to canonicalize");
     let all_bots = planner.initiate_missing_players_with_default_inventory(bot_count);
     planner.update_plan_world();
     let lua = Lua::new();
     if let Err(err) = lua.context::<_, rlua::Result<()>>(|ctx| {
-        let world = create_lua_world(ctx, planner.plan_world.clone())?;
+        let world = create_lua_world(ctx, planner.plan_world.clone(), cwd.to_path_buf())?;
         let plan = create_lua_plan_builder(ctx, planner.graph.clone(), planner.plan_world.clone())?;
+        create_lua_globals(ctx, all_bots, cwd.clone(), stdout.clone(), stderr.clone())?;
+
         let globals = ctx.globals();
-        globals.set("all_bot_count", all_bots.len())?;
-        globals.set("all_bots", all_bots)?;
         globals.set("world", world)?;
-        let _stdout = stdout.clone();
-        globals.set(
-            "print",
-            ctx.create_function(move |_, strings: Variadic<String>| {
-                info!("<cyan>lua</>   ⮞ {}", strings.iter().join(" "));
-                let mut stdout = _stdout.lock();
-                *stdout += &strings.iter().join(" ");
-                *stdout += "\n";
-                Ok(())
-            })?,
-        )?;
-        let _stderr = stderr.clone();
-        globals.set(
-            "print_err",
-            ctx.create_function(move |_, strings: Variadic<String>| {
-                error!("<cyan>lua</>   ⮞ {}", strings.iter().join(" "));
-                let mut stderr = _stderr.lock();
-                *stderr += "ERROR: ";
-                *stderr += &strings.iter().join(" ");
-                *stderr += "\n";
-                Ok(())
-            })?,
-        )?;
-        let _stdout = stdout.clone();
-        globals.set(
-            "print_warn",
-            ctx.create_function(move |_, strings: Variadic<String>| {
-                warn!("<cyan>lua</>   ⮞ {}", strings.iter().join(" "));
-                let mut stdout = _stdout.lock();
-                *stdout += "WARN: ";
-                *stdout += &strings.iter().join(" ");
-                *stdout += "\n";
-                Ok(())
-            })?,
-        )?;
         globals.set("plan", plan)?;
         if let Some(rcon) = planner.rcon.as_ref() {
             let rcon = create_lua_rcon(ctx, rcon.clone(), planner.real_world.clone())?;
@@ -80,11 +52,10 @@ pub async fn run_lua(
     }
 
     let lua_code = lua_code.to_owned();
-    let filename = filename.unwrap_or("unknown").to_owned();
     let result = thread::spawn(move || {
         match lua.context::<_, rlua::Result<Option<serde_json::Value>>>(|ctx| {
             let chunk = ctx.load(&lua_code);
-            let rt = Runtime::new().unwrap();
+            let rt: Runtime = Runtime::new().unwrap();
             rt.block_on(chunk.exec_async(ctx))?;
             let result: Option<rlua::Value> = ctx.globals().get("result")?;
 
@@ -96,17 +67,16 @@ pub async fn run_lua(
     })
     .join()
     .unwrap()?;
-    let stdout = stdout.lock().to_owned();
-    let stderr = stderr.lock().to_owned();
+    let stdout: String = stdout.lock().to_owned();
+    let stderr: String = stderr.lock().to_owned();
     let buffers = buffers_to_string(&stdout, &stderr, buffers)?;
     Ok((result, buffers))
 }
 
 #[cfg(test)]
 mod tests {
-    use factorio_bot_core::gantt_mermaid::to_mermaid_gantt;
     use factorio_bot_core::serde_json::json;
-    use factorio_bot_core::test_utils::{draw_world, fixture_world};
+    use factorio_bot_core::test_utils::fixture_world;
     use std::sync::Arc;
     use tokio::fs;
 
@@ -144,50 +114,24 @@ mod tests {
     #[tokio::test]
     async fn test_script() {
         let world = Arc::new(fixture_world());
-        draw_world(world.clone(), "tests/world_start.png");
+        // draw_world(world.clone(), "tests/world_start.png");
+
+        let tests_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("script.lua");
 
         for bot_count in 1..=1 {
             let mut planner = Planner::new(world.clone(), None);
             let (_result, (stdout, stderr)) = run_lua(
                 &mut planner,
                 include_str!("../tests/script.lua"),
-                Some("../tests/script.lua"),
+                Some(tests_path.to_str().unwrap()),
                 bot_count,
                 false,
             )
             .await
             .expect("run_lua failed");
-            let graph = planner.graph();
 
-            fs::write(
-                format!(
-                    "{}/tests/task_graph-{}.dot",
-                    env!("CARGO_MANIFEST_DIR"),
-                    bot_count
-                ),
-                graph.graphviz_dot(),
-            )
-            .await
-            .expect("failed to write");
-
-            let mut bot_ids = Vec::new();
-            for i in 1..=bot_count {
-                bot_ids.push(i);
-            }
-
-            fs::write(
-                format!(
-                    "{}/tests/task_graph-{}.md",
-                    env!("CARGO_MANIFEST_DIR"),
-                    bot_count
-                ),
-                format!(
-                    "```mermaid\n{}\n```\n",
-                    to_mermaid_gantt(&planner, bot_ids, &format!("{} bots", bot_count))
-                ),
-            )
-            .await
-            .expect("failed to write");
             fs::write(
                 format!(
                     "{}/tests/stdout-{}.txt",
@@ -211,15 +155,6 @@ mod tests {
                 .await
                 .expect("failed to write");
             }
-
-            draw_world(
-                planner.plan_world.clone(),
-                &format!(
-                    "{}/tests/world_end-{}.png",
-                    env!("CARGO_MANIFEST_DIR"),
-                    bot_count
-                ),
-            );
         }
     }
 
@@ -228,11 +163,11 @@ mod tests {
         result_test(
             1,
             r#"
-result = world.findFreeResourceRect("iron-ore", 2, 2, {x=0,y=0})
+result = world.find_free_resource_rect("iron-ore", 2, 2, {x=0,y=0})
 "#,
             json!({
-                "leftTop": {"x": -36.0, "y": 36.0},
-                "rightBottom": {"x": -34.0, "y": 38.0}
+                "left_top": {"x": -36.0, "y": 36.0},
+                "right_bottom": {"x": -34.0, "y": 38.0}
             }),
         )
         .await
@@ -243,11 +178,11 @@ result = world.findFreeResourceRect("iron-ore", 2, 2, {x=0,y=0})
         result_test(
             1,
             r#"
-result = world.findFreeResourceRect("iron-ore", 2, 2, {x=0,y=-200})
+result = world.find_free_resource_rect("iron-ore", 2, 2, {x=0,y=-200})
 "#,
             json!({
-                "leftTop": {"x": -37.0, "y": 35.0},
-                "rightBottom": {"x": -35.0, "y": 37.0}
+                "left_top": {"x": -37.0, "y": 35.0},
+                "right_bottom": {"x": -35.0, "y": 37.0}
             }),
         )
         .await
@@ -256,7 +191,7 @@ result = world.findFreeResourceRect("iron-ore", 2, 2, {x=0,y=-200})
     async fn result_test(bot_count: u8, code: &str, expected: serde_json::Value) {
         let world = Arc::new(fixture_world());
         let mut planner = Planner::new(world, None);
-        let (result, _) = run_lua(&mut planner, code, None, bot_count, false)
+        let (result, _) = run_lua(&mut planner, code, Some("./test.lua"), bot_count, false)
             .await
             .expect("run_lua failed");
 

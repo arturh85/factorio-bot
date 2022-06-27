@@ -1,0 +1,1 @@
+initSidebarItems({"fn":[["draw_world",""],["entity_graph_from",""],["fixture_entity_prototypes",""],["fixture_item_prototypes",""],["fixture_recipes",""],["fixture_world",""],["spawn_ore",""],["spawn_rocks",""],["spawn_trees",""],["spawn_water",""]]});

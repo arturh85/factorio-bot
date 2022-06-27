@@ -1,0 +1,760 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+   "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8"/>
+<head>
+    <title>Lua Api: Factorio Bot</title>
+    <link rel="stylesheet" href="../ldoc.css" type="text/css" />
+</head>
+<body>
+
+<div id="container">
+
+<div id="product">
+	<div id="product_logo"></div>
+	<div id="product_name"><big><b></b></big></div>
+	<div id="product_description"></div>
+</div> <!-- id="product" -->
+
+
+<div id="main">
+
+
+<!-- Menu -->
+
+<div id="navigation">
+<br/>
+<h1>Factorio Bot</h1>
+
+<ul>
+  <li><a href="../index.html">Index</a></li>
+</ul>
+
+<h2>Contents</h2>
+<ul>
+<li><a href="#Tables">Tables</a></li>
+</ul>
+
+
+<h2>Modules</h2>
+<ul class="$(kind=='Topics' and '' or 'nowrap'">
+  <li><a href="../modules/globals.html">globals</a></li>
+  <li><a href="../modules/plan.html">plan</a></li>
+  <li><a href="../modules/rcon.html">rcon</a></li>
+  <li><strong>types</strong></li>
+  <li><a href="../modules/world.html">world</a></li>
+</ul>
+
+</div>
+
+<div id="content">
+
+<h1>Module <code>types</code></h1>
+<p>Types</p>
+<p> NOTE: not available in scripts, only for documentation purposes</p>
+
+
+<h2><a href="#Tables">Tables</a></h2>
+<table class="function_list">
+	<tr>
+	<td class="name" nowrap><a href="#FactorioTile">FactorioTile</a></td>
+	<td class="summary">FactorioTile</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#FactorioTechnology">FactorioTechnology</a></td>
+	<td class="summary">FactorioTechnology</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#FactorioForce">FactorioForce</a></td>
+	<td class="summary">FactorioForce</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#InventoryResponse">InventoryResponse</a></td>
+	<td class="summary">InventoryResponse</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#FactorioRecipe">FactorioRecipe</a></td>
+	<td class="summary">FactorioRecipe</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#FactorioIngredient">FactorioIngredient</a></td>
+	<td class="summary">FactorioIngredient</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#FactorioProduct">FactorioProduct</a></td>
+	<td class="summary">FactorioProduct</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#FactorioPlayer">FactorioPlayer</a></td>
+	<td class="summary">FactorioPlayer</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#ChunkPosition">ChunkPosition</a></td>
+	<td class="summary">ChunkPosition</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#Position">Position</a></td>
+	<td class="summary">Position</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#Rect">Rect</a></td>
+	<td class="summary">Rect</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#FactorioGraphic">FactorioGraphic</a></td>
+	<td class="summary">FactorioGraphic</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#FactorioEntity">FactorioEntity</a></td>
+	<td class="summary">FactorioEntity</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#FactorioEntityPrototype">FactorioEntityPrototype</a></td>
+	<td class="summary">FactorioEntityPrototype</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#FactorioItemPrototype">FactorioItemPrototype</a></td>
+	<td class="summary">FactorioItemPrototype</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#FactorioFluidBoxPrototype">FactorioFluidBoxPrototype</a></td>
+	<td class="summary">FactorioFluidBoxPrototype</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#FactorioFluidBoxConnection">FactorioFluidBoxConnection</a></td>
+	<td class="summary">FactorioFluidBoxConnection</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#FactorioBlueprintInfo">FactorioBlueprintInfo</a></td>
+	<td class="summary">FactorioBlueprintInfo</td>
+	</tr>
+</table>
+
+<br/>
+<br/>
+
+
+    <h2 class="section-header "><a name="Tables"></a>Tables</h2>
+
+    <dl class="function">
+    <dt>
+    <a name = "FactorioTile"></a>
+    <strong>FactorioTile</strong>
+    </dt>
+    <dd>
+    FactorioTile
+
+
+    <h3>Fields:</h3>
+    <ul>
+        <li><span class="parameter">name</span>
+        string
+        </li>
+        <li><span class="parameter">player_collidable</span>
+        boolean
+        </li>
+        <li><span class="parameter">position</span>
+        <a href="../modules/types.html#Position">Position</a>
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "FactorioTechnology"></a>
+    <strong>FactorioTechnology</strong>
+    </dt>
+    <dd>
+    FactorioTechnology
+
+
+    <h3>Fields:</h3>
+    <ul>
+        <li><span class="parameter">name</span>
+        string
+        </li>
+        <li><span class="parameter">enabled</span>
+        boolean
+        </li>
+        <li><span class="parameter">upgrade</span>
+        boolean
+        </li>
+        <li><span class="parameter">prerequisites</span>
+        {string}
+        </li>
+        <li><span class="parameter">researched</span>
+        boolean
+        </li>
+        <li><span class="parameter">research_unit_ingredients</span>
+        {<a href="../modules/types.html#FactorioIngredient">FactorioIngredient</a>}
+        </li>
+        <li><span class="parameter">research_unit_count</span>
+        int
+        </li>
+        <li><span class="parameter">research_unit_energy</span>
+        int
+        </li>
+        <li><span class="parameter">order</span>
+        string
+        </li>
+        <li><span class="parameter">level</span>
+        number
+        </li>
+        <li><span class="parameter">valid</span>
+        boolean
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "FactorioForce"></a>
+    <strong>FactorioForce</strong>
+    </dt>
+    <dd>
+    FactorioForce
+
+
+    <h3>Fields:</h3>
+    <ul>
+        <li><span class="parameter">name</span>
+        string
+        </li>
+        <li><span class="parameter">force_id</span>
+        int
+        </li>
+        <li><span class="parameter">current_research</span>
+        string
+        </li>
+        <li><span class="parameter">research_progress</span>
+        int
+        </li>
+        <li><span class="parameter">technologies</span>
+        {<a href="../modules/types.html#FactorioTechnology">FactorioTechnology</a>}
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "InventoryResponse"></a>
+    <strong>InventoryResponse</strong>
+    </dt>
+    <dd>
+    InventoryResponse
+
+
+    <h3>Fields:</h3>
+    <ul>
+        <li><span class="parameter">name</span>
+        string
+        </li>
+        <li><span class="parameter">position</span>
+        <a href="../modules/types.html#Position">Position</a>
+        </li>
+        <li><span class="parameter">output_inventory</span>
+        {[string]=int,...}
+        </li>
+        <li><span class="parameter">fuel_inventory</span>
+        {[string]=int,...}
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "FactorioRecipe"></a>
+    <strong>FactorioRecipe</strong>
+    </dt>
+    <dd>
+    FactorioRecipe
+
+
+    <h3>Fields:</h3>
+    <ul>
+        <li><span class="parameter">name</span>
+        string
+        </li>
+        <li><span class="parameter">valid</span>
+        boolean
+        </li>
+        <li><span class="parameter">enabled</span>
+        boolean
+        </li>
+        <li><span class="parameter">category</span>
+        string
+        </li>
+        <li><span class="parameter">ingredients</span>
+        {<a href="../modules/types.html#FactorioIngredient">FactorioIngredient</a>}
+        </li>
+        <li><span class="parameter">products</span>
+        {<a href="../modules/types.html#FactorioProduct">FactorioProduct</a>}
+        </li>
+        <li><span class="parameter">hidden</span>
+        boolean
+        </li>
+        <li><span class="parameter">energy</span>
+        int
+        </li>
+        <li><span class="parameter">order</span>
+        string
+        </li>
+        <li><span class="parameter">group</span>
+        string
+        </li>
+        <li><span class="parameter">subgroup</span>
+        string
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "FactorioIngredient"></a>
+    <strong>FactorioIngredient</strong>
+    </dt>
+    <dd>
+    FactorioIngredient
+
+
+    <h3>Fields:</h3>
+    <ul>
+        <li><span class="parameter">name</span>
+        string
+        </li>
+        <li><span class="parameter">ingredient_type</span>
+        string
+        </li>
+        <li><span class="parameter">amount</span>
+        number
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "FactorioProduct"></a>
+    <strong>FactorioProduct</strong>
+    </dt>
+    <dd>
+    FactorioProduct
+
+
+    <h3>Fields:</h3>
+    <ul>
+        <li><span class="parameter">name</span>
+        string
+        </li>
+        <li><span class="parameter">product_type</span>
+        string
+        </li>
+        <li><span class="parameter">amount</span>
+        number
+        </li>
+        <li><span class="parameter">probability</span>
+        int
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "FactorioPlayer"></a>
+    <strong>FactorioPlayer</strong>
+    </dt>
+    <dd>
+    FactorioPlayer
+
+
+    <h3>Fields:</h3>
+    <ul>
+        <li><span class="parameter">player_id</span>
+        int
+        </li>
+        <li><span class="parameter">position</span>
+        <a href="../modules/types.html#Position">Position</a>
+        </li>
+        <li><span class="parameter">main_inventory</span>
+        {[string]=int,...}
+        </li>
+        <li><span class="parameter">build_distance</span>
+        int
+        </li>
+        <li><span class="parameter">reach_distance</span>
+        int
+        </li>
+        <li><span class="parameter">drop_item_distance</span>
+        int
+        </li>
+        <li><span class="parameter">item_pickup_distance</span>
+        int
+        </li>
+        <li><span class="parameter">loot_pickup_distance</span>
+        int
+        </li>
+        <li><span class="parameter">resource_reach_distance</span>
+        int
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "ChunkPosition"></a>
+    <strong>ChunkPosition</strong>
+    </dt>
+    <dd>
+    ChunkPosition
+
+
+    <h3>Fields:</h3>
+    <ul>
+        <li><span class="parameter">x</span>
+        int
+        </li>
+        <li><span class="parameter">y</span>
+        int
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "Position"></a>
+    <strong>Position</strong>
+    </dt>
+    <dd>
+    Position
+
+
+    <h3>Fields:</h3>
+    <ul>
+        <li><span class="parameter">x</span>
+        int
+        </li>
+        <li><span class="parameter">y</span>
+        int
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "Rect"></a>
+    <strong>Rect</strong>
+    </dt>
+    <dd>
+    Rect
+
+
+    <h3>Fields:</h3>
+    <ul>
+        <li><span class="parameter">left_top</span>
+        <a href="../modules/types.html#Position">Position</a>
+        </li>
+        <li><span class="parameter">right_bottom</span>
+        <a href="../modules/types.html#Position">Position</a>
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "FactorioGraphic"></a>
+    <strong>FactorioGraphic</strong>
+    </dt>
+    <dd>
+    FactorioGraphic
+
+
+    <h3>Fields:</h3>
+    <ul>
+        <li><span class="parameter">entity_name</span>
+        string
+        </li>
+        <li><span class="parameter">image_path</span>
+        string
+        </li>
+        <li><span class="parameter">width</span>
+        number
+        </li>
+        <li><span class="parameter">height</span>
+        int
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "FactorioEntity"></a>
+    <strong>FactorioEntity</strong>
+    </dt>
+    <dd>
+    FactorioEntity
+
+
+    <h3>Fields:</h3>
+    <ul>
+        <li><span class="parameter">name</span>
+        string
+        </li>
+        <li><span class="parameter">entity_type</span>
+        string
+        </li>
+        <li><span class="parameter">position</span>
+        <a href="../modules/types.html#Position">Position</a>
+        </li>
+        <li><span class="parameter">bounding_box</span>
+        <a href="../modules/types.html#Rect">Rect</a>
+        </li>
+        <li><span class="parameter">direction</span>
+        int
+        </li>
+        <li><span class="parameter">drop_position</span>
+        <a href="../modules/types.html#Position">Position</a>
+        </li>
+        <li><span class="parameter">pickup_position</span>
+        <a href="../modules/types.html#Position">Position</a>
+        </li>
+        <li><span class="parameter">output_inventory</span>
+        {[string]=int,...}
+        </li>
+        <li><span class="parameter">fuel_inventory</span>
+        {[string]=int,...}
+        </li>
+        <li><span class="parameter">amount</span>
+        int
+        </li>
+        <li><span class="parameter">recipe</span>
+        string
+        </li>
+        <li><span class="parameter">ghost_name</span>
+        string
+        </li>
+        <li><span class="parameter">ghost_type</span>
+        string
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "FactorioEntityPrototype"></a>
+    <strong>FactorioEntityPrototype</strong>
+    </dt>
+    <dd>
+    FactorioEntityPrototype
+
+
+    <h3>Fields:</h3>
+    <ul>
+        <li><span class="parameter">name</span>
+        string
+        </li>
+        <li><span class="parameter">entity_type</span>
+        string
+        </li>
+        <li><span class="parameter">collision_mask</span>
+        {string}
+        </li>
+        <li><span class="parameter">collision_box</span>
+        <a href="../modules/types.html#Rect">Rect</a>
+        </li>
+        <li><span class="parameter">mine_result</span>
+        {[string]=int,...}
+        </li>
+        <li><span class="parameter">mining_time</span>
+        int
+        </li>
+        <li><span class="parameter">mining_speed</span>
+        int
+        </li>
+        <li><span class="parameter">crafting_speed</span>
+        int
+        </li>
+        <li><span class="parameter">max_underground_distance</span>
+        int
+        </li>
+        <li><span class="parameter">fluidbox_prototypes</span>
+        {<a href="../modules/types.html#FactorioFluidBoxPrototype">FactorioFluidBoxPrototype</a>}
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "FactorioItemPrototype"></a>
+    <strong>FactorioItemPrototype</strong>
+    </dt>
+    <dd>
+    FactorioItemPrototype
+
+
+    <h3>Fields:</h3>
+    <ul>
+        <li><span class="parameter">name</span>
+        string
+        </li>
+        <li><span class="parameter">item_type</span>
+        string
+        </li>
+        <li><span class="parameter">stack_size</span>
+        number
+        </li>
+        <li><span class="parameter">fuel_value</span>
+        int
+        </li>
+        <li><span class="parameter">place_result</span>
+        string
+        </li>
+        <li><span class="parameter">group</span>
+        string
+        </li>
+        <li><span class="parameter">subgroup</span>
+        string
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "FactorioFluidBoxPrototype"></a>
+    <strong>FactorioFluidBoxPrototype</strong>
+    </dt>
+    <dd>
+    FactorioFluidBoxPrototype
+
+
+    <h3>Fields:</h3>
+    <ul>
+        <li><span class="parameter">pipe_connections</span>
+        {<a href="../modules/types.html#FactorioFluidBoxConnection">FactorioFluidBoxConnection</a>}
+        </li>
+        <li><span class="parameter">production_type</span>
+        string
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "FactorioFluidBoxConnection"></a>
+    <strong>FactorioFluidBoxConnection</strong>
+    </dt>
+    <dd>
+    FactorioFluidBoxConnection
+
+
+    <h3>Fields:</h3>
+    <ul>
+        <li><span class="parameter">max_underground_distance</span>
+        number
+        </li>
+        <li><span class="parameter">connection_type</span>
+        string
+        </li>
+        <li><span class="parameter">positions</span>
+        {Position}
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "FactorioBlueprintInfo"></a>
+    <strong>FactorioBlueprintInfo</strong>
+    </dt>
+    <dd>
+    FactorioBlueprintInfo
+
+
+    <h3>Fields:</h3>
+    <ul>
+        <li><span class="parameter">label</span>
+        string
+        </li>
+        <li><span class="parameter">blueprint</span>
+        string
+        </li>
+        <li><span class="parameter">width</span>
+        number
+        </li>
+        <li><span class="parameter">height</span>
+        number
+        </li>
+        <li><span class="parameter">rect</span>
+        <a href="../modules/types.html#Rect">Rect</a>
+        </li>
+        <li><span class="parameter">data</span>
+        data
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+</dl>
+
+
+</div> <!-- id="content" -->
+</div> <!-- id="main" -->
+<div id="about">
+<i>generated by <a href="http://github.com/stevedonovan/LDoc">LDoc 1.4.3</a></i>
+<i style="float:right;">Last updated 2022-06-27 20:24:33 </i>
+</div> <!-- id="about" -->
+</div> <!-- id="container" -->
+</body>
+</html>

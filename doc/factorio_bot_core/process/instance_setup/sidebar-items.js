@@ -1,0 +1,1 @@
+initSidebarItems({"fn":[["setup_factorio_instance",""],["update_map_gen_settings",""]]});

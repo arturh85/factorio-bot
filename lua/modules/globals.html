@@ -1,0 +1,276 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+   "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8"/>
+<head>
+    <title>Lua Api: Factorio Bot</title>
+    <link rel="stylesheet" href="../ldoc.css" type="text/css" />
+</head>
+<body>
+
+<div id="container">
+
+<div id="product">
+	<div id="product_logo"></div>
+	<div id="product_name"><big><b></b></big></div>
+	<div id="product_description"></div>
+</div> <!-- id="product" -->
+
+
+<div id="main">
+
+
+<!-- Menu -->
+
+<div id="navigation">
+<br/>
+<h1>Factorio Bot</h1>
+
+<ul>
+  <li><a href="../index.html">Index</a></li>
+</ul>
+
+<h2>Contents</h2>
+<ul>
+<li><a href="#Functions">Functions</a></li>
+<li><a href="#Fields">Fields</a></li>
+</ul>
+
+
+<h2>Modules</h2>
+<ul class="$(kind=='Topics' and '' or 'nowrap'">
+  <li><strong>globals</strong></li>
+  <li><a href="../modules/plan.html">plan</a></li>
+  <li><a href="../modules/rcon.html">rcon</a></li>
+  <li><a href="../modules/types.html">types</a></li>
+  <li><a href="../modules/world.html">world</a></li>
+</ul>
+
+</div>
+
+<div id="content">
+
+<h1>Module <code>globals</code></h1>
+<p>Global functions</p>
+<p>
+
+</p>
+
+
+<h2><a href="#Functions">Functions</a></h2>
+<table class="function_list">
+	<tr>
+	<td class="name" nowrap><a href="#write_file">write_file (target_path, contents)</a></td>
+	<td class="summary">writes string to file</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#include">include (source_path)</a></td>
+	<td class="summary">include lua code files</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#print">print (message)</a></td>
+	<td class="summary">Print given strings on stdout</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#print_warn">print_warn (message)</a></td>
+	<td class="summary">Print given strings on stdout with WARN: prefix</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#print_err">print_err (message)</a></td>
+	<td class="summary">Print given strings on stderr with ERROR: prefix</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#read_file">read_file (source_path)</a></td>
+	<td class="summary">reads file to string</td>
+	</tr>
+</table>
+<h2><a href="#Fields">Fields</a></h2>
+<table class="function_list">
+	<tr>
+	<td class="name" nowrap><a href="#all_bots">all_bots</a></td>
+	<td class="summary">List of Player ids for available bots</td>
+	</tr>
+</table>
+
+<br/>
+<br/>
+
+
+    <h2 class="section-header "><a name="Functions"></a>Functions</h2>
+
+    <dl class="function">
+    <dt>
+    <a name = "write_file"></a>
+    <strong>write_file (target_path, contents)</strong>
+    </dt>
+    <dd>
+    writes string to file
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">target_path</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         path to file
+        </li>
+        <li><span class="parameter">contents</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         contenst of file
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "include"></a>
+    <strong>include (source_path)</strong>
+    </dt>
+    <dd>
+    include lua code files
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">source_path</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+
+
+
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "print"></a>
+    <strong>print (message)</strong>
+    </dt>
+    <dd>
+    Print given strings on stdout
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">message</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+
+
+
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "print_warn"></a>
+    <strong>print_warn (message)</strong>
+    </dt>
+    <dd>
+    Print given strings on stdout with WARN: prefix
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">message</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+
+
+
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "print_err"></a>
+    <strong>print_err (message)</strong>
+    </dt>
+    <dd>
+    Print given strings on stderr with ERROR: prefix
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">message</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+
+
+
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "read_file"></a>
+    <strong>read_file (source_path)</strong>
+    </dt>
+    <dd>
+    reads file to string
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">source_path</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+
+
+
+        </li>
+    </ul>
+
+    <h3>Returns:</h3>
+    <ol>
+
+        string contents of file
+    </ol>
+
+
+
+
+</dd>
+</dl>
+    <h2 class="section-header "><a name="Fields"></a>Fields</h2>
+
+    <dl class="function">
+    <dt>
+    <a name = "all_bots"></a>
+    <strong>all_bots</strong>
+    </dt>
+    <dd>
+    List of Player ids for available bots
+
+
+
+
+
+
+
+</dd>
+</dl>
+
+
+</div> <!-- id="content" -->
+</div> <!-- id="main" -->
+<div id="about">
+<i>generated by <a href="http://github.com/stevedonovan/LDoc">LDoc 1.4.3</a></i>
+<i style="float:right;">Last updated 2022-06-27 20:24:33 </i>
+</div> <!-- id="about" -->
+</div> <!-- id="container" -->
+</body>
+</html>

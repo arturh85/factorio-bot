@@ -1,0 +1,1 @@
+initSidebarItems({"mod":[["arrange_windows",""],["instance_setup",""],["io_utils",""],["output_parser",""],["output_reader",""],["process_control",""]],"struct":[["InteractiveProcess","Wraps a [Child] object in an interface for doing newline-dellimited string IO with a child process."]]});

@@ -1,0 +1,1 @@
+initSidebarItems({"constant":[["APP_SETTINGS_FILENAME",""]],"fn":[["data_local_dir",""],["settings_file",""],["workspace_dir",""]]});

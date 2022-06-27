@@ -1,0 +1,1 @@
+initSidebarItems({"fn":[["is_instance_started",""],["start_instances",""],["stop_instances",""]]});

@@ -1,0 +1,1 @@
+initSidebarItems({"fn":[["maximize_window",""]]});

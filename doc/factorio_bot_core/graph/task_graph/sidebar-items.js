@@ -1,0 +1,1 @@
+initSidebarItems({"enum":[["TaskData",""],["TaskStatus",""]],"struct":[["EntityPlacement",""],["InventoryItem",""],["InventoryLocation",""],["MineTarget",""],["PositionRadius",""],["TaskGraph",""],["TaskNode",""],["TaskResult",""]],"type":[["TaskGraphInner",""]]});

@@ -1,0 +1,1 @@
+initSidebarItems({"fn":[["load_app_settings",""]],"struct":[["AppSettings",""],["GuiSettings",""]],"type":[["SharedAppSettings",""]]});

@@ -1,0 +1,1 @@
+initSidebarItems({"enum":[["DumpType",""]],"fn":[["build",""],["run",""]],"struct":[["DumpTypeIter","An iterator over the variants of [Self]"],["ThisCommand",""]]});

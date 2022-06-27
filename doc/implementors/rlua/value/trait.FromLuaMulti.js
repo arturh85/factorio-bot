@@ -1,0 +1,3 @@
+(function() {var implementors = {};
+implementors["factorio_bot_core"] = [{"text":"impl&lt;'lua&gt; FromLuaMulti&lt;'lua&gt; for <a class=\"struct\" href=\"factorio_bot_core/types/struct.Position.html\" title=\"struct factorio_bot_core::types::Position\">Position</a>","synthetic":false,"types":["factorio_bot_core::types::Position"]}];
+if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()

@@ -1,0 +1,1 @@
+initSidebarItems({"fn":[["arrange_windows","arrange factorio windows to fill the primary display"],["window_size",""]]});

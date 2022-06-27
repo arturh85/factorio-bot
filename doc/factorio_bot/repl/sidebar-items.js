@@ -1,0 +1,1 @@
+initSidebarItems({"fn":[["start",""],["subcommands",""],["update_prompt",""]],"mod":[["dump",""],["factorio_control",""],["get_setting",""],["gui",""],["quit",""],["rcon_send",""],["restapi_control",""],["run_script",""],["set_setting",""]],"struct":[["Error",""]],"trait":[["Subcommand",""]],"type":[["Result",""]]});

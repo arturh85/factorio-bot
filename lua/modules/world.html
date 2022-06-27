@@ -1,0 +1,297 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+   "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8"/>
+<head>
+    <title>Lua Api: Factorio Bot</title>
+    <link rel="stylesheet" href="../ldoc.css" type="text/css" />
+</head>
+<body>
+
+<div id="container">
+
+<div id="product">
+	<div id="product_logo"></div>
+	<div id="product_name"><big><b></b></big></div>
+	<div id="product_description"></div>
+</div> <!-- id="product" -->
+
+
+<div id="main">
+
+
+<!-- Menu -->
+
+<div id="navigation">
+<br/>
+<h1>Factorio Bot</h1>
+
+<ul>
+  <li><a href="../index.html">Index</a></li>
+</ul>
+
+<h2>Contents</h2>
+<ul>
+<li><a href="#Functions">Functions</a></li>
+</ul>
+
+
+<h2>Modules</h2>
+<ul class="$(kind=='Topics' and '' or 'nowrap'">
+  <li><a href="../modules/globals.html">globals</a></li>
+  <li><a href="../modules/plan.html">plan</a></li>
+  <li><a href="../modules/rcon.html">rcon</a></li>
+  <li><a href="../modules/types.html">types</a></li>
+  <li><strong>world</strong></li>
+</ul>
+
+</div>
+
+<div id="content">
+
+<h1>Module <code>world</code></h1>
+<p>Factorio World
+ Internal representation of a Factorio world.</p>
+<p>
+
+</p>
+
+
+<h2><a href="#Functions">Functions</a></h2>
+<table class="function_list">
+	<tr>
+	<td class="name" nowrap><a href="#draw">draw (save_path)</a></td>
+	<td class="summary">draw world and save as image at given path
+ Sends</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#find_free_resource_rect">find_free_resource_rect (ore_name, width, height, near)</a></td>
+	<td class="summary">find non-blocked rectangle with given resource
+ The ...</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#inventory">inventory (player_id, item_name)</a></td>
+	<td class="summary">counts how many of a given item the player has
+ The ...</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#player">player (player_id)</a></td>
+	<td class="summary">lookup player by id
+ The player id will start at 1 and increment.</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#find_entities_in_radius">find_entities_in_radius (search_center, radius[, search_name[, search_type]])</a></td>
+	<td class="summary">find entities at given position/radius with optional filters
+ Sends</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#recipe">recipe (name)</a></td>
+	<td class="summary">lookup recipe by name
+ The name as defined by https://wiki.factorio.com/Materials<em>and</em>recipes</td>
+	</tr>
+</table>
+
+<br/>
+<br/>
+
+
+    <h2 class="section-header "><a name="Functions"></a>Functions</h2>
+
+    <dl class="function">
+    <dt>
+    <a name = "draw"></a>
+    <strong>draw (save_path)</strong>
+    </dt>
+    <dd>
+    draw world and save as image at given path
+ Sends
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">save_path</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         save path
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "find_free_resource_rect"></a>
+    <strong>find_free_resource_rect (ore_name, width, height, near)</strong>
+    </dt>
+    <dd>
+    find non-blocked rectangle with given resource
+ The ...
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">ore_name</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         name of item to craft
+        </li>
+        <li><span class="parameter">width</span>
+            <span class="types"><span class="type">int</span></span>
+         name of item to craft
+        </li>
+        <li><span class="parameter">height</span>
+            <span class="types"><span class="type">int</span></span>
+         name of item to craft
+        </li>
+        <li><span class="parameter">near</span>
+         <a href="../modules/types.html#Position">types.Position</a>
+        </li>
+    </ul>
+
+    <h3>Returns:</h3>
+    <ol>
+
+        <a href="../modules/types.html#FactorioPlayer">types.FactorioPlayer</a>
+    </ol>
+
+
+
+
+</dd>
+    <dt>
+    <a name = "inventory"></a>
+    <strong>inventory (player_id, item_name)</strong>
+    </dt>
+    <dd>
+    counts how many of a given item the player has
+ The ...
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">player_id</span>
+            <span class="types"><span class="type">int</span></span>
+         id of player
+        </li>
+        <li><span class="parameter">item_name</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         name of item
+        </li>
+    </ul>
+
+    <h3>Returns:</h3>
+    <ol>
+
+        {<a href="../modules/types.html#FactorioEntity">types.FactorioEntity</a>}
+    </ol>
+
+
+
+
+</dd>
+    <dt>
+    <a name = "player"></a>
+    <strong>player (player_id)</strong>
+    </dt>
+    <dd>
+    lookup player by id
+ The player id will start at 1 and increment.
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">player_id</span>
+            <span class="types"><span class="type">int</span></span>
+         id of player
+        </li>
+    </ul>
+
+    <h3>Returns:</h3>
+    <ol>
+
+        <a href="../modules/types.html#FactorioPlayer">types.FactorioPlayer</a>
+    </ol>
+
+
+
+
+</dd>
+    <dt>
+    <a name = "find_entities_in_radius"></a>
+    <strong>find_entities_in_radius (search_center, radius[, search_name[, search_type]])</strong>
+    </dt>
+    <dd>
+    find entities at given position/radius with optional filters
+ Sends
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">search_center</span>
+         <a href="../modules/types.html#Position">types.Position</a>
+        </li>
+        <li><span class="parameter">radius</span>
+            <span class="types"><span class="type">int</span></span>
+         searches in circular radius around search_center
+        </li>
+        <li><span class="parameter">search_name</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         name of entity to find
+         (<em>optional</em>)
+        </li>
+        <li><span class="parameter">search_type</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         type of entity to find
+         (<em>optional</em>)
+        </li>
+    </ul>
+
+    <h3>Returns:</h3>
+    <ol>
+
+        {<a href="../modules/types.html#FactorioEntity">types.FactorioEntity</a>}
+    </ol>
+
+
+
+
+</dd>
+    <dt>
+    <a name = "recipe"></a>
+    <strong>recipe (name)</strong>
+    </dt>
+    <dd>
+    lookup recipe by name
+ The name as defined by https://wiki.factorio.com/Materials<em>and</em>recipes
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">name</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         name of item to craft
+        </li>
+    </ul>
+
+    <h3>Returns:</h3>
+    <ol>
+
+        <a href="../modules/types.html#FactorioRecipe">types.FactorioRecipe</a>
+    </ol>
+
+
+
+
+</dd>
+</dl>
+
+
+</div> <!-- id="content" -->
+</div> <!-- id="main" -->
+<div id="about">
+<i>generated by <a href="http://github.com/stevedonovan/LDoc">LDoc 1.4.3</a></i>
+<i style="float:right;">Last updated 2022-06-27 20:24:33 </i>
+</div> <!-- id="about" -->
+</div> <!-- id="container" -->
+</body>
+</html>

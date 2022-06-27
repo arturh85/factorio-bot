@@ -1,0 +1,1 @@
+window.ALL_CRATES = ["factorio_bot","factorio_bot_core","factorio_bot_restapi","factorio_bot_scripting","factorio_bot_scripting_lua"];

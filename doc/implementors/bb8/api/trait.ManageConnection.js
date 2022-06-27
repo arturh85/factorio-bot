@@ -1,0 +1,3 @@
+(function() {var implementors = {};
+implementors["factorio_bot_core"] = [{"text":"impl ManageConnection for <a class=\"struct\" href=\"factorio_bot_core/factorio/rcon/struct.ConnectionManager.html\" title=\"struct factorio_bot_core::factorio::rcon::ConnectionManager\">ConnectionManager</a>","synthetic":false,"types":["factorio_bot_core::factorio::rcon::ConnectionManager"]}];
+if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()

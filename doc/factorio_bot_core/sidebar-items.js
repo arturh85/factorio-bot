@@ -1,0 +1,1 @@
+initSidebarItems({"externcrate":[["async_trait",""],["paris",""]],"mod":[["aabb_quadtree","A simple spacial partitioning data structure that allows fast queries for 2-dimensional objects."],["constants",""],["draw",""],["errors",""],["factorio",""],["gantt_mermaid",""],["graph",""],["plan",""],["process",""],["settings",""],["test_utils",""],["types",""]]});

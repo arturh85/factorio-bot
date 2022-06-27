@@ -1,0 +1,664 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+   "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8"/>
+<head>
+    <title>Lua Api: Factorio Bot</title>
+    <link rel="stylesheet" href="../ldoc.css" type="text/css" />
+</head>
+<body>
+
+<div id="container">
+
+<div id="product">
+	<div id="product_logo"></div>
+	<div id="product_name"><big><b></b></big></div>
+	<div id="product_description"></div>
+</div> <!-- id="product" -->
+
+
+<div id="main">
+
+
+<!-- Menu -->
+
+<div id="navigation">
+<br/>
+<h1>Factorio Bot</h1>
+
+<ul>
+  <li><a href="../index.html">Index</a></li>
+</ul>
+
+<h2>Contents</h2>
+<ul>
+<li><a href="#Functions">Functions</a></li>
+</ul>
+
+
+<h2>Modules</h2>
+<ul class="$(kind=='Topics' and '' or 'nowrap'">
+  <li><a href="../modules/globals.html">globals</a></li>
+  <li><a href="../modules/plan.html">plan</a></li>
+  <li><strong>rcon</strong></li>
+  <li><a href="../modules/types.html">types</a></li>
+  <li><a href="../modules/world.html">world</a></li>
+</ul>
+
+</div>
+
+<div id="content">
+
+<h1>Module <code>rcon</code></h1>
+<p>RCON interface
+ methods for sending rcon commands to running factorio instance</p>
+<p>
+
+</p>
+
+
+<h2><a href="#Functions">Functions</a></h2>
+<table class="function_list">
+	<tr>
+	<td class="name" nowrap><a href="#place_blueprint">place_blueprint (player_id, blueprint, position, direction, force_build, only_ghosts, helper_player_ids)</a></td>
+	<td class="summary">places a whole blueprint
+ Sends /silent-command remote.call('place_blueprint', ...)</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#mine">mine (player_id, name, position, count)</a></td>
+	<td class="summary">Mine a resource with player
+ Sends /silent-command remote.call('action<em>start</em>mining', ...)</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#add_research">add_research (technology_name)</a></td>
+	<td class="summary">adds research to queue
+ Sends /silent-command remote.call('add<em>research', technology</em>name)</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#cheat_technology">cheat_technology (technology_name)</a></td>
+	<td class="summary">CHEATs research
+ Sends /silent-command remote.call('cheat<em>technology', technology</em>name)</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#inventory_contents_at">inventory_contents_at (inventories)</a></td>
+	<td class="summary">Craft an item with player
+ Sends /silent-command remote.call('action<em>start</em>crafting', ...)</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#move">move (player_id, position, radius)</a></td>
+	<td class="summary">Move a player to a different position
+ Sends /silent-command remote.call('action<em>start</em>walk_waypoints', ...)</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#print">print (message)</a></td>
+	<td class="summary">print given message on the server
+ Sends /c print(message)</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#cheat_all_technologies">cheat_all_technologies ()</a></td>
+	<td class="summary">CHEATs all research
+ Sends /silent-command remote.call('cheat<em>all</em>technologies')</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#insert_to_inventory">insert_to_inventory (player_id, entity_name, position, inventory_type, item_name, item_count)</a></td>
+	<td class="summary">Inserts an item into an inventory
+ Sends /silent-command remote.call('insert<em>to</em>inventory', ...)</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#cheat_item">cheat_item (player_id, name, count)</a></td>
+	<td class="summary">CHEATs given item
+ Sends /silent-command remote.call('cheat_item', ...)</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#revive_ghost">revive_ghost (player_id, name, position)</a></td>
+	<td class="summary">CHEATs a whole blueprint
+ Sends /silent-command remote.call('revive_ghost', ...)</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#cheat_blueprint">cheat_blueprint (player_id, blueprint, position, direction, force_build)</a></td>
+	<td class="summary">CHEATs a whole blueprint
+ Sends /silent-command remote.call('cheat_blueprint', ...)</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#place_entity">place_entity (player_id, name, position, direction)</a></td>
+	<td class="summary">Places an item by a player
+ Sends /silent-command remote.call('place_entity', ...)</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#remove_from_inventory">remove_from_inventory (player_id, entity_name, position, inventory_type, item_name, item_count)</a></td>
+	<td class="summary">Removes an item from an inventory
+ Sends /silent-command remote.call('remove<em>from</em>inventory', ...)</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#find_entities_in_radius">find_entities_in_radius (search_center, radius[, search_name[, search_type]])</a></td>
+	<td class="summary">find entities at given position/radius with optional filters
+ Sends /silent-command remote.call('find<em>entities</em>filtered', ...)</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#craft">craft (player_id, name, count)</a></td>
+	<td class="summary">Craft an item with player
+ Sends /silent-command remote.call('action<em>start</em>crafting', ...)</td>
+	</tr>
+</table>
+
+<br/>
+<br/>
+
+
+    <h2 class="section-header "><a name="Functions"></a>Functions</h2>
+
+    <dl class="function">
+    <dt>
+    <a name = "place_blueprint"></a>
+    <strong>place_blueprint (player_id, blueprint, position, direction, force_build, only_ghosts, helper_player_ids)</strong>
+    </dt>
+    <dd>
+    places a whole blueprint
+ Sends /silent-command remote.call('place_blueprint', ...)
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">player_id</span>
+            <span class="types"><span class="type">int</span></span>
+         id of player to give the item to
+        </li>
+        <li><span class="parameter">blueprint</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         blueprint string
+        </li>
+        <li><span class="parameter">position</span>
+         <a href="../modules/types.html#Position">types.Position</a>
+        </li>
+        <li><span class="parameter">direction</span>
+            <span class="types"><span class="type">int</span></span>
+         rotates the blueprint in given direction
+        </li>
+        <li><span class="parameter">force_build</span>
+            <span class="types"><span class="type">bool</span></span>
+         forces the build even if other entities needs to be removed first
+        </li>
+        <li><span class="parameter">only_ghosts</span>
+            <span class="types"><span class="type">bool</span></span>
+         only places ghost version of entities
+        </li>
+        <li><span class="parameter">helper_player_ids</span>
+            <span class="types"><span class="type">{int}</span></span>
+         array of player ids which may help
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "mine"></a>
+    <strong>mine (player_id, name, position, count)</strong>
+    </dt>
+    <dd>
+    Mine a resource with player
+ Sends /silent-command remote.call('action<em>start</em>mining', ...)
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">player_id</span>
+            <span class="types"><span class="type">int</span></span>
+         id of player to give the item to
+        </li>
+        <li><span class="parameter">name</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         name of resource to mine
+        </li>
+        <li><span class="parameter">position</span>
+         <a href="../modules/types.html#Position">types.Position</a>
+        </li>
+        <li><span class="parameter">count</span>
+            <span class="types"><span class="type">int</span></span>
+         how many to mine
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "add_research"></a>
+    <strong>add_research (technology_name)</strong>
+    </dt>
+    <dd>
+    adds research to queue
+ Sends /silent-command remote.call('add<em>research', technology</em>name)
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">technology_name</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         name of technology to research
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "cheat_technology"></a>
+    <strong>cheat_technology (technology_name)</strong>
+    </dt>
+    <dd>
+    CHEATs research
+ Sends /silent-command remote.call('cheat<em>technology', technology</em>name)
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">technology_name</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         name of technology to CHEAT
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "inventory_contents_at"></a>
+    <strong>inventory_contents_at (inventories)</strong>
+    </dt>
+    <dd>
+    Craft an item with player
+ Sends /silent-command remote.call('action<em>start</em>crafting', ...)
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">inventories</span>
+         table list of <a href="../modules/types.html#Position">types.Position</a> to check
+        </li>
+    </ul>
+
+    <h3>Returns:</h3>
+    <ol>
+
+        {[string]=int,...}
+    </ol>
+
+
+
+
+</dd>
+    <dt>
+    <a name = "move"></a>
+    <strong>move (player_id, position, radius)</strong>
+    </dt>
+    <dd>
+    Move a player to a different position
+ Sends /silent-command remote.call('action<em>start</em>walk_waypoints', ...)
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">player_id</span>
+            <span class="types"><span class="type">int</span></span>
+         id of player to give the item to
+        </li>
+        <li><span class="parameter">position</span>
+         <a href="../modules/types.html#Position">types.Position</a>
+        </li>
+        <li><span class="parameter">radius</span>
+            <span class="types"><span class="type">int</span></span>
+         radius
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "print"></a>
+    <strong>print (message)</strong>
+    </dt>
+    <dd>
+    print given message on the server
+ Sends /c print(message)
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">message</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+
+
+
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "cheat_all_technologies"></a>
+    <strong>cheat_all_technologies ()</strong>
+    </dt>
+    <dd>
+    CHEATs all research
+ Sends /silent-command remote.call('cheat<em>all</em>technologies')
+
+
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "insert_to_inventory"></a>
+    <strong>insert_to_inventory (player_id, entity_name, position, inventory_type, item_name, item_count)</strong>
+    </dt>
+    <dd>
+    Inserts an item into an inventory
+ Sends /silent-command remote.call('insert<em>to</em>inventory', ...)
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">player_id</span>
+            <span class="types"><span class="type">int</span></span>
+         id of plaer
+        </li>
+        <li><span class="parameter">entity_name</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         name entity to insert
+        </li>
+        <li><span class="parameter">position</span>
+         <a href="../modules/types.html#Position">types.Position</a> of inventory
+        </li>
+        <li><span class="parameter">inventory_type</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         which type of inventory to place in
+        </li>
+        <li><span class="parameter">item_name</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         which item to insert
+        </li>
+        <li><span class="parameter">item_count</span>
+            <span class="types"><span class="type">int</span></span>
+         how many items to insert
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "cheat_item"></a>
+    <strong>cheat_item (player_id, name, count)</strong>
+    </dt>
+    <dd>
+    CHEATs given item
+ Sends /silent-command remote.call('cheat_item', ...)
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">player_id</span>
+            <span class="types"><span class="type">int</span></span>
+         id of player to give the item to
+        </li>
+        <li><span class="parameter">name</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         item name
+        </li>
+        <li><span class="parameter">count</span>
+            <span class="types"><span class="type">int</span></span>
+         how many items to give player
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "revive_ghost"></a>
+    <strong>revive_ghost (player_id, name, position)</strong>
+    </dt>
+    <dd>
+    CHEATs a whole blueprint
+ Sends /silent-command remote.call('revive_ghost', ...)
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">player_id</span>
+            <span class="types"><span class="type">int</span></span>
+         id of player to give the item to
+        </li>
+        <li><span class="parameter">name</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         name of entity to revive
+        </li>
+        <li><span class="parameter">position</span>
+         <a href="../modules/types.html#Position">types.Position</a>
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "cheat_blueprint"></a>
+    <strong>cheat_blueprint (player_id, blueprint, position, direction, force_build)</strong>
+    </dt>
+    <dd>
+    CHEATs a whole blueprint
+ Sends /silent-command remote.call('cheat_blueprint', ...)
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">player_id</span>
+            <span class="types"><span class="type">int</span></span>
+         id of player to give the item to
+        </li>
+        <li><span class="parameter">blueprint</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         blueprint string
+        </li>
+        <li><span class="parameter">position</span>
+         <a href="../modules/types.html#Position">types.Position</a>
+        </li>
+        <li><span class="parameter">direction</span>
+            <span class="types"><span class="type">int</span></span>
+         rotates the blueprint in given direction
+        </li>
+        <li><span class="parameter">force_build</span>
+            <span class="types"><span class="type">bool</span></span>
+         forces the build even if other entities needs to be removed first
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "place_entity"></a>
+    <strong>place_entity (player_id, name, position, direction)</strong>
+    </dt>
+    <dd>
+    Places an item by a player
+ Sends /silent-command remote.call('place_entity', ...)
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">player_id</span>
+            <span class="types"><span class="type">int</span></span>
+         id of plaer
+        </li>
+        <li><span class="parameter">name</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         name of item to craft
+        </li>
+        <li><span class="parameter">position</span>
+          <a href="../modules/types.html#Position">types.Position</a>
+        </li>
+        <li><span class="parameter">direction</span>
+            <span class="types"><span class="type">int</span></span>
+         direction of placed entity
+        </li>
+    </ul>
+
+    <h3>Returns:</h3>
+    <ol>
+
+        <a href="../modules/types.html#FactorioEntity">types.FactorioEntity</a>
+    </ol>
+
+
+
+
+</dd>
+    <dt>
+    <a name = "remove_from_inventory"></a>
+    <strong>remove_from_inventory (player_id, entity_name, position, inventory_type, item_name, item_count)</strong>
+    </dt>
+    <dd>
+    Removes an item from an inventory
+ Sends /silent-command remote.call('remove<em>from</em>inventory', ...)
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">player_id</span>
+            <span class="types"><span class="type">int</span></span>
+         id of plaer
+        </li>
+        <li><span class="parameter">entity_name</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         name entity to remove
+        </li>
+        <li><span class="parameter">position</span>
+          <a href="../modules/types.html#Position">types.Position</a> of inventory
+        </li>
+        <li><span class="parameter">inventory_type</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         which type of inventory to remove from
+        </li>
+        <li><span class="parameter">item_name</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         which item to remove
+        </li>
+        <li><span class="parameter">item_count</span>
+            <span class="types"><span class="type">int</span></span>
+         how many items to remove
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "find_entities_in_radius"></a>
+    <strong>find_entities_in_radius (search_center, radius[, search_name[, search_type]])</strong>
+    </dt>
+    <dd>
+    find entities at given position/radius with optional filters
+ Sends /silent-command remote.call('find<em>entities</em>filtered', ...)
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">search_center</span>
+         <a href="../modules/types.html#Position">types.Position</a>
+        </li>
+        <li><span class="parameter">radius</span>
+            <span class="types"><span class="type">int</span></span>
+         searches in circular radius around search_center
+        </li>
+        <li><span class="parameter">search_name</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         name of entity to find
+         (<em>optional</em>)
+        </li>
+        <li><span class="parameter">search_type</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         type of entity to find
+         (<em>optional</em>)
+        </li>
+    </ul>
+
+    <h3>Returns:</h3>
+    <ol>
+
+        {<a href="../modules/types.html#FactorioEntity">types.FactorioEntity</a>}
+    </ol>
+
+
+
+
+</dd>
+    <dt>
+    <a name = "craft"></a>
+    <strong>craft (player_id, name, count)</strong>
+    </dt>
+    <dd>
+    Craft an item with player
+ Sends /silent-command remote.call('action<em>start</em>crafting', ...)
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">player_id</span>
+            <span class="types"><span class="type">int</span></span>
+         id of plaer
+        </li>
+        <li><span class="parameter">name</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         name of item to craft
+        </li>
+        <li><span class="parameter">count</span>
+            <span class="types"><span class="type">int</span></span>
+         how many to craft
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+</dl>
+
+
+</div> <!-- id="content" -->
+</div> <!-- id="main" -->
+<div id="about">
+<i>generated by <a href="http://github.com/stevedonovan/LDoc">LDoc 1.4.3</a></i>
+<i style="float:right;">Last updated 2022-06-27 20:24:33 </i>
+</div> <!-- id="about" -->
+</div> <!-- id="container" -->
+</body>
+</html>

@@ -1,0 +1,281 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+   "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8"/>
+<head>
+    <title>Lua Api: Factorio Bot</title>
+    <link rel="stylesheet" href="../ldoc.css" type="text/css" />
+</head>
+<body>
+
+<div id="container">
+
+<div id="product">
+	<div id="product_logo"></div>
+	<div id="product_name"><big><b></b></big></div>
+	<div id="product_description"></div>
+</div> <!-- id="product" -->
+
+
+<div id="main">
+
+
+<!-- Menu -->
+
+<div id="navigation">
+<br/>
+<h1>Factorio Bot</h1>
+
+<ul>
+  <li><a href="../index.html">Index</a></li>
+</ul>
+
+<h2>Contents</h2>
+<ul>
+<li><a href="#Functions">Functions</a></li>
+</ul>
+
+
+<h2>Modules</h2>
+<ul class="$(kind=='Topics' and '' or 'nowrap'">
+  <li><a href="../modules/globals.html">globals</a></li>
+  <li><strong>plan</strong></li>
+  <li><a href="../modules/rcon.html">rcon</a></li>
+  <li><a href="../modules/types.html">types</a></li>
+  <li><a href="../modules/world.html">world</a></li>
+</ul>
+
+</div>
+
+<div id="content">
+
+<h1>Module <code>plan</code></h1>
+<p>Plan Builder
+ Internally holds a graph of Task Nodes which can be grown by using the methods.</p>
+<p>  </p>
+
+
+<h2><a href="#Functions">Functions</a></h2>
+<table class="function_list">
+	<tr>
+	<td class="name" nowrap><a href="#place">place (player_id, position, name)</a></td>
+	<td class="summary">adds a PLACE node to graph
+ If required first a WALK node is inserted to walk near the item to place</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#group_end">group_end ()</a></td>
+	<td class="summary">adds a GROUP END node to graph</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#mine">mine (player_id, position, name, count)</a></td>
+	<td class="summary">adds a MINE node to graph
+ If required first a WALK node is inserted to walk near the item to mine</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#task_graph_graphviz">task_graph_graphviz ()</a></td>
+	<td class="summary">build graphviz from task graph</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#walk">walk (player_id, position, radius)</a></td>
+	<td class="summary">adds a WALK node to graph</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#task_graph_mermaid_gantt">task_graph_mermaid_gantt ()</a></td>
+	<td class="summary">build mermaid gantt from task graph</td>
+	</tr>
+	<tr>
+	<td class="name" nowrap><a href="#group_start">group_start (label)</a></td>
+	<td class="summary">adds a GROUP START node to graph
+ Groups are used to synchronize bots so their tasks are completed before the next group is started.</td>
+	</tr>
+</table>
+
+<br/>
+<br/>
+
+
+    <h2 class="section-header "><a name="Functions"></a>Functions</h2>
+
+    <dl class="function">
+    <dt>
+    <a name = "place"></a>
+    <strong>place (player_id, position, name)</strong>
+    </dt>
+    <dd>
+    adds a PLACE node to graph
+ If required first a WALK node is inserted to walk near the item to place
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">player_id</span>
+            <span class="types"><span class="type">int</span></span>
+         id of player
+        </li>
+        <li><span class="parameter">position</span>
+         <a href="../modules/types.html#Position">types.Position</a>
+        </li>
+        <li><span class="parameter">name</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         name of item to place
+        </li>
+    </ul>
+
+    <h3>Returns:</h3>
+    <ol>
+
+        <a href="../modules/types.html#FactorioEntity">types.FactorioEntity</a>
+    </ol>
+
+
+
+
+</dd>
+    <dt>
+    <a name = "group_end"></a>
+    <strong>group_end ()</strong>
+    </dt>
+    <dd>
+    adds a GROUP END node to graph
+
+
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "mine"></a>
+    <strong>mine (player_id, position, name, count)</strong>
+    </dt>
+    <dd>
+    adds a MINE node to graph
+ If required first a WALK node is inserted to walk near the item to mine
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">player_id</span>
+            <span class="types"><span class="type">int</span></span>
+         id of player
+        </li>
+        <li><span class="parameter">position</span>
+         <a href="../modules/types.html#Position">types.Position</a>
+        </li>
+        <li><span class="parameter">name</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         name of item to mine
+        </li>
+        <li><span class="parameter">count</span>
+            <span class="types"><span class="type">int</span></span>
+         how many items to mine
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "task_graph_graphviz"></a>
+    <strong>task_graph_graphviz ()</strong>
+    </dt>
+    <dd>
+    build graphviz from task graph
+
+
+
+    <h3>Returns:</h3>
+    <ol>
+
+        string graphviz string
+    </ol>
+
+
+
+
+</dd>
+    <dt>
+    <a name = "walk"></a>
+    <strong>walk (player_id, position, radius)</strong>
+    </dt>
+    <dd>
+    adds a WALK node to graph
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">player_id</span>
+            <span class="types"><span class="type">int</span></span>
+         id of player
+        </li>
+        <li><span class="parameter">position</span>
+         <a href="../modules/types.html#Position">types.Position</a>
+        </li>
+        <li><span class="parameter">radius</span>
+            <span class="types"><span class="type">int</span></span>
+         how close to walk to
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+    <dt>
+    <a name = "task_graph_mermaid_gantt"></a>
+    <strong>task_graph_mermaid_gantt ()</strong>
+    </dt>
+    <dd>
+    build mermaid gantt from task graph
+
+
+
+    <h3>Returns:</h3>
+    <ol>
+
+        string mermaid string
+    </ol>
+
+
+
+
+</dd>
+    <dt>
+    <a name = "group_start"></a>
+    <strong>group_start (label)</strong>
+    </dt>
+    <dd>
+    adds a GROUP START node to graph
+ Groups are used to synchronize bots so their tasks are completed before the next group is started.
+ Should be closed with <a href="../modules/plan.html#group_end">group_end</a>.
+
+
+    <h3>Parameters:</h3>
+    <ul>
+        <li><span class="parameter">label</span>
+            <span class="types"><a class="type" href="http://www.lua.org/manual/5.2/manual.html#6.4">string</a></span>
+         label of group
+        </li>
+    </ul>
+
+
+
+
+
+</dd>
+</dl>
+
+
+</div> <!-- id="content" -->
+</div> <!-- id="main" -->
+<div id="about">
+<i>generated by <a href="http://github.com/stevedonovan/LDoc">LDoc 1.4.3</a></i>
+<i style="float:right;">Last updated 2022-06-27 20:24:33 </i>
+</div> <!-- id="about" -->
+</div> <!-- id="container" -->
+</body>
+</html>

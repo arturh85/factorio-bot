@@ -1,9 +1,11 @@
+use factorio_bot_core::factorio::util::blueprint_build_area;
 use factorio_bot_core::factorio::world::FactorioWorld;
-use factorio_bot_core::rlua;
+use factorio_bot_core::factorio_blueprint::BlueprintCodec;
 use factorio_bot_core::rlua::{Context, Table};
 use factorio_bot_core::rlua_serde;
 use factorio_bot_core::test_utils::draw_world;
-use factorio_bot_core::types::{PlayerId, Position, Rect};
+use factorio_bot_core::types::{FactorioBlueprintInfo, PlayerId, Position, Rect};
+use factorio_bot_core::{rlua, serde_json};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -106,6 +108,37 @@ end
                 Ok(Rect::default())
             },
         )?,
+    )?;
+
+    map_table.set(
+        "__doc_fn_parse_blueprint",
+        String::from(
+            r#"
+--- Parse blueprint
+-- @string blueprint blueprint string
+-- @return `types.FactorioBlueprintInfo`
+function world.parse_blueprint(...)
+end
+"#,
+        ),
+    )?;
+    let world = _world.clone();
+    map_table.set(
+        "parse_blueprint",
+        ctx.create_function(move |ctx, (blueprint, label): (String, String)| {
+            let decoded =
+                BlueprintCodec::decode_string(&blueprint).expect("failed to parse blueprint");
+            let rect = blueprint_build_area(world.entity_prototypes.clone(), &blueprint);
+            let response = FactorioBlueprintInfo {
+                rect: rect.clone(),
+                label: label.clone(),
+                blueprint: blueprint.clone(),
+                width: rect.width() as u16,
+                height: rect.height() as u16,
+                data: serde_json::to_value(decoded).unwrap(),
+            };
+            Ok(rlua_serde::to_value(ctx, response))
+        })?,
     )?;
 
     let world = _world.clone();

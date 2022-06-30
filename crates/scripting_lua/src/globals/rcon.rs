@@ -28,13 +28,13 @@ local rcon = {}
     map_table.set("__doc__footer", String::from(r#"return rcon"#))?;
     let rcon = _rcon.clone();
     map_table.set(
-        "__doc_fn_find_entities_in_radius",
+        "__doc_entry_find_entities_in_radius",
         String::from(
             r#"
 --- find entities at given position/radius with optional filters
 -- Sends /silent-command remote.call('find_entities_filtered', ...)
 -- @param search_center `types.Position`
--- @int radius searches in circular radius around search_center
+-- @number radius searches in circular radius around search_center
 -- @string[opt] search_name name of entity to find
 -- @string[opt] search_type type of entity to find
 -- @return {`types.FactorioEntity`}
@@ -71,7 +71,7 @@ end
     )?;
     let rcon = _rcon.clone();
     map_table.set(
-        "__doc_fn_print",
+        "__doc_entry_print",
         String::from(
             r#"
 --- print given message on the server
@@ -94,7 +94,7 @@ end
     )?;
     let rcon = _rcon.clone();
     map_table.set(
-        "__doc_fn_add_research",
+        "__doc_entry_add_research",
         String::from(
             r#"
 --- adds research to queue
@@ -121,7 +121,7 @@ end
     )?;
     let rcon = _rcon.clone();
     map_table.set(
-        "__doc_fn_cheat_technology",
+        "__doc_entry_cheat_technology",
         String::from(
             r#"
 --- CHEATs research
@@ -148,7 +148,7 @@ end
     )?;
     let rcon = _rcon.clone();
     map_table.set(
-        "__doc_fn_cheat_all_technologies",
+        "__doc_entry_cheat_all_technologies",
         String::from(
             r#"
 --- CHEATs all research
@@ -170,14 +170,14 @@ end
     )?;
     let rcon = _rcon.clone();
     map_table.set(
-        "__doc_fn_cheat_item",
+        "__doc_entry_cheat_item",
         String::from(
             r#"
 --- CHEATs given item
 -- Sends /silent-command remote.call('cheat_item', ...)
--- @int player_id id of player to give the item to
+-- @number player_id id of player to give the item to
 -- @string name item name
--- @int count how many items to give player
+-- @number count how many items to give player
 function rcon.cheat_item(player_id, name, count)
 end
 "#,
@@ -202,15 +202,15 @@ end
     let rcon = _rcon.clone();
     let world = _world.clone();
     map_table.set(
-        "__doc_fn_place_blueprint",
+        "__doc_entry_place_blueprint",
         String::from(
             r#"
 --- places a whole blueprint
 -- Sends /silent-command remote.call('place_blueprint', ...)
--- @int player_id id of player to give the item to
+-- @number player_id id of player to give the item to
 -- @string blueprint blueprint string
 -- @param position `types.Position`
--- @int direction rotates the blueprint in given direction
+-- @number direction rotates the blueprint in given direction
 -- @bool force_build forces the build even if other entities needs to be removed first
 -- @bool only_ghosts only places ghost version of entities
 -- @tparam {int} helper_player_ids array of player ids which may help
@@ -257,15 +257,15 @@ end
     )?;
     let rcon = _rcon.clone();
     map_table.set(
-        "__doc_fn_cheat_blueprint",
+        "__doc_entry_cheat_blueprint",
         String::from(
             r#"
 --- CHEATs a whole blueprint
 -- Sends /silent-command remote.call('cheat_blueprint', ...)
--- @int player_id id of player to give the item to
+-- @number player_id id of player to give the item to
 -- @string blueprint blueprint string
 -- @param position `types.Position`
--- @int direction rotates the blueprint in given direction
+-- @number direction rotates the blueprint in given direction
 -- @bool force_build forces the build even if other entities needs to be removed first
 function rcon.cheat_blueprint(player_id, blueprint, position, direction, force_build)
 end
@@ -299,12 +299,12 @@ end
     let rcon = _rcon.clone();
     let world = _world.clone();
     map_table.set(
-        "__doc_fn_revive_ghost",
+        "__doc_entry_revive_ghost",
         String::from(
             r#"
 --- CHEATs a whole blueprint
 -- Sends /silent-command remote.call('revive_ghost', ...)
--- @int player_id id of player to give the item to
+-- @number player_id id of player to give the item to
 -- @string name name of entity to revive
 -- @param position `types.Position`
 function rcon.revive_ghost(player_id, name, position)
@@ -333,14 +333,14 @@ end
     let rcon = _rcon.clone();
     let world = _world.clone();
     map_table.set(
-        "__doc_fn_move",
+        "__doc_entry_move",
         String::from(
             r#"
 --- Move a player to a different position
 -- Sends /silent-command remote.call('action_start_walk_waypoints', ...)
--- @int player_id id of player to give the item to
+-- @number player_id id of player to give the item to
 -- @param position `types.Position`
--- @int radius radius
+-- @number radius radius
 function rcon.move(player_id, position, radius)
 end
 "#,
@@ -368,15 +368,15 @@ end
     let rcon = _rcon.clone();
     let world = _world.clone();
     map_table.set(
-        "__doc_fn_mine",
+        "__doc_entry_mine",
         String::from(
             r#"
 --- Mine a resource with player
 -- Sends /silent-command remote.call('action_start_mining', ...)
--- @int player_id id of player to give the item to
+-- @number player_id id of player to give the item to
 -- @string name name of resource to mine
 -- @param position `types.Position`
--- @int count how many to mine
+-- @number count how many to mine
 function rcon.mine(player_id, name, position, count)
 end
 "#,
@@ -410,14 +410,14 @@ end
     let rcon = _rcon.clone();
     let world = _world.clone();
     map_table.set(
-        "__doc_fn_craft",
+        "__doc_entry_craft",
         String::from(
             r#"
 --- Craft an item with player
 -- Sends /silent-command remote.call('action_start_crafting', ...)
--- @int player_id id of plaer
+-- @number player_id id of plaer
 -- @string name name of item to craft
--- @int count how many to craft
+-- @number count how many to craft
 function rcon.craft(player_id, name, count)
 end
 "#,
@@ -442,13 +442,13 @@ end
     )?;
     let rcon = _rcon.clone();
     map_table.set(
-        "__doc_fn_inventory_contents_at",
+        "__doc_entry_inventory_contents_at",
         String::from(
             r#"
 --- Craft an item with player
 -- Sends /silent-command remote.call('action_start_crafting', ...)
 -- @param inventories table list of `types.Position` to check
--- @return {[string]=int,...}
+-- @return {[string]=number,...}
 function rcon.inventory_contents_at(inventories)
 end
 "#,
@@ -482,15 +482,15 @@ end
     let rcon = _rcon.clone();
     let world = _world.clone();
     map_table.set(
-        "__doc_fn_place_entity",
+        "__doc_entry_place_entity",
         String::from(
             r#"
 --- Places an item by a player
 -- Sends /silent-command remote.call('place_entity', ...)
--- @int player_id id of plaer
+-- @number player_id id of plaer
 -- @string name name of item to craft
 -- @param position  `types.Position`
--- @int direction direction of placed entity
+-- @number direction direction of placed entity
 -- @return `types.FactorioEntity`
 function rcon.place_entity(player_id, name, position, direction)
 end
@@ -519,17 +519,17 @@ end
     let rcon = _rcon.clone();
     let world = _world.clone();
     map_table.set(
-        "__doc_fn_insert_to_inventory",
+        "__doc_entry_insert_to_inventory",
         String::from(
             r#"
 --- Inserts an item into an inventory
 -- Sends /silent-command remote.call('insert_to_inventory', ...)
--- @int player_id id of plaer
+-- @number player_id id of plaer
 -- @string entity_name name entity to insert
 -- @param position `types.Position` of inventory
 -- @string inventory_type which type of inventory to place in
 -- @string item_name which item to insert
--- @int item_count how many items to insert
+-- @number item_count how many items to insert
 function rcon.insert_to_inventory(player_id, entity_name, position, inventory_type, item_name, item_count)
 end
 "#,
@@ -573,17 +573,17 @@ end
     let rcon = _rcon;
     let world = _world;
     map_table.set(
-        "__doc_fn_remove_from_inventory",
+        "__doc_entry_remove_from_inventory",
         String::from(
             r#"
 --- Removes an item from an inventory
 -- Sends /silent-command remote.call('remove_from_inventory', ...)
--- @int player_id id of plaer
+-- @number player_id id of plaer
 -- @string entity_name name entity to remove
 -- @param position  `types.Position` of inventory
 -- @string inventory_type which type of inventory to remove from
 -- @string item_name which item to remove
--- @int item_count how many items to remove
+-- @number item_count how many items to remove
 function rcon.remove_from_inventory(player_id, entity_name, position, inventory_type, item_name, item_count)
 end
 "#,

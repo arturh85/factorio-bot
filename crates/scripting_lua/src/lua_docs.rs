@@ -8,6 +8,7 @@ use factorio_bot_core::parking_lot::Mutex;
 use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_core::rlua;
 use factorio_bot_core::rlua::{Lua, Table};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,7 +25,9 @@ pub fn write_lua_docs(target_path: PathBuf) -> rlua::Result<()> {
         let world = create_lua_world(ctx, planner.plan_world.clone(), cwd.to_path_buf())?;
         let plan = create_lua_plan_builder(ctx, planner.graph.clone(), planner.plan_world.clone())?;
         let rcon = create_lua_rcon(ctx, rcon, planner.real_world)?;
-        create_lua_globals(ctx, vec![], cwd.to_path_buf(), stdout, stderr)?;
+        let code_by_path: HashMap<String, String> = HashMap::new();
+        let code_by_path: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(code_by_path));
+        create_lua_globals(ctx, vec![], cwd.to_path_buf(), stdout, stderr, code_by_path)?;
 
         write_lua_doc(target_path.join("globals.lua"), &ctx.globals());
         write_lua_doc(target_path.join("world.lua"), &world);
@@ -45,7 +48,7 @@ fn write_lua_doc(target_path: PathBuf, doc_table: &Table) {
 
     for result in doc_table.clone().pairs::<String, String>() {
         if let Ok((key, value)) = result.as_ref() {
-            if key.starts_with("__doc_fn") {
+            if key.starts_with("__doc_entry_") {
                 body += value.trim();
                 body += "\n\n"
             }

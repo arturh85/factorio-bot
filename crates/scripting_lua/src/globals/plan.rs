@@ -1,10 +1,11 @@
 use factorio_bot_core::factorio::world::FactorioWorld;
-use factorio_bot_core::graph::task_graph::{PositionRadius, TaskGraph};
+use factorio_bot_core::graph::task_graph::TaskGraph;
+use factorio_bot_core::num_traits::FromPrimitive;
 use factorio_bot_core::parking_lot::RwLock;
 use factorio_bot_core::plan::plan_builder::PlanBuilder;
 use factorio_bot_core::rlua;
 use factorio_bot_core::rlua::{Context, Table};
-use factorio_bot_core::types::{FactorioEntity, PlayerId, Position};
+use factorio_bot_core::types::{Direction, FactorioEntity, PlayerId, Position, PositionRadius};
 use std::sync::Arc;
 
 pub fn create_lua_plan_builder(
@@ -33,15 +34,15 @@ local plan = {}
 
     let plan_builder = _plan_builder.clone();
     map_table.set(
-        "__doc_fn_mine",
+        "__doc_entry_mine",
         String::from(
             r#"
 --- adds a MINE node to graph
 -- If required first a WALK node is inserted to walk near the item to mine 
--- @int player_id id of player
+-- @number player_id id of player
 -- @param position `types.Position`
 -- @string name name of item to mine
--- @int count how many items to mine
+-- @number count how many items to mine
 function plan.mine(player_id, position, name, count)
 end
 "#,
@@ -67,16 +68,17 @@ end
     // let world = _world.clone();
     let world = _world;
     map_table.set(
-        "__doc_fn_place",
+        "__doc_entry_place",
         String::from(
             r#"
 --- adds a PLACE node to graph
 -- If required first a WALK node is inserted to walk near the item to place 
--- @int player_id id of player
+-- @number player_id id of player
+-- @string entity_name name of item to place
 -- @param position `types.Position` 
--- @string name name of item to place
+-- @param[opt] direction `types.Direction` 
 -- @return `types.FactorioEntity`
-function plan.place(player_id, position, name)
+function plan.place(player_id, entity_name, position, direction)
 end
 "#,
         ),
@@ -84,11 +86,17 @@ end
     map_table.set(
         "place",
         ctx.create_function(
-            move |_ctx, (player_id, position, name): (PlayerId, Table, String)| {
+            move |_ctx,
+                  (player_id, entity_name, position, direction): (
+                PlayerId,
+                String,
+                Table,
+                Option<u8>,
+            )| {
                 let entity = FactorioEntity::from_prototype(
-                    &name,
+                    &entity_name,
                     Position::new(position.get("x").unwrap(), position.get("y").unwrap()),
-                    None,
+                    direction.map(|d| Direction::from_u8(d).expect("invalid direction")),
                     None,
                     None,
                     world.entity_prototypes.clone(),
@@ -100,13 +108,13 @@ end
         )?,
     )?;
     map_table.set(
-        "__doc_fn_walk",
+        "__doc_entry_walk",
         String::from(
             r#"
 --- adds a WALK node to graph
--- @int player_id id of player
+-- @number player_id id of player
 -- @param position `types.Position` 
--- @int radius how close to walk to
+-- @number radius how close to walk to
 function plan.walk(player_id, position, radius)
 end
 "#,
@@ -133,7 +141,7 @@ end
     )?;
     let graph = _graph.clone();
     map_table.set(
-        "__doc_fn_task_graph_graphviz",
+        "__doc_entry_task_graph_graphviz",
         String::from(
             r#"
 --- build graphviz from task graph
@@ -152,7 +160,7 @@ end
     )?;
     let graph = _graph;
     map_table.set(
-        "__doc_fn_task_graph_mermaid_gantt",
+        "__doc_entry_task_graph_mermaid_gantt",
         String::from(
             r#"
 --- build mermaid gantt from task graph
@@ -171,7 +179,7 @@ end
     )?;
     let plan_builder = _plan_builder.clone();
     map_table.set(
-        "__doc_fn_group_start",
+        "__doc_entry_group_start",
         String::from(
             r#"
 --- adds a GROUP START node to graph
@@ -192,7 +200,7 @@ end
     )?;
     let plan_builder = _plan_builder;
     map_table.set(
-        "__doc_fn_group_end",
+        "__doc_entry_group_end",
         String::from(
             r#"
 --- adds a GROUP END node to graph

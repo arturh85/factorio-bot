@@ -11,6 +11,7 @@ use factorio_bot_core::{rlua, serde_json};
 use factorio_bot_scripting::{buffers_to_string, redirect_buffers};
 use miette::Result;
 use rlua_async::ChunkExt;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::thread;
@@ -31,13 +32,24 @@ pub async fn run_lua(
         .expect("failed to find cwd")
         .canonicalize()
         .expect("failed to canonicalize");
+    let mut code_by_path: HashMap<String, String> = HashMap::new();
+    code_by_path.insert(filename.clone(), lua_code.to_owned());
+    let code_by_path: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(code_by_path));
     let all_bots = planner.initiate_missing_players_with_default_inventory(bot_count);
     planner.update_plan_world();
     let lua = Lua::new();
+    let _code_by_path = code_by_path.clone();
     if let Err(err) = lua.context::<_, rlua::Result<()>>(|ctx| {
         let world = create_lua_world(ctx, planner.plan_world.clone(), cwd.to_path_buf())?;
         let plan = create_lua_plan_builder(ctx, planner.graph.clone(), planner.plan_world.clone())?;
-        create_lua_globals(ctx, all_bots, cwd.clone(), stdout.clone(), stderr.clone())?;
+        create_lua_globals(
+            ctx,
+            all_bots,
+            cwd.clone(),
+            stdout.clone(),
+            stderr.clone(),
+            _code_by_path,
+        )?;
 
         let globals = ctx.globals();
         globals.set("world", world)?;
@@ -54,7 +66,7 @@ pub async fn run_lua(
     let lua_code = lua_code.to_owned();
     let result = thread::spawn(move || {
         match lua.context::<_, rlua::Result<Option<serde_json::Value>>>(|ctx| {
-            let chunk = ctx.load(&lua_code);
+            let chunk = ctx.load(&lua_code).set_name(&filename)?;
             let rt: Runtime = Runtime::new().unwrap();
             rt.block_on(chunk.exec_async(ctx))?;
             let result: Option<rlua::Value> = ctx.globals().get("result")?;
@@ -62,7 +74,10 @@ pub async fn run_lua(
             Ok(result.map(|r| rlua_serde::from_value(r).unwrap()))
         }) {
             Ok(result) => Ok(result),
-            Err(err) => Err(crate::error::to_lua_error(err, &filename, &lua_code)),
+            Err(err) => {
+                let code_by_path = code_by_path.lock().clone();
+                Err(crate::error::to_lua_error(err, &code_by_path))
+            }
         }
     })
     .join()
@@ -82,35 +97,6 @@ mod tests {
 
     use super::*;
 
-    // #[test]
-    // fn test_dumped_world() {
-    // use factorio_bot_core::factorio::world::FactorioWorld;
-    // use factorio_bot_core::serde_json;
-    //     let world: FactorioWorld =
-    //         serde_json::from_str(include_str!("../tests/dump.json")).unwrap();
-    //     let world = Arc::new(world);
-    //     draw_world(world, "tests/dump.png");
-    // }
-
-    // ! gag does not work properly with test runners: https://crates.io/crates/gag
-    // ! > Won't work in rust test cases.
-    // ! > The rust test cases use std::io::set_print to redirect stdout. You can get around this
-    // ! > though by using the --nocapture argument when running your tests.
-    // #[test]
-    // fn test_logging_world() {
-    //     let world = Arc::new(fixture_world());
-    //     let mut planner = Planner::new(world, None);
-    //     let (stdout, _) = planner
-    //         .plan(
-    //             r##"
-    // print("teststring");
-    // "##,
-    //             0,
-    //         )
-    //         .unwrap();
-    //     assert!(stdout.contains("teststring"));
-    // }
-
     #[tokio::test]
     async fn test_script() {
         let world = Arc::new(fixture_world());
@@ -119,13 +105,19 @@ mod tests {
         let tests_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests")
             .join("script.lua");
+        let tests_path = tests_path.to_str().unwrap();
 
-        for bot_count in 1..=1 {
+        let cwd = std::env::current_dir().unwrap();
+        let cwd = cwd.to_str().unwrap().to_owned();
+        let relative_path = tests_path.replace(&cwd, "");
+        let relative_path = &relative_path[1..];
+
+        for bot_count in 1..=2 {
             let mut planner = Planner::new(world.clone(), None);
             let (_result, (stdout, stderr)) = run_lua(
                 &mut planner,
                 include_str!("../tests/script.lua"),
-                Some(tests_path.to_str().unwrap()),
+                Some(relative_path),
                 bot_count,
                 false,
             )

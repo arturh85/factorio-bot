@@ -32,7 +32,7 @@ local world = {}
 
     let world = _world.clone();
     map_table.set(
-        "__doc_fn_recipe",
+        "__doc_entry_recipe",
         String::from(
             r#"
 --- lookup recipe by name
@@ -54,12 +54,12 @@ end
 
     let world = _world.clone();
     map_table.set(
-        "__doc_fn_player",
+        "__doc_entry_player",
         String::from(
             r#"
 --- lookup player by id
 -- The player id will start at 1 and increment.
--- @int player_id id of player
+-- @number player_id id of player
 -- @return `types.FactorioPlayer`
 function world.player(player_id)
 end
@@ -78,14 +78,14 @@ end
 
     let world = _world.clone();
     map_table.set(
-        "__doc_fn_find_free_resource_rect",
+        "__doc_entry_find_free_resource_rect",
         String::from(
             r#"
 --- find non-blocked rectangle with given resource
 -- The ...
 -- @string ore_name name of item to craft
--- @int width name of item to craft
--- @int height name of item to craft
+-- @number width name of item to craft
+-- @number height name of item to craft
 -- @param near `types.Position`
 -- @return `types.FactorioPlayer`
 function world.find_free_resource_rect(ore_name, width, height, near)
@@ -111,7 +111,7 @@ end
     )?;
 
     map_table.set(
-        "__doc_fn_parse_blueprint",
+        "__doc_entry_parse_blueprint",
         String::from(
             r#"
 --- Parse blueprint
@@ -131,8 +131,8 @@ end
             let rect = blueprint_build_area(world.entity_prototypes.clone(), &blueprint);
             let response = FactorioBlueprintInfo {
                 rect: rect.clone(),
-                label: label.clone(),
-                blueprint: blueprint.clone(),
+                label,
+                blueprint,
                 width: rect.width() as u16,
                 height: rect.height() as u16,
                 data: serde_json::to_value(decoded).unwrap(),
@@ -143,13 +143,13 @@ end
 
     let world = _world.clone();
     map_table.set(
-        "__doc_fn_find_entities_in_radius",
+        "__doc_entry_find_entities_in_radius",
         String::from(
             r#"
 --- find entities at given position/radius with optional filters
 -- Sends 
 -- @param search_center `types.Position` 
--- @int radius searches in circular radius around search_center
+-- @number radius searches in circular radius around search_center
 -- @string[opt] search_name name of entity to find
 -- @string[opt] search_type type of entity to find
 -- @return {`types.FactorioEntity`}
@@ -184,7 +184,7 @@ end
     )?;
     let world = _world.clone();
     map_table.set(
-        "__doc_fn_draw",
+        "__doc_entry_draw",
         String::from(
             r#"
 --- draw world and save as image at given path
@@ -205,12 +205,12 @@ end
 
     let world = _world;
     map_table.set(
-        "__doc_fn_inventory",
+        "__doc_entry_inventory",
         String::from(
             r#"
 --- counts how many of a given item the player has
 -- The ...
--- @int player_id id of player
+-- @number player_id id of player
 -- @string item_name name of item
 -- @return {`types.FactorioEntity`}
 function world.inventory(player_id, item_name)

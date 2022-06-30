@@ -838,6 +838,63 @@ impl ResourcePatch {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct InventoryItem {
+    pub name: String,
+    pub count: u32,
+}
+
+impl InventoryItem {
+    pub fn new(name: &str, count: u32) -> InventoryItem {
+        InventoryItem {
+            name: name.into(),
+            count,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct InventoryLocation {
+    pub entity_name: String,
+    pub position: Position,
+    pub inventory_type: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct EntityPlacement {
+    pub item_name: String,
+    pub position: Position,
+    pub direction: Direction,
+}
+
+#[derive(Debug, Clone)]
+pub struct PositionRadius {
+    pub position: Position,
+    pub radius: f64,
+}
+
+impl PositionRadius {
+    pub fn new(x: f64, y: f64, radius: f64) -> PositionRadius {
+        PositionRadius {
+            position: Position::new(x, y),
+            radius,
+        }
+    }
+    pub fn from_position(pos: &Position, radius: f64) -> PositionRadius {
+        PositionRadius {
+            position: pos.clone(),
+            radius,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MineTarget {
+    pub position: Position,
+    pub name: String,
+    pub count: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct FactorioResult {

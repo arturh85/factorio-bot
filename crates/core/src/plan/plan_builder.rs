@@ -1,10 +1,11 @@
 use crate::errors::PlayerMissingItem;
 use crate::factorio::util::calculate_distance;
 use crate::factorio::world::FactorioWorld;
-use crate::graph::task_graph::{MineTarget, PositionRadius, TaskGraph};
+use crate::graph::task_graph::TaskGraph;
 use crate::types::{
-    FactorioEntity, FactorioPlayer, PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent,
-    PlayerId, Position,
+    FactorioEntity, FactorioPlayer, InventoryItem, InventoryLocation, MineTarget,
+    PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent, PlayerId, Position,
+    PositionRadius,
 };
 use miette::Result;
 use num_traits::ToPrimitive;
@@ -138,6 +139,46 @@ impl PlanBuilder {
             })?;
         self.world.on_some_entity_created(entity.clone())?;
         Ok(entity)
+    }
+
+    pub fn add_insert_into_inventory(
+        &self,
+        player_id: PlayerId,
+        location: InventoryLocation,
+        item: InventoryItem,
+    ) -> Result<()> {
+        // FIXME
+        let player = self.player(player_id);
+        let distance = calculate_distance(&player.position, &location.position);
+        let reach_distance = player.reach_distance as f64;
+        if distance > reach_distance {
+            self.add_walk(
+                player_id,
+                PositionRadius::from_position(&location.position, reach_distance),
+            )?;
+        }
+        let inventory = self.player(player_id).main_inventory;
+        let inventory_item_count = *inventory.get(&item.name).unwrap_or(&0);
+        if inventory_item_count < item.count {
+            return Err(PlayerMissingItem {
+                player_id,
+                item: item.name,
+            }
+            .into());
+        }
+        let mut graph = self.graph.write();
+        graph.add_insert_into_inventory_node(player_id, 1., location, item);
+        // inventory.insert(entity.name.clone(), inventory_item_count - 1);
+        // self.world
+        //     .player_changed_main_inventory(PlayerChangedMainInventoryEvent {
+        //         player_id,
+        //         main_inventory: inventory,
+        //     })?;
+        // self.world.on_some_entity_created(entity.clone())?;
+
+        // FIXME finish
+        // self.world.on_inventory_change(entity.clone())?;
+        Ok(())
     }
 
     pub fn group_start(&self, label: &str) {

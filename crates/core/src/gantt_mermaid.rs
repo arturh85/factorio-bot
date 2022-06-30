@@ -80,11 +80,10 @@ impl MermaidGanttBuilder {
 
 #[cfg(test)]
 mod tests {
-    use crate::graph::task_graph::PositionRadius;
     use crate::plan::plan_builder::PlanBuilder;
     use crate::plan::planner::Planner;
     use crate::test_utils::fixture_world;
-    use crate::types::Position;
+    use crate::types::{Position, PositionRadius};
     use std::sync::Arc;
 
     #[tokio::test]

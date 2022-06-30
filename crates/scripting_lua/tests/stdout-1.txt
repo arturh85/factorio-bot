@@ -1,2 +1,40 @@
 start script for 1 bots
+dumping ingredients for burner-mining-drill
+- 1:
+  - ingredient_type: item
+  - amount: 3
+  - name: iron-plate
+- 2:
+  - ingredient_type: item
+  - amount: 3
+  - name: iron-gear-wheel
+- 3:
+  - ingredient_type: item
+  - amount: 1
+  - name: stone-furnace
+
+------------
+dumping bot inventory
+- coal: 48
+- wood: 1
+- burner-mining-drill: 1
+- stone-furnace: 1
+- stone: 48
+
+------------
+dumping ingredients for stone-furnace
+- 1:
+  - ingredient_type: item
+  - amount: 5
+  - name: stone
+
+------------
+dumping bot inventory
+- coal: 48
+- wood: 1
+- burner-mining-drill: 0
+- stone-furnace: 1
+- stone: 48
+
+------------
 end script

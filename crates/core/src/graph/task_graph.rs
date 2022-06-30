@@ -1,7 +1,10 @@
 use crate::factorio::util::format_dotgraph;
 use crate::gantt_mermaid::MermaidGanttBuilder;
 use crate::num_traits::FromPrimitive;
-use crate::types::{Direction, FactorioEntity, PlayerId, Position};
+use crate::types::{
+    Direction, FactorioEntity, InventoryItem, InventoryLocation, MineTarget, PlayerId,
+    PositionRadius,
+};
 use noisy_float::types::{r64, R64};
 use num_traits::ToPrimitive;
 use parking_lot::RwLock;
@@ -114,6 +117,32 @@ impl TaskGraph {
         let node = self
             .inner
             .add_node(TaskNode::new_place(player_id, entity, cost));
+        self.add_to_group(player_id, node, cost);
+    }
+
+    pub fn add_insert_into_inventory_node(
+        &mut self,
+        player_id: PlayerId,
+        cost: f64,
+        location: InventoryLocation,
+        item: InventoryItem,
+    ) {
+        let node = self.inner.add_node(TaskNode::new_insert_to_inventory(
+            player_id, location, item, cost,
+        ));
+        self.add_to_group(player_id, node, cost);
+    }
+
+    pub fn add_remove_from_inventory_node(
+        &mut self,
+        player_id: PlayerId,
+        cost: f64,
+        location: InventoryLocation,
+        item: InventoryItem,
+    ) {
+        let node = self.inner.add_node(TaskNode::new_remove_from_inventory(
+            player_id, location, item, cost,
+        ));
         self.add_to_group(player_id, node, cost);
     }
 
@@ -255,62 +284,6 @@ impl TaskGraph {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct InventoryItem {
-    pub name: String,
-    pub count: u32,
-}
-
-impl InventoryItem {
-    pub fn new(name: &str, count: u32) -> InventoryItem {
-        InventoryItem {
-            name: name.into(),
-            count,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct InventoryLocation {
-    pub entity_name: String,
-    pub position: Position,
-    pub inventory_type: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct EntityPlacement {
-    pub item_name: String,
-    pub position: Position,
-    pub direction: Direction,
-}
-
-#[derive(Debug, Clone)]
-pub struct PositionRadius {
-    pub position: Position,
-    pub radius: f64,
-}
-impl PositionRadius {
-    pub fn new(x: f64, y: f64, radius: f64) -> PositionRadius {
-        PositionRadius {
-            position: Position::new(x, y),
-            radius,
-        }
-    }
-    pub fn from_position(pos: &Position, radius: f64) -> PositionRadius {
-        PositionRadius {
-            position: pos.clone(),
-            radius,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct MineTarget {
-    pub position: Position,
-    pub name: String,
-    pub count: u32,
-}
-
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum TaskData {
@@ -420,6 +393,22 @@ impl TaskNode {
             cost,
         )
     }
+    pub fn new_remove_from_inventory(
+        player_id: PlayerId,
+        location: InventoryLocation,
+        item: InventoryItem,
+        cost: f64,
+    ) -> TaskNode {
+        TaskNode::new(
+            Some(player_id),
+            &*format!(
+                "Remove {}x{} from {} at {}",
+                &item.name, &item.count, location.entity_name, location.position
+            ),
+            Some(TaskData::RemoveFromInventory(location, item)),
+            cost,
+        )
+    }
 }
 
 impl std::fmt::Display for TaskNode {
@@ -451,6 +440,7 @@ fn duration_to_timestamp(duration: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::Position;
 
     #[test]
     fn test_simple_group() {

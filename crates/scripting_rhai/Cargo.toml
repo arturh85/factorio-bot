@@ -12,7 +12,7 @@ publish = false
 [dependencies]
 factorio-bot-core = { path = "../core" }
 factorio-bot-scripting = { path = "../scripting" }
-rhai = {version = "1.7.0", features = ["serde", "metadata", "debugging", "sync"]}
+rhai = {version = "1.8.0", features = ["serde", "metadata", "debugging", "sync"]}
 # for error.rs
 miette = {version = "^5.1", features = ["fancy"] }
 thiserror = "^1.0"

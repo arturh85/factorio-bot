@@ -9,6 +9,7 @@
     "sourceMap": true,
     "lib": ["esnext", "dom"],
     "types": [
+      "web-bluetooth",
       "vitest/globals",
       "vite/client",
       "vue"

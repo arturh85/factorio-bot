@@ -7,7 +7,7 @@
 # More details at https://github.com/rust-lang/rust-clippy 
 # and https://rust-lang.github.io/rust-clippy/
 
-name: rust-clippy analyze
+name: rust-clippy
 
 on:
   push:
@@ -20,7 +20,7 @@ on:
 
 jobs:
   rust-clippy-analyze:
-    name: Run rust-clippy analyzing
+    name: Analyze rust code
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -36,6 +36,8 @@ jobs:
           toolchain: stable
           components: clippy
           override: true
+      - name: 💾 Cache rust dependencies
+        uses: Swatinem/rust-cache@v1
 
       - name: Install required cargo
         run: cargo install clippy-sarif sarif-fmt

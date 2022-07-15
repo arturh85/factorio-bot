@@ -15,6 +15,7 @@ impl MermaidGanttBuilder {
         }
     }
 
+    #[allow(clippy::format_push_string)]
     pub fn build(&self) -> String {
         let mut output = "gantt\n".to_owned();
         output += &format!("    title {}\n", self.title);

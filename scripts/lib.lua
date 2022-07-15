@@ -9,7 +9,7 @@ end
 
 -- FIXME: use all bots
 function mine_with_bots(bots, entities, label, count)
-    plan.group_start("Mine " .. label .. "x" .. tostring(count) .. " with " .. tostring(#bots) .. " Bots")
+    --plan.group_start("Mine " .. label .. "x" .. tostring(count) .. " with " .. tostring(#bots) .. " Bots")
     for idx,playerId in pairs(bots) do
         for i=1,count do
             local entityIdx = ((idx - 1) * count) + i
@@ -19,20 +19,24 @@ function mine_with_bots(bots, entities, label, count)
             plan.mine(playerId, entities[entityIdx].position, entities[entityIdx].name, 1)
         end
     end
-    plan.group_end()
+    --plan.group_end()
 end
 
 function mine_rocks(bots, count)
-    local player = world.player(bots[1])
-    local huge_rocks = world.find_entities_in_radius(player.position, 100, "rock-huge")
-    if #huge_rocks > 0 then
-        mine_with_bots(bots, huge_rocks, "rocks", count)
-    else
-        local big_rocks = world.find_entities_in_radius(player.position, 100, "rock-big")
-        if #big_rocks > 0 then
-            mine_with_bots(bots, huge_rocks, "rocks", count)
+    plan.group_start("Mine Rocks x" .. tostring(count) .. " with " .. tostring(#bots) .. " Bots")
+    for idx, bot_id in pairs(bots) do
+        local player = world.player(bot_id)
+        local huge_rocks = world.find_entities_in_radius(player.position, 100, ENTITIES.ROCK_HUGE)
+        if #huge_rocks > 0 then
+            mine_with_bots({ bot_id }, huge_rocks, "rocks", count)
+        else
+            local big_rocks = world.find_entities_in_radius(player.position, 100, ENTITIES.ROCK_BIG)
+            if #big_rocks > 0 then
+                mine_with_bots({ bot_id }, huge_rocks, "rocks", count)
+            end
         end
     end
+    plan.group_end()
 end
 
 function required_ingredients(recipe, search_ingredient, count)

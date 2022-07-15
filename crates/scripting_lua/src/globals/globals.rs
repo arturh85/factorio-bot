@@ -96,9 +96,8 @@ end
     map_table.set(
         "file_write",
         ctx.create_function(move |_ctx, (target_path, contents): (String, String)| {
-            let content = fs::write(_cwd.join(target_path).to_str().unwrap(), contents)
-                .expect("failed to write");
-            Ok(content)
+            fs::write(_cwd.join(target_path).to_str().unwrap(), contents).expect("failed to write");
+            Ok(())
         })?,
     )?;
 

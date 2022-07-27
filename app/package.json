@@ -58,7 +58,7 @@
     "eslint-plugin-prettier": "4.2.1",
     "eslint-plugin-vue": "9.3.0",
     "prettier": "2.7.1",
-    "rollup": "2.77.1",
+    "rollup": "2.77.2",
     "rollup-plugin-visualizer": "5.7.1",
     "sass": "1.54.0",
     "ts-node": "10.9.1",

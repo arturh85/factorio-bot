@@ -330,55 +330,55 @@
   resolved "https://registry.yarnpkg.com/@vitejs/plugin-vue/-/plugin-vue-3.0.1.tgz#b6af8f782485374bbb5fe09edf067a845bf4caae"
   integrity sha512-Ll9JgxG7ONIz/XZv3dssfoMUDu9qAnlJ+km+pBA0teYSXzwPCIzS/e1bmwNYl5dcQGs677D21amgfYAnzMl17A==
 
-"@volar/code-gen@0.39.3":
-  version "0.39.3"
-  resolved "https://registry.yarnpkg.com/@volar/code-gen/-/code-gen-0.39.3.tgz#d7b4ee0ba0974ea1f147e099da72d18102cf311c"
-  integrity sha512-iea+ciPOiszCAHdT3HbLlYIHZvi4CrTDiAvq2HB+Fk/VH/a0IYHgwEsc2uKcO9+3v8STmOv6Az8+FkN9zGca/w==
+"@volar/code-gen@0.39.4":
+  version "0.39.4"
+  resolved "https://registry.yarnpkg.com/@volar/code-gen/-/code-gen-0.39.4.tgz#89d025af12d537ff7236ebab3dda0eb7bdc2175b"
+  integrity sha512-2RoDdktnN5ovhJoL1NgxKwKhfgP2TzcKVWp8+1Lb67sZ+hvWRL5GjHGkvlPkS91cElpwuURUHnbNNDT+uEqXuA==
   dependencies:
-    "@volar/source-map" "0.39.3"
+    "@volar/source-map" "0.39.4"
 
-"@volar/source-map@0.39.3":
-  version "0.39.3"
-  resolved "https://registry.yarnpkg.com/@volar/source-map/-/source-map-0.39.3.tgz#04611664658e76a872964544d1416682b1827b86"
-  integrity sha512-lEzXp4GJS5FwEojy/maMJ1jj2TlH0Qgwnfj0ULx+XZS9ivXTTNqhi/0mO00FODu6eRxViM0CevM6ZTJx0dWCcA==
+"@volar/source-map@0.39.4":
+  version "0.39.4"
+  resolved "https://registry.yarnpkg.com/@volar/source-map/-/source-map-0.39.4.tgz#a6d059f04d0ae66777375edff4f78dc6b6780bbf"
+  integrity sha512-0zp7v0Ta1rZ2nKC4RcsU94Q/wJVVDWD0AJIqRGFU8rlEs2QO+RpBgotTL6wnKyJjyTzXxhcz/7AHUcwFs2oRnw==
 
-"@volar/typescript-faster@0.39.3":
-  version "0.39.3"
-  resolved "https://registry.yarnpkg.com/@volar/typescript-faster/-/typescript-faster-0.39.3.tgz#176c8bb46e8b375a5d4083e5770390a5acacbbb9"
-  integrity sha512-TdcTED+BGGzM9zWNOYS1PhMr1UpBO3UcaS4WCV+s2kANBnh+TY60C451yzL8LA+w2PZx17MDnhle/D/bdVPUtw==
+"@volar/typescript-faster@0.39.4":
+  version "0.39.4"
+  resolved "https://registry.yarnpkg.com/@volar/typescript-faster/-/typescript-faster-0.39.4.tgz#d02d2f5eedce9b0651f625819680349f2d4ba650"
+  integrity sha512-nVwTr1MSeUOjm+piJge3WW8PE+JyYbkfpEsf54P0e4P+8PUPHbGRIgr2TSpAh3802JSqg2SHCoDionECT5aXYw==
   dependencies:
     semver "^7.3.7"
 
-"@volar/vue-code-gen@0.39.3":
-  version "0.39.3"
-  resolved "https://registry.yarnpkg.com/@volar/vue-code-gen/-/vue-code-gen-0.39.3.tgz#f1fdfeb3c0a2071ece5957cd5f0d275b971205d5"
-  integrity sha512-Cp/+QPs9bG76hXxxFvDDTLcYhP2azgneVi2a2XsdZ/6EAFL+K5chprtwlYI5NyPmZQ9crS0DjzWEL0CuJTUfbw==
+"@volar/vue-code-gen@0.39.4":
+  version "0.39.4"
+  resolved "https://registry.yarnpkg.com/@volar/vue-code-gen/-/vue-code-gen-0.39.4.tgz#b838a8075784036a3829a1747f5595b66e60566d"
+  integrity sha512-jQwweKAgtKhX7kDvsVcBRieyNtEywoxZFN+XTyPRvtY57Z2B7Ei9zQb/01n1l2lI+FPuskxaXdZKCn4txSKojQ==
   dependencies:
-    "@volar/code-gen" "0.39.3"
-    "@volar/source-map" "0.39.3"
+    "@volar/code-gen" "0.39.4"
+    "@volar/source-map" "0.39.4"
     "@vue/compiler-core" "^3.2.37"
     "@vue/compiler-dom" "^3.2.37"
     "@vue/shared" "^3.2.37"
 
-"@volar/vue-language-core@0.39.3":
-  version "0.39.3"
-  resolved "https://registry.yarnpkg.com/@volar/vue-language-core/-/vue-language-core-0.39.3.tgz#93577e0690ec53088c6e68c42cbbd19db5996433"
-  integrity sha512-7YfsoMwko8fa1H7/EM5LJJWFaslZDsKd0jVqOUTAWMCUNUCB+V8vlV5bOmcQzHKe4kAswkDt8bk2HaVh7fcdew==
+"@volar/vue-language-core@0.39.4":
+  version "0.39.4"
+  resolved "https://registry.yarnpkg.com/@volar/vue-language-core/-/vue-language-core-0.39.4.tgz#15cee0a964f92a3cb888a51da8dcf456d861bdcd"
+  integrity sha512-ua4HAT8VYSf3EgY4Fl/mfpOQcUWz3gokJ8qsGIGfgKq3MxORnpp+RzKOEpMo1q+Ic550i+x0fh6Ylde76zOLww==
   dependencies:
-    "@volar/code-gen" "0.39.3"
-    "@volar/source-map" "0.39.3"
-    "@volar/vue-code-gen" "0.39.3"
+    "@volar/code-gen" "0.39.4"
+    "@volar/source-map" "0.39.4"
+    "@volar/vue-code-gen" "0.39.4"
     "@vue/compiler-sfc" "^3.2.37"
     "@vue/reactivity" "^3.2.37"
 
-"@volar/vue-typescript@0.39.3":
-  version "0.39.3"
-  resolved "https://registry.yarnpkg.com/@volar/vue-typescript/-/vue-typescript-0.39.3.tgz#2e1f0711bfd8ca2a853d2480464e5e1bd6a93524"
-  integrity sha512-y7jxByZUHG+m0P0GMGk8Xvz+lZ8dMRDXvmx6sSUJWM4wnR26jILkqaTt5m2iF3XH6/By1EF2cU22UgkoUydh2Q==
+"@volar/vue-typescript@0.39.4":
+  version "0.39.4"
+  resolved "https://registry.yarnpkg.com/@volar/vue-typescript/-/vue-typescript-0.39.4.tgz#e171d6e132915c4aa30c6391b11b9f72106517c0"
+  integrity sha512-ZIWg8EvTq53+P4DQVlrW5y+bo5v9VTOASBTrojBo0yK2frNbv/Gs7Ml4V+NmlsvIggtrPtDC/hIQChFiS5B3SA==
   dependencies:
-    "@volar/code-gen" "0.39.3"
-    "@volar/typescript-faster" "0.39.3"
-    "@volar/vue-language-core" "0.39.3"
+    "@volar/code-gen" "0.39.4"
+    "@volar/typescript-faster" "0.39.4"
+    "@volar/vue-language-core" "0.39.4"
 
 "@vue/compiler-core@3.2.37", "@vue/compiler-core@^3.2.37":
   version "3.2.37"
@@ -2924,13 +2924,13 @@ vue-router@4.1.3:
   dependencies:
     "@vue/devtools-api" "^6.1.4"
 
-vue-tsc@0.39.3:
-  version "0.39.3"
-  resolved "https://registry.yarnpkg.com/vue-tsc/-/vue-tsc-0.39.3.tgz#9848bef6a3499122796c43308c5650e27357167c"
-  integrity sha512-nxmMC6WEc+/PNsMyGzkXKalNae6cgRkfylw1HW77GLvIOAWrS3Gkhk5DDiWq4D+RX4jC5vmUw5tw6EnW9UV/pw==
+vue-tsc@0.39.4:
+  version "0.39.4"
+  resolved "https://registry.yarnpkg.com/vue-tsc/-/vue-tsc-0.39.4.tgz#4ca8d252de912e0f7fbcc097742a506ce8d89f7c"
+  integrity sha512-oGFuAdSt8Q1NatnyyJheW0P/8Sk9RDMWPNzeMHXl1OOnoXrbjz2miMcccujySCpA48+AhzdtyFY1PL0XTPsOSg==
   dependencies:
-    "@volar/vue-language-core" "0.39.3"
-    "@volar/vue-typescript" "0.39.3"
+    "@volar/vue-language-core" "0.39.4"
+    "@volar/vue-typescript" "0.39.4"
 
 vue@3.2.37:
   version "3.2.37"

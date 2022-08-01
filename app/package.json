@@ -28,7 +28,7 @@
     "dummy": "true"
   },
   "dependencies": {
-    "@babel/types": "7.18.9",
+    "@babel/types": "7.18.10",
     "@tauri-apps/api": "1.0.2",
     "@vueuse/core": "9.0.2",
     "ansi-html": "0.0.9",

@@ -40,7 +40,7 @@
     "primeicons": "5.0.0",
     "primevue": "3.16.2",
     "vue": "3.2.37",
-    "vue-router": "4.1.4",
+    "vue-router": "4.1.5",
     "ynetwork": "3.0.6"
   },
   "devDependencies": {

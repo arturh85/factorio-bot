@@ -39,7 +39,7 @@ typescript-definitions = { git = "https://github.com/ufoscout/typescript-definit
 enum-primitive-derive = "^0.2"
 unicode-segmentation = "^1.9"
 strum = { version = "^0.24", features = ["derive"] }
-dashmap = {version = "^5.3", features = ["serde"] }
+dashmap = {version = "^5.4", features = ["serde"] }
 euclid = {version = "^0.22.7", features = ["serde"] }
 smallvec = { version = "1.9.0", features = ["serde"] }
 base64 = "^0.13"

@@ -32,7 +32,7 @@
     "@tauri-apps/api": "1.0.2",
     "@vueuse/core": "9.2.0",
     "ansi-html": "0.0.9",
-    "mermaid": "9.1.6",
+    "mermaid": "9.1.7",
     "monaco-editor": "0.34.0",
     "nanoid": "4.0.0",
     "pinia": "2.0.22",

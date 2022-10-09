@@ -66,7 +66,7 @@
     "vite": "3.1.6",
     "vite-plugin-monaco-editor": "1.0.12",
     "vitest": "0.21.1",
-    "vue-tsc": "1.0.1"
+    "vue-tsc": "1.0.2"
   },
   "browserslist": [
     "> 1%",

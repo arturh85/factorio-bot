@@ -37,7 +37,7 @@ jobs:
           components: clippy
           override: true
       - name: 💾 Cache rust dependencies
-        uses: Swatinem/rust-cache@v1
+        uses: Swatinem/rust-cache@v2
 
       - name: Install required cargo
         run: cargo install clippy-sarif sarif-fmt

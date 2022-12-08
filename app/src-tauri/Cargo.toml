@@ -23,7 +23,7 @@ factorio-bot-restapi = { path = "../../crates/restapi", optional = true }
 factorio-bot-scripting-lua = { path = "../../crates/scripting_lua", optional = true }
 
 # gui
-tauri = { version = "1.2.1", features = ["dialog-all", "http-all", "updater"], optional = true }
+tauri = { version = "1.2.2", features = ["dialog-all", "http-all", "updater"], optional = true }
 open = {version = "^3.2", optional = true}
 port_scanner = { version = "^0.1.5", optional = true } # scan available port on localhost
 

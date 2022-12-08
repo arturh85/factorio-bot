@@ -44,7 +44,7 @@
     "ynetwork": "3.0.6"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "1.2.1",
+    "@tauri-apps/cli": "1.2.2",
     "@types/node": "18.11.11",
     "@typescript-eslint/eslint-plugin": "5.45.1",
     "@typescript-eslint/parser": "5.45.1",

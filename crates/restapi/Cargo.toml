@@ -15,7 +15,7 @@ rocket = { version = "0.5.0-rc.2", features = ["json"] }
 rocket_okapi = { version = "0.8.0-rc.2", features = ["swagger", "rapidoc"] }
 okapi = { version = "0.7.0-rc.1" }
 schemars = { version = "0.8.11", features = ["preserve_order"] }
-tokio = { version = "^1.20", features = ["full", "tracing"] }
+tokio = { version = "^1.24", features = ["full", "tracing"] }
 serde = { version = "^1.0", features = ["derive"] }
 serde_json = "^1.0"
 miette = { version = "^5.5", features = ["fancy"] }

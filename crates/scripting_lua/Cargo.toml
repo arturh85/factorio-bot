@@ -19,4 +19,4 @@ miette = {version = "^5.5", features = ["fancy"] }
 thiserror = "1.0.38"
 
 [dev-dependencies]
-tokio = { version = "^1.20", features = ["full", "tracing"] }
+tokio = { version = "^1.24", features = ["full", "tracing"] }

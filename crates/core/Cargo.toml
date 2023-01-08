@@ -42,7 +42,7 @@ strum = { version = "^0.24", features = ["derive"] }
 dashmap = {version = "^5.4", features = ["serde"] }
 euclid = {version = "^0.22.7", features = ["serde"] }
 smallvec = { version = "1.10.0", features = ["serde"] }
-base64 = "^0.20"
+base64 = "^0.21"
 ptree = "^0.4"
 fnv = "^1.0.7"
 itertools = "^0.10"

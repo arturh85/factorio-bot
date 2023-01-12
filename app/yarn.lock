@@ -2313,10 +2313,10 @@ primeicons@6.0.1:
   resolved "https://registry.yarnpkg.com/primeicons/-/primeicons-6.0.1.tgz#431fa7c79825934eefd62087d8e1faa6a9e376ad"
   integrity sha512-KDeO94CbWI4pKsPnYpA1FPjo79EsY9I+M8ywoPBSf9XMXoe/0crjbUK7jcQEDHuc0ZMRIZsxH3TYLv4TUtHmAA==
 
-primevue@3.22.0:
-  version "3.22.0"
-  resolved "https://registry.yarnpkg.com/primevue/-/primevue-3.22.0.tgz#369e06a0231a524823b2e99cc2c62e73d8962a52"
-  integrity sha512-9QGciTVRdj1248SZXi0l6yxs0THnxWbXt1iiz0KnhQcqS2fg80N2XXESc28/oc0MHdA7FhtzAJCx+vZJoiZV0A==
+primevue@3.22.1:
+  version "3.22.1"
+  resolved "https://registry.yarnpkg.com/primevue/-/primevue-3.22.1.tgz#c9d0b15258550ce62b017bb1432fb784902a8ca2"
+  integrity sha512-19vKbvioeJ0jbpy3aVwSPiTI8goispIyXn3eLkDgpbm51iAzS+yVtBilrkmgOruKZOLTSbsHlFusuMpnfzqLtw==
 
 punycode@^2.1.0:
   version "2.1.1"

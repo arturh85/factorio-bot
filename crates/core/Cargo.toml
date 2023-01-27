@@ -51,7 +51,7 @@ flate2 = "^1.0"
 tar = "^0.4"
 xz2 = "^0.1"
 zip = "^0.6"
-toml = "^0.6"
+toml = "^0.7"
 regex = "^1.7"
 schemars = { version = "0.8", features = ["preserve_order"] }
 rlua = "^0.19"

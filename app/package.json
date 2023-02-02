@@ -39,7 +39,7 @@
     "primeflex": "3.3.0",
     "primeicons": "6.0.1",
     "primevue": "3.23.0",
-    "vue": "3.2.45",
+    "vue": "3.2.47",
     "vue-router": "4.1.6",
     "ynetwork": "3.0.6"
   },
@@ -49,7 +49,7 @@
     "@typescript-eslint/eslint-plugin": "5.50.0",
     "@typescript-eslint/parser": "5.50.0",
     "@vitejs/plugin-vue": "4.0.0",
-    "@vue/compiler-sfc": "3.2.45",
+    "@vue/compiler-sfc": "3.2.47",
     "c8": "7.12.0",
     "concurrently": "7.6.0",
     "cross-env": "7.0.3",

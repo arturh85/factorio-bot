@@ -23,7 +23,7 @@ paris = { version = "^1.5", features = ["timestamps", "macros"] }
 color-eyre = "^0.6.2"
 petgraph = { version = "^0.6", features = ["serde-1"] }
 indicatif = "^0.16"
-err-derive = "^0.3"
+err-derive = "^0.3.1"
 wildmatch = "^2.1"
 image = "^0.24"
 imageproc = { version = "0.23.0"}

@@ -36,7 +36,7 @@ async-trait = "^0.1.66"
 tokio = { version = "^1.20.4", features = ["full", "tracing"] }
 noisy_float = { version = "^0.2", features = ["serde"] }
 typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"]}
-enum-primitive-derive = "^0.2"
+enum-primitive-derive = "^0.2.2"
 unicode-segmentation = "^1.10"
 strum = { version = "^0.24", features = ["derive"] }
 dashmap = {version = "^5.4", features = ["serde"] }

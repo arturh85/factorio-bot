@@ -38,7 +38,7 @@ toml = "^0.7"
 
 # cli
 clap = {version = "^3.2.23", optional = true }
-clap_complete = {version = "^3.2", optional = true }
+clap_complete = {version = "^3.2.5", optional = true }
 
 # repl
 reedline-repl-rs = { version = "^1.0.2", optional = true }

@@ -30,7 +30,7 @@ imageproc = { version = "0.23.0"}
 rusttype = "^0.9"
 factorio-blueprint = "^0.3"
 include_dir = "^0.7.3"
-num-traits = "^0.2"
+num-traits = "^0.2.15"
 runas = "^1.0"
 async-trait = "^0.1.66"
 tokio = { version = "^1.20.4", features = ["full", "tracing"] }

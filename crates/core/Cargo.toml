@@ -54,7 +54,7 @@ zip = "^0.6"
 toml = "^0.7"
 regex = "^1.7.1"
 schemars = { version = "0.8", features = ["preserve_order"] }
-rlua = "^0.19"
+rlua = "^0.19.4"
 rlua_serde = { git = "https://github.com/creepinson/rlua_serde" } # fork which is compatible with rlua 0.19
 miette = {version = "^5.6", features = ["fancy"] }
 thiserror = "^1.0"

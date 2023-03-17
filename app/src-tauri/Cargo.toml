@@ -33,7 +33,7 @@ console-subscriber = { version = "^0.1", optional = true }
 
 # serializing / deserializing
 serde = { version = "^1.0.156", features = [ "derive" ] }
-strum = { version = "^0.24", features = ["derive"] }
+strum = { version = "^0.24.1", features = ["derive"] }
 toml = "^0.7"
 
 # cli

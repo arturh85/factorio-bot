@@ -16,7 +16,7 @@ itertools = "^0.10.5"
 rlua-async = "^0.5"
 rlua_serde = { git = "https://github.com/creepinson/rlua_serde" } # fork which is compatible with rlua 0.19
 miette = {version = "^5.6", features = ["fancy"] }
-thiserror = "1.0.39"
+thiserror = "1.0.40"
 
 [dev-dependencies]
 tokio = { version = "^1.20.4", features = ["full", "tracing"] }

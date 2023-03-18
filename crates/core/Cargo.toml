@@ -13,7 +13,7 @@ publish = false
 rand = "^0.8.5"
 rcon = { version = "^0.6", features = ["rt-tokio"] }
 bb8 = "^0.8"
-serde = "^1.0.156"
+serde = "^1.0.157"
 serde_derive = "^1.0.156"
 serde_json = "^1.0.94"
 config = "^0.13.3"
@@ -73,7 +73,7 @@ windows-sys = { version = "^0.45", features = [
 ] }
 
 [build-dependencies]
-serde = { version = "^1.0.156", features = [ "derive" ] }
+serde = { version = "^1.0.157", features = [ "derive" ] }
 config_struct = "^0.5"
 toml = "*"
 

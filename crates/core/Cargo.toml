@@ -52,7 +52,7 @@ tar = "^0.4.38"
 xz2 = "^0.1.7"
 zip = "^0.6.4"
 toml = "^0.7.3"
-regex = "^1.7.1"
+regex = "^1.7.2"
 schemars = { version = "0.8", features = ["preserve_order"] }
 rlua = "^0.19.4"
 rlua_serde = { git = "https://github.com/creepinson/rlua_serde" } # fork which is compatible with rlua 0.19

@@ -58,7 +58,7 @@ rlua = "^0.19.4"
 rlua_serde = { git = "https://github.com/creepinson/rlua_serde" } # fork which is compatible with rlua 0.19
 miette = {version = "^5.6", features = ["fancy"] }
 thiserror = "^1.0.40"
-futures = "0.3.27"
+futures = "0.3.28"
 #
 #[target.'cfg(unix)'.dependencies]
 #

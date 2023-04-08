@@ -32,7 +32,7 @@ tokio = { version = "^1.20.4", features = ["full", "tracing"] }
 console-subscriber = { version = "^0.1", optional = true }
 
 # serializing / deserializing
-serde = { version = "^1.0.158", features = [ "derive" ] }
+serde = { version = "^1.0.159", features = [ "derive" ] }
 strum = { version = "^0.24.1", features = ["derive"] }
 toml = "^0.7.3"
 
@@ -53,7 +53,7 @@ factorio-bot-core = { path = "../../crates/core" }
 factorio-bot-restapi = { path = "../../crates/restapi", optional = true }
 factorio-bot-scripting-lua = { path = "../../crates/scripting_lua", optional = true }
 tauri-build = { version = "1.2.1", features = [], optional = true }
-serde = { version = "^1.0.158", features = [ "derive" ] }
+serde = { version = "^1.0.159", features = [ "derive" ] }
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "^0.1.12"

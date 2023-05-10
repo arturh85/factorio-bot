@@ -29,7 +29,7 @@ port_scanner = { version = "^0.1.5", optional = true } # scan available port on 
 
 # async
 tokio = { version = "^1.20.4", features = ["full", "tracing"] }
-console-subscriber = { version = "^0.1", optional = true }
+console-subscriber = { version = "^0.1.9", optional = true }
 
 # serializing / deserializing
 serde = { version = "^1.0.159", features = [ "derive" ] }

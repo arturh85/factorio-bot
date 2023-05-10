@@ -37,7 +37,7 @@ strum = { version = "^0.24.1", features = ["derive"] }
 toml = "^0.7.3"
 
 # cli
-clap = {version = "^3.2.23", optional = true }
+clap = {version = "^3.2.25", optional = true }
 clap_complete = {version = "^3.2.5", optional = true }
 
 # repl

@@ -33,7 +33,7 @@ include_dir = "^0.7.3"
 num-traits = "^0.2.15"
 runas = "^1.0"
 async-trait = "^0.1.68"
-tokio = { version = "^1.20.4", features = ["full", "tracing"] }
+tokio = { version = "^1.28.1", features = ["full", "tracing"] }
 noisy_float = { version = "^0.2", features = ["serde"] }
 typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"]}
 enum-primitive-derive = "^0.2.2"

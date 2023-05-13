@@ -60,7 +60,7 @@
     "prettier": "2.8.8",
     "rollup": "3.21.7",
     "rollup-plugin-visualizer": "5.9.0",
-    "sass": "1.61.0",
+    "sass": "1.62.1",
     "ts-node": "10.9.1",
     "typescript": "5.0.4",
     "vite": "4.2.1",

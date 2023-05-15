@@ -2813,10 +2813,10 @@ vite-plugin-monaco-editor@1.0.12:
   resolved "https://registry.yarnpkg.com/vite-plugin-monaco-editor/-/vite-plugin-monaco-editor-1.0.12.tgz#ece1f77488a7788e3b7bdcae2bc02605a1ec7cd2"
   integrity sha512-r7f6we2eiyk45EmpoD76rKez18aEr1dwYqxqdsP0zObpPun/ukmop8kv86qZGd14GjEncjE5+9eky+edyPPdxA==
 
-vite@4.3.5:
-  version "4.3.5"
-  resolved "https://registry.yarnpkg.com/vite/-/vite-4.3.5.tgz#3871fe0f4b582ea7f49a85386ac80e84826367d9"
-  integrity sha512-0gEnL9wiRFxgz40o/i/eTBwm+NEbpUeTWhzKrZDSdKm6nplj+z4lKz8ANDgildxHm47Vg8EUia0aicKbawUVVA==
+vite@4.3.6:
+  version "4.3.6"
+  resolved "https://registry.yarnpkg.com/vite/-/vite-4.3.6.tgz#d129487dd9edf10ec79314e2e7891c60a2f86051"
+  integrity sha512-cqIyLSbA6gornMS659AXTVKF7cvSHMdKmJJwQ9DXq3lwsT1uZSdktuBRlpHQ8VnOWx0QHtjDwxPpGtyo9Fh/Qg==
   dependencies:
     esbuild "^0.17.5"
     postcss "^8.4.23"

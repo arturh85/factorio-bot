@@ -2482,10 +2482,10 @@ rollup-plugin-visualizer@5.9.0:
     source-map "^0.7.4"
     yargs "^17.5.1"
 
-rollup@3.21.7, rollup@^3.21.0:
-  version "3.21.7"
-  resolved "https://registry.yarnpkg.com/rollup/-/rollup-3.21.7.tgz#022ab47416712c93546f369abfb20da5fb8ed42e"
-  integrity sha512-KXPaEuR8FfUoK2uHwNjxTmJ18ApyvD6zJpYv9FOJSqLStmt6xOY84l1IjK2dSolQmoXknrhEFRaPRgOPdqCT5w==
+rollup@3.21.8:
+  version "3.21.8"
+  resolved "https://registry.yarnpkg.com/rollup/-/rollup-3.21.8.tgz#fc768008fe2c953f18210370fd70fe1ffff59e2c"
+  integrity sha512-SSFV2T2fWtQ/vvBip85u2Nr0GNKireabH9d7nXswBg+XSH+jbVDSYptRAEbCEsquhs503rpPA9POYAp0/Jhasw==
   optionalDependencies:
     fsevents "~2.3.2"
 
@@ -2493,6 +2493,13 @@ rollup@^2.59.0:
   version "2.64.0"
   resolved "https://registry.yarnpkg.com/rollup/-/rollup-2.64.0.tgz#f0f59774e21fbb56de438a37d06a2189632b207a"
   integrity sha512-+c+lbw1lexBKSMb1yxGDVfJ+vchJH3qLbmavR+awDinTDA2C5Ug9u7lkOzj62SCu0PKUExsW36tpgW7Fmpn3yQ==
+  optionalDependencies:
+    fsevents "~2.3.2"
+
+rollup@^3.21.0:
+  version "3.21.7"
+  resolved "https://registry.yarnpkg.com/rollup/-/rollup-3.21.7.tgz#022ab47416712c93546f369abfb20da5fb8ed42e"
+  integrity sha512-KXPaEuR8FfUoK2uHwNjxTmJ18ApyvD6zJpYv9FOJSqLStmt6xOY84l1IjK2dSolQmoXknrhEFRaPRgOPdqCT5w==
   optionalDependencies:
     fsevents "~2.3.2"
 

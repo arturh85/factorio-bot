@@ -30,7 +30,7 @@
   "dependencies": {
     "@babel/types": "7.22.5",
     "@tauri-apps/api": "1.2.0",
-    "@vueuse/core": "10.1.2",
+    "@vueuse/core": "10.2.0",
     "ansi-html": "0.0.9",
     "mermaid": "10.2.3",
     "monaco-editor": "0.39.0",

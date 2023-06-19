@@ -1378,7 +1378,7 @@ dependencies = [
  "port_scanner",
  "reedline-repl-rs",
  "serde 1.0.164",
- "strum",
+ "strum 0.25.0",
  "tauri",
  "tauri-build",
  "tokio",
@@ -1433,7 +1433,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "smallvec",
- "strum",
+ "strum 0.25.0",
  "tar",
  "thiserror",
  "tokio",
@@ -1975,7 +1975,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "25a68131a662b04931e71891fb14aaf65ee4b44d08e8abc10f49e77418c86c64"
 dependencies = [
  "anyhow",
- "heck 0.4.0",
+ "heck 0.4.1",
  "proc-macro-crate",
  "proc-macro-error",
  "proc-macro2 1.0.56",
@@ -2139,9 +2139,9 @@ dependencies = [
 
 [[package]]
 name = "heck"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2540771e65fc8cb83cd6e8a237f70c319bd5c29f78ed1084ba5d50eeac86f7f9"
+checksum = "95505c38b4572b2d910cecb0281560f54b440a19336cbbcb27bf6ce6adc6f5a8"
 
 [[package]]
 name = "hermit-abi"
@@ -4154,8 +4154,8 @@ dependencies = [
  "nu-ansi-term",
  "serde 1.0.164",
  "strip-ansi-escapes",
- "strum",
- "strum_macros",
+ "strum 0.24.1",
+ "strum_macros 0.24.1",
  "unicode-segmentation",
  "unicode-width",
 ]
@@ -5098,8 +5098,14 @@ name = "strum"
 version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "063e6045c0e62079840579a7e47a355ae92f60eb74daaf156fb1e84ba164e63f"
+
+[[package]]
+name = "strum"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "290d54ea6f91c969195bdbcd7442c8c2a2ba87da8bf60a7ee86a235d4bc1e125"
 dependencies = [
- "strum_macros",
+ "strum_macros 0.25.0",
 ]
 
 [[package]]
@@ -5108,11 +5114,24 @@ version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9550962e7cf70d9980392878dfaf1dcc3ece024f4cf3bf3c46b978d0bad61d6c"
 dependencies = [
- "heck 0.4.0",
+ "heck 0.4.1",
  "proc-macro2 1.0.56",
  "quote 1.0.26",
  "rustversion",
  "syn 1.0.107",
+]
+
+[[package]]
+name = "strum_macros"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe9f3bd7d2e45dcc5e265fbb88d6513e4747d8ef9444cf01a533119bce28a157"
+dependencies = [
+ "heck 0.4.1",
+ "proc-macro2 1.0.56",
+ "quote 1.0.26",
+ "rustversion",
+ "syn 2.0.13",
 ]
 
 [[package]]
@@ -5220,7 +5239,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1a45a1c4c9015217e12347f2a411b57ce2c4fc543913b14b6fe40483328e709"
 dependencies = [
  "cfg-expr 0.10.3",
- "heck 0.4.0",
+ "heck 0.4.1",
  "pkg-config",
  "toml 0.5.9",
  "version-compare 0.1.0",
@@ -5312,7 +5331,7 @@ dependencies = [
  "glib",
  "glob",
  "gtk",
- "heck 0.4.0",
+ "heck 0.4.1",
  "http",
  "ignore",
  "minisign-verify",
@@ -5353,7 +5372,7 @@ checksum = "8807c85d656b2b93927c19fe5a5f1f1f348f96c2de8b90763b3c2d561511f9b4"
 dependencies = [
  "anyhow",
  "cargo_toml",
- "heck 0.4.0",
+ "heck 0.4.1",
  "json-patch 0.2.6",
  "semver 1.0.10",
  "serde_json",
@@ -5392,7 +5411,7 @@ version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8784cfe6f5444097e93c69107d1ac5e8f13d02850efa8d8f2a40fe79674cef46"
 dependencies = [
- "heck 0.4.0",
+ "heck 0.4.1",
  "proc-macro2 1.0.56",
  "quote 1.0.26",
  "syn 1.0.107",
@@ -5450,7 +5469,7 @@ dependencies = [
  "brotli",
  "ctor",
  "glob",
- "heck 0.4.0",
+ "heck 0.4.1",
  "html5ever",
  "infer",
  "json-patch 1.0.0",

@@ -1082,6 +1082,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "deprecate-until"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ec2e2a2d0c79afd023be50309ecf010f20bf4a2761f15e264f4ac9516aff58b"
+dependencies = [
+ "proc-macro2 1.0.66",
+ "quote 1.0.31",
+ "semver 1.0.18",
+ "syn 2.0.26",
+]
+
+[[package]]
 name = "derive_more"
 version = "0.99.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3529,12 +3541,13 @@ checksum = "8835116a5c179084a830efb3adc117ab007512b535bc1a21c991d3b32a6b44dd"
 
 [[package]]
 name = "pathfinding"
-version = "4.3.0"
+version = "4.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfc597cf0c06c15bcca90fba95ee81b3a80a934403562001d0ed7d8626f7c6ae"
+checksum = "c246434cbaa32c6430ea09b0a7dd28c0f954143f7866cf551e42f2390d8a65ae"
 dependencies = [
+ "deprecate-until",
  "fixedbitset",
- "indexmap 1.9.2",
+ "indexmap 2.0.0",
  "integer-sqrt",
  "num-traits 0.2.16",
  "rustc-hash",
@@ -4504,7 +4517,7 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bfa0f585226d2e68097d4f95d113b15b83a82e819ab25717ec0590d9584ef366"
 dependencies = [
- "semver 1.0.10",
+ "semver 1.0.18",
 ]
 
 [[package]]
@@ -4682,9 +4695,9 @@ dependencies = [
 
 [[package]]
 name = "semver"
-version = "1.0.10"
+version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a41d061efea015927ac527063765e73601444cdc344ba855bc7bd44578b25e1c"
+checksum = "b0293b4b29daaf487284529cc2f5675b8e57c61f70167ba415a463651fd6a918"
 dependencies = [
  "serde 1.0.174",
 ]
@@ -5364,7 +5377,7 @@ dependencies = [
  "rand 0.8.5",
  "raw-window-handle",
  "rfd",
- "semver 1.0.10",
+ "semver 1.0.18",
  "serde 1.0.174",
  "serde_json",
  "serde_repr",
@@ -5397,7 +5410,7 @@ dependencies = [
  "cargo_toml",
  "heck 0.4.1",
  "json-patch 0.2.6",
- "semver 1.0.10",
+ "semver 1.0.18",
  "serde_json",
  "tauri-utils",
  "winres",
@@ -5417,7 +5430,7 @@ dependencies = [
  "png",
  "proc-macro2 1.0.66",
  "quote 1.0.31",
- "semver 1.0.10",
+ "semver 1.0.18",
  "serde 1.0.174",
  "serde_json",
  "sha2",
@@ -5501,7 +5514,7 @@ dependencies = [
  "phf 0.10.1",
  "proc-macro2 1.0.66",
  "quote 1.0.31",
- "semver 1.0.10",
+ "semver 1.0.18",
  "serde 1.0.174",
  "serde_json",
  "serde_with",

@@ -17,7 +17,7 @@ serde = "^1.0.174"
 serde_derive = "^1.0.174"
 serde_json = "^1.0.105"
 config = "^0.13.3"
-pathfinding = "^4.3.1"
+pathfinding = "^4.3.3"
 parking_lot = "^0.12.1"
 paris = { version = "^1.5.15", features = ["timestamps", "macros"] }
 color-eyre = "^0.6.2"

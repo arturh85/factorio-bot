@@ -16,7 +16,7 @@ rocket_okapi = { version = "0.8.0-rc.3", features = ["swagger", "rapidoc"] }
 okapi = { version = "0.7.0-rc.1" }
 schemars = { version = "0.8.16", features = ["preserve_order"] }
 tokio = { version = "^1.28.2", features = ["full", "tracing"] }
-serde = { version = "^1.0.174", features = ["derive"] }
+serde = { version = "^1.0.192", features = ["derive"] }
 serde_json = "^1.0.108"
 miette = { version = "^5.9.0", features = ["fancy"] }
 thiserror = "^1.0.50"

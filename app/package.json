@@ -51,7 +51,7 @@
     "@vitejs/plugin-vue": "4.2.3",
     "@vue/compiler-sfc": "3.3.4",
     "c8": "8.0.1",
-    "concurrently": "8.2.0",
+    "concurrently": "8.2.2",
     "cross-env": "7.0.3",
     "eslint": "8.43.0",
     "eslint-config-prettier": "8.8.0",

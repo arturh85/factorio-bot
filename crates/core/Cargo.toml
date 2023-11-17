@@ -57,7 +57,7 @@ schemars = { version = "0.8", features = ["preserve_order"] }
 rlua = "^0.19.7"
 rlua_serde = { git = "https://github.com/creepinson/rlua_serde" } # fork which is compatible with rlua 0.19
 miette = {version = "^5.9.0", features = ["fancy"] }
-thiserror = "^1.0.44"
+thiserror = "^1.0.50"
 futures = "0.3.29"
 #
 #[target.'cfg(unix)'.dependencies]

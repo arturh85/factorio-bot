@@ -18,7 +18,7 @@ schemars = { version = "0.8.16", features = ["preserve_order"] }
 tokio = { version = "^1.28.2", features = ["full", "tracing"] }
 serde = { version = "^1.0.192", features = ["derive"] }
 serde_json = "^1.0.108"
-miette = { version = "^5.9.0", features = ["fancy"] }
+miette = { version = "^5.10.0", features = ["fancy"] }
 thiserror = "^1.0.50"
 num-traits = "^0.2.17"
 typescript-definitions = { git = "https://github.com/ufoscout/typescript-definitions", branch = "no-debug-attrs", features = ["export-typescript"] }

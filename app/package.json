@@ -46,8 +46,8 @@
   "devDependencies": {
     "@tauri-apps/cli": "1.2.3",
     "@types/node": "18.18.11",
-    "@typescript-eslint/eslint-plugin": "5.60.0",
-    "@typescript-eslint/parser": "5.60.0",
+    "@typescript-eslint/eslint-plugin": "5.62.0",
+    "@typescript-eslint/parser": "5.62.0",
     "@vitejs/plugin-vue": "4.5.0",
     "@vue/compiler-sfc": "3.3.8",
     "c8": "8.0.1",

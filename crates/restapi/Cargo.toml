@@ -11,7 +11,7 @@ publish = false
 
 [dependencies]
 factorio-bot-core = { path = "../core" }
-rocket = { version = "0.5.0-rc.3", features = ["json"] }
+rocket = { version = "0.5.0", features = ["json"] }
 rocket_okapi = { version = "0.8.0-rc.3", features = ["swagger", "rapidoc"] }
 okapi = { version = "0.7.0-rc.1" }
 schemars = { version = "0.8.16", features = ["preserve_order"] }

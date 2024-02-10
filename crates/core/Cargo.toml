@@ -22,7 +22,7 @@ parking_lot = "^0.12.1"
 paris = { version = "^1.5.15", features = ["timestamps", "macros"] }
 color-eyre = "^0.6.2"
 petgraph = { version = "^0.6.4", features = ["serde-1"] }
-indicatif = "^0.16"
+indicatif = "^0.17.8"
 err-derive = "^0.3.1"
 wildmatch = "^2.1.1"
 image = "^0.24.7"

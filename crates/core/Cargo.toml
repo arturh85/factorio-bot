@@ -20,7 +20,7 @@ config = "^0.13.3"
 pathfinding = "^4.3.3"
 parking_lot = "^0.12.1"
 paris = { version = "^1.5.15", features = ["timestamps", "macros"] }
-color-eyre = "^0.6.2"
+color-eyre = "^0.6.3"
 petgraph = { version = "^0.6.4", features = ["serde-1"] }
 indicatif = "^0.16"
 err-derive = "^0.3.1"

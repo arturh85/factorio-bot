@@ -44,7 +44,7 @@ clap_complete = {version = "^3.2.5", optional = true }
 reedline-repl-rs = { version = "^1.0.2", optional = true }
 
 # other
-color-eyre = "^0.6" # colorful human oriented error reports via panics
+color-eyre = "^0.6.3" # colorful human oriented error reports via panics
 dirs-next = "^2.0.0" # platform-specific standard locations of directories for config, cache and other
 
 [build-dependencies]

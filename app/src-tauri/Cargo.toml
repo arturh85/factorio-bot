@@ -41,7 +41,7 @@ clap = {version = "^3.2.25", optional = true }
 clap_complete = {version = "^3.2.5", optional = true }
 
 # repl
-reedline-repl-rs = { version = "^1.0.2", optional = true }
+reedline-repl-rs = { version = "^1.1.1", optional = true }
 
 # other
 color-eyre = "^0.6" # colorful human oriented error reports via panics

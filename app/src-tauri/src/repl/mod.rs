@@ -60,7 +60,7 @@ async fn update_prompt(context: &mut Context) -> Result<Option<String>> {
   let mut prompt = "repl".to_owned();
   if instance_state.is_some() {
     prompt += &Paint::blue(" [running]").bold().to_string();
-  };
+  }
   Ok(Some(prompt))
 }
 

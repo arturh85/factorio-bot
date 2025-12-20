@@ -114,13 +114,13 @@ impl<T, S, A: Array<Item = (ItemId, Rect<S>)>> QuadTree<T, S, A> {
     ///
     /// * `size`: the enclosing space for the quad-tree.
     /// * `allow_duplicates`: if false, the quadtree will
-    /// remove objects that have the same bounding box.
+    ///   remove objects that have the same bounding box.
     /// * `min_children`: the minimum amount of children
-    /// that a tree node will have. * `max_children`:
-    /// the maximum amount of children that a tree node
-    /// will have before it gets split. * `max_depth`:
-    /// the maximum depth that the tree can grow before it
-    /// stops.
+    ///   that a tree node will have.
+    /// * `max_children`: the maximum amount of children that a tree node
+    ///   will have before it gets split.
+    /// * `max_depth`: the maximum depth that the tree can grow before it
+    ///   stops.
     pub fn new(
         size: Rect<S>,
         allow_duplicates: bool,
@@ -203,7 +203,7 @@ impl<T, S, A: Array<Item = (ItemId, Rect<S>)>> QuadTree<T, S, A> {
     /// Retrieves an element by looking it up from the
     /// ItemId.
     pub fn get(&self, id: ItemId) -> Option<&T> {
-        self.elements.get(&id).map(|&(ref a, _)| a)
+        self.elements.get(&id).map(|(a, _)| a)
     }
 
     /// Returns an iterator of (element, bounding-box, id)
@@ -259,7 +259,7 @@ impl<T, S, A: Array<Item = (ItemId, Rect<S>)>> QuadTree<T, S, A> {
     /// * `&Rect`: The bounding box of that tree node
     /// * `usize`: The current depth
     /// * `bool`: True if the node is a leaf-node, False if
-    /// the node is a branch node.
+    ///   the node is a branch node.
     pub fn inspect<F: FnMut(&Rect<S>, usize, bool)>(&self, mut f: F) {
         self.root.inspect(&mut f);
     }
@@ -471,7 +471,7 @@ impl<S, A: Array<Item = (ItemId, Rect<S>)>> QuadNode<S, A> {
                 Ok(())
             })
             .ok();
-            elements.sort_by(|&(id1, _), &(ref id2, _)| id1.cmp(id2));
+            elements.sort_by(|(id1, _), (id2, _)| id1.cmp(id2));
             elements.dedup();
             *self = QuadNode::Leaf {
                 aabb,

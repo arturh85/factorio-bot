@@ -55,7 +55,7 @@ impl AppSettings {
 
   fn merge(a: &mut Value, b: &Value) {
     match (a, b) {
-      (&mut Value::Object(ref mut a), &Value::Object(ref b)) => {
+      (&mut Value::Object(ref mut a), Value::Object(b)) => {
         for (k, v) in b {
           AppSettings::merge(a.entry(k.clone()).or_insert(Value::Null), v);
         }
@@ -70,7 +70,7 @@ impl AppSettings {
 #[allow(clippy::module_name_repetitions)]
 pub fn load_app_settings() -> Result<AppSettings> {
   let mut app_settings = AppSettings::load(paths::settings_file())?;
-  if app_settings.factorio.workspace_path == "" {
+  if app_settings.factorio.workspace_path.is_empty() {
     let s: String = paths::workspace_dir().to_str().unwrap().into();
     app_settings.factorio.workspace_path = Cow::from(s);
   }

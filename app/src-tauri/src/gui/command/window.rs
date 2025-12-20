@@ -9,5 +9,5 @@ pub fn maximize_window(app_handle: AppHandle<Wry>) -> Result<(), String> {
     .get_window("main")
     .unwrap()
     .maximize()
-    .map_err(|e| format!("error: {}", e))
+    .map_err(|e| format!("error: {e}"))
 }

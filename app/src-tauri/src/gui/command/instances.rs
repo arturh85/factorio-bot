@@ -23,7 +23,7 @@ pub async fn start_instances(
 
   let app_settings = app_settings.read().await;
   let workspace_path = paths::workspace_dir();
-  std::fs::create_dir_all(&workspace_path).map_err(|e| format!("error: {}", e))?;
+  std::fs::create_dir_all(&workspace_path).map_err(|e| format!("error: {e}"))?;
 
   let map_exchange_string = app_settings.factorio.map_exchange_string.to_string();
   let seed = app_settings.factorio.seed.to_string();
@@ -49,12 +49,12 @@ pub async fn start_instances(
       *instance_state = Some(started_instance_state);
       app_handle
         .emit_all("instances_started", true)
-        .map_err(|e| format!("error: {}", e))?;
+        .map_err(|e| format!("error: {e}"))?;
       Ok(())
     }
     Err(err) => {
       error!("failed to start instances: {:?}", err);
-      Err(format!("{:?}", err))
+      Err(format!("{err:?}"))
     }
   }
 }
@@ -78,7 +78,7 @@ pub async fn stop_instances(
   instance_state.take().unwrap().stop().unwrap();
   app_handle
     .emit_all("instances_stopped", true)
-    .map_err(|e| format!("error: {}", e))?;
+    .map_err(|e| format!("error: {e}"))?;
   *instance_state = None;
   Ok(())
 }

@@ -476,7 +476,8 @@ end
                     })
                 })
                 .collect();
-            let request_entities: LuaResult<Vec<RequestEntity>> = request_entities.into_iter().collect();
+            let request_entities: LuaResult<Vec<RequestEntity>> =
+                request_entities.into_iter().collect();
             async move {
                 let res = _rcon
                     .as_ref()

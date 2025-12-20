@@ -46,12 +46,12 @@ pub async fn start(mut context: Context) -> Result<Option<Command<'static>>> {
   }
   let matches = app.clone().get_matches();
   if let Ok(shell) = matches.value_of_t::<Shell>("shell") {
-    eprintln!("Generating completion file for {}...", shell);
+    eprintln!("Generating completion file for {shell}...");
     print_completions(shell, &mut app);
     return Ok(None);
   }
   for subcommand in &subcommands {
-    if let Some(matches) = matches.subcommand_matches(&subcommand.name()) {
+    if let Some(matches) = matches.subcommand_matches(subcommand.name()) {
       let callback = subcommand.build_callback();
       callback(matches.clone(), &mut context).await?;
       return Ok(None);

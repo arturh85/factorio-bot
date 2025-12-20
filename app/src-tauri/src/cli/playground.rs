@@ -5,7 +5,7 @@ use factorio_bot_core::miette::Result;
 use factorio_bot_core::paris::info;
 
 impl Subcommand for ThisCommand {
-  fn name(&self) -> &str {
+  fn name(&self) -> &'static str {
     "play"
   }
   fn build_command(&self) -> Command<'static> {

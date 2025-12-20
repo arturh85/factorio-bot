@@ -16,7 +16,7 @@ pub async fn load_settings(
 #[tauri::command]
 pub async fn save_settings(app_settings: State<'_, RwLock<AppSettings>>) -> Result<(), String> {
   let app_settings = app_settings.write().await;
-  AppSettings::save(settings_file(), &*app_settings).map_err(ERR_TO_STRING)
+  AppSettings::save(settings_file(), &app_settings).map_err(ERR_TO_STRING)
 }
 
 #[tauri::command]
@@ -26,5 +26,5 @@ pub async fn update_settings(
 ) -> Result<(), String> {
   let mut app_settings = app_settings.write().await;
   *app_settings = settings;
-  AppSettings::save(settings_file(), &*app_settings).map_err(ERR_TO_STRING)
+  AppSettings::save(settings_file(), &app_settings).map_err(ERR_TO_STRING)
 }

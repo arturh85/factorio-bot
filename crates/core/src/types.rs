@@ -967,16 +967,22 @@ impl FromLuaMulti<'_> for Position {
     fn from_lua_multi(values: LuaMultiValue<'_>, _lua: &Lua) -> LuaResult<Self> {
         let values: Vec<LuaValue> = values.into_iter().collect();
         if values.len() < 2 {
-            return Err(LuaError::RuntimeError("invalid position: too few values".into()));
+            return Err(LuaError::RuntimeError(
+                "invalid position: too few values".into(),
+            ));
         }
         if let LuaValue::Number(x) = values[0] {
             if let LuaValue::Number(y) = values[1] {
                 Ok(Position::new(x, y))
             } else {
-                Err(LuaError::RuntimeError("invalid position: y is not a number".into()))
+                Err(LuaError::RuntimeError(
+                    "invalid position: y is not a number".into(),
+                ))
             }
         } else {
-            Err(LuaError::RuntimeError("invalid position: x is not a number".into()))
+            Err(LuaError::RuntimeError(
+                "invalid position: x is not a number".into(),
+            ))
         }
     }
 }

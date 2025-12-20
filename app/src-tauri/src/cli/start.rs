@@ -9,7 +9,7 @@ use factorio_bot_core::process::process_control::{
 };
 
 impl Subcommand for ThisCommand {
-  fn name(&self) -> &str {
+  fn name(&self) -> &'static str {
     "start"
   }
   fn build_command(&self) -> Command<'static> {

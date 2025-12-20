@@ -2,8 +2,8 @@ use crate::context::Context;
 use crate::repl::{Error, Subcommand};
 use factorio_bot_core::miette::{IntoDiagnostic, Result};
 use factorio_bot_core::paris::error;
-use reedline_repl_rs::clap::{builder::PossibleValuesParser, Arg, ArgMatches, Command};
 use reedline_repl_rs::clap::builder::PossibleValue;
+use reedline_repl_rs::clap::{builder::PossibleValuesParser, Arg, ArgMatches, Command};
 use reedline_repl_rs::Repl;
 use std::str::FromStr;
 use strum::{EnumIter, EnumMessage, EnumString, IntoEnumIterator, IntoStaticStr};
@@ -12,13 +12,13 @@ async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String
   let command = DumpType::from_str(
     matches
       .get_one::<String>("type")
-      .map(|s| s.as_str())
+      .map(std::string::String::as_str)
       .expect("Has default value"),
   )
   .into_diagnostic()?;
   let save_path = match matches
     .get_one::<String>("save")
-    .map(|s| s.as_str())
+    .map(std::string::String::as_str)
     .expect("Has default value")
   {
     "" => None,

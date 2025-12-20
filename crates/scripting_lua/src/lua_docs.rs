@@ -4,9 +4,9 @@ use crate::globals::rcon::create_lua_rcon;
 use crate::globals::world::create_lua_world;
 use factorio_bot_core::factorio::rcon::FactorioRcon;
 use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::parking_lot::Mutex;
 use factorio_bot_core::plan::planner::Planner;
-use factorio_bot_core::mlua::prelude::*;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -26,7 +26,14 @@ pub fn write_lua_docs(target_path: PathBuf) -> LuaResult<()> {
     let rcon_table = create_lua_rcon(&lua, rcon, planner.real_world)?;
     let code_by_path: HashMap<String, String> = HashMap::new();
     let code_by_path: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(code_by_path));
-    create_lua_globals(&lua, vec![], cwd.to_path_buf(), stdout, stderr, code_by_path)?;
+    create_lua_globals(
+        &lua,
+        vec![],
+        cwd.to_path_buf(),
+        stdout,
+        stderr,
+        code_by_path,
+    )?;
 
     write_lua_doc(target_path.join("globals.lua"), &lua.globals());
     write_lua_doc(target_path.join("world.lua"), &world_table);

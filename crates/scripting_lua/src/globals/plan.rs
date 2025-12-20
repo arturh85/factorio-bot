@@ -1,9 +1,9 @@
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::graph::task_graph::TaskGraph;
+use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::num_traits::FromPrimitive;
 use factorio_bot_core::parking_lot::RwLock;
 use factorio_bot_core::plan::plan_builder::PlanBuilder;
-use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::types::{Direction, FactorioEntity, PlayerId, Position, PositionRadius};
 use std::sync::Arc;
 

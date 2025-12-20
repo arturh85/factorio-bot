@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 #[tauri::command]
 pub fn file_exists(path: &str) -> Result<bool, String> {
-  let path = PathBuf::from_str(path).map_err(|e| format!("error: {}", e))?;
+  let path = PathBuf::from_str(path).map_err(|e| format!("error: {e}"))?;
   Ok(path.exists())
 }
 
@@ -16,5 +16,5 @@ pub fn is_port_available(port: u16) -> bool {
 
 #[tauri::command]
 pub fn open_in_browser(url: String) -> Result<(), String> {
-  open::that(url).map_err(|e| format!("error: {}", e))
+  open::that(url).map_err(|e| format!("error: {e}"))
 }

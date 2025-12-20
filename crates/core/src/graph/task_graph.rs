@@ -15,8 +15,8 @@ use petgraph::stable_graph::{Edges, NodeIndices, StableGraph};
 use petgraph::visit::EdgeRef;
 use petgraph::Directed;
 use ptree::graph::print_graph;
-use std::fmt::Formatter;
 use std::collections::HashMap;
+use std::fmt::Formatter;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -423,8 +423,6 @@ impl std::fmt::Debug for TaskNode {
         Ok(())
     }
 }
-
-pub struct TaskResult(i32);
 
 pub type TaskGraphInner = StableGraph<TaskNode, f64>;
 

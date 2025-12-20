@@ -2,9 +2,9 @@ use factorio_bot_core::factorio::util::blueprint_build_area;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::factorio_blueprint::BlueprintCodec;
 use factorio_bot_core::mlua::prelude::*;
+use factorio_bot_core::serde_json;
 use factorio_bot_core::test_utils::draw_world;
 use factorio_bot_core::types::{FactorioBlueprintInfo, PlayerId, Position, Rect};
-use factorio_bot_core::serde_json;
 use std::path::PathBuf;
 use std::sync::Arc;
 

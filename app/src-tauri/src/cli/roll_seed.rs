@@ -8,7 +8,7 @@ use factorio_bot_core::miette::{IntoDiagnostic, Result};
 use factorio_bot_scripting_lua::roll_best_seed::{roll_seed, RollSeedLimit};
 
 impl Subcommand for ThisCommand {
-  fn name(&self) -> &str {
+  fn name(&self) -> &'static str {
     "roll-seed"
   }
   fn build_command(&self) -> Command<'static> {
@@ -94,7 +94,7 @@ async fn run(matches: ArgMatches, _context: &mut Context) -> Result<()> {
   )
   .await?
   {
-    println!("Best Seed: {} with Score {}", seed, score);
+    println!("Best Seed: {seed} with Score {score}");
   } else {
     eprintln!("no seed found");
   }

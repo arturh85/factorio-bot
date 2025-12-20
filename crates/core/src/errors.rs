@@ -79,7 +79,7 @@ pub struct FactorioLevelFailed {}
 pub struct FactorioAlreadyStarted {}
 
 #[derive(Error, Debug, Diagnostic)]
-#[error("player not found")]
+#[error("player not found (id {player_id})")]
 #[diagnostic(
     code(factorio::workspace::not_found),
     help("provide correct player id")
@@ -104,14 +104,14 @@ pub struct RconPlayerBlockesAllPlacement {}
 pub struct RconUnexpectedEmptyResponse {}
 
 #[derive(Error, Debug, Diagnostic)]
-#[error("Unexpected Output")]
+#[error("Unexpected Output: {output}")]
 #[diagnostic(code(factorio::workspace::not_found), help("read logs"))]
 pub struct RconUnexpectedOutput {
     pub output: String,
 }
 
 #[derive(Error, Debug, Diagnostic)]
-#[error("Unexpected Response")]
+#[error("Unexpected Response: {message}")]
 #[diagnostic(code(factorio::workspace::not_found), help("read logs"))]
 pub struct RconError {
     pub message: String,
@@ -123,7 +123,7 @@ pub struct RconError {
 pub struct RconTimeout {}
 
 #[derive(Error, Debug, Diagnostic)]
-#[error("max radius: 3000")]
+#[error("max radius request {limit} exceeds limit of 3000")]
 #[diagnostic(
     code(factorio::workspace::not_found),
     help("use lower value for radius")
@@ -153,14 +153,14 @@ pub struct RconTargetPositionBlocked {}
 pub struct RconNoPathFound {}
 
 #[derive(Error, Debug, Diagnostic)]
-#[error("invalid rect: expected A,B;C,D like 1.2,3.4;5.6,7.8")]
+#[error("invalid rect input: '{invalid_input}' (expected A,B;C,D like 1.2,3.4;5.6,7.8)")]
 #[diagnostic(code(factorio::workspace::not_found), help("fix rect formatting"))]
 pub struct RectInvalid {
     pub invalid_input: String,
 }
 
 #[derive(Error, Debug, Diagnostic)]
-#[error("player does not have item in inventory")]
+#[error("player {player_id} does not have item '{item}' in inventory")]
 #[diagnostic(code(factorio::workspace::not_found), help("fix logic"))]
 pub struct PlayerMissingItem {
     pub player_id: PlayerId,

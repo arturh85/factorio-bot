@@ -5,8 +5,8 @@ use factorio_bot_core::paris::{error, info};
 use factorio_bot_core::process::process_control::{
   FactorioInstance, FactorioParams, FactorioStartCondition,
 };
-use reedline_repl_rs::clap::{builder::PossibleValuesParser, Arg, ArgMatches, Command};
 use reedline_repl_rs::clap::builder::PossibleValue;
+use reedline_repl_rs::clap::{builder::PossibleValuesParser, Arg, ArgMatches, Command};
 use reedline_repl_rs::crossterm::event::{KeyCode, KeyModifiers};
 use reedline_repl_rs::reedline::ReedlineEvent;
 use reedline_repl_rs::Repl;
@@ -17,7 +17,7 @@ async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String
   let action = Action::from_str(
     matches
       .get_one::<String>("action")
-      .map(|s| s.as_str())
+      .map(std::string::String::as_str)
       .expect("Has default value"),
   )
   .into_diagnostic()?;
@@ -26,7 +26,7 @@ async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String
       let app_settings = context.app_settings.read().await;
       let client_count: u8 = match matches
         .get_one::<String>("clients")
-        .map(|s| s.as_str())
+        .map(std::string::String::as_str)
         .expect("Has default value")
       {
         "" => app_settings.factorio.client_count,
@@ -35,11 +35,11 @@ async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String
       let write_logs: bool = matches.get_flag("logs");
       let verbose: bool = matches.get_flag("verbose");
       let seed = config_fallback(
-        matches.get_one::<String>("seed").map(|s| s.as_str()),
+        matches.get_one::<String>("seed").map(std::string::String::as_str),
         &app_settings.factorio.seed,
       );
       let map_exchange_string = config_fallback(
-        matches.get_one::<String>("map").map(|s| s.as_str()),
+        matches.get_one::<String>("map").map(std::string::String::as_str),
         &app_settings.factorio.map_exchange_string,
       );
       let wait_until_finished = matches.get_flag("wait_until_finished");

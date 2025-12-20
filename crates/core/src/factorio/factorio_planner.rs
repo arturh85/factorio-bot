@@ -1,12 +1,14 @@
 use std::io::Read;
 
-use base64::{Engine as _, engine::general_purpose};
+use base64::{engine::general_purpose, Engine as _};
 use flate2::read::ZlibDecoder;
 use miette::{IntoDiagnostic, Result};
 use serde_json::Value;
 
 pub fn decode_zlibencoded_json(exchange_str: &str) -> Result<serde_json::Value> {
-    let content = general_purpose::STANDARD.decode(exchange_str).into_diagnostic()?;
+    let content = general_purpose::STANDARD
+        .decode(exchange_str)
+        .into_diagnostic()?;
     let mut content = ZlibDecoder::new(&content[..]);
     let mut s = String::new();
     content.read_to_string(&mut s).unwrap();

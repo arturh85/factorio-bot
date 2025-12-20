@@ -31,7 +31,7 @@ pub async fn execute_script(
         let bot_count = app_settings.factorio.client_count;
         let (stdout, stderr) = run_script_file(&mut planner, &path[1..], bot_count, true)
           .await
-          .map_err(|e| format!("error: {:?}", e))?;
+          .map_err(|e| format!("error: {e:?}"))?;
         return Ok((stdout, stderr));
       }
       #[cfg(not(feature = "lua"))]
@@ -68,7 +68,7 @@ pub async fn execute_code(
         let bot_count = app_settings.read().await.factorio.client_count;
         let (stdout, stderr) = run_script(&mut planner, &language, &code, None, bot_count, true)
           .await
-          .map_err(|e| format!("error: {:?}", e))?;
+          .map_err(|e| format!("error: {e:?}"))?;
         return Ok((stdout, stderr));
       }
       #[cfg(not(feature = "lua"))]
@@ -108,7 +108,7 @@ pub async fn load_scripts_in_directory(
       return Err("path not directory".into());
     }
 
-    let readdir = dir_path.read_dir().map_err(|e| format!("error: {}", e))?;
+    let readdir = dir_path.read_dir().map_err(|e| format!("error: {e}"))?;
 
     let result = readdir
       .filter(|entry| entry.is_ok() && entry.as_ref().unwrap().file_type().is_ok())
@@ -161,7 +161,7 @@ pub async fn load_script(
     if !dir_path.is_file() {
       return Err("path not directory".into());
     }
-    std::fs::read_to_string(dir_path).map_err(|e| format!("error: {}", e))
+    std::fs::read_to_string(dir_path).map_err(|e| format!("error: {e}"))
   }
   #[cfg(not(feature = "lua"))]
   {
@@ -195,7 +195,7 @@ pub async fn save_script(
     if !dir_path.is_file() {
       return Err("path not directory".into());
     }
-    std::fs::write(dir_path, code).map_err(|e| format!("error: {}", e))
+    std::fs::write(dir_path, code).map_err(|e| format!("error: {e}"))
   }
   #[cfg(not(feature = "lua"))]
   {

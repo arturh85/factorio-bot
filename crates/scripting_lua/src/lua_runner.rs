@@ -6,8 +6,8 @@ use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::mlua::LuaSerdeExt;
 use factorio_bot_core::parking_lot::Mutex;
 use factorio_bot_core::plan::planner::Planner;
-use factorio_bot_core::tokio::runtime::Runtime;
 use factorio_bot_core::serde_json;
+use factorio_bot_core::tokio::runtime::Runtime;
 use factorio_bot_scripting::{buffers_to_string, redirect_buffers};
 use miette::Result;
 use std::collections::HashMap;
@@ -60,7 +60,8 @@ pub async fn run_lua(
             thread_stdout,
             thread_stderr,
             _code_by_path,
-        ).unwrap();
+        )
+        .unwrap();
 
         let globals = lua.globals();
         globals.set("world", world).unwrap();

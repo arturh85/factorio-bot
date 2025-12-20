@@ -41,4 +41,4 @@ pub fn start(context: Context) -> Result<()> {
   Ok(())
 }
 
-pub const ERR_TO_STRING: fn(Report) -> String = |e| String::from("error: ") + &*format!("{:?}", e);
+pub const ERR_TO_STRING: fn(Report) -> String = |e| String::from("error: ") + &*format!("{e:?}");

@@ -1,5 +1,5 @@
-use factorio_bot_core::regex::Regex;
 use factorio_bot_core::mlua;
+use factorio_bot_core::regex::Regex;
 use factorio_bot_core::thiserror::Error;
 use factorio_bot_scripting::line_offset;
 use miette::{miette, Diagnostic, NamedSource, SourceSpan};

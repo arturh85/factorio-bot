@@ -1,8 +1,8 @@
+use factorio_bot_core::mlua::prelude::*;
+use factorio_bot_core::mlua::Variadic as LuaVariadic;
 use factorio_bot_core::num_traits::{FromPrimitive, ToPrimitive};
 use factorio_bot_core::paris::{error, info, warn};
 use factorio_bot_core::parking_lot::Mutex;
-use factorio_bot_core::mlua::prelude::*;
-use factorio_bot_core::mlua::Variadic as LuaVariadic;
 use factorio_bot_core::types::{Direction, PlayerId};
 use itertools::Itertools;
 use std::collections::HashMap;

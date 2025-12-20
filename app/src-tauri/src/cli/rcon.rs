@@ -8,7 +8,7 @@ use factorio_bot_core::settings::FactorioSettings;
 use std::sync::Arc;
 
 impl Subcommand for ThisCommand {
-  fn name(&self) -> &str {
+  fn name(&self) -> &'static str {
     "rcon"
   }
   fn build_command(&self) -> Command<'static> {

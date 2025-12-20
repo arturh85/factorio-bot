@@ -6,7 +6,7 @@ use reedline_repl_rs::Repl;
 
 async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String>, Error> {
   let command = matches
-    .value_of("rcon-command")
+    .get_one::<String>("rcon-command")
     .expect("Required arg validated by clap")
     .to_owned();
   let instance_state = context.instance_state.read().await;
@@ -24,7 +24,7 @@ async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String
 }
 
 impl Subcommand for ThisCommand {
-  fn name(&self) -> &str {
+  fn name(&self) -> &'static str {
     "rcon"
   }
   fn build_command(&self, repl: Repl<Context, Error>) -> Repl<Context, Error> {

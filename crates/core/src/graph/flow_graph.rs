@@ -319,7 +319,7 @@ impl FlowGraph {
             .update_edge(source_flow_idx, target_flow_idx, flow);
     }
 
-    pub fn inner_graph(&self) -> RwLockReadGuard<FlowGraphInner> {
+    pub fn inner_graph(&self) -> RwLockReadGuard<'_, FlowGraphInner> {
         self.inner.read()
     }
     pub fn node_at(&self, position: &Position) -> Option<NodeIndex> {

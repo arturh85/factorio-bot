@@ -4,15 +4,14 @@ use crate::globals::rcon::create_lua_rcon;
 use crate::globals::world::create_lua_world;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::mlua::LuaSerdeExt;
-use factorio_bot_core::paris::error;
 use factorio_bot_core::parking_lot::Mutex;
 use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_core::tokio::runtime::Runtime;
-use factorio_bot_core::{mlua, serde_json};
+use factorio_bot_core::serde_json;
 use factorio_bot_scripting::{buffers_to_string, redirect_buffers};
-use miette::{IntoDiagnostic, Result};
+use miette::Result;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 

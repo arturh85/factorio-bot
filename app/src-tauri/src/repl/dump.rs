@@ -2,17 +2,25 @@ use crate::context::Context;
 use crate::repl::{Error, Subcommand};
 use factorio_bot_core::miette::{IntoDiagnostic, Result};
 use factorio_bot_core::paris::error;
-use reedline_repl_rs::clap::{
-  builder::PossibleValuesParser, Arg, ArgMatches, Command, PossibleValue,
-};
+use reedline_repl_rs::clap::{builder::PossibleValuesParser, Arg, ArgMatches, Command};
+use reedline_repl_rs::clap::builder::PossibleValue;
 use reedline_repl_rs::Repl;
 use std::str::FromStr;
 use strum::{EnumIter, EnumMessage, EnumString, IntoEnumIterator, IntoStaticStr};
 
 async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String>, Error> {
-  let command =
-    DumpType::from_str(matches.value_of("type").expect("Has default value")).into_diagnostic()?;
-  let save_path = match matches.value_of("save").expect("Has default value") {
+  let command = DumpType::from_str(
+    matches
+      .get_one::<String>("type")
+      .map(|s| s.as_str())
+      .expect("Has default value"),
+  )
+  .into_diagnostic()?;
+  let save_path = match matches
+    .get_one::<String>("save")
+    .map(|s| s.as_str())
+    .expect("Has default value")
+  {
     "" => None,
     save_path => Some(save_path),
   };
@@ -69,7 +77,7 @@ enum DumpType {
 }
 
 impl Subcommand for ThisCommand {
-  fn name(&self) -> &str {
+  fn name(&self) -> &'static str {
     "dump"
   }
   fn build_command(&self, repl: Repl<Context, Error>) -> Repl<Context, Error> {
@@ -81,7 +89,7 @@ impl Subcommand for ThisCommand {
             .required(true)
             .value_parser(PossibleValuesParser::new(DumpType::iter().map(|action| {
               let message = action.get_message().unwrap();
-              PossibleValue::new(action.into()).help(message)
+              PossibleValue::new(Into::<&str>::into(action)).help(message)
             })))
             .help("type of information to dump"),
         )

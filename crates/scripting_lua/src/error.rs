@@ -46,7 +46,7 @@ pub struct LuaError {
     pub message: String,
     pub short: String,
     #[source_code]
-    pub src: NamedSource,
+    pub src: NamedSource<String>,
     #[label("{short}")]
     pub bad_bit: SourceSpan,
 }

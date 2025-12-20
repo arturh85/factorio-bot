@@ -154,7 +154,7 @@ impl TaskGraph {
         r64(weight)
     }
 
-    pub fn node_indices(&self) -> NodeIndices<TaskNode, DefaultIx> {
+    pub fn node_indices(&self) -> NodeIndices<'_, TaskNode, DefaultIx> {
         self.inner.node_indices()
     }
 
@@ -279,7 +279,7 @@ impl TaskGraph {
         &self,
         i: NodeIndex,
         dir: petgraph::Direction,
-    ) -> Edges<f64, Directed, DefaultIx> {
+    ) -> Edges<'_, f64, Directed, DefaultIx> {
         self.inner.edges_directed(i, dir)
     }
 }

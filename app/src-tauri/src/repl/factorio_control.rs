@@ -5,9 +5,8 @@ use factorio_bot_core::paris::{error, info};
 use factorio_bot_core::process::process_control::{
   FactorioInstance, FactorioParams, FactorioStartCondition,
 };
-use reedline_repl_rs::clap::{
-  builder::PossibleValuesParser, Arg, ArgMatches, Command, PossibleValue,
-};
+use reedline_repl_rs::clap::{builder::PossibleValuesParser, Arg, ArgMatches, Command};
+use reedline_repl_rs::clap::builder::PossibleValue;
 use reedline_repl_rs::crossterm::event::{KeyCode, KeyModifiers};
 use reedline_repl_rs::reedline::ReedlineEvent;
 use reedline_repl_rs::Repl;
@@ -15,24 +14,36 @@ use std::str::FromStr;
 use strum::{EnumIter, EnumMessage, EnumString, IntoEnumIterator, IntoStaticStr};
 
 async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String>, Error> {
-  let action =
-    Action::from_str(matches.value_of("action").expect("Has default value")).into_diagnostic()?;
+  let action = Action::from_str(
+    matches
+      .get_one::<String>("action")
+      .map(|s| s.as_str())
+      .expect("Has default value"),
+  )
+  .into_diagnostic()?;
   match action {
     Action::Start => {
       let app_settings = context.app_settings.read().await;
-      let client_count: u8 = match matches.value_of("clients").expect("Has default value") {
+      let client_count: u8 = match matches
+        .get_one::<String>("clients")
+        .map(|s| s.as_str())
+        .expect("Has default value")
+      {
         "" => app_settings.factorio.client_count,
         clients => clients.parse().into_diagnostic()?,
       };
-      let write_logs: bool = matches.is_present("logs");
-      let verbose: bool = matches.is_present("verbose");
-      let seed = config_fallback(matches.value_of("seed"), &app_settings.factorio.seed);
+      let write_logs: bool = matches.get_flag("logs");
+      let verbose: bool = matches.get_flag("verbose");
+      let seed = config_fallback(
+        matches.get_one::<String>("seed").map(|s| s.as_str()),
+        &app_settings.factorio.seed,
+      );
       let map_exchange_string = config_fallback(
-        matches.value_of("map"),
+        matches.get_one::<String>("map").map(|s| s.as_str()),
         &app_settings.factorio.map_exchange_string,
       );
-      let wait_until_finished = matches.is_present("wait_until_finished");
-      let recreate = matches.is_present("new");
+      let wait_until_finished = matches.get_flag("wait_until_finished");
+      let recreate = matches.get_flag("new");
       drop(app_settings);
       subcommand_start(
         context,
@@ -200,7 +211,7 @@ enum Action {
 }
 
 impl Subcommand for ThisCommand {
-  fn name(&self) -> &str {
+  fn name(&self) -> &'static str {
     "factorio"
   }
   fn build_command(&self, repl: Repl<Context, Error>) -> Repl<Context, Error> {
@@ -220,10 +231,10 @@ impl Subcommand for ThisCommand {
           .about("control factorio instances")
           .arg(
             Arg::new("action")
-              .default_value(Action::Start.into())
+              .default_value(Into::<&str>::into(Action::Start))
               .value_parser(PossibleValuesParser::new(Action::iter().map(|action| {
                 let message = action.get_message().unwrap();
-                PossibleValue::new(action.into()).help(message)
+                PossibleValue::new(Into::<&str>::into(action)).help(message)
               })))
               .help("what action to take"),
           )

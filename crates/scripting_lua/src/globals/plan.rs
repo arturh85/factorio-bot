@@ -11,7 +11,7 @@ pub fn create_lua_plan_builder(
     lua: &Lua,
     graph: Arc<RwLock<TaskGraph>>,
     world: Arc<FactorioWorld>,
-) -> LuaResult<LuaTable> {
+) -> LuaResult<LuaTable<'_>> {
     let map_table = lua.create_table()?;
     map_table.set(
         "__doc__header",

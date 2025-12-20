@@ -11,9 +11,12 @@ use reedline_repl_rs::Repl;
 use std::path::Path;
 
 async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String>, Error> {
-  let filename = matches.value_of("filename").unwrap().to_owned();
+  let filename = matches
+    .get_one::<String>("filename")
+    .unwrap()
+    .to_owned();
   let bot_count: PlayerId = matches
-    .value_of("bots")
+    .get_one::<String>("bots")
     .expect("Has default value")
     .parse()
     .into_diagnostic()?;
@@ -37,7 +40,7 @@ async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String
 }
 
 impl Subcommand for ThisCommand {
-  fn name(&self) -> &str {
+  fn name(&self) -> &'static str {
     "run"
   }
 

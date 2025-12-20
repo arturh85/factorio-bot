@@ -58,19 +58,19 @@ impl EntityGraph {
             resources: DashMap::new(),
         }
     }
-    pub fn inner_graph(&self) -> RwLockReadGuard<EntityGraphInner> {
+    pub fn inner_graph(&self) -> RwLockReadGuard<'_, EntityGraphInner> {
         self.entity_graph.read()
     }
-    pub fn inner_tree(&self) -> RwLockReadGuard<EntityQuadTree> {
+    pub fn inner_tree(&self) -> RwLockReadGuard<'_, EntityQuadTree> {
         self.entity_tree.read()
     }
-    pub fn tile_tree(&self) -> RwLockReadGuard<TileQuadTree> {
+    pub fn tile_tree(&self) -> RwLockReadGuard<'_, TileQuadTree> {
         self.tile_tree.read()
     }
-    pub fn blocked_tree(&self) -> RwLockReadGuard<BlockedQuadTree> {
+    pub fn blocked_tree(&self) -> RwLockReadGuard<'_, BlockedQuadTree> {
         self.blocked_tree.read()
     }
-    pub fn resource_tree(&self) -> RwLockReadGuard<ResourceQuadTree> {
+    pub fn resource_tree(&self) -> RwLockReadGuard<'_, ResourceQuadTree> {
         self.resource_tree.read()
     }
     pub fn entity_prototypes(&self) -> Arc<DashMap<String, FactorioEntityPrototype>> {

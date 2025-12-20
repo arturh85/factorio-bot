@@ -10,55 +10,53 @@ push = false
 publish = false
 
 [dependencies]
-rand = "^0.8.5"
-rcon = { version = "^0.6", features = ["rt-tokio"] }
-bb8 = "^0.8.1"
-serde = "^1.0.193"
-serde_derive = "^1.0.193"
-serde_json = "^1.0.108"
-config = "^0.13.3"
-pathfinding = "^4.3.3"
-parking_lot = "^0.12.1"
-paris = { version = "^1.5.15", features = ["timestamps", "macros"] }
-color-eyre = "^0.6.2"
-petgraph = { version = "^0.6.4", features = ["serde-1"] }
-indicatif = "^0.16"
-err-derive = "^0.3.1"
-wildmatch = "^2.1.1"
-image = "^0.24.7"
-imageproc = { version = "0.23.0"}
-rusttype = "^0.9.3"
-factorio-blueprint = "^0.3"
-include_dir = "^0.7.3"
-num-traits = "^0.2.17"
-runas = "^1.1.0"
-async-trait = "^0.1.74"
-tokio = { version = "^1.34.0", features = ["full", "tracing"] }
-noisy_float = { version = "^0.2", features = ["serde"] }
-typescript-definitions = { version = "0.1.11", package = "typescript-definitions-ufo-patch", features = ["export-typescript"] }
-enum-primitive-derive = "^0.3.0"
-unicode-segmentation = "^1.10.1"
-strum = { version = "^0.25.0", features = ["derive"] }
-dashmap = {version = "^5.5.3", features = ["serde"] }
-euclid = {version = "^0.22.8", features = ["serde"] }
-smallvec = { version = "1.11.2", features = ["serde"] }
-base64 = "^0.21.5"
-ptree = "^0.4"
-fnv = "^1.0.7"
-itertools = "^0.12.0"
-human-sort = "^0.2.2"
-flate2 = "^1.0.28"
-tar = "^0.4.40"
-xz2 = "^0.1.7"
-zip = "^0.6.6"
-toml = "^0.8.8"
-regex = "^1.10.2"
+rand = "0.8"
+rcon = { version = "0.6", features = ["rt-tokio"] }
+bb8 = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_derive = "1.0"
+serde_json = "1.0"
+config = "0.14"
+pathfinding = "4.14"
+parking_lot = "0.12"
+paris = { version = "1.5", features = ["timestamps", "macros"] }
+color-eyre = "0.6"
+petgraph = { version = "0.6", features = ["serde-1"] }
+indicatif = "0.17"
+wildmatch = "2.1"
+image = "0.25"
+imageproc = "0.25"
+rusttype = "0.9"
+factorio-blueprint = "0.3"
+include_dir = "0.7"
+num-traits = "0.2"
+runas = "1.2"
+async-trait = "0.1"
+tokio = { version = "1", features = ["full", "tracing"] }
+noisy_float = { version = "0.2", features = ["serde"] }
+typescript-definitions = { version = "0.1", package = "typescript-definitions-ufo-patch", features = ["export-typescript"] }
+enum-primitive-derive = "0.3"
+unicode-segmentation = "1.12"
+strum = { version = "0.26", features = ["derive"] }
+dashmap = {version = "6.1", features = ["serde"] }
+euclid = {version = "0.22", features = ["serde"] }
+smallvec = { version = "1.13", features = ["serde"] }
+base64 = "0.22"
+ptree = "0.5"
+fnv = "1.0"
+itertools = "0.13"
+human-sort = "0.2"
+flate2 = "1.0"
+tar = "0.4"
+xz2 = "0.1"
+zip = "2.2"
+toml = "0.8"
+regex = "1.11"
 schemars = { version = "0.8", features = ["preserve_order"] }
 mlua = { version = "0.9", features = ["lua54", "serialize", "macros"] }
-# rlua_serde = { git = "https://github.com/creepinson/rlua_serde" } # fork which is compatible with rlua 0.19
-miette = {version = "^5.10.0", features = ["fancy"] }
-thiserror = "^1.0.50"
-futures = "0.3.29"
+miette = {version = "7.4", features = ["fancy"] }
+thiserror = "2.0"
+futures = "0.3"
 #
 #[target.'cfg(unix)'.dependencies]
 #

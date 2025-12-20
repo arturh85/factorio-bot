@@ -4,7 +4,7 @@ use factorio_bot_core::factorio_blueprint::BlueprintCodec;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::test_utils::draw_world;
 use factorio_bot_core::types::{FactorioBlueprintInfo, PlayerId, Position, Rect};
-use factorio_bot_core::{mlua, serde_json};
+use factorio_bot_core::serde_json;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -12,7 +12,7 @@ pub fn create_lua_world(
     lua: &Lua,
     _world: Arc<FactorioWorld>,
     cwd: PathBuf,
-) -> LuaResult<LuaTable> {
+) -> LuaResult<LuaTable<'_>> {
     let map_table = lua.create_table()?;
     map_table.set(
         "__doc__header",

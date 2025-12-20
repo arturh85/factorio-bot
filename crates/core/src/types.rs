@@ -958,7 +958,7 @@ pub struct PrimeVueTreeNode {
 }
 
 impl IntoLua<'_> for InventoryResponse {
-    fn into_lua(self, lua: &Lua) -> LuaResult<LuaValue> {
+    fn into_lua(self, lua: &Lua) -> LuaResult<LuaValue<'_>> {
         lua.to_value(&self)
     }
 }
@@ -982,13 +982,13 @@ impl FromLuaMulti<'_> for Position {
 }
 
 impl IntoLua<'_> for Rect {
-    fn into_lua(self, lua: &Lua) -> LuaResult<LuaValue> {
+    fn into_lua(self, lua: &Lua) -> LuaResult<LuaValue<'_>> {
         lua.to_value(&self)
     }
 }
 
 impl IntoLua<'_> for FactorioEntity {
-    fn into_lua(self, lua: &Lua) -> LuaResult<LuaValue> {
+    fn into_lua(self, lua: &Lua) -> LuaResult<LuaValue<'_>> {
         lua.to_value(&self)
     }
 }

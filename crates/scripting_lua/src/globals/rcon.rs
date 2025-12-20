@@ -8,7 +8,7 @@ pub fn create_lua_rcon(
     lua: &Lua,
     _rcon: Arc<FactorioRcon>,
     _world: Arc<FactorioWorld>,
-) -> LuaResult<LuaTable> {
+) -> LuaResult<LuaTable<'_>> {
     let map_table = lua.create_table()?;
     map_table.set(
         "__doc__header",
@@ -52,7 +52,7 @@ end
                 Option<String>,
             )| {
                 let _rcon = rcon.clone();
-                let _lua = lua.clone();
+                let _lua = lua;
                 let search_center = Position::new(
                     search_center.get("x").unwrap(),
                     search_center.get("y").unwrap(),
@@ -234,7 +234,7 @@ end
             ): (PlayerId, String, LuaTable, u8, bool, bool, Vec<PlayerId>)| {
                 let _rcon = rcon.clone();
                 let _world = world.clone();
-                let _lua = lua.clone();
+                let _lua = lua;
                 let position =
                     Position::new(position.get("x").unwrap(), position.get("y").unwrap());
                 async move {
@@ -286,7 +286,7 @@ end
                 bool,
             )| {
                 let _rcon = rcon.clone();
-                let _lua = lua.clone();
+                let _lua = lua;
                 let position =
                     Position::new(position.get("x").unwrap(), position.get("y").unwrap());
                 async move {
@@ -322,7 +322,7 @@ end
             move |lua, (player_id, name, position): (PlayerId, String, LuaTable)| {
                 let _rcon = rcon.clone();
                 let _world = world.clone();
-                let _lua = lua.clone();
+                let _lua = lua;
                 let position =
                     Position::new(position.get("x").unwrap(), position.get("y").unwrap());
                 async move {
@@ -464,7 +464,7 @@ end
         "inventory_contents_at",
         lua.create_async_function(move |lua, inventories: LuaTable| {
             let _rcon = rcon.clone();
-            let _lua = lua.clone();
+            let _lua = lua;
             let request_entities: Vec<LuaResult<RequestEntity>> = inventories
                 .pairs::<u32, LuaTable>()
                 .map(|a| {
@@ -511,7 +511,7 @@ end
             move |lua, (player_id, name, position, direction): (PlayerId, String, LuaTable, u8)| {
                 let _rcon = rcon.clone();
                 let _world = world.clone();
-                let _lua = lua.clone();
+                let _lua = lua;
                 let position =
                     Position::new(position.get("x").unwrap(), position.get("y").unwrap());
 

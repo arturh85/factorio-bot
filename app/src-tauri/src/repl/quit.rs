@@ -13,7 +13,7 @@ async fn run(_matches: ArgMatches, context: &mut Context) -> Result<Option<Strin
 }
 
 impl Subcommand for ThisCommand {
-  fn name(&self) -> &str {
+  fn name(&self) -> &'static str {
     "quit"
   }
 

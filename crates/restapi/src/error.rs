@@ -9,7 +9,7 @@ pub struct ErrorResponse {
 
 impl ErrorResponse {
     pub fn new(message: String, code: u32) -> BadRequest<Json<ErrorResponse>> {
-        BadRequest(Some(Json(ErrorResponse { message, code })))
+        BadRequest(Json(ErrorResponse { message, code }))
     }
 }
 

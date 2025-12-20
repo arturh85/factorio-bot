@@ -76,11 +76,11 @@ impl<S, A: Array<Item = (ItemId, Rect<S>)>> Clone for QuadNode<S, A> {
     fn clone(&self) -> QuadNode<S, A> {
         match self {
             QuadNode::Branch {
-                ref aabb,
-                ref children,
-                ref in_all,
-                ref element_count,
-                ref depth,
+                aabb,
+                children,
+                in_all,
+                element_count,
+                depth,
             } => {
                 let children = [
                     children[0].clone(),
@@ -97,9 +97,9 @@ impl<S, A: Array<Item = (ItemId, Rect<S>)>> Clone for QuadNode<S, A> {
                 }
             }
             QuadNode::Leaf {
-                ref aabb,
-                ref elements,
-                ref depth,
+                aabb,
+                elements,
+                depth,
             } => QuadNode::Leaf {
                 aabb: *aabb,
                 elements: elements.clone(),
@@ -249,7 +249,7 @@ impl<T, S, A: Array<Item = (ItemId, Rect<S>)>> QuadTree<T, S, A> {
     }
 
     /// Returns an iterator over all the items in the tree.
-    pub fn iter(&self) -> ::std::collections::hash_map::Iter<ItemId, (T, Rect<S>)> {
+    pub fn iter(&self) -> ::std::collections::hash_map::Iter<'_, ItemId, (T, Rect<S>)> {
         self.elements.iter()
     }
 
@@ -284,8 +284,8 @@ impl<T, S, A: Array<Item = (ItemId, Rect<S>)>> QuadTree<T, S, A> {
 impl<S, A: Array<Item = (ItemId, Rect<S>)>> QuadNode<S, A> {
     fn bounding_box(&self) -> Rect<S> {
         match self {
-            QuadNode::Branch { ref aabb, .. } => *aabb,
-            QuadNode::Leaf { ref aabb, .. } => *aabb,
+            QuadNode::Branch { aabb, .. } => *aabb,
+            QuadNode::Leaf { aabb, .. } => *aabb,
         }
     }
 

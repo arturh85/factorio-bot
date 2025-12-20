@@ -6,11 +6,11 @@ use reedline_repl_rs::Repl;
 #[allow(clippy::unused_async)]
 async fn run(matches: ArgMatches, _context: &mut Context) -> Result<Option<String>, Error> {
   let _key = matches
-    .value_of("key")
+    .get_one::<String>("key")
     .expect("Required value validated by clap")
     .to_owned();
   let _value = matches
-    .value_of("key")
+    .get_one::<String>("value")
     .expect("Required value validated by clap")
     .to_owned();
 
@@ -18,7 +18,7 @@ async fn run(matches: ArgMatches, _context: &mut Context) -> Result<Option<Strin
 }
 
 impl Subcommand for ThisCommand {
-  fn name(&self) -> &str {
+  fn name(&self) -> &'static str {
     "set"
   }
   fn build_command(&self, repl: Repl<Context, Error>) -> Repl<Context, Error> {

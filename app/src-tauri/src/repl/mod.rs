@@ -59,13 +59,13 @@ async fn update_prompt(context: &mut Context) -> Result<Option<String>> {
   let instance_state = context.instance_state.read().await;
   let mut prompt = "repl".to_owned();
   if instance_state.is_some() {
-    prompt += &Box::new(Paint::blue(" [running]").bold()).to_string();
+    prompt += &Paint::blue(" [running]").bold().to_string();
   };
   Ok(Some(prompt))
 }
 
 pub trait Subcommand {
-  fn name(&self) -> &str;
+  fn name(&self) -> &'static str;
   fn build_command(&self, repl: Repl<Context, Error>) -> Repl<Context, Error>;
 }
 

@@ -10,3 +10,4 @@ mods/*/
 /tree.txt
 /resource.rc
 /.vscode/settings.json
+.DS_Store

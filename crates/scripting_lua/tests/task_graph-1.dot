@@ -1,7 +1,7 @@
 digraph {
     0 [ label = "Process Start" ]
     1 [ label = "Process End" ]
-    2 [ label = "Start: Mine rocksx3 with 1 Bots" ]
+    2 [ label = "Start: Mine Rocks x3 with 1 Bots" ]
     3 [ label = "Walk to [20, 20]" ]
     4 [ label = "Mining rock-huge" ]
     5 [ label = "Mining rock-huge" ]

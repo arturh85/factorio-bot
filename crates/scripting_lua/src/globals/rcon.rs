@@ -1,17 +1,15 @@
 use factorio_bot_core::factorio::rcon::FactorioRcon;
 use factorio_bot_core::factorio::world::FactorioWorld;
-use factorio_bot_core::rlua;
-use factorio_bot_core::rlua::{Context, Table};
+use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::types::{AreaFilter, PlayerId, Position, RequestEntity};
-use rlua_async::ContextExt;
 use std::sync::Arc;
 
 pub fn create_lua_rcon(
-    ctx: Context,
+    lua: &Lua,
     _rcon: Arc<FactorioRcon>,
     _world: Arc<FactorioWorld>,
-) -> rlua::Result<Table> {
-    let map_table = ctx.create_table()?;
+) -> LuaResult<LuaTable> {
+    let map_table = lua.create_table()?;
     map_table.set(
         "__doc__header",
         String::from(
@@ -45,26 +43,28 @@ end
     )?;
     map_table.set(
         "find_entities_in_radius",
-        ctx.create_async_function_mut::<_, _, _, _>(
-            move |_ctx,
+        lua.create_async_function(
+            move |lua,
                   (search_center, radius, search_name, search_type): (
-                Table,
+                LuaTable,
                 f64,
                 Option<String>,
                 Option<String>,
             )| {
                 let _rcon = rcon.clone();
+                let _lua = lua.clone();
                 let search_center = Position::new(
                     search_center.get("x").unwrap(),
                     search_center.get("y").unwrap(),
                 );
                 async move {
                     let filter = AreaFilter::PositionRadius((search_center, Some(radius)));
-                    Ok(_rcon
+                    let result = _rcon
                         .as_ref()
                         .find_entities_filtered(&filter, search_name, search_type)
                         .await
-                        .unwrap())
+                        .unwrap();
+                    _lua.to_value(&result)
                 }
             },
         )?,
@@ -84,7 +84,7 @@ end
     )?;
     map_table.set(
         "print",
-        ctx.create_async_function_mut::<_, _, _, _>(move |_ctx, message: String| {
+        lua.create_async_function(move |_lua, message: String| {
             let _rcon = rcon.clone();
             async move {
                 _rcon.as_ref().print(message.as_str()).await.unwrap();
@@ -107,7 +107,7 @@ end
     )?;
     map_table.set(
         "add_research",
-        ctx.create_async_function_mut::<_, _, _, _>(move |_ctx, technology_name: String| {
+        lua.create_async_function(move |_lua, technology_name: String| {
             let _rcon = rcon.clone();
             async move {
                 _rcon
@@ -134,7 +134,7 @@ end
     )?;
     map_table.set(
         "cheat_technology",
-        ctx.create_async_function_mut::<_, _, _, _>(move |_ctx, technology_name: String| {
+        lua.create_async_function(move |_lua, technology_name: String| {
             let _rcon = rcon.clone();
             async move {
                 _rcon
@@ -160,7 +160,7 @@ end
     )?;
     map_table.set(
         "cheat_all_technologies",
-        ctx.create_async_function_mut::<_, _, _, _>(move |_ctx, (): ()| {
+        lua.create_async_function(move |_lua, (): ()| {
             let _rcon = rcon.clone();
             async move {
                 _rcon.as_ref().cheat_all_technologies().await.unwrap();
@@ -185,8 +185,8 @@ end
     )?;
     map_table.set(
         "cheat_item",
-        ctx.create_async_function_mut::<_, _, _, _>(
-            move |_ctx, (player_id, name, count): (PlayerId, String, u32)| {
+        lua.create_async_function(
+            move |_lua, (player_id, name, count): (PlayerId, String, u32)| {
                 let _rcon = rcon.clone();
                 async move {
                     _rcon
@@ -221,8 +221,8 @@ end
     )?;
     map_table.set(
         "place_blueprint",
-        ctx.create_async_function_mut::<_, _, _, _>(
-            move |_ctx,
+        lua.create_async_function(
+            move |lua,
                   (
                 player_id,
                 blueprint,
@@ -231,13 +231,14 @@ end
                 force_build,
                 only_ghosts,
                 helper_player_ids,
-            ): (PlayerId, String, Table, u8, bool, bool, Vec<PlayerId>)| {
+            ): (PlayerId, String, LuaTable, u8, bool, bool, Vec<PlayerId>)| {
                 let _rcon = rcon.clone();
                 let _world = world.clone();
+                let _lua = lua.clone();
                 let position =
                     Position::new(position.get("x").unwrap(), position.get("y").unwrap());
                 async move {
-                    Ok(_rcon
+                    let result = _rcon
                         .as_ref()
                         .place_blueprint(
                             player_id,
@@ -250,7 +251,8 @@ end
                             &_world,
                         )
                         .await
-                        .unwrap())
+                        .unwrap();
+                    _lua.to_value(&result)
                 }
             },
         )?,
@@ -274,24 +276,26 @@ end
     )?;
     map_table.set(
         "cheat_blueprint",
-        ctx.create_async_function_mut::<_, _, _, _>(
-            move |_ctx,
+        lua.create_async_function(
+            move |lua,
                   (player_id, blueprint, position, direction, force_build): (
                 PlayerId,
                 String,
-                Table,
+                LuaTable,
                 u8,
                 bool,
             )| {
                 let _rcon = rcon.clone();
+                let _lua = lua.clone();
                 let position =
                     Position::new(position.get("x").unwrap(), position.get("y").unwrap());
                 async move {
-                    Ok(_rcon
+                    let result = _rcon
                         .as_ref()
                         .cheat_blueprint(player_id, blueprint, &position, direction, force_build)
                         .await
-                        .unwrap())
+                        .unwrap();
+                    _lua.to_value(&result)
                 }
             },
         )?,
@@ -314,18 +318,20 @@ end
     )?;
     map_table.set(
         "revive_ghost",
-        ctx.create_async_function_mut::<_, _, _, _>(
-            move |_ctx, (player_id, name, position): (PlayerId, String, Table)| {
+        lua.create_async_function(
+            move |lua, (player_id, name, position): (PlayerId, String, LuaTable)| {
                 let _rcon = rcon.clone();
                 let _world = world.clone();
+                let _lua = lua.clone();
                 let position =
                     Position::new(position.get("x").unwrap(), position.get("y").unwrap());
                 async move {
-                    Ok(_rcon
+                    let result = _rcon
                         .as_ref()
                         .revive_ghost(player_id, name.as_str(), &position, &_world)
                         .await
-                        .unwrap())
+                        .unwrap();
+                    _lua.to_value(&result)
                 }
             },
         )?,
@@ -348,8 +354,8 @@ end
     )?;
     map_table.set(
         "move",
-        ctx.create_async_function_mut::<_, _, _, _>(
-            move |_ctx, (player_id, position, radius): (PlayerId, Table, Option<f64>)| {
+        lua.create_async_function(
+            move |_lua, (player_id, position, radius): (PlayerId, LuaTable, Option<f64>)| {
                 let _rcon = rcon.clone();
                 let _world = world.clone();
                 let position =
@@ -384,8 +390,8 @@ end
     )?;
     map_table.set(
         "mine",
-        ctx.create_async_function_mut::<_, _, _, _>(
-            move |_ctx, (player_id, name, position, count): (PlayerId, String, Table, Option<u32>)| {
+        lua.create_async_function(
+            move |_lua, (player_id, name, position, count): (PlayerId, String, LuaTable, Option<u32>)| {
                 let _rcon = rcon.clone();
                 let _world = world.clone();
                 let position =
@@ -425,8 +431,8 @@ end
     )?;
     map_table.set(
         "craft",
-        ctx.create_async_function_mut::<_, _, _, _>(
-            move |_ctx, (player_id, name, count): (PlayerId, String, Option<u32>)| {
+        lua.create_async_function(
+            move |_lua, (player_id, name, count): (PlayerId, String, Option<u32>)| {
                 let _rcon = rcon.clone();
                 let _world = world.clone();
                 async move {
@@ -456,26 +462,28 @@ end
     )?;
     map_table.set(
         "inventory_contents_at",
-        ctx.create_async_function_mut::<_, _, _, _>(move |_ctx, inventories: Table| {
+        lua.create_async_function(move |lua, inventories: LuaTable| {
             let _rcon = rcon.clone();
-            let request_entities: Vec<RequestEntity> = inventories
-                .pairs::<u32, Table>()
-                .into_iter()
+            let _lua = lua.clone();
+            let request_entities: Vec<LuaResult<RequestEntity>> = inventories
+                .pairs::<u32, LuaTable>()
                 .map(|a| {
-                    let t: Table = a.unwrap().1;
-                    let position = Position::new(t.get("x").unwrap(), t.get("y").unwrap());
-                    RequestEntity {
-                        name: t.get("name").unwrap(),
+                    let t: LuaTable = a?.1;
+                    let position = Position::new(t.get("x")?, t.get("y")?);
+                    Ok(RequestEntity {
+                        name: t.get("name")?,
                         position,
-                    }
+                    })
                 })
                 .collect();
+            let request_entities: LuaResult<Vec<RequestEntity>> = request_entities.into_iter().collect();
             async move {
-                Ok(_rcon
+                let res = _rcon
                     .as_ref()
-                    .inventory_contents_at(request_entities)
+                    .inventory_contents_at(request_entities?)
                     .await
-                    .unwrap())
+                    .unwrap();
+                _lua.to_value(&res)
             }
         })?,
     )?;
@@ -499,19 +507,21 @@ end
     )?;
     map_table.set(
         "place_entity",
-        ctx.create_async_function_mut::<_, _, _, _>(
-            move |_ctx, (player_id, name, position, direction): (PlayerId, String, Table, u8)| {
+        lua.create_async_function(
+            move |lua, (player_id, name, position, direction): (PlayerId, String, LuaTable, u8)| {
                 let _rcon = rcon.clone();
                 let _world = world.clone();
+                let _lua = lua.clone();
                 let position =
                     Position::new(position.get("x").unwrap(), position.get("y").unwrap());
 
                 async move {
-                    Ok(_rcon
+                    let result = _rcon
                         .as_ref()
                         .place_entity(player_id, name, position, direction, &_world)
                         .await
-                        .unwrap())
+                        .unwrap();
+                    _lua.to_value(&result)
                 }
             },
         )?,
@@ -537,12 +547,12 @@ end
     )?;
     map_table.set(
         "insert_to_inventory",
-        ctx.create_async_function_mut::<_, _, _, _>(
-            move |_ctx,
+        lua.create_async_function(
+            move |_lua,
                   (player_id, entity_name, position, inventory_type, item_name, item_count): (
                 PlayerId,
                 String,
-                Table,
+                LuaTable,
                 u32,
                 String,
                 u32,
@@ -591,12 +601,12 @@ end
     )?;
     map_table.set(
         "remove_from_inventory",
-        ctx.create_async_function_mut::<_, _, _, _>(
-            move |_ctx,
+        lua.create_async_function(
+            move |_lua,
                   (player_id, entity_name, position, inventory_type, item_name, item_count): (
                 PlayerId,
                 String,
-                Table,
+                LuaTable,
                 u32,
                 String,
                 u32,

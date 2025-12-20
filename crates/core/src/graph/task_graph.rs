@@ -15,7 +15,7 @@ use petgraph::stable_graph::{Edges, NodeIndices, StableGraph};
 use petgraph::visit::EdgeRef;
 use petgraph::Directed;
 use ptree::graph::print_graph;
-use serde::__private::Formatter;
+use std::fmt::Formatter;
 use std::collections::HashMap;
 use std::sync::Arc;
 

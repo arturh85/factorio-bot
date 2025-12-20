@@ -3,17 +3,16 @@ use factorio_bot_core::graph::task_graph::TaskGraph;
 use factorio_bot_core::num_traits::FromPrimitive;
 use factorio_bot_core::parking_lot::RwLock;
 use factorio_bot_core::plan::plan_builder::PlanBuilder;
-use factorio_bot_core::rlua;
-use factorio_bot_core::rlua::{Context, Table};
+use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::types::{Direction, FactorioEntity, PlayerId, Position, PositionRadius};
 use std::sync::Arc;
 
 pub fn create_lua_plan_builder(
-    ctx: Context,
+    lua: &Lua,
     graph: Arc<RwLock<TaskGraph>>,
     world: Arc<FactorioWorld>,
-) -> rlua::Result<Table> {
-    let map_table = ctx.create_table()?;
+) -> LuaResult<LuaTable> {
+    let map_table = lua.create_table()?;
     map_table.set(
         "__doc__header",
         String::from(
@@ -50,8 +49,8 @@ end
     )?;
     map_table.set(
         "mine",
-        ctx.create_function(
-            move |_ctx, (player_id, position, name, count): (PlayerId, Table, String, u32)| {
+        lua.create_function(
+            move |_lua, (player_id, position, name, count): (PlayerId, LuaTable, String, u32)| {
                 plan_builder
                     .mine(
                         player_id,
@@ -85,12 +84,12 @@ end
     )?;
     map_table.set(
         "place",
-        ctx.create_function(
-            move |_ctx,
+        lua.create_function(
+            move |_lua,
                   (player_id, entity_name, position, direction): (
                 PlayerId,
                 String,
-                Table,
+                LuaTable,
                 Option<u8>,
             )| {
                 let entity = FactorioEntity::from_prototype(
@@ -123,8 +122,8 @@ end
     let plan_builder = _plan_builder.clone();
     map_table.set(
         "walk",
-        ctx.create_function(
-            move |_ctx, (player_id, position, radius): (PlayerId, Table, f64)| {
+        lua.create_function(
+            move |_lua, (player_id, position, radius): (PlayerId, LuaTable, f64)| {
                 plan_builder
                     .add_walk(
                         player_id,
@@ -153,7 +152,7 @@ end
     )?;
     map_table.set(
         "task_graph_graphviz",
-        ctx.create_function(move |_ctx, ()| {
+        lua.create_function(move |_lua, ()| {
             let graph = graph.read();
             Ok(graph.graphviz_dot())
         })?,
@@ -172,7 +171,7 @@ end
     )?;
     map_table.set(
         "task_graph_mermaid_gantt",
-        ctx.create_function(move |_ctx, (bot_ids, title): (Vec<u8>, String)| {
+        lua.create_function(move |_lua, (bot_ids, title): (Vec<u8>, String)| {
             let graph = graph.read();
             Ok(graph.mermaid_gantt(bot_ids, &title))
         })?,
@@ -193,7 +192,7 @@ end
     )?;
     map_table.set(
         "group_start",
-        ctx.create_function(move |_ctx, label: String| {
+        lua.create_function(move |_lua, label: String| {
             plan_builder.group_start(label.as_str());
             Ok(())
         })?,
@@ -211,7 +210,7 @@ end
     )?;
     map_table.set(
         "group_end",
-        ctx.create_function(move |_ctx, ()| {
+        lua.create_function(move |_lua, ()| {
             plan_builder.group_end();
             Ok(())
         })?,

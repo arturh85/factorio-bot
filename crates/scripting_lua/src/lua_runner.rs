@@ -2,17 +2,17 @@ use crate::globals::create_lua_globals;
 use crate::globals::plan::create_lua_plan_builder;
 use crate::globals::rcon::create_lua_rcon;
 use crate::globals::world::create_lua_world;
+use factorio_bot_core::mlua::prelude::*;
+use factorio_bot_core::mlua::LuaSerdeExt;
 use factorio_bot_core::paris::error;
 use factorio_bot_core::parking_lot::Mutex;
 use factorio_bot_core::plan::planner::Planner;
-use factorio_bot_core::rlua::Lua;
 use factorio_bot_core::tokio::runtime::Runtime;
-use factorio_bot_core::{rlua, serde_json};
+use factorio_bot_core::{mlua, serde_json};
 use factorio_bot_scripting::{buffers_to_string, redirect_buffers};
-use miette::Result;
-use rlua_async::ChunkExt;
+use miette::{IntoDiagnostic, Result};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 
@@ -37,48 +37,54 @@ pub async fn run_lua(
     let code_by_path: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(code_by_path));
     let all_bots = planner.initiate_missing_players_with_default_inventory(bot_count);
     planner.update_plan_world();
-    let lua = Lua::new();
-    let _code_by_path = code_by_path.clone();
-    if let Err(err) = lua.context::<_, rlua::Result<()>>(|ctx| {
-        let world = create_lua_world(ctx, planner.plan_world.clone(), cwd.to_path_buf())?;
-        let plan = create_lua_plan_builder(ctx, planner.graph.clone(), planner.plan_world.clone())?;
+    let lua_code = lua_code.to_owned();
+    let filename = filename.to_owned();
+
+    let plan_world = planner.plan_world.clone();
+    let graph = planner.graph.clone();
+    let real_world = planner.real_world.clone();
+    let rcon = planner.rcon.clone();
+    let cwd_buf = cwd.to_path_buf();
+
+    let thread_stdout = stdout.clone();
+    let thread_stderr = stderr.clone();
+
+    let result = thread::spawn(move || {
+        let lua = Lua::new();
+        let _code_by_path = code_by_path.clone();
+        let world = create_lua_world(&lua, plan_world.clone(), cwd_buf).unwrap();
+        let plan = create_lua_plan_builder(&lua, graph, plan_world).unwrap();
         create_lua_globals(
-            ctx,
+            &lua,
             all_bots,
             cwd.clone(),
-            stdout.clone(),
-            stderr.clone(),
+            thread_stdout,
+            thread_stderr,
             _code_by_path,
-        )?;
+        ).unwrap();
 
-        let globals = ctx.globals();
-        globals.set("world", world)?;
-        globals.set("plan", plan)?;
-        if let Some(rcon) = planner.rcon.as_ref() {
-            let rcon = create_lua_rcon(ctx, rcon.clone(), planner.real_world.clone())?;
-            globals.set("rcon", rcon)?;
+        let globals = lua.globals();
+        globals.set("world", world).unwrap();
+        globals.set("plan", plan).unwrap();
+        if let Some(rcon) = rcon.as_ref() {
+            let rcon = create_lua_rcon(&lua, rcon.clone(), real_world.clone()).unwrap();
+            globals.set("rcon", rcon).unwrap();
         }
-        Ok(())
-    }) {
-        error!("error setting up context: {}", err)
-    }
 
-    let lua_code = lua_code.to_owned();
-    let result = thread::spawn(move || {
-        match lua.context::<_, rlua::Result<Option<serde_json::Value>>>(|ctx| {
-            let chunk = ctx.load(&lua_code).set_name(&filename)?;
-            let rt: Runtime = Runtime::new().unwrap();
-            rt.block_on(chunk.exec_async(ctx))?;
-            let result: Option<rlua::Value> = ctx.globals().get("result")?;
-
-            Ok(result.map(|r| rlua_serde::from_value(r).unwrap()))
-        }) {
-            Ok(result) => Ok(result),
-            Err(err) => {
-                let code_by_path = code_by_path.lock().clone();
-                Err(crate::error::to_lua_error(err, &code_by_path))
+        let rt: Runtime = Runtime::new().unwrap();
+        rt.block_on(async {
+            let chunk = lua.load(&lua_code).set_name(&filename);
+            match chunk.exec_async().await {
+                Ok(_) => {
+                    let result: Option<LuaValue> = lua.globals().get("result").ok();
+                    Ok(result.map(|r| lua.from_value(r).unwrap()))
+                }
+                Err(err) => {
+                    let code_by_path = code_by_path.lock().clone();
+                    Err(crate::error::to_lua_error(err, &code_by_path))
+                }
             }
-        }
+        })
     })
     .join()
     .unwrap()?;

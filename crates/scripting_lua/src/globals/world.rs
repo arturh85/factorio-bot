@@ -1,20 +1,19 @@
 use factorio_bot_core::factorio::util::blueprint_build_area;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::factorio_blueprint::BlueprintCodec;
-use factorio_bot_core::rlua::{Context, Table};
-use factorio_bot_core::rlua_serde;
+use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::test_utils::draw_world;
 use factorio_bot_core::types::{FactorioBlueprintInfo, PlayerId, Position, Rect};
-use factorio_bot_core::{rlua, serde_json};
+use factorio_bot_core::{mlua, serde_json};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 pub fn create_lua_world(
-    ctx: Context,
+    lua: &Lua,
     _world: Arc<FactorioWorld>,
     cwd: PathBuf,
-) -> rlua::Result<Table> {
-    let map_table = ctx.create_table()?;
+) -> LuaResult<LuaTable> {
+    let map_table = lua.create_table()?;
     map_table.set(
         "__doc__header",
         String::from(
@@ -46,9 +45,9 @@ end
     )?;
     map_table.set(
         "recipe",
-        ctx.create_function(move |ctx, name: String| match world.recipes.get(&name) {
-            Some(recipe) => rlua_serde::to_value(ctx, recipe.clone()),
-            None => Ok(rlua::Value::Nil),
+        lua.create_function(move |lua, name: String| match world.recipes.get(&name) {
+            Some(recipe) => lua.to_value(&*recipe),
+            None => Ok(LuaValue::Nil),
         })?,
     )?;
 
@@ -68,10 +67,10 @@ end
     )?;
     map_table.set(
         "player",
-        ctx.create_function(
-            move |ctx, player_id: PlayerId| match world.players.get(&player_id) {
-                Some(player) => rlua_serde::to_value(ctx, player.clone()),
-                None => Ok(rlua::Value::Nil),
+        lua.create_function(
+            move |lua, player_id: PlayerId| match world.players.get(&player_id) {
+                Some(player) => lua.to_value(&*player),
+                None => Ok(LuaValue::Nil),
             },
         )?,
     )?;
@@ -95,8 +94,8 @@ end
     )?;
     map_table.set(
         "find_free_resource_rect",
-        ctx.create_function(
-            move |_ctx, (ore_name, width, height, near): (String, u32, u32, Table)| {
+        lua.create_function(
+            move |_lua, (ore_name, width, height, near): (String, u32, u32, LuaTable)| {
                 let patches = world.entity_graph.resource_patches(ore_name.as_str());
                 let near = Position::new(near.get("x").unwrap(), near.get("y").unwrap());
                 for patch in patches {
@@ -125,7 +124,7 @@ end
     let world = _world.clone();
     map_table.set(
         "parse_blueprint",
-        ctx.create_function(move |ctx, (blueprint, label): (String, String)| {
+        lua.create_function(move |lua, (blueprint, label): (String, String)| {
             let decoded =
                 BlueprintCodec::decode_string(&blueprint).expect("failed to parse blueprint");
             let rect = blueprint_build_area(world.entity_prototypes.clone(), &blueprint);
@@ -137,7 +136,7 @@ end
                 height: rect.height() as u16,
                 data: serde_json::to_value(decoded).unwrap(),
             };
-            Ok(rlua_serde::to_value(ctx, response))
+            lua.to_value(&response)
         })?,
     )?;
 
@@ -160,10 +159,10 @@ end
     )?;
     map_table.set(
         "find_entities_in_radius",
-        ctx.create_function(
-            move |_ctx,
+        lua.create_function(
+            move |_lua,
                   (search_center, radius, search_name, search_type): (
-                Table,
+                LuaTable,
                 f64,
                 Option<String>,
                 Option<String>,
@@ -197,7 +196,7 @@ end
     )?;
     map_table.set(
         "draw",
-        ctx.create_function(move |_ctx, save_path: String| {
+        lua.create_function(move |_lua, save_path: String| {
             draw_world(world.clone(), cwd.clone(), &save_path);
             Ok(())
         })?,
@@ -220,13 +219,13 @@ end
     )?;
     map_table.set(
         "inventory",
-        ctx.create_function(move |_ctx, (player_id, item_name): (PlayerId, String)| {
+        lua.create_function(move |_lua, (player_id, item_name): (PlayerId, String)| {
             match world.players.get(&player_id) {
                 Some(player) => match player.main_inventory.get(&item_name) {
                     Some(cnt) => Ok(*cnt),
                     None => Ok(0),
                 },
-                None => Err(rlua::Error::RuntimeError("player not found".into())),
+                None => Err(LuaError::RuntimeError("player not found".into())),
             }
         })?,
     )?;

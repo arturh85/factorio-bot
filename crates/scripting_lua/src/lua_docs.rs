@@ -6,48 +6,45 @@ use factorio_bot_core::factorio::rcon::FactorioRcon;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::parking_lot::Mutex;
 use factorio_bot_core::plan::planner::Planner;
-use factorio_bot_core::rlua;
-use factorio_bot_core::rlua::{Lua, Table};
+use factorio_bot_core::mlua::prelude::*;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub fn write_lua_docs(target_path: PathBuf) -> rlua::Result<()> {
+pub fn write_lua_docs(target_path: PathBuf) -> LuaResult<()> {
     let lua = Lua::new();
-    lua.context::<_, rlua::Result<()>>(|ctx| {
-        let world = Arc::new(FactorioWorld::new());
-        let rcon = Arc::new(FactorioRcon::new_empty());
-        let stdout = Arc::new(Mutex::new(String::new()));
-        let stderr = Arc::new(Mutex::new(String::new()));
-        let planner = Planner::new(world, None);
-        let cwd = target_path.parent().expect("failed to find parent");
-        let world = create_lua_world(ctx, planner.plan_world.clone(), cwd.to_path_buf())?;
-        let plan = create_lua_plan_builder(ctx, planner.graph.clone(), planner.plan_world.clone())?;
-        let rcon = create_lua_rcon(ctx, rcon, planner.real_world)?;
-        let code_by_path: HashMap<String, String> = HashMap::new();
-        let code_by_path: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(code_by_path));
-        create_lua_globals(ctx, vec![], cwd.to_path_buf(), stdout, stderr, code_by_path)?;
+    let world = Arc::new(FactorioWorld::new());
+    let rcon = Arc::new(FactorioRcon::new_empty());
+    let stdout = Arc::new(Mutex::new(String::new()));
+    let stderr = Arc::new(Mutex::new(String::new()));
+    let planner = Planner::new(world, None);
+    let cwd = target_path.parent().expect("failed to find parent");
+    let world_table = create_lua_world(&lua, planner.plan_world.clone(), cwd.to_path_buf())?;
+    let plan_table =
+        create_lua_plan_builder(&lua, planner.graph.clone(), planner.plan_world.clone())?;
+    let rcon_table = create_lua_rcon(&lua, rcon, planner.real_world)?;
+    let code_by_path: HashMap<String, String> = HashMap::new();
+    let code_by_path: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(code_by_path));
+    create_lua_globals(&lua, vec![], cwd.to_path_buf(), stdout, stderr, code_by_path)?;
 
-        write_lua_doc(target_path.join("globals.lua"), &ctx.globals());
-        write_lua_doc(target_path.join("world.lua"), &world);
-        write_lua_doc(target_path.join("plan.lua"), &plan);
-        write_lua_doc(target_path.join("rcon.lua"), &rcon);
-        Ok(())
-    })?;
+    write_lua_doc(target_path.join("globals.lua"), &lua.globals());
+    write_lua_doc(target_path.join("world.lua"), &world_table);
+    write_lua_doc(target_path.join("plan.lua"), &plan_table);
+    write_lua_doc(target_path.join("rcon.lua"), &rcon_table);
     Ok(())
 }
 
-fn write_lua_doc(target_path: PathBuf, doc_table: &Table) {
+fn write_lua_doc(target_path: PathBuf, doc_table: &LuaTable) {
     let mut body = doc_table
-        .get::<String, String>("__doc__header".to_string())
-        .unwrap()
+        .get::<_, String>("__doc__header")
+        .unwrap_or_default()
         .trim()
         .to_string();
     body += "\n\n";
 
     for result in doc_table.clone().pairs::<String, String>() {
-        if let Ok((key, value)) = result.as_ref() {
+        if let Ok((key, value)) = result {
             if key.starts_with("__doc_entry_") {
                 body += value.trim();
                 body += "\n\n"
@@ -55,8 +52,8 @@ fn write_lua_doc(target_path: PathBuf, doc_table: &Table) {
         }
     }
     body += doc_table
-        .get::<String, String>("__doc__footer".to_string())
-        .unwrap()
+        .get::<_, String>("__doc__footer")
+        .unwrap_or_default()
         .trim();
     body += "\n";
 

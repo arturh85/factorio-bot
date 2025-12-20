@@ -1,11 +1,11 @@
 use factorio_bot_core::regex::Regex;
-use factorio_bot_core::rlua;
+use factorio_bot_core::mlua;
 use factorio_bot_core::thiserror::Error;
 use factorio_bot_scripting::line_offset;
 use miette::{miette, Diagnostic, NamedSource, SourceSpan};
 use std::collections::HashMap;
 
-pub fn to_lua_error(err: rlua::Error, code_by_path: &HashMap<String, String>) -> miette::Report {
+pub fn to_lua_error(err: mlua::Error, code_by_path: &HashMap<String, String>) -> miette::Report {
     let message = err.to_string() + "\n";
     let short = message.lines().next().unwrap();
     let r = Regex::new("\\[string \"(.*?)\"]:(\\d+):").expect("failed to compile regex");

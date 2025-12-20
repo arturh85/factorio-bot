@@ -1,8 +1,8 @@
 use factorio_bot_core::num_traits::{FromPrimitive, ToPrimitive};
 use factorio_bot_core::paris::{error, info, warn};
 use factorio_bot_core::parking_lot::Mutex;
-use factorio_bot_core::rlua;
-use factorio_bot_core::rlua::{Context, Variadic};
+use factorio_bot_core::mlua::prelude::*;
+use factorio_bot_core::mlua::Variadic as LuaVariadic;
 use factorio_bot_core::types::{Direction, PlayerId};
 use itertools::Itertools;
 use std::collections::HashMap;
@@ -11,14 +11,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub fn create_lua_globals(
-    ctx: Context,
+    lua: &Lua,
     all_bots: Vec<PlayerId>,
     cwd: PathBuf,
     stdout: Arc<Mutex<String>>,
     stderr: Arc<Mutex<String>>,
     code_by_path: Arc<Mutex<HashMap<String, String>>>,
-) -> rlua::Result<()> {
-    let map_table = ctx.globals();
+) -> LuaResult<()> {
+    let map_table = lua.globals();
 
     map_table.set(
         "__doc__header",
@@ -48,13 +48,13 @@ end
     let _cwd = cwd.clone();
     map_table.set(
         "include",
-        ctx.create_function(move |ctx, source_path: String| {
+        lua.create_function(move |lua, source_path: String| {
             let content = fs::read_to_string(_cwd.join(&source_path).to_str().unwrap())
                 .expect("file not found");
-            let mut code_by_path = code_by_path.lock();
-            code_by_path.insert(source_path.to_owned(), content.clone());
-            drop(code_by_path);
-            let chunk = ctx.load(&content).set_name(&source_path)?;
+            let mut code_by_path_lock = code_by_path.lock();
+            code_by_path_lock.insert(source_path.to_owned(), content.clone());
+            drop(code_by_path_lock);
+            let chunk = lua.load(&content).set_name(&source_path);
             chunk.exec().expect("failed to execute");
             Ok(())
         })?,
@@ -74,7 +74,7 @@ end
     let _cwd = cwd.clone();
     map_table.set(
         "file_read",
-        ctx.create_function(move |_ctx, source_path: String| {
+        lua.create_function(move |_lua, source_path: String| {
             let content = fs::read_to_string(_cwd.join(source_path).to_str().unwrap())
                 .expect("file not found");
             Ok(content)
@@ -95,7 +95,7 @@ end
     let _cwd = cwd;
     map_table.set(
         "file_write",
-        ctx.create_function(move |_ctx, (target_path, contents): (String, String)| {
+        lua.create_function(move |_lua, (target_path, contents): (String, String)| {
             fs::write(_cwd.join(target_path).to_str().unwrap(), contents).expect("failed to write");
             Ok(())
         })?,
@@ -115,11 +115,11 @@ end
     )?;
     map_table.set(
         "print",
-        ctx.create_function(move |_, strings: Variadic<String>| {
+        lua.create_function(move |_, strings: LuaVariadic<String>| {
             info!("<cyan>lua</>   ⮞ {}", strings.iter().join(" "));
-            let mut stdout = _stdout.lock();
-            *stdout += &strings.iter().join(" ");
-            *stdout += "\n";
+            let mut stdout_lock = _stdout.lock();
+            *stdout_lock += &strings.iter().join(" ");
+            *stdout_lock += "\n";
             Ok(())
         })?,
     )?;
@@ -137,12 +137,12 @@ end
     )?;
     map_table.set(
         "print_err",
-        ctx.create_function(move |_, strings: Variadic<String>| {
+        lua.create_function(move |_, strings: LuaVariadic<String>| {
             error!("<cyan>lua</>   ⮞ {}", strings.iter().join(" "));
-            let mut stderr = _stderr.lock();
-            *stderr += "ERROR: ";
-            *stderr += &strings.iter().join(" ");
-            *stderr += "\n";
+            let mut stderr_lock = _stderr.lock();
+            *stderr_lock += "ERROR: ";
+            *stderr_lock += &strings.iter().join(" ");
+            *stderr_lock += "\n";
             Ok(())
         })?,
     )?;
@@ -160,12 +160,12 @@ end
     )?;
     map_table.set(
         "print_warn",
-        ctx.create_function(move |_, strings: Variadic<String>| {
+        lua.create_function(move |_, strings: LuaVariadic<String>| {
             warn!("<cyan>lua</>   ⮞ {}", strings.iter().join(" "));
-            let mut stdout = _stdout.lock();
-            *stdout += "WARN: ";
-            *stdout += &strings.iter().join(" ");
-            *stdout += "\n";
+            let mut stdout_lock = _stdout.lock();
+            *stdout_lock += "WARN: ";
+            *stdout_lock += &strings.iter().join(" ");
+            *stdout_lock += "\n";
             Ok(())
         })?,
     )?;
@@ -199,7 +199,7 @@ globals.Direction = {
 "#,
         ),
     )?;
-    let direction = ctx.create_table()?;
+    let direction = lua.create_table()?;
     direction.set("North", 0)?;
     direction.set("NorthEast", 1)?;
     direction.set("East", 2)?;
@@ -223,7 +223,7 @@ end
     )?;
     map_table.set(
         "directions_all",
-        ctx.create_function(move |_, ()| {
+        lua.create_function(move |_, ()| {
             Ok(Direction::all()
                 .iter()
                 .map(|d| d.to_u8().unwrap())
@@ -244,7 +244,7 @@ end
     )?;
     map_table.set(
         "directions_orthogonal",
-        ctx.create_function(move |_, ()| {
+        lua.create_function(move |_, ()| {
             Ok(Direction::orthogonal()
                 .iter()
                 .map(|d| d.to_u8().unwrap())
@@ -266,7 +266,7 @@ end
     )?;
     map_table.set(
         "direction_clockwise",
-        ctx.create_function(move |_, direction: u8| {
+        lua.create_function(move |_, direction: u8| {
             let direction = Direction::from_u8(direction).unwrap();
             Ok(direction.clockwise().to_u8().unwrap())
         })?,
@@ -286,7 +286,7 @@ end
     )?;
     map_table.set(
         "direction_opposite",
-        ctx.create_function(move |_, direction: u8| {
+        lua.create_function(move |_, direction: u8| {
             let direction = Direction::from_u8(direction).unwrap();
             Ok(direction.opposite().to_u8().unwrap())
         })?,

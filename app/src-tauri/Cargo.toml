@@ -33,7 +33,7 @@ factorio-bot-restapi = { path = "../../crates/restapi", optional = true }
 factorio-bot-scripting-lua = { path = "../../crates/scripting_lua", optional = true }
 
 # gui
-tauri = { version = "1.2.5", features = ["dialog-all", "http-all", "updater"], optional = true }
+tauri = { version = "2", features = ["unstable"], optional = true }
 open = {version = "^5.0.0", optional = true}
 port_scanner = { version = "^0.1.5", optional = true } # scan available port on localhost
 
@@ -43,6 +43,7 @@ console-subscriber = { version = "0.4", optional = true }
 
 # serializing / deserializing
 serde = { version = "1.0", features = [ "derive" ] }
+serde_json = "1.0.145"
 strum = { version = "0.26", features = ["derive"] }
 toml = "0.8"
 
@@ -56,17 +57,25 @@ reedline-repl-rs = { version = "1.3.0", optional = true }
 # other
 color-eyre = "0.6" # colorful human oriented error reports via panics
 dirs-next = "2.0" # platform-specific standard locations of directories for config, cache and other
+tauri-plugin-fs = "2"
+tauri-plugin-http = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-log = "2"
+log = "0.4"
 
 [build-dependencies]
 typescript-definitions = { version = "0.1", package = "typescript-definitions-ufo-patch", features = ["export-typescript"] }
 factorio-bot-core = { path = "../../crates/core" }
 factorio-bot-restapi = { path = "../../crates/restapi", optional = true }
 factorio-bot-scripting-lua = { path = "../../crates/scripting_lua", optional = true }
-tauri-build = { version = "1.2.1", features = [], optional = true }
+tauri-build = { version = "2", features = [], optional = true }
 serde = { version = "1.0", features = [ "derive" ] }
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "^0.1.12"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"
 
 
 [features]

@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import {AppSettings} from '@/models/settings';
-import {invoke} from '@tauri-apps/api/tauri';
+import {invoke} from '@tauri-apps/api/core';
 import {useRestApiStore} from '@/store/restapiStore';
 
 export const useAppStore = defineStore({

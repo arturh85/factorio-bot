@@ -9,7 +9,7 @@ use factorio_bot_core::paris::error;
 use factorio_bot_core::process::process_control::{
   FactorioInstance, FactorioParams, SharedFactorioInstance,
 };
-use tauri::{AppHandle, Manager, State, Wry};
+use tauri::{AppHandle, Emitter, State, Wry};
 
 #[tauri::command]
 pub async fn start_instances(
@@ -48,7 +48,7 @@ pub async fn start_instances(
       let _copy = (**started_instance_state.world.as_ref().unwrap()).clone();
       *instance_state = Some(started_instance_state);
       app_handle
-        .emit_all("instances_started", true)
+        .emit("instances_started", true)
         .map_err(|e| format!("error: {e}"))?;
       Ok(())
     }
@@ -77,7 +77,7 @@ pub async fn stop_instances(
   }
   instance_state.take().unwrap().stop().unwrap();
   app_handle
-    .emit_all("instances_stopped", true)
+    .emit("instances_stopped", true)
     .map_err(|e| format!("error: {e}"))?;
   *instance_state = None;
   Ok(())

@@ -1,5 +1,5 @@
 import {defineStore} from 'pinia'
-import {invoke} from '@tauri-apps/api/tauri';
+import {invoke} from '@tauri-apps/api/core';
 import {useAppStore} from '@/store/appStore';
 
 export const useInstanceStore = defineStore({

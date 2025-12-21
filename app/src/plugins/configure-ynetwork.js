@@ -1,11 +1,12 @@
-import { http } from '@tauri-apps/api';
+import {  } from '@tauri-apps/api';
 import { YNetwork } from 'ynetwork';
+import { fetch } from '@tauri-apps/plugin-http';
 
 async function tauriReuestResolver({ method, url, data, headers }) {
 
   try {
 
-    const response = await http.fetch(url, {
+    const response = await fetch(url, {
       method: method.toUpperCase(),
       body: data,
       headers,

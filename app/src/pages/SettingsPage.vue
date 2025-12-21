@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import {computed, watch, ref} from 'vue';
 import {useAppStore} from '@/store/appStore';
-import {open} from '@tauri-apps/api/dialog'
-import {readDir} from '@tauri-apps/api/fs'
+import {open} from '@tauri-apps/plugin-dialog'
+import {readDir} from '@tauri-apps/plugin-fs'
 import InputText from 'primevue/inputtext';
 import Slider from 'primevue/slider';
 import Button from 'primevue/button';

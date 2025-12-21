@@ -18,21 +18,22 @@ mod scripting;
 mod settings;
 
 use context::Context;
-use factorio_bot_core::miette::Result;
-pub const APP_NAME: &str = env!("CARGO_BIN_NAME");
+pub const APP_NAME: &str = env!("CARGO_PKG_NAME");
 pub const APP_AUTHOR: &str = env!("CARGO_PKG_AUTHORS");
 pub const APP_ABOUT: &str = env!("CARGO_PKG_DESCRIPTION");
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-  let context = Context::new()?;
+  let context = Context::new().expect("failed to create context");
 
   #[cfg(feature = "cli")]
   {
-    let app = cli::start(context.clone()).await?;
+    let app = tauri::async_runtime::block_on(async {
+      cli::start(context.clone()).await
+    }).expect("failed to start cli");
+
     if app.is_none() {
-      // happens when subcommand successfully executes
-      return Ok(());
+      return ();
     }
     #[cfg(all(not(feature = "gui"), not(feature = "repl")))]
     {
@@ -45,13 +46,15 @@ pub fn run() {
   }
   #[cfg(feature = "gui")]
   {
-    gui::start(context.clone())?;
+    gui::start(context.clone()).expect("failed to start gui");
   }
   #[cfg(not(feature = "gui"))]
   {
     #[cfg(feature = "repl")]
     {
-      repl::start(context.clone()).await?;
+      tauri::async_runtime::block_on(async {
+        repl::start(context.clone()).await
+      })?;
     }
     #[cfg(all(not(feature = "cli"), not(feature = "repl")))]
     {
@@ -60,5 +63,4 @@ pub fn run() {
       ));
     }
   }
-  Ok(())
 }

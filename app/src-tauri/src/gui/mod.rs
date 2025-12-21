@@ -1,43 +1,52 @@
 pub mod command;
 
 use crate::context::Context;
-use factorio_bot_core::miette::{IntoDiagnostic, Report, Result};
+use factorio_bot_core::miette::{Report, Result};
 
 #[allow(clippy::items_after_statements)]
 pub fn start(context: Context) -> Result<()> {
-  let mut app = tauri::Builder::default()
+  let app = tauri::Builder::default()
+    .setup(|app| {
+      if cfg!(debug_assertions) {
+        app.handle().plugin(
+          tauri_plugin_log::Builder::default()
+            .level(log::LevelFilter::Info)
+            .build(),
+        )?;
+      }
+      Ok(())
+    })
+    .plugin(tauri_plugin_fs::init())
+    .plugin(tauri_plugin_http::init())
+    .plugin(tauri_plugin_dialog::init())
+    .plugin(tauri_plugin_updater::Builder::new().build())
     .manage(context.app_settings)
     .manage(context.instance_state)
     .manage(context.restapi_handle)
     .invoke_handler(tauri::generate_handler![
-      crate::gui::command::is_restapi_started,
-      crate::gui::command::is_instance_started,
-      crate::gui::command::is_port_available,
-      crate::gui::command::save_script,
-      crate::gui::command::load_script,
-      crate::gui::command::load_scripts_in_directory,
-      crate::gui::command::execute_rcon,
-      crate::gui::command::execute_script,
-      crate::gui::command::execute_code,
-      crate::gui::command::update_settings,
-      crate::gui::command::load_settings,
-      crate::gui::command::save_settings,
-      crate::gui::command::start_instances,
-      crate::gui::command::stop_instances,
-      crate::gui::command::start_restapi,
-      crate::gui::command::stop_restapi,
-      crate::gui::command::maximize_window,
-      crate::gui::command::file_exists,
-      crate::gui::command::open_in_browser,
-    ])
-    .build(tauri::generate_context!())
-    .into_diagnostic()?;
-  loop {
-    let iteration = app.run_iteration();
-    if iteration.window_count == 0 {
-      break;
-    }
-  }
+      command::is_restapi_started,
+      command::is_instance_started,
+      command::is_port_available,
+      command::save_script,
+      command::load_script,
+      command::load_scripts_in_directory,
+      command::execute_rcon,
+      command::execute_script,
+      command::execute_code,
+      command::update_settings,
+      command::load_settings,
+      command::save_settings,
+      command::start_instances,
+      command::stop_instances,
+      command::start_restapi,
+      command::stop_restapi,
+      command::maximize_window,
+      command::file_exists,
+      command::open_in_browser,
+    ]);
+  app
+    .run(tauri::generate_context!())
+    .expect("error while running tauri application");
   Ok(())
 }
 

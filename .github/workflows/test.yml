@@ -46,7 +46,7 @@ jobs:
         if: matrix.platform == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y webkit2gtk-4.0 libgtksourceview-3.0-dev libsoup-3.0-dev
+          sudo apt-get install -y webkit2gtk-4.0 libgtksourceview-3.0-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
       - name: 🛠️ Install Lua 5.4 (macOS)
         if: matrix.platform == 'macos-latest'
         run: |
@@ -63,6 +63,11 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "PKG_CONFIG_PATH=$pkgconfigDir"
           $pkgconfigBin = Join-Path $env:ChocolateyInstall 'lib\pkgconfiglite\tools'
           Add-Content -Path $env:GITHUB_PATH -Value $pkgconfigBin
+      - name: 🔧 Configure mlua vendored build (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          Add-Content -Path $env:GITHUB_ENV -Value "MLUA_BUILD_LUA=1"
 
       # Javascript
       - name: 🛠️ Install nodejs dependencies
@@ -81,8 +86,8 @@ jobs:
       # Rust
       - name: 🏗️ Build rust code
         env:
-          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
-          TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
         run: |
           cd app; yarn tauri:build
       - name: 🧪 Test rust code

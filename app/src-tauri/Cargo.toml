@@ -8,6 +8,16 @@ repository = "https://github.com/arturh85/factorio-bot/"
 default-run = "factorio-bot"
 edition = "2021"
 
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "factorio-bot" # overwrite binary name
+path = "src/main.rs"
+
+
+
 [package.metadata.release]
 publish = false
 tag-name = "v{{version}}"
@@ -71,8 +81,3 @@ restapi = ["dep:factorio-bot-restapi"]
 lua = ["dep:factorio-bot-scripting-lua"]
 repl = ["reedline-repl-rs/async"]
 tokio-console = ["dep:console-subscriber"]
-
-[[bin]]
-name = "factorio-bot" # overwrite binary name
-path = "src/main.rs"
-

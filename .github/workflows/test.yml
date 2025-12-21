@@ -46,7 +46,23 @@ jobs:
         if: matrix.platform == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y webkit2gtk-4.0 libgtksourceview-3.0-dev
+          sudo apt-get install -y webkit2gtk-4.0 libgtksourceview-3.0-dev libsoup-3.0-dev
+      - name: 🛠️ Install Lua 5.4 (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: |
+          brew update
+          brew install lua@5.4 pkg-config
+          echo "PKG_CONFIG_PATH=$(brew --prefix lua@5.4)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> $GITHUB_ENV
+      - name: 🛠️ Install Lua 5.4 (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          choco install -y pkgconfiglite
+          & "C:\vcpkg\vcpkg.exe" install lua:x64-windows
+          $pkgconfigDir = 'C:\vcpkg\installed\x64-windows\lib\pkgconfig'
+          Add-Content -Path $env:GITHUB_ENV -Value "PKG_CONFIG_PATH=$pkgconfigDir"
+          $pkgconfigBin = Join-Path $env:ChocolateyInstall 'lib\pkgconfiglite\tools'
+          Add-Content -Path $env:GITHUB_PATH -Value $pkgconfigBin
 
       # Javascript
       - name: 🛠️ Install nodejs dependencies

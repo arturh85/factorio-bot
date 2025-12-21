@@ -8,15 +8,15 @@ impl Subcommand for ThisCommand {
   fn name(&self) -> &'static str {
     "repl"
   }
-  fn build_command(&self) -> Command<'static> {
-    Command::new(self.name()).about("repl")
+  fn build_command(&self) -> Command {
+    Command::new("repl").about("repl")
   }
   fn build_callback(&self) -> SubcommandCallback {
     |args, context| Box::pin(run(args, context))
   }
 }
 
-async fn run(_matches: ArgMatches, context: &mut Context) -> Result<()> {
+async fn run(_matches: &ArgMatches, context: &mut Context) -> Result<()> {
   repl::start(context.clone()).await
 }
 

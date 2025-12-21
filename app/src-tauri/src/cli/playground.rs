@@ -8,8 +8,8 @@ impl Subcommand for ThisCommand {
   fn name(&self) -> &'static str {
     "play"
   }
-  fn build_command(&self) -> Command<'static> {
-    Command::new(self.name()).about("play")
+  fn build_command(&self) -> Command {
+    Command::new("play").about("play")
   }
   fn build_callback(&self) -> SubcommandCallback {
     |args, context| Box::pin(run(args, context))
@@ -17,7 +17,7 @@ impl Subcommand for ThisCommand {
 }
 
 #[allow(clippy::unused_async)]
-async fn run(_matches: ArgMatches, _context: &mut Context) -> Result<()> {
+async fn run(_matches: &ArgMatches, _context: &mut Context) -> Result<()> {
   info!("hello world");
   Ok(())
 }

@@ -29,7 +29,7 @@ pub fn subcommands() -> Vec<Box<dyn Subcommand>> {
   ]
 }
 
-pub async fn start(mut context: Context) -> Result<Option<Command<'static>>> {
+pub async fn start(mut context: Context) -> Result<Option<Command>> {
   let mut app = Command::new(APP_NAME)
     .version(env!("CARGO_PKG_VERSION"))
     .author(APP_AUTHOR)
@@ -45,7 +45,7 @@ pub async fn start(mut context: Context) -> Result<Option<Command<'static>>> {
     app = app.subcommand(subcommand.build_command());
   }
   let matches = app.clone().get_matches();
-  if let Ok(shell) = matches.value_of_t::<Shell>("shell") {
+  if let Some(shell) = matches.get_one::<Shell>("shell").copied() {
     eprintln!("Generating completion file for {shell}...");
     print_completions(shell, &mut app);
     return Ok(None);
@@ -53,7 +53,7 @@ pub async fn start(mut context: Context) -> Result<Option<Command<'static>>> {
   for subcommand in &subcommands {
     if let Some(matches) = matches.subcommand_matches(subcommand.name()) {
       let callback = subcommand.build_callback();
-      callback(matches.clone(), &mut context).await?;
+      callback(matches, &mut context).await?;
       return Ok(None);
     }
   }
@@ -66,9 +66,9 @@ fn print_completions<G: Generator>(gen: G, cmd: &mut Command) {
 
 pub trait Subcommand {
   fn name(&self) -> &str;
-  fn build_command(&self) -> Command<'static>;
+  fn build_command(&self) -> Command;
   fn build_callback(&self) -> SubcommandCallback;
 }
 
 pub type SubcommandCallback =
-  fn(ArgMatches, &'_ mut Context) -> Pin<Box<dyn Future<Output = Result<()>> + '_>>;
+  for<'a> fn(&'a ArgMatches, &'a mut Context) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>>;

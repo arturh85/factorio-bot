@@ -85,6 +85,8 @@ pub struct FactorioAlreadyStarted {}
     help("provide correct player id")
 )]
 pub struct RconPlayerNotFound {
+    #[allow(unused_assignments)]
+    #[allow(unused)]
     pub player_id: PlayerId,
 }
 

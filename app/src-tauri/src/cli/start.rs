@@ -1,7 +1,7 @@
 use crate::cli::{Subcommand, SubcommandCallback};
 use crate::context::Context;
 use crate::settings::load_app_settings;
-use clap::{Arg, ArgMatches, Command};
+use clap::{value_parser, Arg, ArgAction, ArgMatches, Command};
 use factorio_bot_core::miette::Result;
 use factorio_bot_core::paris::info;
 use factorio_bot_core::process::process_control::{
@@ -12,14 +12,15 @@ impl Subcommand for ThisCommand {
   fn name(&self) -> &'static str {
     "start"
   }
-  fn build_command(&self) -> Command<'static> {
-    Command::new(self.name())
+  fn build_command(&self) -> Command {
+    Command::new("start")
       .about("start the factorio server and clients + web server")
       .arg(
         Arg::new("clients")
           .short('c')
           .long("clients")
           .default_value("1")
+          .value_parser(value_parser!(u8))
           .help("number of clients to start in addition to the server"),
       )
       .arg(
@@ -28,6 +29,7 @@ impl Subcommand for ThisCommand {
           .long("server")
           .value_name("server")
           .required(false)
+          .value_parser(value_parser!(String))
           .help("connect to server instead of starting a server"),
       )
       .arg(
@@ -35,6 +37,7 @@ impl Subcommand for ThisCommand {
           .long("seed")
           .value_name("seed")
           .required(false)
+          .value_parser(value_parser!(String))
           .help("use given seed to recreate level"),
       )
       .arg(
@@ -42,18 +45,21 @@ impl Subcommand for ThisCommand {
           .long("map")
           .value_name("map")
           .required(false)
+          .value_parser(value_parser!(String))
           .help("use given map exchange string"),
       )
       .arg(
         Arg::new("new")
           .long("new")
           .short('n')
+          .action(ArgAction::SetTrue)
           .help("recreate level by deleting server map if exists"),
       )
       .arg(
         Arg::new("logs")
           .short('l')
           .long("logs")
+          .action(ArgAction::SetTrue)
           .help("enabled writing server & client logs to workspace"),
       )
       .about("start given number of clients after server start")
@@ -64,23 +70,19 @@ impl Subcommand for ThisCommand {
   }
 }
 
-async fn run(matches: ArgMatches, _context: &mut Context) -> Result<()> {
+async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
   let app_settings = load_app_settings()?;
-  let clients: u8 = matches.value_of("clients").unwrap().parse().unwrap();
-  let write_logs: bool = matches.is_present("logs");
-  let seed = matches
-    .value_of("seed")
-    .map(std::string::ToString::to_string);
-  let map_exchange_string = matches
-    .value_of("map")
-    .map(std::string::ToString::to_string);
-  let recreate = matches.is_present("new");
-  let server_host = matches.value_of("server");
+  let clients = *matches.get_one::<u8>("clients").expect("defaulted by clap");
+  let write_logs = matches.get_flag("logs");
+  let seed = matches.get_one::<String>("seed").cloned();
+  let map_exchange_string = matches.get_one::<String>("map").cloned();
+  let recreate = matches.get_flag("new");
+  let server_host = matches.get_one::<String>("server").cloned();
   // let websocket_server = FactorioWebSocketServer { listeners: vec![] }.start();
 
   let params = FactorioParams {
     seed,
-    server_host: server_host.map(std::borrow::ToOwned::to_owned),
+    server_host,
     client_count: clients,
     recreate,
     write_logs,

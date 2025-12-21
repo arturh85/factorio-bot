@@ -35,11 +35,15 @@ async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String
       let write_logs: bool = matches.get_flag("logs");
       let verbose: bool = matches.get_flag("verbose");
       let seed = config_fallback(
-        matches.get_one::<String>("seed").map(std::string::String::as_str),
+        matches
+          .get_one::<String>("seed")
+          .map(std::string::String::as_str),
         &app_settings.factorio.seed,
       );
       let map_exchange_string = config_fallback(
-        matches.get_one::<String>("map").map(std::string::String::as_str),
+        matches
+          .get_one::<String>("map")
+          .map(std::string::String::as_str),
         &app_settings.factorio.map_exchange_string,
       );
       let wait_until_finished = matches.get_flag("wait_until_finished");

@@ -1,6 +1,6 @@
 use crate::cli::{Subcommand, SubcommandCallback};
 use crate::context::Context;
-use clap::{Arg, ArgMatches, Command};
+use clap::{value_parser, Arg, ArgMatches, Command};
 use factorio_bot_core::factorio::rcon::{FactorioRcon, RconSettings};
 use factorio_bot_core::miette::Result;
 use factorio_bot_core::parking_lot::RwLock;
@@ -11,8 +11,8 @@ impl Subcommand for ThisCommand {
   fn name(&self) -> &'static str {
     "rcon"
   }
-  fn build_command(&self) -> Command<'static> {
-    Command::new(self.name())
+  fn build_command(&self) -> Command {
+    Command::new("rcon")
       .arg(Arg::new("command").required(true).last(true))
       .arg(
         Arg::new("server")
@@ -20,6 +20,7 @@ impl Subcommand for ThisCommand {
           .long("server")
           .value_name("server")
           .required(false)
+          .value_parser(value_parser!(String))
           .help("connect to server instead of starting a server"),
       )
       .about("send given rcon command")
@@ -30,11 +31,12 @@ impl Subcommand for ThisCommand {
   }
 }
 
-async fn run(matches: ArgMatches, _context: &mut Context) -> Result<()> {
-  let command = matches.value_of("command").unwrap();
-  let server_host = matches
-    .value_of("server")
-    .map(std::borrow::ToOwned::to_owned);
+async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
+  let command = matches
+    .get_one::<String>("command")
+    .expect("required by clap")
+    .as_str();
+  let server_host = matches.get_one::<String>("server").cloned();
   let rcon_settings = RconSettings::new_from_config(&FactorioSettings::default(), server_host);
   let rcon = FactorioRcon::new(&rcon_settings, Arc::new(RwLock::new(false)))
     .await

@@ -1,9 +1,9 @@
 use crate::cli::{Subcommand, SubcommandCallback};
 use crate::settings::load_app_settings;
-use clap::{Arg, ArgMatches, Command};
+use clap::{value_parser, Arg, ArgMatches, Command};
 
 use crate::context::Context;
-use factorio_bot_core::miette::{IntoDiagnostic, Result};
+use factorio_bot_core::miette::Result;
 #[cfg(feature = "lua")]
 use factorio_bot_scripting_lua::roll_best_seed::{roll_seed, RollSeedLimit};
 
@@ -11,13 +11,14 @@ impl Subcommand for ThisCommand {
   fn name(&self) -> &'static str {
     "roll-seed"
   }
-  fn build_command(&self) -> Command<'static> {
-    Command::new(self.name())
+  fn build_command(&self) -> Command {
+    Command::new("roll-seed")
       .arg(
         Arg::new("map")
           .long("map")
           .value_name("map")
           .required(true)
+          .value_parser(value_parser!(String))
           .help("use given map exchange string"),
       )
       .arg(
@@ -26,6 +27,7 @@ impl Subcommand for ThisCommand {
           .long("seconds")
           .value_name("seconds")
           .default_value("360")
+          .value_parser(value_parser!(u64))
           .help("limits how long to roll seeds"),
       )
       .arg(
@@ -34,6 +36,7 @@ impl Subcommand for ThisCommand {
           .long("parallel")
           .value_name("parallel")
           .default_value("4")
+          .value_parser(value_parser!(u8))
           .help("how many rolling servers to run in parallel"),
       )
       .arg(
@@ -41,6 +44,7 @@ impl Subcommand for ThisCommand {
           .long("name")
           .value_name("name")
           .required(true)
+          .value_parser(value_parser!(String))
           .help("name of plan without .lua extension"),
       )
       .arg(
@@ -48,6 +52,7 @@ impl Subcommand for ThisCommand {
           .short('r')
           .long("rolls")
           .value_name("rolls")
+          .value_parser(value_parser!(u64))
           .help("how many seeds to roll"),
       )
       .arg(
@@ -55,6 +60,7 @@ impl Subcommand for ThisCommand {
           .short('c')
           .long("clients")
           .default_value("1")
+          .value_parser(value_parser!(u8))
           .help("number of clients to plan for"),
       )
       .about("roll good seed for given map-exchange-string based on heuristics")
@@ -65,32 +71,30 @@ impl Subcommand for ThisCommand {
   }
 }
 
-async fn run(matches: ArgMatches, _context: &mut Context) -> Result<()> {
+async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
   let app_settings = load_app_settings()?;
   if let Some((seed, score)) = roll_seed(
     app_settings.factorio.clone(),
-    matches.value_of("map").expect("map required!").into(),
-    match matches.value_of("rolls") {
-      Some(s) => RollSeedLimit::Rolls(s.parse().into_diagnostic()?),
+    matches
+      .get_one::<String>("map")
+      .expect("required by clap")
+      .to_owned(),
+    match matches.get_one::<u64>("rolls") {
+      Some(rolls) => RollSeedLimit::Rolls(*rolls),
       None => RollSeedLimit::Seconds(
-        matches
-          .value_of("seconds")
-          .unwrap()
-          .parse()
-          .into_diagnostic()?,
+        *matches
+          .get_one::<u64>("seconds")
+          .expect("defaulted by clap"),
       ),
     },
+    *matches
+      .get_one::<u8>("parallel")
+      .expect("defaulted by clap"),
     matches
-      .value_of("parallel")
-      .unwrap()
-      .parse()
-      .into_diagnostic()?,
-    matches.value_of("name").unwrap().into(),
-    matches
-      .value_of("clients")
-      .unwrap()
-      .parse()
-      .into_diagnostic()?,
+      .get_one::<String>("name")
+      .expect("required by clap")
+      .to_owned(),
+    *matches.get_one::<u8>("clients").expect("defaulted by clap"),
   )
   .await?
   {

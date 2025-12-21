@@ -45,10 +45,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y webkit2gtk-4.0 libgtksourceview-3.0-dev
-      - name: 🛠️ Install mdbook with mermaid support
+      - name: 🛠️ Install zensical
         if: matrix.platform == 'ubuntu-latest'
-        run: |
-          cargo install mdbook mdbook-mermaid
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.x
+      - name: 🛠️ Install zensical package
+        if: matrix.platform == 'ubuntu-latest'
+        run: pip install zensical
       - name: 🛠️ Install nodejs dependencies
         run: |
           cd app; yarn
@@ -105,16 +109,11 @@ jobs:
           mkdir public 
           cargo doc --all --no-deps
           mv target/doc public/doc
-      - name: 🏗️ Build mdbook "user guide"
+      - name: 🏗️ Build zensical documentation
         if: matrix.platform == 'ubuntu-latest'
         run: |
-          mdbook build docs/userguide
-          mv docs/userguide/book public/userguide
-      - name: 🏗️ Build mdbook "developer guide"
-        if: matrix.platform == 'ubuntu-latest'
-        run: |
-          mdbook build docs/devguide
-          mv docs/devguide/book public/devguide
+          zensical build --clean
+          mv site/* public/
       - name: 🏗️ Build lua api docs
         if: matrix.platform == 'ubuntu-latest'
         uses: ./.github/actions/ldoc/

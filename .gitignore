@@ -11,3 +11,4 @@ mods/*/
 /resource.rc
 /.vscode/settings.json
 .DS_Store
+/site/

@@ -12,7 +12,7 @@ publish = false
 [dependencies]
 factorio-bot-core = { path = "../core" }
 factorio-bot-scripting = { path = "../scripting" }
-itertools = "0.13"
+itertools = "0.14"
 mlua = { version = "0.9", features = ["lua54", "serialize", "macros", "async"] }
 # rlua_serde = { git = "https://github.com/creepinson/rlua_serde" } # fork which is compatible with rlua 0.19
 miette = {version = "7.4", features = ["fancy"] }

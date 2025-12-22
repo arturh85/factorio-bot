@@ -44,7 +44,7 @@ smallvec = { version = "1.13", features = ["serde"] }
 base64 = "0.22"
 ptree = "0.5"
 fnv = "1.0"
-itertools = "0.13"
+itertools = "0.14"
 human-sort = "0.2"
 flate2 = "1.0"
 tar = "0.4"

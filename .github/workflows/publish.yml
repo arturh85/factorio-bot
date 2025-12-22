@@ -85,7 +85,7 @@ jobs:
 
       # Upload updater json
       - name: 📤️ Upload updater json to Job for later
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.platform }}
           path: updates/*
@@ -208,17 +208,17 @@ jobs:
 
       # Download update jsons
       - name: 📥 Download update json files from windows
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v7
         with:
           name: windows-latest
           path: updates-windows/
       - name: 📥 Download update json files from linux
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v7
         with:
           name: ubuntu-latest
           path: updates-linux/
       - name: 📥 Download update json files from macos
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v7
         with:
           name: macos-latest
           path: updates-macos/

@@ -24,7 +24,7 @@ jobs:
       - name: 🛠️ Install nodejs 16
         uses: actions/setup-node@v6
         with:
-          node-version: 16
+          node-version: 24
       - name: 🛠️ Install rust stable
         uses: actions-rs/toolchain@v1
         with:
@@ -156,7 +156,7 @@ jobs:
       - name: 🛠️ Install nodejs 16
         uses: actions/setup-node@v6
         with:
-          node-version: 16
+          node-version: 24
       - name: 🦠 Update version in package.json & tauri.conf.json
         run: |
           cd app/scripts; node update-package-version.js
@@ -204,7 +204,7 @@ jobs:
       - name: 🛠️ Install nodejs 16
         uses: actions/setup-node@v6
         with:
-          node-version: 16
+          node-version: 24
 
       # Download update jsons
       - name: 📥 Download update json files from windows

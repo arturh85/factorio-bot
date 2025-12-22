@@ -134,7 +134,7 @@ jobs:
       # Publish gh-pages
       - name: 📤 Deploy public/ to gh-pages
         if: matrix.platform == 'ubuntu-latest'
-        uses: peaceiris/actions-gh-pages@v3
+        uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_branch: gh-pages
@@ -235,7 +235,7 @@ jobs:
 
       # Publish gh-pages
       - name: 📤 Re-Deploy public/ to gh-pages (with keep_files)
-        uses: peaceiris/actions-gh-pages@v3
+        uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_branch: gh-pages

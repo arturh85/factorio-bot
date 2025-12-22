@@ -3305,10 +3305,10 @@ v8-to-istanbul@^9.0.0:
     "@types/istanbul-lib-coverage" "^2.0.1"
     convert-source-map "^2.0.0"
 
-vite-plugin-monaco-editor@1.0.12:
-  version "1.0.12"
-  resolved "https://registry.yarnpkg.com/vite-plugin-monaco-editor/-/vite-plugin-monaco-editor-1.0.12.tgz#ece1f77488a7788e3b7bdcae2bc02605a1ec7cd2"
-  integrity sha512-r7f6we2eiyk45EmpoD76rKez18aEr1dwYqxqdsP0zObpPun/ukmop8kv86qZGd14GjEncjE5+9eky+edyPPdxA==
+vite-plugin-monaco-editor@1.1.0:
+  version "1.1.0"
+  resolved "https://registry.yarnpkg.com/vite-plugin-monaco-editor/-/vite-plugin-monaco-editor-1.1.0.tgz#a6238c2e13d5e98dd54a1bc51f6f189325219de3"
+  integrity sha512-IvtUqZotrRoVqwT0PBBDIZPNraya3BxN/bfcNfnxZ5rkJiGcNtO5eAOWWSgT7zullIAEqQwxMU83yL9J5k7gww==
 
 vite@4.5.0:
   version "4.5.0"

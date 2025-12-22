@@ -21,7 +21,7 @@ pathfinding = "4.14"
 parking_lot = "0.12"
 paris = { version = "1.5", features = ["timestamps", "macros"] }
 color-eyre = "0.6"
-petgraph = { version = "0.6.5", features = ["serde-1"] }
+petgraph = { version = "0.8.0", features = ["serde-1"] }
 indicatif = "0.18.3"
 wildmatch = "2.1"
 image = "0.25"

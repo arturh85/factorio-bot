@@ -20,7 +20,7 @@ jobs:
     steps:
       # Prepare
       - name: 🔥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: 🛠️ Install nodejs 16
         uses: actions/setup-node@v6
         with:
@@ -200,7 +200,7 @@ jobs:
     needs: build-publish
     steps:
       - name: 🔥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: 🛠️ Install nodejs 16
         uses: actions/setup-node@v6
         with:

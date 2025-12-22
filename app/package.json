@@ -71,7 +71,7 @@
     "vite-plugin-monaco-editor": "1.0.12",
     "vitest": "0.21.1",
     "vue-eslint-parser": "^9.4.3",
-    "vue-tsc": "3.2.0"
+    "vue-tsc": "3.2.1"
   },
   "browserslist": [
     "> 1%",

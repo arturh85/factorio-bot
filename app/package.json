@@ -68,7 +68,7 @@
     "sass": "1.97.1",
     "ts-node": "10.9.2",
     "typescript": "5.9.3",
-    "vite": "5.4.21",
+    "vite": "7.3.0",
     "vite-plugin-monaco-editor": "1.0.12",
     "vitest": "^4.0.16",
     "vue-eslint-parser": "^9.4.3",

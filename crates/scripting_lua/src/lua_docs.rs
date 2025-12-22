@@ -44,7 +44,7 @@ pub fn write_lua_docs(target_path: PathBuf) -> LuaResult<()> {
 
 fn write_lua_doc(target_path: PathBuf, doc_table: &LuaTable) {
     let mut body = doc_table
-        .get::<_, String>("__doc__header")
+        .get::<String>("__doc__header")
         .unwrap_or_default()
         .trim()
         .to_string();
@@ -59,7 +59,7 @@ fn write_lua_doc(target_path: PathBuf, doc_table: &LuaTable) {
         }
     }
     body += doc_table
-        .get::<_, String>("__doc__footer")
+        .get::<String>("__doc__footer")
         .unwrap_or_default()
         .trim();
     body += "\n";

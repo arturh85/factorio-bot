@@ -31,7 +31,7 @@ pub fn to_lua_error(err: mlua::Error, code_by_path: &HashMap<String, String>) ->
 
         err.into()
     } else {
-        miette!(err)
+        miette!("{}", err)
     }
     // fn position_to_span(pos: Position, code: &str) -> Option<SourceSpan> {
     //     let line_offset = line_offset(code, pos.line()?)?;

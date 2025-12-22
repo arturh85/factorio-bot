@@ -12,7 +12,7 @@ pub fn create_lua_world(
     lua: &Lua,
     _world: Arc<FactorioWorld>,
     cwd: PathBuf,
-) -> LuaResult<LuaTable<'_>> {
+) -> LuaResult<LuaTable> {
     let map_table = lua.create_table()?;
     map_table.set(
         "__doc__header",

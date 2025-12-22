@@ -8,7 +8,7 @@ pub fn create_lua_rcon(
     lua: &Lua,
     _rcon: Arc<FactorioRcon>,
     _world: Arc<FactorioWorld>,
-) -> LuaResult<LuaTable<'_>> {
+) -> LuaResult<LuaTable> {
     let map_table = lua.create_table()?;
     map_table.set(
         "__doc__header",

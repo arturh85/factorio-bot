@@ -957,14 +957,14 @@ pub struct PrimeVueTreeNode {
     pub children: Vec<PrimeVueTreeNode>,
 }
 
-impl IntoLua<'_> for InventoryResponse {
-    fn into_lua(self, lua: &Lua) -> LuaResult<LuaValue<'_>> {
+impl IntoLua for InventoryResponse {
+    fn into_lua(self, lua: &Lua) -> LuaResult<LuaValue> {
         lua.to_value(&self)
     }
 }
 
-impl FromLuaMulti<'_> for Position {
-    fn from_lua_multi(values: LuaMultiValue<'_>, _lua: &Lua) -> LuaResult<Self> {
+impl FromLuaMulti for Position {
+    fn from_lua_multi(values: LuaMultiValue, _lua: &Lua) -> LuaResult<Self> {
         let values: Vec<LuaValue> = values.into_iter().collect();
         if values.len() < 2 {
             return Err(LuaError::RuntimeError(
@@ -987,14 +987,14 @@ impl FromLuaMulti<'_> for Position {
     }
 }
 
-impl IntoLua<'_> for Rect {
-    fn into_lua(self, lua: &Lua) -> LuaResult<LuaValue<'_>> {
+impl IntoLua for Rect {
+    fn into_lua(self, lua: &Lua) -> LuaResult<LuaValue> {
         lua.to_value(&self)
     }
 }
 
-impl IntoLua<'_> for FactorioEntity {
-    fn into_lua(self, lua: &Lua) -> LuaResult<LuaValue<'_>> {
+impl IntoLua for FactorioEntity {
+    fn into_lua(self, lua: &Lua) -> LuaResult<LuaValue> {
         lua.to_value(&self)
     }
 }

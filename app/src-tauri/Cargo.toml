@@ -44,8 +44,8 @@ console-subscriber = { version = "0.5", optional = true }
 # serializing / deserializing
 serde = { version = "1.0", features = [ "derive" ] }
 serde_json = "1.0.145"
-strum = { version = "0.26", features = ["derive"] }
-toml = "0.8"
+strum = { version = "0.27", features = ["derive"] }
+toml = "0.9"
 
 # cli
 clap = {version = "4.5.53", optional = true }

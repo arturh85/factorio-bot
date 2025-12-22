@@ -46,7 +46,7 @@ jobs:
         if: matrix.platform == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtksourceview-3.0-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev liblua5.4-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtksourceview-3.0-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev liblua5.4-dev libfuse2
       - name: 🛠️ Install Lua 5.4 (macOS)
         if: matrix.platform == 'macos-latest'
         run: |
@@ -59,9 +59,19 @@ jobs:
         run: |
           choco install -y pkgconfiglite
           & "C:\vcpkg\vcpkg.exe" install lua:x64-windows
-          $pkgconfigDir = 'C:\vcpkg\installed\x64-windows\lib\pkgconfig'
+          $vcpkgRoot = 'C:\vcpkg\installed\x64-windows'
+          $pkgconfigDir = "$vcpkgRoot\lib\pkgconfig"
           if (Test-Path "$pkgconfigDir\lua.pc") { Copy-Item "$pkgconfigDir\lua.pc" "$pkgconfigDir\lua54.pc" }
-          Add-Content -Path $env:GITHUB_ENV -Value "PKG_CONFIG_PATH=$pkgconfigDir"
+          
+          # Use forward slashes for PKG_CONFIG_PATH to avoid drive letter confusion
+          $pkgConfigPath = $pkgconfigDir -replace '\\', '/'
+          Add-Content -Path $env:GITHUB_ENV -Value "PKG_CONFIG_PATH=$pkgConfigPath"
+          
+          # Set explicit LUA environment variables as fallback for mlua
+          Add-Content -Path $env:GITHUB_ENV -Value "LUA_INC=$vcpkgRoot\include"
+          Add-Content -Path $env:GITHUB_ENV -Value "LUA_LIB=$vcpkgRoot\lib"
+          Add-Content -Path $env:GITHUB_ENV -Value "LUA_LIB_NAME=lua"
+
           $pkgconfigBin = Join-Path $env:ChocolateyInstall 'lib\pkgconfiglite\tools'
           Add-Content -Path $env:GITHUB_PATH -Value $pkgconfigBin
       - name: 🔧 Configure mlua vendored build (Windows)

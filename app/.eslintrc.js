@@ -8,6 +8,7 @@ module.exports = {
 			jsx: true
 		}
 	},
+	plugins: ['vue'],
 	extends: [
 		'plugin:vue/vue3-essential',
 		'plugin:@typescript-eslint/recommended'

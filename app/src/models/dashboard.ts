@@ -2,7 +2,7 @@
 export type DashboardMenu = {
     label: string,
     items: DashboardMenu[],
-    command: Function,
+    command: (event: { originalEvent: Event, item: unknown }) => void,
     url: string,
     icon: string,
     class: string,

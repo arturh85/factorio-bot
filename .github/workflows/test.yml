@@ -92,6 +92,12 @@ jobs:
         run: |
           Add-Content -Path $env:GITHUB_ENV -Value "MLUA_BUILD_LUA=1"
 
+      - name: 🔧 Pin reqwest version (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          cargo update -p reqwest --precise 0.12.26
+
       # Javascript
       - name: 🛠️ Install nodejs dependencies
         run: |
@@ -137,3 +143,4 @@ jobs:
         with:
           fail_ci_if_error: false
           files: ./app/coverage/cobertura-coverage.xml,./cobertura.xml,./target/tarpaulin/coverage.json
+

@@ -46,7 +46,7 @@ jobs:
         if: matrix.platform == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtksourceview-3.0-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtksourceview-3.0-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev liblua5.4-dev
       - name: 🛠️ Install Lua 5.4 (macOS)
         if: matrix.platform == 'macos-latest'
         run: |
@@ -60,6 +60,7 @@ jobs:
           choco install -y pkgconfiglite
           & "C:\vcpkg\vcpkg.exe" install lua:x64-windows
           $pkgconfigDir = 'C:\vcpkg\installed\x64-windows\lib\pkgconfig'
+          if (Test-Path "$pkgconfigDir\lua.pc") { Copy-Item "$pkgconfigDir\lua.pc" "$pkgconfigDir\lua54.pc" }
           Add-Content -Path $env:GITHUB_ENV -Value "PKG_CONFIG_PATH=$pkgconfigDir"
           $pkgconfigBin = Join-Path $env:ChocolateyInstall 'lib\pkgconfiglite\tools'
           Add-Content -Path $env:GITHUB_PATH -Value $pkgconfigBin

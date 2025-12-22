@@ -161,7 +161,7 @@ jobs:
         run: |
           cd app/scripts; node update-package-version.js
       - name: Generate changelog
-        uses: orhun/git-cliff-action@v2
+        uses: orhun/git-cliff-action@v4
         id: git-cliff
         with:
           config: Cargo.toml

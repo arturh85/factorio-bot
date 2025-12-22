@@ -112,7 +112,7 @@ pub fn extract_archive(
         }
         let bar = ProgressBar::new(files.len() as u64);
         bar.set_draw_target(ProgressDrawTarget::stdout());
-        bar.set_style(ProgressStyle::default_spinner().template("{msg}\n{wide_bar} {pos}/{len}"));
+        bar.set_style(ProgressStyle::default_spinner().template("{msg}\n{wide_bar} {pos}/{len}")?);
         for file in files {
             let message = format!("extracting {}", &file);
             bar.set_message(message);

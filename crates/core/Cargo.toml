@@ -71,11 +71,11 @@ windows-sys = { version = "^0.52.0", features = [
 ] }
 
 [build-dependencies]
-serde = { version = "^1.0.193", features = [ "derive" ] }
+serde = { version = "^1", features = [ "derive" ] }
 config_struct = "^0.5"
 toml = "*"
 
 
 [dev-dependencies]
-mockall = "0.11.4"
-mockall_double = "0.3.0"
+mockall = "0.14.0"
+mockall_double = "0.3.1"

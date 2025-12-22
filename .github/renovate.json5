@@ -1,0 +1,19 @@
+{
+  "extends": [
+    "config:base"
+  ],
+  "packageRules": [
+    {
+      "matchUpdateTypes": ["major","minor", "patch", "pin", "digest"],
+      "automerge": true
+    },
+    {
+      "matchPackageNames": ["/typescript/"],
+      "enabled": false
+    },
+    {
+      "matchPackageNames": ["/vite-plugin-monaco-editor/"],
+      "enabled": false
+    },
+  ]
+}

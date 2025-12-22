@@ -77,5 +77,5 @@ toml = "*"
 
 
 [dev-dependencies]
-mockall = "0.11.4"
+mockall = "0.14.0"
 mockall_double = "0.3.0"

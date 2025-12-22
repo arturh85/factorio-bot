@@ -1207,16 +1207,19 @@ impl ConnectionManager {
     }
 }
 
-#[async_trait]
 impl bb8::ManageConnection for ConnectionManager {
     type Connection = rcon::Connection<TcpStream>;
     type Error = rcon::Error;
 
-    async fn connect(&self) -> Result<Self::Connection, Self::Error> {
-        Connection::builder()
-            .enable_factorio_quirks(true)
-            .connect(&self.address, &self.pass)
-            .await
+    fn connect(&self) -> impl std::future::Future<Output = Result<Self::Connection, Self::Error>> + Send {
+        let address = self.address.clone();
+        let pass = self.pass.clone();
+        async move {
+            Connection::builder()
+                .enable_factorio_quirks(true)
+                .connect(&address, &pass)
+                .await
+        }
     }
 
     async fn is_valid(&self, _conn: &mut Self::Connection) -> Result<(), Self::Error> {

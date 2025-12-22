@@ -19,6 +19,14 @@ jobs:
       # Prepare
       - name: 🔥 Checkout code
         uses: actions/checkout@v4
+      - name: 🧹 Free Disk Space (Ubuntu)
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
       - name: 🛠️ Install nodejs 24
         uses: actions/setup-node@v4
         with:
@@ -41,7 +49,8 @@ jobs:
       - name: 🛠️ Install tarpaulin (rust code coverage analyser)
         if: matrix.platform == 'ubuntu-latest'
         run: |
-          cargo install cargo-tarpaulin
+          curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+          cargo binstall -y cargo-tarpaulin
       - name: 🛠️ Install webkit2gtk (for tauri)
         if: matrix.platform == 'ubuntu-latest'
         run: |
@@ -105,6 +114,10 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: 1
         run: |
           cd app; yarn tauri:build
+      - name: 🧹 Clean release artifacts
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          rm -rf target/release
       - name: 🧪 Test rust code
         if: matrix.platform == 'ubuntu-latest'
         run: |

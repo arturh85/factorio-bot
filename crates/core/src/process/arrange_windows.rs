@@ -4,14 +4,14 @@ use miette::Result;
 pub async fn arrange_windows(_client_count: u8) -> Result<()> {
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
+        use windows_sys::Win32::Foundation::{HWND, LPARAM};
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             EnumWindows, GetSystemMetrics, GetWindowTextW, MoveWindow, SM_CXMAXIMIZED,
             SM_CYMAXIMIZED,
         };
         tokio::time::sleep(std::time::Duration::from_secs(_client_count as u64)).await; // wait for window to be visible, hopefully
         static mut HWNDS: Vec<HWND> = Vec::new();
-        extern "system" fn enum_window(window: HWND, _: LPARAM) -> BOOL {
+        extern "system" fn enum_window(window: HWND, _: LPARAM) -> i32 {
             unsafe {
                 let mut text: [u16; 512] = [0; 512];
                 let len = GetWindowTextW(window, text.as_mut_ptr(), text.len().try_into().unwrap());

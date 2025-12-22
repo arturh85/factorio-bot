@@ -9,7 +9,7 @@ use std::{fs, thread};
 
 #[cfg(target_os = "windows")]
 pub async fn kill_process(process_name: &str) -> Result<()> {
-    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, HMODULE};
     use windows_sys::Win32::System::ProcessStatus::{
         K32EnumProcessModules, K32EnumProcesses, K32GetModuleBaseNameW,
     };
@@ -27,9 +27,15 @@ pub async fn kill_process(process_name: &str) -> Result<()> {
         for process_id in processes.iter().take(process_count as usize) {
             let process_handle =
                 OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, *process_id);
-            let mut module = 0isize;
+            let mut module: HMODULE = std::ptr::null_mut();
             let mut cb_needed = 0u32;
-            if K32EnumProcessModules(process_handle, &mut module, 4, &mut cb_needed) > 0 {
+            if K32EnumProcessModules(
+                process_handle,
+                &mut module,
+                std::mem::size_of::<HMODULE>() as u32,
+                &mut cb_needed,
+            ) > 0
+            {
                 let mut text: [u16; 512] = [0; 512];
                 let len = K32GetModuleBaseNameW(
                     process_handle,

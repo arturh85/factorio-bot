@@ -37,7 +37,7 @@
     "@vueuse/core": "14.1.0",
     "ansi-html": "0.0.9",
     "mermaid": "11.12.2",
-    "monaco-editor": "0.44.0",
+    "monaco-editor": "0.55.1",
     "nanoid": "5.1.6",
     "pinia": "2.2.4",
     "primeflex": "^3.3.1",

@@ -508,13 +508,13 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bb8"
-version = "0.8.6"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d89aabfae550a5c44b43ab941844ffcd2e993cb6900b342debf59e9ea74acdb8"
+checksum = "457d7ed3f888dfd2c7af56d4975cade43c622f74bdcddfed6d4352f57acc6310"
 dependencies = [
- "async-trait",
  "futures-util",
  "parking_lot",
+ "portable-atomic",
  "tokio",
 ]
 
@@ -2079,7 +2079,6 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "toml 0.8.2",
- "toml 0.9.10+spec-1.1.0",
  "typescript-definitions-ufo-patch",
  "unicode-segmentation",
  "wildmatch",

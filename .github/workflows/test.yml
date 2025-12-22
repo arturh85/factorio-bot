@@ -46,7 +46,7 @@ jobs:
         if: matrix.platform == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtksourceview-3.0-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev liblua5.4-dev libfuse2 file
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtksourceview-3.0-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev liblua5.4-dev libfuse2 file patchelf librsvg2-dev
       - name: 🛠️ Install Lua 5.4 (macOS)
         if: matrix.platform == 'macos-latest'
         run: |
@@ -71,6 +71,9 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "LUA_INC=$vcpkgRoot\include"
           Add-Content -Path $env:GITHUB_ENV -Value "LUA_LIB=$vcpkgRoot\lib"
           Add-Content -Path $env:GITHUB_ENV -Value "LUA_LIB_NAME=lua"
+
+          # Add Lua bin directory to PATH so build scripts can find lua.dll
+          Add-Content -Path $env:GITHUB_PATH -Value "$vcpkgRoot\bin"
 
           $pkgconfigBin = Join-Path $env:ChocolateyInstall 'lib\pkgconfiglite\tools'
           Add-Content -Path $env:GITHUB_PATH -Value $pkgconfigBin

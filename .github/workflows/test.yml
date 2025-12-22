@@ -39,7 +39,7 @@ jobs:
       - name: 💾 Cache rust dependencies
         uses: Swatinem/rust-cache@v2
       - name: 💾 Cache javascript dependencies
-        uses: actions/cache@v3
+        uses: actions/cache@v5
         with:
           path: '**/node_modules'
           key: ${{ runner.os }}-modules-${{ hashFiles('**/yarn.lock') }}

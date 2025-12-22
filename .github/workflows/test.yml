@@ -132,7 +132,7 @@ jobs:
       # Upload coverage
       - name: 📤 Upload coverage reports to codecov.io
         if: matrix.platform == 'ubuntu-latest' && github.ref == 'refs/heads/master'
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v5
         continue-on-error: true
         with:
           fail_ci_if_error: false

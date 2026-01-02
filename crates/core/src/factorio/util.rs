@@ -108,7 +108,7 @@ pub fn read_to_value(path: &Path) -> Result<Value> {
 }
 
 pub fn write_value_to(value: &Value, path: &Path) -> Result<()> {
-    let mut outfile = fs::File::create(&path).into_diagnostic()?;
+    let mut outfile = fs::File::create(path).into_diagnostic()?;
     let bytes = serde_json::to_string(value).unwrap();
     outfile.write_all(bytes.as_ref()).into_diagnostic()?;
     Ok(())
@@ -390,7 +390,7 @@ pub fn build_entity_path(
                         break;
                     }
                     let target: Pos = move_pos(current_pos, direction, length as i32);
-                    if blocked.get(&target).is_none() {
+                    if !blocked.contains_key(&target) {
                         options.push((
                             (last_pos.clone(), current_pos.clone(), target),
                             if length == 1 { 1 } else { length as i32 * 3 },
@@ -474,8 +474,8 @@ pub fn floor_position(position: &Position) -> Position {
 }
 
 pub fn position_equal(a: &Position, b: &Position) -> bool {
-    (a.x().floor() - b.x().floor()).abs() < std::f64::EPSILON
-        && (a.y().floor() - b.y().floor()).abs() < std::f64::EPSILON
+    (a.x().floor() - b.x().floor()).abs() < f64::EPSILON
+        && (a.y().floor() - b.y().floor()).abs() < f64::EPSILON
 }
 
 pub fn rect_fields(rect: &Rect) -> Vec<Position> {
@@ -517,43 +517,6 @@ pub fn relative_direction(from: &Pos, to: &Pos) -> Direction {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::types::Pos;
-
-    use super::*;
-
-    #[test]
-    fn test_relative_direction() {
-        let center = Pos(0, 0);
-        let left = Pos(-1, 0);
-        let right = Pos(1, 0);
-        let top = Pos(0, -1);
-        let bottom = Pos(0, 1);
-        assert_eq!(relative_direction(&center, &right), Direction::East);
-        assert_eq!(relative_direction(&center, &left), Direction::West);
-        assert_eq!(relative_direction(&center, &top), Direction::North);
-        assert_eq!(relative_direction(&center, &bottom), Direction::South);
-        let left_top = Pos(-1, -1);
-        assert_eq!(relative_direction(&center, &left_top), Direction::NorthWest);
-        let right_top = Pos(1, -1);
-        assert_eq!(
-            relative_direction(&center, &right_top),
-            Direction::NorthEast
-        );
-        let left_bottom = Pos(-1, 1);
-        assert_eq!(
-            relative_direction(&center, &left_bottom),
-            Direction::SouthWest
-        );
-        let right_bottom = Pos(1, 1);
-        assert_eq!(
-            relative_direction(&center, &right_bottom),
-            Direction::SouthEast
-        );
-    }
-}
-
 pub fn format_dotgraph(str: String) -> String {
     format!(
         "digraph {{\n{}\n}}\n",
@@ -591,5 +554,42 @@ pub fn scaled_draw_rect(
         )
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::types::Pos;
+
+    use super::*;
+
+    #[test]
+    fn test_relative_direction() {
+        let center = Pos(0, 0);
+        let left = Pos(-1, 0);
+        let right = Pos(1, 0);
+        let top = Pos(0, -1);
+        let bottom = Pos(0, 1);
+        assert_eq!(relative_direction(&center, &right), Direction::East);
+        assert_eq!(relative_direction(&center, &left), Direction::West);
+        assert_eq!(relative_direction(&center, &top), Direction::North);
+        assert_eq!(relative_direction(&center, &bottom), Direction::South);
+        let left_top = Pos(-1, -1);
+        assert_eq!(relative_direction(&center, &left_top), Direction::NorthWest);
+        let right_top = Pos(1, -1);
+        assert_eq!(
+            relative_direction(&center, &right_top),
+            Direction::NorthEast
+        );
+        let left_bottom = Pos(-1, 1);
+        assert_eq!(
+            relative_direction(&center, &left_bottom),
+            Direction::SouthWest
+        );
+        let right_bottom = Pos(1, 1);
+        assert_eq!(
+            relative_direction(&center, &right_bottom),
+            Direction::SouthEast
+        );
     }
 }

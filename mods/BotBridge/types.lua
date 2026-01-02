@@ -172,16 +172,19 @@ end
 function serialize_entity_prototype(entity)
     local collision_mask = nil
     if entity.collision_mask ~= nil then
-        for k,v in pairs(entity.collision_mask) do
-            if collision_mask == nil then
-                collision_mask = {}
+        -- In Factorio 2.0, collision_mask might not be iterable with pairs()
+        local ok, _ = pcall(function()
+            for k,v in pairs(entity.collision_mask) do
+                if collision_mask == nil then
+                    collision_mask = {}
+                end
+                table.insert(collision_mask, k)
             end
-            table.insert(collision_mask, k)
-        end
+        end)
     end
     local mine_result = {}
     local mining_time
-    if entity.mineable_properties.minable then
+    if entity.mineable_properties and entity.mineable_properties.minable then
         local array = {}
         if (entity.mineable_properties.products == nil) then
             -- print("wtf, entity "..entity.name.." is mineable, but has no products?!")
@@ -196,21 +199,30 @@ function serialize_entity_prototype(entity)
     end
     local fluidbox_prototypes = {}
     local fluidbox_found = false
-    for _,v in pairs(entity.fluidbox_prototypes) do
-        fluidbox_found = true
-        table.insert(fluidbox_prototypes, serialize_fluidbox_prototype(v))
+    if entity.fluidbox_prototypes then
+        for _,v in pairs(entity.fluidbox_prototypes) do
+            fluidbox_found = true
+            table.insert(fluidbox_prototypes, serialize_fluidbox_prototype(v))
+        end
     end
     local record = table_properties(entity, {"name", "type"}, {type = "entity_type"})
     record.mining_time = mining_time
-    record.max_underground_distance = entity.max_underground_distance
-    record.mining_speed = entity.mining_speed
-    record.crafting_speed = entity.crafting_speed
+    -- These properties may not exist on all entity prototypes
+    local ok, val
+    ok, val = pcall(function() return entity.max_underground_distance end)
+    if ok then record.max_underground_distance = val end
+    ok, val = pcall(function() return entity.mining_speed end)
+    if ok then record.mining_speed = val end
+    ok, val = pcall(function() return entity.crafting_speed end)
+    if ok then record.crafting_speed = val end
     record.mine_result = mine_result
     if fluidbox_found then
         record.fluidbox_prototypes = fluidbox_prototypes
     end
     record.collision_mask = collision_mask
-    record.collision_box = table_properties(entity.collision_box, {"left_top", "right_bottom"}, {left_top = "left_top", right_bottom = "right_bottom"})
+    if entity.collision_box then
+        record.collision_box = table_properties(entity.collision_box, {"left_top", "right_bottom"}, {left_top = "left_top", right_bottom = "right_bottom"})
+    end
 
     return record
 end
@@ -262,7 +274,11 @@ function table_properties(tbl, props, replacements)
         if replacements ~= nil and replacements[v] ~= nil then
             target_v = replacements[v]
         end
-        filtered[target_v] = tbl[v]
+        -- Use pcall to safely access properties that might not exist in Factorio 2.0
+        local ok, val = pcall(function() return tbl[v] end)
+        if ok then
+            filtered[target_v] = val
+        end
     end
     return filtered
 end

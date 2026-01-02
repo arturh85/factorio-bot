@@ -3,7 +3,7 @@ pub mod command;
 use crate::context::Context;
 use factorio_bot_core::miette::{Report, Result};
 
-#[allow(clippy::items_after_statements)]
+#[allow(clippy::items_after_statements, clippy::unnecessary_wraps)]
 pub fn start(context: Context) -> Result<()> {
   let app = tauri::Builder::default()
     .setup(|app| {

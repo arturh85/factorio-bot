@@ -9,28 +9,28 @@
     },
     
     {
-      "name": "BotBridge",
+      "name": "elevated-rails",
       "enabled": true
     },
     
     {
-      "name": "Bottleneck",
+      "name": "quality",
+      "enabled": true
+    },
+    
+    {
+      "name": "space-age",
+      "enabled": true
+    },
+    
+    {
+      "name": "BotBridge",
       "enabled": true
     },
     
     {
       "name": "creative-mod",
       "enabled": false
-    },
-    
-    {
-      "name": "factoryplanner",
-      "enabled": true
-    },
-    
-    {
-      "name": "flib",
-      "enabled": true
     },
     
     {

@@ -1,3 +1,6 @@
+// False positive warnings from thiserror/miette derive macros using struct fields in format strings
+#![allow(unused_assignments)]
+
 use factorio_bot_core::mlua;
 use factorio_bot_core::regex::Regex;
 use factorio_bot_core::thiserror::Error;

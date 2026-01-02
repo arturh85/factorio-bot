@@ -1,3 +1,6 @@
+// False positive warnings from thiserror/miette derive macros using struct fields in format strings
+#![allow(unused_assignments)]
+
 use crate::types::PlayerId;
 use miette::Diagnostic;
 use thiserror::Error;
@@ -85,8 +88,6 @@ pub struct FactorioAlreadyStarted {}
     help("provide correct player id")
 )]
 pub struct RconPlayerNotFound {
-    #[allow(unused_assignments)]
-    #[allow(unused)]
     pub player_id: PlayerId,
 }
 

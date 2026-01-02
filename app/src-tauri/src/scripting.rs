@@ -107,7 +107,8 @@ pub fn prepare_workspace_scripts(workspace_path: &Path) -> Result<PathBuf, Strin
     }
     if !workspace_plans_path.exists() {
       return Err(format!(
-        "Missing scripts/ folder from working directory: {workspace_plans_path:?}"
+        "Missing scripts/ folder from working directory: {}",
+        workspace_plans_path.display()
       ));
     }
   }

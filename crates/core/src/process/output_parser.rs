@@ -149,7 +149,7 @@ impl OutputParser {
                     let action_status = &rest[0..pos];
                     let rest = &rest[pos + 1..];
                     let action_id: u32 = match rest.find(' ') {
-                        Some(pos) => (&rest[0..pos]).parse().into_diagnostic()?,
+                        Some(pos) => rest[0..pos].parse().into_diagnostic()?,
                         None => rest.parse().into_diagnostic()?,
                     };
                     let result = match action_status {

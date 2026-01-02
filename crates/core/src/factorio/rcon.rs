@@ -686,9 +686,9 @@ impl FactorioRcon {
                 ],
             )
             .await?;
-        if lines.is_some() {
+        if let Some(lines) = lines {
             return Err(RconError {
-                message: format!("{:?}", lines.unwrap()),
+                message: format!("{:?}", lines),
             }
             .into());
         }
@@ -735,9 +735,9 @@ impl FactorioRcon {
                 ],
             )
             .await?;
-        if lines.is_some() {
+        if let Some(lines) = lines {
             return Err(RconError {
-                message: format!("{:?}", lines.unwrap()),
+                message: format!("{:?}", lines),
             }
             .into());
         }
@@ -828,9 +828,9 @@ impl FactorioRcon {
                 vec![str_to_lua(name), str_to_lua(map_exchange_string)],
             )
             .await?;
-        if result.is_some() {
+        if let Some(result) = result {
             return Err(RconError {
-                message: result.unwrap().join("\n"),
+                message: result.join("\n"),
             }
             .into());
         }
@@ -1068,9 +1068,9 @@ impl FactorioRcon {
                 ],
             )
             .await?;
-        if result.is_some() {
+        if let Some(result) = result {
             return Err(RconError {
-                message: format!("{:?}", result.unwrap()),
+                message: format!("{:?}", result),
             }
             .into());
         }
@@ -1128,9 +1128,9 @@ impl FactorioRcon {
                 vec![action_id, player_id, str_to_lua(recipe), count.to_string()],
             )
             .await?;
-        if result.is_some() {
+        if let Some(result) = result {
             return Err(RconError {
-                message: format!("{:?}", result.unwrap()),
+                message: format!("{:?}", result),
             }
             .into());
         }
@@ -1211,7 +1211,9 @@ impl bb8::ManageConnection for ConnectionManager {
     type Connection = rcon::Connection<TcpStream>;
     type Error = rcon::Error;
 
-    fn connect(&self) -> impl std::future::Future<Output = Result<Self::Connection, Self::Error>> + Send {
+    fn connect(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Self::Connection, Self::Error>> + Send {
         let address = self.address.clone();
         let pass = self.pass.clone();
         async move {
@@ -1243,7 +1245,7 @@ impl RconSettings {
         server_host: Option<String>,
     ) -> RconSettings {
         RconSettings {
-            port: settings.rcon_port as u16,
+            port: settings.rcon_port,
             pass: settings.rcon_pass.to_string(),
             host: server_host,
         }

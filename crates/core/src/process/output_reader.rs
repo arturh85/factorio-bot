@@ -11,7 +11,7 @@ use crate::factorio::world::FactorioWorld;
 use crate::process::output_parser::OutputParser;
 use crate::process::process_control::FactorioStartCondition;
 use crate::process::InteractiveProcess;
-use miette::{IntoDiagnostic, Result};
+use miette::{miette, IntoDiagnostic, Result};
 use parking_lot::{Mutex, RwLock};
 use std::sync::mpsc;
 
@@ -32,6 +32,9 @@ pub async fn read_output(
     let (tx1, rx1) = mpsc::channel();
     let (tx2, rx2) = mpsc::channel();
     let initialized = Mutex::new(false);
+    let error_buffer: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let error_buffer_stdout = error_buffer.clone();
+    let error_buffer_stderr = error_buffer.clone();
     let _world = output_parser.world();
     let _silent = silent.clone();
     let proc = InteractiveProcess::new_with_stderr(
@@ -66,10 +69,10 @@ pub async fn read_output(
                             log_file.write_all(b"\n").expect("failed to write log file");
                         });
 
-                        if !line.is_empty() && &line[0..2] == "§" {
-                            if let Some(pos) = line[2..].find('§') {
-                                let tick: u64 = (&line[2..pos + 2]).parse().unwrap();
-                                let rest = &line[pos + 4..];
+                        if let Some(stripped) = line.strip_prefix('§') {
+                            if let Some(pos) = stripped.find('§') {
+                                let tick: u64 = stripped[..pos].parse().unwrap();
+                                let rest = &stripped[pos + 2..];
                                 if let Some(pos) = rest.find('§') {
                                     let action = &rest[0..pos];
                                     let rest = &rest[pos + 2..];
@@ -107,8 +110,11 @@ pub async fn read_output(
                                     }
                                 }
                             }
-                        } else if line.contains("Error") && !silent {
-                            warn!("<cyan>server</>⮞ <red>{}</>", line);
+                        } else if line.contains("Error") {
+                            error_buffer_stdout.lock().push(line.clone());
+                            if !silent {
+                                warn!("<cyan>server</>⮞ <red>{}</>", line);
+                            }
                         } else if !silent {
                             // info!("<cyan>server</>⮞ <magenta>{}</>", line);
                             println!("{}", line);
@@ -123,6 +129,7 @@ pub async fn read_output(
         move |line| {
             match line {
                 Ok(line) => {
+                    error_buffer_stderr.lock().push(line.clone());
                     warn!("<cyan>server</>⮞ <red>{}</>", line);
                 }
                 Err(err) => {
@@ -131,7 +138,22 @@ pub async fn read_output(
             };
         },
     ).into_diagnostic()?;
-    rx1.recv().into_diagnostic()?;
+    rx1.recv().map_err(|_| {
+        let errors = error_buffer.lock();
+        let recent_errors: Vec<&String> = errors.iter().rev().take(20).rev().collect();
+        if recent_errors.is_empty() {
+            miette!("Factorio failed to start (no error output captured)")
+        } else {
+            miette!(
+                "Factorio failed to start. Recent errors:\n{}",
+                recent_errors
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        }
+    })?;
     let rcon = FactorioRcon::new(rcon_settings, _silent)
         .await
         .expect("failed to rcon");

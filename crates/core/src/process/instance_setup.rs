@@ -14,7 +14,7 @@ use crate::constants::{
 use crate::errors::*;
 use crate::factorio::rcon::RconSettings;
 use crate::factorio::util::{read_to_value, write_value_to};
-use crate::process::io_utils::{await_lock, extract_archive, symlink};
+use crate::process::io_utils::{await_lock, extract_archive, get_factorio_binary_path, symlink};
 use crate::process::output_reader::read_output;
 use crate::process::process_control::FactorioStartCondition;
 use miette::{miette, IntoDiagnostic, Result};
@@ -157,12 +157,7 @@ pub async fn setup_factorio_instance(
                     .ne(map_exchange_string)
             {
                 if !saves_level_path.exists() {
-                    let binary = if cfg!(windows) {
-                        "bin/x64/factorio.exe"
-                    } else {
-                        "bin/x64/factorio"
-                    };
-                    let factorio_binary_path = instance_path.join(PathBuf::from(binary));
+                    let factorio_binary_path = get_factorio_binary_path(instance_path);
                     if !factorio_binary_path.exists() {
                         error!(
                             "factorio binary missing at <bright-blue>{:?}</>",
@@ -170,13 +165,21 @@ pub async fn setup_factorio_instance(
                         );
                         return Err(FactorioBinaryNotFound {}.into());
                     }
+                    let mods_path = instance_path.join("mods");
+                    let mods_path_str = mods_path.to_str().unwrap().to_string();
                     let mut args = vec!["--create", saves_level_path.to_str().unwrap()];
                     if let Some(seed) = seed.as_ref() {
                         args.push("--map-gen-seed");
                         args.push(seed);
                     }
+                    // macOS Factorio uses ~/Library/Application Support/factorio/mods by default
+                    #[cfg(target_os = "macos")]
+                    {
+                        args.push("--mod-directory");
+                        args.push(&mods_path_str);
+                    }
                     let output = Command::new(&factorio_binary_path)
-                        .args(args)
+                        .args(&args)
                         .output()
                         .expect("failed to run factorio --create");
                     if !saves_level_path.exists() {
@@ -211,12 +214,7 @@ pub async fn setup_factorio_instance(
         }
         if !saves_level_path.exists() {
             let mut logger = Logger::new();
-            let binary = if cfg!(windows) {
-                "bin/x64/factorio.exe"
-            } else {
-                "bin/x64/factorio"
-            };
-            let factorio_binary_path = instance_path.join(PathBuf::from(binary));
+            let factorio_binary_path = get_factorio_binary_path(instance_path);
             if !factorio_binary_path.exists() {
                 error!(
                     "factorio binary missing at <bright-blue>{:?}</>",
@@ -224,6 +222,8 @@ pub async fn setup_factorio_instance(
                 );
                 return Err(FactorioBinaryNotFound {}.into());
             }
+            let mods_path = instance_path.join("mods");
+            let mods_path_str = mods_path.to_str().unwrap().to_string();
             let mut args = vec!["--create", saves_level_path.to_str().unwrap()];
             if let Some(seed) = &seed {
                 args.push("--map-gen-seed");
@@ -245,6 +245,12 @@ pub async fn setup_factorio_instance(
                 args.push("--map-settings");
                 args.push(&map_settings_path);
             }
+            // macOS Factorio uses ~/Library/Application Support/factorio/mods by default
+            #[cfg(target_os = "macos")]
+            {
+                args.push("--mod-directory");
+                args.push(&mods_path_str);
+            }
             await_lock(instance_path.join(PathBuf::from(".lock")), silent).await?;
             if !silent {
                 logger.loading(format!(
@@ -254,7 +260,7 @@ pub async fn setup_factorio_instance(
             }
 
             let output = Command::new(&factorio_binary_path)
-                .args(args)
+                .args(&args)
                 .output()
                 .expect("failed to run factorio --create");
 
@@ -328,12 +334,7 @@ pub async fn update_map_gen_settings(
         );
         return Err(FactorioInstanceNotFound {}.into());
     }
-    let binary = if cfg!(windows) {
-        "bin/x64/factorio.exe"
-    } else {
-        "bin/x64/factorio"
-    };
-    let factorio_binary_path = instance_path.join(PathBuf::from(binary));
+    let factorio_binary_path = get_factorio_binary_path(instance_path);
     if !factorio_binary_path.exists() {
         error!(
             "factorio binary missing at <bright-blue>{:?}</>",
@@ -363,21 +364,31 @@ pub async fn update_map_gen_settings(
             MAP_SETTINGS_FILENAME, MAP_GEN_SETTINGS_FILENAME
         ));
     }
-    let args = &[
+    let mods_path = instance_path.join("mods");
+    let mods_path_str = mods_path.to_str().unwrap().to_string();
+    let port_str = factorio_port.unwrap_or(34197).to_string();
+    let rcon_port_str = rcon_settings.port.to_string();
+    let mut args = vec![
         "--start-server",
         saves_level_path.to_str().unwrap(),
         "--port",
-        &factorio_port.unwrap_or(34197).to_string(),
+        &port_str,
         "--rcon-port",
-        &rcon_settings.port.to_string(),
+        &rcon_port_str,
         "--rcon-password",
         &rcon_settings.pass,
         "--server-settings",
         server_settings_path.to_str().unwrap(),
     ];
+    // macOS Factorio uses ~/Library/Application Support/factorio/mods by default
+    #[cfg(target_os = "macos")]
+    {
+        args.push("--mod-directory");
+        args.push(&mods_path_str);
+    }
     let log_path = workspace_path.join(PathBuf::from_str("server-log.txt").unwrap());
     let mut command = Command::new(&factorio_binary_path);
-    command.args(args);
+    command.args(&args);
     let (_, proc, rcon) = read_output(
         command,
         log_path,

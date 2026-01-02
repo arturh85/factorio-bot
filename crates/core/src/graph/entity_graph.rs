@@ -566,7 +566,6 @@ impl EntityGraph {
         println!("connecting {} nodes", nodes.len());
         for node_index in nodes {
             let inner = self.entity_graph.read();
-            let node_index = node_index;
             if let Some(node) = inner.node_weight(node_index) {
                 let node_entity = tree.get(node.entity_id.unwrap()).unwrap();
                 if let Some(drop_position) = node_entity.drop_position.as_ref() {

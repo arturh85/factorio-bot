@@ -62,6 +62,13 @@ impl Subcommand for ThisCommand {
           .action(ArgAction::SetTrue)
           .help("enabled writing server & client logs to workspace"),
       )
+      .arg(
+        Arg::new("verbose")
+          .short('v')
+          .long("verbose")
+          .action(ArgAction::SetTrue)
+          .help("Log server output to console"),
+      )
       .about("start given number of clients after server start")
   }
 
@@ -74,6 +81,7 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
   let app_settings = load_app_settings()?;
   let clients = *matches.get_one::<u8>("clients").expect("defaulted by clap");
   let write_logs = matches.get_flag("logs");
+  let verbose = matches.get_flag("verbose");
   let seed = matches.get_one::<String>("seed").cloned();
   let map_exchange_string = matches.get_one::<String>("map").cloned();
   let recreate = matches.get_flag("new");
@@ -88,6 +96,7 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
     write_logs,
     map_exchange_string,
     wait_until: FactorioStartCondition::DiscoveryComplete,
+    silent: !verbose,
     ..FactorioParams::default()
   };
   let instance_state = FactorioInstance::start(&app_settings.factorio, params)

@@ -50,12 +50,10 @@ fn write_lua_doc(target_path: PathBuf, doc_table: &LuaTable) {
         .to_string();
     body += "\n\n";
 
-    for result in doc_table.clone().pairs::<String, String>() {
-        if let Ok((key, value)) = result {
-            if key.starts_with("__doc_entry_") {
-                body += value.trim();
-                body += "\n\n"
-            }
+    for (key, value) in doc_table.clone().pairs::<String, String>().flatten() {
+        if key.starts_with("__doc_entry_") {
+            body += value.trim();
+            body += "\n\n"
         }
     }
     body += doc_table

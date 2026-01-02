@@ -6,7 +6,7 @@ use factorio_bot_core::process::process_control::{
   FactorioInstance, FactorioParams, FactorioStartCondition,
 };
 use reedline_repl_rs::clap::builder::PossibleValue;
-use reedline_repl_rs::clap::{builder::PossibleValuesParser, Arg, ArgMatches, Command};
+use reedline_repl_rs::clap::{builder::PossibleValuesParser, Arg, ArgAction, ArgMatches, Command};
 use reedline_repl_rs::crossterm::event::{KeyCode, KeyModifiers};
 use reedline_repl_rs::reedline::ReedlineEvent;
 use reedline_repl_rs::Repl;
@@ -267,24 +267,28 @@ impl Subcommand for ThisCommand {
             Arg::new("new")
               .long("new")
               .short('n')
+              .action(ArgAction::SetTrue)
               .help("recreate level by deleting server map if exists"),
           )
           .arg(
             Arg::new("logs")
               .short('l')
               .long("logs")
+              .action(ArgAction::SetTrue)
               .help("enabled writing server & client logs to workspace"),
           )
           .arg(
             Arg::new("verbose")
               .short('v')
               .long("verbose")
+              .action(ArgAction::SetTrue)
               .help("log server output to console"),
           )
           .arg(
             Arg::new("wait_until_finished")
               .short('w')
               .long("wait")
+              .action(ArgAction::SetTrue)
               .help("wait until world discovery is done"),
           ),
         |args, context| Box::pin(run(args, context)),

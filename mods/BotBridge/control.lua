@@ -210,15 +210,15 @@ end
 
 function on_init()
 	print("on_init!")
-	global.resources = {}
-	global.resources.last_index = 0
-	global.resources.list = {} -- might be sparse, so the #-operator won't work
-	global.resources.map = {}
-	global.map_area = {x1=0, y1=0, x2=0, y2=0} -- a bounding box of all charted map chunks
-	global.p = {} -- player-private data
-	global.pathfinding = {}
-	global.pathfinding.map = {}
-	global.n_clients = 1
+	storage.resources = {}
+	storage.resources.last_index = 0
+	storage.resources.list = {} -- might be sparse, so the #-operator won't work
+	storage.resources.map = {}
+	storage.map_area = {x1=0, y1=0, x2=0, y2=0} -- a bounding box of all charted map chunks
+	storage.p = {} -- player-private data
+	storage.pathfinding = {}
+	storage.pathfinding.map = {}
+	storage.n_clients = 1
 end
 
 function pos_str(pos)
@@ -388,10 +388,10 @@ end
 
 function writeout_entity_prototypes()
 	local result = {}
-	for k, v in pairs(game.entity_prototypes) do
+	for k, v in pairs(prototypes.entity) do
 		table.insert(result, serialize_entity_prototype(v))
 	end
-	rcon.print(game.table_to_json(result))
+	rcon.print(helpers.table_to_json(result))
 end
 
 function writeout_pictures()
@@ -399,11 +399,11 @@ function writeout_pictures()
 	-- order strings of the "DATA_RAW"..i entities. We had to use multiple of those, because
 	-- there's a limit of 200 characters per string.
 
-	if game.entity_prototypes["DATA_RAW_LEN"] == nil then
-		print("Error: no DATA_RAW_LEN entity prototype?!")
+	if prototypes.virtual_signal["DATA_RAW_LEN"] == nil then
+		print("Error: no DATA_RAW_LEN virtual-signal prototype?!")
 	end
 
-	local n = tonumber(game.entity_prototypes["DATA_RAW_LEN"].order)
+	local n = tonumber(prototypes.virtual_signal["DATA_RAW_LEN"].order)
 --	print("n is " .. n)
 
 	local i = 0
@@ -415,7 +415,7 @@ function writeout_pictures()
 	local strings = {}
 	for i = 1,n do
 		if (i % step == 0) then print(string.format("%3.0f%%", 100*i/n)) end
-		table.insert(strings, game.entity_prototypes["DATA_RAW"..i].order)
+		table.insert(strings, prototypes.virtual_signal["DATA_RAW"..i].order)
 	end
 	string = table.concat(strings,'')
 	data = {raw = loadstring(string)()}
@@ -463,9 +463,9 @@ end
 
 function writeout_entity_prototypes()
 	local lines = {}
-	for name, prot in pairs(game.entity_prototypes) do
+	for name, prot in pairs(prototypes.entity) do
 		if string.sub(name, 1, 8) ~= "DATA_RAW" then
-			table.insert(lines, game.table_to_json(serialize_entity_prototype(prot)))
+			table.insert(lines, helpers.table_to_json(serialize_entity_prototype(prot)))
 		end
 	end
 	writeout(0, "entity_prototypes" ,table.concat(lines, "$"))
@@ -473,8 +473,8 @@ end
 
 function writeout_item_prototypes()
 	local lines = {}
-	for name, prot in pairs(game.item_prototypes) do
-		table.insert(lines, game.table_to_json(serialize_item_prototype(prot)))
+	for name, prot in pairs(prototypes.item) do
+		table.insert(lines, helpers.table_to_json(serialize_item_prototype(prot)))
 	end
 	writeout(0, "item_prototypes", table.concat(lines,"$"))
 end
@@ -492,7 +492,7 @@ function writeout_recipes()
 	local lines = {}
 	for name, rec in pairs(game.forces["player"].recipes) do
 		if rec.enabled then
-			table.insert(lines, game.table_to_json(serialize_recipe(rec)))
+			table.insert(lines, helpers.table_to_json(serialize_recipe(rec)))
 		end
 	end
 	writeout(0, "recipes", table.concat(lines,"$"))
@@ -500,7 +500,7 @@ end
 function writeout_forces()
 	local lines = {}
 	for name, force in pairs(game.forces) do
-		writeout(0, "force", game.table_to_json(serialize_force(force)))
+		writeout(0, "force", helpers.table_to_json(serialize_force(force)))
 	end
 end
 
@@ -543,21 +543,21 @@ function on_tick(event)
 	end
 		
 	for idx, player in pairs(game.players) do
-		-- if global.p[idx].walking and player.connected then
+		-- if storage.p[idx].walking and player.connected then
 
 --		game.print("player " .. tostring(idx) .. " connected " .. tostring(player.connected) .. " character " .. tostring(player.character))
---		game.print("player " .. tostring(global.p[idx]))
+--		game.print("player " .. tostring(storage.p[idx]))
 
-		if global.p[idx] == nil then
-			global.p[idx] = {}
+		if storage.p[idx] == nil then
+			storage.p[idx] = {}
 		end
 
 
 		if player.connected and player.character then -- TODO FIXME
 --			game.print("player " .. tostring(idx))
-			if global.p[idx].walking then
---				game.print("player WALKING " .. table_to_string(global.p[idx]))
-				local w = global.p[idx].walking
+			if storage.p[idx].walking then
+--				game.print("player WALKING " .. table_to_string(storage.p[idx]))
+				local w = storage.p[idx].walking
 				local pos = player.character.position
 				local dest = w.waypoints[w.idx]
 
@@ -573,7 +573,7 @@ function on_tick(event)
 						if w.idx > #w.waypoints then
 							player.walking_state = {walking=false}
 							action_completed(event.tick, w.action_id)
-							global.p[idx].walking = nil
+							storage.p[idx].walking = nil
 							dx = 0
 							dy = 0
 						else
@@ -629,12 +629,12 @@ function on_tick(event)
 				end
 			end
 
-			if global.p[idx].mining then
-				local ent = global.p[idx].mining.entity
+			if storage.p[idx].mining then
+				local ent = storage.p[idx].mining.entity
 
 				if ent and ent.valid then -- mining complete
 					if distance(player.position, ent.position) > 6 then
-						action_failed(event.tick, global.p[idx].mining.action_id, "ERROR: too far too mine")
+						action_failed(event.tick, storage.p[idx].mining.action_id, "ERROR: too far too mine")
 					end
 
 					-- unfortunately, factorio doesn't offer a "select this entity" function
@@ -662,9 +662,9 @@ function on_tick(event)
 					-- the entity to be mined has been deleted, but p[idx].mining is still true.
 					-- this means that on_mined_entity() has *not* been called, indicating that something
 					-- else has "stolen" what we actually wanted to mine :(
-					action_failed(event.tick, global.p[idx].mining.action_id)
-					complain("failed to mine " .. global.p[idx].mining.prototype.name)
-					global.p[idx].mining = nil
+					action_failed(event.tick, storage.p[idx].mining.action_id)
+					complain("failed to mine " .. storage.p[idx].mining.prototype.name)
+					storage.p[idx].mining = nil
 				end
 			end
 		end
@@ -719,9 +719,9 @@ end
 
 function on_mined_entity(event)
 	for idx, player in pairs(game.players) do
-		-- if global.p[idx].walking and player.connected then
-		if global.p[idx] and player.connected and player.character then -- TODO FIXME
-			local mining = global.p[idx].mining
+		-- if storage.p[idx].walking and player.connected then
+		if storage.p[idx] and player.connected and player.character then -- TODO FIXME
+			local mining = storage.p[idx].mining
 			if mining then
 				if mining.entity == event.entity then
 --					complain("on_mined_entity mined the desired entity")
@@ -737,11 +737,11 @@ function on_mined_entity(event)
 					if recent_item_additions[idx] == nil then recent_item_additions[idx] = {} end
 					table.insert(recent_item_additions[idx], tmp_recent_item_addition)
 --					dump_dict(mining_results)
-					print("mining: " .. game.table_to_json(mining))
+					print("mining: " .. helpers.table_to_json(mining))
 					mining.left = mining.left - 1
 					if mining.left <= 0 then
 						action_completed(event.tick, mining.action_id)
-						global.p[idx].mining = nil
+						storage.p[idx].mining = nil
 					end
 				end
 			end
@@ -806,10 +806,10 @@ function on_chunk_generated(event)
 	if chunk_xend > 512 then return end
 	if chunk_yend > 512 then return end
 
-	if chunk_x < global.map_area.x1 then global.map_area.x1 = chunk_x end
-	if chunk_y < global.map_area.y1 then global.map_area.y1 = chunk_y end
-	if chunk_xend > global.map_area.x2 then global.map_area.x2 = chunk_xend end
-	if chunk_yend > global.map_area.y2 then global.map_area.y2 = chunk_yend end
+	if chunk_x < storage.map_area.x1 then storage.map_area.x1 = chunk_x end
+	if chunk_y < storage.map_area.y1 then storage.map_area.y1 = chunk_y end
+	if chunk_xend > storage.map_area.x2 then storage.map_area.x2 = chunk_xend end
+	if chunk_yend > storage.map_area.y2 then storage.map_area.y2 = chunk_yend end
 
 	writeout_entities(event.tick, surface, area)
 	local chunk_id = chunk_x .. "/" .. chunk_y
@@ -861,7 +861,9 @@ function writeout_tiles(tick, surface, area) -- SLOW! beastie can do ~2.8 per ti
 	for y = area.left_top.y, area.right_bottom.y-1 do
 		for x = area.left_top.x, area.right_bottom.x-1  do
 			tile = surface.get_tile(x,y)
-			table.insert(line, tile.name .. ":" .. (tile.collides_with('player-layer') and "1" or "0"))
+			-- TODO: Factorio 2.0 changed collision layer API, need to update
+			-- For now, assume tiles don't collide with player (walkable)
+			table.insert(line, tile.name .. ":0")
 		end
 	end
 	writeout(tick, "tiles", header .. table.concat(line, ","))
@@ -907,7 +909,7 @@ function writeout_entities(tick, surface, area)
 			table.insert(objects, serialize_entity(ent))
 		end
 	end
-	writeout(tick, "entities", header .. game.table_to_json(objects))
+	writeout(tick, "entities", header .. helpers.table_to_json(objects))
 	line=nil
 end
 
@@ -924,13 +926,13 @@ function coord(pos)
 end
 
 function on_load()
-	my_client_id = global.n_clients
+	my_client_id = storage.n_clients
 end
 
 function on_player_joined_game(event)
 --	print("player '"..game.players[event.player_index].name.."' joined")
 --	game.write_file("players_connected.txt", game.players[event.player_index].name..'\n', true, 0) -- only on server
-	global.n_clients = global.n_clients + 1
+	storage.n_clients = storage.n_clients + 1
 	wait_for_player_inventory(event)
 
 	if client_local_data.whoami == "client1" then
@@ -972,7 +974,7 @@ function wait_for_player_inventory(event)
 end
 
 function on_player_left_game(event)
-	global.n_clients = global.n_clients - 1
+	storage.n_clients = storage.n_clients - 1
 	local tick = event.tick
 	local player_idx = event.player_index
 	writeout(event.tick, "on_player_left_game", player_idx)
@@ -1003,7 +1005,7 @@ function on_some_entity_created(event)
 		return
 	end
 
-	writeout(event.tick, "on_some_entity_created", game.table_to_json(serialize_entity(ent)))
+	writeout(event.tick, "on_some_entity_created", helpers.table_to_json(serialize_entity(ent)))
 
 --	if ent.type == "pipe" or ent.type == "pipe-to-ground" or ent.type == "wall" or ent.type == "heat-pipe" then -- HACK to semi-correctly assign an orientation to pipes etc
 --		-- need to write out neighboring entities as well, because they might have changed their orientation by this event
@@ -1021,7 +1023,7 @@ function on_some_entity_updated(event)
 		complain("wtf, on_some_entity_updated has nil entity")
 		return
 	end
-	writeout(event.tick, "on_some_entity_updated", game.table_to_json(serialize_entity(ent)))
+	writeout(event.tick, "on_some_entity_updated", helpers.table_to_json(serialize_entity(ent)))
 end
 
 function on_some_entity_deleted(event)
@@ -1030,7 +1032,7 @@ function on_some_entity_deleted(event)
 		complain("wtf, on_some_entity_created has nil entity")
 		return
 	end
-	writeout(event.tick, "on_some_entity_deleted", game.table_to_json(serialize_entity(ent)))
+	writeout(event.tick, "on_some_entity_deleted", helpers.table_to_json(serialize_entity(ent)))
 
 --	-- we can't do this now, because the entity still exists at this point. instead, we schedule the writeout for the next tick
 --
@@ -1096,7 +1098,7 @@ function on_script_path_request_finished(event)
 		for k,v in pairs(event.path) do
 			table.insert(positions, v.position)
 		end
-		result = game.table_to_json(positions)
+		result = helpers.table_to_json(positions)
 	elseif event.try_again_later then
 		result = "Error: try again later!"
 	end
@@ -1138,7 +1140,7 @@ function on_player_changed_position(event)
 	if player.connected and player.character ~= nil then
 		local position = player.position
 
-		writeout(event.tick, "on_player_changed_position", game.table_to_json({
+		writeout(event.tick, "on_player_changed_position", helpers.table_to_json({
 			player_id = player_idx,
 			position = position
 		}))
@@ -1150,7 +1152,7 @@ end
 
 function on_player_changed_distance(event)
 	for idx, player in pairs(game.players) do
-		writeout(event.tick, "on_player_changed_distance", game.table_to_json({
+		writeout(event.tick, "on_player_changed_distance", helpers.table_to_json({
 			player_id = idx,
 			build_distance = player.build_distance,
 			reach_distance = player.reach_distance,
@@ -1173,7 +1175,7 @@ function on_player_main_inventory_changed(event)
 	local tick = event.tick
 	local player_idx = event.player_index
 	local main_inventory = game.players[player_idx].get_main_inventory()
-	writeout(event.tick, "on_player_main_inventory_changed", game.table_to_json({
+	writeout(event.tick, "on_player_main_inventory_changed", helpers.table_to_json({
 		player_id = player_idx,
 		main_inventory = main_inventory.get_contents()
 	}))
@@ -1221,8 +1223,8 @@ function rcon_action_start_walk_waypoints(action_id, player_id, waypoints) -- e.
 	for i = 1, #waypoints do
 		tmp[i] = {x=waypoints[i][1], y=waypoints[i][2]}
 	end
-	--	game.print("waypoints: " .. table_to_string(global.p[player_id]))
-	global.p[player_id].walking = {idx=1, waypoints=tmp, action_id=action_id }
+	--	game.print("waypoints: " .. table_to_string(storage.p[player_id]))
+	storage.p[player_id].walking = {idx=1, waypoints=tmp, action_id=action_id }
 end
 
 function rcon_action_start_mining(action_id, player_id, name, position, count)
@@ -1236,20 +1238,20 @@ function rcon_action_start_mining(action_id, player_id, name, position, count)
 	end
 	if ent and ent.minable then
 --		print("MINING DO")
-		global.p[player_id].mining = { entity = ent, action_id = action_id, prototype = ent.prototype, left = count }
+		storage.p[player_id].mining = { entity = ent, action_id = action_id, prototype = ent.prototype, left = count }
 	elseif name == "stop" then
 --		print("MINING STOP")
-		global.p[player_id].mining = nil
+		storage.p[player_id].mining = nil
 	else
 --		print("MINING ERROR")
 		rcon.print("Error: no entity to mine")
-		global.p[player_id].mining = nil
+		storage.p[player_id].mining = nil
 		action_failed(last_tick, action_id)
 	end
 end
 
 function rcon_place_entity(player_id, item_name, entity_position, direction)
-	local entproto = game.item_prototypes[item_name].place_result
+	local entproto = prototypes.item[item_name].place_result
 	local player = game.players[player_id]
 	local surface = game.players[player_id].surface
 
@@ -1263,9 +1265,9 @@ function rcon_place_entity(player_id, item_name, entity_position, direction)
 		return
 	end
 
-	print("player position " .. game.table_to_json(player.position))
-	print("entproto.collision_box " .. game.table_to_json(entproto.collision_box))
-	print("entity_position " .. game.table_to_json(entity_position))
+	print("player position " .. helpers.table_to_json(player.position))
+	print("entproto.collision_box " .. helpers.table_to_json(entproto.collision_box))
+	print("entity_position " .. helpers.table_to_json(entity_position))
 
 	if not surface.can_place_entity{name=entproto.name, position=entity_position, direction=direction, force=player.force, build_check_type=defines.build_check_type.manual} then
 		local bb = add_to_bounding_box(expand_rect_floor_ceil(entproto.collision_box), {x = entity_position[1], y = entity_position[2]})
@@ -1284,7 +1286,7 @@ function rcon_place_entity(player_id, item_name, entity_position, direction)
 		complain("placing item '"..item_name.."' failed, surface.create_entity returned nil :(")
 	else
 		on_some_entity_created({tick=last_tick, entity = result})
-		rcon.print(game.table_to_json(serialize_entity(result)))
+		rcon.print(helpers.table_to_json(serialize_entity(result)))
 	end
 end
 
@@ -1395,7 +1397,7 @@ function rcon_player_info(player_id)
 	if player == nil then
 		return
 	end
-	rcon.print(game.table_to_json(serialize_player(player)))
+	rcon.print(helpers.table_to_json(serialize_player(player)))
 end
 
 function dotted_path_get(tbl, path)
@@ -1433,20 +1435,20 @@ end
 
 
 function rcon_store_map_data(key, value)
-	if global.p["map_data"] == nil then
-		global.p["map_data"] = {}
+	if storage.p["map_data"] == nil then
+		storage.p["map_data"] = {}
 	end
-	global.p["map_data"][key] = value
+	storage.p["map_data"][key] = value
 end
 
 function rcon_retrieve_map_data(key)
-	if global.p["map_data"] == nil then
+	if storage.p["map_data"] == nil then
 		return
 	end
-	if global.p["map_data"][key] == nil then
+	if storage.p["map_data"][key] == nil then
 		return
 	end
-	rcon.print(game.table_to_json(global.p["map_data"][key]))
+	rcon.print(helpers.table_to_json(storage.p["map_data"][key]))
 end
 
 function rcon_players()
@@ -1456,11 +1458,11 @@ function rcon_players()
 			table.insert(valid_players, serialize_player(player))
 		end
 	end
-	rcon.print(game.table_to_json(valid_players))
+	rcon.print(helpers.table_to_json(valid_players))
 end
 
 function rcon_player_force()
-	rcon.print(game.table_to_json(serialize_force(game.forces["player"])))
+	rcon.print(helpers.table_to_json(serialize_force(game.forces["player"])))
 end
 
 function rcon_add_research(technology_name)
@@ -1494,7 +1496,7 @@ function rcon_inventory_contents_at(positions)
 			table.insert(result, rec)
 		end
 	end
-	rcon.print(game.table_to_json(result))
+	rcon.print(helpers.table_to_json(result))
 end
 
 function rcon_find_entities_filtered(filters)
@@ -1503,7 +1505,7 @@ function rcon_find_entities_filtered(filters)
 	for k, v in pairs(results) do
 		table.insert(lines, serialize_entity(v))
 	end
-	rcon.print(game.table_to_json(lines))
+	rcon.print(helpers.table_to_json(lines))
 end
 
 
@@ -1513,7 +1515,7 @@ function rcon_find_tiles_filtered(filters)
 	for k, v in pairs(results) do
 		table.insert(lines, serialize_tile(v))
 	end
-	rcon.print(game.table_to_json(lines))
+	rcon.print(helpers.table_to_json(lines))
 end
 
 
@@ -1558,18 +1560,18 @@ function rcon_revive_ghost(player_id, name, x, y)
 	local success, entity = ghost.revive()
 	if entity ~= nil then
 		main_inventory.remove({name=name, count=1})
-		rcon.print(game.table_to_json(serialize_entity(entity)))
+		rcon.print(helpers.table_to_json(serialize_entity(entity)))
 	else
-		local prototype = game.entity_prototypes[ghost.ghost_name]
+		local prototype = prototypes.entity[ghost.ghost_name]
 		local bb = add_to_bounding_box(expand_rect_floor_ceil(prototype.collision_box), {x = ghost.position.x, y = ghost.position.y})
-		--				print("ghost bb: " .. game.table_to_json(bb))
+		--				print("ghost bb: " .. helpers.table_to_json(bb))
 		if position_in_rect(player.position, bb) then
 			print("Player is standing inside entity ghost, teleporting player away!")
 			player.teleport({x = bb.right_bottom.x + 1, y = bb.right_bottom.y + 1})
 			local success, entity = ghost.revive()
 			if entity ~= nil then
 				main_inventory.remove({name=name, count=1})
-				rcon.print(game.table_to_json(serialize_entity(entity)))
+				rcon.print(helpers.table_to_json(serialize_entity(entity)))
 			else
 				complain("Error: failed to revive ghost")
 			end
@@ -1652,12 +1654,12 @@ function rcon_place_blueprint(player_id, blueprint, pos_x, pos_y, direction, for
 				inventory = main_inventory.get_contents()
 				table.insert(result, serialize_entity(entity))
 			else
-				local prototype = game.entity_prototypes[item]
---				print("player position: " .. game.table_to_json(player.position))
---				print("ghost position: " .. game.table_to_json(ghost.position))
---				print("ghost collision_box: " .. game.table_to_json(prototype.collision_box))
+				local prototype = prototypes.entity[item]
+--				print("player position: " .. helpers.table_to_json(player.position))
+--				print("ghost position: " .. helpers.table_to_json(ghost.position))
+--				print("ghost collision_box: " .. helpers.table_to_json(prototype.collision_box))
 				local bb = add_to_bounding_box(expand_rect_floor_ceil(prototype.collision_box), {x = ghost.position.x, y = ghost.position.y})
---				print("ghost bb: " .. game.table_to_json(bb))
+--				print("ghost bb: " .. helpers.table_to_json(bb))
 				if position_in_rect(player.position, bb) then
 					print("Player is standing inside entity ghost, teleporting player away!")
 					player.teleport({x = bb.right_bottom.x + 1, y = bb.right_bottom.y + 1})
@@ -1679,7 +1681,7 @@ function rcon_place_blueprint(player_id, blueprint, pos_x, pos_y, direction, for
 	if nothing == true then
 		rcon.print("Error: failed to build anything")
 	else
-		rcon.print(game.table_to_json(result))
+		rcon.print(helpers.table_to_json(result))
 	end
 end
 
@@ -1722,11 +1724,11 @@ function rcon_cheat_blueprint(player_id, blueprint, pos_x, pos_y, direction, for
 			table.insert(result, serialize_entity(ghost))
 		end
 	end
-	rcon.print(game.table_to_json(result))
+	rcon.print(helpers.table_to_json(result))
 end
 
 function rcon_parse_map_exchange_string(name, map_exchange_str)
-	game.write_file(name, game.table_to_json(game.parse_map_exchange_string(map_exchange_str)))
+	helpers.write_file(name, helpers.table_to_json(helpers.parse_map_exchange_string(map_exchange_str)))
 end
 
 function rcon_async_request_player_path(player_id, goal, radius)
@@ -1812,7 +1814,7 @@ function table_to_string(tbl)
 end
 
 function get_player(player_id)
-	if global.p[player_id] ~= nil then
+	if storage.p[player_id] ~= nil then
 		local player = game.players[player_id]
 		if player == nil or not player.connected or not player.character then
 			rcon.print("Error: player " .. tostring(player_id) .. " not connected")
@@ -1820,7 +1822,7 @@ function get_player(player_id)
 			return player
 		end
 	else
-		rcon.print("Error: player not found. valid players: " .. table_keys(global.p))
+		rcon.print("Error: player not found. valid players: " .. table_keys(storage.p))
 	end
 	return nil
 end

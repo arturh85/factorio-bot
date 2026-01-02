@@ -1,4 +1,3 @@
-#[macro_use]
 pub extern crate async_trait;
 #[macro_use]
 extern crate enum_primitive_derive;

@@ -536,9 +536,7 @@ impl FlowGraph {
                 }
             }
         }
-        map.into_iter()
-            .map(|(name, production_rate)| (name, production_rate))
-            .collect()
+        map.into_iter().collect()
     }
 
     fn sum_incoming_edge_weights(&self, position: &Position) -> FlowRates {

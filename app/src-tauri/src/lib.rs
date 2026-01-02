@@ -23,17 +23,19 @@ pub const APP_AUTHOR: &str = env!("CARGO_PKG_AUTHORS");
 pub const APP_ABOUT: &str = env!("CARGO_PKG_DESCRIPTION");
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[allow(clippy::missing_panics_doc)]
 pub fn run() {
   let context = Context::new().expect("failed to create context");
 
   #[cfg(feature = "cli")]
   {
-    let app = tauri::async_runtime::block_on(async {
-      cli::start(context.clone()).await
-    }).expect("failed to start cli");
+    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+    let app = rt
+      .block_on(async { cli::start(context.clone()).await })
+      .expect("failed to start cli");
 
     if app.is_none() {
-      return ();
+      return;
     }
     #[cfg(all(not(feature = "gui"), not(feature = "repl")))]
     {
@@ -41,7 +43,7 @@ pub fn run() {
         .expect("checked before")
         .print_help()
         .expect("failed to print_help");
-      return Err(factorio_bot_core::miette::miette!("missing subcommand"));
+      return;
     }
   }
   #[cfg(feature = "gui")]
@@ -52,15 +54,13 @@ pub fn run() {
   {
     #[cfg(feature = "repl")]
     {
-      tauri::async_runtime::block_on(async {
-        repl::start(context.clone()).await
-      })?;
+      let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+      rt.block_on(async { repl::start(context.clone()).await })
+        .expect("repl failed");
     }
     #[cfg(all(not(feature = "cli"), not(feature = "repl")))]
     {
-      return Err(factorio_bot_core::miette::miette!(
-        "select at least one feature of cli, repl, gui"
-      ));
+      panic!("select at least one feature of cli, repl, gui");
     }
   }
 }

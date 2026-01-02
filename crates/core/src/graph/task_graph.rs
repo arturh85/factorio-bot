@@ -160,7 +160,7 @@ impl TaskGraph {
 
     pub fn shortest_path(&self) -> Option<f64> {
         let process_start = self.inner.node_indices().next().unwrap();
-        let process_end = self.inner.node_indices().last().unwrap();
+        let process_end = self.inner.node_indices().next_back().unwrap();
         self.shortest_path_between(process_start, process_end)
     }
 
@@ -327,7 +327,7 @@ impl TaskNode {
     pub fn new_craft(player_id: PlayerId, item: InventoryItem, cost: f64) -> TaskNode {
         TaskNode::new(
             Some(player_id),
-            &*format!(
+            &format!(
                 "Craft {}{}",
                 item.name,
                 if item.count > 1 {
@@ -343,7 +343,7 @@ impl TaskNode {
     pub fn new_walk(player_id: PlayerId, target: PositionRadius, cost: f64) -> TaskNode {
         TaskNode::new(
             Some(player_id),
-            &*format!("Walk to {}", target.position),
+            &format!("Walk to {}", target.position),
             Some(TaskData::Walk(target)),
             cost,
         )
@@ -351,7 +351,7 @@ impl TaskNode {
     pub fn new_mine(player_id: PlayerId, target: MineTarget, cost: f64) -> TaskNode {
         TaskNode::new(
             Some(player_id),
-            &*format!(
+            &format!(
                 "Mining {}{}",
                 target.name,
                 if target.count > 1 {
@@ -367,7 +367,7 @@ impl TaskNode {
     pub fn new_place(player_id: PlayerId, entity: FactorioEntity, cost: f64) -> TaskNode {
         TaskNode::new(
             Some(player_id),
-            &*format!(
+            &format!(
                 "Place {} at {} ({:?})",
                 entity.name,
                 entity.position,
@@ -385,7 +385,7 @@ impl TaskNode {
     ) -> TaskNode {
         TaskNode::new(
             Some(player_id),
-            &*format!(
+            &format!(
                 "Insert {}x{} into {} at {}",
                 &item.name, &item.count, location.entity_name, location.position
             ),
@@ -401,7 +401,7 @@ impl TaskNode {
     ) -> TaskNode {
         TaskNode::new(
             Some(player_id),
-            &*format!(
+            &format!(
                 "Remove {}x{} from {} at {}",
                 &item.name, &item.count, location.entity_name, location.position
             ),

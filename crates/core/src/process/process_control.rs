@@ -80,7 +80,7 @@ impl FactorioInstance {
         let silent = Arc::new(parking_lot::RwLock::new(params.silent));
         let instance_name = params.instance_name.unwrap_or_else(|| "server".to_owned());
         let rcon_settings = RconSettings::new(
-            settings.rcon_port as u16,
+            settings.rcon_port,
             &settings.rcon_pass,
             params.server_host.clone(),
         );
@@ -229,13 +229,8 @@ impl FactorioInstance {
             );
             return Err(FactorioInstanceNotFound {}.into());
         }
-        let binary = if cfg!(windows) {
-            "bin/x64/factorio.exe"
-        } else {
-            "bin/x64/factorio"
-        };
         let current_silent = *silent.read();
-        let factorio_binary_path = instance_path.join(PathBuf::from(binary));
+        let factorio_binary_path = io_utils::get_factorio_binary_path(instance_path);
         io_utils::await_lock(instance_path.join(PathBuf::from(".lock")), current_silent).await?;
 
         if !factorio_binary_path.exists() {
@@ -269,19 +264,29 @@ impl FactorioInstance {
         }
 
         let factorio_port = factorio_port.unwrap_or(34197);
-        let args = &[
+        let factorio_port_str = factorio_port.to_string();
+        let rcon_port_str = rcon_settings.port.to_string();
+        let mods_path = instance_path.join("mods");
+        let mods_path_str = mods_path.to_str().unwrap();
+        let mut args = vec![
             "--start-server",
             saves_level_path.to_str().unwrap(),
             "--port",
-            &factorio_port.to_string(),
+            &factorio_port_str,
             "--rcon-port",
-            &rcon_settings.port.to_string(),
+            &rcon_port_str,
             "--rcon-password",
             &rcon_settings.pass,
             "--server-settings",
             server_settings_path.to_str().unwrap(),
-            "--disable-prototype-history", // Disables tracking which mod created/changed what prototype. Mainly for faster startup during development.
         ];
+        // macOS Factorio uses ~/Library/Application Support/factorio/mods by default
+        // We need to explicitly point it to our instance's mods directory
+        #[cfg(target_os = "macos")]
+        {
+            args.push("--mod-directory");
+            args.push(mods_path_str);
+        }
         if !current_silent {
             info!(
                 "Starting <bright-blue>server</> at {:?} with {:?}",
@@ -289,7 +294,7 @@ impl FactorioInstance {
             );
         }
         let mut command = Command::new(&factorio_binary_path);
-        command.args(args);
+        command.args(&args);
         let log_path = workspace_path.join(PathBuf::from_str("server-log.txt").unwrap());
         info!("start waiting");
         let (world, proc, rcon) = read_output(
@@ -332,12 +337,7 @@ impl FactorioInstance {
             );
             return Err(FactorioInstanceNotFound {}.into());
         }
-        let binary = if cfg!(windows) {
-            "bin/x64/factorio.exe"
-        } else {
-            "bin/x64/factorio"
-        };
-        let factorio_binary_path = instance_path.join(PathBuf::from(binary));
+        let factorio_binary_path = io_utils::get_factorio_binary_path(instance_path);
         if !factorio_binary_path.exists() {
             error!(
                 "factorio binary missing at <bright-blue>{:?}</>",
@@ -359,7 +359,6 @@ impl FactorioInstance {
             // "--gfx-safe-mode",
             // "--low-vram",
             "--disable-audio",
-            "--disable-prototype-history", // Disables tracking which mod created/changed what prototype. Mainly for faster startup during development.
         ];
         if !silent {
             info!(
@@ -370,7 +369,6 @@ impl FactorioInstance {
 
         let mut command = Command::new(&factorio_binary_path);
         command.args(args);
-        let instance_name = instance_name;
         let log_instance_name = instance_name.clone();
         // let stdout = child.stdout.take().unwrap();
         // let reader = BufReader::new(stdout);

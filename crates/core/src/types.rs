@@ -20,6 +20,59 @@ use mlua::prelude::*;
 
 pub type FactorioInventory = HashMap<String, u32>;
 
+/// Custom deserializer to handle Lua tables that serialize as {} instead of []
+mod deserialize_helpers {
+    use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
+    use std::fmt;
+    use std::marker::PhantomData;
+
+    /// Deserializes a Vec<T> that may be represented as either [] or {} (empty map)
+    /// This is needed because Lua's JSON serializer converts empty tables to {} instead of []
+    pub fn vec_or_empty_map<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: serde::Deserialize<'de>,
+    {
+        struct VecOrEmptyMap<T>(PhantomData<T>);
+
+        impl<'de, T> Visitor<'de> for VecOrEmptyMap<T>
+        where
+            T: serde::Deserialize<'de>,
+        {
+            type Value = Vec<T>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a sequence or empty map")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut vec = Vec::new();
+                while let Some(elem) = seq.next_element()? {
+                    vec.push(elem);
+                }
+                Ok(vec)
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                // Drain the map (should be empty for this to make sense)
+                while map
+                    .next_entry::<de::IgnoredAny, de::IgnoredAny>()?
+                    .is_some()
+                {}
+                Ok(Vec::new())
+            }
+        }
+
+        deserializer.deserialize_any(VecOrEmptyMap(PhantomData))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct FactorioRecipe {
@@ -28,6 +81,7 @@ pub struct FactorioRecipe {
     pub enabled: bool,
     pub category: String,
     pub ingredients: Option<Vec<FactorioIngredient>>,
+    #[serde(deserialize_with = "deserialize_helpers::vec_or_empty_map")]
     pub products: Vec<FactorioProduct>,
     pub hidden: bool,
     pub energy: Box<R64>,
@@ -51,6 +105,7 @@ pub struct FactorioBlueprintInfo {
 #[serde(rename_all = "snake_case")]
 pub struct FactorioIngredient {
     pub name: String,
+    #[serde(default)]
     pub ingredient_type: String,
     pub amount: u32,
 }
@@ -59,6 +114,7 @@ pub struct FactorioIngredient {
 #[serde(rename_all = "snake_case")]
 pub struct FactorioProduct {
     pub name: String,
+    #[serde(default)]
     pub product_type: String,
     pub amount: u32,
     pub probability: Box<R64>,
@@ -158,7 +214,7 @@ pub struct Pos(pub i32, pub i32);
 
 impl Pos {
     pub fn distance(&self, other: &Pos) -> u32 {
-        (self.0.abs_diff(other.0) + self.1.abs_diff(other.1)) as u32
+        self.0.abs_diff(other.0) + self.1.abs_diff(other.1)
     }
 }
 
@@ -186,8 +242,9 @@ impl From<&Pos> for Position {
     }
 }
 
-#[derive(Primitive, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Primitive, Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub enum Direction {
+    #[default]
     North = 0,
     NorthEast = 1,
     East = 2,
@@ -219,12 +276,6 @@ impl Direction {
     }
     pub fn clockwise(&self) -> Direction {
         Direction::from_u8((Direction::to_u8(self).unwrap() + 2) % 8).unwrap()
-    }
-}
-
-impl Default for Direction {
-    fn default() -> Self {
-        Direction::North
     }
 }
 
@@ -262,7 +313,7 @@ impl Position {
     just multiply the X part of the vector by -1, and then swap X and Y values.
      */
     pub fn rotate_clockwise(&self) -> Position {
-        Position::new(self.y(), self.x() * -1.0)
+        Position::new(self.y(), -self.x())
     }
 }
 
@@ -402,6 +453,7 @@ pub struct FactorioTechnology {
     pub upgrade: bool,
     pub researched: bool,
     pub prerequisites: Option<Vec<String>>,
+    #[serde(deserialize_with = "deserialize_helpers::vec_or_empty_map")]
     pub research_unit_ingredients: Vec<FactorioIngredient>,
     pub research_unit_count: u64,
     pub research_unit_energy: Box<R64>,
@@ -485,7 +537,7 @@ pub struct FactorioFluidBoxPrototype {
 #[serde(rename_all = "snake_case")]
 pub struct FactorioFluidBoxConnection {
     pub max_underground_distance: Option<u32>,
-    pub connection_type: String,
+    pub connection_type: Option<String>,
     pub positions: Vec<Position>,
 }
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema)]
@@ -537,7 +589,7 @@ impl FactorioEntity {
             .direction
             .map(|d| Direction::from_u8(d % 8).expect("should always work"));
         Self::from_prototype(
-            &*entity.name,
+            &entity.name,
             position,
             direction,
             entity.pickup_position.map(|p| p.into()),
@@ -815,7 +867,7 @@ impl ResourcePatch {
                     //     invalid = true;
                     //     break;
                     // }
-                    if element_map.get(&pos).is_none() {
+                    if !element_map.contains_key(&pos) {
                         invalid = true;
                         break;
                     }

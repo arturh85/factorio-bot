@@ -11,6 +11,7 @@ use miette::{IntoDiagnostic, Result};
 use serde::de::{MapAccess, Visitor};
 use serde::ser::SerializeStruct;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::{fmt, fs};
 use tokio::sync::Mutex;
@@ -139,12 +140,23 @@ impl FactorioWorld {
         &self,
         event: PlayerChangedMainInventoryEvent,
     ) -> Result<()> {
+        // Convert Vec<InventoryItemWithQuality> to BTreeMap<String, u32>
+        // (sum counts by item name, ignore quality for now)
+        let main_inventory: BTreeMap<String, u32> =
+            event
+                .main_inventory
+                .into_iter()
+                .fold(BTreeMap::new(), |mut acc, item| {
+                    *acc.entry(item.name).or_insert(0) += item.count;
+                    acc
+                });
+
         let player = if self.players.contains_key(&event.player_id) {
             let existing_player = self.players.get(&event.player_id).unwrap();
             FactorioPlayer {
                 player_id: event.player_id,
                 position: existing_player.position.clone(),
-                main_inventory: event.main_inventory,
+                main_inventory,
                 build_distance: existing_player.build_distance,
                 reach_distance: existing_player.reach_distance,
                 drop_item_distance: existing_player.drop_item_distance,
@@ -155,7 +167,7 @@ impl FactorioWorld {
         } else {
             FactorioPlayer {
                 player_id: event.player_id,
-                main_inventory: event.main_inventory.clone(),
+                main_inventory,
                 ..Default::default()
             }
         };

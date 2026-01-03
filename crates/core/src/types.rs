@@ -905,6 +905,15 @@ impl InventoryItem {
     }
 }
 
+/// Inventory item with quality field (Factorio 2.0 format)
+#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct InventoryItemWithQuality {
+    pub name: String,
+    pub quality: String,
+    pub count: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct InventoryLocation {
     pub entity_name: String,
@@ -991,7 +1000,26 @@ pub struct PlayerChangedPositionEvent {
 #[serde(rename_all = "snake_case")]
 pub struct PlayerChangedMainInventoryEvent {
     pub player_id: PlayerId,
-    pub main_inventory: BTreeMap<String, u32>,
+    #[serde(deserialize_with = "deserialize_helpers::vec_or_empty_map")]
+    pub main_inventory: Vec<InventoryItemWithQuality>,
+}
+
+impl PlayerChangedMainInventoryEvent {
+    /// Create an event from a BTreeMap (for internal use/simulation)
+    pub fn from_btreemap(player_id: PlayerId, inventory: BTreeMap<String, u32>) -> Self {
+        let main_inventory = inventory
+            .into_iter()
+            .map(|(name, count)| InventoryItemWithQuality {
+                name,
+                quality: "normal".to_string(),
+                count,
+            })
+            .collect();
+        Self {
+            player_id,
+            main_inventory,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]

@@ -34,16 +34,29 @@ pub fn run() {
       .block_on(async { cli::start(context.clone()).await })
       .expect("failed to start cli");
 
-    if app.is_none() {
-      return;
-    }
+    // If no subcommand was run, app is Some and we should show help (unless GUI/REPL will start)
     #[cfg(all(not(feature = "gui"), not(feature = "repl")))]
     {
+      if app.is_none() {
+        return;
+      }
       app
         .expect("checked before")
         .print_help()
         .expect("failed to print_help");
       return;
+    }
+    // With GUI or REPL features, continue even after a subcommand runs
+    #[cfg(any(feature = "gui", feature = "repl"))]
+    {
+      if app.is_some() {
+        // No subcommand was run, show help and let GUI/REPL take over
+        app
+          .expect("checked before")
+          .print_help()
+          .expect("failed to print_help");
+      }
+      // If app is None, a subcommand ran - continue to GUI/REPL
     }
   }
   #[cfg(feature = "gui")]

@@ -5,7 +5,7 @@ repl *ARGS:
     cargo repl {{ARGS}}
 
 factorio *ARGS:
-    cargo run --release --no-default-features --features cli -- start -v {{ARGS}}
+    cargo run --release --no-default-features --features cli,repl -- start -v {{ARGS}}
 
 test:
     cargo fmt --all

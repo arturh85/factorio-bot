@@ -346,11 +346,16 @@ impl FactorioInstance {
             return Err(FactorioBinaryNotFound {}.into());
         }
         io_utils::await_lock(instance_path.join(PathBuf::from(".lock")), silent).await?;
+        let mods_path = workspace_path.join("mods");
+        let mods_path_str = mods_path.to_str().unwrap().to_string();
+        let config_path = instance_path.join("config").join("config.ini");
+        let config_path_str = config_path.to_str().unwrap().to_string();
+        let server_host_str = server_host
+            .clone()
+            .unwrap_or_else(|| "localhost".to_owned());
         let args = &[
             "--mp-connect",
-            &server_host
-                .clone()
-                .unwrap_or_else(|| "localhost".to_owned()),
+            &server_host_str,
             "--graphics-quality",
             "low",
             // "--force-graphics-preset", "very-low",
@@ -359,6 +364,10 @@ impl FactorioInstance {
             // "--gfx-safe-mode",
             // "--low-vram",
             "--disable-audio",
+            "--mod-directory",
+            &mods_path_str,
+            "--config",
+            &config_path_str,
         ];
         if !silent {
             info!(
@@ -393,12 +402,13 @@ impl FactorioInstance {
         //     }
         //     exit_code
         // });
-        let is_client = server_host.is_some();
-
         let initialized = Mutex::new(false);
         let (tx, rx) = channel();
         tx.send(()).into_diagnostic()?;
 
+        let log_client_name = instance_name.clone();
+        let stdout_silent = silent;
+        let stderr_silent = silent;
         let proc = InteractiveProcess::new_with_stderr(
             command,
             move |line| {
@@ -421,27 +431,37 @@ impl FactorioInstance {
                                 log_file.write_all(b"\n").expect("failed to write log file");
                             }
                         });
-                        if is_client && !line.contains(" / ") && !line.starts_with('§') {
-                            info!("<cyan>{}</>⮞ <magenta>{}</>", &log_instance_name, line);
+                        // Log client output (filter progress lines) only if not silent
+                        if !stdout_silent && !line.contains(" / ") && !line.starts_with('§') {
+                            info!("<cyan>{}</>⮞ <magenta>{}</>", &log_client_name, line);
                         }
                     }
                     Err(err) => {
-                        error!("<red>failed to read client stdout: {:?}</>", err);
+                        error!(
+                            "<red>failed to read {} stdout: {:?}</>",
+                            &log_client_name, err
+                        );
                     }
                 };
             },
             move |line| {
                 match line {
                     Ok(line) => {
-                        warn!("<cyan>client</>⮞ <red>{}</>", line);
+                        if !stderr_silent {
+                            warn!("<cyan>{}</>⮞ <red>{}</>", &log_instance_name, line);
+                        }
                     }
                     Err(err) => {
-                        error!("<red>failed to read client stderr: {:?}</>", err);
+                        error!(
+                            "<red>failed to read {} stderr: {:?}</>",
+                            &log_instance_name, err
+                        );
                     }
                 };
             },
         )
         .unwrap();
+
         tx.send(()).into_diagnostic()?;
         Ok(proc)
     }

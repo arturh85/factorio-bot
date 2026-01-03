@@ -77,7 +77,7 @@ impl Subcommand for ThisCommand {
   }
 }
 
-async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
+async fn run(matches: &ArgMatches, context: &mut Context) -> Result<()> {
   let app_settings = load_app_settings()?;
   let clients = *matches.get_one::<u8>("clients").expect("defaulted by clap");
   let write_logs = matches.get_flag("logs");
@@ -110,8 +110,10 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
 
   // FIXME: watch children die?
 
-  if let Some(_world) = &instance_state.world {
+  if instance_state.world.is_some() {
     info!("started!");
+    // Store the instance in context to keep processes alive
+    *context.instance_state.write().await = Some(instance_state);
     // start_webserver(rcon, websocket_server, open_browser, world).await;
   }
   Ok(())

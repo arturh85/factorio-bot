@@ -68,10 +68,9 @@ impl PlanBuilder {
         );
         drop(player);
         self.world
-            .player_changed_main_inventory(PlayerChangedMainInventoryEvent {
-                player_id,
-                main_inventory: inventory,
-            })?;
+            .player_changed_main_inventory(
+                PlayerChangedMainInventoryEvent::from_btreemap(player_id, inventory),
+            )?;
         Ok(())
     }
 
@@ -133,10 +132,9 @@ impl PlanBuilder {
         graph.add_place_node(player_id, 1., entity.clone());
         inventory.insert(entity.name.clone(), inventory_item_count - 1);
         self.world
-            .player_changed_main_inventory(PlayerChangedMainInventoryEvent {
-                player_id,
-                main_inventory: inventory,
-            })?;
+            .player_changed_main_inventory(
+                PlayerChangedMainInventoryEvent::from_btreemap(player_id, inventory),
+            )?;
         self.world.on_some_entity_created(entity.clone())?;
         Ok(entity)
     }

@@ -6,63 +6,100 @@
 [![GitHub issues](https://img.shields.io/github/issues/arturh85/factorio-bot)](https://github.com/arturh85/factorio-bot/issues)
 [![Dev Guide](https://img.shields.io/badge/dev-guide-red)](https://arturh85.github.io/factorio-bot/devguide/)
 
-# What is it?
+## What is it?
 
-Factorio Bot is a platform for the game
-[Factorio](https://www.factorio.com) inspired by [factorio-bot](https://github.com/Windfisch/factorio-bot/). It allows scripted execution of a factorio server and multiple clients. 
+Factorio Bot is a platform for [Factorio](https://www.factorio.com) that enables **multi-bot coordination** for automated gameplay. Unlike other TAS tools or AI environments, Factorio Bot can orchestrate 8-16 bots working cooperatively on tasks.
 
-Goals / Use Cases:
-- TAS (Tool Assisted Speedrun) to beat the world record with many bots which share the workload efficiently
-- Learning Environment to train Machine Learning algorithms within Factorio
-- Playground for Factorio Experiments
+**Vision:** Say `goal("launch_rocket")` and watch multiple bots coordinate to complete the game automatically.
+
+## Goals / Use Cases
+
+- **TAS (Tool Assisted Speedrun)** - Beat world records with many bots sharing the workload efficiently
+- **Goal-Driven Automation** - Give high-level goals ("research automation") → system decomposes into tasks → bots execute cooperatively
+- **ML/AI Research** - Learning environment for training algorithms within Factorio (future)
+- **Playground** - Experiment with Factorio automation
+
+## How It Compares
+
+| Project                                                                                       | Approach            | Multi-bot      | Factorio 2.0 |
+|-----------------------------------------------------------------------------------------------|---------------------|----------------|--------------|
+| [Factorio Learning Environment](https://github.com/JackHopkins/factorio-learning-environment) | LLM agents, Python  | No             | Partial      |
+| [Factorio-AnyPct-TAS](https://github.com/gotyoke/Factorio-AnyPct-TAS)                         | Pre-scripted TAS    | No             | No (0.18)    |
+| **Factorio Bot**                                                                              | Scripted + Planning | **Yes (8-16)** | **Yes**      |
 
 ## Youtube Videos
 
 - Reference: [Any% World Record gets automation in 7:33](https://www.youtube.com/watch?v=rHvaZMdjnLE&t=455)
-
 - [Factorio Bot 0.1.2: Research logistics with 4 Bots in 15:51](https://youtu.be/iFhcyjfcjx8)
 - [Factorio Bot 0.1.1: Research automation with 1 Bot in 8:57](https://youtu.be/1vbWWiSV6Sw)
 - [Factorio Bot 0.1.0: Research automation with 1 Bot in 12:33](https://youtu.be/6KXYuVDRZ-I)
 
 ## Features
-- [x] sets up & starts factorio server & configurable number of clients
-- [x] resizes Factorio client windows so the whole screen is equally used (windows only)
-- [x] integrated [monaco](https://microsoft.github.io/monaco-editor/) lua editor which allows scripting of bots 
-- [x] uses included factorio mod to read factorio instance ...
-  - [x] recipes
-  - [x] entity prototypes
-  - [x] item prototypes
-  - [x] entities
-  - [x] resources
-- Build Graphs of:
-  - [x] Entity Connections with distance based weights
-  - [x] Flow Connections with flow rate per second for each belt side/resource
-  - [x] Bot Task Dependencies with time estimate based weights
-- Example LUA Script which can:
-  - [x] Plan some task with time estimation
-  - [x] Find Seed which minimizes execution time
-  - [ ] Research Automation in MM:SS (work in progress)
-- [x] (optional) REST API Endpoints with OpenAPI specs
-- [ ] read map contents by chunk for leaflet based Map View (currently broken)
-- [x] use whatever mods you want, configured in central location for all factorio instances
-- [x] should work on Win/Mac/Linux (not tested on Mac)
-- [x] MIT licenced
+
+- [x] Factorio 2.0 compatible (including quality system)
+- [x] Sets up & starts Factorio server + configurable number of clients
+- [x] Multi-bot task coordination with dependency tracking
+- [x] Integrated [Monaco](https://microsoft.github.io/monaco-editor/) Lua editor for scripting
+- [x] Task graph visualization (Graphviz, Mermaid Gantt charts)
+- [x] Uses BotBridge mod to read game state:
+  - [x] Recipes, entity prototypes, item prototypes
+  - [x] Entities, resources, player inventories
+- [x] Build graphs of:
+  - [x] Entity connections with distance-based weights
+  - [x] Flow connections with flow rate per belt side/resource
+  - [x] Bot task dependencies with time estimates
+- [x] REPL mode for fast iteration (`cargo repl`)
+- [x] (Optional) REST API with OpenAPI specs
+- [x] Works on Windows/Mac/Linux
+- [x] MIT licensed
 
 ## Planned Features
-- [ ] Create ZIP from Steam Verson of Factorio
-- [ ] Indicate Client Actions as Drawn Lines / Rectangle in the Factorio Client
 
-# Quickstart
+See [PLAN.md](PLAN.md) for the full roadmap.
 
-- Download the [latest release](https://github.com/arturh85/factorio-bot/releases) for your Operating System
-- Download [Factorio](https://www.factorio.com) as .zip or .tar.xz (don't use the headless version!)
-- Start the application and select your downloaded factorio archive under `Settings`
-- Use the `Start` Button in the top right to start the given number of factorio instances with given seed/map exchange string
-- Select the Script you want to run and execute it
+- [ ] Goal decomposition: `goal("research_automation")` → automatic task generation
+- [ ] Full game completion: `goal("launch_rocket")` with 8-16 cooperating bots
+- [ ] Seed rolling for optimal map selection
+- [ ] LLM integration (future)
+
+## Quickstart
+
+### CLI/REPL Mode (Recommended)
+
+```bash
+# Build and run REPL
+cargo repl
+
+# Or start full Factorio server + client
+just factorio
+```
+
+### Desktop App
+
+- Download the [latest release](https://github.com/arturh85/factorio-bot/releases) for your OS
+- Download [Factorio](https://www.factorio.com) as .zip or .tar.xz (not headless!)
+- Start the app and select your Factorio archive under `Settings`
+- Use `Start` to launch Factorio instances
+- Select and execute Lua scripts
+
+## Development
+
+```bash
+# Run tests + clippy + build
+just test
+
+# Start Factorio for testing
+just factorio
+
+# Frontend development
+cd app && npm start
+```
+
+See the [Dev Guide](https://arturh85.github.io/factorio-bot/devguide/) for more details.
 
 ## Contribute
 
-See the [Dev Guide](https://arturh85.github.io/factorio-bot/devguide/) and Send me your Pull Requests :)
+Send Pull Requests! See [PLAN.md](PLAN.md) for what needs work.
 
 ## Contact
 

@@ -55,9 +55,10 @@ impl Planner {
                 main_inventory.insert(EntityName::StoneFurnace.to_string(), 1);
                 main_inventory.insert(EntityName::BurnerMiningDrill.to_string(), 1);
                 self.real_world
-                    .player_changed_main_inventory(
-                        PlayerChangedMainInventoryEvent::from_btreemap(player_id, main_inventory),
-                    )
+                    .player_changed_main_inventory(PlayerChangedMainInventoryEvent::from_btreemap(
+                        player_id,
+                        main_inventory,
+                    ))
                     .expect("failed to set player inventory");
             }
         }

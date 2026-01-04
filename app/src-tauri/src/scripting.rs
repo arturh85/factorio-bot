@@ -63,12 +63,13 @@ pub async fn run_script_file(
   if !file_path.is_file() {
     return Err(miette!("path not a file"));
   }
-  let code = fs::read_to_string(file_path).into_diagnostic()?;
+  let code = fs::read_to_string(&file_path).into_diagnostic()?;
+  let full_path = file_path.to_str().expect("invalid path");
   run_script(
     planner,
     language.unwrap(),
     &code,
-    Some(path),
+    Some(full_path),
     bot_count,
     redirect,
   )
@@ -85,32 +86,39 @@ pub fn language_by_filename(filename: &str) -> Option<&'static str> {
 }
 
 pub fn prepare_workspace_scripts(workspace_path: &Path) -> Result<PathBuf, String> {
-  #[allow(unused_mut)]
-  let mut workspace_plans_path = workspace_path.join(PathBuf::from("scripts"));
-  if !workspace_plans_path.exists() {
-    #[cfg(debug_assertions)]
-    {
-      workspace_plans_path = PathBuf::from("../../scripts");
-      if !workspace_plans_path.exists() {
-        workspace_plans_path = PathBuf::from("./scripts");
-      }
-    }
-    #[cfg(not(debug_assertions))]
-    {
-      std::fs::create_dir_all(&workspace_plans_path).map_err(|e| format!("error: {}", e))?;
-      if let Err(err) = factorio_bot_core::process::instance_setup::PLANS_CONTENT
-        .extract(workspace_plans_path.clone())
-      {
-        factorio_bot_core::paris::error!("failed to extract static mods content: {:?}", err);
-        return Err("failed to extract mods content to workspace".into());
-      }
-    }
-    if !workspace_plans_path.exists() {
-      return Err(format!(
-        "Missing scripts/ folder from working directory: {}",
-        workspace_plans_path.display()
-      ));
+  // Prefer development paths (project root scripts/) over workspace/scripts/
+  let dev_paths = [
+    PathBuf::from("./scripts"),
+    PathBuf::from("../../scripts"),
+  ];
+  for path in &dev_paths {
+    if path.exists() {
+      return Ok(fs::canonicalize(path).expect("Failed to canonicalize scripts path"));
     }
   }
-  Ok(fs::canonicalize(workspace_plans_path).expect("Failed to canonicalize workspace_plans_path"))
+
+  // Fall back to workspace/scripts
+  let workspace_plans_path = workspace_path.join(PathBuf::from("scripts"));
+  if workspace_plans_path.exists() {
+    return Ok(fs::canonicalize(workspace_plans_path).expect("Failed to canonicalize workspace_plans_path"));
+  }
+
+  // In release mode, extract bundled scripts if nothing found
+  #[cfg(not(debug_assertions))]
+  {
+    std::fs::create_dir_all(&workspace_plans_path).map_err(|e| format!("error: {}", e))?;
+    if let Err(err) = factorio_bot_core::process::instance_setup::PLANS_CONTENT
+      .extract(workspace_plans_path.clone())
+    {
+      factorio_bot_core::paris::error!("failed to extract static mods content: {:?}", err);
+      return Err("failed to extract mods content to workspace".into());
+    }
+    return Ok(fs::canonicalize(workspace_plans_path).expect("Failed to canonicalize workspace_plans_path"));
+  }
+
+  #[cfg(debug_assertions)]
+  Err(format!(
+    "Missing scripts/ folder from working directory: {}",
+    workspace_plans_path.display()
+  ))
 }

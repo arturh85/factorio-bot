@@ -8,13 +8,9 @@ use crate::process::output_reader::read_output;
 use crate::process::{io_utils, InteractiveProcess};
 use crate::settings::FactorioSettings;
 use miette::{IntoDiagnostic, Result};
-use parking_lot::Mutex;
-use std::fs::File;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
-use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
@@ -156,6 +152,7 @@ impl FactorioInstance {
                     .expect("failed to connect"),
             ),
         };
+        // Spawn all clients first
         for instance_number in 0..params.client_count {
             let instance_name = format!("client{}", instance_number + 1);
             let started = Instant::now();
@@ -167,20 +164,68 @@ impl FactorioInstance {
                 true,
             )
             .await?;
-            // report_child_death(child);
             client_children.push(child);
             if !params.silent {
                 success!(
-                    "Started <bright-blue>{}</> in <yellow>{:?}</>",
+                    "Spawned <bright-blue>{}</> in <yellow>{:?}</>",
                     &instance_name,
                     started.elapsed()
                 );
             }
+        }
+
+        // Wait for all clients to actually connect to the server
+        // Clients take 20-30 seconds to load sprites and connect
+        if params.client_count > 0 && !params.silent {
+            info!("Waiting for {} client(s) to connect...", params.client_count);
+        }
+        let wait_started = Instant::now();
+        let expected_players = params.client_count as usize;
+        loop {
+            // Poll connected player count
+            match rcon.connected_player_count().await {
+                Ok(count) => {
+                    if count >= expected_players {
+                        if !params.silent {
+                            success!(
+                                "All {} client(s) connected in <yellow>{:?}</>",
+                                params.client_count,
+                                wait_started.elapsed()
+                            );
+                        }
+                        break;
+                    }
+                    // Show progress
+                    if !params.silent {
+                        info!("Clients: {}/{} connected", count, expected_players);
+                    }
+                }
+                Err(e) => {
+                    if !params.silent {
+                        warn!("Error checking player count: {:?}", e);
+                    }
+                }
+            }
+            // Timeout after 90 seconds (clients take 25-30s to load sprites)
+            if wait_started.elapsed() > std::time::Duration::from_secs(90) {
+                error!(
+                    "Timeout waiting for clients to connect (expected {})",
+                    expected_players
+                );
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        }
+
+        // Register client names with BotBridge after they're connected
+        for instance_number in 0..params.client_count {
+            let instance_name = format!("client{}", instance_number + 1);
             rcon.whoami(&instance_name).await.unwrap();
             // Execute a dummy command to silence the warning about "using commands will
             // disable achievements". If we don't do this, the first command will be lost
             rcon.silent_print("").await.unwrap();
         }
+
         arrange_windows(params.client_count).await?;
         Ok(FactorioInstance {
             client_processes: client_children,
@@ -268,6 +313,8 @@ impl FactorioInstance {
         let rcon_port_str = rcon_settings.port.to_string();
         let mods_path = instance_path.join("mods");
         let mods_path_str = mods_path.to_str().unwrap();
+        let config_path = instance_path.join("config").join("config.ini");
+        let config_path_str = config_path.to_str().unwrap().to_string();
         let mut args = vec![
             "--start-server",
             saves_level_path.to_str().unwrap(),
@@ -279,6 +326,8 @@ impl FactorioInstance {
             &rcon_settings.pass,
             "--server-settings",
             server_settings_path.to_str().unwrap(),
+            "--config",
+            &config_path_str,
         ];
         // macOS Factorio uses ~/Library/Application Support/factorio/mods by default
         // We need to explicitly point it to our instance's mods directory
@@ -316,7 +365,7 @@ impl FactorioInstance {
         settings: &FactorioSettings,
         instance_name: String,
         server_host: Option<String>,
-        write_logs: bool,
+        _write_logs: bool,
         silent: bool,
     ) -> Result<InteractiveProcess> {
         let workspace_path = settings.workspace_path.to_string();
@@ -378,91 +427,22 @@ impl FactorioInstance {
 
         let mut command = Command::new(&factorio_binary_path);
         command.args(args);
-        let log_instance_name = instance_name.clone();
-        // let stdout = child.stdout.take().unwrap();
-        // let reader = BufReader::new(stdout);
-        let log_filename = format!(
-            "{}/{}-log.txt",
-            workspace_path.to_str().unwrap(),
-            instance_name
-        );
-        let log_file: Arc<Mutex<Option<File>>> = Arc::new(Mutex::new(match write_logs {
-            true => Some(File::create(log_filename).into_diagnostic()?),
-            false => None,
-        }));
-        // let handle = thread::spawn(move || {
-        //     let exit_code = child.wait().expect("failed to wait for client");
-        //     if let Some(code) = exit_code.code() {
-        //         error!(
-        //             "<red>{} stopped</> with exit code <yellow>{}</>",
-        //             &instance_name, code
-        //         );
-        //     } else {
-        //         error!("<red>{} stopped</> without exit code", &instance_name);
-        //     }
-        //     exit_code
-        // });
-        let initialized = Mutex::new(false);
-        let (tx, rx) = channel();
-        tx.send(()).into_diagnostic()?;
 
-        let log_client_name = instance_name.clone();
-        let stdout_silent = silent;
-        let stderr_silent = silent;
-        let proc = InteractiveProcess::new_with_stderr(
-            command,
-            move |line| {
-                match line {
-                    Ok(line) => {
-                        let mut initialized = initialized.lock();
-                        // wait for factorio init before sending confirmation
-                        if !*initialized && line.contains("my_client_id") {
-                            *initialized = true;
-                            rx.recv().unwrap();
-                            rx.recv().unwrap();
-                        }
-                        let mut log_file = log_file.lock();
-                        log_file.iter_mut().for_each(|log_file| {
-                            // filter out 6.6 million lines like 6664601 / 6665150...
-                            if *initialized || !line.contains(" / ") {
-                                log_file
-                                    .write_all(line.as_bytes())
-                                    .expect("failed to write log file");
-                                log_file.write_all(b"\n").expect("failed to write log file");
-                            }
-                        });
-                        // Log client output (filter progress lines) only if not silent
-                        if !stdout_silent && !line.contains(" / ") && !line.starts_with('§') {
-                            info!("<cyan>{}</>⮞ <magenta>{}</>", &log_client_name, line);
-                        }
-                    }
-                    Err(err) => {
-                        error!(
-                            "<red>failed to read {} stdout: {:?}</>",
-                            &log_client_name, err
-                        );
-                    }
-                };
-            },
-            move |line| {
-                match line {
-                    Ok(line) => {
-                        if !stderr_silent {
-                            warn!("<cyan>{}</>⮞ <red>{}</>", &log_instance_name, line);
-                        }
-                    }
-                    Err(err) => {
-                        error!(
-                            "<red>failed to read {} stderr: {:?}</>",
-                            &log_instance_name, err
-                        );
-                    }
-                };
-            },
-        )
-        .unwrap();
+        // For macOS graphical clients, we need to use null stdio to avoid
+        // interfering with GUI rendering. InteractiveProcess with piped stdio
+        // causes GUI apps to fail silently on macOS.
+        use std::process::Stdio;
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::null());
+        command.stderr(Stdio::null());
 
-        tx.send(()).into_diagnostic()?;
+        // Spawn the child process directly
+        let child = command.spawn().into_diagnostic()?;
+
+        // Create a minimal InteractiveProcess wrapper for compatibility
+        // We don't actually read from the process since GUI apps don't write to stdout
+        let proc = InteractiveProcess::from_child(child);
+
         Ok(proc)
     }
 

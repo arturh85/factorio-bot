@@ -7,6 +7,13 @@ repl *ARGS:
 factorio *ARGS:
     cargo run --release --no-default-features --features cli,repl -- start -v {{ARGS}}
 
+lua SCRIPT *ARGS:
+    cargo run --release --no-default-features --features cli,lua -- lua {{SCRIPT}} {{ARGS}}
+
+# Fast iteration: connect to already-running Factorio (start with 'just factorio' first)
+lua-connect SCRIPT *ARGS:
+    cargo run --release --no-default-features --features cli,lua -- lua --connect {{SCRIPT}} {{ARGS}}
+
 test:
     cargo fmt --all
     cargo fmt --all -- --check

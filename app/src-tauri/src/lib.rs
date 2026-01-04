@@ -49,12 +49,9 @@ pub fn run() {
     // With GUI or REPL features, continue even after a subcommand runs
     #[cfg(any(feature = "gui", feature = "repl"))]
     {
-      if app.is_some() {
+      if let Some(mut app) = app {
         // No subcommand was run, show help and let GUI/REPL take over
-        app
-          .expect("checked before")
-          .print_help()
-          .expect("failed to print_help");
+        app.print_help().expect("failed to print_help");
       }
       // If app is None, a subcommand ran - continue to GUI/REPL
     }

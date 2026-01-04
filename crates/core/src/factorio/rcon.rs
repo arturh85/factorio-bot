@@ -157,6 +157,30 @@ impl FactorioRcon {
         Ok(())
     }
 
+    /// Returns the number of connected players (with characters)
+    pub async fn connected_player_count(&self) -> Result<usize> {
+        let response = self.remote_call("players", vec![]).await?;
+        if let Some(lines) = response {
+            // Response is JSON array of player objects, count them
+            // Note: Lua's helpers.table_to_json({}) returns "{}" for empty tables,
+            // not "[]", so we need to handle both cases
+            let json_str = lines.join("");
+            if json_str == "{}" || json_str.is_empty() {
+                // Empty table serialized as object, means no players
+                return Ok(0);
+            }
+            match serde_json::from_str::<Vec<serde_json::Value>>(&json_str) {
+                Ok(players) => Ok(players.len()),
+                Err(e) => {
+                    info!("rcon players parse error: {} for: {}", e, json_str);
+                    Ok(0)
+                }
+            }
+        } else {
+            Ok(0)
+        }
+    }
+
     /// Adds research to the queue
     pub async fn add_research(&self, technology_name: &str) -> Result<()> {
         self.remote_call("add_research", vec![str_to_lua(technology_name)])

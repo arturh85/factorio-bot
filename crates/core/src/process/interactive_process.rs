@@ -33,7 +33,7 @@ const ASCII_NEWLINE: u8 = 10;
 /// invoked when the child's `stdout` stream is closed.
 pub struct InteractiveProcess {
     child: Child,
-    stdin: ChildStdin,
+    stdin: Option<ChildStdin>,
 }
 
 impl InteractiveProcess {
@@ -122,20 +122,37 @@ impl InteractiveProcess {
             });
         }
 
-        Ok(InteractiveProcess { stdin, child })
+        Ok(InteractiveProcess {
+            stdin: Some(stdin),
+            child,
+        })
+    }
+
+    /// Create an InteractiveProcess from an already-spawned Child.
+    /// This is useful for GUI processes where we don't want to capture stdio.
+    pub fn from_child(child: Child) -> Self {
+        InteractiveProcess { child, stdin: None }
     }
 
     /// Send a string to the client process's `stdin` stream. A newline will be
     /// appended to the string.
     pub fn send(&mut self, data: &str) -> std::io::Result<()> {
-        self.stdin.write_all(data.as_bytes())?;
-        self.stdin.write_all(&[ASCII_NEWLINE])
+        if let Some(ref mut stdin) = self.stdin {
+            stdin.write_all(data.as_bytes())?;
+            stdin.write_all(&[ASCII_NEWLINE])
+        } else {
+            Ok(()) // No stdin available (e.g., GUI process)
+        }
     }
 
     /// Send a string to the client process's `stdin` stream, without appending a
     /// newline.
     pub fn send_unterminated(&mut self, data: &str) -> std::io::Result<()> {
-        self.stdin.write_all(data.as_bytes())
+        if let Some(ref mut stdin) = self.stdin {
+            stdin.write_all(data.as_bytes())
+        } else {
+            Ok(()) // No stdin available (e.g., GUI process)
+        }
     }
 
     /// Consume this `InteractiveProcess` and return its child. This closes the

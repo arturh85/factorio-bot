@@ -12,3 +12,4 @@ mods/*/
 /.vscode/settings.json
 .DS_Store
 /site/
+/.mcp.json

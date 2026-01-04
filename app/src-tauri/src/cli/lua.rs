@@ -176,8 +176,8 @@ async fn run(matches: &ArgMatches, context: &mut Context) -> Result<()> {
 
       info!("Script completed");
 
-      // Store the instance to keep processes alive
-      *context.instance_state.write().await = Some(instance_state);
+      // Clean up Factorio processes (clients first, then server)
+      instance_state.stop().expect("failed to stop factorio");
     } else {
       factorio_bot_core::paris::error!("Failed to start Factorio (no world/rcon available)");
     }

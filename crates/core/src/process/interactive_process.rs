@@ -155,6 +155,11 @@ impl InteractiveProcess {
         }
     }
 
+    /// Get the process ID of the child process
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Consume this `InteractiveProcess` and return its child. This closes the
     /// process's stdin stream, which usually kills the process. If it doesn't,
     /// you can use the returned `Child` object to kill it:

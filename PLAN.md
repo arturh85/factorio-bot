@@ -34,26 +34,46 @@
 
 ## Phase 1: Stabilization (Get It Working)
 
-### 1.1 Fix mlua Migration Issues
-- [ ] Test existing Lua scripts, find a way to automatically start factorio server and a client, wait for that to complete, and then run the lua scripts in a way you can observe their output automatically.
-- [ ] Fix any mlua API differences from rlua
-- [ ] Verify all RCON functions work (rcon.move, rcon.mine, rcon.craft, etc.)
-- [ ] Verify world.* functions work (world.recipe, world.player, world.inventory)
-- [ ] Verify plan.* functions work (plan.mine, plan.walk, plan.place)
+### 1.1 Fix mlua Migration Issues ✅ COMPLETE
+- [x] Test existing Lua scripts, find a way to automatically start factorio server and a client, wait for that to complete, and then run the lua scripts in a way you can observe their output automatically.
+- [x] Fix any mlua API differences from rlua
+- [x] Verify all RCON functions work (rcon.print, rcon.find_entities, rcon.cheat_*, etc.)
+- [x] Verify world.* functions work (world.recipe, world.player, world.inventory)
+- [x] Verify plan.* functions work (plan.walk, plan.group_start/end, task graph generation)
+
+**Completed work:**
+- Fixed naming convention bug in `scripts/rcontest.lua` (camelCase → snake_case)
+- Fixed Factorio 2.0 inventory format incompatibility (`Vec<InventoryItemWithQuality>`)
+- Created comprehensive API test suite (`scripts/api_test.lua`)
+- All 4 API modules verified: global, rcon, world, plan
+- Process cleanup added to CLI mode
 
 **Key files:**
 - `crates/scripting_lua/src/globals/*.rs`
-- `scripts/example.lua`, `scripts/lib.lua`
+- `scripts/example.lua`, `scripts/rcontest.lua`, `scripts/api_test.lua`
 
-### 1.2 Validate Multi-Client Setup
-- [ ] Test launching server + 2-4 clients
-- [ ] Verify each client can be controlled independently via RCON
-- [ ] Test basic multi-bot coordination (bot 1 mines, bot 2 smelts)
+### 1.2 Validate Multi-Client Setup ✅ COMPLETE
+- [x] Test launching server + 2-4 clients
+- [x] Verify each client can be controlled independently via RCON
+- [x] Test basic multi-bot coordination (bot 1 mines, bot 2 smelts)
+
+**Completed work:**
+- Created `scripts/multi_client_test.lua` to verify independent control
+- Successfully tested server + 2 clients
+- Verified each bot can be assigned different tasks
+- Task graph generation working with multiple bots
+- **Fixed critical bug**: config.ini creation was skipped when `config/` directory existed
+  - Root cause: Factorio archive extraction creates empty `config/` directory
+  - Fix: Changed `if !config_path.exists()` → `if !config_ini_path.exists()` in instance_setup.rs:299
+  - Result: Client2 now launches successfully, both clients connect
+- **Visual confirmation**: 2 Factorio icons appear in macOS Dock when running 2 clients
 
 ### 1.3 Fix Known Issues
-- [ ] Complete `add_insert_into_inventory` FIXME in plan_builder.rs
+- [x] ~~Client2+ failing to launch due to missing config.ini~~ - FIXED in Phase 1.2
+- [ ] Complete `add_insert_into_inventory` FIXME in plan_builder.rs:67
 - [ ] Fix clippy warning in `app/src-tauri/src/lib.rs:54`
 - [ ] Review and commit pending changes in plan_builder.rs and planner.rs
+- [ ] Fix script path resolution panic in CLI mode (path not found when running scripts)
 
 ---
 

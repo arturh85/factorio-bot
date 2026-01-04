@@ -294,11 +294,17 @@ pub async fn setup_factorio_instance(
         let player_data_file = File::create(&player_data_path).into_diagnostic()?;
         serde_json::to_writer_pretty(player_data_file, &value).into_diagnostic()?;
 
+        // CRITICAL: Check if config.ini FILE exists, not just the config/ directory
+        // Bug fix (Jan 2026): Archive extraction creates an empty config/ directory,
+        // so checking `!config_path.exists()` would skip config.ini creation, causing
+        // clients to crash with "Error: Specified config file doesn't exist"
         let config_path = instance_path.join(PathBuf::from("config"));
-        if !config_path.exists() {
-            create_dir(&config_path).await.into_diagnostic()?;
+        let config_ini_path = config_path.join(PathBuf::from("config.ini"));
+        if !config_ini_path.exists() {
+            if !config_path.exists() {
+                create_dir(&config_path).await.into_diagnostic()?;
+            }
             let config_ini_data = include_bytes!("../data/config.ini");
-            let config_ini_path = config_path.join(PathBuf::from("config.ini"));
             let mut outfile = File::create(&config_ini_path).into_diagnostic()?;
             outfile.write_all(config_ini_data).into_diagnostic()?;
             if !silent {

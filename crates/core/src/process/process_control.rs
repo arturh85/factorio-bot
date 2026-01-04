@@ -155,6 +155,16 @@ impl FactorioInstance {
         // Spawn all clients first
         for instance_number in 0..params.client_count {
             let instance_name = format!("client{}", instance_number + 1);
+            let instance_path = Path::new(settings.workspace_path.as_ref()).join(PathBuf::from(&instance_name));
+            let lock_path = instance_path.join(PathBuf::from(".lock"));
+
+            // Diagnostic logging
+            if !params.silent {
+                info!("Attempting to spawn <bright-blue>{}</> at {:?}", instance_name, instance_path);
+                info!("  Instance directory exists: {}", instance_path.exists());
+                info!("  Lock file exists: {}", lock_path.exists());
+            }
+
             let started = Instant::now();
             let child = Self::start_client(
                 &settings,
@@ -164,6 +174,12 @@ impl FactorioInstance {
                 true,
             )
             .await?;
+
+            // Log process ID
+            if !params.silent {
+                info!("  Successfully spawned <bright-blue>{}</> (PID: {})", instance_name, child.pid());
+            }
+
             client_children.push(child);
             if !params.silent {
                 success!(

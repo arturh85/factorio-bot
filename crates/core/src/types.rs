@@ -165,8 +165,8 @@ pub struct RequestEntity {
 pub struct InventoryResponse {
     pub name: String,
     pub position: Position,
-    pub output_inventory: Box<Option<BTreeMap<String, u32>>>,
-    pub fuel_inventory: Box<Option<BTreeMap<String, u32>>>,
+    pub output_inventory: Box<Option<Vec<InventoryItemWithQuality>>>,
+    pub fuel_inventory: Box<Option<Vec<InventoryItemWithQuality>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
@@ -434,8 +434,8 @@ pub struct ChunkObject {
     pub position: Position,
     pub direction: String,
     pub bounding_box: Rect,
-    pub output_inventory: Box<Option<BTreeMap<String, u32>>>,
-    pub fuel_inventory: Box<Option<BTreeMap<String, u32>>>,
+    pub output_inventory: Box<Option<Vec<InventoryItemWithQuality>>>,
+    pub fuel_inventory: Box<Option<Vec<InventoryItemWithQuality>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]
@@ -565,8 +565,8 @@ pub struct FactorioEntity {
     pub direction: u8,
     pub drop_position: Option<Position>,
     pub pickup_position: Option<Position>, // only type = inserter
-    pub output_inventory: Option<BTreeMap<String, u32>>,
-    pub fuel_inventory: Option<BTreeMap<String, u32>>,
+    pub output_inventory: Option<Vec<InventoryItemWithQuality>>, // Factorio 2.0 format
+    pub fuel_inventory: Option<Vec<InventoryItemWithQuality>>,   // Factorio 2.0 format
     pub amount: Option<u32>,        // only type = resource
     pub recipe: Option<String>,     // only CraftingMachines
     pub ghost_name: Option<String>, // only type = entity-ghost
@@ -906,7 +906,7 @@ impl InventoryItem {
 }
 
 /// Inventory item with quality field (Factorio 2.0 format)
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema, Hash, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct InventoryItemWithQuality {
     pub name: String,

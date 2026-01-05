@@ -48,11 +48,16 @@ pub async fn run_script_file(
     return Err(miette!("invalid path"));
   }
 
-  let language = language_by_filename(path);
+  // Normalize path: strip leading "/" or "scripts/" prefix
+  let normalized_path = path
+    .trim_start_matches('/')
+    .trim_start_matches("scripts/");
+
+  let language = language_by_filename(normalized_path);
   if language.is_none() {
     return Err(miette!("unknown scripting file extension"));
   }
-  let pathbuf = PathBuf::from(path);
+  let pathbuf = PathBuf::from(normalized_path);
   let file_path = workspace_plans_path.join(&pathbuf);
   if !file_path.exists() {
     return Err(miette!(format!(

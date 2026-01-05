@@ -42,6 +42,9 @@ cargo build --all-features
 cargo build --no-default-features
 ```
 
+*LSP tools**: Prefer `mcp__rust__lsp_*` tools for refactoring (rename_symbol, find_references, get_definitions)
+These leverage rust-analyzer for accuracy with macros and trait implementations
+
 ## Architecture
 
 ```

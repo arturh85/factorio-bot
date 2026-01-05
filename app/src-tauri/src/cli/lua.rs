@@ -94,7 +94,7 @@ impl Subcommand for ThisCommand {
   }
 }
 
-async fn run(matches: &ArgMatches, context: &mut Context) -> Result<()> {
+async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
   let app_settings = load_app_settings()?;
   let script_path = matches
     .get_one::<String>("script")

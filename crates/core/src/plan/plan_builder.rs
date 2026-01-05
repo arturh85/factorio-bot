@@ -143,7 +143,6 @@ impl PlanBuilder {
         location: InventoryLocation,
         item: InventoryItem,
     ) -> Result<()> {
-        // FIXME
         let player = self.player(player_id);
         let distance = calculate_distance(&player.position, &location.position);
         let reach_distance = player.reach_distance as f64;
@@ -153,7 +152,7 @@ impl PlanBuilder {
                 PositionRadius::from_position(&location.position, reach_distance),
             )?;
         }
-        let inventory = self.player(player_id).main_inventory;
+        let mut inventory = self.player(player_id).main_inventory;
         let inventory_item_count = *inventory.get(&item.name).unwrap_or(&0);
         if inventory_item_count < item.count {
             return Err(PlayerMissingItem {
@@ -163,17 +162,14 @@ impl PlanBuilder {
             .into());
         }
         let mut graph = self.graph.write();
-        graph.add_insert_into_inventory_node(player_id, 1., location, item);
-        // inventory.insert(entity.name.clone(), inventory_item_count - 1);
-        // self.world
-        //     .player_changed_main_inventory(PlayerChangedMainInventoryEvent {
-        //         player_id,
-        //         main_inventory: inventory,
-        //     })?;
-        // self.world.on_some_entity_created(entity.clone())?;
+        graph.add_insert_into_inventory_node(player_id, 1., location, item.clone());
+        drop(graph);
 
-        // FIXME finish
-        // self.world.on_inventory_change(entity.clone())?;
+        // Update player inventory to reflect items inserted into target inventory
+        inventory.insert(item.name.clone(), inventory_item_count - item.count);
+        self.world.player_changed_main_inventory(
+            PlayerChangedMainInventoryEvent::from_btreemap(player_id, inventory),
+        )?;
         Ok(())
     }
 

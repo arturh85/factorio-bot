@@ -197,6 +197,26 @@ end
             Ok(())
         })?,
     )?;
+    let plan_builder = _plan_builder.clone();
+    map_table.set(
+        "__doc_entry_finalize",
+        String::from(
+            r#"
+--- Finalizes the task graph by resolving dependencies and validating resource flow
+-- Should be called after all tasks have been added to the plan
+-- @raise error if resource flow validation fails
+function plan.finalize()
+end
+"#,
+        ),
+    )?;
+    map_table.set(
+        "finalize",
+        lua.create_function(move |_lua, ()| {
+            plan_builder.finalize().unwrap();
+            Ok(())
+        })?,
+    )?;
     let plan_builder = _plan_builder;
     map_table.set(
         "__doc_entry_group_end",

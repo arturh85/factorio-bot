@@ -182,4 +182,13 @@ impl PlanBuilder {
         let mut graph = self.graph.write();
         graph.group_end();
     }
+
+    /// Finalizes the task graph by resolving dependencies and validating resource flow
+    /// Should be called after all tasks have been added to the plan
+    pub fn finalize(&self) -> Result<()> {
+        let mut graph = self.graph.write();
+        graph.resolve_dependencies();
+        graph.validate_resource_flow()?;
+        Ok(())
+    }
 }

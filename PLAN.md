@@ -68,44 +68,108 @@
   - Result: Client2 now launches successfully, both clients connect
 - **Visual confirmation**: 2 Factorio icons appear in macOS Dock when running 2 clients
 
-### 1.3 Fix Known Issues
+### 1.3 Fix Known Issues ✅ COMPLETE
 - [x] ~~Client2+ failing to launch due to missing config.ini~~ - FIXED in Phase 1.2
-- [ ] Complete `add_insert_into_inventory` FIXME in plan_builder.rs:67
-- [ ] Fix clippy warning in `app/src-tauri/src/lib.rs:54`
-- [ ] Review and commit pending changes in plan_builder.rs and planner.rs
-- [ ] Fix script path resolution panic in CLI mode (path not found when running scripts)
+- [x] Complete `add_insert_into_inventory` FIXME in plan_builder.rs:67
+- [x] Fix clippy warning in `app/src-tauri/src/cli/lua.rs:97`
+- [x] Review and commit pending changes - No uncommitted changes found
+- [x] Fix script path resolution panic in CLI mode (path not found when running scripts)
+
+**Completed work:**
+- Fixed inventory state update in `add_insert_into_inventory` (plan_builder.rs:140-174)
+- Renamed unused `context` parameter to `_context` (cli/lua.rs:97)
+- Added path normalization to fix doubled path bug (scripting.rs:51-60)
+- All three path formats now work: `api_test.lua`, `scripts/api_test.lua`, `/scripts/api_test.lua`
+- ✅ All clippy warnings resolved
+- ✅ All 22 tests pass
 
 ---
 
 ## Phase 2: Core Engine (Task Graph Execution)
 
-### 2.1 Task Graph Builder
+### 2.1 Task Graph Builder ✅ COMPLETE
 The existing system has:
 - `plan.mine()`, `plan.walk()`, `plan.place()` - create task nodes
 - `plan.group_start()`, `plan.group_end()` - synchronization barriers
 - `plan.task_graph_graphviz()` - visualization
 
-Need to add:
-- [ ] Task dependencies (task B waits for task A)
-- [ ] Resource flow tracking (output of mining → input of smelting)
-- [ ] Time estimation for scheduling
+Implemented:
+- [x] Task dependencies (implicit, based on resource flow)
+- [x] Resource flow tracking (inputs/outputs per task)
+- [x] Automatic dependency resolution
+- [x] Resource flow validation
+- [x] `plan.finalize()` - validates graph before execution
+
+**Completed work:**
+- Added `ResourceFlow` struct to track item production/consumption (task_graph.rs:287-292)
+- Extended `TaskNode` with `inputs` and `outputs` fields (task_graph.rs:318-319)
+- Updated `add_mine_node()` to populate outputs (task_graph.rs:102-111)
+- Updated `add_place_node()` to populate inputs (task_graph.rs:120-129)
+- Updated `add_insert_into_inventory_node()` to populate inputs (task_graph.rs:131-151)
+- Implemented `resolve_dependencies()` - creates edges based on resource flow (task_graph.rs:166-213)
+- Implemented `validate_resource_flow()` - ensures resources are available (task_graph.rs:215-265)
+- Added `InsufficientResources` error type (errors.rs:173-182)
+- Added `PlanBuilder::finalize()` method (plan_builder.rs:186-193)
+- Exposed `plan.finalize()` to Lua (scripting_lua/src/globals/plan.rs:200-219)
+- Created integration test script: `scripts/test_phase_2_1.lua`
+- ✅ All existing tests still pass (test_simple_group, test_diverging_group)
+
+**Design decisions:**
+- Dependencies are **implicit** via resource flow (no manual `task.depends_on()` needed)
+- Resource tracking is **per-player** (bot 1's resources != bot 2's resources)
+- Validation runs during `finalize()`, not during task creation
+- Time estimation for crafting deferred to Phase 2.2 (craft API implementation)
 
 **Key files:**
 - `crates/core/src/plan/plan_builder.rs`
 - `crates/core/src/graph/task_graph.rs`
+- `crates/core/src/errors.rs`
+- `crates/scripting_lua/src/globals/plan.rs`
 
-### 2.2 Multi-Bot Executor
-Current state: Skeleton exists, core logic commented out.
+### 2.2 Multi-Bot Executor ✅ COMPLETE
+Current state: All task types execute with proper status transitions and dependency checking.
 
-Need to implement:
-- [ ] Task assignment algorithm (which bot does what)
-- [ ] Consider bot position, travel time, current task
-- [ ] Parallel execution of independent tasks
-- [ ] Wait for dependencies before starting dependent tasks
-- [ ] Handle failures and re-planning
+Implemented:
+- [x] All 6 task types execute via RCON (Mine, Walk, Craft, Place, InsertToInventory, RemoveFromInventory)
+- [x] Status transitions (Planned → Running → Success/Failed)
+- [x] Dependency checking (waits for incoming edges to complete)
+- [x] Error handling (no `.expect()` panics, graceful failure propagation)
+- [x] Parallel execution per bot (via `execute()` and `execute_single()`)
+- [x] Fail-fast on errors (stops bot execution on first failure)
+
+**Completed work:**
+- Replaced all `.expect()` with proper error handling using `?` and `ok_or_else()` (execute.rs)
+- Implemented 5 missing task handlers using existing RCON methods (execute.rs:52-131)
+  - Walk → `move_player()`
+  - Craft → `player_craft()`
+  - PlaceEntity → `place_entity()`
+  - InsertToInventory → `insert_to_inventory()`
+  - RemoveFromInventory → `remove_from_inventory()`
+- Added status transitions before/after task execution (execute.rs:38-46, 138-152)
+- Implemented dependency checking via incoming edge validation (execute.rs:37-82)
+  - Polls dependencies every 100ms if not ready
+  - Fails if dependency task failed
+  - Skips structural nodes (start, group markers)
+- Updated existing test to mock `move_player()` (execute.rs:237-240)
+- Created integration test script: `scripts/test_phase_2_2.lua`
+- ✅ All existing tests pass (test_execution)
+
+**Design decisions:**
+- **Fail-fast approach:** Bot stops on first error, no retry/re-planning (simple for Phase 2.2)
+- **Per-bot parallelism:** `execute()` spawns async `execute_single()` per bot, each walks graph sequentially
+- **Polling-based dependencies:** Simple 100ms polling loop, no complex async coordination
+- **No task reassignment:** Tasks pre-assigned to bots during planning, no dynamic assignment yet
 
 **Key files:**
-- `crates/core/src/plan/planner.rs` - `execute_plan()` function
+- `crates/core/src/plan/execute.rs` - Complete execution logic (~150 lines modified)
+- `scripts/test_phase_2_2.lua` - Integration test (new file)
+
+**Deferred to Phase 2.3:**
+- Task assignment algorithm (dynamic bot selection)
+- Re-planning on failure
+- Task optimization (considering travel time, current task)
+- Real game tick tracking (currently use placeholder 0)
+- Group synchronization (explicit wait at group_end)
 
 ### 2.3 Bot Coordination (8-16 bots)
 - [ ] Efficient task distribution

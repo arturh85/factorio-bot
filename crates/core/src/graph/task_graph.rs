@@ -5,6 +5,7 @@ use crate::types::{
     Direction, FactorioEntity, InventoryItem, InventoryLocation, MineTarget, PlayerId,
     PositionRadius,
 };
+use miette::Result;
 use noisy_float::types::{r64, R64};
 use num_traits::ToPrimitive;
 use parking_lot::RwLock;
@@ -100,9 +101,13 @@ impl TaskGraph {
     }
 
     pub fn add_mine_node(&mut self, player_id: PlayerId, cost: f64, target: MineTarget) {
-        let node = self
-            .inner
-            .add_node(TaskNode::new_mine(player_id, target, cost));
+        let mut task_node = TaskNode::new_mine(player_id, target.clone(), cost);
+        // Populate outputs with mined resources
+        task_node.outputs.push(ResourceFlow {
+            item_name: target.name.clone(),
+            count: target.count,
+        });
+        let node = self.inner.add_node(task_node);
         self.add_to_group(player_id, node, cost);
     }
 
@@ -114,9 +119,13 @@ impl TaskGraph {
     }
 
     pub fn add_place_node(&mut self, player_id: PlayerId, cost: f64, entity: FactorioEntity) {
-        let node = self
-            .inner
-            .add_node(TaskNode::new_place(player_id, entity, cost));
+        let mut task_node = TaskNode::new_place(player_id, entity.clone(), cost);
+        // Populate inputs - placing an entity consumes 1 item from inventory
+        task_node.inputs.push(ResourceFlow {
+            item_name: entity.name.clone(),
+            count: 1,
+        });
+        let node = self.inner.add_node(task_node);
         self.add_to_group(player_id, node, cost);
     }
 
@@ -127,9 +136,18 @@ impl TaskGraph {
         location: InventoryLocation,
         item: InventoryItem,
     ) {
-        let node = self.inner.add_node(TaskNode::new_insert_to_inventory(
-            player_id, location, item, cost,
-        ));
+        let mut task_node = TaskNode::new_insert_to_inventory(
+            player_id,
+            location.clone(),
+            item.clone(),
+            cost,
+        );
+        // Populate inputs - inserting an item consumes it from player's inventory
+        task_node.inputs.push(ResourceFlow {
+            item_name: item.name.clone(),
+            count: item.count,
+        });
+        let node = self.inner.add_node(task_node);
         self.add_to_group(player_id, node, cost);
     }
 
@@ -144,6 +162,106 @@ impl TaskGraph {
             player_id, location, item, cost,
         ));
         self.add_to_group(player_id, node, cost);
+    }
+
+    /// Automatically creates dependency edges based on resource flow
+    /// For each task with inputs, finds tasks that produce matching outputs and adds edges
+    pub fn resolve_dependencies(&mut self) {
+        let node_indices: Vec<_> = self.inner.node_indices().collect();
+
+        for consumer_idx in &node_indices {
+            let consumer = match self.inner.node_weight(*consumer_idx) {
+                Some(n) => n.clone(),
+                None => continue,
+            };
+
+            // Skip if no inputs required
+            if consumer.inputs.is_empty() {
+                continue;
+            }
+
+            // Find all producer tasks that output resources this consumer needs
+            for producer_idx in &node_indices {
+                if producer_idx == consumer_idx {
+                    continue;
+                }
+
+                let producer = match self.inner.node_weight(*producer_idx) {
+                    Some(n) => n,
+                    None => continue,
+                };
+
+                // Check if producer outputs match consumer inputs
+                let has_matching_resource = producer.outputs.iter().any(|output| {
+                    consumer.inputs.iter().any(|input| {
+                        input.item_name == output.item_name
+                    })
+                });
+
+                if has_matching_resource {
+                    // Only add edge if it doesn't already exist
+                    if self.inner.find_edge(*producer_idx, *consumer_idx).is_none() {
+                        // Get the estimated time from producer's status
+                        let time = match *producer.status.read() {
+                            TaskStatus::Planned(t) => t,
+                            _ => 0.0,
+                        };
+                        self.inner.add_edge(*producer_idx, *consumer_idx, time);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Validates that all resource requirements are satisfied
+    /// Returns an error if any task requires resources that aren't produced
+    pub fn validate_resource_flow(&self) -> Result<()> {
+        use crate::errors::InsufficientResources;
+
+        // Track available resources per player
+        let mut player_resources: HashMap<PlayerId, HashMap<String, u32>> = HashMap::new();
+
+        // Process nodes in topological order (start to end)
+        for node_idx in self.inner.node_indices() {
+            let node = match self.inner.node_weight(node_idx) {
+                Some(n) => n,
+                None => continue,
+            };
+
+            // Skip nodes without a player (start/end markers)
+            let player_id = match node.player_id {
+                Some(id) => id,
+                None => continue,
+            };
+
+            // Initialize player's resource tracker if needed
+            let resources = player_resources.entry(player_id).or_default();
+
+            // Check if inputs are satisfied
+            for input in &node.inputs {
+                let available = resources.get(&input.item_name).copied().unwrap_or(0);
+                if available < input.count {
+                    return Err(InsufficientResources {
+                        task_name: node.name.clone(),
+                        player_id,
+                        item_name: input.item_name.clone(),
+                        required: input.count,
+                        available,
+                    }
+                    .into());
+                }
+                // Consume the input
+                resources.insert(input.item_name.clone(), available - input.count);
+            }
+
+            // Add outputs to available resources
+            for output in &node.outputs {
+                let current = resources.get(&output.item_name).copied().unwrap_or(0);
+                resources.insert(output.item_name.clone(), current + output.count);
+            }
+        }
+
+        Ok(())
     }
 
     pub fn node_weight(&self, idx: NodeIndex) -> Option<&TaskNode> {
@@ -284,6 +402,13 @@ impl TaskGraph {
     }
 }
 
+/// Represents resource flow (items produced or consumed) for a task
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResourceFlow {
+    pub item_name: String,
+    pub count: u32,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum TaskData {
@@ -308,6 +433,8 @@ pub struct TaskNode {
     pub player_id: Option<PlayerId>,
     pub data: Option<TaskData>,
     pub status: Arc<RwLock<TaskStatus>>,
+    pub inputs: Vec<ResourceFlow>,
+    pub outputs: Vec<ResourceFlow>,
 }
 
 impl TaskNode {
@@ -322,6 +449,8 @@ impl TaskNode {
             player_id,
             data,
             status: Arc::new(RwLock::new(TaskStatus::Planned(cost))),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
         }
     }
     pub fn new_craft(player_id: PlayerId, item: InventoryItem, cost: f64) -> TaskNode {

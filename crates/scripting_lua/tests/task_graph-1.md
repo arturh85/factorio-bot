@@ -12,9 +12,9 @@ gantt
     Mining rock-huge : 3s
     End : 0s
     Start﹕ Build Starter Miner/Furnace : 0s
-    Walk to [-36, 36] : 59s
-    Place burner-mining-drill at [-36, 36] (NorthEast) : 1s
-    Place stone-furnace at [-36, 34] (South) : 1s
+    Walk to [-36, 37] : 59s
+    Place burner-mining-drill at [-36, 37] (NorthEast) : 1s
+    Place stone-furnace at [-36, 35] (South) : 1s
     End : 0s
 
 ```

@@ -15,13 +15,32 @@ async fn health() -> &'static str {
 }
 
 pub fn build_router(state: AppState) -> Router {
+    let web_root = state
+        .settings
+        .try_read()
+        .ok()
+        .and_then(|settings| settings.web_root.clone());
+
     let (router, api) = OpenApiRouter::with_openapi(crate::openapi::ApiDoc::openapi())
         .route("/api/v1/health", get(health))
         .merge(crate::game::router())
         .with_state(state)
         .split_for_parts();
 
-    router.merge(SwaggerUi::new("/swagger-ui").url("/openapi.json", api))
+    let router = router.merge(SwaggerUi::new("/swagger-ui").url("/openapi.json", api));
+
+    match crate::spa::service(web_root.as_deref()) {
+        Some(spa) => router
+            .route("/api/v1/{*rest}", axum::routing::any(api_not_found))
+            .fallback_service(spa),
+        None => router,
+    }
+}
+
+async fn api_not_found() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let body = crate::error::ErrorResponse::new("not found".into(), 404);
+    (axum::http::StatusCode::NOT_FOUND, axum::Json(body)).into_response()
 }
 
 pub async fn start(

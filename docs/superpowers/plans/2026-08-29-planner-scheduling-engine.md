@@ -18,7 +18,7 @@
 - **All commands run inside the Nix devShell with mise tools on PATH.** Prefix every cargo invocation:
   `nix develop --command bash -c 'eval "$(mise env -s bash)"; <command>'`
 - `cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated` must pass at the end of every task.
-- `cargo fmt --all` before every commit.
+- **`cargo fmt -p factorio-bot-planner` before every commit — never `cargo fmt --all`.** Another agent owns the other crates in this checkout; `--all` reformats their in-progress files and dirties the shared tree. (This already happened once.)
 - Crate name `factorio-bot-planner`, directory `crates/planner`, version `0.2.4-dev` to match `factorio-bot-core`.
 - **`Ticks` is `u32`, a count of game ticks. 60 ticks = 1 second.** No `f64` durations anywhere in layers 0-4. Seconds appear only in `render.rs` output.
 - **`factorio_bot_core::types::ActionId` already exists** (a `u32` alias used for RCON action correlation). The planner's `ActionId` is a distinct newtype in `crates/planner/src/ids.rs`. Never import core's.
@@ -28,7 +28,7 @@
 - **Another agent works in `app/**` in this same checkout and keeps changes staged.** `git add` followed by `git commit` commits the WHOLE INDEX, including their staged files — this has already happened once. Always commit with the partial-commit form, which builds the commit from the working tree for the named paths and ignores the index entirely:
   `git commit -m "<message>" -- <explicit paths>`
   Never `git add -A`, never `git add .`, never `git commit -a`. Never `git checkout`, `git stash`, or `git reset` anything outside `crates/planner/`.
-- **Scope clippy to the planner while another agent is mid-edit in `crates/core`:** run `cargo clippy -p factorio-bot-planner --all-features --all-targets -- --deny warnings --deny deprecated` for the per-task gate. The workspace-wide clippy in the Global Constraints applies at the final review, when the tree is stable.
+- Workspace-wide clippy is the per-task gate and is safe to run even with another agent's uncommitted work present: their changes are formatting-only and cannot break compilation.
 
 ## Deviation from the spec, flagged
 
@@ -388,7 +388,7 @@ Expected: PASS — 5 tests.
 
 - [ ] **Step 7: Verify lints**
 
-Run: `nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt --all && cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated'`
+Run: `nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt -p factorio-bot-planner && cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated'`
 Expected: no output, exit 0.
 
 - [ ] **Step 8: Commit**
@@ -634,7 +634,7 @@ Expected: PASS — 11 tests.
 - [ ] **Step 6: Verify lints and commit**
 
 ```bash
-nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt --all && cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated'
+nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt -p factorio-bot-planner && cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated'
 git commit -m "feat(planner): add entity, resource and research overlay to PlanState" -- crates/planner/src/state.rs
 ```
 
@@ -959,7 +959,7 @@ Expected: PASS — 18 tests.
 - [ ] **Step 6: Verify lints and commit**
 
 ```bash
-nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt --all && cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated'
+nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt -p factorio-bot-planner && cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated'
 git commit -m "feat(planner): add Actor, Condition and Effect with data-driven semantics" -- crates/planner/src
 ```
 
@@ -1366,7 +1366,7 @@ Expected: PASS — 25 tests.
 - [ ] **Step 7: Verify lints and commit**
 
 ```bash
-nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt --all && cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated'
+nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt -p factorio-bot-planner && cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated'
 git commit -m "feat(planner): add Action and ActionNetwork with lag-carrying edges" -- crates/planner/src
 ```
 
@@ -1806,7 +1806,7 @@ Expected: PASS — 36 tests.
 - [ ] **Step 6: Verify lints and commit**
 
 ```bash
-nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt --all && cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated'
+nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt -p factorio-bot-planner && cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated'
 git commit -m "feat(planner): add travel-aware greedy scheduler" -- crates/planner/src
 ```
 
@@ -2091,7 +2091,7 @@ If `more_bots_never_increase_the_makespan` fails, the greedy selection is at fau
 - [ ] **Step 5: Verify lints and commit**
 
 ```bash
-nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt --all && cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated'
+nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt -p factorio-bot-planner && cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated'
 git commit -m "test(planner): pin scheduler guarantees as properties" -- crates/planner
 ```
 
@@ -2314,7 +2314,7 @@ Another agent is working in `app/**` in this same checkout. **Only ever `git add
 - [ ] **Step 7: Verify lints and commit**
 
 ```bash
-nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt --all && cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated'
+nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt -p factorio-bot-planner && cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated'
 git commit -m "feat(planner): render schedules as Mermaid Gantt and graphviz" -- crates/planner/src
 ```
 

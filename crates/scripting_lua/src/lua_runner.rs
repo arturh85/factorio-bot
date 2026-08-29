@@ -156,6 +156,17 @@ mod tests {
         }
     }
 
+    // The fixture's iron-ore field (see `add_to_rect` in `test_utils.rs`) spans
+    // integer tile positions x in [-45,-35], y in [35,45]. Since
+    // `EntityGraph::resource_patches`'s flood-fill bug was fixed (45c1e1f), the
+    // field is now a single contiguous patch instead of being split into
+    // fragments by seed order, so `find_free_resource_rect` searches the whole
+    // field for every query origin. Both {x=0,y=0} and {x=0,y=-200} lie north
+    // and/or east of the field, so both resolve to the same north-east corner
+    // of the patch (the closest corner to either origin): the edge element
+    // (-35,35) is the nearest point overall but can't anchor a 2x2 block
+    // (x=-35 is the field's east edge), so the nearest valid anchor is
+    // (-36,35).
     #[tokio::test]
     async fn test_free_rect_from_center() {
         result_test(
@@ -164,8 +175,8 @@ mod tests {
 result = world.find_free_resource_rect("iron-ore", 2, 2, {x=0,y=0})
 "#,
             json!({
-                "left_top": {"x": -36.0, "y": 36.0},
-                "right_bottom": {"x": -34.0, "y": 38.0}
+                "left_top": {"x": -36.0, "y": 35.0},
+                "right_bottom": {"x": -34.0, "y": 37.0}
             }),
         )
         .await
@@ -179,8 +190,30 @@ result = world.find_free_resource_rect("iron-ore", 2, 2, {x=0,y=0})
 result = world.find_free_resource_rect("iron-ore", 2, 2, {x=0,y=-200})
 "#,
             json!({
-                "left_top": {"x": -37.0, "y": 35.0},
-                "right_bottom": {"x": -35.0, "y": 37.0}
+                "left_top": {"x": -36.0, "y": 35.0},
+                "right_bottom": {"x": -34.0, "y": 37.0}
+            }),
+        )
+        .await
+    }
+
+    // A far-southern origin is closest to the field's *southern* edge (high
+    // y) rather than the northern one, so it must resolve to a different
+    // rect than `test_free_rect_from_center`/`test_free_rect_from_top` above
+    // -- this is what restores coverage of the `near` parameter now that
+    // those two return the same value. The nearest edge element is (-35,45),
+    // which can't anchor a 2x2 block (y=45 is the field's south edge), so the
+    // nearest valid anchor is (-36,44).
+    #[tokio::test]
+    async fn test_free_rect_from_south() {
+        result_test(
+            1,
+            r#"
+result = world.find_free_resource_rect("iron-ore", 2, 2, {x=0,y=200})
+"#,
+            json!({
+                "left_top": {"x": -36.0, "y": 44.0},
+                "right_bottom": {"x": -34.0, "y": 46.0}
             }),
         )
         .await

@@ -25,6 +25,10 @@
 - **`Actor::Role` must not be resolved outside `schedule()`.** Layers 0 and 3 take an explicit `binding: BotId` parameter; they never guess.
 - Large enum variants get `Box`ed (`FactorioEntity` is ~200 bytes) — clippy denies `large_enum_variant` under `--deny warnings`.
 - Determinism is required: every tie-break in the scheduler is broken by `(ActionId, BotId)` ascending, so golden tests are stable.
+- **Another agent works in `app/**` in this same checkout and keeps changes staged.** `git add` followed by `git commit` commits the WHOLE INDEX, including their staged files — this has already happened once. Always commit with the partial-commit form, which builds the commit from the working tree for the named paths and ignores the index entirely:
+  `git commit -m "<message>" -- <explicit paths>`
+  Never `git add -A`, never `git add .`, never `git commit -a`. Never `git checkout`, `git stash`, or `git reset` anything outside `crates/planner/`.
+- **Scope clippy to the planner while another agent is mid-edit in `crates/core`:** run `cargo clippy -p factorio-bot-planner --all-features --all-targets -- --deny warnings --deny deprecated` for the per-task gate. The workspace-wide clippy in the Global Constraints applies at the final review, when the tree is stable.
 
 ## Deviation from the spec, flagged
 
@@ -390,8 +394,7 @@ Expected: no output, exit 0.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add Cargo.toml Cargo.lock crates/planner
-git commit -m "feat(planner): add crate skeleton with forkable PlanState"
+git commit -m "feat(planner): add crate skeleton with forkable PlanState" -- Cargo.toml Cargo.lock crates/planner
 ```
 
 ---
@@ -632,8 +635,7 @@ Expected: PASS — 11 tests.
 
 ```bash
 nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt --all && cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated'
-git add crates/planner/src/state.rs
-git commit -m "feat(planner): add entity, resource and research overlay to PlanState"
+git commit -m "feat(planner): add entity, resource and research overlay to PlanState" -- crates/planner/src/state.rs
 ```
 
 ---
@@ -958,8 +960,7 @@ Expected: PASS — 18 tests.
 
 ```bash
 nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt --all && cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated'
-git add crates/planner/src
-git commit -m "feat(planner): add Actor, Condition and Effect with data-driven semantics"
+git commit -m "feat(planner): add Actor, Condition and Effect with data-driven semantics" -- crates/planner/src
 ```
 
 ---
@@ -1366,8 +1367,7 @@ Expected: PASS — 25 tests.
 
 ```bash
 nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt --all && cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated'
-git add crates/planner/src
-git commit -m "feat(planner): add Action and ActionNetwork with lag-carrying edges"
+git commit -m "feat(planner): add Action and ActionNetwork with lag-carrying edges" -- crates/planner/src
 ```
 
 ---
@@ -1807,8 +1807,7 @@ Expected: PASS — 36 tests.
 
 ```bash
 nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt --all && cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated'
-git add crates/planner/src
-git commit -m "feat(planner): add travel-aware greedy scheduler"
+git commit -m "feat(planner): add travel-aware greedy scheduler" -- crates/planner/src
 ```
 
 ---
@@ -2093,8 +2092,7 @@ If `more_bots_never_increase_the_makespan` fails, the greedy selection is at fau
 
 ```bash
 nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt --all && cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated'
-git add crates/planner
-git commit -m "test(planner): pin scheduler guarantees as properties"
+git commit -m "test(planner): pin scheduler guarantees as properties" -- crates/planner
 ```
 
 ---
@@ -2317,8 +2315,7 @@ Another agent is working in `app/**` in this same checkout. **Only ever `git add
 
 ```bash
 nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt --all && cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated'
-git add crates/planner/src
-git commit -m "feat(planner): render schedules as Mermaid Gantt and graphviz"
+git commit -m "feat(planner): render schedules as Mermaid Gantt and graphviz" -- crates/planner/src
 ```
 
 ---

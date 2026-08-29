@@ -714,12 +714,12 @@
   resolved "https://nodejs-cache.arturh.internal/@types/json-schema/-/json-schema-7.0.15.tgz#596a1747233694d50f6ad8a7869fcb6f56cf5841"
   integrity sha512-5+fP8P8MFNC+AyZCDxrB2pkZFPGzqQWUzpSeuuVLvm8VMcorNYavBqoFcxK8bQz4Qsbn4oUEEem4wDLfcysGHA==
 
-"@types/node@25.9.5":
-  version "25.9.5"
-  resolved "https://nodejs-cache.arturh.internal/@types/node/-/node-25.9.5.tgz#0fefc09e6e82e94cde291bacf43522e989eb01a4"
-  integrity sha512-OScDchr2fwuUmWdf4kZ9h7PcJiYDVInhJizG/biAq3cAvqwYktuy/TYGGdZNMtNTFUP7rnb0NU4TUdm82kt4Rg==
+"@types/node@^26":
+  version "26.4.0"
+  resolved "https://nodejs-cache.arturh.internal/@types/node/-/node-26.4.0.tgz#4c4ca071c42241fe602741d02999f16b4e64c468"
+  integrity sha512-faiGnoIrLH/V8cibOMEAZ8pMw6oXqSukl29ra4mN8GdaB2ZewzeaLj+INpV5N+Z1eKWzY+IzaIZH2EIR6YZRNQ==
   dependencies:
-    undici-types ">=7.24.0 <7.24.7"
+    undici-types "~8.3.0"
 
 "@types/trusted-types@^2.0.7":
   version "2.0.7"
@@ -1107,17 +1107,15 @@ ansi-html@0.0.9:
   resolved "https://nodejs-cache.arturh.internal/ansi-html/-/ansi-html-0.0.9.tgz#6512d02342ae2cc68131952644a129cb734cd3f0"
   integrity sha512-ozbS3LuenHVxNRh/wdnN16QapUHzauqSomAl1jwwJRRsGwFwtj644lIhxfWu0Fy0acCij2+AEgHvjscq3dlVXg==
 
-ansi-regex@^5.0.1:
-  version "5.0.1"
-  resolved "https://nodejs-cache.arturh.internal/ansi-regex/-/ansi-regex-5.0.1.tgz#082cb2c89c9fe8659a311a53bd6a4dc5301db304"
-  integrity sha512-quJQXlTSUGL2LH9SUXo8VwsY4soanhgo6LNSm84E1LBcE8s3O0wpdiRzyR9z/ZZJMlMWv37qOOb9pdJlMUEKFQ==
+ansi-regex@^6.2.2:
+  version "6.3.0"
+  resolved "https://nodejs-cache.arturh.internal/ansi-regex/-/ansi-regex-6.3.0.tgz#247c8e7b70a1a43b10ce14c0226fcbf58e8815d5"
+  integrity sha512-WpDfL7NO6j7tH88IDBNVdUJxDh9nmCteAVW9dsep846XdwF4naCBK+/tGLX3KJgcpgMRXCFlTM2hKGoK9FsdrQ==
 
-ansi-styles@^4.0.0, ansi-styles@^4.1.0:
-  version "4.3.0"
-  resolved "https://nodejs-cache.arturh.internal/ansi-styles/-/ansi-styles-4.3.0.tgz#edd803628ae71c04c85ae7a0906edad34b648937"
-  integrity sha512-zbB9rCJAT1rbjiVDb2hqKFHNYLxgtk8NURxZ3IZwD3F6NtxbXZQCnnSi1Lkx+IDohdPlFp222wVALIheZJQSEg==
-  dependencies:
-    color-convert "^2.0.1"
+ansi-styles@^6.2.1:
+  version "6.2.3"
+  resolved "https://nodejs-cache.arturh.internal/ansi-styles/-/ansi-styles-6.2.3.tgz#c044d5dcc521a076413472597a1acb1f103c4041"
+  integrity sha512-4Dj6M28JB+oAH8kFkTLUo+a2jwOFkuqb3yucU0CANcRRUbxS0cP0nZYCGjcc3BNXwRIsUVmDGgzawme7zvJHvg==
 
 assertion-error@^2.0.1:
   version "2.0.1"
@@ -1179,18 +1177,22 @@ brace-expansion@^5.0.8:
   dependencies:
     balanced-match "^4.0.2"
 
+bundle-name@^4.1.0:
+  version "4.1.0"
+  resolved "https://nodejs-cache.arturh.internal/bundle-name/-/bundle-name-4.1.0.tgz#f3b96b34160d6431a19d7688135af7cfb8797889"
+  integrity sha512-tjwM5exMg6BGRI+kNmTntNsvdZS1X8BFYS6tnJ2hdH0kVxM6/eVZ2xy+FqStSWvYmtfFMDLIxurorHwDKfDz5Q==
+  dependencies:
+    run-applescript "^7.0.0"
+
 chai@^6.2.2:
   version "6.2.2"
   resolved "https://nodejs-cache.arturh.internal/chai/-/chai-6.2.2.tgz#ae41b52c9aca87734505362717f3255facda360e"
   integrity sha512-NUPRluOfOiTKBKvWPtSD4PhFvWCqOi0BGStNWs57X9js7XGTprSmFoz5F0tWhR4WPjNeR9jXqdC7/UpSJTnlRg==
 
-chalk@4.1.2:
-  version "4.1.2"
-  resolved "https://nodejs-cache.arturh.internal/chalk/-/chalk-4.1.2.tgz#aac4e2b7734a740867aeb16bf02aad556a1e7a01"
-  integrity sha512-oKnbhFyRIXpUuez8iBMmyEa4nbj4IOQyuhc/wy9kY7/WVPcwIO9VA668Pu8RkO7+0G76SLROeyw9CpQ061i4mA==
-  dependencies:
-    ansi-styles "^4.1.0"
-    supports-color "^7.1.0"
+chalk@5.6.2:
+  version "5.6.2"
+  resolved "https://nodejs-cache.arturh.internal/chalk/-/chalk-5.6.2.tgz#b1238b6e23ea337af71c7f8a295db5af0c158aea"
+  integrity sha512-7NzBL0rN6fMUW+f7A6Io4h40qQlG+xGmtMxfbnH/K7TAtt8JQWVQK+6g0UXKMeVJoyV5EkkNsErQ8pVD3bLHbA==
 
 chokidar@^5.0.0:
   version "5.0.0"
@@ -1199,38 +1201,26 @@ chokidar@^5.0.0:
   dependencies:
     readdirp "^5.0.0"
 
-cliui@^8.0.1:
-  version "8.0.1"
-  resolved "https://nodejs-cache.arturh.internal/cliui/-/cliui-8.0.1.tgz#0c04b075db02cbfe60dc8e6cf2f5486b1a3608aa"
-  integrity sha512-BSeNnyus75C4//NQ9gQt1/csTXyo/8Sb+afLAkzAptFuMsod9HFokGNudZpi/oQV73hnVK+sR+5PVRMd+Dr7YQ==
+cliui@^9.0.1:
+  version "9.0.1"
+  resolved "https://nodejs-cache.arturh.internal/cliui/-/cliui-9.0.1.tgz#6f7890f386f6f1f79953adc1f78dec46fcc2d291"
+  integrity sha512-k7ndgKhwoQveBL+/1tqGJYNz097I7WOvwbmmU2AR5+magtbjPWQTS1C5vzGkBC8Ym8UWRzfKUzUUqFLypY4Q+w==
   dependencies:
-    string-width "^4.2.0"
-    strip-ansi "^6.0.1"
-    wrap-ansi "^7.0.0"
+    string-width "^7.2.0"
+    strip-ansi "^7.1.0"
+    wrap-ansi "^9.0.0"
 
-color-convert@^2.0.1:
-  version "2.0.1"
-  resolved "https://nodejs-cache.arturh.internal/color-convert/-/color-convert-2.0.1.tgz#72d3a68d598c9bdb3af2ad1e84f21d896abd4de3"
-  integrity sha512-RRECPsj7iu/xb5oKYcsFHSppFNnsj/52OVTRKb4zP5onXwVF3zVmmToNcOfGC+CRDpfK/U584fMg38ZHCaElKQ==
+concurrently@^10:
+  version "10.0.5"
+  resolved "https://nodejs-cache.arturh.internal/concurrently/-/concurrently-10.0.5.tgz#5dd22464ad37f77136a02f4d0f05ddd912fe5c80"
+  integrity sha512-JaP/CoftUrCcAFW/g//RbgEGwlelnEae6cfBLgH6ZdO6s8jPkn6p9SB9u6pdVxYXoiSnFqseOlHfrEfF82TVOg==
   dependencies:
-    color-name "~1.1.4"
-
-color-name@~1.1.4:
-  version "1.1.4"
-  resolved "https://nodejs-cache.arturh.internal/color-name/-/color-name-1.1.4.tgz#c2a09a87acbde69543de6f63fa3995c826c536a2"
-  integrity sha512-dOy+3AuW3a2wNbZHIuMZpTcgjGuLU/uBL/ubcZF9OXbDo8ff4O8yVp5Bf0efS8uEoYo5q4Fx7dY9OgQGXgAsQA==
-
-concurrently@9.2.4:
-  version "9.2.4"
-  resolved "https://nodejs-cache.arturh.internal/concurrently/-/concurrently-9.2.4.tgz#4cd9bba735ade2ccb287f000f8706513d2f581f8"
-  integrity sha512-TZ0CEhyzvFjgtAvHTusDMgj7wNdihCh7LLLrzdUOXIhdlnL2JBBGA9eJxR24rtqgmdjh3OA3hrN1rCHj6HM8qA==
-  dependencies:
-    chalk "4.1.2"
+    chalk "5.6.2"
     rxjs "7.8.2"
     shell-quote "1.9.0"
-    supports-color "8.1.1"
+    supports-color "10.2.2"
     tree-kill "1.2.2"
-    yargs "17.7.2"
+    yargs "18.0.0"
 
 confbox@^0.1.8:
   version "0.1.8"
@@ -1286,10 +1276,23 @@ deep-is@^0.1.3:
   resolved "https://nodejs-cache.arturh.internal/deep-is/-/deep-is-0.1.4.tgz#a6f2dce612fadd2ef1f519b73551f17e85199831"
   integrity sha512-oIPzksmTg4/MriiaYGO+okXDT7ztn/w3Eptv/+gSIdMdKsJo0u4CfYNFJPy+4SKMuCqGw2wxnA+URMg3t8a/bQ==
 
-define-lazy-prop@^2.0.0:
-  version "2.0.0"
-  resolved "https://nodejs-cache.arturh.internal/define-lazy-prop/-/define-lazy-prop-2.0.0.tgz#3f7ae421129bcaaac9bc74905c98a0009ec9ee7f"
-  integrity sha512-Ds09qNh8yw3khSjiJjiUInaGX9xlqZDY7JVryGxdxV7NPeuqQfplOpQ66yJFZut3jLa5zOwkXw1g9EI2uKh4Og==
+default-browser-id@^5.0.0:
+  version "5.0.1"
+  resolved "https://nodejs-cache.arturh.internal/default-browser-id/-/default-browser-id-5.0.1.tgz#f7a7ccb8f5104bf8e0f71ba3b1ccfa5eafdb21e8"
+  integrity sha512-x1VCxdX4t+8wVfd1so/9w+vQ4vx7lKd2Qp5tDRutErwmR85OgmfX7RlLRMWafRMY7hbEiXIbudNrjOAPa/hL8Q==
+
+default-browser@^5.5.1:
+  version "5.5.1"
+  resolved "https://nodejs-cache.arturh.internal/default-browser/-/default-browser-5.5.1.tgz#1790affc52680fbb11e17cab2752d69aa2a37d2c"
+  integrity sha512-m1pAzaJgZ/gssEqlOhJkPJp8Xly7QyW6xcrkUa2KKcDeDSEMP7X8xipU3snUcfisTQx0w1AGae+9UtJSfVnXGw==
+  dependencies:
+    bundle-name "^4.1.0"
+    default-browser-id "^5.0.0"
+
+define-lazy-prop@^3.0.0:
+  version "3.0.0"
+  resolved "https://nodejs-cache.arturh.internal/define-lazy-prop/-/define-lazy-prop-3.0.0.tgz#dbb19adfb746d7fc6d734a06b72f4a00d021255f"
+  integrity sha512-N+MeXYoqr3pOgn8xfyRPREN7gHakLYjhsHhWGT3fWAiL4IkAt0iDw14QiiEm2bE30c5XX5q0FtAA3CK5f9/BUg==
 
 detect-libc@^2.0.3:
   version "2.1.2"
@@ -1303,10 +1306,10 @@ dompurify@3.2.7:
   optionalDependencies:
     "@types/trusted-types" "^2.0.7"
 
-emoji-regex@^8.0.0:
-  version "8.0.0"
-  resolved "https://nodejs-cache.arturh.internal/emoji-regex/-/emoji-regex-8.0.0.tgz#e818fd69ce5ccfcb404594f842963bf53164cc37"
-  integrity sha512-MSjYzcWNOA0ewAHpz0MxpYFvwg6yjy1NG3xteoqz644VCo/RPgnr1/GGt+ic3iJTzQ8Eu3TdM14SawnVUmGE6A==
+emoji-regex@^10.3.0:
+  version "10.6.0"
+  resolved "https://nodejs-cache.arturh.internal/emoji-regex/-/emoji-regex-10.6.0.tgz#bf3d6e8f7f8fd22a65d9703475bc0147357a6b0d"
+  integrity sha512-toUI84YS5YmxW219erniWD0CIVOo46xGKColeNQRgOzDorgBi1v4D71/OFzgD9GO2UGKIv1C3Sp8DAn0+j5w7A==
 
 entities@^7.0.1:
   version "7.0.1"
@@ -1564,6 +1567,11 @@ get-caller-file@^2.0.5:
   resolved "https://nodejs-cache.arturh.internal/get-caller-file/-/get-caller-file-2.0.5.tgz#4f94412a82db32f36e3b0b9741f8a97feb031f7e"
   integrity sha512-DyFP3BM/3YHTQOCUL/w0OZHR0lpKeGrxotcHWcqNEdnltqFwXVfhEBQ94eIo34AfQpo0rGki4cyIiftY06h2Fg==
 
+get-east-asian-width@^1.0.0, get-east-asian-width@^1.5.0:
+  version "1.6.0"
+  resolved "https://nodejs-cache.arturh.internal/get-east-asian-width/-/get-east-asian-width-1.6.0.tgz#216900f91df11a8b2c198c3e1d93d6c035a776b9"
+  integrity sha512-QRbvDIbx6YklUe6RxeTeleMR0yv3cYH6PsPZHcnVn7xv7zO1BHN8r0XETu8n6Ye3Q+ahtSarc3WgtNWmehIBfA==
+
 glob-parent@^6.0.2:
   version "6.0.2"
   resolved "https://nodejs-cache.arturh.internal/glob-parent/-/glob-parent-6.0.2.tgz#6d237d99083950c79290f24c7642a3de9a28f9e3"
@@ -1606,20 +1614,15 @@ imurmurhash@^0.1.4:
   resolved "https://nodejs-cache.arturh.internal/imurmurhash/-/imurmurhash-0.1.4.tgz#9218b9b2b928a238b13dc4fb6b6d576f231453ea"
   integrity sha512-JmXMZ6wuvDmLiHEml9ykzqO6lwFbof0GG4IkcGaENdCRDDmMVnny7s5HsIgHCbaq0w2MyPhDqkhTUgS2LU2PHA==
 
-is-docker@^2.0.0, is-docker@^2.1.1:
-  version "2.2.1"
-  resolved "https://nodejs-cache.arturh.internal/is-docker/-/is-docker-2.2.1.tgz#33eeabe23cfe86f14bde4408a02c0cfb853acdaa"
-  integrity sha512-F+i2BKsFrH66iaUFc0woD8sLy8getkwTwtOBjvs56Cx4CgJDeKQeqfz8wAYiSb8JOprWhHH5p77PbmYCvvUuXQ==
+is-docker@^3.0.0:
+  version "3.0.0"
+  resolved "https://nodejs-cache.arturh.internal/is-docker/-/is-docker-3.0.0.tgz#90093aa3106277d8a77a5910dbae71747e15a200"
+  integrity sha512-eljcgEDlEns/7AXFosB5K/2nCM4P7FQPkGc/DWLy5rmFEWvZayGrik1d9/QIY5nJ4f9YsVvBkA6kJpHn9rISdQ==
 
 is-extglob@^2.1.1:
   version "2.1.1"
   resolved "https://nodejs-cache.arturh.internal/is-extglob/-/is-extglob-2.1.1.tgz#a88c02535791f02ed37c76a1b9ea9773c833f8c2"
   integrity sha512-SbKbANkN603Vi4jEZv49LeVJMn4yGwsbzZworEoyEiutsN3nJYdbO36zfhGJ6QEDpOZIFkDtnq5JRxmvl3jsoQ==
-
-is-fullwidth-code-point@^3.0.0:
-  version "3.0.0"
-  resolved "https://nodejs-cache.arturh.internal/is-fullwidth-code-point/-/is-fullwidth-code-point-3.0.0.tgz#f116f8064fe90b3f7844a38997c0b75051269f1d"
-  integrity sha512-zymm5+u+sCsSWyD9qNaejV3DFvhCKclKdizYaJUuHA83RLjb7nSuGnddCHGv0hk+KY7BMAlsWeK4Ueg6EV6XQg==
 
 is-glob@^4.0.0, is-glob@^4.0.3:
   version "4.0.3"
@@ -1628,12 +1631,24 @@ is-glob@^4.0.0, is-glob@^4.0.3:
   dependencies:
     is-extglob "^2.1.1"
 
-is-wsl@^2.2.0:
-  version "2.2.0"
-  resolved "https://nodejs-cache.arturh.internal/is-wsl/-/is-wsl-2.2.0.tgz#74a4c76e77ca9fd3f932f290c17ea326cd157271"
-  integrity sha512-fKzAra0rGJUUBwGBgNkHZuToZcn+TtXHpeCgmkMJMMYx1sQDYaCSyjJBSCa2nH1DGm7s3n1oBnohoVTBaN7Lww==
+is-in-ssh@^1.0.0:
+  version "1.0.0"
+  resolved "https://nodejs-cache.arturh.internal/is-in-ssh/-/is-in-ssh-1.0.0.tgz#8eb73c1cabba77748d389588eeea132a63057622"
+  integrity sha512-jYa6Q9rH90kR1vKB6NM7qqd1mge3Fx4Dhw5TVlK1MUBqhEOuCagrEHMevNuCcbECmXZ0ThXkRm+Ymr51HwEPAw==
+
+is-inside-container@^1.0.0:
+  version "1.0.0"
+  resolved "https://nodejs-cache.arturh.internal/is-inside-container/-/is-inside-container-1.0.0.tgz#e81fba699662eb31dbdaf26766a61d4814717ea4"
+  integrity sha512-KIYLCCJghfHZxqjYBE7rEy0OBuTd5xCHS7tHVgvCLkx7StIoaxwNW3hCALgEUjFfeRk+MG/Qxmp/vtETEF3tRA==
   dependencies:
-    is-docker "^2.0.0"
+    is-docker "^3.0.0"
+
+is-wsl@^3.1.0:
+  version "3.1.1"
+  resolved "https://nodejs-cache.arturh.internal/is-wsl/-/is-wsl-3.1.1.tgz#327897b26832a3eb117da6c27492d04ca132594f"
+  integrity sha512-e6rvdUCiQCAuumZslxRJWR/Doq4VpPR82kqclvcS0efgt430SlGIk05vdCN58+VrzgtIcfNODjozVielycD4Sw==
+  dependencies:
+    is-inside-container "^1.0.0"
 
 isexe@^2.0.0:
   version "2.0.0"
@@ -1889,14 +1904,17 @@ obug@^2.1.1:
   resolved "https://nodejs-cache.arturh.internal/obug/-/obug-2.1.4.tgz#9090d8a548a522517915d2aa6aae907197ac6cf8"
   integrity sha512-4a+OsYv9UktOJKE+l1A4OufDgdRF9PifWj+tJnHURo/P+WOxpG4GzUFL9qCalmWauao6ogiG+QvnCovwPoyAWA==
 
-open@^8.0.0:
-  version "8.4.2"
-  resolved "https://nodejs-cache.arturh.internal/open/-/open-8.4.2.tgz#5b5ffe2a8f793dcd2aad73e550cb87b59cb084f9"
-  integrity sha512-7x81NCL719oNbsq/3mh+hVrAWmFuEYUqrq/Iw3kUzH8ReypT9QQ0BLoJS7/G9k6N81XjW4qHWtjWwe/9eLy1EQ==
+open@^11.0.0:
+  version "11.0.2"
+  resolved "https://nodejs-cache.arturh.internal/open/-/open-11.0.2.tgz#146069263c50839eebbac6e5810f7da9ac80ab2a"
+  integrity sha512-RWqF+pBSkqecEvCKOn8QYhaNdRMJDZRIrlS/7rTDdLHaPcfXGCZ/h8zb413NfvdeAV0MR7T1yJcA34/q+CSm1Q==
   dependencies:
-    define-lazy-prop "^2.0.0"
-    is-docker "^2.1.1"
-    is-wsl "^2.2.0"
+    default-browser "^5.5.1"
+    define-lazy-prop "^3.0.0"
+    is-in-ssh "^1.0.0"
+    is-inside-container "^1.0.0"
+    powershell-utils "^0.2.1"
+    wsl-utils "^1.0.0"
 
 optionator@^0.9.3:
   version "0.9.4"
@@ -2001,6 +2019,16 @@ postcss@^8.5.19, postcss@^8.5.26, postcss@^8.5.3:
     picocolors "^1.1.1"
     source-map-js "^1.2.1"
 
+powershell-utils@^0.1.0:
+  version "0.1.0"
+  resolved "https://nodejs-cache.arturh.internal/powershell-utils/-/powershell-utils-0.1.0.tgz#5a42c9a824fb4f2f251ccb41aaae73314f5d6ac2"
+  integrity sha512-dM0jVuXJPsDN6DvRpea484tCUaMiXWjuCn++HGTqUWzGDjv5tZkEZldAJ/UMlqRYGFrD/etByo4/xOuC/snX2A==
+
+powershell-utils@^0.2.1:
+  version "0.2.1"
+  resolved "https://nodejs-cache.arturh.internal/powershell-utils/-/powershell-utils-0.2.1.tgz#0853016f5b3c12d52b9571c8fe8059677d9ddbe2"
+  integrity sha512-C+y9x90UElAddDZmV4qOx9W53B61PO7cIqWz2dQsWlwswuq4mr8NEwytdGKboYbQlGZ3awrkTeNvcZiZNHnQ8A==
+
 prelude-ls@^1.2.1:
   version "1.2.1"
   resolved "https://nodejs-cache.arturh.internal/prelude-ls/-/prelude-ls-1.2.1.tgz#debc6489d7a6e6b0e7611888cec880337d316396"
@@ -2048,11 +2076,6 @@ readdirp@^5.0.0:
   resolved "https://nodejs-cache.arturh.internal/readdirp/-/readdirp-5.1.1.tgz#520bca06f9d1ae1b96cc0800dbe84b983d19422c"
   integrity sha512-Kko+Y5XQ6fM+Ce3dq3m9YGxnacYZYl9cA1wZjaF3Vbry2L3i1qVg8+CAgNPsXRArPMUMCaOR7oa9Nqntc43JKA==
 
-require-directory@^2.1.1:
-  version "2.1.1"
-  resolved "https://nodejs-cache.arturh.internal/require-directory/-/require-directory-2.1.1.tgz#8c64ad5fd30dab1c976e2344ffe7f792a6a6df42"
-  integrity sha512-fGxEI7+wsG9xrvdjsrlmL22OMTTiHRwAMroiEeMgq8gzoLC/PQr7RsRDSTLUg/bZAZtF+TVIkHc6/4RIKrui+Q==
-
 rolldown@~1.2.4:
   version "1.2.6"
   resolved "https://nodejs-cache.arturh.internal/rolldown/-/rolldown-1.2.6.tgz#025f5c11975cc70129ea9c76c54f35dd35881786"
@@ -2077,17 +2100,17 @@ rolldown@~1.2.4:
     "@rolldown/binding-win32-arm64-msvc" "1.2.6"
     "@rolldown/binding-win32-x64-msvc" "1.2.6"
 
-rollup-plugin-visualizer@6.0.11:
-  version "6.0.11"
-  resolved "https://nodejs-cache.arturh.internal/rollup-plugin-visualizer/-/rollup-plugin-visualizer-6.0.11.tgz#64addb59eb43d560cd1bdc5db91e64c0069b9f71"
-  integrity sha512-TBwVHVY7buHjIKVLqr9scTVFwqZqMXINcCphPwIWKPDCOBIa+jCQfafvbjRJDZgXdq/A996Dy6yGJ/+/NtAXDQ==
+rollup-plugin-visualizer@^7:
+  version "7.1.1"
+  resolved "https://nodejs-cache.arturh.internal/rollup-plugin-visualizer/-/rollup-plugin-visualizer-7.1.1.tgz#92b5ca95ab882e1ac200dedc2a22b5c85bc31f4c"
+  integrity sha512-ThaGiHTU8XW02OkK80TrTHATraJmM9OAduU4otal+7gyXLpYEtmGBLfx5kW+EHvvLwn03YGW2NnwKUIqsYlJAA==
   dependencies:
-    open "^8.0.0"
-    picomatch "^4.0.2"
-    source-map "^0.7.4"
-    yargs "^17.5.1"
+    open "^11.0.0"
+    picomatch "^4.0.5"
+    source-map "^0.8.0"
+    yargs "^18.1.0"
 
-rollup@4.63.1, rollup@^4.34.9:
+rollup@^4.34.9:
   version "4.63.1"
   resolved "https://nodejs-cache.arturh.internal/rollup/-/rollup-4.63.1.tgz#a9b96d5b2558d034babb12ad8b67a043bc870ac4"
   integrity sha512-3Df9jsstwhccuEfmAMi9l8XUh/GOkVObmFTU7CCVBysEbcOZLl84jCtaAZMcPiMz2EGKsATzQcU+Xr3n/wU6cg==
@@ -2121,6 +2144,11 @@ rollup@4.63.1, rollup@^4.34.9:
     "@rollup/rollup-win32-x64-gnu" "4.63.1"
     "@rollup/rollup-win32-x64-msvc" "4.63.1"
     fsevents "~2.3.2"
+
+run-applescript@^7.0.0:
+  version "7.1.0"
+  resolved "https://nodejs-cache.arturh.internal/run-applescript/-/run-applescript-7.1.0.tgz#2e9e54c4664ec3106c5b5630e249d3d6595c4911"
+  integrity sha512-DPe5pVFaAsinSaV6QjQ6gdiedWDcRCbUuiQfQa2wmWV7+xC9bGulGI8+TdRmoFkAPaBXk8CrAbnlY2ISniJ47Q==
 
 rxjs@7.8.2:
   version "7.8.2"
@@ -2177,10 +2205,10 @@ siginfo@^2.0.0:
   resolved "https://nodejs-cache.arturh.internal/source-map-js/-/source-map-js-1.2.1.tgz#1ce5650fddd87abc099eda37dcff024c2667ae46"
   integrity sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==
 
-source-map@^0.7.4:
-  version "0.7.6"
-  resolved "https://nodejs-cache.arturh.internal/source-map/-/source-map-0.7.6.tgz#a3658ab87e5b6429c8a1f3ba0083d4c61ca3ef02"
-  integrity sha512-i5uvt8C3ikiWeNZSVZNWcfZPItFQOsYTUAOkcUPGd8DqDy1uOUikjt5dG+uRlwyvR108Fb9DOd4GvXfT0N2/uQ==
+source-map@^0.8.0:
+  version "0.8.0"
+  resolved "https://nodejs-cache.arturh.internal/source-map/-/source-map-0.8.0.tgz#72b9006383bd9fc70d52e435c91c2d73249c60a4"
+  integrity sha512-d8EqvL+k/SOXCreS/SUzg2ciyHqBBLcN/yuRjFsbvVhHTE2pgei7oAhmPM7kWFbkX6OSMQfUq4KbkF3au9lhYQ==
 
 stackback@0.0.2:
   version "0.0.2"
@@ -2192,28 +2220,34 @@ std-env@^4.0.0-rc.1:
   resolved "https://nodejs-cache.arturh.internal/std-env/-/std-env-4.2.0.tgz#8ebe0ec60485668ab47227b312f4254cdf80c9d3"
   integrity sha512-oCUKSupKTHX53EyjDtuZQ64pjLJ6yYCtpmEw0goYxtjG9KpbRe8KAsl2tBUGU9DyMcJ0RwJ8GqJAFzMXcXW1Rw==
 
-string-width@^4.1.0, string-width@^4.2.0, string-width@^4.2.3:
-  version "4.2.3"
-  resolved "https://nodejs-cache.arturh.internal/string-width/-/string-width-4.2.3.tgz#269c7117d27b05ad2e536830a8ec895ef9c6d010"
-  integrity sha512-wKyQRQpjJ0sIp62ErSZdGsjMJWsap5oRNihHhu6G7JVO/9jIB6UyevL+tXuOqrng8j/cxKTWyWUwvSTriiZz/g==
+string-width@^7.0.0, string-width@^7.2.0:
+  version "7.2.0"
+  resolved "https://nodejs-cache.arturh.internal/string-width/-/string-width-7.2.0.tgz#b5bb8e2165ce275d4d43476dd2700ad9091db6dc"
+  integrity sha512-tsaTIkKW9b4N+AEj+SVA+WhJzV7/zMhcSu78mLKWSk7cXMOSHsBKFWUs0fWwq8QyK3MgJBQRX6Gbi4kYbdvGkQ==
   dependencies:
-    emoji-regex "^8.0.0"
-    is-fullwidth-code-point "^3.0.0"
-    strip-ansi "^6.0.1"
+    emoji-regex "^10.3.0"
+    get-east-asian-width "^1.0.0"
+    strip-ansi "^7.1.0"
 
-strip-ansi@^6.0.0, strip-ansi@^6.0.1:
-  version "6.0.1"
-  resolved "https://nodejs-cache.arturh.internal/strip-ansi/-/strip-ansi-6.0.1.tgz#9e26c63d30f53443e9489495b2105d37b67a85d9"
-  integrity sha512-Y38VPSHcqkFrCpFnQ9vuSXmquuv5oXOKpGeT6aGrr3o3Gc9AlVa6JBfUSOCnbxGGZF+/0ooI7KrPuUSztUdU5A==
+string-width@^8.2.1:
+  version "8.2.2"
+  resolved "https://nodejs-cache.arturh.internal/string-width/-/string-width-8.2.2.tgz#7310516493df575742fe98af6fae87d85d5ed0ac"
+  integrity sha512-GaPUh5gfdrYzqeVNZvUfT23vYYxXzKYidUcnMtJg/3rxRV63EFZy3k6xfKlmfeJD0176lnUV/Usr3XcwSvFzpg==
   dependencies:
-    ansi-regex "^5.0.1"
+    get-east-asian-width "^1.5.0"
+    strip-ansi "^7.1.2"
 
-supports-color@8.1.1:
-  version "8.1.1"
-  resolved "https://nodejs-cache.arturh.internal/supports-color/-/supports-color-8.1.1.tgz#cd6fc17e28500cff56c1b86c0a7fd4a54a73005c"
-  integrity sha512-MpUEN2OodtUzxvKQl72cUF7RQ5EiHsGvSsVG0ia9c5RbWGL2CI4C7EpPS8UTBIplnlzZiNuV56w+FuNxy3ty2Q==
+strip-ansi@^7.1.0, strip-ansi@^7.1.2:
+  version "7.2.0"
+  resolved "https://nodejs-cache.arturh.internal/strip-ansi/-/strip-ansi-7.2.0.tgz#d22a269522836a627af8d04b5c3fd2c7fa3e32e3"
+  integrity sha512-yDPMNjp4WyfYBkHnjIRLfca1i6KMyGCtsVgoKe/z1+6vukgaENdgGBZt+ZmKPc4gavvEZ5OgHfHdrazhgNyG7w==
   dependencies:
-    has-flag "^4.0.0"
+    ansi-regex "^6.2.2"
+
+supports-color@10.2.2:
+  version "10.2.2"
+  resolved "https://nodejs-cache.arturh.internal/supports-color/-/supports-color-10.2.2.tgz#466c2978cc5cd0052d542a0b576461c2b802ebb4"
+  integrity sha512-SS+jx45GF1QjgEXQx4NJZV9ImqmO2NPz5FNsIHrsDjh2YsHnawpan7SNQ1o8NuhrbHZy9AZhIoCUiCeaW/C80g==
 
 supports-color@^7.1.0:
   version "7.2.0"
@@ -2294,10 +2328,10 @@ ufo@^1.6.3:
   resolved "https://nodejs-cache.arturh.internal/ufo/-/ufo-1.6.4.tgz#7a8fb875fcc6382d2c7d0b3692738b0500a92467"
   integrity sha512-JFNbkD1Svwe0KvGi8GOeLcP4kAWQ609twvCdcHxq1oSL8svv39ZuSvajcD8B+5D0eL4+s1Is2D/O6KN3qcTeRA==
 
-"undici-types@>=7.24.0 <7.24.7":
-  version "7.24.6"
-  resolved "https://nodejs-cache.arturh.internal/undici-types/-/undici-types-7.24.6.tgz#61275b485d7fd4e9d269c7cf04ec2873c9cc0f91"
-  integrity sha512-WRNW+sJgj5OBN4/0JpHFqtqzhpbnV0GuB+OozA9gCL7a993SmU+1JBZCzLNxYsbMfIeDL+lTsphD5jN5N+n0zg==
+undici-types@~8.3.0:
+  version "8.3.0"
+  resolved "https://nodejs-cache.arturh.internal/undici-types/-/undici-types-8.3.0.tgz#44e9fc9f3244648cdea35e4f9bb2d681e9410809"
+  integrity sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ==
 
 unplugin-utils@^0.3.0, unplugin-utils@^0.3.2:
   version "0.3.2"
@@ -2464,14 +2498,22 @@ word-wrap@^1.2.5:
   resolved "https://nodejs-cache.arturh.internal/word-wrap/-/word-wrap-1.2.5.tgz#d2c45c6dd4fbce621a66f136cbe328afd0410b34"
   integrity sha512-BN22B5eaMMI9UMtjrGd5g5eCYPpCPDUy0FJXbYsaT5zYxjFOckS53SQDE3pWkVoWpHXVb3BrYcEN4Twa55B5cA==
 
-wrap-ansi@^7.0.0:
-  version "7.0.0"
-  resolved "https://nodejs-cache.arturh.internal/wrap-ansi/-/wrap-ansi-7.0.0.tgz#67e145cff510a6a6984bdf1152911d69d2eb9e43"
-  integrity sha512-YVGIj2kamLSTxw6NsZjoBxfSwsn0ycdesmc4p+Q21c5zPuZ1pl+NfxVdxPtdHvmNVOQ6XSYG4AUtyt/Fi7D16Q==
+wrap-ansi@^9.0.0:
+  version "9.0.2"
+  resolved "https://nodejs-cache.arturh.internal/wrap-ansi/-/wrap-ansi-9.0.2.tgz#956832dea9494306e6d209eb871643bb873d7c98"
+  integrity sha512-42AtmgqjV+X1VpdOfyTGOYRi0/zsoLqtXQckTmqTeybT+BDIbM/Guxo7x3pE2vtpr1ok6xRqM9OpBe+Jyoqyww==
   dependencies:
-    ansi-styles "^4.0.0"
-    string-width "^4.1.0"
-    strip-ansi "^6.0.0"
+    ansi-styles "^6.2.1"
+    string-width "^7.0.0"
+    strip-ansi "^7.1.0"
+
+wsl-utils@^1.0.0:
+  version "1.0.0"
+  resolved "https://nodejs-cache.arturh.internal/wsl-utils/-/wsl-utils-1.0.0.tgz#e113d9964e766657c53f5d570da1bbbdfee7f837"
+  integrity sha512-Hl0ZOAs672vg+06kfujwRhoS6/jehvULrlFkuF2dRu6pHgA8U06h3xqNIqNNU1LTXPcedxByAR4GS6pwQK0mgA==
+  dependencies:
+    is-wsl "^3.1.0"
+    powershell-utils "^0.1.0"
 
 xml-name-validator@^5.0.0:
   version "5.0.0"
@@ -2483,36 +2525,34 @@ y18n@^5.0.5:
   resolved "https://nodejs-cache.arturh.internal/y18n/-/y18n-5.0.8.tgz#7f4934d0f7ca8c56f95314939ddcd2dd91ce1d55"
   integrity sha512-0pfFzegeDWJHJIAmTLRP2DwHjdF5s7jo9tuztdQxAhINCdvS+3nGINqPd00AphqJR/0LhANUS6/+7SCb98YOfA==
 
-yargs-parser@^21.1.1:
-  version "21.1.1"
-  resolved "https://nodejs-cache.arturh.internal/yargs-parser/-/yargs-parser-21.1.1.tgz#9096bceebf990d21bb31fa9516e0ede294a77d35"
-  integrity sha512-tVpsJW7DdjecAiFpbIB1e3qxIQsE6NoPc5/eTdrbbIC4h0LVsWhnoa3g+m2HclBIujHzsxZ4VJVA+GUuc2/LBw==
+yargs-parser@^22.0.0:
+  version "22.0.0"
+  resolved "https://nodejs-cache.arturh.internal/yargs-parser/-/yargs-parser-22.0.0.tgz#87b82094051b0567717346ecd00fd14804b357c8"
+  integrity sha512-rwu/ClNdSMpkSrUb+d6BRsSkLUq1fmfsY6TOpYzTwvwkg1/NRG85KBy3kq++A8LKQwX6lsu+aWad+2khvuXrqw==
 
-yargs@17.7.2:
-  version "17.7.2"
-  resolved "https://nodejs-cache.arturh.internal/yargs/-/yargs-17.7.2.tgz#991df39aca675a192b816e1e0363f9d75d2aa269"
-  integrity sha512-7dSzzRQ++CKnNI/krKnYRV7JKKPUXMEh61soaHKg9mrWEhzFWhFnxPxGl+69cD1Ou63C13NUPCnmIcrvqCuM6w==
+yargs@18.0.0:
+  version "18.0.0"
+  resolved "https://nodejs-cache.arturh.internal/yargs/-/yargs-18.0.0.tgz#6c84259806273a746b09f579087b68a3c2d25bd1"
+  integrity sha512-4UEqdc2RYGHZc7Doyqkrqiln3p9X2DZVxaGbwhn2pi7MrRagKaOcIKe8L3OxYcbhXLgLFUS3zAYuQjKBQgmuNg==
   dependencies:
-    cliui "^8.0.1"
+    cliui "^9.0.1"
     escalade "^3.1.1"
     get-caller-file "^2.0.5"
-    require-directory "^2.1.1"
-    string-width "^4.2.3"
+    string-width "^7.2.0"
     y18n "^5.0.5"
-    yargs-parser "^21.1.1"
+    yargs-parser "^22.0.0"
 
-yargs@^17.5.1:
-  version "17.7.3"
-  resolved "https://nodejs-cache.arturh.internal/yargs/-/yargs-17.7.3.tgz#779dffe6bcafec596a7172e983289a588647faaa"
-  integrity sha512-GZtjxm/J/4TSxuL3FNYjCmLktBTnIw/rVmKSIyKeYAZpmJB2ig9VauCC5xsa82GNKVKDAqpOn3KVzNt0zmrU0g==
+yargs@^18.1.0:
+  version "18.1.0"
+  resolved "https://nodejs-cache.arturh.internal/yargs/-/yargs-18.1.0.tgz#cd7e98c703ef51695bbbf062ed58f28e94291b56"
+  integrity sha512-2rAgRKu54VsHkqI0/tYkmluGXHD4KW7yZoycuqDQ15QOTnc2VVfy0nN/1eMhnQLO00A+dwtK20xuCnc1YGeUyg==
   dependencies:
-    cliui "^8.0.1"
+    cliui "^9.0.1"
     escalade "^3.1.1"
     get-caller-file "^2.0.5"
-    require-directory "^2.1.1"
-    string-width "^4.2.3"
+    string-width "^8.2.1"
     y18n "^5.0.5"
-    yargs-parser "^21.1.1"
+    yargs-parser "^22.0.0"
 
 ynetwork@3.0.6:
   version "3.0.6"

@@ -1,7 +1,8 @@
 import { defineConfig } from 'vitest/config'
 import vue from '@vitejs/plugin-vue';
-import visualizer from 'rollup-plugin-visualizer'
-import * as path from 'path';
+import { visualizer } from 'rollup-plugin-visualizer'
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export default defineConfig({
     plugins: [
@@ -11,7 +12,7 @@ export default defineConfig({
             filename: 'dist/stats.html',
             template: 'treemap',
             brotliSize: true
-        }) as any
+        })
     ],
     test: {
         coverage: {
@@ -20,7 +21,7 @@ export default defineConfig({
     },
     resolve: {
         alias: {
-            '@': path.resolve(__dirname, './src')
+            '@': path.resolve(path.dirname(fileURLToPath(import.meta.url)), './src')
             // 'vue-i18n': 'vue-i18n/dist/vue-i18n.cjs.js'
         }
     },

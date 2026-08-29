@@ -2193,9 +2193,22 @@ mod tests {
     #[test]
     fn the_gantt_places_steps_at_their_start_time() {
         let out = mermaid_gantt(&schedule(), "Test");
+        // Bot 1's walk is its first step (a1), the mining act its second (a2):
+        // ids are `bot_index * 1000 + step_index + 1`.
+        assert!(
+            out.contains("walk to [10, 0] :a1, 00:00:00, 1s"),
+            "unexpected gantt body:\n{}",
+            out
+        );
         // The mining step starts one second in and runs for five.
         assert!(
-            out.contains("mine 5 iron-ore :a1, 00:00:01, 5s"),
+            out.contains("mine 5 iron-ore :a2, 00:00:01, 5s"),
+            "unexpected gantt body:\n{}",
+            out
+        );
+        // Bot 2's only step opens a fresh id block.
+        assert!(
+            out.contains("craft iron-gear-wheel :a1001, 00:00:00, 2s"),
             "unexpected gantt body:\n{}",
             out
         );

@@ -110,73 +110,73 @@ async fn execute_single(planner: &Planner, player_id: u8) -> Result<()> {
                             )
                             .await?;
                     }
-                TaskData::Walk(target) => {
-                    planner
-                        .rcon
-                        .as_ref()
-                        .ok_or_else(|| miette::miette!("RCON connection not available"))?
-                        .move_player(
-                            &planner.real_world,
-                            player_id,
-                            &target.position,
-                            Some(target.radius),
-                        )
-                        .await?;
-                }
-                TaskData::Craft(item) => {
-                    planner
-                        .rcon
-                        .as_ref()
-                        .ok_or_else(|| miette::miette!("RCON connection not available"))?
-                        .player_craft(&planner.real_world, player_id, &item.name, item.count)
-                        .await?;
-                }
-                TaskData::InsertToInventory(location, item) => {
-                    planner
-                        .rcon
-                        .as_ref()
-                        .ok_or_else(|| miette::miette!("RCON connection not available"))?
-                        .insert_to_inventory(
-                            player_id,
-                            location.entity_name.clone(),
-                            location.position.clone(),
-                            location.inventory_type,
-                            item.name.clone(),
-                            item.count,
-                            &planner.real_world,
-                        )
-                        .await?;
-                }
-                TaskData::RemoveFromInventory(location, item) => {
-                    planner
-                        .rcon
-                        .as_ref()
-                        .ok_or_else(|| miette::miette!("RCON connection not available"))?
-                        .remove_from_inventory(
-                            player_id,
-                            location.entity_name.clone(),
-                            location.position.clone(),
-                            location.inventory_type,
-                            item.name.clone(),
-                            item.count,
-                            &planner.real_world,
-                        )
-                        .await?;
-                }
-                TaskData::PlaceEntity(entity) => {
-                    planner
-                        .rcon
-                        .as_ref()
-                        .ok_or_else(|| miette::miette!("RCON connection not available"))?
-                        .place_entity(
-                            player_id,
-                            entity.name.clone(),
-                            entity.position.clone(),
-                            entity.direction,
-                            &planner.real_world,
-                        )
-                        .await?;
-                }
+                    TaskData::Walk(target) => {
+                        planner
+                            .rcon
+                            .as_ref()
+                            .ok_or_else(|| miette::miette!("RCON connection not available"))?
+                            .move_player(
+                                &planner.real_world,
+                                player_id,
+                                &target.position,
+                                Some(target.radius),
+                            )
+                            .await?;
+                    }
+                    TaskData::Craft(item) => {
+                        planner
+                            .rcon
+                            .as_ref()
+                            .ok_or_else(|| miette::miette!("RCON connection not available"))?
+                            .player_craft(&planner.real_world, player_id, &item.name, item.count)
+                            .await?;
+                    }
+                    TaskData::InsertToInventory(location, item) => {
+                        planner
+                            .rcon
+                            .as_ref()
+                            .ok_or_else(|| miette::miette!("RCON connection not available"))?
+                            .insert_to_inventory(
+                                player_id,
+                                location.entity_name.clone(),
+                                location.position.clone(),
+                                location.inventory_type,
+                                item.name.clone(),
+                                item.count,
+                                &planner.real_world,
+                            )
+                            .await?;
+                    }
+                    TaskData::RemoveFromInventory(location, item) => {
+                        planner
+                            .rcon
+                            .as_ref()
+                            .ok_or_else(|| miette::miette!("RCON connection not available"))?
+                            .remove_from_inventory(
+                                player_id,
+                                location.entity_name.clone(),
+                                location.position.clone(),
+                                location.inventory_type,
+                                item.name.clone(),
+                                item.count,
+                                &planner.real_world,
+                            )
+                            .await?;
+                    }
+                    TaskData::PlaceEntity(entity) => {
+                        planner
+                            .rcon
+                            .as_ref()
+                            .ok_or_else(|| miette::miette!("RCON connection not available"))?
+                            .place_entity(
+                                player_id,
+                                entity.name.clone(),
+                                entity.position.clone(),
+                                entity.direction,
+                                &planner.real_world,
+                            )
+                            .await?;
+                    }
                 }
                 Ok(())
             }

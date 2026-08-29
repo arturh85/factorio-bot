@@ -49,9 +49,7 @@ pub async fn run_script_file(
   }
 
   // Normalize path: strip leading "/" or "scripts/" prefix
-  let normalized_path = path
-    .trim_start_matches('/')
-    .trim_start_matches("scripts/");
+  let normalized_path = path.trim_start_matches('/').trim_start_matches("scripts/");
 
   let language = language_by_filename(normalized_path);
   if language.is_none() {
@@ -92,10 +90,7 @@ pub fn language_by_filename(filename: &str) -> Option<&'static str> {
 
 pub fn prepare_workspace_scripts(workspace_path: &Path) -> Result<PathBuf, String> {
   // Prefer development paths (project root scripts/) over workspace/scripts/
-  let dev_paths = [
-    PathBuf::from("./scripts"),
-    PathBuf::from("../../scripts"),
-  ];
+  let dev_paths = [PathBuf::from("./scripts"), PathBuf::from("../../scripts")];
   for path in &dev_paths {
     if path.exists() {
       return Ok(fs::canonicalize(path).expect("Failed to canonicalize scripts path"));
@@ -105,7 +100,9 @@ pub fn prepare_workspace_scripts(workspace_path: &Path) -> Result<PathBuf, Strin
   // Fall back to workspace/scripts
   let workspace_plans_path = workspace_path.join(PathBuf::from("scripts"));
   if workspace_plans_path.exists() {
-    return Ok(fs::canonicalize(workspace_plans_path).expect("Failed to canonicalize workspace_plans_path"));
+    return Ok(
+      fs::canonicalize(workspace_plans_path).expect("Failed to canonicalize workspace_plans_path"),
+    );
   }
 
   // In release mode, extract bundled scripts if nothing found
@@ -118,7 +115,9 @@ pub fn prepare_workspace_scripts(workspace_path: &Path) -> Result<PathBuf, Strin
       factorio_bot_core::paris::error!("failed to extract static mods content: {:?}", err);
       return Err("failed to extract mods content to workspace".into());
     }
-    return Ok(fs::canonicalize(workspace_plans_path).expect("Failed to canonicalize workspace_plans_path"));
+    return Ok(
+      fs::canonicalize(workspace_plans_path).expect("Failed to canonicalize workspace_plans_path"),
+    );
   }
 
   #[cfg(debug_assertions)]

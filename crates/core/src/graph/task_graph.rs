@@ -136,12 +136,8 @@ impl TaskGraph {
         location: InventoryLocation,
         item: InventoryItem,
     ) {
-        let mut task_node = TaskNode::new_insert_to_inventory(
-            player_id,
-            location.clone(),
-            item.clone(),
-            cost,
-        );
+        let mut task_node =
+            TaskNode::new_insert_to_inventory(player_id, location.clone(), item.clone(), cost);
         // Populate inputs - inserting an item consumes it from player's inventory
         task_node.inputs.push(ResourceFlow {
             item_name: item.name.clone(),
@@ -193,9 +189,10 @@ impl TaskGraph {
 
                 // Check if producer outputs match consumer inputs
                 let has_matching_resource = producer.outputs.iter().any(|output| {
-                    consumer.inputs.iter().any(|input| {
-                        input.item_name == output.item_name
-                    })
+                    consumer
+                        .inputs
+                        .iter()
+                        .any(|input| input.item_name == output.item_name)
                 });
 
                 if has_matching_resource {

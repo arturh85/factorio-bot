@@ -155,12 +155,16 @@ impl FactorioInstance {
         // Spawn all clients first
         for instance_number in 0..params.client_count {
             let instance_name = format!("client{}", instance_number + 1);
-            let instance_path = Path::new(settings.workspace_path.as_ref()).join(PathBuf::from(&instance_name));
+            let instance_path =
+                Path::new(settings.workspace_path.as_ref()).join(PathBuf::from(&instance_name));
             let lock_path = instance_path.join(PathBuf::from(".lock"));
 
             // Diagnostic logging
             if !params.silent {
-                info!("Attempting to spawn <bright-blue>{}</> at {:?}", instance_name, instance_path);
+                info!(
+                    "Attempting to spawn <bright-blue>{}</> at {:?}",
+                    instance_name, instance_path
+                );
                 info!("  Instance directory exists: {}", instance_path.exists());
                 info!("  Lock file exists: {}", lock_path.exists());
             }
@@ -177,7 +181,11 @@ impl FactorioInstance {
 
             // Log process ID
             if !params.silent {
-                info!("  Successfully spawned <bright-blue>{}</> (PID: {})", instance_name, child.pid());
+                info!(
+                    "  Successfully spawned <bright-blue>{}</> (PID: {})",
+                    instance_name,
+                    child.pid()
+                );
             }
 
             client_children.push(child);
@@ -193,7 +201,10 @@ impl FactorioInstance {
         // Wait for all clients to actually connect to the server
         // Clients take 20-30 seconds to load sprites and connect
         if params.client_count > 0 && !params.silent {
-            info!("Waiting for {} client(s) to connect...", params.client_count);
+            info!(
+                "Waiting for {} client(s) to connect...",
+                params.client_count
+            );
         }
         let wait_started = Instant::now();
         let expected_players = params.client_count as usize;

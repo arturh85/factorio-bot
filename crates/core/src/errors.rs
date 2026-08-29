@@ -172,7 +172,10 @@ pub struct PlayerMissingItem {
 
 #[derive(Error, Debug, Diagnostic)]
 #[error("Task '{task_name}' (player {player_id}) requires {required} {item_name}, but only {available} available")]
-#[diagnostic(code(factorio::task_graph::resource_flow), help("ensure tasks produce required resources before consumption"))]
+#[diagnostic(
+    code(factorio::task_graph::resource_flow),
+    help("ensure tasks produce required resources before consumption")
+)]
 pub struct InsufficientResources {
     pub task_name: String,
     pub player_id: PlayerId,

@@ -2,13 +2,10 @@ import { defineConfig } from 'vitest/config'
 import vue from '@vitejs/plugin-vue';
 import visualizer from 'rollup-plugin-visualizer'
 import * as path from 'path';
-import monacoEditorPlugin from 'vite-plugin-monaco-editor'
 
 export default defineConfig({
     plugins: [
         vue(),
-        // vite-plugin-monaco-editor >=1.1.0 no longer defaults its options argument
-        monacoEditorPlugin({}),
         visualizer({
             title: 'Bundle Size Visualizer',
             filename: 'dist/stats.html',

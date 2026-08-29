@@ -1,4 +1,4 @@
-//! Action network (DAG) construction and validation. Filled in by Task 4.
+//! A partially ordered set of actions. No bot appears here; ordering only.
 
 use crate::action::Action;
 use crate::error::PlannerError;

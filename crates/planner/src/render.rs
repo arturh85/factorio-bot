@@ -1,4 +1,4 @@
-//! Rendering of plans (e.g. Mermaid/Gantt output). Filled in by Task 6.
+//! Mermaid Gantt and graphviz output for schedules and action networks.
 
 use crate::ids::{BotId, Ticks};
 use crate::network::ActionNetwork;
@@ -167,5 +167,51 @@ mod tests {
         let out = mermaid_gantt(&Schedule::default(), "Empty");
         assert!(out.starts_with("gantt"));
         assert!(out.contains("title Empty"));
+    }
+
+    #[test]
+    fn the_gantt_orders_sections_by_bot() {
+        let out = mermaid_gantt(&schedule(), "Test");
+        let first = out.find("section bot 1").expect("bot 1 section");
+        let second = out.find("section bot 2").expect("bot 2 section");
+        assert!(first < second, "sections must be ordered by bot id");
+    }
+
+    #[test]
+    fn graphviz_renders_nodes_and_lag_labelled_edges() {
+        use crate::action::{Action, ActionKind};
+        use crate::ids::ActionIdGen;
+        use crate::network::ActionNetwork;
+
+        fn node(gen: &mut ActionIdGen, label: &str) -> Action {
+            Action {
+                id: gen.next(),
+                kind: ActionKind::Craft {
+                    item: "iron-gear-wheel".into(),
+                    count: 1,
+                },
+                pre: vec![],
+                eff: vec![],
+                duration: 60,
+                pinned: None,
+                label: label.into(),
+            }
+        }
+
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let a = net.add(node(&mut gen, "insert ore"));
+        let b = net.add(node(&mut gen, "remove \"plate\""));
+        net.link(a, b, 192);
+
+        let out = graphviz(&net);
+        assert!(out.starts_with("digraph {\n"));
+        assert!(out.ends_with("}\n"));
+        assert!(out.contains("0 [label=\"insert ore\"];"));
+        // A double quote in a label becomes a single quote so the DOT stays well formed.
+        assert!(out.contains("1 [label=\"remove 'plate'\"];"));
+        // The edge carries its lag, and only in the direction it was linked.
+        assert!(out.contains("0 -> 1 [label=\"192t\"];"));
+        assert!(!out.contains("1 -> 0"));
     }
 }

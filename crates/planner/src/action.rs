@@ -1,4 +1,4 @@
-//! Action definitions for the planner. Filled in by Task 3.
+//! What a bot can do: actions, and the conditions and effects that describe them as data.
 
 use crate::error::PlannerError;
 use crate::ids::{ActionId, BotId, ItemId, Ticks};

@@ -1,4 +1,4 @@
-//! Scheduling of the action network across bots. Filled in by Task 5/7.
+//! Assignment of a bot-free action network to concrete bots over time.
 
 use crate::error::PlannerError;
 use crate::ids::{ActionId, BotId, Ticks};

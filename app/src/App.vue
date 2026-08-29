@@ -43,7 +43,7 @@ import {useInstanceStore} from '@/store/instanceStore';
 import {computed, onBeforeUpdate, onMounted, ref} from 'vue';
 import {onBeforeRouteLeave} from 'vue-router';
 import {useToast} from 'primevue/usetoast';
-import {DashboardMenu} from "@/models/dashboard";
+import {DashboardMenu} from '@/models/dashboard';
 
 const layoutMode = ref('static')
 const layoutColorMode = ref('dark')
@@ -57,7 +57,7 @@ const menu = ref([
       {label: 'RCON', icon: 'pi pi-fw pi-cog', to: '/rcon'},
       {label: 'LUA Script', icon: 'pi pi-fw pi-cog', to: '/script'},
       // {label: 'Mods', icon: 'pi pi-fw pi-th-large', to: '/factorioMods'},
-      {label: 'Tasks', icon: 'pi pi-fw pi-sitemap', to: '/tasks'},
+      {label: 'Tasks', icon: 'pi pi-fw pi-sitemap', to: '/tasks'}
       // {label: 'Entities', icon: 'pi pi-fw pi-sitemap', to: '/workspace'},
       // {label: 'Map', icon: 'pi pi-fw pi-map-marker', to: '/workspace'},
       // {label: 'Instances', icon: 'pi pi-fw pi-circle-off', to: '/instances'},

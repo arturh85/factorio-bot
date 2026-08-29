@@ -110,12 +110,12 @@ function hideConfigurator(event: Event) {
   event.preventDefault();
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+ 
 function changeInputStyle() {
   // this.$appState.inputStyle = value;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+ 
 function changeRipple() {
   // this.$primevue.ripple = value;
 }

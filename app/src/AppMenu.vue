@@ -10,7 +10,7 @@ import {PropType} from 'vue';
 import {DashboardMenu} from '@/models/dashboard';
 
 defineProps({
-  model: Array as PropType<DashboardMenu[]>,
+  model: Array as PropType<DashboardMenu[]>
 })
 
 const emit = defineEmits(['menuitem-click']);

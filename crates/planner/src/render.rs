@@ -1,1 +1,171 @@
 //! Rendering of plans (e.g. Mermaid/Gantt output). Filled in by Task 6.
+
+use crate::ids::{BotId, Ticks};
+use crate::network::ActionNetwork;
+use crate::schedule::{Schedule, StepKind};
+use std::collections::BTreeSet;
+use std::fmt::Write;
+
+const TICKS_PER_SECOND: Ticks = 60;
+
+pub fn ticks_to_timestamp(ticks: Ticks) -> String {
+    let total_seconds = ticks / TICKS_PER_SECOND;
+    format!(
+        "{:02}:{:02}:{:02}",
+        total_seconds / 3600,
+        (total_seconds % 3600) / 60,
+        total_seconds % 60
+    )
+}
+
+/// A Mermaid Gantt chart, one section per bot.
+pub fn mermaid_gantt(schedule: &Schedule, title: &str) -> String {
+    let mut out = String::new();
+    out.push_str("gantt\n");
+    let _ = writeln!(out, "    title {}", title);
+    out.push_str("    dateFormat HH:mm:ss\n");
+    out.push_str("    axisFormat %H:%M:%S\n");
+
+    let bots: BTreeSet<BotId> = schedule.steps.iter().map(|s| s.bot).collect();
+    for (bot_index, bot) in bots.iter().enumerate() {
+        let _ = writeln!(out, "    section {}", bot);
+        for (step_index, step) in schedule.steps_for(*bot).iter().enumerate() {
+            let label = match &step.what {
+                StepKind::Act { label, .. } => label.clone(),
+                StepKind::Walk { to } => format!("walk to {}", to),
+            };
+            let seconds = (step.end.saturating_sub(step.start)) / TICKS_PER_SECOND;
+            let _ = writeln!(
+                out,
+                "    {} :a{}, {}, {}s",
+                label,
+                bot_index * 1000 + step_index + 1,
+                ticks_to_timestamp(step.start),
+                seconds
+            );
+        }
+    }
+    out
+}
+
+/// The action network as a graphviz digraph, edges labelled with their lag.
+pub fn graphviz(net: &ActionNetwork) -> String {
+    let mut out = String::from("digraph {\n");
+    for action in net.actions() {
+        let _ = writeln!(
+            out,
+            "    {} [label=\"{}\"];",
+            action.id.0,
+            action.label.replace('"', "'")
+        );
+    }
+    for action in net.actions() {
+        for (pred, lag) in net.preds(action.id) {
+            let _ = writeln!(
+                out,
+                "    {} -> {} [label=\"{}t\"];",
+                pred.0, action.id.0, lag
+            );
+        }
+    }
+    out.push_str("}\n");
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ids::ActionId;
+    use crate::schedule::{Schedule, ScheduledStep, StepKind};
+    use factorio_bot_core::types::Position;
+
+    fn schedule() -> Schedule {
+        Schedule {
+            steps: vec![
+                ScheduledStep {
+                    what: StepKind::Walk {
+                        to: Position::new(10., 0.),
+                    },
+                    bot: BotId(1),
+                    start: 0,
+                    end: 60,
+                },
+                ScheduledStep {
+                    what: StepKind::Act {
+                        action: ActionId(0),
+                        label: "mine 5 iron-ore".into(),
+                    },
+                    bot: BotId(1),
+                    start: 60,
+                    end: 360,
+                },
+                ScheduledStep {
+                    what: StepKind::Act {
+                        action: ActionId(1),
+                        label: "craft iron-gear-wheel".into(),
+                    },
+                    bot: BotId(2),
+                    start: 0,
+                    end: 120,
+                },
+            ],
+            makespan: 360,
+        }
+    }
+
+    #[test]
+    fn ticks_render_as_hours_minutes_seconds() {
+        assert_eq!(ticks_to_timestamp(0), "00:00:00");
+        assert_eq!(ticks_to_timestamp(60), "00:00:01");
+        assert_eq!(ticks_to_timestamp(3600), "00:01:00");
+        assert_eq!(ticks_to_timestamp(216_000), "01:00:00");
+    }
+
+    #[test]
+    fn the_gantt_has_a_section_per_bot() {
+        let out = mermaid_gantt(&schedule(), "Test");
+        assert!(out.starts_with("gantt"));
+        assert!(out.contains("title Test"));
+        assert!(out.contains("section bot 1"));
+        assert!(out.contains("section bot 2"));
+    }
+
+    #[test]
+    fn the_gantt_names_every_action_and_walk() {
+        let out = mermaid_gantt(&schedule(), "Test");
+        assert!(out.contains("mine 5 iron-ore"));
+        assert!(out.contains("craft iron-gear-wheel"));
+        assert!(out.contains("walk to [10, 0]"));
+    }
+
+    #[test]
+    fn the_gantt_places_steps_at_their_start_time() {
+        let out = mermaid_gantt(&schedule(), "Test");
+        // Bot 1's walk is its first step (a1), the mining act its second (a2):
+        // ids are `bot_index * 1000 + step_index + 1`.
+        assert!(
+            out.contains("walk to [10, 0] :a1, 00:00:00, 1s"),
+            "unexpected gantt body:\n{}",
+            out
+        );
+        // The mining step starts one second in and runs for five.
+        assert!(
+            out.contains("mine 5 iron-ore :a2, 00:00:01, 5s"),
+            "unexpected gantt body:\n{}",
+            out
+        );
+        // Bot 2's only step opens a fresh id block.
+        assert!(
+            out.contains("craft iron-gear-wheel :a1001, 00:00:00, 2s"),
+            "unexpected gantt body:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn an_empty_schedule_still_renders_a_valid_chart() {
+        let out = mermaid_gantt(&Schedule::default(), "Empty");
+        assert!(out.starts_with("gantt"));
+        assert!(out.contains("title Empty"));
+    }
+}

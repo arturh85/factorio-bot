@@ -1829,9 +1829,11 @@ git commit -m "feat(planner): add travel-aware greedy scheduler" -- crates/plann
 - Consumes: the full public API from Tasks 1-5.
 - Produces: nothing new. This task exists to pin the guarantees the spec promised, including the two that the omitted `Reservations` structure was meant to provide.
 
-- [ ] **Step 1: Write the failing tests**
+**This task is not TDD and has no RED phase.** Every behaviour it tests is already implemented by Tasks 1-5; these tests exist to pin guarantees, not to drive new code. They are expected to pass on the first run. **If any of them fails, that is a real defect in Tasks 1-5 — report it and stop. Do not adjust an assertion to match observed output.**
 
-Create `crates/planner/tests/scheduling.rs`:
+- [ ] **Step 1: Write the property tests**
+
+Create `crates/planner/tests/scheduling.rs`. Note that `factorio-bot-core` is already a regular dependency of the planner crate, and Cargo makes `[dependencies]` available to integration-test targets, so no manifest change is needed:
 
 ```rust
 use factorio_bot_planner::action::{Action, ActionKind, Actor, Condition, Effect};
@@ -2077,28 +2079,14 @@ fn scheduling_terminates_on_a_deep_chain() {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
-
-Run: `nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo test -p factorio-bot-planner --test scheduling'`
-Expected: FAIL to compile — `factorio-bot-core` is not a dev-dependency of the planner crate for integration tests.
-
-- [ ] **Step 3: Add the dev-dependency**
-
-Append to `crates/planner/Cargo.toml`:
-
-```toml
-[dev-dependencies]
-factorio-bot-core = { path = "../core", version = "0.2.4-dev" }
-```
-
-- [ ] **Step 4: Run the tests to verify they pass**
+- [ ] **Step 2: Run the tests**
 
 Run: `nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo test -p factorio-bot-planner --test scheduling'`
 Expected: PASS — 6 tests.
 
 If `more_bots_never_increase_the_makespan` fails, the greedy selection is at fault, not the test: the property is a genuine requirement. The likely cause is the tie-break comparing `end` before considering that a bot idle since tick 0 should win over one that just became free; verify the `(end, action.id, bot)` tuple ordering in Task 5 step 3 is exactly as written.
 
-- [ ] **Step 5: Verify lints and commit**
+- [ ] **Step 3: Verify lints and commit**
 
 ```bash
 nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt -p factorio-bot-planner && cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated'

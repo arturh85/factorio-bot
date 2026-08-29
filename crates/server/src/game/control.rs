@@ -1,4 +1,5 @@
 use crate::error::{ApiResult, ErrorResponse};
+use crate::game::{require_player, require_world};
 use crate::state::AppState;
 use axum::extract::State;
 use axum::Json;
@@ -44,21 +45,17 @@ pub async fn move_player(
 
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
-    let world = instance
-        .world
-        .as_ref()
-        .ok_or_else(|| ErrorResponse::new("world not initialized".into(), 2))?;
+    let world = require_world(instance)?;
+    // Validate the player id before mutating anything, see `require_player`.
+    require_player(world, body.player_id)?;
     instance
         .rcon
         .move_player(world, body.player_id, &goal, body.radius)
         .await
         .map_err(ErrorResponse::from)?;
 
-    let player = world
-        .players
-        .get(&body.player_id)
-        .ok_or_else(|| ErrorResponse::new("player not found".into(), 2))?;
-    Ok(Json(player.clone()))
+    let player = require_player(world, body.player_id)?;
+    Ok(Json(player))
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -94,10 +91,9 @@ pub async fn place_entity(
 
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
-    let world = instance
-        .world
-        .as_ref()
-        .ok_or_else(|| ErrorResponse::new("world not initialized".into(), 2))?;
+    let world = require_world(instance)?;
+    // Validate the player id before mutating anything, see `require_player`.
+    require_player(world, body.player_id)?;
     let entity = instance
         .rcon
         .place_entity(
@@ -110,14 +106,8 @@ pub async fn place_entity(
         .await
         .map_err(ErrorResponse::from)?;
     sleep(Duration::from_millis(50)).await;
-    let player = world
-        .players
-        .get(&body.player_id)
-        .ok_or_else(|| ErrorResponse::new("player not found".into(), 2))?;
-    Ok(Json(PlaceEntityResult {
-        entity,
-        player: player.clone(),
-    }))
+    let player = require_player(world, body.player_id)?;
+    Ok(Json(PlaceEntityResult { entity, player }))
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -144,21 +134,17 @@ pub async fn cheat_item(
 ) -> ApiResult<FactorioPlayer> {
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
-    let world = instance
-        .world
-        .as_ref()
-        .ok_or_else(|| ErrorResponse::new("world not initialized".into(), 2))?;
+    let world = require_world(instance)?;
+    // Validate the player id before mutating anything, see `require_player`.
+    require_player(world, body.player_id)?;
     instance
         .rcon
         .cheat_item(body.player_id, &body.name, body.count)
         .await
         .map_err(ErrorResponse::from)?;
     sleep(Duration::from_millis(50)).await;
-    let player = world
-        .players
-        .get(&body.player_id)
-        .ok_or_else(|| ErrorResponse::new("player not found".into(), 2))?;
-    Ok(Json(player.clone()))
+    let player = require_player(world, body.player_id)?;
+    Ok(Json(player))
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -243,10 +229,9 @@ pub async fn insert_to_inventory(
 
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
-    let world = instance
-        .world
-        .as_ref()
-        .ok_or_else(|| ErrorResponse::new("world not initialized".into(), 2))?;
+    let world = require_world(instance)?;
+    // Validate the player id before mutating anything, see `require_player`.
+    require_player(world, body.player_id)?;
     instance
         .rcon
         .insert_to_inventory(
@@ -261,11 +246,8 @@ pub async fn insert_to_inventory(
         .await
         .map_err(ErrorResponse::from)?;
     sleep(Duration::from_millis(50)).await;
-    let player = world
-        .players
-        .get(&body.player_id)
-        .ok_or_else(|| ErrorResponse::new("player not found".into(), 2))?;
-    Ok(Json(player.clone()))
+    let player = require_player(world, body.player_id)?;
+    Ok(Json(player))
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -299,10 +281,9 @@ pub async fn remove_from_inventory(
 
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
-    let world = instance
-        .world
-        .as_ref()
-        .ok_or_else(|| ErrorResponse::new("world not initialized".into(), 2))?;
+    let world = require_world(instance)?;
+    // Validate the player id before mutating anything, see `require_player`.
+    require_player(world, body.player_id)?;
     instance
         .rcon
         .remove_from_inventory(
@@ -317,11 +298,8 @@ pub async fn remove_from_inventory(
         .await
         .map_err(ErrorResponse::from)?;
     sleep(Duration::from_millis(50)).await;
-    let player = world
-        .players
-        .get(&body.player_id)
-        .ok_or_else(|| ErrorResponse::new("player not found".into(), 2))?;
-    Ok(Json(player.clone()))
+    let player = require_player(world, body.player_id)?;
+    Ok(Json(player))
 }
 
 /// Server Save

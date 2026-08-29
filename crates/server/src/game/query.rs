@@ -1,4 +1,5 @@
 use crate::error::{ApiResult, ErrorResponse};
+use crate::game::{require_player, require_world};
 use crate::state::AppState;
 use axum::extract::{Query, State};
 use axum::Json;
@@ -10,6 +11,31 @@ use factorio_bot_core::types::{
 use serde::Deserialize;
 use std::collections::HashMap;
 use utoipa::IntoParams;
+
+/// Builds an [`AreaFilter`] from the mutually exclusive `area` and
+/// `position` + `radius` query parameters.
+fn area_filter_from(
+    area: Option<&str>,
+    position: Option<&str>,
+    radius: Option<f64>,
+) -> Result<AreaFilter, ErrorResponse> {
+    match area {
+        Some(area) => Ok(AreaFilter::Rect(area.parse().map_err(|_| {
+            ErrorResponse::bad_request(format!("invalid area: {area}"))
+        })?)),
+        None => match position {
+            Some(position) => Ok(AreaFilter::PositionRadius((
+                position.parse().map_err(|_| {
+                    ErrorResponse::bad_request(format!("invalid position: {position}"))
+                })?,
+                radius,
+            ))),
+            None => Err(ErrorResponse::bad_request(
+                "area or position + optional radius needed",
+            )),
+        },
+    }
+}
 
 #[derive(Debug, Default, Deserialize, IntoParams)]
 #[serde(default)]
@@ -36,25 +62,11 @@ pub async fn find_entities(
     State(state): State<AppState>,
     Query(params): Query<FindEntitiesParams>,
 ) -> ApiResult<Vec<FactorioEntity>> {
-    let area_filter = match &params.area {
-        Some(area) => AreaFilter::Rect(
-            area.parse()
-                .map_err(|_| ErrorResponse::bad_request(format!("invalid area: {area}")))?,
-        ),
-        None => match &params.position {
-            Some(position) => AreaFilter::PositionRadius((
-                position.parse().map_err(|_| {
-                    ErrorResponse::bad_request(format!("invalid position: {position}"))
-                })?,
-                params.radius,
-            )),
-            None => {
-                return Err(ErrorResponse::bad_request(
-                    "area or position + optional radius needed",
-                ))
-            }
-        },
-    };
+    let area_filter = area_filter_from(
+        params.area.as_deref(),
+        params.position.as_deref(),
+        params.radius,
+    )?;
 
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
@@ -109,10 +121,7 @@ pub async fn plan_path(
 
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
-    let world = instance
-        .world
-        .as_ref()
-        .ok_or_else(|| ErrorResponse::new("world not initialized".into(), 2))?;
+    let world = require_world(instance)?;
     let entities = instance
         .rcon
         .plan_path(
@@ -155,25 +164,11 @@ pub async fn find_tiles(
     State(state): State<AppState>,
     Query(params): Query<FindTilesParams>,
 ) -> ApiResult<Vec<FactorioTile>> {
-    let area_filter = match &params.area {
-        Some(area) => AreaFilter::Rect(
-            area.parse()
-                .map_err(|_| ErrorResponse::bad_request(format!("invalid area: {area}")))?,
-        ),
-        None => match &params.position {
-            Some(position) => AreaFilter::PositionRadius((
-                position.parse().map_err(|_| {
-                    ErrorResponse::bad_request(format!("invalid position: {position}"))
-                })?,
-                params.radius,
-            )),
-            None => {
-                return Err(ErrorResponse::bad_request(
-                    "area or position + optional radius needed",
-                ))
-            }
-        },
-    };
+    let area_filter = area_filter_from(
+        params.area.as_deref(),
+        params.position.as_deref(),
+        params.radius,
+    )?;
 
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
@@ -185,8 +180,7 @@ pub async fn find_tiles(
     Ok(Json(tiles))
 }
 
-#[derive(Debug, Default, Deserialize, IntoParams)]
-#[serde(default)]
+#[derive(Debug, Deserialize, IntoParams)]
 pub struct InventoryContentsAtParams {
     pub query: String,
 }
@@ -232,8 +226,7 @@ pub async fn inventory_contents_at(
     Ok(Json(contents))
 }
 
-#[derive(Debug, Default, Deserialize, IntoParams)]
-#[serde(default)]
+#[derive(Debug, Deserialize, IntoParams)]
 pub struct PlayerInfoParams {
     pub player_id: PlayerId,
 }
@@ -255,15 +248,9 @@ pub async fn player_info(
 ) -> ApiResult<FactorioPlayer> {
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
-    let world = instance
-        .world
-        .as_ref()
-        .ok_or_else(|| ErrorResponse::new("world not initialized".into(), 2))?;
-    let player = world
-        .players
-        .get(&params.player_id)
-        .ok_or_else(|| ErrorResponse::new("player not found".into(), 2))?;
-    Ok(Json(player.clone()))
+    let world = require_world(instance)?;
+    let player = require_player(world, params.player_id)?;
+    Ok(Json(player))
 }
 
 /// List all connected Players
@@ -279,10 +266,7 @@ pub async fn player_info(
 pub async fn all_players(State(state): State<AppState>) -> ApiResult<Vec<FactorioPlayer>> {
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
-    let world = instance
-        .world
-        .as_ref()
-        .ok_or_else(|| ErrorResponse::new("world not initialized".into(), 2))?;
+    let world = require_world(instance)?;
     let mut all_players: Vec<FactorioPlayer> = Vec::new();
     for player in world.players.iter() {
         all_players.push(player.clone());
@@ -305,10 +289,7 @@ pub async fn item_prototypes(
 ) -> ApiResult<HashMap<String, FactorioItemPrototype>> {
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
-    let world = instance
-        .world
-        .as_ref()
-        .ok_or_else(|| ErrorResponse::new("world not initialized".into(), 2))?;
+    let world = require_world(instance)?;
     let mut data: HashMap<String, FactorioItemPrototype> = HashMap::new();
     for item_prototype in world.item_prototypes.iter() {
         data.insert(item_prototype.name.clone(), item_prototype.clone());
@@ -331,10 +312,7 @@ pub async fn entity_prototypes(
 ) -> ApiResult<HashMap<String, FactorioEntityPrototype>> {
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
-    let world = instance
-        .world
-        .as_ref()
-        .ok_or_else(|| ErrorResponse::new("world not initialized".into(), 2))?;
+    let world = require_world(instance)?;
     let mut data: HashMap<String, FactorioEntityPrototype> = HashMap::new();
     for prototype in world.entity_prototypes.iter() {
         data.insert(prototype.name.clone(), prototype.clone());

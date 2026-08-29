@@ -74,6 +74,29 @@ async fn inventory_contents_at_rejects_query_without_separator() {
     assert!(!body.is_empty());
 }
 
+/// `player_id` is required: with `#[serde(default)]` a missing key silently
+/// became player 0 and returned somebody else's data.
+#[tokio::test]
+async fn player_info_without_player_id_is_rejected() {
+    let (status, body) = get("/api/v1/game/player-info").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        !body.contains("not started"),
+        "expected the missing-parameter rejection, got: {body}"
+    );
+}
+
+/// `query` is required too, for the same reason.
+#[tokio::test]
+async fn inventory_contents_at_without_query_is_rejected() {
+    let (status, body) = get("/api/v1/game/inventory-contents-at").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        !body.contains("not started"),
+        "expected the missing-parameter rejection, got: {body}"
+    );
+}
+
 #[tokio::test]
 async fn player_info_rejects_out_of_range_player_id() {
     let (status, _body) = get("/api/v1/game/player-info?player_id=300").await;

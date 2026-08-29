@@ -1,7 +1,7 @@
 //! Action definitions for the planner. Filled in by Task 3.
 
 use crate::error::PlannerError;
-use crate::ids::{BotId, ItemId};
+use crate::ids::{ActionId, BotId, ItemId, Ticks};
 use crate::state::PlanState;
 use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::types::{FactorioEntity, Position};
@@ -161,6 +161,58 @@ impl Effect {
             Effect::GainItem { item, count, .. } => Some((item.as_str(), *count)),
             _ => None,
         }
+    }
+}
+
+/// What a bot physically does. Carries the payload the executor needs;
+/// the planner reasons from `pre` and `eff`, never from this.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ActionKind {
+    Mine {
+        pos: Position,
+        item: ItemId,
+        count: u32,
+    },
+    Craft {
+        item: ItemId,
+        count: u32,
+    },
+    Place {
+        entity: Box<FactorioEntity>,
+    },
+    Insert {
+        pos: Position,
+        item: ItemId,
+        count: u32,
+    },
+    Remove {
+        pos: Position,
+        item: ItemId,
+        count: u32,
+    },
+    Research {
+        tech: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Action {
+    pub id: ActionId,
+    pub kind: ActionKind,
+    pub pre: Vec<Condition>,
+    pub eff: Vec<Effect>,
+    /// Nominal estimate. The observed duration lives in the execution log.
+    pub duration: Ticks,
+    /// An escape hatch for hand-tuned work. Normally `None`.
+    pub pinned: Option<BotId>,
+    pub label: String,
+}
+
+impl Action {
+    /// Where the acting bot must stand, taken from its `AtPosition`
+    /// precondition. The scheduler emits a walk to satisfy it.
+    pub fn required_position(&self) -> Option<(Position, f64)> {
+        self.pre.iter().find_map(|c| c.required_position())
     }
 }
 

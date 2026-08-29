@@ -241,6 +241,32 @@ mod tests {
         }
     }
 
+    /// Like `at`, but with a caller-chosen duration.
+    fn at_for(
+        gen: &mut ActionIdGen,
+        label: &str,
+        pos: Position,
+        radius: f64,
+        duration: Ticks,
+    ) -> Action {
+        Action {
+            id: gen.next(),
+            kind: ActionKind::Craft {
+                item: "iron-gear-wheel".into(),
+                count: 1,
+            },
+            pre: vec![Condition::AtPosition {
+                who: Actor::Role,
+                pos: pos.clone(),
+                radius,
+            }],
+            eff: vec![],
+            duration,
+            pinned: None,
+            label: label.into(),
+        }
+    }
+
     #[test]
     fn no_bots_is_an_error() {
         let net = ActionNetwork::new();
@@ -304,7 +330,8 @@ mod tests {
             "first step should be the walk"
         );
         assert!(matches!(result.steps[1].what, StepKind::Act { .. }));
-        assert!(result.makespan > 60, "walking must cost time");
+        // 30 tiles, radius 3: ceil(27 / 0.15) = 180 travel ticks, then 60 duration.
+        assert_eq!(result.makespan, 240);
     }
 
     #[test]
@@ -381,5 +408,74 @@ mod tests {
         let first = schedule(&net, &state(&bots), &bots).unwrap();
         let second = schedule(&net, &state(&bots), &bots).unwrap();
         assert_eq!(first.steps, second.steps);
+    }
+
+    #[test]
+    fn travel_cost_can_outweigh_an_idle_bot() {
+        let bots = [BotId(1), BotId(2)];
+        let mut s = PlanState::from_world(Arc::new(fixture_world()), &bots);
+        s.set_position(BotId(1), Position::new(0., 0.));
+        s.set_position(BotId(2), Position::new(200., 0.));
+
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let first = net.add(at_for(&mut gen, "first", Position::new(0., 0.), 3.0, 600));
+        let second = net.add(at_for(&mut gen, "second", Position::new(0., 0.), 3.0, 600));
+
+        let result = schedule(&net, &s, &bots).unwrap();
+
+        // Round 1: bot 1 is on the spot, finishing at 600.
+        assert_eq!(result.assignment(first), Some(BotId(1)));
+        // Round 2: bot 1 queues and finishes at 1200. Bot 2 is idle but must walk
+        // 197 tiles: ceil(197 / 0.15) = 1314 travel, so it would finish at 1914.
+        // A travel-blind scheduler would hand this to the idle bot and claim 600.
+        assert_eq!(result.assignment(second), Some(BotId(1)));
+        assert_eq!(result.makespan, 1200);
+    }
+
+    #[test]
+    fn an_idle_bot_wins_when_its_travel_is_affordable() {
+        let bots = [BotId(1), BotId(2)];
+        let mut s = PlanState::from_world(Arc::new(fixture_world()), &bots);
+        s.set_position(BotId(1), Position::new(0., 0.));
+        s.set_position(BotId(2), Position::new(30., 0.));
+
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let first = net.add(at_for(&mut gen, "first", Position::new(0., 0.), 3.0, 600));
+        let second = net.add(at_for(&mut gen, "second", Position::new(0., 0.), 3.0, 600));
+
+        let result = schedule(&net, &s, &bots).unwrap();
+
+        assert_eq!(result.assignment(first), Some(BotId(1)));
+        // Bot 1 would queue to 1200. Bot 2 walks 27 tiles: ceil(27 / 0.15) = 180
+        // travel, finishing at 780. The idle bot wins this time.
+        assert_eq!(result.assignment(second), Some(BotId(2)));
+        assert_eq!(result.makespan, 780);
+    }
+
+    #[test]
+    fn ties_break_on_end_time_before_action_id() {
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        // Lower id, longer duration. Higher id, shorter duration. One bot.
+        let long = net.add(free(&mut gen, "long", 100));
+        let short = net.add(free(&mut gen, "short", 10));
+        let bots = [BotId(1)];
+
+        let result = schedule(&net, &state(&bots), &bots).unwrap();
+
+        let order: Vec<_> = result
+            .steps
+            .iter()
+            .map(|s| match &s.what {
+                StepKind::Act { action, .. } => *action,
+                StepKind::Walk { .. } => panic!("no walks in this scenario"),
+            })
+            .collect();
+        // With (end, action.id, bot) the shorter action is picked first despite its
+        // higher id. With (action.id, end, bot) the order would be reversed.
+        assert_eq!(order, vec![short, long]);
+        assert_eq!(result.makespan, 110);
     }
 }

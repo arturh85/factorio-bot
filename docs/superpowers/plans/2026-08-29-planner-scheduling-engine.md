@@ -498,7 +498,21 @@ Expected: FAIL — `resource_available`, `consume_resource`, `is_position_free`,
 
 - [ ] **Step 3: Add the overlay fields**
 
-Replace the `PlanState` struct definition and add the imports:
+First add the per-tile capacity constant near the top of the file, above `BotState`:
+
+```rust
+/// How much ore one tile yields before this plan exhausts it.
+///
+/// Factorio reports per-tile resource amounts, but they do not survive into the
+/// entity graph: `FactorioEntity::new_resource` (`core/src/types.rs:686`) leaves
+/// `amount` as `None`, and `EntityGraph::add` (`core/src/graph/entity_graph.rs:217`)
+/// never inserts resource entities into the entity tree. A constant is therefore
+/// the only capacity available. Honouring real amounts needs a BotBridge change and
+/// is out of scope.
+pub const DEFAULT_RESOURCE_PER_TILE: u32 = 500;
+```
+
+Then replace the `PlanState` struct definition and add the imports:
 
 ```rust
 use factorio_bot_core::types::{FactorioEntity, Pos, Position, ResourcePatch};
@@ -556,18 +570,17 @@ Append to `impl PlanState`:
         self.removed.insert(key);
     }
 
-    /// Ore remaining at a tile: the base amount less what this plan has taken.
+    /// Ore remaining at a tile: the tile's capacity less what this plan has taken.
+    ///
+    /// Presence comes from `resource_contains`, not `entity_at`: `EntityGraph::add`
+    /// routes resource entities into `resources`/`resource_tree` only, so they are
+    /// absent from the entity tree that `entity_at` queries.
     pub fn resource_available(&self, position: &Position, item: &str) -> u32 {
         let key = Pos::from(position);
-        let base_amount = self
-            .base
-            .entity_graph
-            .entity_at(position)
-            .and_then(|id| self.base.entity_graph.entity_by_id(id))
-            .filter(|e| e.name == item)
-            .and_then(|e| e.amount)
-            .unwrap_or(0);
-        base_amount.saturating_sub(self.consumed.get(&key).copied().unwrap_or(0))
+        if !self.base.entity_graph.resource_contains(item, key.clone()) {
+            return 0;
+        }
+        DEFAULT_RESOURCE_PER_TILE.saturating_sub(self.consumed.get(&key).copied().unwrap_or(0))
     }
 
     pub fn consume_resource(
@@ -2291,6 +2304,14 @@ Expected: PASS — 41 unit tests plus 6 integration tests.
 
 Run: `nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo test --workspace'`
 Expected: PASS. The existing tests are untouched by this plan — nothing in `core`, `scripting_lua` or `server` was modified.
+
+The workspace suite rewrites `crates/scripting_lua/tests/task_graph-1.dot`, `task_graph-1.md` and three `.png` snapshots on every run. They are stale in the repo and the churn is not yours. Discard it before committing:
+
+```bash
+git checkout -- crates/scripting_lua/tests/
+```
+
+Another agent is working in `app/**` in this same checkout. **Only ever `git add` explicit paths** — never `git add -A` or `git add .`.
 
 - [ ] **Step 7: Verify lints and commit**
 

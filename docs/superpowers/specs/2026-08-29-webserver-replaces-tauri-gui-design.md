@@ -135,9 +135,16 @@ Three behavioral notes:
   anyway.
 - **Query parameters.** Rocket maps an absent or unparseable `Option<T>` to
   `None`. axum's `Query<T>` treats a missing key as a deserialization error, so
-  every optional field needs `#[serde(default)]`, and empty values (`?radius=`)
-  need `deserialize_with` to match. Getting this wrong silently breaks both live
-  callers.
+  every optional field needs `#[serde(default)]`. Only genuinely optional fields
+  get it: a required parameter such as `player_id` must stay required, since
+  `#[serde(default)]` on a `u8` would turn a missing key into player `0`.
+
+  **Decided (2026-08-29): empty and unparseable optional values return 400, not
+  `None`.** Rocket silently coerced `?radius=` and `?radius=notanumber` to
+  `None`; matching that would require a `deserialize_with` on every optional
+  field. We deliberately keep axum's default rejection instead — the wire format
+  is already breaking with this rewrite, there is no in-repo caller depending on
+  the old coercion, and rejecting garbage is better than silently ignoring it.
 - **Panics.** `restapi.rs` has ~40 `.unwrap()`s on user input — `area.parse()`
   at `:34`, `Direction::from_u8(to_direction).unwrap()` at `:36` (any value > 7),
   `parts[1]` at `:98`. With `panic = "abort"` in release these abort the process,

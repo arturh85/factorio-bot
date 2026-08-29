@@ -12,7 +12,7 @@ graph LR
     subgraph Rust Workspace
         B --> C[crates/core]
         B --> D[crates/scripting + scripting_lua]
-        B --> E[crates/restapi]
+        B --> E[crates/server]
     end
     subgraph Factorio Runtime
         F[Server Instance]
@@ -27,7 +27,7 @@ graph LR
     H -->|BotBridge remote calls| I
     I -->|Entity/recipe data| C
     D -->|Lua API| A
-    E -->|REST/WebSocket| External
+    E -->|REST + SPA| External
 ```
 
 ### Runtime loop
@@ -53,7 +53,7 @@ sequenceDiagram
 ### Subsystems (Rust workspace)
 - **`crates/core`**: Owns launching Factorio binaries, configuring saves/mod sets, scheduling tasks, and building domain graphs (entity/flow/task). Provides graph traversal utilities (`graph/`, `plan/`, `process/`) and shared data models in `types.rs`.
 - **`crates/scripting` + `crates/scripting_lua`**: Wrap Lua (via `mlua`) and expose typed host functions so scripts can queue tasks, query graphs, or issue direct commands. Also contains the REPL/minimal runtime used for smoke tests.
-- **`crates/restapi`**: Optional HTTP API (OpenAPI documented) that mirrors the Lua controls for remote automation and monitoring.
+- **`crates/server`**: axum HTTP server that mirrors the Lua controls for remote automation and monitoring. Routes and the OpenAPI spec are generated together with `utoipa`/`utoipa-axum` (Swagger UI at `/swagger-ui`, spec at `/openapi.json`), and the same server also serves the built Vue SPA from the configured web root.
 - **`src-tauri`**: IPC boundary for the desktop app. Commands forward to the Rust workspace, debounce UI requests, and proxy file-system interactions (config, scripts, mod archives).
 
 ### Factorio orchestration

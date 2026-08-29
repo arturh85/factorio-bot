@@ -56,7 +56,7 @@ Tauri Commands (app/src-tauri/)
 │ Rust Workspace                          │
 │  • crates/core         (orchestration)  │
 │  • crates/scripting*   (Lua via mlua)   │
-│  • crates/restapi      (optional HTTP)  │
+│  • crates/server       (axum HTTP+SPA)  │
 └─────────────────────────────────────────┘
     ↓ (RCON + process management)
 Factorio Runtime
@@ -79,7 +79,11 @@ BotBridge Mod (Factorio mod for RPC)
 
 - **crates/scripting_lua**: Lua 5.4 bindings exposing host functions for task queuing, graph queries, and RCON commands
 
-- **crates/restapi**: Rocket-based HTTP API with OpenAPI/Swagger docs
+- **crates/server**: axum HTTP server (replaces the former Rocket `crates/restapi`)
+  - `webserver.rs` - router assembly, static SPA serving, `start()` entry point
+  - `game/` - the `/api/v1/game/*` query and control handlers
+  - OpenAPI generated with utoipa; Swagger UI at `/swagger-ui`, spec at `/openapi.json`
+  - Serves the built Vue SPA from the configured `web_root` (index.html fallback); with no web root it serves the API only and redirects `/` to the docs
 
 ### Frontend (app/src/)
 

@@ -315,28 +315,30 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::field_reassign_with_default)]
     fn created_entities_occupy_their_position() {
         let mut a = state();
         let pos = Position::new(3., 3.);
         assert!(a.is_position_free(&pos));
-        let mut furnace = FactorioEntity::default();
-        furnace.name = "stone-furnace".into();
-        furnace.entity_type = "furnace".into();
-        furnace.position = pos.clone();
+        let furnace = FactorioEntity {
+            name: "stone-furnace".into(),
+            entity_type: "furnace".into(),
+            position: pos.clone(),
+            ..Default::default()
+        };
         a.create_entity(furnace);
         assert!(!a.is_position_free(&pos));
         assert_eq!(a.entity_at(&pos).unwrap().name, "stone-furnace");
     }
 
     #[test]
-    #[allow(clippy::field_reassign_with_default)]
     fn removed_entities_free_their_position() {
         let mut a = state();
         let pos = Position::new(3., 3.);
-        let mut furnace = FactorioEntity::default();
-        furnace.name = "stone-furnace".into();
-        furnace.position = pos.clone();
+        let furnace = FactorioEntity {
+            name: "stone-furnace".into(),
+            position: pos.clone(),
+            ..Default::default()
+        };
         a.create_entity(furnace);
         a.remove_entity(&pos);
         assert!(a.is_position_free(&pos));

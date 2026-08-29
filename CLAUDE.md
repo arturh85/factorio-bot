@@ -87,10 +87,24 @@ BotBridge Mod (Factorio mod for RPC)
 
 ### Frontend (app/src/)
 
-- Vue 3 + PrimeVue components
-- Monaco editor for Lua scripting (`components/Editor.vue`)
-- Mermaid for graph visualization
-- Pinia for state management
+- Vue 3 + PrimeVue 4 components, themed with the `@primeuix/themes` Lara preset
+  configured in `main.ts` (PrimeVue 4 dropped the shipped theme stylesheets for a
+  runtime theme service, so `app.use(PrimeVue, ...)` is mandatory)
+- Monaco editor for Lua scripting (`components/Editor.vue`), whose workers are
+  wired through Vite's native `?worker` imports
+- Pinia 4 for state management (`defineStore('id', {...})`, not the removed
+  object-with-id form) and Vue Router 5 with hash history
+- Vite config lives in `vite.config.mts` — `.mts` because the package is not
+  `"type": "module"` and some plugins are ESM-only
+- ESLint uses flat config in `app/eslint.config.mjs`; `.eslintrc.js` no longer
+  works on ESLint 10. `yarn lint` runs `tsc`, `vue-tsc` and `eslint` over both
+  `.ts` and `.vue` files
+
+Known gap: the templates still carry PrimeFlex 1/2 grid class names (`p-grid`,
+`p-col-12`, `p-formgrid`, `p-field-radiobutton`). PrimeFlex 3 removed the `p-`
+prefix and PrimeFlex itself is archived upstream, so those classes resolve to no
+rules and the affected pages render as stacked blocks rather than grids.
+Restoring the intended layout is open work.
 
 ### Communication Flow
 

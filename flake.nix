@@ -17,6 +17,7 @@
           libs = with pkgs; [
             lua5_4 # mlua links against system lua 5.4
             openssl
+            xz # liblzma, loaded at runtime by the compiled binaries
           ] ++ lib.optionals stdenv.hostPlatform.isLinux (with pkgs; [
             webkitgtk_4_1 # also provides javascriptcoregtk-4.1
             libsoup_3

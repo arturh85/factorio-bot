@@ -154,7 +154,7 @@ impl EntityGraph {
                     let other: Pos = (&move_position(&(&pos).into(), direction, 1.0)).into();
                     if let Some(p) = positions_by_id.get(&other) {
                         if p.is_none() {
-                            positions_by_id.insert(pos.clone(), Some(next_id));
+                            positions_by_id.insert(other.clone(), Some(next_id));
                             stack.push(other);
                         }
                     }
@@ -1193,9 +1193,93 @@ pub type ResourceQuadTree = QuadTree<String, Rect, [(ItemId, QuadTreeRect); 4]>;
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::entity_graph_from;
+    use crate::factorio::util::rect_fields;
+    use crate::test_utils::{entity_graph_from, fixture_world, spawn_ore};
 
     use super::*;
+
+    #[test]
+    fn test_resource_patches_single_field_is_one_patch() {
+        let world = fixture_world();
+        // fixture_world spawns iron ore via
+        // add_to_rect(&Rect::from_wh(10., 10.), &Position::new(-40., 40.))
+        // which is left_top (-45, 35) .. right_bottom (-35, 45); rect_fields is
+        // inclusive on both ends, so it actually yields 11x11 = 121 tiles, not 10x10.
+        let iron_rect = add_to_rect(&Rect::from_wh(10., 10.), &Position::new(-40., 40.));
+        let expected_tiles = rect_fields(&iron_rect).len();
+        assert_eq!(expected_tiles, 121);
+
+        let patches = world
+            .entity_graph
+            .resource_patches(&EntityName::IronOre.to_string());
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0].elements.len(), expected_tiles);
+    }
+
+    #[test]
+    fn test_resource_patches_separate_fields_stay_separate() {
+        let world = fixture_world();
+        let iron = world
+            .entity_graph
+            .resource_patches(&EntityName::IronOre.to_string());
+        let copper = world
+            .entity_graph
+            .resource_patches(&EntityName::CopperOre.to_string());
+        assert_eq!(iron.len(), 1);
+        assert_eq!(copper.len(), 1);
+
+        let iron_positions: std::collections::HashSet<Pos> =
+            iron[0].elements.iter().map(Pos::from).collect();
+        let copper_positions: std::collections::HashSet<Pos> =
+            copper[0].elements.iter().map(Pos::from).collect();
+        assert!(iron_positions.is_disjoint(&copper_positions));
+    }
+
+    #[test]
+    fn test_resource_patches_repeated_calls_agree() {
+        let world = fixture_world();
+        let name = EntityName::IronOre.to_string();
+        let first = sorted_patches(world.entity_graph.resource_patches(&name));
+        for _ in 0..5 {
+            let next = sorted_patches(world.entity_graph.resource_patches(&name));
+            assert_eq!(next.len(), first.len());
+            assert_eq!(next, first);
+        }
+    }
+
+    #[test]
+    fn test_resource_patches_two_disjoint_fields_of_same_resource_are_two_patches() {
+        let mut entities: Vec<FactorioEntity> = vec![];
+        spawn_ore(
+            &mut entities,
+            add_to_rect(&Rect::from_wh(4., 4.), &Position::new(0., 0.)),
+            &EntityName::IronOre.to_string(),
+        );
+        spawn_ore(
+            &mut entities,
+            add_to_rect(&Rect::from_wh(4., 4.), &Position::new(100., 100.)),
+            &EntityName::IronOre.to_string(),
+        );
+        let graph = entity_graph_from(entities).unwrap();
+        let patches = graph.resource_patches(&EntityName::IronOre.to_string());
+        assert_eq!(patches.len(), 2);
+    }
+
+    // helper: sort each patch's elements (as Pos, for a total order) and sort the
+    // patches themselves so repeated calls can be compared for equality even
+    // though patch id assignment order is not guaranteed to be stable.
+    fn sorted_patches(patches: Vec<ResourcePatch>) -> Vec<Vec<Pos>> {
+        let mut result: Vec<Vec<Pos>> = patches
+            .iter()
+            .map(|patch| {
+                let mut elements: Vec<Pos> = patch.elements.iter().map(Pos::from).collect();
+                elements.sort();
+                elements
+            })
+            .collect();
+        result.sort();
+        result
+    }
 
     #[test]
     fn test_splitters() {

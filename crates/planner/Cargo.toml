@@ -1,0 +1,17 @@
+[package]
+name = "factorio-bot-planner"
+version = "0.2.4-dev"
+authors = ["Artur Hallmann <arturh@arturh.de>"]
+edition = "2021"
+
+[package.metadata.release]
+tag = false
+push = false
+publish = false
+
+[dependencies]
+factorio-bot-core = { path = "../core", version = "0.2.4-dev" }
+petgraph = { version = "0.6.5", features = ["serde-1"] }
+miette = { version = "7.4", features = ["fancy"] }
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }

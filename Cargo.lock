@@ -1907,6 +1907,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "factorio-bot-planner"
+version = "0.2.4-dev"
+dependencies = [
+ "factorio-bot-core",
+ "miette",
+ "petgraph",
+ "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "factorio-bot-scripting"
 version = "0.2.4-dev"
 dependencies = [

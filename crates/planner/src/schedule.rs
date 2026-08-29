@@ -62,6 +62,21 @@ struct Candidate {
     end: Ticks,
 }
 
+impl Candidate {
+    /// The ranking key. Ascending, so the smallest wins.
+    fn key(&self) -> (Ticks, ActionId, BotId) {
+        (self.end, self.action, self.bot)
+    }
+}
+
+/// A pair rejected because one of the action's preconditions would not hold
+/// for that bot. Kept only so the error names a plausible pair if *no* pair is
+/// feasible.
+struct Rejected {
+    candidate: Candidate,
+    condition: String,
+}
+
 /// Assign every action in `net` to one of `bots`, travel-aware and greedy.
 ///
 /// A pure function of its three arguments. Ties break on `(ActionId, BotId)`
@@ -97,6 +112,7 @@ pub fn schedule(
         }
 
         let mut best: Option<Candidate> = None;
+        let mut best_rejected: Option<Rejected> = None;
         for action in &ready {
             let deps_ready = net
                 .preds(action.id)
@@ -119,23 +135,62 @@ pub fn schedule(
                 };
                 let start = free_at[&bot].max(deps_ready);
                 let end = start + travel + action.duration;
-                let better = match &best {
-                    None => true,
-                    Some(b) => (end, action.id, bot) < (b.end, b.action, b.bot),
+                let candidate = Candidate {
+                    action: action.id,
+                    bot,
+                    start,
+                    travel,
+                    end,
                 };
-                if better {
-                    best = Some(Candidate {
-                        action: action.id,
-                        bot,
-                        start,
-                        travel,
-                        end,
-                    });
+
+                // Feasibility is part of selection, not a check on the winner:
+                // a pair whose preconditions cannot hold is never offered, so
+                // another bot can take the action. A positional precondition is
+                // satisfied by the walk this very pair would emit, so it is
+                // tested against a fork with the bot already moved. Forking is
+                // an overlay clone — cheap enough to do per candidate, which is
+                // what the shared `Arc` base is for.
+                let mut trial = sim.fork();
+                if travel > 0 {
+                    if let Some((pos, _)) = action.required_position() {
+                        trial.set_position(bot, pos);
+                    }
+                }
+                let failing = action.pre.iter().find(|c| !c.holds(&trial, bot));
+
+                match failing {
+                    None => {
+                        if best.as_ref().is_none_or(|b| candidate.key() < b.key()) {
+                            best = Some(candidate);
+                        }
+                    }
+                    Some(condition) => {
+                        if best_rejected
+                            .as_ref()
+                            .is_none_or(|r| candidate.key() < r.candidate.key())
+                        {
+                            best_rejected = Some(Rejected {
+                                condition: condition.to_string(),
+                                candidate,
+                            });
+                        }
+                    }
                 }
             }
         }
 
-        let chosen = best.expect("ready is non-empty and bots is non-empty");
+        // Only when no bot can run any ready action is the plan actually stuck.
+        let chosen = match best {
+            Some(candidate) => candidate,
+            None => {
+                let rejected = best_rejected.expect("ready and bots are both non-empty");
+                return Err(PlannerError::PreconditionUnsatisfied {
+                    action: rejected.candidate.action,
+                    bot: rejected.candidate.bot,
+                    condition: rejected.condition,
+                });
+            }
+        };
         let action = net
             .action(chosen.action)
             .expect("candidate came from this network");
@@ -154,15 +209,8 @@ pub fn schedule(
             sim.set_position(chosen.bot, target);
         }
 
-        for condition in &action.pre {
-            if !condition.holds(&sim, chosen.bot) {
-                return Err(PlannerError::PreconditionUnsatisfied {
-                    action: action.id,
-                    bot: chosen.bot,
-                    condition: condition.to_string(),
-                });
-            }
-        }
+        // No precondition check here: selection already proved every one of them
+        // holds for this pair against a fork that made exactly the move above.
 
         for effect in &action.eff {
             effect.apply(&mut sim, chosen.bot)?;
@@ -395,6 +443,46 @@ mod tests {
         let bots = [BotId(1)];
         let result = schedule(&net, &state(&bots), &bots).unwrap();
         assert_eq!(result.assignment(c), Some(BotId(1)));
+    }
+
+    #[test]
+    fn a_consumer_goes_to_the_bot_that_holds_the_items() {
+        let bots = [BotId(1), BotId(2)];
+        let mut s = PlanState::from_world(Arc::new(fixture_world()), &bots);
+        s.set_position(BotId(1), Position::new(0., 0.));
+        s.set_position(BotId(2), Position::new(100., 0.));
+
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+
+        // Producing happens at the origin, where only bot 1 stands.
+        let mut producer = at_for(&mut gen, "produce", Position::new(0., 0.), 3.0, 10);
+        producer.eff = vec![Effect::GainItem {
+            who: Actor::Role,
+            item: "iron-ore".into(),
+            count: 5,
+        }];
+        // Consuming happens where only bot 2 stands, but needs the producer's ore.
+        let mut consumer = at_for(&mut gen, "consume", Position::new(100., 0.), 3.0, 10);
+        consumer.pre.push(Condition::HasItem {
+            who: Actor::Role,
+            item: "iron-ore".into(),
+            count: 5,
+        });
+
+        let p = net.add(producer);
+        let c = net.add(consumer);
+        net.link(p, c, 0);
+
+        let result = schedule(&net, &s, &bots).expect("one bot can do both");
+
+        assert_eq!(result.assignment(p), Some(BotId(1)));
+        // Bot 2 is the cheapest by time — zero travel, so it would finish at 20
+        // against bot 1's 667 — but it has no ore, so it is not a candidate at
+        // all. Ranking without feasibility would bind it and fail the plan.
+        assert_eq!(result.assignment(c), Some(BotId(1)));
+        // Bot 1 walks 97 tiles: ceil(97 / 0.15) = 647, then acts for 10.
+        assert_eq!(result.makespan, 667);
     }
 
     #[test]

@@ -18,6 +18,17 @@ pub fn ticks_to_timestamp(ticks: Ticks) -> String {
     )
 }
 
+/// Make a label safe to interpolate into a Mermaid Gantt task line.
+///
+/// A task line is `label :id, start, duration` — comma and colon are its field
+/// separators, so a label containing either splits the line and corrupts the
+/// chart. This is not hypothetical: every walk label is `walk to [10, 20]`, and
+/// `Position`'s `Display` puts a comma in the middle of it. Both characters
+/// become a space, which reads correctly and cannot be misparsed.
+fn gantt_label(label: &str) -> String {
+    label.replace([',', ':'], " ")
+}
+
 /// A Mermaid Gantt chart, one section per bot.
 pub fn mermaid_gantt(schedule: &Schedule, title: &str) -> String {
     let mut out = String::new();
@@ -34,11 +45,17 @@ pub fn mermaid_gantt(schedule: &Schedule, title: &str) -> String {
                 StepKind::Act { label, .. } => label.clone(),
                 StepKind::Walk { to } => format!("walk to {}", to),
             };
-            let seconds = (step.end.saturating_sub(step.start)) / TICKS_PER_SECOND;
+            // Round up, and never below one second: a 30-tick walk is a real
+            // step and a `0s` bar is invisible in the rendered chart.
+            let seconds = step
+                .end
+                .saturating_sub(step.start)
+                .div_ceil(TICKS_PER_SECOND)
+                .max(1);
             let _ = writeln!(
                 out,
                 "    {} :a{}, {}, {}s",
-                label,
+                gantt_label(&label),
                 bot_index * 1000 + step_index + 1,
                 ticks_to_timestamp(step.start),
                 seconds
@@ -135,7 +152,9 @@ mod tests {
         let out = mermaid_gantt(&schedule(), "Test");
         assert!(out.contains("mine 5 iron-ore"));
         assert!(out.contains("craft iron-gear-wheel"));
-        assert!(out.contains("walk to [10, 0]"));
+        // The comma in the position is replaced: it would otherwise split the
+        // Mermaid task line.
+        assert!(out.contains("walk to [10  0]"));
     }
 
     #[test]
@@ -144,7 +163,7 @@ mod tests {
         // Bot 1's walk is its first step (a1), the mining act its second (a2):
         // ids are `bot_index * 1000 + step_index + 1`.
         assert!(
-            out.contains("walk to [10, 0] :a1, 00:00:00, 1s"),
+            out.contains("walk to [10  0] :a1, 00:00:00, 1s"),
             "unexpected gantt body:\n{}",
             out
         );
@@ -157,6 +176,46 @@ mod tests {
         // Bot 2's only step opens a fresh id block.
         assert!(
             out.contains("craft iron-gear-wheel :a1001, 00:00:00, 2s"),
+            "unexpected gantt body:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn a_short_step_still_gets_a_visible_bar() {
+        let schedule = Schedule {
+            steps: vec![ScheduledStep {
+                what: StepKind::Walk {
+                    to: Position::new(1., 0.),
+                },
+                bot: BotId(1),
+                start: 0,
+                end: 30,
+            }],
+            makespan: 30,
+        };
+        let out = mermaid_gantt(&schedule, "Test");
+        // Integer division would render this half-second walk as `0s`.
+        assert!(out.contains(", 1s"), "unexpected gantt body:\n{}", out);
+    }
+
+    #[test]
+    fn a_label_cannot_break_the_task_line() {
+        let schedule = Schedule {
+            steps: vec![ScheduledStep {
+                what: StepKind::Act {
+                    action: ActionId(0),
+                    label: "craft 1 gear, then: rest".into(),
+                },
+                bot: BotId(1),
+                start: 0,
+                end: 60,
+            }],
+            makespan: 60,
+        };
+        let out = mermaid_gantt(&schedule, "Test");
+        assert!(
+            out.contains("craft 1 gear  then  rest :a1, 00:00:00, 1s"),
             "unexpected gantt body:\n{}",
             out
         );

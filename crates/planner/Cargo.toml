@@ -11,7 +11,6 @@ publish = false
 
 [dependencies]
 factorio-bot-core = { path = "../core", version = "0.2.4-dev" }
-petgraph = { version = "0.6.5", features = ["serde-1"] }
 miette = { version = "7.4", features = ["fancy"] }
 thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }

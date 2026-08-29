@@ -217,8 +217,34 @@ impl PlanState {
         self.researched.insert(tech.to_string());
     }
 
+    /// The base world's resource patches, with each patch's tiles in a stable
+    /// order.
+    ///
+    /// `EntityGraph::resource_patches` builds `elements` by iterating a
+    /// `HashMap` (`core/src/graph/entity_graph.rs:164-170`), so tile order
+    /// varies with the randomised hash seed. Planning is required to be
+    /// deterministic — the same world and the same goal must give the same
+    /// schedule — and a method picking "the first tile of the patch" would
+    /// otherwise pick a different one on every run. Sorting here keeps the fix
+    /// inside the planner rather than perturbing `core`.
+    ///
+    /// **This makes tile order deterministic, not the patches themselves.** The
+    /// flood fill at `entity_graph.rs:152-162` marks `pos` where it means
+    /// `other`, so a tile pushed onto the stack is only ever labelled if it
+    /// still has an unlabelled neighbour when it is popped; one that does not
+    /// stays unlabelled and seeds a fresh patch. The fixture's contiguous
+    /// 11x11 ore square therefore comes back as two or three patches, and which
+    /// tiles are orphaned changes between calls *within one process*. Sorting
+    /// cannot repair a partition that is wrong before it arrives. Fixing it is
+    /// a one-word change in `core` and belongs with a test there.
     pub fn resource_patches(&self, item: &str) -> Vec<ResourcePatch> {
-        self.base.entity_graph.resource_patches(item)
+        let mut patches = self.base.entity_graph.resource_patches(item);
+        for patch in &mut patches {
+            patch
+                .elements
+                .sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+        }
+        patches
     }
 }
 
@@ -317,6 +343,22 @@ mod tests {
             .first()
             .expect("patch has tiles")
             .clone()
+    }
+
+    #[test]
+    fn patch_tiles_come_back_sorted() {
+        let a = state();
+        for patch in a.resource_patches("iron-ore") {
+            let mut sorted = patch.elements.clone();
+            sorted.sort_by(|l, r| l.x.total_cmp(&r.x).then(l.y.total_cmp(&r.y)));
+            assert_eq!(
+                patch.elements, sorted,
+                "every patch's tiles must come back sorted by (x, y)"
+            );
+        }
+        // Deliberately not asserted: that two calls return the same patches.
+        // They do not — see `resource_patches` for why, and why the planner
+        // cannot fix it.
     }
 
     #[test]

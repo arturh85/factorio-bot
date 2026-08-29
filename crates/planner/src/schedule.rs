@@ -57,8 +57,13 @@ impl Schedule {
 struct Candidate {
     action: ActionId,
     bot: BotId,
-    start: Ticks,
+    /// When the bot sets off. It walks as soon as it is free, even if the
+    /// action's dependencies are not ready yet — see `schedule`.
+    walk_start: Ticks,
     travel: Ticks,
+    /// When the action itself begins: after the walk *and* after the
+    /// dependencies, whichever is later.
+    act_start: Ticks,
     end: Ticks,
 }
 
@@ -81,6 +86,20 @@ struct Rejected {
 ///
 /// A pure function of its three arguments. Ties break on `(ActionId, BotId)`
 /// ascending, so the output is stable across runs.
+///
+/// A bot walks the moment it is free, not the moment its dependencies are:
+///
+/// ```text
+/// walk_start = free_at[bot]
+/// walk_end   = walk_start + travel
+/// act_start  = max(walk_end, deps_ready)
+/// end        = act_start + duration
+/// ```
+///
+/// Walking across a lag is most of where multi-bot parallelism comes from —
+/// heading for the next furnace while the current one smelts. Adding travel
+/// *after* `max(free_at, deps_ready)` instead would idle the bot for the lag
+/// and then walk, which is strictly worse and never better.
 pub fn schedule(
     net: &ActionNetwork,
     state: &PlanState,
@@ -133,13 +152,15 @@ pub fn schedule(
                     Some((ref pos, radius)) => travel_ticks(from, pos, radius),
                     None => 0,
                 };
-                let start = free_at[&bot].max(deps_ready);
-                let end = start + travel + action.duration;
+                let walk_start = free_at[&bot];
+                let act_start = (walk_start + travel).max(deps_ready);
+                let end = act_start + action.duration;
                 let candidate = Candidate {
                     action: action.id,
                     bot,
-                    start,
+                    walk_start,
                     travel,
+                    act_start,
                     end,
                 };
 
@@ -195,7 +216,8 @@ pub fn schedule(
             .action(chosen.action)
             .expect("candidate came from this network");
 
-        // Walk first, so the AtPosition precondition can hold when checked.
+        // Walk first, so the AtPosition precondition holds by `act_start`. The
+        // walk may finish well before it, if the action waits on a lag.
         if chosen.travel > 0 {
             let (target, _) = action
                 .required_position()
@@ -203,8 +225,8 @@ pub fn schedule(
             steps.push(ScheduledStep {
                 what: StepKind::Walk { to: target.clone() },
                 bot: chosen.bot,
-                start: chosen.start,
-                end: chosen.start + chosen.travel,
+                start: chosen.walk_start,
+                end: chosen.walk_start + chosen.travel,
             });
             sim.set_position(chosen.bot, target);
         }
@@ -222,7 +244,7 @@ pub fn schedule(
                 label: action.label.clone(),
             },
             bot: chosen.bot,
-            start: chosen.start + chosen.travel,
+            start: chosen.act_start,
             end: chosen.end,
         });
 
@@ -443,6 +465,37 @@ mod tests {
         let bots = [BotId(1)];
         let result = schedule(&net, &state(&bots), &bots).unwrap();
         assert_eq!(result.assignment(c), Some(BotId(1)));
+    }
+
+    #[test]
+    fn a_bot_walks_across_a_dependency_lag() {
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        // Insert the ore, then remove the plate 200 ticks later, 30 tiles away.
+        let insert = net.add(free(&mut gen, "insert", 10));
+        let remove = net.add(at_for(&mut gen, "remove", Position::new(30., 0.), 3.0, 60));
+        net.link(insert, remove, 200);
+
+        let bots = [BotId(1)];
+        let result = schedule(&net, &state(&bots), &bots).unwrap();
+
+        // 30 tiles, radius 3: ceil(27 / 0.15) = 180 travel ticks. The bot is free
+        // at 10 and the lag clears at 210, so it walks [10, 190] *during* the
+        // lag, waits 20 ticks, and acts [210, 270]. Idling first and walking
+        // afterwards would give 210 + 180 + 60 = 450.
+        let walk = result
+            .steps
+            .iter()
+            .find(|s| matches!(s.what, StepKind::Walk { .. }))
+            .expect("the bot must walk");
+        assert_eq!((walk.start, walk.end), (10, 190));
+        let act = result
+            .steps
+            .iter()
+            .find(|s| matches!(&s.what, StepKind::Act { action, .. } if *action == remove))
+            .expect("the removal is scheduled");
+        assert_eq!((act.start, act.end), (210, 270));
+        assert_eq!(result.makespan, 270);
     }
 
     #[test]

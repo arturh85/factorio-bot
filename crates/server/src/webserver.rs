@@ -1,5 +1,6 @@
 use crate::settings::RestApiSettings;
 use crate::state::AppState;
+use axum::response::Redirect;
 use axum::routing::get;
 use axum::Router;
 use factorio_bot_core::process::process_control::SharedFactorioInstance;
@@ -27,13 +28,16 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
         .split_for_parts();
 
-    let router = router.merge(SwaggerUi::new("/swagger-ui").url("/openapi.json", api));
+    let router = router
+        .merge(SwaggerUi::new("/swagger-ui").url("/openapi.json", api))
+        // Unmatched API paths always answer with the JSON error body, whether or
+        // not a frontend is deployed.
+        .route("/api/v1/{*rest}", axum::routing::any(api_not_found));
 
     match crate::spa::service(web_root.as_deref()) {
-        Some(spa) => router
-            .route("/api/v1/{*rest}", axum::routing::any(api_not_found))
-            .fallback_service(spa),
-        None => router,
+        Some(spa) => router.fallback_service(spa),
+        // Without a frontend `/` has nothing to serve, so point it at the docs.
+        None => router.route("/", get(|| async { Redirect::temporary("/swagger-ui/") })),
     }
 }
 
@@ -47,7 +51,12 @@ pub async fn start(
     settings: RestApiSettings,
     instance_state: SharedFactorioInstance,
 ) -> Result<()> {
-    let port = settings.port as u16;
+    let port = u16::try_from(settings.port).map_err(|_| {
+        miette::miette!(
+            "invalid restapi port {}: must be between 0 and 65535",
+            settings.port
+        )
+    })?;
     let state = AppState {
         instance: instance_state,
         settings: Arc::new(RwLock::new(settings)),

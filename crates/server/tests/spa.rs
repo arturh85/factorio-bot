@@ -80,20 +80,72 @@ async fn api_404_is_not_swallowed_by_the_spa_fallback() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
-#[tokio::test]
-async fn server_starts_without_a_web_root() {
-    let response = build_router(AppState {
+fn state_without_web_root() -> AppState {
+    AppState {
         instance: Arc::new(RwLock::new(None)),
         settings: Arc::new(RwLock::new(RestApiSettings::default())),
-    })
-    .oneshot(
-        Request::builder()
-            .uri("/api/v1/health")
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await
-    .unwrap();
+    }
+}
+
+/// The JSON error contract must not depend on whether a frontend is deployed.
+#[tokio::test]
+async fn api_404_is_json_without_a_web_root() {
+    let response = build_router(state_without_web_root())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/does-not-exist")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/json")
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["code"], 404);
+    assert_eq!(body["message"], "not found");
+}
+
+/// SettingsPage.vue links to `http://localhost:<port>`; without a frontend that
+/// root has nothing to serve, so it points at the API docs instead.
+#[tokio::test]
+async fn root_redirects_to_swagger_ui_without_a_web_root() {
+    let response = build_router(state_without_web_root())
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/swagger-ui/")
+    );
+}
+
+#[tokio::test]
+async fn server_starts_without_a_web_root() {
+    let response = build_router(state_without_web_root())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
 }

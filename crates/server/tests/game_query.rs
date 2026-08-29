@@ -79,3 +79,39 @@ async fn player_info_rejects_out_of_range_player_id() {
     let (status, _body) = get("/api/v1/game/player-info?player_id=300").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+const PLAN_PATH_PARAMS: &str = "entity_name=transport-belt&entity_type=transport-belt&underground_entity_name=underground-belt&underground_entity_type=underground-belt&underground_max=4&from_position=0,0&to_position=10,10";
+
+/// to_direction > 7 hit `Direction::from_u8(...).unwrap()` in the Rocket version,
+/// which aborts the process under `panic = "abort"`.
+#[tokio::test]
+async fn plan_path_rejects_out_of_range_direction() {
+    let (status, body) = get(&format!(
+        "/api/v1/game/plan-path?{PLAN_PATH_PARAMS}&to_direction=99"
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("direction"), "got: {body}");
+}
+
+#[tokio::test]
+async fn plan_path_rejects_unparseable_position() {
+    let (status, body) = get(
+        "/api/v1/game/plan-path?entity_name=transport-belt&entity_type=transport-belt&\
+         underground_entity_name=underground-belt&underground_entity_type=underground-belt&\
+         underground_max=4&from_position=not-a-position&to_position=10,10&to_direction=0",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("from_position"), "got: {body}");
+}
+
+#[tokio::test]
+async fn plan_path_without_running_instance_reports_not_started() {
+    let (status, body) = get(&format!(
+        "/api/v1/game/plan-path?{PLAN_PATH_PARAMS}&to_direction=0"
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("not started"), "got: {body}");
+}

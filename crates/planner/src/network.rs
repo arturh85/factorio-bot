@@ -73,19 +73,31 @@ impl ActionNetwork {
 
     /// Add ordering edges implied by preconditions and effects.
     ///
-    /// A producer of an item is linked to a consumer of that item unless the
-    /// edge would close a cycle. Candidates are considered in ascending
+    /// A producer is linked to a consumer when any of the producer's effects
+    /// `satisfies` any of the consumer's preconditions, unless the edge would
+    /// close a cycle. Candidates are considered in ascending
     /// `(producer, consumer)` order, so the result is deterministic.
     ///
-    /// Matching is by item name only — both the produced and the required
-    /// counts are ignored. This is conservative: a consumer is ordered after
-    /// *every* producer of an item it needs, so no real dependency is ever
-    /// missed. The cost is over-constraint, since a consumer needing four
-    /// plates is ordered after all ten producers rather than the four it
-    /// actually consumes, which serialises work that could have run in
-    /// parallel. Choosing *which* producers satisfy a consumer is an
-    /// assignment problem that belongs with the methods that build the
-    /// network, not with inference over a finished one.
+    /// Item matching is by name only — both the produced and the required
+    /// counts are ignored — so a consumer needing four plates is ordered after
+    /// all ten producers rather than the four it actually consumes, which
+    /// serialises work that could have run in parallel. Choosing *which*
+    /// producers satisfy a consumer is an assignment problem that belongs with
+    /// the methods that build the network, not with inference over a finished
+    /// one: before scheduling, `Actor::Role` is unbound, so nothing here can
+    /// know whose inventory a producer's output lands in.
+    ///
+    /// **Inferred edges enforce order, never location.** Ordering a consumer
+    /// after ten producers spread across four bots does not put the items in
+    /// the consumer's inventory, because `HasItem { who: Role }` is checked
+    /// against the single bot that runs the consumer. Getting the items into
+    /// one place is what a `Consolidate` method is for; inference cannot do it
+    /// and does not pretend to.
+    ///
+    /// Only the pairings listed in `Effect::satisfies` are inferred. Effects
+    /// that no condition can name — `LoseItem`, `ConsumeResource` — order
+    /// nothing, and `ResourceAvailable` has no producing effect at all: ore in
+    /// the ground is not made by an action.
     ///
     /// Cost is O(n² · (V+E)): every candidate edge runs a full `validate()`,
     /// which rebuilds the graph and topologically sorts it. Networks here are
@@ -96,28 +108,14 @@ impl ActionNetwork {
     pub fn infer_edges(&mut self) {
         let ids: Vec<ActionId> = self.actions.keys().copied().collect();
         for consumer in &ids {
-            let wanted: Vec<(String, u32)> = self.actions[consumer]
-                .pre
-                .iter()
-                .filter_map(|c| match c {
-                    crate::action::Condition::HasItem { item, count, .. } => {
-                        Some((item.clone(), *count))
-                    }
-                    _ => None,
-                })
-                .collect();
-            if wanted.is_empty() {
-                continue;
-            }
             for producer in &ids {
                 if producer == consumer {
                     continue;
                 }
-                let produces = self.actions[producer]
-                    .eff
+                let produces = self.actions[consumer]
+                    .pre
                     .iter()
-                    .filter_map(|e| e.produces())
-                    .any(|(item, _)| wanted.iter().any(|(w, _)| w == item));
+                    .any(|cond| self.actions[producer].eff.iter().any(|e| e.satisfies(cond)));
                 if !produces {
                     continue;
                 }
@@ -173,7 +171,7 @@ mod tests {
     use super::*;
     use crate::action::{Action, ActionKind, Actor, Condition, Effect};
     use crate::ids::{ActionIdGen, BotId};
-    use factorio_bot_core::types::Position;
+    use factorio_bot_core::types::{FactorioEntity, Position};
 
     fn mine(gen: &mut ActionIdGen, item: &str, count: u32) -> Action {
         let id = gen.next();
@@ -341,6 +339,151 @@ mod tests {
         net.link(b, sink, 0);
         net.link(a, sink, 0);
         assert_eq!(net.preds(sink), vec![(a, 0), (b, 0), (c, 0)]);
+    }
+
+    /// Place a furnace at `pos`, requiring the tile to be free first.
+    fn place(gen: &mut ActionIdGen, pos: Position) -> Action {
+        let furnace = FactorioEntity {
+            name: "stone-furnace".into(),
+            entity_type: "furnace".into(),
+            position: pos.clone(),
+            ..Default::default()
+        };
+        Action {
+            id: gen.next(),
+            kind: ActionKind::Place {
+                entity: Box::new(furnace.clone()),
+            },
+            pre: vec![Condition::PositionFree { pos }],
+            eff: vec![Effect::CreateEntity(Box::new(furnace))],
+            duration: 30,
+            pinned: None,
+            label: "place stone-furnace".into(),
+        }
+    }
+
+    /// Insert ore into the furnace standing at `pos`.
+    fn insert(gen: &mut ActionIdGen, pos: Position) -> Action {
+        Action {
+            id: gen.next(),
+            kind: ActionKind::Insert {
+                pos: pos.clone(),
+                item: "iron-ore".into(),
+                count: 1,
+            },
+            pre: vec![Condition::EntityAt {
+                pos,
+                name: "stone-furnace".into(),
+            }],
+            eff: vec![],
+            duration: 10,
+            pinned: None,
+            label: "insert iron-ore".into(),
+        }
+    }
+
+    fn research(gen: &mut ActionIdGen, tech: &str) -> Action {
+        Action {
+            id: gen.next(),
+            kind: ActionKind::Research { tech: tech.into() },
+            pre: vec![],
+            eff: vec![Effect::Researched(tech.into())],
+            duration: 600,
+            pinned: None,
+            label: format!("research {}", tech),
+        }
+    }
+
+    /// An action gated on `tech` having been researched.
+    fn needs_research(gen: &mut ActionIdGen, tech: &str) -> Action {
+        Action {
+            id: gen.next(),
+            kind: ActionKind::Craft {
+                item: "transport-belt".into(),
+                count: 1,
+            },
+            pre: vec![Condition::Researched(tech.into())],
+            eff: vec![],
+            duration: 30,
+            pinned: None,
+            label: "craft transport-belt".into(),
+        }
+    }
+
+    #[test]
+    fn inference_links_a_placement_to_what_needs_the_entity() {
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let pos = Position::new(5., 5.);
+        let p = net.add(place(&mut gen, pos.clone()));
+        let i = net.add(insert(&mut gen, pos));
+        net.infer_edges();
+        // The spec's Smelt method emits exactly this pair; before the general
+        // matcher the insert got no edge back to the place at all.
+        assert_eq!(net.preds(i), vec![(p, 0)]);
+        assert!(net.preds(p).is_empty());
+    }
+
+    #[test]
+    fn inference_matches_an_entity_by_tile_not_by_exact_position() {
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        // The furnace sits at the tile's centre; the condition names its corner.
+        let p = net.add(place(&mut gen, Position::new(5.5, 5.5)));
+        let i = net.add(insert(&mut gen, Position::new(5., 5.)));
+        net.infer_edges();
+        assert_eq!(net.preds(i), vec![(p, 0)]);
+    }
+
+    #[test]
+    fn inference_does_not_link_a_placement_of_another_entity() {
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let mut other = place(&mut gen, Position::new(5., 5.));
+        other.eff = vec![Effect::CreateEntity(Box::new(FactorioEntity {
+            name: "wooden-chest".into(),
+            position: Position::new(5., 5.),
+            ..Default::default()
+        }))];
+        net.add(other);
+        let i = net.add(insert(&mut gen, Position::new(5., 5.)));
+        net.infer_edges();
+        assert!(net.preds(i).is_empty(), "a chest is not a furnace");
+    }
+
+    #[test]
+    fn inference_links_a_removal_to_what_needs_the_tile_free() {
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let pos = Position::new(5., 5.);
+        let mut clear = place(&mut gen, Position::new(0., 0.));
+        clear.pre = vec![];
+        clear.eff = vec![Effect::RemoveEntity { pos: pos.clone() }];
+        clear.label = "mine the tree away".into();
+        let r = net.add(clear);
+        let p = net.add(place(&mut gen, pos));
+        net.infer_edges();
+        assert_eq!(net.preds(p), vec![(r, 0)]);
+    }
+
+    #[test]
+    fn inference_links_research_to_what_it_unlocks() {
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let r = net.add(research(&mut gen, "logistics"));
+        let c = net.add(needs_research(&mut gen, "logistics"));
+        net.infer_edges();
+        assert_eq!(net.preds(c), vec![(r, 0)]);
+    }
+
+    #[test]
+    fn inference_does_not_link_an_unrelated_technology() {
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        net.add(research(&mut gen, "automation"));
+        let c = net.add(needs_research(&mut gen, "logistics"));
+        net.infer_edges();
+        assert!(net.preds(c).is_empty());
     }
 
     #[test]

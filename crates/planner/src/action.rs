@@ -4,7 +4,7 @@ use crate::error::PlannerError;
 use crate::ids::{ActionId, BotId, ItemId, Ticks};
 use crate::state::PlanState;
 use factorio_bot_core::factorio::util::calculate_distance;
-use factorio_bot_core::types::{FactorioEntity, Position};
+use factorio_bot_core::types::{FactorioEntity, Pos, Position};
 
 /// Who an action's condition or effect applies to.
 ///
@@ -155,11 +155,19 @@ impl Effect {
         }
     }
 
-    /// The item and count this effect makes available, used by dependency inference.
-    pub fn produces(&self) -> Option<(&str, u32)> {
-        match self {
-            Effect::GainItem { item, count, .. } => Some((item.as_str(), *count)),
-            _ => None,
+    /// Does this effect contribute to making `cond` true? Ordering inference only:
+    /// item matching deliberately ignores counts — see `ActionNetwork::infer_edges`.
+    pub fn satisfies(&self, cond: &Condition) -> bool {
+        match (self, cond) {
+            (Effect::GainItem { item, .. }, Condition::HasItem { item: want, .. }) => item == want,
+            (Effect::CreateEntity(e), Condition::EntityAt { pos, name }) => {
+                &e.name == name && Pos::from(&e.position) == Pos::from(pos)
+            }
+            (Effect::RemoveEntity { pos }, Condition::PositionFree { pos: want }) => {
+                Pos::from(pos) == Pos::from(want)
+            }
+            (Effect::Researched(t), Condition::Researched(want)) => t == want,
+            _ => false,
         }
     }
 }

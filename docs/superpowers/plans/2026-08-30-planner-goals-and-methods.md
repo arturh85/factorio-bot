@@ -35,7 +35,8 @@ Expansion still needs *some* binding to simulate against, so `ExpansionCtx` carr
 - Build structs with functional-update syntax (`Foo { a, ..Default::default() }`), never `let mut x = Foo::default();` plus field assignments. An `#[allow(clippy::field_reassign_with_default)]` is the wrong fix.
 - Large enum variants get `Box`ed — clippy denies `large_enum_variant`.
 - Determinism is required end to end. Iterate `BTreeMap`/`BTreeSet`/`Vec`, never `HashMap`/`HashSet`, anywhere a result can influence output.
-- **Never adjust an assertion to match observed output.** If a stated expectation fails, report the actual value and stop. This has already caught two controller errors across these plans.
+- **Never adjust an assertion to match observed output.** If a stated expectation fails, report the actual value and stop. This has already caught three controller errors across these plans.
+- **RED phase for a task that creates a new file:** an orphaned `.rs` file with no `pub mod` line is silently excluded from the build, so the tests in it neither run nor fail. Add the `pub mod` declaration *first*, then run the tests, so the failure you observe is the real one — a missing type, not a missing module.
 
 ## Existing API this plan builds on (all committed and reviewed)
 
@@ -367,7 +368,6 @@ impl MethodRegistry {
         Self::default()
     }
 
-    #[allow(clippy::should_implement_trait)]
     pub fn with(mut self, method: Box<dyn Method>) -> Self {
         self.methods.push(method);
         self

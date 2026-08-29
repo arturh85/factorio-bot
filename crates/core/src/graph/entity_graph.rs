@@ -175,7 +175,7 @@ impl EntityGraph {
                 id,
             });
         }
-        patches.sort_by(|a, b| b.elements.len().cmp(&a.elements.len()));
+        patches.sort_by_key(|a| std::cmp::Reverse(a.elements.len()));
         patches
     }
 

@@ -175,7 +175,7 @@ pub fn extract_archive(
         if !extracted_path.exists() {
             logger.loading(format!(
                 "Uncompressing xz2 <bright-blue>{}</> to <magenta>{}</> ...",
-                &archive_path.to_str().unwrap(),
+                archive_path.to_str().unwrap(),
                 workspace_path.to_str().unwrap()
             ));
             let tar_xz = File::open(&archive_path).into_diagnostic()?;
@@ -186,7 +186,7 @@ pub fn extract_archive(
                 .expect("failed to decompress xz");
             logger.success(format!(
                 "Uncompressed tar <bright-blue>{}</> to <magenta>{}</>",
-                &archive_path.to_str().unwrap(),
+                archive_path.to_str().unwrap(),
                 workspace_path.to_str().unwrap()
             ));
         }

@@ -516,7 +516,7 @@ impl TaskNode {
             Some(player_id),
             &format!(
                 "Insert {}x{} into {} at {}",
-                &item.name, &item.count, location.entity_name, location.position
+                item.name, item.count, location.entity_name, location.position
             ),
             Some(TaskData::InsertToInventory(location, item)),
             cost,
@@ -532,7 +532,7 @@ impl TaskNode {
             Some(player_id),
             &format!(
                 "Remove {}x{} from {} at {}",
-                &item.name, &item.count, location.entity_name, location.position
+                item.name, item.count, location.entity_name, location.position
             ),
             Some(TaskData::RemoveFromInventory(location, item)),
             cost,

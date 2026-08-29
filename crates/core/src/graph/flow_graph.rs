@@ -90,14 +90,14 @@ impl FlowGraph {
                                     .unwrap_or_else(|| {
                                         panic!(
                                             "entity '{}' not found in prototypes",
-                                            &entity_root.entity_name
+                                            entity_root.entity_name
                                         )
                                     })
                                     .mining_speed
                                     .unwrap_or_else(|| {
                                         panic!(
                                             "entity '{}' has no mining_speed",
-                                            &entity_root.entity_name
+                                            entity_root.entity_name
                                         )
                                     })
                                     .to_f64()
@@ -106,11 +106,11 @@ impl FlowGraph {
                                     .entity_prototypes
                                     .get(miner_ore)
                                     .unwrap_or_else(|| {
-                                        panic!("entity '{}' not found in prototypes", &miner_ore)
+                                        panic!("entity '{}' not found in prototypes", miner_ore)
                                     })
                                     .mining_time
                                     .unwrap_or_else(|| {
-                                        panic!("entity '{}' has no mining_time", &miner_ore)
+                                        panic!("entity '{}' has no mining_time", miner_ore)
                                     })
                                     .to_f64()
                                     .unwrap();

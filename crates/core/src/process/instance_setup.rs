@@ -165,7 +165,10 @@ pub async fn setup_factorio_instance(
                         );
                         return Err(FactorioBinaryNotFound {}.into());
                     }
+                    // only used to point macOS Factorio at the instance mods directory
+                    #[cfg(target_os = "macos")]
                     let mods_path = instance_path.join("mods");
+                    #[cfg(target_os = "macos")]
                     let mods_path_str = mods_path.to_str().unwrap().to_string();
                     let mut args = vec!["--create", saves_level_path.to_str().unwrap()];
                     if let Some(seed) = seed.as_ref() {
@@ -209,7 +212,7 @@ pub async fn setup_factorio_instance(
 
         if saves_level_path.exists() && recreate_save {
             fs::remove_file(&saves_level_path).unwrap_or_else(|_| {
-                panic!("failed to delete {}", &saves_level_path.to_str().unwrap())
+                panic!("failed to delete {}", saves_level_path.to_str().unwrap())
             });
         }
         if !saves_level_path.exists() {
@@ -222,7 +225,10 @@ pub async fn setup_factorio_instance(
                 );
                 return Err(FactorioBinaryNotFound {}.into());
             }
+            // only used to point macOS Factorio at the instance mods directory
+            #[cfg(target_os = "macos")]
             let mods_path = instance_path.join("mods");
+            #[cfg(target_os = "macos")]
             let mods_path_str = mods_path.to_str().unwrap().to_string();
             let mut args = vec!["--create", saves_level_path.to_str().unwrap()];
             if let Some(seed) = &seed {
@@ -255,7 +261,7 @@ pub async fn setup_factorio_instance(
             if !silent {
                 logger.loading(format!(
                     "Creating Level at <bright-blue>{:?}</>...",
-                    &saves_level_path
+                    saves_level_path
                 ));
             }
 
@@ -275,7 +281,7 @@ pub async fn setup_factorio_instance(
             if !silent {
                 logger.success(format!(
                     "Created Level at <bright-blue>{:?}</>",
-                    &saves_level_path
+                    saves_level_path
                 ));
             }
         }
@@ -370,10 +376,15 @@ pub async fn update_map_gen_settings(
             MAP_SETTINGS_FILENAME, MAP_GEN_SETTINGS_FILENAME
         ));
     }
+    // only used to point macOS Factorio at the instance mods directory
+    #[cfg(target_os = "macos")]
     let mods_path = instance_path.join("mods");
+    #[cfg(target_os = "macos")]
     let mods_path_str = mods_path.to_str().unwrap().to_string();
     let port_str = factorio_port.unwrap_or(34197).to_string();
     let rcon_port_str = rcon_settings.port.to_string();
+    // pushed to in the macOS-only block below
+    #[allow(unused_mut)]
     let mut args = vec![
         "--start-server",
         saves_level_path.to_str().unwrap(),
@@ -418,7 +429,7 @@ pub async fn update_map_gen_settings(
     write_value_to(&value["map_settings"], &target_map_settings_path)?;
     write_value_to(&value["map_gen_settings"], &target_map_gen_settings_path)?;
     fs::remove_file(&source_map_gen_settings_path)
-        .unwrap_or_else(|_| panic!("failed to delete {:?}", &source_map_gen_settings_path));
+        .unwrap_or_else(|_| panic!("failed to delete {:?}", source_map_gen_settings_path));
 
     if !silent {
         logger.success(format!(

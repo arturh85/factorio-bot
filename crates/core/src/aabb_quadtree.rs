@@ -471,7 +471,7 @@ impl<S, A: Array<Item = (ItemId, Rect<S>)>> QuadNode<S, A> {
                 Ok(())
             })
             .ok();
-            elements.sort_by(|(id1, _), (id2, _)| id1.cmp(id2));
+            elements.sort_by_key(|(id1, _)| *id1);
             elements.dedup();
             *self = QuadNode::Leaf {
                 aabb,

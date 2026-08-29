@@ -13,3 +13,4 @@ mods/*/
 .DS_Store
 /site/
 /.mcp.json
+.direnv/

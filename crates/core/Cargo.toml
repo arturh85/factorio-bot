@@ -25,7 +25,7 @@ petgraph = { version = "0.6.5", features = ["serde-1"] }
 indicatif = "0.18.3"
 wildmatch = "2.1"
 image = "0.25"
-imageproc = "0.25"
+imageproc = "0.27"
 rusttype = "0.9"
 factorio-blueprint = "0.3"
 include_dir = "0.7"
@@ -49,11 +49,11 @@ human-sort = "0.2"
 flate2 = "1.0"
 tar = "0.4"
 xz2 = "0.1"
-zip = "7.0"
+zip = "8.6"
 toml = "0.9"
 regex = "1.11"
 schemars = { version = "0.8.22", features = ["preserve_order"] }
-mlua = { version = "0.11", features = ["lua54", "serialize", "macros"] }
+mlua = { version = "0.12", features = ["lua54", "serialize", "macros"] }
 miette = {version = "7.4", features = ["fancy"] }
 thiserror = "2.0"
 futures = "0.3"

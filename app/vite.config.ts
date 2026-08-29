@@ -7,7 +7,8 @@ import monacoEditorPlugin from 'vite-plugin-monaco-editor'
 export default defineConfig({
     plugins: [
         vue(),
-        monacoEditorPlugin(),
+        // vite-plugin-monaco-editor >=1.1.0 no longer defaults its options argument
+        monacoEditorPlugin({}),
         visualizer({
             title: 'Bundle Size Visualizer',
             filename: 'dist/stats.html',

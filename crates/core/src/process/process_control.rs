@@ -327,10 +327,15 @@ impl FactorioInstance {
         let factorio_port = factorio_port.unwrap_or(34197);
         let factorio_port_str = factorio_port.to_string();
         let rcon_port_str = rcon_settings.port.to_string();
+        // only used to point macOS Factorio at the instance mods directory
+        #[cfg(target_os = "macos")]
         let mods_path = instance_path.join("mods");
+        #[cfg(target_os = "macos")]
         let mods_path_str = mods_path.to_str().unwrap();
         let config_path = instance_path.join("config").join("config.ini");
         let config_path_str = config_path.to_str().unwrap().to_string();
+        // pushed to in the macOS-only block below
+        #[allow(unused_mut)]
         let mut args = vec![
             "--start-server",
             saves_level_path.to_str().unwrap(),

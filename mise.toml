@@ -1,0 +1,9 @@
+[settings]
+# NixOS: use the official prebuilt node tarballs (nix-ld runs them) instead of
+# mise compiling node from source, which takes ~1h
+node.compile = false
+
+[tools]
+rust = "stable"
+node = "24"
+"npm:yarn" = "1"

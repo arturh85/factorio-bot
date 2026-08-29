@@ -36,11 +36,10 @@ pub fn line_offset(input: &str, line: usize) -> Option<usize> {
     let mut cursor = input;
     let mut offset = 0;
     for _ in 1..line {
-        if let Some(pos) = cursor.find('\n') {
+        {
+            let pos = cursor.find('\n')?;
             cursor = &cursor[pos + 1..cursor.len()];
             offset += pos + 1;
-        } else {
-            return None;
         }
     }
     Some(offset)

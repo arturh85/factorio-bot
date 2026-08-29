@@ -1,0 +1,30 @@
+[package]
+name = "factorio-bot-server"
+version = "0.2.4-dev"
+authors = ["Artur Hallmann <arturh@arturh.de>"]
+edition = "2021"
+
+[package.metadata.release]
+tag = false
+push = false
+publish = false
+
+[dependencies]
+factorio-bot-core = { path = "../core" }
+axum = { version = "0.8.9", features = ["json", "tokio", "http1"] }
+tower = "0.5.3"
+tower-http = { version = "0.6.11", features = ["fs", "trace", "catch-panic"] }
+utoipa = { version = "5.5.0", features = ["axum_extras", "preserve_order"] }
+utoipa-axum = "0.2.0"
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum", "vendored"] }
+tokio = { version = "1", features = ["full", "tracing"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+miette = { version = "7.4", features = ["fancy"] }
+thiserror = "2.0"
+num-traits = "0.2"
+tracing = "0.1"
+typescript-definitions = { version = "0.1", package = "typescript-definitions-ufo-patch", features = ["export-typescript"] }
+
+[dev-dependencies]
+tempfile = "3"

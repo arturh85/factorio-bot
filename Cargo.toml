@@ -3,6 +3,7 @@ members = [
     "app/src-tauri",
     "crates/core",
     "crates/restapi",
+    "crates/server",
     "crates/scripting",
 #    "crates/scripting_rhai",
 #    "crates/scripting_rune",

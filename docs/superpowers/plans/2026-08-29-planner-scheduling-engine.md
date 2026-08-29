@@ -25,6 +25,7 @@
 - **`Actor::Role` must not be resolved outside `schedule()`.** Layers 0 and 3 take an explicit `binding: BotId` parameter; they never guess.
 - Large enum variants get `Box`ed (`FactorioEntity` is ~200 bytes) — clippy denies `large_enum_variant` under `--deny warnings`.
 - Determinism is required: every tie-break in the scheduler is broken by `(ActionId, BotId)` ascending, so golden tests are stable.
+- Build structs with functional-update syntax (`Foo { a, b, ..Default::default() }`), never `let mut x = Foo::default();` followed by field assignments — clippy's `field_reassign_with_default` fires under `--deny warnings`, and an `#[allow]` is the wrong fix.
 - **Another agent works in `app/**` in this same checkout and keeps changes staged.** `git add` followed by `git commit` commits the WHOLE INDEX, including their staged files — this has already happened once. Always commit with the partial-commit form, which builds the commit from the working tree for the named paths and ignores the index entirely:
   `git commit -m "<message>" -- <explicit paths>`
   Never `git add -A`, never `git add .`, never `git commit -a`. Never `git checkout`, `git stash`, or `git reset` anything outside `crates/planner/`.
@@ -463,10 +464,12 @@ Append to the `mod tests` in `crates/planner/src/state.rs`:
         let mut a = state();
         let pos = Position::new(3., 3.);
         assert!(a.is_position_free(&pos));
-        let mut furnace = FactorioEntity::default();
-        furnace.name = "stone-furnace".into();
-        furnace.entity_type = "furnace".into();
-        furnace.position = pos.clone();
+        let furnace = FactorioEntity {
+            name: "stone-furnace".into(),
+            entity_type: "furnace".into(),
+            position: pos.clone(),
+            ..Default::default()
+        };
         a.create_entity(furnace);
         assert!(!a.is_position_free(&pos));
         assert_eq!(a.entity_at(&pos).unwrap().name, "stone-furnace");
@@ -476,9 +479,11 @@ Append to the `mod tests` in `crates/planner/src/state.rs`:
     fn removed_entities_free_their_position() {
         let mut a = state();
         let pos = Position::new(3., 3.);
-        let mut furnace = FactorioEntity::default();
-        furnace.name = "stone-furnace".into();
-        furnace.position = pos.clone();
+        let furnace = FactorioEntity {
+            name: "stone-furnace".into(),
+            position: pos.clone(),
+            ..Default::default()
+        };
         a.create_entity(furnace);
         a.remove_entity(&pos);
         assert!(a.is_position_free(&pos));
@@ -1894,10 +1899,12 @@ fn mine_at(gen: &mut ActionIdGen, pos: &Position, count: u32) -> Action {
 
 /// Place a furnace at `pos`, requiring the tile to be free.
 fn place_at(gen: &mut ActionIdGen, pos: &Position) -> Action {
-    let mut furnace = FactorioEntity::default();
-    furnace.name = "stone-furnace".into();
-    furnace.entity_type = "furnace".into();
-    furnace.position = pos.clone();
+    let furnace = FactorioEntity {
+        name: "stone-furnace".into(),
+        entity_type: "furnace".into(),
+        position: pos.clone(),
+        ..Default::default()
+    };
     Action {
         id: gen.next(),
         kind: ActionKind::Place {

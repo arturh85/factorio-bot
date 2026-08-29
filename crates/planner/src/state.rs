@@ -226,6 +226,7 @@ impl PlanState {
 mod tests {
     use super::*;
     use factorio_bot_core::test_utils::fixture_world;
+    use factorio_bot_core::types::{FactorioEntity, Position};
 
     fn state() -> PlanState {
         PlanState::from_world(Arc::new(fixture_world()), &[BotId(1), BotId(2)])
@@ -264,6 +265,41 @@ mod tests {
     }
 
     #[test]
+    fn a_bot_takes_its_position_inventory_and_reach_from_its_player() {
+        // The only path a real world takes into the planner: `fixture_world()`
+        // has no players, so every other test exercises the `None` arm and the
+        // three `as f64` casts here run nowhere else.
+        use factorio_bot_core::types::FactorioPlayer;
+
+        let world = fixture_world();
+        world.players.insert(
+            1,
+            FactorioPlayer {
+                player_id: 1,
+                position: Position::new(12.5, -7.5),
+                main_inventory: BTreeMap::from([("iron-plate".to_string(), 42u32)]),
+                build_distance: 12,
+                reach_distance: 8,
+                resource_reach_distance: 4,
+                ..Default::default()
+            },
+        );
+
+        let s = PlanState::from_world(Arc::new(world), &[BotId(1), BotId(2)]);
+        let bot = s.bot(BotId(1)).expect("bot 1 exists");
+        assert_eq!(bot.position, Position::new(12.5, -7.5));
+        assert_eq!(s.inventory_count(BotId(1), "iron-plate"), 42);
+        assert_eq!(bot.build_distance, 12.0);
+        assert_eq!(bot.reach_distance, 8.0);
+        assert_eq!(bot.resource_reach_distance, 4.0);
+
+        // Bot 2 has no player and still falls back to the defaults.
+        let other = s.bot(BotId(2)).expect("bot 2 exists");
+        assert_eq!(other.position, Position::new(0., 0.));
+        assert_eq!(other.build_distance, 10.0);
+    }
+
+    #[test]
     fn missing_bots_get_default_reach_distances() {
         let a = state();
         let bot = a.bot(BotId(1)).expect("bot 1 exists");
@@ -271,8 +307,6 @@ mod tests {
         assert_eq!(bot.reach_distance, 10.0);
         assert_eq!(bot.resource_reach_distance, 3.0);
     }
-
-    use factorio_bot_core::types::{FactorioEntity, Position};
 
     fn iron_ore_tile(state: &PlanState) -> Position {
         state

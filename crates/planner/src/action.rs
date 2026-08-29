@@ -230,7 +230,7 @@ mod tests {
     use crate::ids::BotId;
     use crate::state::PlanState;
     use factorio_bot_core::test_utils::fixture_world;
-    use factorio_bot_core::types::Position;
+    use factorio_bot_core::types::{FactorioEntity, Position};
     use std::sync::Arc;
 
     fn state() -> PlanState {
@@ -319,6 +319,72 @@ mod tests {
         }
         .apply(&mut s, BotId(1));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn entity_at_matches_by_name_and_tile() {
+        let mut s = state();
+        let pos = Position::new(3., 3.);
+        let cond = Condition::EntityAt {
+            pos: pos.clone(),
+            name: "stone-furnace".into(),
+        };
+        assert!(!cond.holds(&s, BotId(1)), "nothing stands there yet");
+
+        s.create_entity(FactorioEntity {
+            name: "stone-furnace".into(),
+            entity_type: "furnace".into(),
+            position: pos.clone(),
+            ..Default::default()
+        });
+        assert!(cond.holds(&s, BotId(1)));
+
+        // The right tile, the wrong entity.
+        let wrong_name = Condition::EntityAt {
+            pos,
+            name: "wooden-chest".into(),
+        };
+        assert!(!wrong_name.holds(&s, BotId(1)));
+        // The right entity, the wrong tile.
+        let wrong_tile = Condition::EntityAt {
+            pos: Position::new(4., 3.),
+            name: "stone-furnace".into(),
+        };
+        assert!(!wrong_tile.holds(&s, BotId(1)));
+    }
+
+    #[test]
+    fn removing_an_entity_frees_its_tile() {
+        let mut s = state();
+        let pos = Position::new(3., 3.);
+        Effect::CreateEntity(Box::new(FactorioEntity {
+            name: "stone-furnace".into(),
+            position: pos.clone(),
+            ..Default::default()
+        }))
+        .apply(&mut s, BotId(1))
+        .unwrap();
+        assert!(!Condition::PositionFree { pos: pos.clone() }.holds(&s, BotId(1)));
+
+        Effect::RemoveEntity { pos: pos.clone() }
+            .apply(&mut s, BotId(1))
+            .unwrap();
+        assert!(Condition::PositionFree { pos }.holds(&s, BotId(1)));
+    }
+
+    #[test]
+    fn researching_a_technology_satisfies_the_condition() {
+        let mut s = state();
+        let cond = Condition::Researched("automation".into());
+        assert!(!cond.holds(&s, BotId(1)));
+
+        Effect::Researched("automation".into())
+            .apply(&mut s, BotId(1))
+            .unwrap();
+        assert!(cond.holds(&s, BotId(1)));
+        // Research is global, not per bot, so the binding is irrelevant.
+        assert!(cond.holds(&s, BotId(2)));
+        assert!(!Condition::Researched("logistics".into()).holds(&s, BotId(1)));
     }
 
     #[test]

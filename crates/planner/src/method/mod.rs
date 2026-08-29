@@ -78,7 +78,6 @@ impl MethodRegistry {
         Self::default()
     }
 
-    #[allow(clippy::should_implement_trait)]
     pub fn with(mut self, method: Box<dyn Method>) -> Self {
         self.methods.push(method);
         self
@@ -173,5 +172,32 @@ mod tests {
         let first = c.ids.next();
         let second = c.ids.next();
         assert!(first < second);
+    }
+
+    #[test]
+    fn the_registry_skips_an_inapplicable_method_and_falls_through() {
+        /// Declines everything, so the registry must keep looking.
+        struct Declines;
+        impl Method for Declines {
+            fn name(&self) -> &'static str {
+                "declines"
+            }
+            fn applicable(&self, _goal: &Goal, _state: &PlanState) -> bool {
+                false
+            }
+            fn expand(&self, _g: &Goal, _c: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+                unreachable!("an inapplicable method must never be expanded")
+            }
+        }
+        let reg = MethodRegistry::new()
+            .with(Box::new(Declines))
+            .with(Box::new(Nothing));
+        let c = ctx();
+        let goal = Goal::Have {
+            item: "coal".into(),
+            count: 1,
+            whose: Holder::Anyone,
+        };
+        assert_eq!(reg.find(&goal, &c.state).map(|m| m.name()), Some("nothing"));
     }
 }

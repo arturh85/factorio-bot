@@ -14,6 +14,7 @@ async fn health() -> &'static str {
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/health", get(health))
+        .nest("/api/v1/game", crate::game::router())
         .with_state(state)
 }
 

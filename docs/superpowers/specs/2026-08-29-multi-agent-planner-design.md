@@ -100,6 +100,15 @@ interface — a contained change, not a redesign.
 A reservation conflict is a precondition failure at plan time, not a runtime
 race.
 
+**Implementation note.** The scheduling engine omits `Reservations` as a
+separate structure: because effects are applied at the moment an action is
+assigned, consuming ore and occupying a position each make the next action's own
+precondition fail, and a reservation table would be a second copy of that fact.
+Both guarantees are property-tested. **The third category — item counts — has no
+model yet**, because `PlanState` carries no container inventory. `TakeFromChest`
+and `Consolidate` therefore cannot yet express "two actions must not spend the
+same stack", and closing that gap is a prerequisite for either method.
+
 ### Layer 1 — `Goal`
 
 Declarative and bot-agnostic.
@@ -222,8 +231,23 @@ pub struct Schedule {
 }
 ```
 
-Phase one infers the ordering graph by matching `Effect`s to `Condition`s with
-quantity and direction — what `resolve_dependencies()` gets wrong today.
+Phase one infers the ordering graph by matching `Effect`s to `Condition`s —
+`GainItem` to `HasItem`, `CreateEntity` to `EntityAt`, `RemoveEntity` to
+`PositionFree`, `Researched` to `Researched`. This is what
+`resolve_dependencies()` gets wrong today, which matches on item name across the
+whole graph with no regard for direction and no cycle check.
+
+**Matching deliberately ignores quantities.** Before assignment `Actor::Role` is
+unbound, so the network cannot know *whose* inventory a producer's output lands
+in; quantity-aware producer selection is therefore not merely premature at this
+layer, it is unsound at it. It belongs with the methods, which know they are
+building one bot's chain. The consequence is over-constraint rather than
+unsoundness: a consumer needing four plates is ordered after all ten producers
+of plates, serialising work that could have run in parallel. Note also that
+**inferred edges enforce order, never location** — ordering a consumer after ten
+producers spread across four bots does not put the items in the consumer's
+inventory, since `HasItem { who: Role }` is checked against one bot. That is
+precisely why a `Consolidate` method has to exist.
 
 **Ordering edges carry a minimum lag in ticks.** A lag expresses "this
 dependency is satisfied, but not until *t* ticks after its producer finishes."
@@ -232,12 +256,36 @@ It is what models machine processes: the `Smelt` method emits `Place(furnace)`,
 carries the furnace's smelting time. A bot is free to do other work across a
 lag — which is most of where multi-bot parallelism comes from.
 
-Phase two is greedy travel-aware list scheduling. Maintain a per-bot fork of
-`PlanState`. Repeatedly select the ready `(action, bot)` pair minimising
-`max(bot_free, deps_done) + travel + duration`; bind `Actor::Role` to that bot,
-emit the walk, claim reservations, apply effects to that bot's fork. An action
-with `pinned: Some(bot)` is a constraint the selection honours rather than a
+Phase two is greedy travel-aware list scheduling. Repeatedly select the ready
+`(action, bot)` pair minimising the action's completion time, bind
+`Actor::Role` to that bot, emit the walk, and apply effects. An action with
+`pinned: Some(bot)` is a constraint the selection honours rather than a
 candidate it ranks.
+
+The timing is:
+
+```
+walk  = [bot_free, bot_free + travel]
+start = max(bot_free + travel, deps_done)
+end   = start + duration
+```
+
+**The bot walks during the wait, not after it.** An earlier draft of this spec
+said `max(bot_free, deps_done) + travel`, which idles the bot until its
+dependency is ready and only then sends it walking — contradicting the previous
+paragraph's claim that a bot is free to work across a lag. Walking to the next
+furnace while the current one smelts is the canonical case, and the wrong
+formula forfeits it entirely.
+
+**Feasibility is part of selection, not a check after it.** A pair whose
+preconditions do not hold under that binding is skipped rather than ranked, and
+`PreconditionUnsatisfied` is returned only when no bot can take any ready
+action. Checking after selection instead rejects schedules that are perfectly
+feasible: if a producer leaves ore with bot 1 and the consumer's cheapest bot is
+bot 2, ranking-then-checking aborts the whole plan rather than assigning the
+consumer to bot 1. Every `Have`-chain produces exactly that shape. Because a
+positional precondition is satisfied by the walk the scheduler is about to
+emit, feasibility is evaluated against a fork with the bot already moved.
 
 Scheduling is a pure function of three values. This is what the layer is for:
 

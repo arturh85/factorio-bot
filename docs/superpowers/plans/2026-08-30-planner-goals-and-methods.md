@@ -28,7 +28,9 @@ Expansion still needs *some* binding to simulate against, so `ExpansionCtx` carr
 - **Every cargo invocation must be wrapped:** `nix develop --command bash -c 'eval "$(mise env -s bash)"; <command>'`
 - **`cargo fmt -p factorio-bot-planner` before every commit — never `cargo fmt --all`.** Other crates in this checkout belong to other workstreams.
 - `cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated` must pass. It is currently clean.
-- **Another agent may be working in this checkout with files staged.** Commit with the partial-commit form only: `git commit -m "<message>" -- crates/planner`. Never `git add`, never `git add -A`, never `git commit -a`. Never `git checkout`/`stash`/`reset`/`clean` outside `crates/planner/`.
+- **Another agent may be working in this checkout with files staged.** Commit with the partial-commit form: `git commit -m "<message>" -- crates/planner`. This builds the commit from the working tree for that path and ignores the index entirely, so another agent's staged work cannot be swept in.
+- **New files are the one exception.** A pathspec commit cannot see an untracked file, so a task that creates one must first run `git add <that exact path>` — naming the file, never a directory — and then commit with the pathspec as usual. Staging one named new file cannot capture anyone else's work. **Never `git add -A`, never `git add .`, never `git commit -a`.**
+- Never `git checkout`/`stash`/`reset`/`clean` outside `crates/planner/`, with the single exception of discarding `crates/scripting_lua/tests/` snapshot churn after a workspace-wide test run.
 - `Ticks` is `u32`; 60 ticks = 1 second. No `f64` durations — `f64` is for distances and radii only.
 - Build structs with functional-update syntax (`Foo { a, ..Default::default() }`), never `let mut x = Foo::default();` plus field assignments. An `#[allow(clippy::field_reassign_with_default)]` is the wrong fix.
 - Large enum variants get `Box`ed — clippy denies `large_enum_variant`.

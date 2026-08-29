@@ -23,7 +23,7 @@ pub struct FindEntitiesParams {
     tag = "Query",
     params(FindEntitiesParams),
     responses(
-        (status = 200, body = Vec<serde_json::Value>, description = "List of entities matching the filter (serialized FactorioEntity)"),
+        (status = 200, body = Vec<FactorioEntity>),
         (status = 400, body = crate::error::ErrorResponse),
     )
 )]

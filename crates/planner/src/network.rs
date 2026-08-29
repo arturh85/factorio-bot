@@ -76,6 +76,23 @@ impl ActionNetwork {
     /// A producer of an item is linked to a consumer of that item unless the
     /// edge would close a cycle. Candidates are considered in ascending
     /// `(producer, consumer)` order, so the result is deterministic.
+    ///
+    /// Matching is by item name only — both the produced and the required
+    /// counts are ignored. This is conservative: a consumer is ordered after
+    /// *every* producer of an item it needs, so no real dependency is ever
+    /// missed. The cost is over-constraint, since a consumer needing four
+    /// plates is ordered after all ten producers rather than the four it
+    /// actually consumes, which serialises work that could have run in
+    /// parallel. Choosing *which* producers satisfy a consumer is an
+    /// assignment problem that belongs with the methods that build the
+    /// network, not with inference over a finished one.
+    ///
+    /// Cost is O(n² · (V+E)): every candidate edge runs a full `validate()`,
+    /// which rebuilds the graph and topologically sorts it. Networks here are
+    /// expected in the hundreds of actions at most, and inference runs once at
+    /// planning time, not per tick. If that stops holding, replace the
+    /// validate-and-rollback with a DFS reachability check from `to` to `from`
+    /// before pushing the edge.
     pub fn infer_edges(&mut self) {
         let ids: Vec<ActionId> = self.actions.keys().copied().collect();
         for consumer in &ids {
@@ -292,5 +309,49 @@ mod tests {
         action.pinned = Some(BotId(2));
         let id = net.add(action);
         assert_eq!(net.action(id).unwrap().pinned, Some(BotId(2)));
+    }
+
+    #[test]
+    fn relinking_the_same_pair_keeps_the_larger_lag() {
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let a = net.add(mine(&mut gen, "iron-ore", 1));
+        let b = net.add(mine(&mut gen, "iron-plate", 1));
+        net.link(a, b, 5);
+        net.link(a, b, 200);
+        assert_eq!(net.preds(b), vec![(a, 200)], "the larger lag must win");
+        net.link(a, b, 20);
+        assert_eq!(
+            net.preds(b),
+            vec![(a, 200)],
+            "a smaller lag must not shrink it"
+        );
+    }
+
+    #[test]
+    fn preds_are_sorted_by_predecessor_id() {
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let a = net.add(mine(&mut gen, "iron-ore", 1));
+        let b = net.add(mine(&mut gen, "coal", 1));
+        let c = net.add(mine(&mut gen, "stone", 1));
+        let sink = net.add(craft(&mut gen, "iron-ore", 1, "iron-gear-wheel"));
+        // Linked in descending order; preds must still come back ascending.
+        net.link(c, sink, 0);
+        net.link(b, sink, 0);
+        net.link(a, sink, 0);
+        assert_eq!(net.preds(sink), vec![(a, 0), (b, 0), (c, 0)]);
+    }
+
+    #[test]
+    fn inference_ignores_quantities_and_links_every_producer() {
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        // Two producers of one plate each; a consumer that needs four.
+        let p1 = net.add(mine(&mut gen, "iron-plate", 1));
+        let p2 = net.add(mine(&mut gen, "iron-plate", 1));
+        let c = net.add(craft(&mut gen, "iron-plate", 4, "iron-gear-wheel"));
+        net.infer_edges();
+        assert_eq!(net.preds(c), vec![(p1, 0), (p2, 0)]);
     }
 }

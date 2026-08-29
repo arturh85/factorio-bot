@@ -53,6 +53,13 @@ async fn unknown_path_falls_back_to_index_html() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(bytes.to_vec()).unwrap(),
+        "<html>spa</html>"
+    );
 }
 
 #[tokio::test]

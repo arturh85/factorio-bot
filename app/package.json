@@ -29,6 +29,7 @@
     "dummy": "true"
   },
   "dependencies": {
+    "@primeuix/themes": "^2",
     "@tauri-apps/api": "2.11.1",
     "@tauri-apps/plugin-dialog": "^2.4.2",
     "@tauri-apps/plugin-fs": "^2.4.4",
@@ -38,9 +39,8 @@
     "ansi-html": "0.0.9",
     "monaco-editor": "0.55.1",
     "pinia": "^4",
-    "primeflex": "^3.3.1",
-    "primeicons": "^6.0.1",
-    "primevue": "3.53.1",
+    "primeicons": "7.0.0",
+    "primevue": "4.5.5",
     "vue": "3.5.42",
     "vue-router": "^5",
     "ynetwork": "3.0.6"

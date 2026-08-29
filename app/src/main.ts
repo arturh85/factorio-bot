@@ -1,17 +1,14 @@
 import { createApp } from 'vue';
-import { reactive } from 'vue';
 import router from './router';
 import {createPinia} from 'pinia';
+import PrimeVue from 'primevue/config';
+import Lara from '@primeuix/themes/lara';
 import ToastService from 'primevue/toastservice';
 import Tooltip from 'primevue/tooltip';
 import Ripple from 'primevue/ripple';
 
-import 'primevue/resources/themes/saga-blue/theme.css';
-import 'primevue/resources/primevue.min.css';
-import 'primeflex/primeflex.css';
 import 'primeicons/primeicons.css';
 import './assets/layout/layout.scss';
-import './assets/layout/flags/flags.css';
 
 import './plugins/configure-ynetwork';
 import App from './App.vue';
@@ -25,8 +22,22 @@ router.beforeEach(() => {
 const app = createApp(App);
 const store = createPinia()
 
-app.config.globalProperties.$appState = reactive({ inputStyle: 'outlined' });
-app.config.globalProperties.$primevue = reactive({ ripple: true, config: {zIndex: {}} });
+// PrimeVue 4 replaced the shipped theme stylesheets with a runtime theme
+// service, so app.use(PrimeVue, ...) is mandatory rather than optional and
+// installs $primevue itself. Lara is the closest preset to the saga-blue theme
+// this app used under PrimeVue 3; swapping it for Aura, Nora or Material is a
+// one-line change here.
+app.use(PrimeVue, {
+    ripple: true,
+    theme: {
+        preset: Lara,
+        options: {
+            // The layout shell is a hard-coded light theme, so following the OS
+            // dark-mode preference would darken the controls and nothing else.
+            darkModeSelector: false
+        }
+    }
+});
 
 app.use(ToastService);
 app.use(store);

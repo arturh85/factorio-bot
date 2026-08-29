@@ -378,6 +378,48 @@
   resolved "https://nodejs-cache.arturh.internal/@pkgr/core/-/core-0.3.6.tgz#3569708bd4be4d8870ba32bf1c456dac81600d97"
   integrity sha512-SEeaJLb3qBNF/OaXnaR1NmmBbFYk1zC0ZH/52fATcRPLFg/p791YrcyFFy44Bo9sLaGuSuLp5Q6axbb/O+v/RA==
 
+"@primeuix/styled@^0.7.4":
+  version "0.7.4"
+  resolved "https://nodejs-cache.arturh.internal/@primeuix/styled/-/styled-0.7.4.tgz#d2108a7fad297dea60d549b2c10ed744dc0cbc0e"
+  integrity sha512-QSO/NpOQg8e9BONWRBx9y8VGMCMYz0J/uKfNJEya/RGEu7ARx0oYW0ugI1N3/KB1AAvyGxzKBzGImbwg0KUiOQ==
+  dependencies:
+    "@primeuix/utils" "^0.6.1"
+
+"@primeuix/styles@^2.0.3":
+  version "2.0.3"
+  resolved "https://nodejs-cache.arturh.internal/@primeuix/styles/-/styles-2.0.3.tgz#e42d14c138fe092683228d65a3f6de17de70d6a0"
+  integrity sha512-2ykAB6BaHzR/6TwF8ShpJTsZrid6cVIEBVlookSdvOdmlWuevGu5vWOScgIwqWwlZcvkFYAGR/SUV3OHCTBMdw==
+  dependencies:
+    "@primeuix/styled" "^0.7.4"
+
+"@primeuix/themes@^2":
+  version "2.0.3"
+  resolved "https://nodejs-cache.arturh.internal/@primeuix/themes/-/themes-2.0.3.tgz#c3919d49e818b3bbac611ab8d89a52d4ffed6815"
+  integrity sha512-3fS1883mtCWhgUgNf/feiaaDSOND4EBIOu9tZnzJlJ8QtYyL6eFLcA6V3ymCWqLVXQ1+lTVEZv1gl47FIdXReg==
+  dependencies:
+    "@primeuix/styled" "^0.7.4"
+
+"@primeuix/utils@^0.6.1", "@primeuix/utils@^0.6.2":
+  version "0.6.4"
+  resolved "https://nodejs-cache.arturh.internal/@primeuix/utils/-/utils-0.6.4.tgz#f436eae1be166662d424b8550a97ba0c150819e6"
+  integrity sha512-pZ5f+vj7wSzRhC7KoEQRU5fvYAe+RP9+m39CTscZ3UywCD1Y2o6Fe1rRgklMPSkzUcty2jzkA0zMYkiJBD1hgg==
+
+"@primevue/core@4.5.5":
+  version "4.5.5"
+  resolved "https://nodejs-cache.arturh.internal/@primevue/core/-/core-4.5.5.tgz#c450314a6e891f9840c915ccace3055e84d03087"
+  integrity sha512-JpkXhq1ddc70JdsC3CC4dM+UbeeWuCW/8DpS9dNBfrOk824TLSlRlMEGFyVKqRMn5WPQvYLiy3xXfLQeNdSqhQ==
+  dependencies:
+    "@primeuix/styled" "^0.7.4"
+    "@primeuix/utils" "^0.6.2"
+
+"@primevue/icons@4.5.5":
+  version "4.5.5"
+  resolved "https://nodejs-cache.arturh.internal/@primevue/icons/-/icons-4.5.5.tgz#282702f4a21393a9bbde2b326efe1454169f1365"
+  integrity sha512-eteOhTdAOXEYE9qW1AOrBBgDxQ2szHJxSkEK1XVdV2TKxGM5FQf03Ovms0VDyZTc16XBIgvwYjXJQS0BPbhPaA==
+  dependencies:
+    "@primeuix/utils" "^0.6.2"
+    "@primevue/core" "4.5.5"
+
 "@rolldown/binding-android-arm-eabi@1.2.6":
   version "1.2.6"
   resolved "https://nodejs-cache.arturh.internal/@rolldown/binding-android-arm-eabi/-/binding-android-arm-eabi-1.2.6.tgz#81bc32b79902fcd3875dffdf3be2ccba3ef8d794"
@@ -2046,20 +2088,21 @@ prettier@3.9.6:
   resolved "https://nodejs-cache.arturh.internal/prettier/-/prettier-3.9.6.tgz#b3ea5146515d40fc53f18aa63f74dfab1e10dbf6"
   integrity sha512-OpN0zzVdiaiAhxpuuj5efpIS4sY9j7bY6uR5mnj5yPzGkdkjNKSJeUThPb60Jw29QuAZgA4o+/iB49kFiaBX6g==
 
-primeflex@^3.3.1:
-  version "3.3.1"
-  resolved "https://nodejs-cache.arturh.internal/primeflex/-/primeflex-3.3.1.tgz#361dddf6eb5db50d733e4cddd4b6e376a3d7bd68"
-  integrity sha512-zaOq3YvcOYytbAmKv3zYc+0VNS9Wg5d37dfxZnveKBFPr7vEIwfV5ydrpiouTft8MVW6qNjfkaQphHSnvgQbpQ==
+primeicons@7.0.0:
+  version "7.0.0"
+  resolved "https://nodejs-cache.arturh.internal/primeicons/-/primeicons-7.0.0.tgz#6b25c3fdcb29bb745a3035bdc1ed5902f4a419cf"
+  integrity sha512-jK3Et9UzwzTsd6tzl2RmwrVY/b8raJ3QZLzoDACj+oTJ0oX7L9Hy+XnVwgo4QVKlKpnP/Ur13SXV/pVh4LzaDw==
 
-primeicons@^6.0.1:
-  version "6.0.1"
-  resolved "https://nodejs-cache.arturh.internal/primeicons/-/primeicons-6.0.1.tgz#431fa7c79825934eefd62087d8e1faa6a9e376ad"
-  integrity sha512-KDeO94CbWI4pKsPnYpA1FPjo79EsY9I+M8ywoPBSf9XMXoe/0crjbUK7jcQEDHuc0ZMRIZsxH3TYLv4TUtHmAA==
-
-primevue@3.53.1:
-  version "3.53.1"
-  resolved "https://nodejs-cache.arturh.internal/primevue/-/primevue-3.53.1.tgz#d5a40010acf0f3f351047499e785934219291f92"
-  integrity sha512-Bp4peZPdhfKYXwvtsOGGh5dfgmTelm+LZEZKGs/c5mOHhsUJ6xi3EcOZoQVI6oklS946ayMQvgD5L0S7itGO0g==
+primevue@4.5.5:
+  version "4.5.5"
+  resolved "https://nodejs-cache.arturh.internal/primevue/-/primevue-4.5.5.tgz#9bbaa59583418fab2d2d74bf3b6d30f4c9a851ad"
+  integrity sha512-Kv5REIewCdP806QaoU+4nBXfmpzOGFKkZ9qH4KsL6MjiAQVc4PUzypt8erl4r3Vzh3nr3aWZIxkxYRRsLGiX2A==
+  dependencies:
+    "@primeuix/styled" "^0.7.4"
+    "@primeuix/styles" "^2.0.3"
+    "@primeuix/utils" "^0.6.2"
+    "@primevue/core" "4.5.5"
+    "@primevue/icons" "4.5.5"
 
 punycode@^2.1.0:
   version "2.3.1"

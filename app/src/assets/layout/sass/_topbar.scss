@@ -110,6 +110,11 @@
     }
 
     .layout-menu-button {
+    // PrimeVue 4 removed .p-link, which used to supply this reset
+    background: none;
+    border: 0 none;
+    padding: 0;
+    cursor: pointer;
         cursor: pointer;
         display: inline-block;
         text-decoration: none;

@@ -24,7 +24,7 @@
       </div>
 
       <h5>Ripple Effect</h5>
-      <InputSwitch :modelValue="rippleActive" @update:modelValue="changeRipple"/>
+      <ToggleSwitch :modelValue="rippleActive" @update:modelValue="changeRipple"/>
 
       <h5>Menu Type</h5>
       <div class="p-formgroup-inline">
@@ -59,7 +59,7 @@
 
 <script setup lang="ts">
 import RadioButton from 'primevue/radiobutton';
-import InputSwitch from 'primevue/inputswitch';
+import ToggleSwitch from 'primevue/toggleswitch';
 
 import {ref, computed} from 'vue';
 

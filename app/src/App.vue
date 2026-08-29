@@ -159,9 +159,7 @@ const containerClass = computed(() => {
     'layout-static': layoutMode.value === 'static',
     'layout-static-sidebar-inactive': staticMenuInactive.value && layoutMode.value === 'static',
     'layout-overlay-sidebar-active': overlayMenuActive.value && layoutMode.value === 'overlay',
-    'layout-mobile-sidebar-active': mobileMenuActive.value,
-    'p-input-filled': true,
-    'p-ripple-disabled': false
+    'layout-mobile-sidebar-active': mobileMenuActive.value
   }]
 })
 const sidebarClass = computed(() => {
@@ -200,8 +198,7 @@ onBeforeUpdate(() => {
 </script>
 
 <style lang="scss">
-.p-toast.p-toast-topright {
+.p-toast.p-toast-bottom-right {
   z-index: 1000;
-  top: 70px;
 }
 </style>

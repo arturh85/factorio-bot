@@ -64,7 +64,7 @@ const stopInstances = async() => {
   <ToggleButton v-model="recreateLevel" onLabel="Recreate Level" offLabel="Use existing Level" onIcon="pi pi-check" offIcon="pi pi-times" />
   <Button :icon="isStarted ? 'pi pi-check' : ''"
           :label="buttonLabel"
-          :class="isStarted ? 'p-button-success' : 'p-button-error' + ' p-mr-2 p-mb-2'"
+          :severity="isStarted ? 'success' : 'danger'"
           :disabled="isStopping || isStarting" @click="isStarted ? stopInstances() : startInstances()">
   </Button>
 </template>

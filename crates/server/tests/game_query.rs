@@ -51,3 +51,31 @@ async fn find_entities_without_running_instance_reports_not_started() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body.contains("not started"), "got: {body}");
 }
+
+#[tokio::test]
+async fn read_routes_report_not_started_without_instance() {
+    for uri in [
+        "/api/v1/game/find-tiles?position=0,0&radius=10",
+        "/api/v1/game/player-info?player_id=1",
+        "/api/v1/game/all-players",
+        "/api/v1/game/item-prototypes",
+        "/api/v1/game/entity-prototypes",
+    ] {
+        let (status, body) = get(uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        assert!(body.contains("not started"), "{uri} returned: {body}");
+    }
+}
+
+#[tokio::test]
+async fn inventory_contents_at_rejects_query_without_separator() {
+    let (status, body) = get("/api/v1/game/inventory-contents-at?query=nonsense").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(!body.is_empty());
+}
+
+#[tokio::test]
+async fn player_info_rejects_out_of_range_player_id() {
+    let (status, _body) = get("/api/v1/game/player-info?player_id=300").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}

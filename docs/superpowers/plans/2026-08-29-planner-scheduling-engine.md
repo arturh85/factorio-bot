@@ -2319,7 +2319,7 @@ pub use render::{graphviz, mermaid_gantt, ticks_to_timestamp};
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo test -p factorio-bot-planner'`
-Expected: PASS — 41 unit tests plus 6 integration tests.
+Expected: PASS — 44 unit tests plus 6 integration tests. (Counts assume Task 4's fix round added three network tests; if a task added others, the total shifts and that is fine. Never adjust an assertion to match an observed count — report the discrepancy instead.)
 
 - [ ] **Step 6: Run the full workspace suite**
 

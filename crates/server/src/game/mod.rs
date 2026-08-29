@@ -2,31 +2,26 @@ pub mod control;
 pub mod query;
 
 use crate::state::AppState;
-use axum::routing::{get, post};
-use axum::Router;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
-pub fn router() -> Router<AppState> {
-    Router::new()
-        .route("/find-entities", get(query::find_entities))
-        .route("/find-tiles", get(query::find_tiles))
-        .route("/inventory-contents-at", get(query::inventory_contents_at))
-        .route("/player-info", get(query::player_info))
-        .route("/all-players", get(query::all_players))
-        .route("/item-prototypes", get(query::item_prototypes))
-        .route("/entity-prototypes", get(query::entity_prototypes))
-        .route("/move-player", post(control::move_player))
-        .route("/place-entity", post(control::place_entity))
-        .route("/cheat-item", post(control::cheat_item))
-        .route("/cheat-technology", post(control::cheat_technology))
-        .route(
-            "/cheat-all-technologies",
-            post(control::cheat_all_technologies),
-        )
-        .route("/insert-to-inventory", post(control::insert_to_inventory))
-        .route(
-            "/remove-from-inventory",
-            post(control::remove_from_inventory),
-        )
-        .route("/server-save", post(control::server_save))
-        .route("/add-research", post(control::add_research))
+pub fn router() -> OpenApiRouter<AppState> {
+    OpenApiRouter::new()
+        .routes(routes!(query::find_entities))
+        .routes(routes!(query::find_tiles))
+        .routes(routes!(query::inventory_contents_at))
+        .routes(routes!(query::player_info))
+        .routes(routes!(query::all_players))
+        .routes(routes!(query::item_prototypes))
+        .routes(routes!(query::entity_prototypes))
+        .routes(routes!(query::plan_path))
+        .routes(routes!(control::move_player))
+        .routes(routes!(control::place_entity))
+        .routes(routes!(control::cheat_item))
+        .routes(routes!(control::cheat_technology))
+        .routes(routes!(control::cheat_all_technologies))
+        .routes(routes!(control::insert_to_inventory))
+        .routes(routes!(control::remove_from_inventory))
+        .routes(routes!(control::server_save))
+        .routes(routes!(control::add_research))
 }

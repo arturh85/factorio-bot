@@ -2,9 +2,10 @@ use crate::error::{ApiResult, ErrorResponse};
 use crate::state::AppState;
 use axum::extract::{Query, State};
 use axum::Json;
+use factorio_bot_core::num_traits::FromPrimitive;
 use factorio_bot_core::types::{
-    AreaFilter, FactorioEntity, FactorioEntityPrototype, FactorioItemPrototype, FactorioPlayer,
-    FactorioTile, InventoryResponse, PlayerId, RequestEntity,
+    AreaFilter, Direction, FactorioEntity, FactorioEntityPrototype, FactorioItemPrototype,
+    FactorioPlayer, FactorioTile, InventoryResponse, PlayerId, Position, RequestEntity,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -63,6 +64,67 @@ pub async fn find_entities(
             &area_filter,
             params.name.clone(),
             params.entity_type.clone(),
+        )
+        .await
+        .map_err(ErrorResponse::from)?;
+    Ok(Json(entities))
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct PlanPathParams {
+    pub entity_name: String,
+    pub entity_type: String,
+    pub underground_entity_name: String,
+    pub underground_entity_type: String,
+    pub underground_max: u8,
+    pub from_position: String,
+    pub to_position: String,
+    pub to_direction: u8,
+}
+
+/// Plan path from one position to another
+#[utoipa::path(
+    get,
+    path = "/api/v1/game/plan-path",
+    tag = "Query",
+    params(PlanPathParams),
+    responses(
+        (status = 200, body = Vec<FactorioEntity>),
+        (status = 400, body = crate::error::ErrorResponse),
+    )
+)]
+pub async fn plan_path(
+    State(state): State<AppState>,
+    Query(params): Query<PlanPathParams>,
+) -> ApiResult<Vec<FactorioEntity>> {
+    let from_position: Position = params.from_position.parse().map_err(|_| {
+        ErrorResponse::bad_request(format!("invalid from_position: {}", params.from_position))
+    })?;
+    let to_position: Position = params.to_position.parse().map_err(|_| {
+        ErrorResponse::bad_request(format!("invalid to_position: {}", params.to_position))
+    })?;
+    let to_direction = Direction::from_u8(params.to_direction).ok_or_else(|| {
+        ErrorResponse::bad_request(format!("invalid to_direction: {}", params.to_direction))
+    })?;
+
+    let instance = state.instance.read().await;
+    let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
+    let world = instance
+        .world
+        .as_ref()
+        .ok_or_else(|| ErrorResponse::new("world not initialized".into(), 2))?;
+    let entities = instance
+        .rcon
+        .plan_path(
+            world,
+            &params.entity_name,
+            &params.entity_type,
+            &params.underground_entity_name,
+            &params.underground_entity_type,
+            params.underground_max,
+            &from_position,
+            &to_position,
+            to_direction,
         )
         .await
         .map_err(ErrorResponse::from)?;

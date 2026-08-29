@@ -6,16 +6,22 @@ use factorio_bot_core::process::process_control::SharedFactorioInstance;
 use miette::{IntoDiagnostic, Result};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use utoipa::OpenApi;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_swagger_ui::SwaggerUi;
 
 async fn health() -> &'static str {
     "ok"
 }
 
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
+    let (router, api) = OpenApiRouter::with_openapi(crate::openapi::ApiDoc::openapi())
         .route("/api/v1/health", get(health))
-        .nest("/api/v1/game", crate::game::router())
+        .merge(crate::game::router())
         .with_state(state)
+        .split_for_parts();
+
+    router.merge(SwaggerUi::new("/swagger-ui").url("/openapi.json", api))
 }
 
 pub async fn start(

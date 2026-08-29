@@ -16,9 +16,10 @@ import './assets/layout/flags/flags.css';
 import './plugins/configure-ynetwork';
 import App from './App.vue';
 
-router.beforeEach(function(to, from, next) {
+// Vue Router 5 deprecates the next() callback; returning undefined continues
+// the navigation, and next() is removed entirely in Router 6.
+router.beforeEach(() => {
     window.scrollTo(0, 0);
-    next();
 });
 
 const app = createApp(App);

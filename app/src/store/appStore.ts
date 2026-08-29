@@ -3,8 +3,7 @@ import {AppSettings} from '@/models/settings';
 import {invoke} from '@tauri-apps/api/core';
 import {useRestApiStore} from '@/store/restapiStore';
 
-export const useAppStore = defineStore({
-  id: 'app',
+export const useAppStore = defineStore('app', {
   state: () => ({
     settings: null as AppSettings | null
   }),

@@ -3,8 +3,7 @@ import {invoke} from '@tauri-apps/api/core';
 import {PrimeVueTreeNode} from '@/models/types';
 import {languageFromPath} from '@/utils';
 
-export const useScriptStore = defineStore({
-    id: 'script',
+export const useScriptStore = defineStore('script', {
     state: () => ({
         code: '',
         language: 'lua',

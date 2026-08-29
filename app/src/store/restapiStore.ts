@@ -2,8 +2,7 @@ import {defineStore} from 'pinia'
 import {invoke} from '@tauri-apps/api/core';
 import {useAppStore} from '@/store/appStore';
 
-export const useRestApiStore = defineStore({
-    id: 'restapi',
+export const useRestApiStore = defineStore('restapi', {
     state: () => ({
         starting: false,
         stopping: false,

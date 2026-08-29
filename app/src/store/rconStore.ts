@@ -1,8 +1,7 @@
 import {defineStore} from 'pinia'
 import {invoke} from '@tauri-apps/api/core';
 
-export const useRconStore = defineStore({
-    id: 'rcon',
+export const useRconStore = defineStore('rcon', {
     state: () => ({
         executing: false,
         success: false,

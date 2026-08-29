@@ -5,7 +5,7 @@ use factorio_bot_core::serde_json;
 use factorio_bot_core::serde_json::Value;
 use factorio_bot_core::settings::FactorioSettings;
 #[cfg(feature = "restapi")]
-use factorio_bot_restapi::settings::RestApiSettings;
+use factorio_bot_server::settings::RestApiSettings;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

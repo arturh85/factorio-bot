@@ -8,7 +8,7 @@ use crate::settings::SharedAppSettings;
 use factorio_bot_core::miette::Result;
 use factorio_bot_core::process::process_control::SharedFactorioInstance;
 #[cfg(feature = "restapi")]
-use factorio_bot_restapi::webserver;
+use factorio_bot_server::webserver;
 use tauri::State;
 
 #[allow(unused_variables)]

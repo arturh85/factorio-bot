@@ -42,7 +42,7 @@ fn typescriptify() {
   use factorio_bot_core::settings::*;
   use factorio_bot_core::types::*;
   #[cfg(feature = "restapi")]
-  use factorio_bot_restapi::settings::RestApiSettings;
+  use factorio_bot_server::settings::RestApiSettings;
   use std::fs;
   use typescript_definitions::TypeScriptifyTrait;
 

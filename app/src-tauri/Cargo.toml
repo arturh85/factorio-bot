@@ -27,7 +27,7 @@ dev-version-ext = "dev"
 [dependencies]
 # workspace
 factorio-bot-core = { path = "../../crates/core" }
-factorio-bot-restapi = { path = "../../crates/restapi", optional = true }
+factorio-bot-server = { path = "../../crates/server", optional = true }
 #factorio-bot-scripting-rune = { path = "../../crates/scripting_rune", optional = true }
 #factorio-bot-scripting-rhai = { path = "../../crates/scripting_rhai", optional = true }
 factorio-bot-scripting-lua = { path = "../../crates/scripting_lua", optional = true }
@@ -66,7 +66,7 @@ log = "0.4"
 [build-dependencies]
 typescript-definitions = { version = "0.1", package = "typescript-definitions-ufo-patch", features = ["export-typescript"] }
 factorio-bot-core = { path = "../../crates/core" }
-factorio-bot-restapi = { path = "../../crates/restapi", optional = true }
+factorio-bot-server = { path = "../../crates/server", optional = true }
 factorio-bot-scripting-lua = { path = "../../crates/scripting_lua", optional = true }
 tauri-build = { version = "2", features = [], optional = true }
 serde = { version = "1.0", features = [ "derive" ] }
@@ -84,7 +84,7 @@ default = ["gui", "restapi", "repl", "cli", "lua"]
 custom-protocol = ["tauri/custom-protocol"] # custom_protocol disables dev mode
 gui = ["dep:open", "dep:port_scanner", "tauri", "dep:tauri-build"]
 cli = ["dep:clap", "dep:clap_complete"]
-restapi = ["dep:factorio-bot-restapi"]
+restapi = ["dep:factorio-bot-server"]
 #rhai = ["dep:factorio-bot-scripting-rhai"]
 #rune = ["dep:factorio-bot-scripting-rune"]
 lua = ["dep:factorio-bot-scripting-lua"]

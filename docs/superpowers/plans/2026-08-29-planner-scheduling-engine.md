@@ -1080,9 +1080,12 @@ mod tests {
         let b = net.add(craft(&mut gen, "iron-gear-wheel", 1, "iron-plate"));
         net.infer_edges();
         net.validate().expect("inference must not introduce a cycle");
-        // Exactly one direction survives; the lower id wins deterministically.
-        assert_eq!(net.preds(b), vec![(a, 0)]);
-        assert!(net.preds(a).is_empty());
+        // Exactly one direction survives. Consumers are visited in ascending id
+        // order, so `a` is served first and keeps its incoming edge from `b`;
+        // the reverse edge would close the cycle and is discarded. The rule is
+        // "the first consumer visited keeps its edge", not "the lower id wins".
+        assert_eq!(net.preds(a), vec![(b, 0)]);
+        assert!(net.preds(b).is_empty());
     }
 
     #[test]

@@ -10,4 +10,7 @@ pub use action::{Action, ActionKind, Actor, Condition, Effect};
 pub use error::PlannerError;
 pub use ids::{ActionId, ActionIdGen, BotId, ItemId, Ticks};
 pub use network::{ActionNetwork, Edge};
+pub use schedule::{
+    schedule, travel_ticks, Schedule, ScheduledStep, StepKind, WALK_TILES_PER_TICK,
+};
 pub use state::{BotState, PlanState};

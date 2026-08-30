@@ -21,6 +21,19 @@ use miette::{miette, IntoDiagnostic, Result};
 use parking_lot::RwLock;
 use tokio::fs::create_dir;
 
+// Release builds must be self-contained, so `mods/` and `scripts/` are baked
+// into the binary at compile time and extracted into the workspace on first
+// setup. Debug builds instead point the mods path at `../../mods` in the repo
+// (see below), which is live.
+//
+// Two consequences, both of which have already cost a debugging session:
+//   * editing `mods/` has no effect on a release binary until it is rebuilt --
+//     the embedded copy is a snapshot taken by `include_dir!`;
+//   * it has no effect on an existing `workspace/mods` at all, in any build,
+//     because extraction is skipped once that directory exists. Delete it (or
+//     edit the copy in place) to pick up mod changes.
+//
+// This divergence is deliberate; do not "fix" it by dropping the embedding.
 #[cfg(not(debug_assertions))]
 pub const MODS_CONTENT: include_dir::Dir = include_dir!("mods");
 #[cfg(not(debug_assertions))]

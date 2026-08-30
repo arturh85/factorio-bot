@@ -1,6 +1,7 @@
 //! The first vertical slice: ten red science packs, four bots, no Factorio.
 
 use factorio_bot_core::test_utils::fixture_world;
+use factorio_bot_core::types::Position;
 use factorio_bot_planner::goal::{Goal, Holder};
 use factorio_bot_planner::method::expand;
 use factorio_bot_planner::method::have::registry_for;
@@ -13,6 +14,14 @@ fn world_with_furnaces(bots: &[BotId]) -> PlanState {
     for bot in bots {
         // Every bot starts the way `Planner` seeds a fresh player.
         state.gain(*bot, "stone-furnace", 2);
+    }
+    // `Planner` seeds real players where they actually stand, not all on one
+    // tile. Collocating them removes travel cost as a signal entirely, leaving
+    // bot id order to decide everything — the artificial condition that let the
+    // chain-binding gap sit unnoticed. Bot 2 stands 30 tiles east so that at
+    // least one comparison in this suite is settled by a walk.
+    if bots.contains(&BotId(2)) {
+        state.set_position(BotId(2), Position::new(30., 0.));
     }
     state
 }

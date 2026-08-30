@@ -48,10 +48,13 @@ pub enum Step {
 pub struct ExpansionCtx {
     pub state: PlanState,
     pub ids: ActionIdGen,
-    pub chains: ChainIdGen,
+    /// Driver-owned. A method that allocated or overwrote a chain would break
+    /// binding silently — the network would still schedule, just onto the wrong
+    /// bots — so methods cannot reach these two at all.
+    pub(crate) chains: ChainIdGen,
     pub chain_actor: BotId,
-    /// The chain actions emitted right now belong to, if any.
-    pub chain: Option<ChainId>,
+    /// The chain actions emitted right now belong to, if any. Driver-owned.
+    pub(crate) chain: Option<ChainId>,
     pub depth: u32,
 }
 
@@ -168,6 +171,14 @@ fn expand_goal(
         // allocating on every match instead would give each ingredient its own
         // chain and scatter a branching recipe across bots again, which is the
         // failure this exists to prevent.
+        //
+        // The flip side: any goal inside this subtree that is *not* addressed
+        // to a bot silently inherits this chain, and so gets welded to this
+        // chain's runner. `Holder` has only `Anyone` and `Bot` today and no
+        // method emits `Anyone` beneath a `Bot`, so nothing inherits wrongly.
+        // The moment a holder names somewhere reachable by every bot — a chest,
+        // once `Consolidate` exists — inheriting is the wrong default and this
+        // is the line to revisit.
         if ctx.chain.is_none() {
             ctx.chain = Some(ctx.chains.next());
         }

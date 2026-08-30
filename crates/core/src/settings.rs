@@ -31,3 +31,36 @@ impl Default for FactorioSettings {
         }
     }
 }
+
+#[derive(
+    Debug, Clone, typescript_definitions::TypeScriptify, serde::Serialize, serde::Deserialize,
+)]
+pub struct RestApiSettings {
+    pub port: i64,
+    /// Directory containing the built SPA. Relative paths resolve against the
+    /// current working directory. When the directory does not exist, the server
+    /// still starts and serves the API only.
+    #[serde(default)]
+    pub web_root: Option<String>,
+}
+
+impl Default for RestApiSettings {
+    fn default() -> Self {
+        RestApiSettings {
+            port: 7492,
+            web_root: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod restapi_settings_tests {
+    use super::RestApiSettings;
+
+    #[test]
+    fn defaults_match_the_shipped_configuration() {
+        let settings = RestApiSettings::default();
+        assert_eq!(settings.port, 7492);
+        assert_eq!(settings.web_root, None);
+    }
+}

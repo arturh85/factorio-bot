@@ -159,8 +159,14 @@ pub struct FactorioBlueprintInfo {
     pub data: Value,
 }
 
+// Deserialised through `RawFactorioIngredient` because Factorio's
+// `Ingredient.amount` is a `double` (see
+// `workspace/factorio-api-docs/runtime-api.json`, concept `Ingredient`), which
+// a bare `u32` field would reject as soon as the game reports `2.5` for a
+// fluid.
+/// One input of a recipe.
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", from = "RawFactorioIngredient")]
 pub struct FactorioIngredient {
     pub name: String,
     #[serde(default)]
@@ -168,14 +174,124 @@ pub struct FactorioIngredient {
     pub amount: u32,
 }
 
+// Deserialised through `RawFactorioProduct`, which normalises the shapes the
+// different Factorio versions report. Everything downstream keeps reading a
+// single expected `amount` and an effective `probability`.
+/// One output of a recipe: how much of what, and how likely it is produced.
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", from = "RawFactorioProduct")]
 pub struct FactorioProduct {
     pub name: String,
     #[serde(default)]
     pub product_type: String,
     pub amount: u32,
     pub probability: Box<R64>,
+}
+
+/// The `Ingredient` shape as it arrives from `mods/BotBridge`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RawFactorioIngredient {
+    pub name: String,
+    #[serde(default)]
+    pub ingredient_type: String,
+    /// `double` in the runtime API, integral for every vanilla item recipe.
+    pub amount: f64,
+}
+
+impl From<RawFactorioIngredient> for FactorioIngredient {
+    fn from(raw: RawFactorioIngredient) -> Self {
+        FactorioIngredient {
+            name: raw.name,
+            ingredient_type: raw.ingredient_type,
+            amount: round_to_u32(raw.amount),
+        }
+    }
+}
+
+/// The `Product` shape as it arrives from `mods/BotBridge`, across game
+/// versions.
+///
+/// Factorio 2.1's `ItemProduct`/`FluidProduct` (see
+/// `workspace/factorio-api-docs/runtime-api.json`) have **no `probability`
+/// field at all**: it was split into `independent_probability` (a `double`) and
+/// `shared_probability` (a `{min, max}` window on a per-craft shared roll).
+/// `amount` is optional there too — randomised outputs report `amount_min` /
+/// `amount_max` instead. Factorio 2.0 and earlier sent `probability` and a
+/// mandatory `amount`.
+///
+/// Every field is therefore optional, and missing probability information means
+/// "produced with certainty" (1.0), which is what the game does when a product
+/// declares none.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RawFactorioProduct {
+    pub name: String,
+    #[serde(default)]
+    pub product_type: String,
+    #[serde(default)]
+    pub amount: Option<f64>,
+    #[serde(default)]
+    pub amount_min: Option<f64>,
+    #[serde(default)]
+    pub amount_max: Option<f64>,
+    /// Factorio <= 2.0 only; removed in 2.1.
+    #[serde(default)]
+    pub probability: Option<f64>,
+    /// Factorio 2.1: chance for this product on its own roll.
+    #[serde(default)]
+    pub independent_probability: Option<f64>,
+    /// Factorio 2.1: the window of the per-craft shared roll in which this
+    /// product is given.
+    #[serde(default)]
+    pub shared_probability: Option<SharedProbabilityDefinition>,
+}
+
+/// `SharedProbabilityDefinition` from the runtime API: the product is given
+/// when the craft's single shared roll falls into `[min, max]`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SharedProbabilityDefinition {
+    pub min: f64,
+    pub max: f64,
+}
+
+impl From<RawFactorioProduct> for FactorioProduct {
+    fn from(raw: RawFactorioProduct) -> Self {
+        let amount = raw
+            .amount
+            .or(match (raw.amount_min, raw.amount_max) {
+                (Some(min), Some(max)) => Some((min + max) / 2.0),
+                (Some(only), None) | (None, Some(only)) => Some(only),
+                (None, None) => None,
+            })
+            .unwrap_or(0.0);
+        // A missing shared window is the full range, i.e. no restriction.
+        let shared_window = raw
+            .shared_probability
+            .map_or(1.0, |shared| (shared.max - shared.min).clamp(0.0, 1.0));
+        let probability = raw
+            .probability
+            .or(raw
+                .independent_probability
+                .map(|independent| independent * shared_window))
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+        FactorioProduct {
+            name: raw.name,
+            product_type: raw.product_type,
+            amount: round_to_u32(amount),
+            probability: Box::new(r64(probability)),
+        }
+    }
+}
+
+/// Rounds a wire amount to the whole units the rest of the codebase counts in.
+/// Negative and non-finite values become 0 rather than wrapping.
+fn round_to_u32(amount: f64) -> u32 {
+    if !amount.is_finite() || amount <= 0.0 {
+        return 0;
+    }
+    amount.round().to_u32().unwrap_or(u32::MAX)
 }
 
 pub type PlayerId = u8;
@@ -1269,5 +1385,89 @@ mod tests {
         }"#;
         let player: FactorioPlayer = serde_json::from_str(json).expect("parses");
         assert!(player.main_inventory.is_empty());
+    }
+
+    /// The exact product object a live Factorio 2.1.17 server sent, taken from
+    /// the panic in `output_parser.rs` that it caused: 2.1 has no
+    /// `probability` field on `ItemProduct`, so requiring one rejected every
+    /// recipe in the game.
+    const LIVE_2_1_PRODUCT: &str = r#"{"name":"wooden-chest","product_type":"item","amount":1}"#;
+
+    #[test]
+    fn the_live_2_1_product_parses_and_is_certain() {
+        let product: FactorioProduct = serde_json::from_str(LIVE_2_1_PRODUCT).expect("parses");
+        assert_eq!(product.name, "wooden-chest");
+        assert_eq!(product.product_type, "item");
+        assert_eq!(product.amount, 1);
+        assert_eq!(*product.probability, r64(1.0));
+    }
+
+    /// Factorio 2.0 and earlier sent `probability` directly. A workspace that
+    /// still holds the old mod must keep working.
+    #[test]
+    fn a_legacy_probability_is_taken_as_is() {
+        let json = r#"{"name":"coal","product_type":"item","amount":1,"probability":0.25}"#;
+        let product: FactorioProduct = serde_json::from_str(json).expect("parses");
+        assert_eq!(*product.probability, r64(0.25));
+    }
+
+    /// 2.1 splits the chance into an independent roll and a window on a shared
+    /// roll; the effective chance is their product.
+    #[test]
+    fn a_2_1_probability_combines_the_independent_and_shared_chances() {
+        let json = r#"{"name":"uranium-235","product_type":"item","amount":1,
+            "independent_probability":0.5,"shared_probability":{"min":0.25,"max":0.75}}"#;
+        let product: FactorioProduct = serde_json::from_str(json).expect("parses");
+        assert_eq!(*product.probability, r64(0.25));
+
+        let full_window = r#"{"name":"uranium-238","product_type":"item","amount":1,
+            "independent_probability":0.993,"shared_probability":{"min":0.0,"max":1.0}}"#;
+        let product: FactorioProduct = serde_json::from_str(full_window).expect("parses");
+        assert_eq!(*product.probability, r64(0.993));
+    }
+
+    /// `amount` is optional in 2.1: randomised outputs report a range instead.
+    #[test]
+    fn a_randomised_product_amount_is_the_midpoint_of_its_range() {
+        let json = r#"{"name":"raw-fish","product_type":"item","amount_min":1,"amount_max":5}"#;
+        let product: FactorioProduct = serde_json::from_str(json).expect("parses");
+        assert_eq!(product.amount, 3);
+        assert_eq!(*product.probability, r64(1.0));
+    }
+
+    /// `Ingredient.amount` is a `double` in the runtime API.
+    #[test]
+    fn a_fractional_ingredient_amount_rounds_to_whole_units() {
+        let json = r#"{"name":"water","ingredient_type":"fluid","amount":49.5}"#;
+        let ingredient: FactorioIngredient = serde_json::from_str(json).expect("parses");
+        assert_eq!(ingredient.amount, 50);
+    }
+
+    /// The whole recipe as the live 2.1.17 server sends it once
+    /// `mods/BotBridge` fills in `category` from `LuaRecipe.categories`.
+    /// Reconstructed from the live panic: without the `category` key the
+    /// product object ends at column 250, exactly where serde_json reported
+    /// the missing `probability`.
+    #[test]
+    fn the_live_2_1_recipe_parses() {
+        let json = r#"{"name":"wooden-chest","valid":true,"enabled":true,"category":"crafting","hidden":false,"energy":0.5,"order":"a[items]-a[wooden-chest]","ingredients":[{"name":"wood","ingredient_type":"item","amount":2}],"products":[{"name":"wooden-chest","product_type":"item","amount":1}],"group":"logistics","subgroup":"storage"}"#;
+        let recipe: FactorioRecipe = serde_json::from_str(json).expect("parses");
+        assert_eq!(recipe.category, "crafting");
+        assert_eq!(recipe.ingredients.expect("has ingredients")[0].amount, 2);
+        assert_eq!(recipe.products[0].amount, 1);
+        assert_eq!(*recipe.products[0].probability, r64(1.0));
+    }
+
+    /// `category` decides whether the planner smelts or crafts an item
+    /// (`crates/planner/src/method/have.rs`), so a payload without it must
+    /// fail loudly instead of quietly planning with an empty category.
+    #[test]
+    fn a_recipe_without_a_category_is_rejected() {
+        let json = r#"{"name":"wooden-chest","valid":true,"enabled":true,"hidden":false,"energy":0.5,"order":"a[items]-a[wooden-chest]","ingredients":[],"products":[{"name":"wooden-chest","product_type":"item","amount":1}],"group":"logistics","subgroup":"storage"}"#;
+        let err = serde_json::from_str::<FactorioRecipe>(json).expect_err("must not parse");
+        assert!(
+            err.to_string().contains("category"),
+            "expected a complaint about category, got: {err}"
+        );
     }
 }

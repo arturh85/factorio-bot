@@ -479,12 +479,27 @@ function writeout_item_prototypes()
 	writeout(0, "item_prototypes", table.concat(lines,"$"))
 end
 
+-- Expected number of items a product yields per craft.
+-- Factorio 2.1 dropped Product.probability (it is independent_probability
+-- times the shared_probability window now) and made amount optional, so every
+-- field here has to be treated as possibly nil.
 function simplify_amount(prod)
 	if prod.amount ~= nil then
 		return prod.amount
-	else
-		return (prod.amount_min + prod.amount_max) / 2 * prod.probability
 	end
+	local min = prod.amount_min or prod.amount_max or 0
+	local max = prod.amount_max or prod.amount_min or 0
+	local probability = prod.probability
+	if probability == nil then
+		local independent = prod.independent_probability or 1
+		local shared = prod.shared_probability
+		local window = 1
+		if shared ~= nil then
+			window = shared.max - shared.min
+		end
+		probability = independent * window
+	end
+	return (min + max) / 2 * probability
 end
 
 function writeout_recipes()

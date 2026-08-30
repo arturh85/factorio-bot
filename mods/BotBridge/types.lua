@@ -23,6 +23,16 @@
 
 function serialize_recipe(recipe)
     local record = table_properties(recipe, {"name", "valid", "enabled", "category", "hidden", "energy", "order"})
+    -- Factorio 2.1 replaced LuaRecipe.category (one string) with categories (an
+    -- array), so the pcall above yields nothing on 2.1. The planner branches on
+    -- the crafting category ("smelting" vs "crafting"), so keep sending it under
+    -- the old name.
+    if record.category == nil then
+        local ok, categories = pcall(function() return recipe.categories end)
+        if ok and categories ~= nil then
+            record.category = categories[1]
+        end
+    end
     -- "ingredients", "products",
     local ingredients = {}
     local ingredients_found = false
@@ -43,8 +53,21 @@ function serialize_recipe(recipe)
     return record
 end
 
+-- Factorio 2.1 (runtime-api.json, ItemProduct/FluidProduct) has no
+-- `probability` field: it became `independent_probability` plus a
+-- `shared_probability` {min, max} window. `amount` is optional there too --
+-- randomised outputs carry `amount_min`/`amount_max` instead. Send whatever
+-- this game version has and let FactorioProduct (crates/core/src/types.rs)
+-- normalise it; absent keys are simply left out of the JSON.
 function serialize_product(product)
-    return table_properties(product, {"name", "type", "amount", "probability"}, {type = "product_type"})
+    return table_properties(
+        product,
+        {
+            "name", "type", "amount", "amount_min", "amount_max",
+            "probability", "independent_probability", "shared_probability"
+        },
+        {type = "product_type"}
+    )
 end
 
 function serialize_ingredient(ingredient)

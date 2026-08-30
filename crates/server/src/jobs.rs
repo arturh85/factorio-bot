@@ -304,6 +304,14 @@ impl JobHandle {
     }
 
     /// Records the outcome of the run and frees the slot.
+    /// Records the run's outcome and frees the execution slot.
+    ///
+    /// If every strong `Arc<JobRegistry>` has already been dropped, the `Weak`
+    /// fails to upgrade and this silently does nothing. That is reachable only
+    /// at process teardown -- `AppState` is built once and lives for the
+    /// server's lifetime -- but a caller that spawns a detached task holding a
+    /// `JobHandle` must not assume the outcome is guaranteed to land, because
+    /// at shutdown it will not.
     pub fn finish(self, outcome: miette::Result<(String, String)>) {
         self.finished.store(true, Ordering::SeqCst);
         if let Some(registry) = self.registry.upgrade() {
@@ -475,6 +483,36 @@ mod tests {
             "the newest job should be retained"
         );
         assert_eq!(registry.list().len(), 2);
+        // `list()` is documented newest-first. Without this the ordering is
+        // free to reverse under a refactor with the suite staying green.
+        assert_eq!(
+            registry.list().iter().map(|job| job.id).collect::<Vec<_>>(),
+            vec![ids[2], ids[1]],
+            "list() must be newest-first"
+        );
+    }
+
+    #[test]
+    fn a_running_job_is_not_evicted_by_the_history_cap() {
+        // Structurally guaranteed today -- insertion is push_back, eviction is
+        // pop_front, and only one job runs at a time, so the running job is
+        // always the newest element. Asserted anyway: that argument rests on
+        // three separate properties, and a change to any one of them would
+        // silently start evicting the job whose handle is still live.
+        let registry = JobRegistry::new(1);
+        let first = registry.try_start(Some("a.lua".into())).expect("start");
+        let first_id = first.id();
+        first.finish(Ok((String::new(), String::new())));
+
+        let running = registry.try_start(Some("b.lua".into())).expect("start");
+        assert!(
+            registry.get(running.id()).is_some(),
+            "the running job must survive an eviction that the cap forces"
+        );
+        assert!(
+            registry.get(first_id).is_none(),
+            "the finished job is the one that should have been evicted"
+        );
     }
 
     #[test]

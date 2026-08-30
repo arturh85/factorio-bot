@@ -2012,9 +2012,39 @@ Drop `pub mod plan;` from `crates/core/src/lib.rs` and the `task_graph` line fro
 Run: `cargo clippy --workspace --all-features --all-targets -- --deny warnings` then `cargo test --workspace`
 Expected: green, with no reference to `TaskGraph` remaining: `grep -rn "TaskGraph\|PlanBuilder" --include="*.rs" crates app` returns nothing.
 
+The changelog is generated from commit messages by git-cliff, wired as a `cargo-release` pre-release hook (`release.toml:2`, config in `Cargo.toml`). So the `BREAKING CHANGE:` footer below is the only thing that carries this to users at release time — a script in the wild calling `plan.*` breaks at *runtime*, not at build time, and the published Lua API docs regenerate silently from `lua_docs.rs`. The footer is not decoration; write it.
+
 ```bash
 cargo fmt -p factorio-bot-core -p factorio-bot-scripting-lua
-git commit -m "feat!: replace the task-graph planner with the goal planner and executor" -- crates app scripts
+git commit -F- -- crates app scripts <<'MSG'
+feat!: replace the task-graph planner with the goal planner and executor
+
+The Lua `plan.*` global is removed and replaced by `goal.*`, backed by the
+new goal planner and the executor crate. `world.*` and `rcon.*` are
+unchanged.
+
+BREAKING CHANGE: the Lua `plan.*` API is removed. Scripts calling
+`plan.mine`, `plan.place`, `plan.walk`, `plan.group_start`,
+`plan.group_end`, `plan.finalize`, `plan.task_graph_graphviz` or
+`plan.task_graph_mermaid_gantt` fail at runtime rather than at build time.
+
+Migrate as follows:
+  plan.mine / plan.place / plan.walk  ->  goal.have(item, count)
+      The planner derives mining, placement and travel from the goal;
+      you no longer schedule them individually.
+  plan.group_start / plan.group_end   ->  removed, no replacement.
+      Grouping is derived from the goal decomposition. To force specific
+      work onto a specific bot, use the planner's pin rather than a
+      Lua-side bracket.
+  plan.finalize                       ->  goal.schedule(handle, bots)
+  plan.task_graph_graphviz            ->  goal.graphviz(handle)
+  plan.task_graph_mermaid_gantt       ->  removed; render from the
+      Schedule instead.
+
+Execution is now explicit and non-blocking: goal.execute(handle) returns
+a run handle, goal.progress(handle) reports live status, and
+goal.wait(handle) blocks for completion.
+MSG
 ```
 
 ---

@@ -12,20 +12,11 @@ use factorio_bot_core::factorio_blueprint::BlueprintCodec;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::scripts::resolve_write_path;
 use factorio_bot_core::serde_json;
-use factorio_bot_core::types::{FactorioBlueprintInfo, PlayerId, Position, Rect};
+use factorio_bot_core::types::{FactorioBlueprintInfo, PlayerId, Rect};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::{path_error, relative_to};
-
-/// Reads a `{x=..., y=...}` table a script passed in.
-///
-/// A missing key arrives as `Nil`, whose conversion to `f64` fails, so a bare
-/// `world.find_free_resource_rect("iron-ore", 2, 2, {})` reports an error
-/// instead of unwrapping `None` and aborting the process.
-fn position_from(table: &LuaTable) -> LuaResult<Position> {
-    Ok(Position::new(table.get("x")?, table.get("y")?))
-}
+use super::{path_error, position_from_lua, relative_to};
 
 /// See [`crate::globals::create_lua_globals`] for why the sandbox needs both a
 /// `scripts_root` (the boundary) and a `script_dir` (what relative paths are
@@ -120,7 +111,7 @@ end
         lua.create_function(
             move |_lua, (ore_name, width, height, near): (String, u32, u32, LuaTable)| {
                 let patches = world.entity_graph.resource_patches(ore_name.as_str());
-                let near = position_from(&near)?;
+                let near = position_from_lua(&near, "near")?;
                 for patch in patches {
                     let rect = patch.find_free_rect(width, height, &near);
                     if let Some(rect) = rect {
@@ -193,7 +184,7 @@ end
                 Option<String>,
                 Option<String>,
             )| {
-                let search_center = position_from(&search_center)?;
+                let search_center = position_from_lua(&search_center, "search_center")?;
                 let entities = world.entity_graph.find_entities_in_radius(
                     search_center,
                     radius,

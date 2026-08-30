@@ -1,8 +1,28 @@
+// Reachable from one line of user Lua, and this crate builds with
+// `panic = "abort"`, so every panic here is a remote kill of the whole server
+// process rather than a failed script. Two distinct classes lived in this
+// file: argument parsing (attacker input) and RCON call results (the game
+// server simply being unreachable). The lint keeps both out.
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+
 use factorio_bot_core::factorio::rcon::FactorioRcon;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::types::{AreaFilter, PlayerId, Position, RequestEntity};
 use std::sync::Arc;
+
+use super::position_from_lua;
+
+/// An RCON call that fails means the game server is unreachable, not that the
+/// script was wrong.
+///
+/// This is the ordinary unhappy path, not an attack: unwrapping it meant the
+/// Factorio server dropping its connection mid-script took the bot server down
+/// with it. No attacker required, and looking for a security bug would have
+/// walked straight past it.
+fn rcon_error(err: impl std::fmt::Display) -> LuaError {
+    LuaError::RuntimeError(format!("rcon: {err}"))
+}
 
 pub fn create_lua_rcon(
     lua: &Lua,
@@ -53,17 +73,15 @@ end
             )| {
                 let _rcon = rcon.clone();
                 let _lua = lua;
-                let search_center = Position::new(
-                    search_center.get("x").unwrap(),
-                    search_center.get("y").unwrap(),
-                );
+                let search_center = position_from_lua(&search_center, "search_center");
                 async move {
+                    let search_center = search_center?;
                     let filter = AreaFilter::PositionRadius((search_center, Some(radius)));
                     let result = _rcon
                         .as_ref()
                         .find_entities_filtered(&filter, search_name, search_type)
                         .await
-                        .unwrap();
+                        .map_err(rcon_error)?;
                     _lua.to_value(&result)
                 }
             },
@@ -87,7 +105,11 @@ end
         lua.create_async_function(move |_lua, message: String| {
             let _rcon = rcon.clone();
             async move {
-                _rcon.as_ref().print(message.as_str()).await.unwrap();
+                _rcon
+                    .as_ref()
+                    .print(message.as_str())
+                    .await
+                    .map_err(rcon_error)?;
                 Ok(())
             }
         })?,
@@ -114,7 +136,7 @@ end
                     .as_ref()
                     .add_research(technology_name.as_str())
                     .await
-                    .unwrap();
+                    .map_err(rcon_error)?;
                 Ok(())
             }
         })?,
@@ -141,7 +163,7 @@ end
                     .as_ref()
                     .cheat_technology(technology_name.as_str())
                     .await
-                    .unwrap();
+                    .map_err(rcon_error)?;
                 Ok(())
             }
         })?,
@@ -163,7 +185,11 @@ end
         lua.create_async_function(move |_lua, (): ()| {
             let _rcon = rcon.clone();
             async move {
-                _rcon.as_ref().cheat_all_technologies().await.unwrap();
+                _rcon
+                    .as_ref()
+                    .cheat_all_technologies()
+                    .await
+                    .map_err(rcon_error)?;
                 Ok(())
             }
         })?,
@@ -193,7 +219,7 @@ end
                         .as_ref()
                         .cheat_item(player_id, name.as_str(), count)
                         .await
-                        .unwrap();
+                        .map_err(rcon_error)?;
                     Ok(())
                 }
             },
@@ -235,9 +261,9 @@ end
                 let _rcon = rcon.clone();
                 let _world = world.clone();
                 let _lua = lua;
-                let position =
-                    Position::new(position.get("x").unwrap(), position.get("y").unwrap());
+                let position = position_from_lua(&position, "position");
                 async move {
+                    let position = position?;
                     let result = _rcon
                         .as_ref()
                         .place_blueprint(
@@ -251,7 +277,7 @@ end
                             &_world,
                         )
                         .await
-                        .unwrap();
+                        .map_err(rcon_error)?;
                     _lua.to_value(&result)
                 }
             },
@@ -287,14 +313,14 @@ end
             )| {
                 let _rcon = rcon.clone();
                 let _lua = lua;
-                let position =
-                    Position::new(position.get("x").unwrap(), position.get("y").unwrap());
+                let position = position_from_lua(&position, "position");
                 async move {
+                    let position = position?;
                     let result = _rcon
                         .as_ref()
                         .cheat_blueprint(player_id, blueprint, &position, direction, force_build)
                         .await
-                        .unwrap();
+                        .map_err(rcon_error)?;
                     _lua.to_value(&result)
                 }
             },
@@ -323,14 +349,14 @@ end
                 let _rcon = rcon.clone();
                 let _world = world.clone();
                 let _lua = lua;
-                let position =
-                    Position::new(position.get("x").unwrap(), position.get("y").unwrap());
+                let position = position_from_lua(&position, "position");
                 async move {
+                    let position = position?;
                     let result = _rcon
                         .as_ref()
                         .revive_ghost(player_id, name.as_str(), &position, &_world)
                         .await
-                        .unwrap();
+                        .map_err(rcon_error)?;
                     _lua.to_value(&result)
                 }
             },
@@ -358,14 +384,14 @@ end
             move |_lua, (player_id, position, radius): (PlayerId, LuaTable, Option<f64>)| {
                 let _rcon = rcon.clone();
                 let _world = world.clone();
-                let position =
-                    Position::new(position.get("x").unwrap(), position.get("y").unwrap());
+                let position = position_from_lua(&position, "position");
                 async move {
+                    let position = position?;
                     _rcon
                         .as_ref()
                         .move_player(&_world, player_id, &position, radius)
                         .await
-                        .unwrap();
+                        .map_err(rcon_error)?;
                     Ok(())
                 }
             },
@@ -394,9 +420,9 @@ end
             move |_lua, (player_id, name, position, count): (PlayerId, String, LuaTable, Option<u32>)| {
                 let _rcon = rcon.clone();
                 let _world = world.clone();
-                let position =
-                    Position::new(position.get("x").unwrap(), position.get("y").unwrap());
+                let position = position_from_lua(&position, "position");
                 async move {
+                    let position = position?;
                     _rcon
                         .as_ref()
                         .player_mine(
@@ -407,7 +433,7 @@ end
                             count.unwrap_or(1),
                         )
                         .await
-                        .unwrap();
+                        .map_err(rcon_error)?;
                     Ok(())
                 }
             },
@@ -440,7 +466,7 @@ end
                         .as_ref()
                         .player_craft(&_world, player_id, name.as_str(), count.unwrap_or(1))
                         .await
-                        .unwrap();
+                        .map_err(rcon_error)?;
                     Ok(())
                 }
             },
@@ -483,7 +509,7 @@ end
                     .as_ref()
                     .inventory_contents_at(request_entities?)
                     .await
-                    .unwrap();
+                    .map_err(rcon_error)?;
                 _lua.to_value(&res)
             }
         })?,
@@ -513,15 +539,15 @@ end
                 let _rcon = rcon.clone();
                 let _world = world.clone();
                 let _lua = lua;
-                let position =
-                    Position::new(position.get("x").unwrap(), position.get("y").unwrap());
+                let position = position_from_lua(&position, "position");
 
                 async move {
+                    let position = position?;
                     let result = _rcon
                         .as_ref()
                         .place_entity(player_id, name, position, direction, &_world)
                         .await
-                        .unwrap();
+                        .map_err(rcon_error)?;
                     _lua.to_value(&result)
                 }
             },
@@ -560,9 +586,9 @@ end
             )| {
                 let _rcon = rcon.clone();
                 let _world = world.clone();
-                let position =
-                    Position::new(position.get("x").unwrap(), position.get("y").unwrap());
+                let position = position_from_lua(&position, "position");
                 async move {
+                    let position = position?;
                     _rcon
                         .as_ref()
                         .insert_to_inventory(
@@ -575,7 +601,7 @@ end
                             &_world,
                         )
                         .await
-                        .unwrap();
+                        .map_err(rcon_error)?;
                     Ok(())
                 }
             },
@@ -614,9 +640,9 @@ end
             )| {
                 let _rcon = rcon.clone();
                 let _world = world.clone();
-                let position =
-                    Position::new(position.get("x").unwrap(), position.get("y").unwrap());
+                let position = position_from_lua(&position, "position");
                 async move {
+                    let position = position?;
                     _rcon
                         .as_ref()
                         .remove_from_inventory(
@@ -629,7 +655,7 @@ end
                             &_world,
                         )
                         .await
-                        .unwrap();
+                        .map_err(rcon_error)?;
                     Ok(())
                 }
             },

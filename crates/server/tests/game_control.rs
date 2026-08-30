@@ -98,8 +98,10 @@ async fn get_is_not_allowed_on_mutating_routes() {
 }
 
 /// A `FactorioInstance` with an empty world (no players) and a poolless rcon:
-/// any real rcon round-trip panics inside `FactorioRcon::send` on
-/// `self.pool.as_ref().unwrap()` (`crates/core/src/factorio/rcon.rs:85`).
+/// any real rcon round-trip fails inside `FactorioRcon::send`, which returns
+/// "rcon is not connected" when there is no pool. It used to panic there
+/// instead; the tests below relied on that and still hold, because a failed
+/// round-trip cannot produce the success status they assert.
 fn unknown_player_state() -> AppState {
     AppState::new(
         Arc::new(RwLock::new(Some(FactorioInstance {
@@ -123,10 +125,10 @@ fn unknown_player_state() -> AppState {
 /// `require_player` guard in `control.rs`: `FactorioRcon::move_player` has no
 /// player-existence check of its own, it goes straight to `player_path` ->
 /// `async_request_player_path` -> `remote_call` -> `send`. With
-/// `FactorioRcon::new_empty()` (no pool), reaching `send` panics
+/// `FactorioRcon::new_empty()` (no pool), reaching `send` fails
 /// unconditionally, regardless of whether player 42 exists. So if the guard
-/// were deleted or moved after the rcon call, this test would fail by panic,
-/// not by a wrong-but-passing assertion.
+/// were deleted or moved after the rcon call, this test would fail on the
+/// status code, not pass on a wrong-but-plausible one.
 #[tokio::test]
 async fn move_player_rejects_an_unknown_player_before_calling_rcon() {
     let response = build_router(unknown_player_state(), None)

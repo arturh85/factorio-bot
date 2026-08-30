@@ -120,6 +120,7 @@ pub async fn run_lua(
 
 #[cfg(test)]
 mod tests {
+    use factorio_bot_core::factorio::rcon::FactorioRcon;
     use factorio_bot_core::serde_json::json;
     use factorio_bot_core::test_utils::fixture_world;
     use std::sync::Arc;
@@ -164,6 +165,82 @@ mod tests {
             .await
             .map(|_| ());
         (dir, outcome)
+    }
+
+    /// Like [`sandboxed`], but with an RCON handle, because `create_lua_rcon`
+    /// only registers the `rcon.*` table when one exists — which is exactly
+    /// the configuration the HTTP execute endpoint runs in.
+    ///
+    /// The handle has no connection pool, so any call that reaches the socket
+    /// fails. That is deliberate: these tests are about the argument parsing
+    /// that happens *before* the call, and a test that needed a live Factorio
+    /// server would not run here at all.
+    async fn sandboxed_with_rcon(code: &str) -> (tempfile::TempDir, Result<()>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let world = Arc::new(fixture_world());
+        let rcon = Arc::new(FactorioRcon::new_empty());
+        let mut planner = Planner::new(world, Some(rcon));
+        let outcome = run_lua(&mut planner, code, None, &root, 1, false)
+            .await
+            .map(|_| ());
+        (dir, outcome)
+    }
+
+    /// Guards the helper itself: if `rcon.mine` were misspelled the call would
+    /// be `attempt to call a nil value`, which is an error and not a panic, so
+    /// the two tests below would pass against the vulnerable code without ever
+    /// reaching the argument parsing they exist to cover.
+    #[tokio::test]
+    async fn the_rcon_table_is_registered_when_a_handle_exists() {
+        let (_dir, result) = sandboxed_with_rcon(
+            r#"
+            assert(type(rcon) == "table", "rcon table missing")
+            assert(type(rcon.mine) == "function", "rcon.mine missing")
+            "#,
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn an_rcon_binding_given_a_table_without_coordinates_reports_an_error() {
+        // `rcon.mine(player_id, name, position, count)` -- the position is the
+        // third argument. An empty table has no `x`, and the old
+        // `position.get("x").unwrap()` aborted the process on it.
+        let (_dir, result) = sandboxed_with_rcon(r#"rcon.mine(1, "iron-ore", {}, 1)"#).await;
+        assert!(result.is_err(), "a table with no x/y must be refused");
+        assert_reported_not_panicked(&result);
+    }
+
+    #[tokio::test]
+    async fn an_rcon_binding_given_a_non_numeric_coordinate_reports_an_error() {
+        let (_dir, result) =
+            sandboxed_with_rcon(r#"rcon.mine(1, "iron-ore", {x="north", y=0}, 1)"#).await;
+        assert!(result.is_err(), "a non-numeric coordinate must be refused");
+        assert_reported_not_panicked(&result);
+    }
+
+    /// The availability half: no attacker involved. With a handle that has no
+    /// connection, a well-formed call must report that the game server is
+    /// unreachable rather than take the process down -- which is what happens
+    /// when Factorio drops its connection mid-script.
+    #[tokio::test]
+    async fn an_rcon_call_that_cannot_reach_the_game_reports_an_error() {
+        let (_dir, result) = sandboxed_with_rcon(r#"rcon.print("hello")"#).await;
+        assert!(result.is_err(), "an unreachable rcon call must be refused");
+        assert_reported_not_panicked(&result);
+    }
+
+    #[tokio::test]
+    async fn an_rcon_call_with_a_valid_position_that_cannot_reach_the_game_reports_an_error() {
+        // Proves the position parse *succeeded* and the failure came from the
+        // call: the same script with a valid position gets past the argument
+        // check that the two tests above stop at.
+        let (_dir, result) =
+            sandboxed_with_rcon(r#"rcon.mine(1, "iron-ore", {x=0, y=0}, 1)"#).await;
+        assert!(result.is_err(), "an unreachable rcon call must be refused");
+        assert_reported_not_panicked(&result);
     }
 
     #[tokio::test]

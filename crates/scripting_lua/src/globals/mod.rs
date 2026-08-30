@@ -7,6 +7,7 @@ pub(crate) mod world;
 
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::scripts::ScriptPathError;
+use factorio_bot_core::types::Position;
 use std::path::Path;
 
 /// Re-expresses a script-relative path as a path relative to the sandbox root.
@@ -43,6 +44,22 @@ pub(crate) fn relative_to(
         Ok(rest) => rest.to_string_lossy().into_owned(),
         Err(_) => requested.to_owned(),
     })
+}
+
+/// Reads an `{x=, y=}` table a script passed in, refusing anything else.
+///
+/// `table.get("x").unwrap()` panicked on a missing or non-numeric field —
+/// `rcon.mine(1, "iron-ore", {}, 1)` was enough — and under `panic = "abort"`
+/// that ends the process rather than the script. `argument` names the
+/// parameter so the message says which one was wrong.
+pub(crate) fn position_from_lua(table: &LuaTable, argument: &str) -> LuaResult<Position> {
+    let x: f64 = table
+        .get("x")
+        .map_err(|_| LuaError::RuntimeError(format!("{argument}: expected a number at `x`")))?;
+    let y: f64 = table
+        .get("y")
+        .map_err(|_| LuaError::RuntimeError(format!("{argument}: expected a number at `y`")))?;
+    Ok(Position::new(x, y))
 }
 
 /// Every filesystem binding reports a refused path the same way.

@@ -15,7 +15,7 @@ use crate::types::{
     ActionId, AreaFilter, Direction, FactorioEntity, FactorioForce, FactorioPlayer, FactorioTile,
     InventoryResponse, PlayerId, Pos, Position, Rect, RequestEntity,
 };
-use miette::{Context, IntoDiagnostic, Result};
+use miette::{miette, Context, IntoDiagnostic, Result};
 use paris::info;
 use parking_lot::RwLock;
 use rcon::Connection;
@@ -56,8 +56,11 @@ impl FactorioRcon {
         })
     }
 
-    /// Create a FactorioRcon instance without any connection which would fail if used
-    /// Why? because LuaRconBuilder requires FactorioRcon which i didnt want to change to an option.
+    /// Create a FactorioRcon instance without any connection; every call
+    /// through [`FactorioRcon::send`] returns a "not connected" error.
+    ///
+    /// Why? because LuaRconBuilder requires FactorioRcon which i didnt want to
+    /// change to an option. It used to *panic* rather than fail — see `send`.
     pub fn new_empty() -> Self {
         FactorioRcon {
             pool: None,
@@ -82,7 +85,16 @@ impl FactorioRcon {
             info!("<cyan>rcon</>  ⮜ <green>{}</>", command);
         }
         // let started = Instant::now();
-        let mut conn = self.pool.as_ref().unwrap().get().await.into_diagnostic()?;
+        // Every rcon call funnels through here, including the `rcon.*` Lua
+        // bindings. `new_empty()` builds a poolless handle by design, and this
+        // used to `unwrap()` it — so "not connected" aborted the process
+        // instead of returning, and under `panic = "abort"` that takes the
+        // whole server with it rather than failing the one call.
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| miette!("rcon is not connected"))?;
+        let mut conn = pool.get().await.into_diagnostic()?;
         let result = conn
             .cmd(&String::from(command).add("\n"))
             .await

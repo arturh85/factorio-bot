@@ -2999,7 +2999,9 @@ git commit -m "feat(app): run scripts over http and stream their output live"
 
 > **This task's scope has shrunk to roughly one file — measure before you plan work.** Tasks 6, 7 and 8 each deviated to fix the views they broke, rather than deferring them here, because leaving `pnpm run lint` red would have cost the following tasks their typecheck signal. Those deviations were accepted and they absorbed most of this task.
 >
-> As of now `grep -rln "@tauri-apps" app/src` returns exactly **two** files: `app/src/store/scriptStore.ts` (which Task 10 owns) and `app/src/pages/SettingsPage.vue`. So after Task 10 this task is `SettingsPage.vue` alone.
+> As of now `grep -rln "@tauri-apps" app/src` returns **two** files: `app/src/pages/SettingsPage.vue` and `app/src/plugins/configure-ynetwork.js` (which imports `@tauri-apps/plugin-http` and which **Task 12 deletes**). `scriptStore.ts` was the third and Task 10 has migrated it.
+>
+> **Correction to an earlier version of this note**, which claimed the second file was `scriptStore.ts` and that this task would be `SettingsPage.vue` alone: that count came from a grep restricted to `--include='*.vue' --include='*.ts'`, which silently excluded the `.js` file. The number was reported as measured fact and was measured on a narrower set than the claim. Run the grep unfiltered.
 >
 > What remains there is `@tauri-apps/plugin-dialog`, used for **two native file pickers that browse the *server's* filesystem** — which was already wrong in the desktop app whenever the server was remote, and is simply impossible in a browser. Replace with text inputs plus server-side validation; `GET /api/v1/fs/exists` already exists for exactly this and the typed client already wraps it.
 >

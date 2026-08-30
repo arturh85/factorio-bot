@@ -21,6 +21,9 @@
 - **The scripts root is `ensure_scripts_dir(workspace_path)`** — `workspace_path/scripts`, canonicalized. It is never `./scripts` relative to the process's working directory. `factorio_bot_core::scripts::scripts_dir` is the old CWD-first resolver and must not gain new callers.
 - **Every path check is canonicalize-then-`starts_with(root)`.** Never `contains("..")`, never a substring test.
 - **Every new route is registered in `crates/server/src/manage/mod.rs`'s `router()` via `routes!`** and asserted by `crates/server/tests/openapi.rs`. Query-parameter structs carry `#[into_params(parameter_in = Query)]` — without it utoipa publishes them as *path* parameters (this was finding I1 of plan 3).
+- **Mutation checks name an input class, not a line.** A spec that says "delete guard X and test Y goes red" is only valid when X is the *sole* gate on Y's input. Task 1 proved the failure mode: `resolve_write_path`'s three guards are mutually redundant, so deleting any one of them killed zero tests while the tests themselves were perfectly sound — an absolute path is caught by the `is_absolute` guard, a `..` path that escapes is caught by the `target` bound check even with the `parent` check gone, and each masks the other. Before writing a mutation step, ask which *input* only that guard rejects. If no such input exists, the guard cannot be defended by a test and the honest move is to say so in the report rather than manufacture a passing mutation.
+- **A mutation must be observed to land.** Task 1's first sweep reported all-green and was wrong: the loop ran under zsh, which does not word-split unquoted variables, so the edit silently never applied. Assert the file actually changed before trusting the result.
+- **A mutation that makes a test *hang* is not a signal.** Bound every test that consumes a stream with an explicit timeout, so the mutated behaviour is a failure with a name rather than a suite that never returns.
 - **Cargo runs inside the Nix devShell:** `nix develop --command bash -c 'eval "$(mise env -s bash)"; <command>'`.
 - **Test names state the behaviour**, not the function under test: `a_script_cannot_write_outside_the_scripts_root`, not `test_file_write`.
 - Every task ends green on `cargo clippy --workspace --all-features --all-targets -- --deny warnings` and `cargo fmt --all -- --check`.
@@ -1085,7 +1088,9 @@ lua = ["dep:factorio-bot-scripting-lua"]
 
 - [ ] **Step 6: Prove the slot guard is load-bearing (mutation)**
 
-Make `try_start` always take the slot (delete the `if let Some(running) = inner.running { return Err(running) }` branch). `a_second_start_is_refused_while_one_is_running` must fail. Record the failure set. Restore.
+Make `try_start` always take the slot (delete the `if let Some(running) = inner.running { return Err(running) }` branch). `a_second_start_is_refused_while_one_is_running` must fail, and so must `a_second_execution_is_refused_with_the_running_job_id` once Task 6 lands.
+
+This mutation *is* valid under the rule in Global Constraints: that branch is the sole gate on "a second start while one is running", and no other check rejects that input. Record the full failure set — every failing test name, not a count. Restore.
 
 - [ ] **Step 7: Commit**
 
@@ -1363,7 +1368,11 @@ The registry gets a process-wide `shutdown: watch::Receiver<bool>` (or a `Cancel
 
 - [ ] **Step 6: Prove the terminator is load-bearing (mutation)**
 
-Remove the `JobEvent::Finished` stream terminator (let the stream continue after the terminal event). `the_event_stream_replays_a_finished_job_and_ends` must hang and be killed by its timeout rather than passing. Record it. Restore.
+Remove the `JobEvent::Finished` stream terminator (let the stream continue after the terminal event).
+
+Wrap the body collection in `the_event_stream_replays_a_finished_job_and_ends` in `tokio::time::timeout(Duration::from_secs(5), ...)` with an `.expect("the stream must end once the job has finished")` **before** running the mutation, so the mutated build fails on a named assertion in five seconds instead of hanging the suite. A hang is not a test result — CI reports it as a timeout with no attribution, and a developer running the suite locally cannot tell it from a deadlock elsewhere.
+
+Confirm that test, and only that test, goes red. Record the full failure set. Restore.
 
 - [ ] **Step 7: Commit**
 

@@ -42,10 +42,10 @@ for _, ore in ipairs({"coal", "stone", "copper-ore"}) do
   assert(w > 0, "no " .. ore .. " patch in the attached world")
 end
 
--- 4. The whole point: plan and schedule.
-local plan = goal.have("iron-plate", 5)
-local makespan = goal.schedule(plan, 1)
-print("scheduled: makespan=" .. tostring(makespan))
-assert(makespan > 0, "a plan built from a snapshot must take a positive number of ticks")
+-- 4. The whole point: plan and schedule, in one call now (this run has one
+--    bot, so goal.plan's default -- the whole roster -- is that one bot).
+local plan = goal.plan(goal.have("iron-plate", 5))
+print("scheduled: makespan=" .. tostring(plan.makespan))
+assert(plan.makespan > 0, "a plan built from a snapshot must take a positive number of ticks")
 
 print("end attach smoke")

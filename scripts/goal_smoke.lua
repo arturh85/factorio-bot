@@ -29,35 +29,44 @@ for _, id in ipairs(world.all_bots and world.all_bots() or {1}) do
   end
 end
 
-local p = goal.have("iron-plate", 5)
-print("expanded ok")
+local g = goal.have("iron-plate", 5)
+print("goal value built")
 
--- Dump the plan BEFORE scheduling: if the world says bot 1 holds a furnace
--- but the scheduler disagrees, the plan's own shape is the place to look.
-local dot = goal.graphviz(p)
+-- Expansion and scheduling used to be two calls -- `goal.have` expanded the
+-- network, then `goal.schedule(plan, n)` re-expanded it for whichever bot
+-- count was asked for, which is exactly how a plan built for N bots could be
+-- scheduled onto fewer and fail on a per-bot precondition (the smoke test
+-- this file replaced hit that live). `goal.plan` does both at once, against
+-- one roster, so that mismatch is no longer something a script can even
+-- write: there is no unscheduled plan to inspect before this call, only a
+-- scheduled one after it.
+local bots = (type(all_bots) == "table" and #all_bots > 0) and #all_bots or 1
+print("planning over " .. tostring(bots) .. " bot(s)")
+local p = goal.plan(g)
+print("scheduled: makespan=" .. tostring(p.makespan))
+assert(p.makespan > 0, "a real plan must take a positive number of ticks")
+
+local dot = p:graphviz()
 print("plan actions: " .. tostring(select(2, dot:gsub("%[label=", ""))))
 for line in dot:gmatch("[^\n]+") do
   if line:find("stone%-furnace") or line:find("Place") or line:find("Insert") then
     print("  " .. line:gsub("^%s+", ""))
   end
 end
-
--- Schedule over the ACTUAL roster, not a hardcoded 1. Scheduling a plan that
--- was expanded for N bots onto fewer used to fail on a per-bot precondition --
--- goal.schedule now re-expands for the bots asked for, and this is what proves
--- it, because a hardcoded 1 only ever exercises the single-bot path.
-local bots = (type(all_bots) == "table" and #all_bots > 0) and #all_bots or 1
-print("scheduling over " .. tostring(bots) .. " bot(s)")
-local makespan = goal.schedule(p, bots)
-print("scheduled: makespan=" .. tostring(makespan))
-assert(makespan > 0, "a real plan must take a positive number of ticks")
-
-local dot = goal.graphviz(p)
 assert(#dot > 0, "graphviz produced nothing")
 print("graphviz bytes: " .. tostring(#dot))
 
-local gantt = goal.gantt(p, "smoke")
+local gantt = p:gantt("smoke")
 assert(#gantt > 0, "gantt produced nothing")
 print("gantt bytes: " .. tostring(#gantt))
+
+-- The capability this whole increment buys: a plan's shape can be asserted on
+-- directly, with no running game involved.
+local p2 = goal.plan(goal.all { goal.have("iron-plate", 5), goal.researched("automation") })
+assert(p2:count { kind = "place", entity = "stone-furnace" } <= #p2.bots,
+       "no more furnaces than bots")
+for _, s in ipairs(p2:find { kind = "mine" }) do
+    assert(s.count > 0, "a mine step for nothing is a planner bug")
+end
 
 print("end goal smoke")

@@ -17,13 +17,15 @@ end
 
 -- Was: one `plan.mine` per bot per entity, round-robining a list of nearby
 -- entities by index arithmetic -- and carrying a `FIXME: use all bots`, because
--- it never used them all. `goal.have` owns both of those choices now, which
--- entity and which bot, so the caller only says how many it wants in the end.
--- The `entities` argument is gone with the index math that consumed it.
+-- it never used them all. `goal.have` owns which entity to mine, and
+-- `goal.plan` owns which bots do the work: it always plans and schedules
+-- against the run's whole roster, so the caller only says how many items it
+-- wants in the end. The `entities` argument is gone with the index math that
+-- consumed it, and so is the `bots` count that used to be threaded through to
+-- `goal.schedule` -- passing it on would only reintroduce the roster
+-- mismatch `goal.plan` exists to make unrepresentable.
 function mine_with_bots(bots, item_name, count)
-    local plan = goal.have(item_name, count)
-    goal.schedule(plan, #bots)
-    return plan
+    return goal.plan(goal.have(item_name, count))
 end
 
 -- Rocks are terrain to clear, not an item count: there is no meaningful

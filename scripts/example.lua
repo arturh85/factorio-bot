@@ -51,12 +51,13 @@ rcon.move(1, {x=5, y=5}, 1.0)
 print("Moved bot 1 towards (5, 5)")
 
 -- Planning needs the cached world (recipes, resources), which connect mode does
--- not have -- hence the pcall rather than an unconditional call.
-local ok, plan = pcall(goal.have, "iron-plate", 1)
+-- not have -- hence the pcall. `goal.have` itself is pure and cannot fail on
+-- that account; `goal.plan` is what expands and schedules against the world,
+-- so that is the call this guards now.
+local ok, plan = pcall(goal.plan, goal.have("iron-plate", 1))
 if ok then
-    goal.schedule(plan, 1)
     print("\nSchedule (Mermaid Gantt):")
-    print(goal.gantt(plan, "Test Plan"))
+    print(plan:gantt("Test Plan"))
 else
     print("SKIP: goal planning needs world data (expected in --connect mode): " .. tostring(plan))
 end

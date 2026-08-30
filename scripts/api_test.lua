@@ -60,11 +60,11 @@ print("RCON move: walked bot 1 to (10, 10) then (20, 20) ✓")
 
 -- The gantt chart now comes from a scheduled goal rather than from a
 -- hand-built task graph.
-local plan = goal.have("iron-plate", 1)
-local makespan = goal.schedule(plan, 1)
+local plan = goal.plan(goal.have("iron-plate", 1))
+local makespan = plan.makespan
 print("Goal schedule: " .. (makespan > 0 and "PASS ✓ (" .. makespan .. " ticks)" or "FAIL ✗"))
 
-local gantt = goal.gantt(plan, "API Test Plan")
+local gantt = plan:gantt("API Test Plan")
 print("Goal gantt: " .. (gantt ~= nil and "PASS ✓" or "FAIL ✗"))
 print("\nGantt chart generated:")
 print(gantt)

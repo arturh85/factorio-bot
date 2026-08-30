@@ -33,7 +33,8 @@ pub fn router() -> OpenApiRouter<AppState> {
     let router = router
         .routes(routes!(execute::post_execute))
         .routes(routes!(execute::list_jobs))
-        .routes(routes!(execute::get_job));
+        .routes(routes!(execute::get_job))
+        .routes(routes!(execute::job_events));
 
     router
 }

@@ -1960,6 +1960,7 @@ dependencies = [
  "factorio-bot-core",
  "factorio-bot-scripting",
  "factorio-bot-scripting-lua",
+ "futures-util",
  "miette",
  "num-traits",
  "serde",
@@ -1967,6 +1968,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-stream",
  "tower",
  "tower-http",
  "tracing",
@@ -7206,6 +7208,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

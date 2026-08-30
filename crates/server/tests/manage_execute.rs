@@ -21,9 +21,14 @@ use factorio_bot_core::factorio::rcon::FactorioRcon;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::parking_lot;
 use factorio_bot_core::process::process_control::FactorioInstance;
+// `OutputSink` is what puts `JobHandle::line` in scope: the event-stream tests
+// drive a job's output directly rather than through a real script, so that
+// what they assert about the wire format does not depend on the interpreter.
+use factorio_bot_scripting::{OutputSink, Stream};
 use factorio_bot_server::state::AppState;
 use factorio_bot_server::webserver::build_router;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
@@ -114,6 +119,20 @@ async fn get(state: &AppState, uri: &str) -> Response<Body> {
         .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
         .await
         .unwrap()
+}
+
+/// Drains a response body to a string.
+///
+/// For an SSE response this only returns once the stream *ends*, which is why
+/// every caller below wraps it in a `tokio::time::timeout`: a stream that
+/// stayed open would otherwise hang the suite, and a hang is not a test
+/// result -- CI reports it as an unattributed timeout and a developer running
+/// the suite locally cannot tell it from a deadlock somewhere else.
+async fn collect_body(response: Response<Body>) -> String {
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("the body is readable");
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 async fn body_json(response: Response<Body>) -> serde_json::Value {
@@ -463,4 +482,126 @@ async fn an_unrelated_error_body_carries_no_running_job_id() {
         body.get("running_job_id").is_none(),
         "unrelated errors must not carry the field: {body}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// `GET /api/v1/jobs/{id}/events`
+// ---------------------------------------------------------------------------
+
+/// The common case, not the exotic one: a fast script is over before a browser
+/// can open the stream, so the finished-job path is what almost every real
+/// request takes. `JobRegistry::subscribe` answers `None` both for a job that
+/// never existed and for one whose channel was pruned on completion; reading
+/// that `None` as a `404` would break this.
+#[tokio::test]
+async fn the_event_stream_replays_a_finished_job_and_ends() {
+    let (_dir, state) = test_state();
+    let handle = state.jobs.try_start(Some("a.lua".into())).expect("start");
+    let id = handle.id();
+    handle.line(Stream::Stdout, "hello");
+    handle.finish(Ok(("hello".into(), String::new())));
+
+    let response = get(&state, &format!("/api/v1/jobs/{id}/events")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream")
+    );
+    // That the whole body is collectable is itself the assertion: a stream
+    // that stayed open would hang here, so the timeout turns that hang into a
+    // named failure.
+    let body = tokio::time::timeout(Duration::from_secs(5), collect_body(response))
+        .await
+        .expect("the stream must end once the job has finished");
+    assert!(body.contains("event: output"), "body was {body:?}");
+    assert!(body.contains("hello"), "body was {body:?}");
+    assert!(body.contains("event: finished"), "body was {body:?}");
+}
+
+#[tokio::test]
+async fn the_event_stream_delivers_output_produced_after_subscribing() {
+    let (_dir, state) = test_state();
+    let handle = state.jobs.try_start(Some("a.lua".into())).expect("start");
+    let id = handle.id();
+    let response = get(&state, &format!("/api/v1/jobs/{id}/events")).await;
+
+    tokio::spawn(async move {
+        handle.line(Stream::Stdout, "late");
+        handle.finish(Ok(("late".into(), String::new())));
+    });
+
+    let body = tokio::time::timeout(Duration::from_secs(5), collect_body(response))
+        .await
+        .expect("the stream must end when the job finishes");
+    assert!(body.contains("late"), "body was {body:?}");
+}
+
+#[tokio::test]
+async fn a_subscriber_that_falls_behind_is_told_it_missed_messages() {
+    // The `lagged` event is in the wire contract and the handler is explicitly
+    // told not to filter the `Lagged` arm away -- so it needs a test that
+    // produces a real one, not a hand-built event. A hand-built event would
+    // pass with the filter_map in place.
+    //
+    // The broadcast channel's capacity is 256. Subscribe, publish past
+    // capacity WITHOUT reading -- `oneshot` returns the response before its
+    // body has been polled even once, so none of these lines is consumed as it
+    // is sent -- then read: the receiver reports how many it dropped.
+    let (_dir, state) = test_state();
+    let handle = state
+        .jobs
+        .try_start(Some("noisy.lua".into()))
+        .expect("start");
+    let id = handle.id();
+    let response = get(&state, &format!("/api/v1/jobs/{id}/events")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    for index in 0..400 {
+        handle.line(Stream::Stdout, &format!("line {index}"));
+    }
+    handle.finish(Ok((String::new(), String::new())));
+
+    let body = tokio::time::timeout(Duration::from_secs(5), collect_body(response))
+        .await
+        .expect("the stream must end when the job finishes");
+    assert!(
+        body.contains("event: lagged"),
+        "a subscriber that fell behind must be told, not silently short-changed; body was {body:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_job_reports_failed_in_its_terminal_event() {
+    // `finished` carries a status, and the two arms are what the UI switches
+    // on. A test that only ever exercises `succeeded` would pass with the
+    // status hardcoded.
+    let (_dir, state) = test_state();
+    let handle = state.jobs.try_start(Some("bad.lua".into())).expect("start");
+    let id = handle.id();
+    handle.finish(Err(miette::miette!("script exploded")));
+
+    let response = get(&state, &format!("/api/v1/jobs/{id}/events")).await;
+    let body = tokio::time::timeout(Duration::from_secs(5), collect_body(response))
+        .await
+        .expect("the stream must end once the job has finished");
+    assert!(body.contains("event: finished"), "body was {body:?}");
+    assert!(
+        body.contains("failed"),
+        "the terminal event must carry the real status; body was {body:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_event_stream_of_an_unknown_job_is_not_found() {
+    let (_dir, state) = test_state();
+    let response = get(&state, "/api/v1/jobs/9999/events").await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    // `code: 4` is `ErrorResponse::not_found`, which only the handler
+    // produces; the router's catch-all for unmatched `/api/v1/*` paths
+    // answers `404` with `code: 404`, so without this the test would pass
+    // just as well against a build where the route was never registered.
+    assert_eq!(body_json(response).await["code"], 4);
 }

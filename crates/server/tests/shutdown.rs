@@ -271,3 +271,134 @@ async fn server_survives_past_the_grace_period_with_no_shutdown_signal() {
 
     server.abort();
 }
+
+/// Grace period for the SSE test below, deliberately *longer* than
+/// `TEST_GRACE_PERIOD`.
+///
+/// The grace period is a backstop, not the mechanism: without any bound on the
+/// streams themselves, `start_with_state` still returns — once the grace period
+/// has fully elapsed. So a test that only asserted "returns within the grace
+/// period plus a margin" would pass with the stream bound deleted, and would be
+/// documentation rather than coverage. What separates the two is *how long* it
+/// takes: bounded streams end the moment the signal fires and the drain
+/// finishes in milliseconds, while an unbounded one burns the whole grace
+/// period. A long grace period makes that gap wide enough to assert on without
+/// the assertion being a stopwatch race on a loaded machine.
+#[cfg(feature = "lua")]
+const STREAMING_GRACE_PERIOD: Duration = Duration::from_secs(3);
+
+/// `webserver.rs`'s own comment names this as the hazard: axum's graceful
+/// drain waits for in-flight requests without bound, and an SSE stream for a
+/// job that never finishes never ends on its own.
+///
+/// Asserts on elapsed time, not on a status: a hang is the failure mode, and
+/// the difference between "bounded" and "saved only by the backstop" is
+/// visible in nothing else.
+#[cfg(feature = "lua")]
+#[tokio::test]
+async fn an_open_event_stream_does_not_hold_shutdown_past_the_grace_period() {
+    use factorio_bot_scripting::{OutputSink, Stream};
+    use factorio_bot_server::state::AppState;
+    use factorio_bot_server::webserver::start_with_state;
+    use tokio::io::AsyncReadExt;
+
+    let settings = AppSettings::default().into_shared();
+    let instance_state: SharedFactorioInstance =
+        Arc::new(RwLock::new(Some(empty_factorio_instance())));
+    let state = AppState::new(instance_state, settings);
+
+    // A job that never finishes: this handle is held for the whole test, so
+    // nothing completes it and its broadcast channel stays open. (Dropping it
+    // would complete the job as failed and close the stream for a reason that
+    // has nothing to do with shutdown.)
+    let running = state
+        .jobs
+        .try_start(Some("forever.lua".into()))
+        .expect("the slot is free");
+    let id = running.id();
+
+    let bind = free_addr().await;
+    let (tx, rx) = oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        start_with_state(
+            state,
+            bind,
+            async {
+                let _ = rx.await;
+            },
+            STREAMING_GRACE_PERIOD,
+        )
+        .await
+    });
+
+    let connect_deadline = Instant::now() + Duration::from_secs(10);
+    let mut stream = loop {
+        match TcpStream::connect(bind).await {
+            Ok(stream) => break stream,
+            Err(err) => {
+                assert!(
+                    Instant::now() < connect_deadline,
+                    "nothing accepted a connection on {bind}: {err}"
+                );
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
+    };
+    let request = format!(
+        "GET /api/v1/jobs/{id}/events HTTP/1.1\r\nHost: {bind}\r\nAccept: text/event-stream\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("request written");
+
+    // Read until a real event has arrived. Waiting for the response *head*
+    // alone would not prove the body is streaming; an event does, and it is
+    // what makes this an in-flight request rather than an idle connection —
+    // hyper tears idle connections down promptly on its own, so a test built
+    // on one could not fail.
+    let mut received = Vec::new();
+    let read_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        running.line(Stream::Stdout, "tick");
+        let mut buffer = [0_u8; 4096];
+        match tokio::time::timeout(Duration::from_millis(100), stream.read(&mut buffer)).await {
+            Ok(Ok(0)) => panic!("the server closed the stream before shutdown was signalled"),
+            Ok(Ok(read)) => received.extend_from_slice(&buffer[..read]),
+            Ok(Err(err)) => panic!("reading the event stream failed: {err}"),
+            Err(_elapsed) => {}
+        }
+        if String::from_utf8_lossy(&received).contains("event: output") {
+            break;
+        }
+        assert!(
+            Instant::now() < read_deadline,
+            "no event ever arrived on the stream: {:?}",
+            String::from_utf8_lossy(&received)
+        );
+    }
+
+    tx.send(()).expect("receiver alive");
+    let shutdown_started = Instant::now();
+
+    let result = tokio::time::timeout(STREAMING_GRACE_PERIOD + Duration::from_secs(5), server)
+        .await
+        .expect("start_with_state did not return at all")
+        .expect("task did not panic");
+    let elapsed = shutdown_started.elapsed();
+
+    assert!(
+        result.is_ok(),
+        "shutdown should be a clean exit: {result:?}"
+    );
+    assert!(
+        elapsed < STREAMING_GRACE_PERIOD / 2,
+        "shutdown took {elapsed:?}: an open event stream must end on the shutdown signal, not sit \
+         there until the {STREAMING_GRACE_PERIOD:?} grace period expires"
+    );
+
+    // Both held to the very end on purpose: dropping either earlier would end
+    // the stream for a reason other than the one under test.
+    drop(stream);
+    drop(running);
+}

@@ -101,6 +101,7 @@ const SCRIPTING_OPERATIONS: &[(&str, &str)] = &[
     ("/api/v1/scripts/execute", "post"),
     ("/api/v1/jobs", "get"),
     ("/api/v1/jobs/{id}", "get"),
+    ("/api/v1/jobs/{id}/events", "get"),
 ];
 #[cfg(not(feature = "lua"))]
 const SCRIPTING_OPERATIONS: &[(&str, &str)] = &[];
@@ -117,7 +118,10 @@ const SCRIPTING_OPERATIONS: &[(&str, &str)] = &[];
 /// listed here that does *not* actually publish a path parameter fails too, so
 /// a stale entry cannot silently widen the guard.
 #[cfg(feature = "lua")]
-const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[("get", "/api/v1/jobs/{id}")];
+const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[
+    ("get", "/api/v1/jobs/{id}"),
+    ("get", "/api/v1/jobs/{id}/events"),
+];
 #[cfg(not(feature = "lua"))]
 const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[];
 

@@ -20,6 +20,14 @@ utoipa = { version = "5.5.0", features = ["axum_extras", "preserve_order"] }
 utoipa-axum = "0.2.0"
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum", "vendored"] }
 tokio = { version = "1", features = ["full", "tracing"] }
+# Only the SSE handler in `manage::execute` needs these, and that module exists
+# only in a `lua` build -- so they are optional and turned on by that feature
+# rather than unconditionally, for the same reason `factorio-bot-scripting-lua`
+# is. Both are already in `Cargo.lock` transitively (`tokio-stream/sync` pulls
+# `tokio-util`, which is there too), so this adds a declared edge and no new
+# third-party code.
+tokio-stream = { version = "0.1.19", features = ["sync"], optional = true }
+futures-util = { version = "0.3", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 miette = { version = "7.4", features = ["fancy"] }
@@ -35,7 +43,7 @@ tracing = "0.1"
 # `cargo build --no-default-features` is a precommit gate, so the combination
 # is exercised rather than theoretical.
 [features]
-lua = ["dep:factorio-bot-scripting-lua"]
+lua = ["dep:factorio-bot-scripting-lua", "dep:tokio-stream", "dep:futures-util"]
 
 [dev-dependencies]
 tempfile = "3"

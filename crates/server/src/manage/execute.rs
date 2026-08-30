@@ -6,19 +6,27 @@
 
 use crate::error::{ApiResult, ErrorResponse};
 use crate::extract::ApiJson;
-use crate::jobs::{Job, JobHandle, JobId};
+use crate::jobs::{Job, JobEvent, JobHandle, JobId, JobStatus};
 use crate::manage::scripts::scripts_root;
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::Json;
 use factorio_bot_core::factorio::rcon::FactorioRcon;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_scripting::{OutputSink, Stream};
+// `Stream` above is the script's stdout/stderr discriminant, so the async
+// trait of the same name is aliased rather than shadowing it.
+use futures_util::stream::Stream as EventStream;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use tokio::sync::{broadcast, watch};
+use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 use utoipa::ToSchema;
 
 /// The language assumed for inline `code` when the caller does not say.
@@ -286,4 +294,283 @@ pub async fn get_job(State(state): State<AppState>, Path(id): Path<String>) -> A
     let not_found = || ErrorResponse::not_found(format!("no such job: {id}"));
     let job_id: JobId = id.parse().map_err(|_| not_found())?;
     state.jobs.get(job_id).map(Json).ok_or_else(not_found)
+}
+
+/// The wire form of a job event.
+///
+/// [`JobEvent`] itself cannot derive `Serialize`: its [`Stream`] comes from
+/// `factorio-bot-scripting`, which has no dependencies at all -- that crate is
+/// a leaf on purpose, and adding serde to it to satisfy a transport concern
+/// would put the wire format's tail in the wrong crate.
+///
+/// `untagged`, because SSE splits a tagged union across two lines already: the
+/// variant name goes on the `event:` line (see [`WireEvent::name`]) and only
+/// the payload belongs in `data:`. The default external tagging would repeat
+/// the name inside the payload, so a browser handler registered for
+/// `output` would receive `{"output":{...}}` instead of `{...}`.
+#[derive(Debug, serde::Serialize)]
+#[serde(untagged)]
+enum WireEvent<'a> {
+    Output {
+        stream: &'a str,
+        text: &'a str,
+    },
+    Finished {
+        status: JobStatus,
+    },
+    /// How many messages a subscriber that fell behind missed. Rendered as a
+    /// visible gap rather than dropped: silently short-changing a reader is
+    /// worse than telling it the transcript is incomplete.
+    Lagged {
+        skipped: u64,
+    },
+}
+
+impl WireEvent<'_> {
+    /// The SSE `event:` name, which is what a browser's `addEventListener`
+    /// switches on.
+    fn name(&self) -> &'static str {
+        match self {
+            WireEvent::Output { .. } => "output",
+            WireEvent::Finished { .. } => "finished",
+            WireEvent::Lagged { .. } => "lagged",
+        }
+    }
+
+    fn into_sse(self) -> Event {
+        let name = self.name();
+        // `json_data` fails only if serialization fails, and every field here
+        // is a string or a `u64`. It is still not unwrapped: the release
+        // profile sets `panic = "abort"`, so an impossible branch that panics
+        // is an impossible branch that kills the server.
+        Event::default()
+            .event(name)
+            .json_data(&self)
+            .unwrap_or_else(|_| Event::default().event(name).data("{}"))
+    }
+}
+
+fn stream_name(stream: Stream) -> &'static str {
+    match stream {
+        Stream::Stdout => "stdout",
+        Stream::Stderr => "stderr",
+    }
+}
+
+/// The events replayed to a subscriber that attached mid-run, or after the run
+/// was over.
+///
+/// stdout and stderr are two separate buffers in a [`Job`], so their relative
+/// interleaving is not recoverable here -- the backlog is stdout then stderr.
+/// Live events, which arrive one at a time, keep their real order.
+fn backlog(job: &Job) -> Vec<Event> {
+    let lines = std::iter::empty()
+        .chain(job.stdout.lines().map(|text| (Stream::Stdout, text)))
+        .chain(job.stderr.lines().map(|text| (Stream::Stderr, text)));
+    let mut events: Vec<Event> = lines
+        .map(|(stream, text)| {
+            WireEvent::Output {
+                stream: stream_name(stream),
+                text,
+            }
+            .into_sse()
+        })
+        .collect();
+    if job.status != JobStatus::Running {
+        events.push(WireEvent::Finished { status: job.status }.into_sse());
+    }
+    events
+}
+
+/// Maps one broadcast item to an SSE event, and says whether it terminates the
+/// stream.
+fn live_event(item: Result<JobEvent, BroadcastStreamRecvError>) -> (Event, bool) {
+    match item {
+        Ok(JobEvent::Output { stream, text }) => (
+            WireEvent::Output {
+                stream: stream_name(stream),
+                text: &text,
+            }
+            .into_sse(),
+            false,
+        ),
+        Ok(JobEvent::Finished { status }) => (WireEvent::Finished { status }.into_sse(), true),
+        // Not filtered away. `BroadcastStreamRecvError` has exactly one
+        // variant, and dropping it is the tidy-looking edit that deletes the
+        // gap indicator the reader is meant to see -- the transcript would
+        // silently skip `skipped` lines with nothing marking the hole.
+        Err(BroadcastStreamRecvError::Lagged(skipped)) => {
+            (WireEvent::Lagged { skipped }.into_sse(), false)
+        }
+    }
+}
+
+/// The body of `GET /api/v1/jobs/{id}/events`: backlog, then live events.
+///
+/// Ends on three things, and the first two are why this is a function rather
+/// than a chain inlined into the handler -- each is separately testable:
+///
+/// 1. the terminal [`JobEvent::Finished`], *inclusively*: the event is
+///    delivered and then the stream ends. Not merely `take_while`, which stops
+///    at the first item failing the predicate and so would need one *further*
+///    event to arrive before it could notice -- an event that, for a job that
+///    has just finished, never comes;
+/// 2. `shutdown`, so that a stream for a job which never finishes cannot hold
+///    axum's unbounded graceful drain open;
+/// 3. the channel closing, which [`crate::jobs::JobRegistry::complete`] causes
+///    by dropping the sender.
+fn job_event_stream(
+    job: &Job,
+    receiver: Option<broadcast::Receiver<JobEvent>>,
+    mut shutdown: watch::Receiver<bool>,
+) -> impl EventStream<Item = Result<Event, Infallible>> + Send + 'static {
+    // `iter` over an `Option` is 0 or 1 receivers, which is how the
+    // finished-job case (no live channel left) and the running case share one
+    // stream type without boxing a branch.
+    let live = futures_util::stream::iter(receiver)
+        .flat_map(BroadcastStream::new)
+        .map(live_event)
+        .take_until(async move {
+            let _ = shutdown.wait_for(|shutting_down| *shutting_down).await;
+        });
+    let live = futures_util::stream::unfold(Some(Box::pin(live)), |state| async move {
+        let mut live = state?;
+        let (event, terminal) = live.next().await?;
+        Some((event, if terminal { None } else { Some(live) }))
+    });
+    futures_util::stream::iter(backlog(job)).chain(live).map(Ok)
+}
+
+/// Streams one script run's output as Server-Sent Events
+///
+/// Carries the script's output only -- not the Factorio server process's
+/// stdout, which belongs to the instance rather than to any one job.
+///
+/// A subscriber that attaches late is not punished for it: the job's buffered
+/// output is replayed first, and a job that already finished gets that
+/// backlog, a `finished` event and end-of-stream. That case is the common one
+/// -- a fast script is over before a browser can open the stream -- and it is
+/// why the handler distinguishes "no such job" from "the job's channel was
+/// pruned when it completed" via [`crate::jobs::JobRegistry::attach`]. Reading
+/// a missing subscription as `404` would fail almost every real request.
+#[utoipa::path(
+    get,
+    path = "/api/v1/jobs/{id}/events",
+    tag = "Admin",
+    params(("id" = String, Path, description = "Job id, as returned by the execute endpoint")),
+    responses(
+        (
+            status = 200,
+            description = "Server-Sent Events: `output`, `lagged`, then a terminal `finished`",
+            content_type = "text/event-stream"
+        ),
+        (status = 404, body = crate::error::ErrorResponse),
+    )
+)]
+pub async fn job_events(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Sse<impl EventStream<Item = Result<Event, Infallible>>>, ErrorResponse> {
+    let not_found = || ErrorResponse::not_found(format!("no such job: {id}"));
+    let job_id: JobId = id.parse().map_err(|_| not_found())?;
+    let (job, receiver) = state.jobs.attach(job_id).ok_or_else(not_found)?;
+    let stream = job_event_stream(&job, receiver, state.jobs.shutdown_signal());
+    // Without a keep-alive a proxy is free to drop a connection that has been
+    // idle for its timeout, and a long-running script can easily print nothing
+    // for minutes.
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jobs::JobRegistry;
+    use axum::response::IntoResponse;
+    use std::time::Duration;
+
+    /// Renders a stream exactly as the handler would, so these tests read the
+    /// same bytes a client does.
+    async fn collect(
+        stream: impl EventStream<Item = Result<Event, Infallible>> + Send + 'static,
+    ) -> String {
+        let bytes = axum::body::to_bytes(Sse::new(stream).into_response().into_body(), usize::MAX)
+            .await
+            .expect("the body is readable");
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// The inclusive terminator, isolated from the channel closing.
+    ///
+    /// The integration tests cannot see this on its own: the registry drops
+    /// the sender when a job completes, so there the stream would end anyway.
+    /// Here the sender is deliberately *held open* after the terminal event,
+    /// which is the only shape in which the terminator is the thing doing the
+    /// work -- delete it and this test hangs, then fails on the timeout below.
+    #[tokio::test]
+    async fn the_stream_ends_at_the_terminal_event_even_while_the_sender_stays_open() {
+        let (sender, receiver) = broadcast::channel(16);
+        let job = Job {
+            id: JobId(1),
+            script: None,
+            status: JobStatus::Running,
+            started_at_ms: 0,
+            finished_at_ms: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: None,
+        };
+        let (_never_fires, shutdown) = watch::channel(false);
+        let stream = job_event_stream(&job, Some(receiver), shutdown);
+
+        sender
+            .send(JobEvent::Output {
+                stream: Stream::Stdout,
+                text: "one".into(),
+            })
+            .expect("a subscriber exists");
+        sender
+            .send(JobEvent::Finished {
+                status: JobStatus::Succeeded,
+            })
+            .expect("a subscriber exists");
+
+        let body = tokio::time::timeout(Duration::from_secs(5), collect(stream))
+            .await
+            .expect("the stream must end at the terminal event, not wait for the sender to drop");
+        // `_sender` is still alive here on purpose: dropping it would end the
+        // stream for the other reason and make this test prove nothing.
+        drop(sender);
+        assert!(body.contains("event: finished"), "body was {body:?}");
+        assert!(body.contains("one"), "body was {body:?}");
+    }
+
+    /// The shutdown bound, isolated from the grace period that
+    /// `tests/shutdown.rs` measures: a stream for a job that never finishes
+    /// must end when the signal fires, with nothing else ending it.
+    #[tokio::test]
+    async fn a_stream_for_a_job_that_never_finishes_ends_at_shutdown() {
+        let registry = JobRegistry::new(8);
+        let handle = registry
+            .try_start(Some("forever.lua".into()))
+            .expect("start");
+        handle.line(Stream::Stdout, "still going");
+        let (job, receiver) = registry.attach(handle.id()).expect("the job exists");
+        let stream = job_event_stream(&job, receiver, registry.shutdown_signal());
+        registry.shutdown();
+
+        let body = tokio::time::timeout(Duration::from_secs(5), collect(stream))
+            .await
+            .expect("a stream must not outlive the shutdown signal");
+        assert!(
+            body.contains("still going"),
+            "the backlog is still owed to the subscriber: {body:?}"
+        );
+        assert!(
+            !body.contains("event: finished"),
+            "the job never finished, so nothing may claim it did: {body:?}"
+        );
+        // Held to the end: dropping it would complete the job and close the
+        // channel, which is the other way this stream could have ended.
+        drop(handle);
+    }
 }

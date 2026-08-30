@@ -23,7 +23,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use utoipa::ToSchema;
 
 /// How many events a subscriber may fall behind before it is told it lagged.
@@ -138,6 +138,15 @@ pub struct JobRegistry {
     /// How many jobs are retained. At least 1, so that the running job is
     /// never evicted from under itself.
     history_limit: usize,
+    /// Latched process-wide "we are shutting down" flag. Every SSE stream
+    /// selects on it, which is what keeps axum's *unbounded* graceful drain
+    /// from waiting on a stream for a job that never finishes -- see
+    /// [`crate::webserver::start_with_state`]. A `watch` rather than a
+    /// `oneshot` because there is one signal and an unknown number of open
+    /// streams, and a receiver created *after* the signal fires must still
+    /// see it (`wait_for` inspects the current value first) -- a stream
+    /// opened during shutdown must not be born unbounded.
+    shutdown: watch::Sender<bool>,
     inner: Mutex<RegistryInner>,
 }
 
@@ -146,8 +155,23 @@ impl JobRegistry {
         Arc::new_cyclic(|me| JobRegistry {
             me: me.clone(),
             history_limit: history_limit.max(1),
+            shutdown: watch::channel(false).0,
             inner: Mutex::new(RegistryInner::default()),
         })
+    }
+
+    /// Tells every open event stream to end.
+    ///
+    /// Latched and idempotent: `send_replace` cannot fail even with no
+    /// receivers at all, which is the normal case (nobody has to be streaming
+    /// for the server to shut down).
+    pub fn shutdown(&self) {
+        self.shutdown.send_replace(true);
+    }
+
+    /// The signal [`JobRegistry::shutdown`] fires, for a stream to end on.
+    pub fn shutdown_signal(&self) -> watch::Receiver<bool> {
+        self.shutdown.subscribe()
     }
 
     /// Every lock in this module goes through here.
@@ -201,6 +225,25 @@ impl JobRegistry {
             .channels
             .get(&id)
             .map(broadcast::Sender::subscribe)
+    }
+
+    /// Snapshots a job *and* subscribes to it under one lock.
+    ///
+    /// `None` means no such job -- and only that, which is the difference
+    /// from [`JobRegistry::subscribe`], whose `None` conflates "unknown" with
+    /// "already finished". The inner `Option` is the subscription: `Some` for
+    /// a running job, `None` for a finished one, whose channel was pruned by
+    /// [`JobRegistry::complete`].
+    ///
+    /// One lock, not `get` followed by `subscribe`, because the two orderings
+    /// are both wrong: `get` then `subscribe` loses a line recorded in
+    /// between (published before the subscription existed, appended after the
+    /// snapshot was taken), and `subscribe` then `get` delivers it twice.
+    pub fn attach(&self, id: JobId) -> Option<(Job, Option<broadcast::Receiver<JobEvent>>)> {
+        let inner = self.lock();
+        let job = inner.jobs.iter().find(|job| job.id == id).cloned()?;
+        let receiver = inner.channels.get(&id).map(broadcast::Sender::subscribe);
+        Some((job, receiver))
     }
 
     pub fn get(&self, id: JobId) -> Option<Job> {
@@ -495,6 +538,67 @@ mod tests {
                 status: JobStatus::Succeeded
             }
         ));
+    }
+
+    /// The boundary between the backlog an attaching subscriber is replayed
+    /// and the live events it then receives. Overlapping them duplicates a
+    /// line in the browser; leaving a gap loses one.
+    #[test]
+    fn attaching_to_a_running_job_yields_the_backlog_and_only_later_events() {
+        let registry = JobRegistry::new(8);
+        let handle = registry.try_start(Some("a.lua".into())).expect("start");
+        handle.line(Stream::Stdout, "before");
+
+        let (job, receiver) = registry.attach(handle.id()).expect("the job exists");
+        let mut receiver = receiver.expect("a running job still has a live channel");
+        assert_eq!(job.stdout, "before\n", "the backlog must carry what ran");
+
+        handle.line(Stream::Stdout, "after");
+        assert!(matches!(
+            receiver.try_recv().expect("the later line"),
+            JobEvent::Output { ref text, .. } if text == "after"
+        ));
+        assert!(
+            receiver.try_recv().is_err(),
+            "a line already in the backlog must not also arrive as an event"
+        );
+    }
+
+    /// The two reasons [`JobRegistry::subscribe`] answers `None` -- and why
+    /// the SSE handler uses `attach` instead: only one of them is a 404.
+    #[test]
+    fn attaching_separates_a_finished_job_from_an_unknown_one() {
+        let registry = JobRegistry::new(8);
+        let handle = registry.try_start(Some("a.lua".into())).expect("start");
+        let id = handle.id();
+        handle.finish(Ok(("done".into(), String::new())));
+
+        let (job, receiver) = registry.attach(id).expect("a finished job is still known");
+        assert_eq!(job.status, JobStatus::Succeeded);
+        assert!(
+            receiver.is_none(),
+            "a finished job's channel is pruned, so there is nothing live to watch"
+        );
+        assert!(
+            registry.attach(JobId(9999)).is_none(),
+            "an unknown job is the only case that may be reported as absent"
+        );
+    }
+
+    /// The shutdown flag is latched, so a stream that opens *after* the signal
+    /// fired is bounded from birth rather than born unbounded.
+    #[tokio::test]
+    async fn the_shutdown_signal_is_latched_for_receivers_created_afterwards() {
+        let registry = JobRegistry::new(8);
+        registry.shutdown();
+        let mut receiver = registry.shutdown_signal();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            receiver.wait_for(|fired| *fired),
+        )
+        .await
+        .expect("a receiver created after shutdown must still see it")
+        .expect("the sender outlives the registry's receivers");
     }
 
     #[test]

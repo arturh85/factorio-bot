@@ -64,8 +64,31 @@ pub async fn start_with_shutdown(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     shutdown_grace_period: Duration,
 ) -> Result<()> {
-    let web_root = settings.read().await.restapi.web_root.clone();
-    let state = AppState::new(instance_state.clone(), settings);
+    start_with_state(
+        AppState::new(instance_state, settings),
+        bind,
+        shutdown,
+        shutdown_grace_period,
+    )
+    .await
+}
+
+/// [`start_with_shutdown`] over a state the caller built.
+///
+/// The seam exists because [`AppState`] owns the job registry, and the
+/// shutdown behaviour of an *open SSE stream* cannot be exercised without
+/// reaching that registry to put a job in it: a test driving the public
+/// entry point can only start a job by running a real script against a real
+/// Factorio instance, which is not something an integration test has.
+pub async fn start_with_state(
+    state: AppState,
+    bind: SocketAddr,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    shutdown_grace_period: Duration,
+) -> Result<()> {
+    let web_root = state.settings.read().await.restapi.web_root.clone();
+    let instance_state = state.instance.clone();
+    let jobs = state.jobs.clone();
     let app = build_router(state, web_root.as_deref());
     let listener = tokio::net::TcpListener::bind(bind)
         .await
@@ -73,11 +96,15 @@ pub async fn start_with_shutdown(
     tracing::info!("listening on http://{bind}");
 
     // `with_graceful_shutdown` waits for every in-flight request to finish
-    // on its own, with no bound, once `shutdown` resolves. That is harmless
-    // today, but plan 4 adds SSE streams that never end by themselves, at
-    // which point this would wait forever after a shutdown signal — and a
-    // second Ctrl-C cannot help, because `tokio::signal` has already
-    // replaced the process's default signal disposition for its lifetime.
+    // on its own, with no bound, once `shutdown` resolves. `GET
+    // /api/v1/jobs/{id}/events` is a stream that never ends by itself while
+    // its job is still running, so this would otherwise wait forever after a
+    // shutdown signal — and a second Ctrl-C cannot help, because
+    // `tokio::signal` has already replaced the process's default signal
+    // disposition for its lifetime. `JobRegistry::shutdown` below ends those
+    // streams so the drain has something finite to wait for; the grace period
+    // remains the backstop for anything else that is stuck (a half-sent
+    // request body, say), not the mechanism.
     //
     // The grace period has to start counting from the moment `shutdown`
     // resolves, not from process start: naively wrapping the whole
@@ -101,6 +128,10 @@ pub async fn start_with_shutdown(
     // on exit.
     tokio::spawn(async move {
         shutdown.await;
+        // Before the drain, not after: an SSE stream must already be ending
+        // by the time axum starts waiting for in-flight requests, or the
+        // wait is the unbounded one this whole arrangement exists to avoid.
+        jobs.shutdown();
         // The receivers are always alive for the lifetime of this function,
         // so the only way `send` fails is if this task outlives the
         // function — harmless either way.

@@ -1,7 +1,7 @@
 //! Assignment of a bot-free action network to concrete bots over time.
 
 use crate::error::PlannerError;
-use crate::ids::{ActionId, BotId, Ticks};
+use crate::ids::{ActionId, BotId, ChainId, Ticks};
 use crate::network::ActionNetwork;
 use crate::state::PlanState;
 use factorio_bot_core::factorio::util::calculate_distance;
@@ -100,6 +100,17 @@ struct Rejected {
 /// heading for the next furnace while the current one smelts. Adding travel
 /// *after* `max(free_at, deps_ready)` instead would idle the bot for the lag
 /// and then walk, which is strictly worse and never better.
+///
+/// Assignment happens at **chain** granularity, not action granularity. The
+/// first action of a chain (`ActionNetwork::chain_of`) is assigned freely, by
+/// the rule above; every later action of that chain goes to the bot the chain
+/// is already bound to. A chain's steps pass items to each other through one
+/// inventory, and a branching chain — two ingredients that each need producing
+/// — has two roots whose first actions carry no `HasItem` precondition to hold
+/// them together, so without this they land on different bots and the action
+/// consuming both has no feasible bot at all. Binding only ever *narrows the
+/// candidate set*: how a candidate is ranked and judged feasible is unchanged.
+/// Actions belonging to no chain stay individually assignable.
 pub fn schedule(
     net: &ActionNetwork,
     state: &PlanState,
@@ -115,6 +126,7 @@ pub fn schedule(
     let mut finished: BTreeMap<ActionId, Ticks> = BTreeMap::new();
     let mut done: BTreeSet<ActionId> = BTreeSet::new();
     let mut steps: Vec<ScheduledStep> = Vec::new();
+    let mut chain_binding: BTreeMap<ChainId, BotId> = BTreeMap::new();
 
     while done.len() < net.len() {
         let ready: Vec<&crate::action::Action> = net
@@ -140,10 +152,41 @@ pub fn schedule(
                 .max()
                 .unwrap_or(0);
 
+            // The bot this action's chain is already running on, if any.
+            let bound = net
+                .chain_of(action.id)
+                .and_then(|chain| chain_binding.get(&chain).copied());
+
             let candidate_bots: Vec<BotId> = match action.pinned {
-                Some(pinned) if bots.contains(&pinned) => vec![pinned],
-                Some(pinned) => return Err(PlannerError::UnknownBot(pinned)),
-                None => bots.to_vec(),
+                Some(pinned) if !bots.contains(&pinned) => {
+                    return Err(PlannerError::UnknownBot(pinned))
+                }
+                // Pinning takes precedence over everything: it is an explicit
+                // instruction, chain binding is an inference. But rather than
+                // silently overriding the binding — which would hand a chain's
+                // items to a bot that does not hold them, and fail later with a
+                // confusing precondition error somewhere else — a contradiction
+                // is reported here, where its cause is still visible. Nothing
+                // sets `pinned` today, so this is defensive.
+                Some(pinned) => {
+                    if let Some(bound) = bound {
+                        if bound != pinned {
+                            return Err(PlannerError::PreconditionUnsatisfied {
+                                action: action.id,
+                                bot: pinned,
+                                condition: format!(
+                                    "pinned to {}, but its chain is already bound to {}",
+                                    pinned, bound
+                                ),
+                            });
+                        }
+                    }
+                    vec![pinned]
+                }
+                None => match bound {
+                    Some(bound) => vec![bound],
+                    None => bots.to_vec(),
+                },
             };
 
             for bot in candidate_bots {
@@ -247,6 +290,11 @@ pub fn schedule(
             start: chosen.act_start,
             end: chosen.end,
         });
+
+        // The chain now has a runner; every later action of it follows.
+        if let Some(chain) = net.chain_of(chosen.action) {
+            chain_binding.insert(chain, chosen.bot);
+        }
 
         free_at.insert(chosen.bot, chosen.end);
         finished.insert(chosen.action, chosen.end);
@@ -536,6 +584,70 @@ mod tests {
         assert_eq!(result.assignment(c), Some(BotId(1)));
         // Bot 1 walks 97 tiles: ceil(97 / 0.15) = 647, then acts for 10.
         assert_eq!(result.makespan, 667);
+    }
+
+    #[test]
+    fn a_branching_chain_lands_wholly_on_one_bot() {
+        use crate::ids::ChainIdGen;
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+
+        // Two independent producers of *different* items — a branching chain
+        // has two roots, and neither carries a `HasItem` precondition that
+        // could keep it near the other. The consumer needs both, from one
+        // inventory, because `Actor::Role` binds to the single bot that runs
+        // it.
+        let mut iron = free(&mut gen, "make iron", 10);
+        iron.eff = vec![Effect::GainItem {
+            who: Actor::Role,
+            item: "iron-plate".into(),
+            count: 1,
+        }];
+        let mut copper = free(&mut gen, "make copper", 10);
+        copper.eff = vec![Effect::GainItem {
+            who: Actor::Role,
+            item: "copper-plate".into(),
+            count: 1,
+        }];
+        let mut consumer = free(&mut gen, "craft the pack", 10);
+        consumer.pre = vec![
+            Condition::HasItem {
+                who: Actor::Role,
+                item: "iron-plate".into(),
+                count: 1,
+            },
+            Condition::HasItem {
+                who: Actor::Role,
+                item: "copper-plate".into(),
+                count: 1,
+            },
+        ];
+
+        let i = net.add(iron);
+        let c = net.add(copper);
+        let pack = net.add(consumer);
+        net.link(i, pack, 0);
+        net.link(c, pack, 0);
+
+        let mut chains = ChainIdGen::new();
+        let chain = chains.next();
+        for id in [i, c, pack] {
+            net.set_chain(id, chain);
+        }
+
+        let bots = [BotId(1), BotId(2)];
+        let result =
+            schedule(&net, &state(&bots), &bots).expect("a chain bound to one bot is schedulable");
+
+        // Both bots are idle at the origin, so without chain binding the two
+        // roots are equally cheap and the greedy rule spreads them: the second
+        // producer's idle bot finishes at 10 against the first bot's 20. The
+        // consumer then finds one plate on each bot and no bot with both.
+        let bot = result
+            .assignment(i)
+            .expect("the iron producer is scheduled");
+        assert_eq!(result.assignment(c), Some(bot), "both roots on one bot");
+        assert_eq!(result.assignment(pack), Some(bot), "and the consumer too");
     }
 
     #[test]

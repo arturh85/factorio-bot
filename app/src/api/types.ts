@@ -4,9 +4,35 @@
  *
  * The generator only sees `crates/core` (the types deriving `TypeScriptify`),
  * and everything below lives in `crates/server` instead: the request and
- * response bodies of the management routes. Nothing checks these against the
- * live `/openapi.json`, so a change to `crates/server/src/manage/*` or
- * `crates/server/src/jobs.rs` has to be mirrored here by hand.
+ * response bodies of the management routes. They are written by hand, but
+ * they are **not** unchecked. A chain of three guards ties them to what the
+ * server publishes:
+ *
+ * 1. `crates/server/tests/openapi.rs` keeps `openapi.snapshot.json` equal to
+ *    the `/openapi.json` the real router serves, so the snapshot cannot rot.
+ * 2. `openapi.contract.spec.ts` asserts the snapshot against a table of what
+ *    the client assumes each schema looks like.
+ * 3. That table is *typed against the interfaces below*
+ *    (`objectContract<InstanceStatus>`, `enumContract<JobStatus>`), so `tsc`
+ *    fails under `pnpm run lint` if a name here and a row there disagree in
+ *    either direction.
+ *
+ * So renaming a field in `crates/server` and mirroring it through the
+ * snapshot and the contract table, but *not* here, does not compile -- which
+ * is the failure this chain exists to force, because the alternative is code
+ * that compiles and reads `undefined` in the browser.
+ *
+ * What the chain does not cover, so that this comment does not overstate it:
+ *
+ * - **The JSON type of a field.** The contract table states `type: 'integer'`
+ *   or `'string'` as its own claim; it is pinned to the spec but not to the
+ *   `number`/`string` written here. Nullability *is* pinned both ways.
+ * - **`OutputStream`.** The job event stream is `text/event-stream` with no
+ *   schema in the document, so there is nothing for the table to check it
+ *   against. Nothing imports it yet either.
+ * - **Application `code` values.** `code: 2` is a value, not a schema; it is
+ *   pinned on the server side by the three `not_started`/`not_running` tests
+ *   in `crates/server/tests/`.
  */
 
 /** `GET /api/v1/instance` -- `crates/server/src/manage/instance.rs`. */

@@ -3,19 +3,31 @@
  *
  * The client is hand-written, and TypeScript cannot see `crates/server`, so
  * without this file a field renamed in Rust typechecks here and fails in the
- * browser. The seam is `openapi.snapshot.json`, and it takes *two* guards to
- * work:
+ * browser. The seam is `openapi.snapshot.json`, and it takes *three* guards
+ * to work:
  *
  * 1. `the_committed_openapi_snapshot_matches_the_published_spec` in
  *    `crates/server/tests/openapi.rs` keeps the snapshot equal to what the
  *    server really publishes. Without it the snapshot would rot exactly the
  *    way `app/src/models/types.ts` has rotted away from its generator.
- * 2. This file checks that everything the client assumes is in the snapshot.
- *    Without it, regenerating the snapshot would bless any server change.
+ * 2. This file's assertions check that everything the client assumes is in
+ *    the snapshot. Without them, regenerating the snapshot would bless any
+ *    server change.
+ * 3. The tables below are *typed against the DTO declarations themselves*
+ *    (`objectContract<InstanceStatus>`, `enumContract<JobStatus>`), so `tsc`
+ *    -- and therefore `pnpm run lint` -- fails if `app/src/api/types.ts` and
+ *    this file disagree about a field name in either direction. Without that,
+ *    `types.ts` hangs off the side of the seam verified by nothing: a
+ *    developer chasing a rename could fix the snapshot and the table below,
+ *    go green, and leave `types.ts` declaring the old field for the browser
+ *    to trip over.
  *
- * So a rename in `crates/server` fails the Rust test; regenerating the
- * snapshot without touching the client then fails this one. Neither test can
- * be satisfied by editing the other's input.
+ * Note what the trio does and does not promise. Each guard *can* be satisfied
+ * on its own by editing another's input -- hand-edit the snapshot and the Rust
+ * test goes red; regenerate it and this file does; rename in both and `tsc`
+ * does. The guarantee is the conjunction: **all three cannot pass unless the
+ * server, the snapshot, the contract tables and the DTO declarations all say
+ * the same thing.**
  *
  * The expectations below are written as *data mirroring the client*, never
  * derived from the snapshot: anything derived from the file under test passes
@@ -31,6 +43,21 @@
 
 import {describe, expect, it} from 'vitest';
 import snapshot from './openapi.snapshot.json';
+// Type-only imports, and they are what makes `types.ts` an *input* to this
+// file rather than a bystander: every table entry below is checked against
+// the declaration it claims to describe.
+import type {AppSettings, GuiSettings} from '@/models/settings';
+import type {FactorioSettings, RestApiSettings, ScriptTreeNode} from '@/models/types';
+import type {
+    ExecuteAccepted,
+    ExecuteRequest,
+    ExistsResponse,
+    InstanceStatus,
+    Job,
+    JobStatus,
+    ScriptContent,
+    StartAccepted
+} from './types';
 
 interface SchemaObject {
     $ref?: string;
@@ -233,6 +260,58 @@ type SchemaContract =
     | {kind: 'scalar'; type: string};
 
 /**
+ * Whether the DTO declares a field as absent-able: `| null`, or optional with
+ * `?`.
+ *
+ * Both reach the wire the same way -- utoipa publishes them as
+ * `type: [t, "null"]` -- so both must carry `nullable: true` below, and a
+ * field declared as neither must not.
+ */
+type Absentable<Value> = undefined extends Value
+    ? true
+    : null extends Value
+        ? true
+        : false;
+
+/**
+ * One property's contract, with its nullability tied to the declaration.
+ *
+ * Declaring `nullable` where `types.ts` says the field is always present (or
+ * omitting it where `types.ts` says `| null`) is a type error, so the three
+ * statements -- spec, table, DTO -- cannot drift apart pairwise.
+ */
+type PropertyContractFor<Value> = PropertyContract &
+    (Absentable<Value> extends true ? {nullable: true} : {nullable?: never});
+
+/**
+ * The contract for one object schema, keyed by the *TypeScript* declaration
+ * the client reads it as.
+ *
+ * This is the whole point of the generic. `{[K in keyof T]-?: …}` demands an
+ * entry for every declared field, and the excess-property check on the object
+ * literal rejects an entry for a field `T` does not declare -- so renaming a
+ * field in `types.ts` alone, or adding one there alone, fails `tsc` under
+ * `pnpm run lint`. Before this, the table was a third hand-written mirror
+ * (server → snapshot → table) that `types.ts` merely sat beside, and a rename
+ * carried through server, snapshot and table left a green suite reassuring
+ * the developer that the browser would work.
+ */
+function objectContract<T>(properties: {[K in keyof T]-?: PropertyContractFor<T[K]>}): SchemaContract {
+    return {kind: 'object', properties: properties as Record<string, PropertyContract>};
+}
+
+/**
+ * The contract for a string enum, keyed by the union `types.ts` declares.
+ *
+ * A `readonly string[]` would have accepted any strings at all. `Record<T,
+ * true>` demands one key per union member and rejects a member the union does
+ * not have, so the union is pinned to the table and the table to the spec.
+ */
+function enumContract<T extends string>(values: Record<T, true>): SchemaContract {
+    return {kind: 'enum', values: Object.keys(values)};
+}
+
+/**
  * Every schema reachable from the operations above, and the shape the client
  * reads it as.
  *
@@ -242,122 +321,115 @@ type SchemaContract =
  */
 const SCHEMAS: Record<string, SchemaContract> = {
     // -- crates/core, mirrored in app/src/models (settings.ts, types.ts) ----
-    AppSettings: {
-        kind: 'object',
-        properties: {
-            factorio: {required: true, ref: 'FactorioSettings'},
-            restapi: {required: true, ref: 'RestApiSettings'},
-            gui: {required: true, ref: 'GuiSettings'}
-        }
-    },
-    FactorioSettings: {
-        kind: 'object',
-        properties: {
-            client_count: {required: true, type: 'integer'},
-            factorio_archive_path: {required: true, type: 'string'},
-            map_exchange_string: {required: true, type: 'string'},
-            rcon_pass: {required: true, type: 'string'},
-            rcon_port: {required: true, type: 'integer'},
-            recreate: {required: true, type: 'boolean'},
-            seed: {required: true, type: 'string'},
-            workspace_path: {required: true, type: 'string'}
-        }
-    },
-    RestApiSettings: {
-        kind: 'object',
-        properties: {
-            port: {required: true, type: 'integer'},
-            // `Option<String>` on the Rust side; `string | null` in
-            // models/types.ts, which is why it is not in `required`.
-            web_root: {required: false, type: 'string', nullable: true}
-        }
-    },
-    GuiSettings: {
-        kind: 'object',
-        properties: {
-            enable_autostart: {required: true, type: 'boolean'},
-            enable_restapi: {required: true, type: 'boolean'}
-        }
-    },
-    ScriptTreeNode: {
-        kind: 'object',
-        properties: {
-            key: {required: true, type: 'string'},
-            label: {required: true, type: 'string'},
-            leaf: {required: true, type: 'boolean'},
-            children: {required: true, arrayOf: 'ScriptTreeNode'}
-        }
-    },
+    AppSettings: objectContract<AppSettings>({
+        factorio: {required: true, ref: 'FactorioSettings'},
+        restapi: {required: true, ref: 'RestApiSettings'},
+        gui: {required: true, ref: 'GuiSettings'}
+    }),
+    FactorioSettings: objectContract<FactorioSettings>({
+        client_count: {required: true, type: 'integer'},
+        factorio_archive_path: {required: true, type: 'string'},
+        map_exchange_string: {required: true, type: 'string'},
+        rcon_pass: {required: true, type: 'string'},
+        rcon_port: {required: true, type: 'integer'},
+        recreate: {required: true, type: 'boolean'},
+        seed: {required: true, type: 'string'},
+        workspace_path: {required: true, type: 'string'}
+    }),
+    RestApiSettings: objectContract<RestApiSettings>({
+        port: {required: true, type: 'integer'},
+        // `Option<String>` on the Rust side; `string | null` in
+        // models/types.ts, which is why it is not in `required`.
+        web_root: {required: false, type: 'string', nullable: true}
+    }),
+    GuiSettings: objectContract<GuiSettings>({
+        enable_autostart: {required: true, type: 'boolean'},
+        enable_restapi: {required: true, type: 'boolean'}
+    }),
+    ScriptTreeNode: objectContract<ScriptTreeNode>({
+        key: {required: true, type: 'string'},
+        label: {required: true, type: 'string'},
+        leaf: {required: true, type: 'boolean'},
+        children: {required: true, arrayOf: 'ScriptTreeNode'}
+    }),
 
     // -- crates/server, mirrored in app/src/api/types.ts -------------------
-    InstanceStatus: {
-        kind: 'object',
-        properties: {
-            started: {required: true, type: 'boolean'},
-            starting: {required: true, type: 'boolean'},
-            client_count: {required: true, type: 'integer'},
-            // The three `Option` fields are always serialised (no
-            // `skip_serializing_if`), so `types.ts` declares them present and
-            // nullable rather than optional. utoipa still leaves them out of
-            // `required`, hence `required: false` here.
-            server_port: {required: false, type: 'integer', nullable: true},
-            rcon_port: {required: false, type: 'integer', nullable: true},
-            last_error: {required: false, type: 'string', nullable: true}
-        }
-    },
-    StartAccepted: {
-        kind: 'object',
-        properties: {accepted: {required: true, type: 'boolean'}}
-    },
-    ScriptContent: {
-        kind: 'object',
-        properties: {code: {required: true, type: 'string'}}
-    },
-    ExistsResponse: {
-        kind: 'object',
-        properties: {exists: {required: true, type: 'boolean'}}
-    },
+    InstanceStatus: objectContract<InstanceStatus>({
+        started: {required: true, type: 'boolean'},
+        starting: {required: true, type: 'boolean'},
+        client_count: {required: true, type: 'integer'},
+        // The three `Option` fields are always serialised (no
+        // `skip_serializing_if`), so `types.ts` declares them present and
+        // nullable rather than optional. utoipa still leaves them out of
+        // `required`, hence `required: false` here.
+        server_port: {required: false, type: 'integer', nullable: true},
+        rcon_port: {required: false, type: 'integer', nullable: true},
+        last_error: {required: false, type: 'string', nullable: true}
+    }),
+    StartAccepted: objectContract<StartAccepted>({
+        accepted: {required: true, type: 'boolean'}
+    }),
+    ScriptContent: objectContract<ScriptContent>({
+        code: {required: true, type: 'string'}
+    }),
+    ExistsResponse: objectContract<ExistsResponse>({
+        exists: {required: true, type: 'boolean'}
+    }),
+    // Not `objectContract<…>`: `sendRcon(command)` builds this body as an
+    // inline literal, so there is no declaration in `types.ts` to bind it to
+    // and this row is the client's only statement of the shape -- a second
+    // mirror of the server, not a third. Give it one and this becomes
+    // `objectContract<RconBody>` like the rest.
     RconBody: {
         kind: 'object',
         properties: {command: {required: true, type: 'string'}}
     },
-    ExecuteRequest: {
-        kind: 'object',
-        // Nothing is required: the server reads "exactly one of `path` or
-        // `code`" off which fields are present, so a required field appearing
-        // here is a breaking change to every caller of `executeScript`.
-        properties: {
-            path: {required: false, type: 'string', nullable: true},
-            code: {required: false, type: 'string', nullable: true},
-            language: {required: false, type: 'string', nullable: true},
-            bot_count: {required: false, type: 'integer', nullable: true}
-        }
-    },
-    ExecuteAccepted: {
-        kind: 'object',
-        properties: {job_id: {required: true, ref: 'JobId'}}
-    },
-    Job: {
-        kind: 'object',
-        properties: {
-            id: {required: true, ref: 'JobId'},
-            script: {required: false, type: 'string', nullable: true},
-            status: {required: true, ref: 'JobStatus'},
-            started_at_ms: {required: true, type: 'integer'},
-            finished_at_ms: {required: false, type: 'integer', nullable: true},
-            stdout: {required: true, type: 'string'},
-            stderr: {required: true, type: 'string'},
-            error: {required: false, type: 'string', nullable: true}
-        }
-    },
+    // Nothing is required: the server reads "exactly one of `path` or `code`"
+    // off which fields are present, so a required field appearing here is a
+    // breaking change to every caller of `executeScript`. The four
+    // `nullable: true`s are not optional decoration either -- `types.ts`
+    // declares all four with `?`, and `PropertyContractFor` makes that agree.
+    ExecuteRequest: objectContract<ExecuteRequest>({
+        path: {required: false, type: 'string', nullable: true},
+        code: {required: false, type: 'string', nullable: true},
+        language: {required: false, type: 'string', nullable: true},
+        bot_count: {required: false, type: 'integer', nullable: true}
+    }),
+    ExecuteAccepted: objectContract<ExecuteAccepted>({
+        job_id: {required: true, ref: 'JobId'}
+    }),
+    Job: objectContract<Job>({
+        id: {required: true, ref: 'JobId'},
+        script: {required: false, type: 'string', nullable: true},
+        status: {required: true, ref: 'JobStatus'},
+        started_at_ms: {required: true, type: 'integer'},
+        finished_at_ms: {required: false, type: 'integer', nullable: true},
+        stdout: {required: true, type: 'string'},
+        stderr: {required: true, type: 'string'},
+        error: {required: false, type: 'string', nullable: true}
+    }),
     // A `u64` counter serialised as a string so a browser cannot lose
-    // precision on it. `types.ts` types every job id as `string`; a schema
-    // that turned back into an integer would break `getJob`'s URL building.
+    // precision on it. `types.ts` types every job id as `string` inline (in
+    // `Job.id` and `ExecuteAccepted.job_id`) rather than as a named alias, so
+    // there is nothing to bind this row to; the two `ref: 'JobId'` entries
+    // above are what tie it to those two fields. A schema that turned back
+    // into an integer would break `getJob`'s URL building.
     JobId: {kind: 'scalar', type: 'string'},
-    // Mirrored by `export type JobStatus` in types.ts.
-    JobStatus: {kind: 'enum', values: ['running', 'succeeded', 'failed']},
+    JobStatus: enumContract<JobStatus>({running: true, succeeded: true, failed: true}),
 
     // -- the error body `http.ts` reads on every failure -------------------
+    // Also unbound, for the same reason as `RconBody`: `errorFromResponse`
+    // narrows the parsed body field by field (`typeof record.code ===
+    // 'number'`) instead of declaring a DTO, so this row is the only
+    // client-side statement of the shape.
+    //
+    // What it cannot see is the *value* of `code`: `code: 2` means "no
+    // Factorio instance is running", every store identifies the condition by
+    // that number rather than by the status, and a number is not part of a
+    // schema. That contract is pinned on the server instead, by
+    // `stopping_when_nothing_runs_is_an_error_not_a_panic`,
+    // `rcon_without_a_running_instance_reports_not_started` and
+    // `executing_without_a_running_instance_is_service_unavailable`.
     ErrorResponse: {
         kind: 'object',
         properties: {

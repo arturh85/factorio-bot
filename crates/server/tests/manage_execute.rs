@@ -159,11 +159,22 @@ async fn body_json(response: Response<Body>) -> serde_json::Value {
 /// script the mutation answers `404` instead, which is the leak it describes --
 /// the endpoint telling a caller what is and is not in the scripts root before
 /// it will admit the game is not running.
+///
+/// `code: 2` is asserted as well as the status, and it is the load-bearing
+/// half. The frontend identifies "no game is running" by that number and never
+/// by the status, precisely because this route answers `503` where
+/// `/api/v1/instance/stop` and `/api/v1/rcon` answer `400` for the same
+/// condition. Without the body assertion, renumbering
+/// `ErrorResponse::not_running` leaves this test green, does not move the
+/// OpenAPI snapshot (the number is a value, not part of the schema), and
+/// leaves the frontend green too because its fixtures are hand-written -- so
+/// the only thing that notices is a browser.
 #[tokio::test]
 async fn executing_without_a_running_instance_is_service_unavailable() {
     let (_dir, state) = test_state();
     let response = post_execute(&state, serde_json::json!({ "path": "/nope.lua" })).await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body_json(response).await["code"], 2);
 }
 
 /// Answered without an instance, which is also the ordering assertion: body

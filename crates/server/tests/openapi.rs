@@ -457,6 +457,12 @@ async fn the_script_listing_publishes_a_script_tree_node_schema() {
 /// Either half alone is worthless. A snapshot nobody regenerates is a second
 /// `models/types.ts`; a frontend test with no upstream guard only ever proves
 /// that the snapshot matches itself.
+///
+/// Note what the pair does and does not promise. Either test *can* be
+/// satisfied on its own by editing the other's input -- hand-edit the snapshot
+/// and this test is what goes red; regenerate it and the TypeScript test is.
+/// The guarantee is the conjunction: **the two cannot both pass unless the
+/// server, the snapshot and the client all say the same thing.**
 const SNAPSHOT_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../app/src/api/openapi.snapshot.json"
@@ -471,6 +477,32 @@ const REGENERATE_HINT: &str = "\n\nRegenerating is a deliberate act with a visib
      Whatever moved has to be mirrored in app/src/api/types.ts, app/src/api/client.ts\n\
      and app/src/api/openapi.contract.spec.ts -- those are what fail next if it is not,\n\
      and the browser is what fails if neither does.";
+
+/// Whether this run was asked to rewrite the committed snapshot instead of
+/// checking it -- and a hard stop if that request arrives from CI.
+///
+/// `UPDATE_OPENAPI_SNAPSHOT=1` turns both guards below off, which is fine at a
+/// developer's terminal where the point is to see the diff before committing
+/// it. In an automated run it would be a disaster of the quiet kind: the job
+/// would rewrite a tracked file, report `ok`, and agree with whatever the
+/// server had just started publishing. No job in this repo sets it today; this
+/// makes sure that stays a fact rather than a hope.
+///
+/// It panics rather than ignoring the variable and checking anyway, because a
+/// CI job that sets it is misconfigured, and a misconfiguration that silently
+/// does the right thing is one nobody fixes.
+fn snapshot_update_requested() -> bool {
+    let requested = std::env::var_os("UPDATE_OPENAPI_SNAPSHOT").is_some();
+    assert!(
+        !(requested && std::env::var_os("CI").is_some()),
+        "UPDATE_OPENAPI_SNAPSHOT is set in a CI environment.\n\
+         Regenerating the committed OpenAPI snapshot is a deliberate local act with a\n\
+         reviewed diff; doing it automatically would re-bless every server change and\n\
+         report a green run. Unset UPDATE_OPENAPI_SNAPSHOT in the CI environment, and\n\
+         regenerate locally instead:{REGENERATE_HINT}"
+    );
+    requested
+}
 
 fn read_snapshot() -> Value {
     let raw = std::fs::read_to_string(SNAPSHOT_PATH).unwrap_or_else(|err| {
@@ -594,8 +626,9 @@ async fn the_committed_openapi_snapshot_matches_the_published_spec() {
 
     // Opt-in regeneration, never automatic: a snapshot a build rewrites on its
     // own is a snapshot that agrees with every change, including the ones that
-    // break the browser.
-    if std::env::var_os("UPDATE_OPENAPI_SNAPSHOT").is_some() {
+    // break the browser. `snapshot_update_requested` refuses the opt-in under
+    // `CI` rather than honouring it silently.
+    if snapshot_update_requested() {
         let mut rendered =
             serde_json::to_string_pretty(&published).expect("the spec serialises back to JSON");
         rendered.push('\n');
@@ -624,8 +657,10 @@ async fn the_committed_openapi_snapshot_matches_the_published_spec() {
 async fn the_snapshot_covers_every_operation_a_build_without_an_interpreter_publishes() {
     // The regenerating run is writing the very file this reads, from a sibling
     // test thread. Reading it here would race the write and fail on a
-    // half-written document rather than on anything real.
-    if std::env::var_os("UPDATE_OPENAPI_SNAPSHOT").is_some() {
+    // half-written document rather than on anything real. Skipping is only
+    // acceptable because `snapshot_update_requested` has already ruled out the
+    // case where the opt-in was not deliberate.
+    if snapshot_update_requested() {
         return;
     }
     let published = openapi_spec().await;

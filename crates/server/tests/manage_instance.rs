@@ -56,6 +56,17 @@ async fn instance_status_reports_stopped_when_nothing_runs() {
     assert_eq!(status["started"], false);
 }
 
+/// `code: 2` is asserted alongside the status, and it is the half the client
+/// actually reads.
+///
+/// "No Factorio instance is running" reaches the browser as `400` here and as
+/// `503` from `POST /api/v1/scripts/execute`, so the stores identify the
+/// condition by `code`, never by the status. Pinning only the status would let
+/// `ErrorResponse::not_started` be renumbered with the whole Rust suite green
+/// and the OpenAPI snapshot unmoved -- the number is a value, not part of the
+/// schema -- while every client branch that recognises the condition silently
+/// stops recognising it. The status assertion still earns its place: it is
+/// what distinguishes this from the `503` leg.
 #[tokio::test]
 async fn stopping_when_nothing_runs_is_an_error_not_a_panic() {
     let response = build_router(state_with(FactorioInstance::new_shared()), None)
@@ -70,6 +81,11 @@ async fn stopping_when_nothing_runs_is_an_error_not_a_panic() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["code"], 2);
 }
 
 #[tokio::test]

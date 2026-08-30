@@ -1333,7 +1333,11 @@ git commit -m "feat(lua): add the goal api backed by the new planner and executo
 
 **Clean up seven write-only snapshot artifacts while you are here.** `crates/scripting_lua/tests/` contains `task_graph-1.dot`, `task_graph-1.md`, `task_graph-2.dot`, `task_graph-2.md`, `world_end-1.png`, `world_end-2.png` and `world_start.png`. Nothing reads or compares them: `lua_runner.rs:133` writes `stdout-N.txt`, the fixture script emits the rest, and no assertion touches any of them. They were last regenerated 122 commits ago (`4b68a8b`) and have drifted since — running the suite today rewrites them with different entity positions, and every test still passes.
 
-They are also specifically *task-graph* renderings, so this task deletes their producer anyway. Delete the four `task_graph-*` files outright. For the three PNGs, either delete them too or make them real assertions — but do not leave a file in the repo that regenerates differently on every run and is compared to nothing, because it reads as a snapshot test to the next person and is not one.
+Note that `crates/scripting_lua/tests/` contains no `.rs` files at all — it is a data directory holding the fixture `script.lua` and its outputs, so there is no test in it that could do any comparing.
+
+All seven are still actively regenerated, so none of them is merely dead. The four `task_graph-*` files come from the planner this task deletes; delete them with their producer. The three PNGs come from the fixture itself — `script.lua:161` calls `world.draw("world_start.png")` and line 176 calls `world.draw("world_end-" .. bot_count .. ".png")`, routed through the live `draw_world` at `crates/scripting_lua/src/globals/world.rs:200`. (Do not be misled by the commented-out `draw_world` at `lua_runner.rs:109`; that is a superseded duplicate path, not the producer.) So the PNGs outlive this task, and the choice for them is real: make them assertions or delete them.
+
+Either way, do not leave a file in the repo that regenerates differently on every run and is compared to nothing — it reads as a snapshot test to the next person and is not one.
 
 - [ ] **Step 1: Migrate the Lua scripts first**
 

@@ -782,21 +782,9 @@ pub async fn run_script_file(
     let language = language_by_filename(requested)
         .ok_or_else(|| miette!("unknown scripting file extension: {requested}"))?;
     let code = std::fs::read_to_string(&resolved).into_diagnostic()?;
+    // The resolved absolute path, not the request: `include` resolves relative
+    // to the script's own directory, and errors should name the real file.
     let filename = resolved.to_string_lossy().into_owned();
-    run_script(planner, language, &code, scripts_root, bot_count, sink)
-        .await
-        .map(|outcome| outcome)
-        .map_err(|err| err)
-        .and_then(|outcome| Ok(outcome))
-        // `filename` is threaded through so `include` resolves next to the
-        // script and errors name the right file.
-        .map(|outcome| { let _ = &filename; outcome })
-}
-```
-
-Do not write the trailing `.map/.and_then` chain above — it is there to show the shape and is nonsense. Write it plainly: resolve, read, then call `run_lua` directly with `Some(&filename)`:
-
-```rust
     match language {
         "lua" => run_lua(planner, &code, Some(&filename), scripts_root, bot_count, sink)
             .await
@@ -1252,7 +1240,16 @@ The spawned task must release the slot on *every* exit path, including a panic i
 
 - [ ] **Step 4: Register the routes and assert them**
 
-`manage/mod.rs` gains four `.routes(routes!(…))` lines. `tests/openapi.rs` gains the four paths to its route list — the existing `no_operation_publishes_a_path_parameter` sweep will cover `{id}`… it will *not*: `{id}` is a genuine path parameter. Add it to that test's allow-list explicitly, naming the two operations, rather than loosening the assertion.
+`manage/mod.rs` gains four `.routes(routes!(…))` lines, and `tests/openapi.rs` gains the four paths to its route list.
+
+`no_operation_publishes_a_path_parameter` needs care. It currently asserts that *nothing* publishes a path parameter, which held because plan 3 added no path-parameterised route. `GET /jobs/{id}` and `GET /jobs/{id}/events` are the first genuine ones. Do **not** relax the assertion to "path parameters are allowed" — that would retire the guard that stops finding I1 from returning. Instead give the test an explicit allow-list of the two operations that legitimately carry `{id}`, so any *third* path parameter still fails:
+
+```rust
+const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[
+    ("get", "/api/v1/jobs/{id}"),
+    ("get", "/api/v1/jobs/{id}/events"),
+];
+```
 
 - [ ] **Step 5: Run the tests and watch them pass**
 

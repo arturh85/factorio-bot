@@ -209,8 +209,29 @@ The system supports running multiple graphical Factorio clients controlled by Lu
 ### Running Multi-Client Tests
 
 ```bash
-# RECOMMENDED: Pre-compile first to separate compile time from test runtime
-cargo build --release --no-default-features --features cli,lua
+# Iterating? Use a DEBUG build. Timing a run? Use --release.
+#
+# This is not a preference, the two builds behave differently:
+#
+#   debug    mods resolve to the repo checkout, so editing mods/BotBridge
+#            takes effect on the next run. Scripts are not extracted.
+#            Data dir is ~/.local/share/factorio-bot-dev/
+#   release  mods and scripts are include_dir!-embedded into the binary at
+#            COMPILE TIME and extracted once into the workspace. Editing
+#            mods/ or scripts/ has NO effect until you rebuild -- and no
+#            effect at all on an existing workspace, because extraction is
+#            skipped when the directory already exists.
+#            Data dir is ~/.local/share/factorio-bot/
+#
+# Editing the mod against a release build costs two confusing runs. Ask.
+cargo build --no-default-features --features cli,lua            # debug: iterating
+cargo build --release --no-default-features --features cli,lua  # release: timing
+
+# FAST PLANNING LOOP: no graphical client, no 90s connect wait.
+# --clients is how many Factorio processes to spawn; --bots is how many bots
+# to plan for. They used to be one flag, which made `-c 0` plan for zero bots
+# and `-c 1` demand a display. Planning only needs bots.
+factorio-bot lua goal_smoke.lua --clients 0 --bots 4
 
 # Run multi-client test with adequate timeout (180s recommended)
 #

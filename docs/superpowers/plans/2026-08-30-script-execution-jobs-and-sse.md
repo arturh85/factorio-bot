@@ -1000,6 +1000,53 @@ async fn a_long_script_does_not_block_other_tasks() {
 
 On two worker threads this may pass by luck even before the fix — the test's value is as a regression guard once `spawn_blocking` is in. Record whichever it does; do not weaken it to force red.
 
+### Runtime ownership — decided here, because Task 5 inherits it
+
+`run_lua` builds its own runtime inside the spawned thread (`lua_runner.rs:109`) and drops it when `block_on` returns. Dropping a tokio runtime aborts every task spawned onto it that has not finished — **silently**, with no error and no log line. So any asynchronous work a binding starts and the script does not explicitly wait for is killed the moment the script returns.
+
+That is invisible today because every binding awaits its own work inline. It stops being invisible the moment a binding hands the script a handle and lets it walk away, which is the shape the other session's `goal.execute` takes: `goal.execute(..)` returns a run handle and `goal.wait(h)` blocks. A script that calls the first and not the second gets its bots stopped mid-plan with no diagnostic.
+
+This is a job-lifetime question, not a binding question, which is why it is settled here rather than left to whoever writes the next binding. Two rules:
+
+1. **A job is one `run_lua` call, and it is not finished while work it started is still running.** Do not redefine a job as "the script returned". Plan 5's UI polls job status; a job that reports `succeeded` while bots are still moving is lying to the operator.
+2. **Outstanding work is awaited, never silently dropped.** `run_lua` gains a handle registry that bindings register spawned work into, and awaits everything in it after the chunk finishes and before returning.
+
+The registry is the seam: this task provides it, bindings opt in. `goal.*` is another session's and will register into it; nothing in this repository does today, so the registry starts empty and the behaviour is unchanged until someone uses it.
+
+```rust
+/// Work a binding spawned that must finish before the run is considered over.
+///
+/// The runtime that `run_lua` builds dies with the call. Anything spawned onto
+/// it and not awaited is aborted with no error and no log line, so a binding
+/// that hands a script a handle and lets it walk away would have its work
+/// killed the moment the script returned. Registering here makes the run wait.
+#[derive(Default, Clone)]
+pub struct PendingWork(Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>);
+
+impl PendingWork {
+    pub fn register(&self, handle: tokio::task::JoinHandle<()>) {
+        self.0.lock().push(handle);
+    }
+
+    /// Awaits everything registered. A panicking task is reported, not
+    /// propagated: one background task dying must not abort the process.
+    pub async fn drain(&self) -> Vec<String> {
+        let handles: Vec<_> = self.0.lock().drain(..).collect();
+        let mut failures = Vec::new();
+        for handle in handles {
+            if let Err(err) = handle.await {
+                failures.push(format!("background task failed: {err}"));
+            }
+        }
+        failures
+    }
+}
+```
+
+`run_lua` calls `pending.drain().await` inside `block_on`, after `chunk.exec_async()` and before the runtime is dropped, and folds any returned failures into the run's stderr.
+
+**Do not** try to solve this by moving the runtime up to the job registry and sharing it across runs. That couples every script's lifetime to every other's and makes one runaway script's tasks outlive the job that owns them — the opposite of what the registry is for.
+
 - [ ] **Step 3: Move the work onto `spawn_blocking`**
 
 Replace `thread::spawn(move || { … }).join().unwrap()?` with:
@@ -1055,7 +1102,8 @@ git commit -m "perf(lua): run scripts on spawn_blocking instead of blocking a wo
 
 ### Design notes for the implementer
 
-- **One at a time.** The user's decision: script execution is serialized. `try_start` takes the single slot or returns the occupant's id, atomically under one lock. Do not implement a queue.
+- **One at a time.** The user's decision: script execution is serialized.
+- **A job is not finished when the script returns — it is finished when `run_lua` returns**, which Task 4 makes wait for work the script spawned and did not await. Do not shortcut this by completing the job on chunk exit. `try_start` takes the single slot or returns the occupant's id, atomically under one lock. Do not implement a queue.
 - **Ids are a `u64` counter, not UUIDs.** The registry is per-process and dies with it, so a counter is sufficient and adds no dependency. Serialize as a string so the frontend never sees a JavaScript number large enough to lose precision.
 - **`broadcast`, not `mpsc`.** Several browser tabs may watch the same job. Capacity 256; a slow subscriber that lags gets `RecvError::Lagged`, which the SSE handler turns into a visible gap rather than dropping the connection.
 - **History is capped** at `history_limit` finished jobs, oldest evicted. Without a cap a long-lived server accumulates every script's full stdout forever.

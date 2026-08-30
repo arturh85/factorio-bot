@@ -1,6 +1,6 @@
+use crate::process::spinner::Spinner;
 use indicatif::HumanDuration;
 use miette::{miette, IntoDiagnostic, Result};
-use paris::Logger;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus};
 use std::thread::{sleep, JoinHandle};
@@ -170,7 +170,7 @@ pub fn extract_archive(
         use std::fs::File;
         use std::str::FromStr;
         let archive_path = PathBuf::from_str(archive).into_diagnostic()?;
-        let mut logger = Logger::new();
+        let mut logger = Spinner::new();
         let extracted_path = workspace_path.join(PathBuf::from("factorio"));
         if !extracted_path.exists() {
             logger.loading(format!(
@@ -217,7 +217,7 @@ pub async fn await_lock(lock_path: PathBuf, silent: bool) -> Result<()> {
         match std::fs::remove_file(&lock_path) {
             Ok(_) => {}
             Err(_) => {
-                let mut logger = Logger::new();
+                let mut logger = Spinner::new();
                 if !silent {
                     logger.loading("Waiting for .lock to disappear");
                 }
@@ -303,7 +303,7 @@ pub fn extract_dmg(dmg_path: &str, target_directory: &Path, workspace_path: &Pat
 
     let workspace_data_path = workspace_path.join(PathBuf::from("data"));
     let started = Instant::now();
-    let mut logger = Logger::new();
+    let mut logger = Spinner::new();
 
     logger.loading(format!("Mounting DMG <bright-blue>{}</> ...", dmg_path));
 

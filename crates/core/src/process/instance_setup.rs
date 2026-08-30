@@ -1,4 +1,3 @@
-use paris::Logger;
 use serde_json::Value;
 use std::fs;
 use std::fs::{read_to_string, File};
@@ -17,6 +16,7 @@ use crate::factorio::util::{read_to_value, write_value_to};
 use crate::process::io_utils::{await_lock, extract_archive, get_factorio_binary_path, symlink};
 use crate::process::output_reader::read_output;
 use crate::process::process_control::FactorioStartCondition;
+use crate::process::spinner::Spinner;
 use miette::{miette, IntoDiagnostic, Result};
 use parking_lot::RwLock;
 use tokio::fs::create_dir;
@@ -38,6 +38,101 @@ use tokio::fs::create_dir;
 pub const MODS_CONTENT: include_dir::Dir = include_dir!("mods");
 #[cfg(not(debug_assertions))]
 pub const PLANS_CONTENT: include_dir::Dir = include_dir!("scripts");
+
+/// The mod this project ships and depends on: without it there is no RCON
+/// bridge, and every other feature is unreachable.
+pub const BRIDGE_MOD_NAME: &str = "BotBridge";
+
+/// Reduces a Factorio version string to its `major.minor` prefix.
+///
+/// Factorio matches a mod's declared `factorio_version` against the running
+/// game on `major.minor` only. Verified against the installed Factorio 2.1.17
+/// by running `factorio --create` with a probe mod: `factorio_version` of
+/// `2.1`, `2.1.17` and even `2.1.0` all load, while `2.0` and `1.1` are
+/// rejected with `Incompatible Factorio version (current: 2.1, required: 2.0)`
+/// -- note that Factorio itself reports its own version as `2.1` there. Wube's
+/// own mods shipped with 2.1.17 (`space-age`, `quality`, `elevated-rails`,
+/// `recycler`) all declare `"factorio_version": "2.1"`.
+///
+/// Returns `None` for anything that is not two leading numeric components, so
+/// a malformed manifest degrades to "cannot tell" rather than a false verdict.
+fn major_minor(version: &str) -> Option<String> {
+    let mut parts = version.trim().split('.');
+    let major = parts.next()?.trim();
+    let minor = parts.next()?.trim();
+    let numeric = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+    if !numeric(major) || !numeric(minor) {
+        return None;
+    }
+    Some(format!("{}.{}", major, minor))
+}
+
+/// Reads a top-level string field out of a JSON file, treating a missing file,
+/// unreadable bytes, invalid JSON and a missing or non-string field all as
+/// "not available". These are operational conditions, not bugs.
+fn read_json_string_field(path: &Path, field: &str) -> Option<String> {
+    let contents = fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&contents).ok()?;
+    Some(value.get(field)?.as_str()?.to_string())
+}
+
+/// Fails before launching Factorio when the bridge mod targets a different
+/// Factorio major.minor than the installed game.
+///
+/// Factorio surfaces this mismatch only as a mod load failure buried in its own
+/// output, after which the run dies with a misleading "failed to create
+/// factorio level". Nothing in the Rust build reads the mod manifest, so no
+/// test can catch it -- hence this preflight.
+///
+/// When either manifest is missing or malformed the check cannot reach a
+/// verdict; it warns and lets the run continue rather than blocking on an
+/// unrelated problem.
+pub fn preflight_mod_factorio_version(
+    mods_path: &Path,
+    data_path: &Path,
+    silent: bool,
+) -> Result<()> {
+    let mod_info_path = mods_path.join(BRIDGE_MOD_NAME).join("info.json");
+    let base_info_path = data_path.join("base").join("info.json");
+
+    let declared = read_json_string_field(&mod_info_path, "factorio_version");
+    let installed = read_json_string_field(&base_info_path, "version");
+    let (Some(declared), Some(installed)) = (declared, installed) else {
+        if !silent {
+            warn!(
+                "skipping Factorio version preflight: could not read `factorio_version` from <bright-blue>{:?}</> or `version` from <bright-blue>{:?}</>",
+                mod_info_path, base_info_path
+            );
+        }
+        return Ok(());
+    };
+
+    let (Some(mod_major_minor), Some(game_major_minor)) =
+        (major_minor(&declared), major_minor(&installed))
+    else {
+        if !silent {
+            warn!(
+                "skipping Factorio version preflight: cannot parse mod version <bright-blue>{}</> ({:?}) or game version <bright-blue>{}</> ({:?}) as major.minor",
+                declared, mod_info_path, installed, base_info_path
+            );
+        }
+        return Ok(());
+    };
+
+    if mod_major_minor != game_major_minor {
+        return Err(ModFactorioVersionMismatch {
+            mod_name: BRIDGE_MOD_NAME.into(),
+            mod_factorio_version: declared,
+            mod_major_minor,
+            game_version: installed,
+            game_major_minor,
+            mod_info_path: mod_info_path.to_string_lossy().into_owned(),
+            base_info_path: base_info_path.to_string_lossy().into_owned(),
+        }
+        .into());
+    }
+    Ok(())
+}
 
 #[allow(clippy::too_many_arguments)]
 pub async fn setup_factorio_instance(
@@ -81,10 +176,17 @@ pub async fn setup_factorio_instance(
     }
     #[allow(unused_mut)]
     let mut workspace_mods_path = workspace_path.join(PathBuf::from(MODS_FOLDERNAME));
+    // Which of the several possible mod sources we ended up on. Logged below,
+    // because "I edited mods/ and the game kept loading the old copy" has
+    // already cost a live debugging session.
+    #[allow(unused_mut, unused_assignments)]
+    let mut mods_source =
+        "pre-existing workspace copy; editing mods/ does NOT update it, delete it to re-extract";
     if !workspace_mods_path.exists() {
         #[cfg(debug_assertions)]
         {
             workspace_mods_path = PathBuf::from(format!("../../{}", MODS_FOLDERNAME));
+            mods_source = "repo checkout (debug build); edits apply on the next run";
         }
         #[cfg(not(debug_assertions))]
         {
@@ -93,9 +195,12 @@ pub async fn setup_factorio_instance(
                 error!("failed to extract static mods content: {:?}", err);
                 return Err(ModExtractFailed {}.into());
             }
+            mods_source =
+                "compile-time snapshot embedded in this release binary; edits to mods/ need a rebuild";
         }
         if !workspace_mods_path.exists() {
             workspace_mods_path = PathBuf::from(MODS_FOLDERNAME);
+            mods_source = "mods/ relative to the current working directory";
             if !workspace_mods_path.exists() {
                 return Err(MissingModsFolder {}.into());
             }
@@ -114,6 +219,12 @@ pub async fn setup_factorio_instance(
     }
 
     let workspace_mods_path = fs::canonicalize(workspace_mods_path).into_diagnostic()?;
+    if !silent {
+        info!(
+            "Using mods directory <bright-blue>{:?}</> ({})",
+            &workspace_mods_path, mods_source
+        );
+    }
     let mods_path = instance_path.join(PathBuf::from(MODS_FOLDERNAME));
     if !mods_path.exists() {
         if !silent {
@@ -132,6 +243,17 @@ pub async fn setup_factorio_instance(
         }
         symlink(&workspace_data_path, &instance_data_path)?;
     }
+    // Refuse to launch a game that will silently drop the bridge mod. Prefer the
+    // workspace data directory, falling back to the instance's own copy.
+    let base_data_path = {
+        let candidate = workspace_path.join(PathBuf::from("data"));
+        if candidate.join("base").join("info.json").exists() {
+            candidate
+        } else {
+            instance_data_path.clone()
+        }
+    };
+    preflight_mod_factorio_version(&workspace_mods_path, &base_data_path, silent)?;
     // delete server/script-output/*
     // let script_output_put = instance_path.join(PathBuf::from("script-output"));
     // if script_output_put.exists() {
@@ -229,7 +351,7 @@ pub async fn setup_factorio_instance(
             });
         }
         if !saves_level_path.exists() {
-            let mut logger = Logger::new();
+            let mut logger = Spinner::new();
             let factorio_binary_path = get_factorio_binary_path(instance_path);
             if !factorio_binary_path.exists() {
                 error!(
@@ -382,7 +504,7 @@ pub async fn update_map_gen_settings(
         return Err(FactorioSettingsNotFound {}.into());
     }
     await_lock(instance_path.join(PathBuf::from(".lock")), silent).await?;
-    let mut logger = Logger::new();
+    let mut logger = Spinner::new();
     if !silent {
         logger.loading(format!(
             "Updating <bright-blue>{}</> and <bright-blue>{}</>",
@@ -451,4 +573,131 @@ pub async fn update_map_gen_settings(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn write_json(path: &Path, contents: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    /// Lays out a mods dir and a data dir. `mod_manifest` / `base_manifest` are
+    /// written verbatim so malformed input can be exercised; `None` means the
+    /// file is absent entirely.
+    fn fixture(mod_manifest: Option<&str>, base_manifest: Option<&str>) -> tempfile::TempDir {
+        let dir = tempdir().unwrap();
+        if let Some(contents) = mod_manifest {
+            write_json(
+                &dir.path()
+                    .join("mods")
+                    .join(BRIDGE_MOD_NAME)
+                    .join("info.json"),
+                contents,
+            );
+        }
+        if let Some(contents) = base_manifest {
+            write_json(
+                &dir.path().join("data").join("base").join("info.json"),
+                contents,
+            );
+        }
+        dir
+    }
+
+    fn run(dir: &tempfile::TempDir) -> Result<()> {
+        preflight_mod_factorio_version(&dir.path().join("mods"), &dir.path().join("data"), true)
+    }
+
+    #[test]
+    fn major_minor_drops_the_patch_component() {
+        assert_eq!(major_minor("2.1.17").as_deref(), Some("2.1"));
+        assert_eq!(major_minor("2.1").as_deref(), Some("2.1"));
+        assert_eq!(major_minor(" 2.1.17 ").as_deref(), Some("2.1"));
+        assert_eq!(major_minor("2"), None);
+        assert_eq!(major_minor(""), None);
+        assert_eq!(major_minor("two.one"), None);
+        assert_eq!(major_minor("2."), None);
+    }
+
+    #[test]
+    fn mismatched_major_minor_fails_and_names_both_versions() {
+        // The exact shape that broke a live run: the mod still declared 2.0
+        // while the installed game was 2.1.17.
+        let dir = fixture(
+            Some(r#"{"name":"BotBridge","factorio_version":"2.0"}"#),
+            Some(r#"{"name":"base","version":"2.1.17"}"#),
+        );
+        let err = run(&dir).expect_err("2.0 mod against a 2.1.17 game must be refused");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("2.0"),
+            "error must name the mod's version, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("2.1.17"),
+            "error must name the installed version, got: {rendered}"
+        );
+        let typed = err
+            .downcast_ref::<ModFactorioVersionMismatch>()
+            .expect("expected ModFactorioVersionMismatch");
+        assert_eq!(typed.mod_factorio_version, "2.0");
+        assert_eq!(typed.mod_major_minor, "2.0");
+        assert_eq!(typed.game_version, "2.1.17");
+        assert_eq!(typed.game_major_minor, "2.1");
+        assert!(typed.mod_info_path.ends_with("BotBridge/info.json"));
+        assert!(typed.base_info_path.ends_with("base/info.json"));
+    }
+
+    #[test]
+    fn differing_patch_level_is_accepted() {
+        // Verified against the real binary: a mod declaring 2.1 loads on 2.1.17.
+        let dir = fixture(
+            Some(r#"{"name":"BotBridge","factorio_version":"2.1"}"#),
+            Some(r#"{"name":"base","version":"2.1.17"}"#),
+        );
+        run(&dir).expect("major.minor match must pass regardless of patch level");
+    }
+
+    #[test]
+    fn differing_major_version_fails() {
+        let dir = fixture(
+            Some(r#"{"name":"BotBridge","factorio_version":"1.1"}"#),
+            Some(r#"{"name":"base","version":"2.1.17"}"#),
+        );
+        run(&dir).expect_err("1.1 mod against a 2.1.17 game must be refused");
+    }
+
+    #[test]
+    fn missing_manifests_are_operational_not_fatal() {
+        run(&fixture(None, Some(r#"{"version":"2.1.17"}"#)))
+            .expect("a missing mod manifest must not fail the run");
+        run(&fixture(Some(r#"{"factorio_version":"2.1"}"#), None))
+            .expect("a missing base manifest must not fail the run");
+        run(&fixture(None, None)).expect("both missing must not fail the run");
+    }
+
+    #[test]
+    fn malformed_manifests_are_operational_not_fatal() {
+        run(&fixture(Some("{not json"), Some(r#"{"version":"2.1.17"}"#)))
+            .expect("unparseable mod manifest must not fail the run");
+        run(&fixture(
+            Some(r#"{"factorio_version":"2.1"}"#),
+            Some("[1, 2, 3]"),
+        ))
+        .expect("unexpected base manifest shape must not fail the run");
+        run(&fixture(
+            Some(r#"{"factorio_version":17}"#),
+            Some(r#"{"version":"2.1.17"}"#),
+        ))
+        .expect("non-string factorio_version must not fail the run");
+        run(&fixture(
+            Some(r#"{"factorio_version":"latest"}"#),
+            Some(r#"{"version":"2.1.17"}"#),
+        ))
+        .expect("unparseable version string must not fail the run");
+    }
 }

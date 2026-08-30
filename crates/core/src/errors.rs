@@ -46,6 +46,22 @@ pub struct ModExtractFailed {}
 pub struct PlansExtractFailed {}
 
 #[derive(Error, Debug, Diagnostic)]
+#[error("mod {mod_name} targets Factorio {mod_factorio_version} but the installed game is {game_version}")]
+#[diagnostic(
+    code(factorio::mods::incompatible_version),
+    help("Factorio compares only major.minor, so it will refuse the mod with `Incompatible Factorio version (current: {game_major_minor}, required: {mod_major_minor})` and the level creation that follows fails with a misleading `failed to create factorio level`. Without {mod_name} there is no RCON bridge and nothing in this project works.\nFix: set \"factorio_version\": \"{game_major_minor}\" in {mod_info_path} (then delete the copy under the workspace mods directory so it is re-extracted), or install a Factorio {mod_major_minor}.x archive.\nThe installed version was read from {base_info_path}.")
+)]
+pub struct ModFactorioVersionMismatch {
+    pub mod_name: String,
+    pub mod_factorio_version: String,
+    pub mod_major_minor: String,
+    pub game_version: String,
+    pub game_major_minor: String,
+    pub mod_info_path: String,
+    pub base_info_path: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
 #[error("failed to find factorio binary")]
 #[diagnostic(
     code(factorio::workspace::not_found),

@@ -43,7 +43,7 @@ pub async fn run_script_file(
   let app_settings = load_app_settings().unwrap();
   let workspace_path = app_settings.factorio.workspace_path.to_string();
   let workspace_path = Path::new(&workspace_path);
-  let workspace_plans_path = prepare_workspace_scripts(workspace_path).unwrap();
+  let workspace_plans_path = factorio_bot_core::scripts::scripts_dir(workspace_path)?;
   if path.contains("..") {
     return Err(miette!("invalid path"));
   }
@@ -86,43 +86,4 @@ pub fn language_by_filename(filename: &str) -> Option<&'static str> {
     // "rn" => Some("rune"),
     _ => None,
   }
-}
-
-pub fn prepare_workspace_scripts(workspace_path: &Path) -> Result<PathBuf, String> {
-  // Prefer development paths (project root scripts/) over workspace/scripts/
-  let dev_paths = [PathBuf::from("./scripts"), PathBuf::from("../../scripts")];
-  for path in &dev_paths {
-    if path.exists() {
-      return Ok(fs::canonicalize(path).expect("Failed to canonicalize scripts path"));
-    }
-  }
-
-  // Fall back to workspace/scripts
-  let workspace_plans_path = workspace_path.join(PathBuf::from("scripts"));
-  if workspace_plans_path.exists() {
-    return Ok(
-      fs::canonicalize(workspace_plans_path).expect("Failed to canonicalize workspace_plans_path"),
-    );
-  }
-
-  // In release mode, extract bundled scripts if nothing found
-  #[cfg(not(debug_assertions))]
-  {
-    std::fs::create_dir_all(&workspace_plans_path).map_err(|e| format!("error: {}", e))?;
-    if let Err(err) = factorio_bot_core::process::instance_setup::PLANS_CONTENT
-      .extract(workspace_plans_path.clone())
-    {
-      factorio_bot_core::paris::error!("failed to extract static mods content: {:?}", err);
-      return Err("failed to extract mods content to workspace".into());
-    }
-    return Ok(
-      fs::canonicalize(workspace_plans_path).expect("Failed to canonicalize workspace_plans_path"),
-    );
-  }
-
-  #[cfg(debug_assertions)]
-  Err(format!(
-    "Missing scripts/ folder from working directory: {}",
-    workspace_plans_path.display()
-  ))
 }

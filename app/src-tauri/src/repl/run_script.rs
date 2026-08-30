@@ -1,6 +1,6 @@
 use crate::context::Context;
 use crate::repl::{Error, Subcommand};
-use crate::scripting::{prepare_workspace_scripts, run_script_file};
+use crate::scripting::run_script_file;
 use crate::settings::load_app_settings;
 use factorio_bot_core::miette::IntoDiagnostic;
 use factorio_bot_core::paris::error;
@@ -46,9 +46,10 @@ impl Subcommand for ThisCommand {
     let app_settings = load_app_settings().unwrap();
     let workspace_path = app_settings.factorio.workspace_path.to_string();
     let workspace_path = Path::new(&workspace_path);
-    let dir =
-      std::fs::read_dir(prepare_workspace_scripts(workspace_path).expect("failed to prepare"))
-        .expect("failed to read script dir");
+    let dir = std::fs::read_dir(
+      factorio_bot_core::scripts::scripts_dir(workspace_path).expect("failed to prepare"),
+    )
+    .expect("failed to read script dir");
     let _entries: Vec<String> = dir
       .map(|entry| entry.unwrap().file_name().to_str().unwrap().to_owned())
       .collect();

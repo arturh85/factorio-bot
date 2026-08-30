@@ -40,6 +40,7 @@ pub mod graph;
 pub mod paths;
 pub mod plan;
 pub mod process;
+pub mod scripts;
 pub mod settings;
 
 pub mod gantt_mermaid;

@@ -18,13 +18,17 @@
 - **A second agent is working in this repo concurrently** (dependency/stack modernization, mostly `app/` and `crates/server`). Therefore: commit with explicit paths — `git commit -m "..." -- <paths>` — never a bare `git commit` or `git add -A`, which would sweep their staged work into your commit. Run `cargo fmt` scoped: `cargo fmt -p <crate>`, never `--all`.
 - **Branch:** work on `master`, committing directly, per the repository owner's instruction.
 - Conventional commit messages. Every task ends with at least one commit.
-- Verification command for the whole workspace: `cargo clippy --workspace --all-features --all-targets -- --deny warnings` then `cargo nextest run`.
+- Verification command for the whole workspace: `cargo clippy --workspace --all-features --all-targets -- --deny warnings` then `cargo test --workspace`.
 
-## Sign-off Gate
+## Sign-off — granted
 
-**Tasks 1–7 are additive and reversible. Task 8 deletes user-facing code and removes a published Lua API.**
+The repository owner approved all eight tasks on 2026-08-30, including Task 8's deletion of `crates/core/src/plan/`, `crates/core/src/graph/task_graph.rs`, and the published Lua `plan.*` API, plus migration of the six scripts under `scripts/`.
 
-Do not begin Task 8 without explicit approval from the repository owner. If approval is not present, stop after Task 7, report that tasks 1–7 are complete, and leave the old `plan.*` API in place. Both APIs coexisting is a supported end state.
+Three design decisions were made at the same time and are folded into the tasks below. They override anything in an earlier draft of this plan:
+
+1. **The executor discovers its own bots.** `RconActuator` asks the game which players are connected and assigns `BotId(0..n)` in ascending player-id order. No caller supplies a mapping. (Task 3)
+2. **`goal.execute` is handle-based, not blocking.** It returns a handle immediately; `goal.wait(h)` blocks for completion and `goal.progress(h)` returns a live snapshot. This is what forces the execution log to be shared state rather than a value merged at the end. (Tasks 5 and 7)
+3. **Manual grouping is dropped.** There is no `goal.group`; the planner's method expansion is the only source of grouping. `plan.group_start` / `plan.group_end` disappear with the old API in Task 8. (Task 7)
 
 ---
 
@@ -418,7 +422,8 @@ git commit -m "feat(executor): add the execution log keyed by action id" -- crat
 
 **Interfaces:**
 - Consumes: `planner::InventorySlot` (Task 1).
-- Produces: `trait Actuator`, `ActuatorError`, `RconActuator::new(rcon, world, bots) -> Result<Self, ActuatorError>`. Task 4 is generic over `Actuator`.
+- Produces: `trait Actuator`, `ActuatorError`, `RconActuator::new(rcon, world) -> Result<Self, ActuatorError>`. Task 4 is generic over `Actuator`.
+- Produces (in core): `FactorioRcon::connected_players() -> Result<Vec<FactorioPlayer>>`.
 
 **Why a trait at all:** `FactorioRcon`'s `automock` is gated on core's own `cfg(test)` and is invisible here. The trait is what makes the run loop testable without a game, and it also normalizes RCON's inconsistent argument order (`world` is the first parameter of `move_player` and the last of `place_entity`).
 
@@ -567,6 +572,35 @@ rcon.print(game.table_to_json(t))";
 
 Add `serde_json` to the crate's dependencies (it is already a workspace-wide dependency via core; use `serde_json = "1"`).
 
+- [ ] **Step 4b: Add `connected_players` to core**
+
+`FactorioRcon::connected_player_count` (`crates/core/src/factorio/rcon.rs:161`) already fetches the full player objects via `remote_call("players", vec![])` and then throws everything away but the length. The mod's `rcon_players()` returns a JSON array of serialized players, and `FactorioPlayer` (`crates/core/src/types.rs:130`) carries `player_id: PlayerId`.
+
+Add a sibling that keeps them, and make the counter delegate to it so the two cannot disagree:
+
+```rust
+    /// Every connected player that has a character, as the mod reports them.
+    ///
+    /// `helpers.table_to_json({})` yields `"{}"` rather than `"[]"` for an
+    /// empty table, so an empty result arrives as an object. That is not an
+    /// error; it means nobody is connected.
+    pub async fn connected_players(&self) -> Result<Vec<FactorioPlayer>> {
+        let response = self.remote_call("players", vec![]).await?;
+        let Some(lines) = response else {
+            return Ok(vec![]);
+        };
+        let json_str = lines.join("");
+        if json_str == "{}" || json_str.is_empty() {
+            return Ok(vec![]);
+        }
+        serde_json::from_str::<Vec<FactorioPlayer>>(&json_str)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("failed to parse players: {json_str}"))
+    }
+```
+
+Then rewrite `connected_player_count` as `Ok(self.connected_players().await?.len())`. Run the workspace tests: `process_control.rs:213` is its only caller and its behaviour must not change.
+
 - [ ] **Step 5: Implement the adapter**
 
 Still in `rcon_actuator.rs`:
@@ -582,11 +616,34 @@ pub struct RconActuator {
 }
 
 impl RconActuator {
+    /// Discovers its own bots: every connected player becomes a bot, numbered
+    /// `BotId(0..n)` in ascending player-id order.
+    ///
+    /// Sorted, so the mapping is a function of who is connected and not of the
+    /// order the game happened to list them. The planner treats bots as
+    /// interchangeable, so which player gets which id does not affect the plan
+    /// — but it must be stable across a re-plan within one run, or the
+    /// executor would hand a chain to a different body midway.
     pub async fn new(
         rcon: Arc<FactorioRcon>,
         world: Arc<FactorioWorld>,
-        players: BTreeMap<BotId, PlayerId>,
     ) -> Result<Self, ActuatorError> {
+        let mut ids: Vec<PlayerId> = rcon
+            .connected_players()
+            .await
+            .map_err(|e| ActuatorError::Rejected(e.to_string()))?
+            .into_iter()
+            .map(|p| p.player_id)
+            .collect();
+        ids.sort_unstable();
+        let players: BTreeMap<BotId, PlayerId> = ids
+            .into_iter()
+            .enumerate()
+            .map(|(i, pid)| (BotId(i as u8), pid))
+            .collect();
+        if players.is_empty() {
+            return Err(ActuatorError::Rejected("no connected players".to_string()));
+        }
         // `FactorioRcon::send` is `async fn send(&self, command: &str)
         // -> Result<Option<Vec<String>>>` (crates/core/src/factorio/rcon.rs:79).
         // A silent-command reply arrives as one line; absence means the game
@@ -737,7 +794,7 @@ Expected: PASS.
 ```bash
 cargo fmt -p factorio-bot-executor
 cargo clippy -p factorio-bot-executor --all-targets -- --deny warnings
-git commit -m "feat(executor): add the actuator trait and its rcon implementation" -- crates/executor crates/core
+git commit -m "feat(executor): add the actuator trait and its rcon implementation" -- crates/executor crates/core Cargo.toml
 ```
 
 ---
@@ -912,7 +969,7 @@ The old executor polled every 100 ms (`crates/core/src/plan/execute.rs:79`). The
 - Test: inline in `run.rs`
 
 **Interfaces:**
-- Produces: `async fn run(act: Arc<dyn Actuator>, sched: &Schedule, net: &ActionNetwork) -> ExecutionLog`.
+- Produces: `async fn run_into(act: &dyn Actuator, sched: &Schedule, net: &ActionNetwork, progress: &Mutex<ExecutionLog>)` plus the wrapper `async fn run(...) -> ExecutionLog`. Task 7 calls `run_into` so it can read progress mid-run.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -932,7 +989,7 @@ async fn a_bot_waits_for_another_bots_action_before_its_own() {
     act.expect_walk().returning(|_, _| Ok(()));
 
     let (net, sched) = cross_bot_fixture();
-    let log = run(Arc::new(act), &sched, &net).await;
+    let log = run(&act, &sched, &net).await;
 
     assert_eq!(log.failed(), vec![]);
     assert_eq!(
@@ -954,7 +1011,7 @@ async fn a_dependent_action_is_abandoned_when_its_predecessor_fails() {
     });
 
     let (net, sched) = cross_bot_fixture();
-    let log = run(Arc::new(act), &sched, &net).await;
+    let log = run(&act, &sched, &net).await;
 
     assert_eq!(log.status(second_action_id()), Status::Pending);
 }
@@ -977,6 +1034,7 @@ Add `futures = "0.3"` to the crate's dependencies.
 use crate::log::{ExecutionLog, Status};
 use futures::future::join_all;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Mutex;
 use tokio::sync::watch;
 
 enum PredOutcome {
@@ -984,7 +1042,23 @@ enum PredOutcome {
     Abandoned,
 }
 
-pub async fn run(act: &dyn Actuator, sched: &Schedule, net: &ActionNetwork) -> ExecutionLog {
+/// Run every bot, recording progress into `progress` as it happens.
+///
+/// The log is shared rather than merged at the end because `goal.progress(h)`
+/// must be able to read it mid-run. Keys are disjoint — each action belongs to
+/// exactly one bot — so concurrent writers never collide on a key, and because
+/// `ExecutionLog` is a `BTreeMap` the finished state is identical regardless of
+/// the order the writes landed. That is what keeps this deterministic despite
+/// being concurrent.
+///
+/// `std::sync::Mutex`, not tokio's: every critical section is a few map
+/// operations with no `.await` inside. Never hold this guard across an await.
+pub async fn run_into(
+    act: &dyn Actuator,
+    sched: &Schedule,
+    net: &ActionNetwork,
+    progress: &Mutex<ExecutionLog>,
+) {
     let mut senders: BTreeMap<ActionId, watch::Sender<Status>> = BTreeMap::new();
     let mut receivers: BTreeMap<ActionId, watch::Receiver<Status>> = BTreeMap::new();
     for id in net.actions().map(|a| a.id) {
@@ -993,20 +1067,23 @@ pub async fn run(act: &dyn Actuator, sched: &Schedule, net: &ActionNetwork) -> E
         receivers.insert(id, rx);
     }
 
-    // BTreeSet, so the future order — and therefore the merge order — is a
-    // function of the schedule alone, not of task completion timing.
+    // BTreeSet, so the future order is a function of the schedule alone, not of
+    // task completion timing.
     let bots: BTreeSet<BotId> = sched.steps.iter().map(|s| s.bot).collect();
-    let logs = join_all(
+    join_all(
         bots.iter()
-            .map(|&bot| run_bot_signalled(act, bot, sched, net, &senders, &receivers)),
+            .map(|&bot| run_bot_signalled(act, bot, sched, net, progress, &senders, &receivers)),
     )
     .await;
+}
 
-    let mut merged = ExecutionLog::default();
-    for l in logs {
-        merged.merge(l);
-    }
-    merged
+/// Convenience wrapper for callers that only want the final state.
+pub async fn run(act: &dyn Actuator, sched: &Schedule, net: &ActionNetwork) -> ExecutionLog {
+    let progress = Mutex::new(ExecutionLog::default());
+    run_into(act, sched, net, &progress).await;
+    progress
+        .into_inner()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 async fn run_bot_signalled(
@@ -1014,10 +1091,10 @@ async fn run_bot_signalled(
     bot: BotId,
     sched: &Schedule,
     net: &ActionNetwork,
+    log: &Mutex<ExecutionLog>,
     senders: &BTreeMap<ActionId, watch::Sender<Status>>,
     receivers: &BTreeMap<ActionId, watch::Receiver<Status>>,
-) -> ExecutionLog {
-    let mut log = ExecutionLog::default();
+) {
     let mine: Vec<&ScheduledStep> = sched.steps.iter().filter(|s| s.bot == bot).collect();
 
     for (i, step) in mine.iter().enumerate() {
@@ -1025,35 +1102,43 @@ async fn run_bot_signalled(
             StepKind::Walk { to } => {
                 if act.walk(bot, to.clone()).await.is_err() {
                     abandon_rest(&mine[i..], senders);
-                    return log;
+                    return;
                 }
             }
             StepKind::Act { action, .. } => {
                 if let PredOutcome::Abandoned = await_preds(net, *action, receivers).await {
                     abandon_rest(&mine[i..], senders);
-                    return log;
+                    return;
                 }
-                log.start(*action, step.start);
+                lock(log).start(*action, step.start);
                 let Some(a) = net.action(*action) else {
-                    log.fail(*action, step.start, "action not in network".to_string());
+                    lock(log).fail(*action, step.start, "action not in network".to_string());
                     abandon_rest(&mine[i..], senders);
-                    return log;
+                    return;
                 };
+                // `perform` awaits, so the guard is taken and dropped around
+                // it, never held across it.
                 match perform(act, bot, &a.kind).await {
                     Ok(()) => {
-                        log.succeed(*action, step.end);
+                        lock(log).succeed(*action, step.end);
                         let _ = senders[action].send(Status::Success);
                     }
                     Err(e) => {
-                        log.fail(*action, step.end, e.to_string());
+                        lock(log).fail(*action, step.end, e.to_string());
                         abandon_rest(&mine[i..], senders);
-                        return log;
+                        return;
                     }
                 }
             }
         }
     }
-    log
+}
+
+/// One place to take the log guard, so poisoning is handled identically
+/// everywhere. A panic mid-run should not turn every later write into a second
+/// panic; the log is observational, so recovering the inner value is right.
+fn lock(log: &Mutex<ExecutionLog>) -> std::sync::MutexGuard<'_, ExecutionLog> {
+    log.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Publish `Failed` for every action this bot will now never reach.
@@ -1117,21 +1202,7 @@ fn ticks_to_wall_clock(ticks: Ticks) -> std::time::Duration {
 }
 ```
 
-Add `merge` to `ExecutionLog` in `crates/executor/src/log.rs`, with a test that merging is order-independent for disjoint key sets:
-
-```rust
-    /// Absorb another log. Bots own disjoint action sets, so no key collides;
-    /// if one ever does, the later write wins and that is a bug worth finding.
-    pub fn merge(&mut self, other: ExecutionLog) {
-        for (id, attempt) in other.attempts {
-            debug_assert!(
-                !self.attempts.contains_key(&id),
-                "two bots reported the same action {id:?}"
-            );
-            self.attempts.insert(id, attempt);
-        }
-    }
-```
+Add a determinism test: run the same fixture twice with the mock actuator's per-action delays reversed, and assert the two final `ExecutionLog`s are equal. Concurrent writers must not be able to change the finished state.
 
 Both accessors the loop needs already exist in `crates/planner/src/network.rs`: `actions()` returns an iterator over `&Action` (line 84) and `preds(id)` returns `Vec<(ActionId, Ticks)>` (line 97). Do not add new ones.
 
@@ -1139,7 +1210,7 @@ Use `tokio::time::pause()` in the tests so lag sleeps do not make the suite slow
 
 - [ ] **Step 4: Run the tests, then the whole workspace**
 
-Run: `cargo test -p factorio-bot-executor` then `cargo nextest run`
+Run: `cargo test -p factorio-bot-executor` then `cargo test --workspace`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -1238,7 +1309,7 @@ pub fn recover(
 
 - [ ] **Step 4: Run the tests and commit**
 
-Run: `cargo test -p factorio-bot-executor` then `cargo nextest run`
+Run: `cargo test -p factorio-bot-executor` then `cargo test --workspace`
 
 ```bash
 cargo fmt -p factorio-bot-executor
@@ -1265,22 +1336,54 @@ Adds a `goal.*` table beside the existing `plan.*`. Nothing is removed in this t
 
 Follow the existing idiom in `crates/scripting_lua/src/globals/plan.rs` exactly — including the `__doc_entry_*` documentation strings, which is where the published Lua API docs come from.
 
-Bind five functions:
+Bind seven functions:
 
 ```lua
--- @treturn table a plan handle
+-- @treturn number a plan handle
 function goal.have(item_name, count)
--- @treturn table a plan handle
+-- @treturn number a plan handle
 function goal.researched(technology_name)
 -- @treturn number the makespan in ticks
 function goal.schedule(plan_handle, bot_count)
 -- @treturn string graphviz source
 function goal.graphviz(plan_handle)
--- executes the schedule; blocks until every bot is done
+-- starts execution and returns immediately
+-- @treturn number a run handle
 function goal.execute(plan_handle)
+-- @treturn table {pending=n, running=n, success=n, failed=n, done=bool}
+function goal.progress(run_handle)
+-- blocks until the run finishes; returns the same table as goal.progress
+-- @treturn table
+function goal.wait(run_handle)
 ```
 
-`goal.have` and `goal.researched` build a `Goal`, run `expand`, and return a handle holding the `ActionNetwork`. `goal.schedule` runs `schedule` and stores the result on the handle. `goal.execute` builds an `RconActuator` from the live `FactorioInstance` and calls `executor::run`.
+`goal.have` and `goal.researched` build a `Goal`, run `expand`, and return a handle holding the `ActionNetwork`. `goal.schedule` runs `schedule` and stores the result on the handle.
+
+**Execution is handle-based, not blocking** — this was an explicit decision, so do not "simplify" it back to a blocking call. `goal.execute` builds an `RconActuator` from the live `FactorioInstance` (which discovers its own bots — it takes no mapping), spawns a tokio task running `executor::run_into`, and returns a run handle immediately. `goal.progress` reads a snapshot of that run's shared `ExecutionLog`; `goal.wait` blocks on the join handle and then returns the final snapshot.
+
+Handles are `u32` keys into a registry the Lua globals own, not Lua tables holding Rust pointers:
+
+```rust
+/// Live runs, keyed by the handle Lua holds.
+///
+/// A registry rather than userdata because the shared log outlives any single
+/// Lua call and must be readable from `goal.progress` on a later call. Bots
+/// keep working while the script does something else — that is the point of
+/// the handle-based API.
+struct Runs {
+    next: u32,
+    runs: BTreeMap<u32, RunEntry>,
+}
+
+struct RunEntry {
+    progress: Arc<Mutex<ExecutionLog>>,
+    join: tokio::task::JoinHandle<()>,
+}
+```
+
+`goal.execute` needs owned values to move into the spawned task, so it clones the handle's `Arc<Schedule>` and `Arc<ActionNetwork>` and calls `run_into(&*act, &*sched, &*net, &progress)` inside. This is the one place `Arc` is needed; `run_into` itself stays borrow-based.
+
+**There is no `goal.group`.** Manual grouping was dropped by decision: the planner's method expansion is the only source of grouping, and a manual bracket that disagreed with it would either be ignored or fight the scheduler. If a script needs to force specific work onto a specific bot, that is `Action::pinned`, which is a planner concern and not a Lua one.
 
 - [ ] **Step 2: Write the failing test script**
 
@@ -1293,7 +1396,9 @@ assert(makespan > 0, "expected a positive makespan")
 assert(#goal.graphviz(p) > 0, "expected graphviz output")
 ```
 
-Add a Rust test that runs it through the same harness `lua_runner.rs`'s existing `test_script` uses. Do not call `goal.execute` in this test — it needs a live game.
+Add a Rust test that runs it through the same harness `lua_runner.rs`'s existing `test_script` uses. Do not call `goal.execute`, `goal.progress` or `goal.wait` in this script — they need a live game.
+
+Cover the handle registry separately, in Rust, where the actuator can be mocked: assert that `goal.execute` returns a handle without waiting, that `goal.progress` on it reports counts that sum to the action total, and that `goal.wait` returns with `done = true`. That is the part of this task most likely to be wrong, and it is the part the Lua fixture cannot reach.
 
 - [ ] **Step 3: Run it to make sure it fails, then implement, then pass**
 
@@ -1343,6 +1448,8 @@ Either way, do not leave a file in the repo that regenerates differently on ever
 
 Rewrite each script's `plan.*` calls onto `goal.*`. Run each one that has a test harness. A script whose behaviour cannot be preserved gets a comment at the top naming what changed and why — do not silently drop functionality.
 
+Expect `plan.group_start` / `plan.group_end` to have no replacement; that is a decided loss, not an oversight. Where a script used them, delete the bracketing and add a one-line comment saying the planner now derives grouping. Do not invent a `goal.group` to preserve them.
+
 - [ ] **Step 2: Remove the Lua plan table**
 
 Delete `globals/plan.rs`, drop its registration from `lua_runner.rs`, and update `lua_docs.rs` and `roll_best_seed.rs`.
@@ -1365,7 +1472,7 @@ Drop `pub mod plan;` from `crates/core/src/lib.rs` and the `task_graph` line fro
 
 - [ ] **Step 5: Verify and commit**
 
-Run: `cargo clippy --workspace --all-features --all-targets -- --deny warnings` then `cargo nextest run`
+Run: `cargo clippy --workspace --all-features --all-targets -- --deny warnings` then `cargo test --workspace`
 Expected: green, with no reference to `TaskGraph` remaining: `grep -rn "TaskGraph\|PlanBuilder" --include="*.rs" crates app` returns nothing.
 
 ```bash
@@ -1385,9 +1492,19 @@ The fix adds a read-only `EntityGraph::any_resource_at` in core (`resource_conta
 
 It moved the recorded red-science makespans, as expected, because every ore-to-furnace trip gained that step: one bot 4749 -> 4751, four bots 1843 -> 1870, speedup 2.577x -> 2.541x. All re-measured, not computed.
 
-## Open questions for the repository owner
+## Remaining open question
 
-1. **Bot-to-player mapping.** `RconActuator` takes `BTreeMap<BotId, PlayerId>`. Who builds it? The natural place is wherever clients are spawned, but that code currently has no notion of `BotId`. Task 3 assumes the caller supplies it.
-2. **`goal.execute` blocking.** The Lua binding blocks until every bot finishes. A long plan makes the script unresponsive. An async/handle-based API would be better but complicates the Lua surface; deferred.
-3. **Game speed.** `ticks_to_wall_clock` assumes 60 ticks per second. A server running at a non-default `game.speed`, or one that stutters under load, makes every lag wait wrong. Reading `game.speed` over RCON at executor construction would fix the first case but not the second; properly, the executor should wait on an observed game tick rather than wall-clock. Deferred, and it is the most likely source of flaky smelting.
-4. **Task 8's script migration** may lose behaviour that only the old API expressed (explicit `plan.group_start`/`group_end` bracketing has no `goal.*` equivalent — the planner derives grouping itself). Confirm that losing manual grouping is acceptable.
+**Game speed.** `ticks_to_wall_clock` assumes 60 ticks per second. A server running at a non-default `game.speed`, or one merely stuttering under load, makes every lag wait wrong — too short, and the executor removes a plate that is not smelted yet.
+
+Reading `game.speed` over RCON at construction fixes the configured case but not the stutter case. The proper fix is to wait on an observed game tick rather than wall-clock: the mod already writes tick-stamped events, so the executor could await "tick >= start + lag" instead of sleeping.
+
+Not resolved, and deliberately not blocking: the wall-clock version is correct on a default server at normal speed, which is every current use. It is recorded here because it is the most likely source of flaky smelting, and a flake here will look like a mysterious RCON failure rather than a timing bug. If smelting proves unreliable in practice, this is the first thing to suspect.
+
+## Decisions already made
+
+These were settled with the repository owner before implementation and are not open. Do not relitigate them mid-task:
+
+- **Bot-to-player mapping**: the executor discovers it (Task 3). No caller supplies a map.
+- **`goal.execute`**: handle-based, non-blocking (Tasks 5 and 7).
+- **Manual grouping**: dropped, with no `goal.*` equivalent (Task 7). Task 8's script migration will lose explicit `plan.group_start`/`group_end` bracketing; that is accepted, because the planner derives grouping from the goal decomposition itself.
+- **Scope**: all eight tasks, including the deletion of the old planner and the `plan.*` API.

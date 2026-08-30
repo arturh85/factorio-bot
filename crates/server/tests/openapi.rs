@@ -125,6 +125,31 @@ const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[
 #[cfg(not(feature = "lua"))]
 const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[];
 
+/// The published response set for `POST /api/v1/instance/start` has to match
+/// what the handler actually answers.
+///
+/// Every other guard in this file checks paths and methods, so the spec listed
+/// only `202` and `409` for months after the handler grew a `400` (a relative
+/// `workspace_path`) and a `500` (one that is not valid UTF-8), and nothing
+/// noticed. A client generated from that spec has no case for either, and both
+/// are answered *synchronously* -- they are the first thing a misconfigured
+/// install sees.
+#[tokio::test]
+async fn the_start_operation_documents_every_status_it_answers() {
+    let spec = openapi_spec().await;
+    let responses = spec["paths"]["/api/v1/instance/start"]["post"]["responses"]
+        .as_object()
+        .expect("the start operation publishes a responses object");
+    for status in ["202", "400", "409", "500"] {
+        assert!(
+            responses.contains_key(status),
+            "POST /api/v1/instance/start answers {status} but does not document it; \
+             a generated client has no case for it. documented: {:?}",
+            responses.keys().collect::<Vec<_>>()
+        );
+    }
+}
+
 #[tokio::test]
 async fn openapi_json_lists_every_route() {
     let spec = openapi_spec().await;

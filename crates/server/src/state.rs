@@ -96,13 +96,40 @@ impl AppState {
 
     /// Records a stop request.
     ///
-    /// Takes the locked instance slot rather than just `&self` so it cannot be
-    /// called without holding the write lock -- the same lock
+    /// Takes the write **guard** rather than just `&self`, so it cannot be
+    /// called without holding the instance write lock -- the same lock
     /// [`AppState::publish_started_instance`] reads the count under. That is
     /// what makes the two atomic with respect to each other: a check beside
     /// the lock instead of under it is the read-then-write shape
     /// [`AppState::claim_start_slot`] exists to avoid.
-    pub fn note_stop_request(&self, _under_instance_lock: &mut Option<FactorioInstance>) {
+    ///
+    /// The guard type is load-bearing. This used to take
+    /// `&mut Option<FactorioInstance>`, which any caller can conjure from a
+    /// local -- `let mut forged = None; state.note_stop_request(&mut forged);`
+    /// compiled and bumped the counter with no lock held anywhere, so the
+    /// docstring above was a hint rather than a fact. A `RwLockWriteGuard` can
+    /// only come from `self.instance.write().await`. Pinned by the
+    /// `compile_fail` example below.
+    ///
+    /// ```compile_fail
+    /// use factorio_bot_core::app_settings::AppSettings;
+    /// use factorio_bot_core::process::process_control::FactorioInstance;
+    /// use factorio_bot_server::state::AppState;
+    /// use std::sync::Arc;
+    /// use tokio::sync::RwLock;
+    ///
+    /// let state = AppState::new(
+    ///     Arc::new(RwLock::new(None)),
+    ///     AppSettings::default().into_shared(),
+    /// );
+    /// // No lock is held here, and there must be no way to say otherwise.
+    /// let mut forged: Option<FactorioInstance> = None;
+    /// state.note_stop_request(&mut forged);
+    /// ```
+    pub fn note_stop_request(
+        &self,
+        _under_instance_lock: &mut tokio::sync::RwLockWriteGuard<'_, Option<FactorioInstance>>,
+    ) {
         self.stop_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }

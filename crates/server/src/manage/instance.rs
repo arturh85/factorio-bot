@@ -71,7 +71,15 @@ pub async fn get_instance(State(state): State<AppState>) -> ApiResult<InstanceSt
     tag = "Admin",
     responses(
         (status = 202, body = StartAccepted),
+        // Both answered synchronously, before the start is spawned: a
+        // `workspace_path` that is relative (400) or not valid UTF-8 (500).
+        // Listed because a client generated from this spec otherwise has no
+        // case for them -- and the OpenAPI guards in `tests/openapi.rs` check
+        // paths and methods, so nothing else would have caught the omission.
+        // `the_start_operation_documents_every_status_it_answers` does.
+        (status = 400, body = crate::error::ErrorResponse),
         (status = 409, body = crate::error::ErrorResponse),
+        (status = 500, body = crate::error::ErrorResponse),
     )
 )]
 pub async fn start_instance(
@@ -104,15 +112,15 @@ pub async fn start_instance(
     // UTF-8 cannot be handed on at all. Vanishingly unlikely and still not
     // worth a silent `to_string_lossy`, which would start Factorio in a
     // *different* directory than the one configured.
-    let workspace_path = workspace_path
-        .into_os_string()
-        .into_string()
-        .map_err(|raw| {
-            ErrorResponse::internal(format!(
-                "workspace path is not valid utf-8: {}",
-                std::path::PathBuf::from(raw).display()
-            ))
-        })?;
+    //
+    // Through `paths::workspace_to_string` rather than restated here: the two
+    // settings loaders used to `to_string_lossy` the same value, so the same
+    // configured workspace was refused by this route and mangled by them. One
+    // rule, one policy -- refuse. Still a 500: a data-local directory the
+    // caller cannot name in the request is the server's problem, not a
+    // malformed request.
+    let workspace_path = factorio_bot_core::paths::workspace_to_string(workspace_path)
+        .map_err(|err| ErrorResponse::internal(err.to_string()))?;
     // *This* is what serialises concurrent starts: `AppState::claim_start_slot`
     // takes the slot in a single `compare_exchange`, where a read-then-write
     // pair would leave a window in which two requests both see `false` and

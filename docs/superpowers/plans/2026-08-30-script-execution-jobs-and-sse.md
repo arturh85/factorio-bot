@@ -1548,6 +1548,55 @@ async fn the_event_stream_delivers_output_produced_after_subscribing() {
 }
 
 #[tokio::test]
+async fn a_subscriber_that_falls_behind_is_told_it_missed_messages() {
+    // The `lagged` event is in the wire contract and the handler is explicitly
+    // told not to filter the `Lagged` arm away -- so it needs a test that
+    // produces a real one, not a hand-built event. A hand-built event would
+    // pass with the filter_map in place.
+    //
+    // The broadcast channel's capacity is 256 (Task 5). Subscribe, publish
+    // past capacity WITHOUT reading, then read: the receiver reports how many
+    // it dropped.
+    let (_dir, state) = test_state().await;
+    let handle = state.jobs.try_start(Some("noisy.lua".into())).expect("start");
+    let id = handle.id();
+    let response = get(&state, &format!("/api/v1/jobs/{id}/events")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    for index in 0..400 {
+        handle.line(Stream::Stdout, &format!("line {index}"));
+    }
+    handle.finish(Ok((String::new(), String::new())));
+
+    let body = tokio::time::timeout(Duration::from_secs(5), collect_body(response))
+        .await
+        .expect("the stream must end when the job finishes");
+    assert!(
+        body.contains("event: lagged"),
+        "a subscriber that fell behind must be told, not silently short-changed; body was {body:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_job_reports_failed_in_its_terminal_event() {
+    // `finished` carries a status, and the two arms are what plan 5's UI
+    // switches on. A test that only ever exercises `succeeded` would pass with
+    // the status hardcoded.
+    let (_dir, state) = test_state().await;
+    let handle = state.jobs.try_start(Some("bad.lua".into())).expect("start");
+    let id = handle.id();
+    handle.finish(Err(miette!("script exploded")));
+
+    let response = get(&state, &format!("/api/v1/jobs/{id}/events")).await;
+    let body = collect_body(response).await;
+    assert!(body.contains("event: finished"), "body was {body:?}");
+    assert!(
+        body.contains("failed"),
+        "the terminal event must carry the real status; body was {body:?}"
+    );
+}
+
+#[tokio::test]
 async fn the_event_stream_of_an_unknown_job_is_not_found() {
     let (_dir, state) = test_state().await;
     let response = get(&state, "/api/v1/jobs/9999/events").await;
@@ -1616,6 +1665,11 @@ Remove the `JobEvent::Finished` stream terminator (let the stream continue after
 Wrap the body collection in `the_event_stream_replays_a_finished_job_and_ends` in `tokio::time::timeout(Duration::from_secs(5), ...)` with an `.expect("the stream must end once the job has finished")` **before** running the mutation, so the mutated build fails on a named assertion in five seconds instead of hanging the suite. A hang is not a test result — CI reports it as a timeout with no attribution, and a developer running the suite locally cannot tell it from a deadlock elsewhere.
 
 Confirm that test, and only that test, goes red. Record the full failure set. Restore.
+
+**Two more mutations, because two of this task's wire-contract arms are otherwise unguarded** — both were added after Task 6's review found a security test that passed for the wrong reason:
+
+- **`filter_map` the `Lagged` arm away** (the tidy-looking mistake this task warns about). Input class: *a subscriber that fell behind*. `a_subscriber_that_falls_behind_is_told_it_missed_messages` must fail. If it does not, the test is not producing a real lag — check that 400 lines genuinely overflow the 256-capacity channel before the stream is polled, rather than being consumed as they are sent.
+- **Hardcode the terminal event's status to `succeeded`.** Input class: *a job that failed*. `a_failed_job_reports_failed_in_its_terminal_event` must fail.
 
 - [ ] **Step 7: Commit**
 

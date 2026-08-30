@@ -39,7 +39,17 @@ impl ExecutionLog {
         self.attempts.get(&id).map_or(Status::Pending, |a| a.status)
     }
 
+    /// Records that an attempt has begun.
+    ///
+    /// An action that already finished is left exactly as it is. A `Schedule`
+    /// naming the same `ActionId` in two steps is malformed input, and
+    /// re-opening a finished attempt would destroy the outcome and the
+    /// duration already observed for it. First completion wins — see
+    /// `succeed`.
     pub fn start(&mut self, id: ActionId, tick: Ticks) {
+        if self.has_finished(id) {
+            return;
+        }
         self.attempts.insert(
             id,
             Attempt {
@@ -51,41 +61,52 @@ impl ExecutionLog {
         );
     }
 
+    fn has_finished(&self, id: ActionId) -> bool {
+        self.attempts
+            .get(&id)
+            .is_some_and(|a| a.ended_tick.is_some())
+    }
+
     /// Records a success. Upserts: if no `start()` was ever recorded for
     /// `id`, an attempt is created rather than the write being dropped, so
     /// completions are never lost from the log — the synthesized
     /// `started_tick` is honest that we never actually observed a start.
-    /// The `debug_assert!` instead guards a genuine misuse: finishing an
-    /// action that was already finished, which would silently overwrite an
-    /// earlier result.
+    ///
+    /// A second completion of an already-finished action is **ignored**, not
+    /// asserted against. This used to be a `debug_assert!`, but the only way
+    /// to reach it is malformed input — the same `ActionId` in two schedule
+    /// steps — and the panic fired inside a `join_all`, unwinding every other
+    /// bot along with it. Bad input is not a reason to abort a run that is
+    /// otherwise going fine. Ignoring the later write is also the only
+    /// order-independent choice available here: overwriting would make the
+    /// recorded outcome and duration depend on which writer the game answered
+    /// first.
     pub fn succeed(&mut self, id: ActionId, tick: Ticks) {
+        if self.has_finished(id) {
+            return;
+        }
         let a = self.attempts.entry(id).or_insert_with(|| Attempt {
             status: Status::Running,
             started_tick: tick,
             ended_tick: None,
             error: None,
         });
-        debug_assert!(
-            a.ended_tick.is_none(),
-            "succeed({id:?}) called on an action that already finished"
-        );
         a.status = Status::Success;
         a.ended_tick = Some(tick);
     }
 
-    /// Records a failure. Upserts for the same reason as `succeed()`, and
-    /// guards the same double-completion misuse.
+    /// Records a failure. Upserts, and ignores a second completion, for the
+    /// same reasons as `succeed()`.
     pub fn fail(&mut self, id: ActionId, tick: Ticks, error: String) {
+        if self.has_finished(id) {
+            return;
+        }
         let a = self.attempts.entry(id).or_insert_with(|| Attempt {
             status: Status::Running,
             started_tick: tick,
             ended_tick: None,
             error: None,
         });
-        debug_assert!(
-            a.ended_tick.is_none(),
-            "fail({id:?}) called on an action that already finished"
-        );
         a.status = Status::Failed;
         a.ended_tick = Some(tick);
         a.error = Some(error);
@@ -181,5 +202,29 @@ mod tests {
             log.attempt(id(3)).and_then(|a| a.error.as_deref()),
             Some("never started")
         );
+    }
+
+    #[test]
+    fn a_second_completion_leaves_the_first_outcome_and_its_timing_alone() {
+        // Reachable only from malformed input (one `ActionId` in two schedule
+        // steps). It used to panic, and the panic unwound every other bot in
+        // the same `join_all`.
+        let mut log = ExecutionLog::default();
+        log.start(id(1), 100);
+        log.succeed(id(1), 340);
+        log.fail(id(1), 900, "a second runner finished it".to_string());
+        assert_eq!(log.status(id(1)), Status::Success);
+        assert_eq!(log.observed_duration(id(1)), Some(240));
+        assert_eq!(log.attempt(id(1)).and_then(|a| a.error.as_deref()), None);
+    }
+
+    #[test]
+    fn restarting_a_finished_action_does_not_reopen_it() {
+        let mut log = ExecutionLog::default();
+        log.start(id(1), 100);
+        log.succeed(id(1), 340);
+        log.start(id(1), 1_000);
+        assert_eq!(log.status(id(1)), Status::Success);
+        assert_eq!(log.observed_duration(id(1)), Some(240));
     }
 }

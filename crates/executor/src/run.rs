@@ -7,6 +7,8 @@
 
 use crate::actuator::{Actuator, ActuatorError};
 use crate::log::{ExecutionLog, Status};
+use factorio_bot_core::petgraph::algo::toposort;
+use factorio_bot_core::petgraph::graph::{DiGraph, NodeIndex};
 use factorio_bot_planner::{
     ActionId, ActionKind, ActionNetwork, BotId, Schedule, ScheduledStep, StepKind, Ticks,
 };
@@ -20,6 +22,20 @@ enum PredOutcome {
     Abandoned,
 }
 
+/// Why a run refused to start.
+///
+/// Every variant is raised before a single command reaches the game, so a
+/// caller holding one knows nothing was executed and the log it handed in is
+/// untouched.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ExecutionError {
+    #[error(
+        "the schedule and the network imply a circular wait through action {0:?}: \
+         it could never start, so the run would never finish"
+    )]
+    CircularWait(ActionId),
+}
+
 /// Run every bot, recording progress into `progress` as it happens.
 ///
 /// The log is shared rather than merged at the end because `goal.progress(h)`
@@ -31,12 +47,19 @@ enum PredOutcome {
 ///
 /// `std::sync::Mutex`, not tokio's: every critical section is a few map
 /// operations with no `.await` inside. Never hold this guard across an await.
+///
+/// It fails only before doing anything, which is why the error carries no log:
+/// the caller already owns `progress`, and on the error path it is still
+/// empty, so handing it back inside the error would offer nothing to read.
 pub async fn run_into(
     act: &dyn Actuator,
     sched: &Schedule,
     net: &ActionNetwork,
     progress: &Mutex<ExecutionLog>,
-) {
+) -> Result<(), ExecutionError> {
+    let steps = planned_steps(sched);
+    check_wait_graph(net, &steps)?;
+
     let mut senders: BTreeMap<ActionId, watch::Sender<Status>> = BTreeMap::new();
     let mut receivers: BTreeMap<ActionId, watch::Receiver<Status>> = BTreeMap::new();
     for id in net.actions().map(|a| a.id) {
@@ -50,14 +73,7 @@ pub async fn run_into(
     // front is the same argument as `abandon_rest` below: a dependent waiting
     // for a signal nobody will ever send waits forever. Nothing is written to
     // the log — we did not attempt it, so it stays `Pending` there.
-    let scheduled: BTreeSet<ActionId> = sched
-        .steps
-        .iter()
-        .filter_map(|s| match &s.what {
-            StepKind::Act { action, .. } => Some(*action),
-            StepKind::Walk { .. } => None,
-        })
-        .collect();
+    let scheduled: BTreeSet<ActionId> = steps.iter().filter_map(|s| act_id(s)).collect();
     for (id, tx) in &senders {
         if !scheduled.contains(id) {
             let _ = tx.send(Status::Failed);
@@ -66,19 +82,102 @@ pub async fn run_into(
 
     // BTreeSet, so the future order is a function of the schedule alone, not of
     // task completion timing.
-    let bots: BTreeSet<BotId> = sched.steps.iter().map(|s| s.bot).collect();
+    let bots: BTreeSet<BotId> = steps.iter().map(|s| s.bot).collect();
     join_all(
         bots.iter()
-            .map(|&bot| run_bot_signalled(act, bot, sched, net, progress, &senders, &receivers)),
+            .map(|&bot| run_bot_signalled(act, bot, &steps, net, progress, &senders, &receivers)),
     )
     .await;
+    Ok(())
+}
+
+fn act_id(step: &ScheduledStep) -> Option<ActionId> {
+    match &step.what {
+        StepKind::Act { action, .. } => Some(*action),
+        StepKind::Walk { .. } => None,
+    }
+}
+
+/// The steps the run will actually execute, in schedule order.
+///
+/// A `Schedule` naming the same `ActionId` in two steps is malformed: the
+/// action was meant to happen once. Running it twice would send the command to
+/// the game twice and give the log two completions for one key, and which of
+/// them the log ended up reporting would depend on which the game answered
+/// first. Keeping the first occurrence and dropping the rest makes both the
+/// dispatches and the log a function of the schedule alone. Walk steps carry
+/// no id and are never dropped.
+fn planned_steps(sched: &Schedule) -> Vec<&ScheduledStep> {
+    let mut seen: BTreeSet<ActionId> = BTreeSet::new();
+    sched
+        .steps
+        .iter()
+        .filter(|s| match act_id(s) {
+            Some(action) => seen.insert(action),
+            None => true,
+        })
+        .collect()
+}
+
+/// Refuse a schedule whose waits can never all be satisfied.
+///
+/// A bot's steps run strictly in order, so the schedule contributes wait edges
+/// the `ActionNetwork` knows nothing about: each of a bot's actions waits on
+/// the one scheduled before it. What decides whether the run terminates is the
+/// union of the two edge sets, and only the union.
+///
+/// Checking the network alone is false comfort. A network holding `1 -> 0` is
+/// perfectly acyclic, yet a bot scheduled to run `0` then `1` waits on itself
+/// forever. The same deadlock reaches across bots with no network cycle at all:
+/// bot 0 running `[a, b]` and bot 1 running `[c, d]` hangs the moment the
+/// network carries `d -> a` and `b -> c`. A check that passes while the hang
+/// remains is worse than no check, because it reads as protection.
+///
+/// Only *scheduled* actions are nodes. An action the network holds but nobody
+/// is scheduled to run is published as `Failed` before the run starts, so a
+/// wait on it resolves at once and it can never be part of a circular wait —
+/// including it would reject schedules that in fact terminate.
+fn check_wait_graph(net: &ActionNetwork, steps: &[&ScheduledStep]) -> Result<(), ExecutionError> {
+    let mut graph: DiGraph<ActionId, ()> = DiGraph::new();
+    let mut node: BTreeMap<ActionId, NodeIndex> = BTreeMap::new();
+    for id in steps.iter().filter_map(|s| act_id(s)) {
+        let ix = graph.add_node(id);
+        node.insert(id, ix);
+    }
+
+    for (&id, &to) in &node {
+        for (pred, _lag) in net.preds(id) {
+            if let Some(&from) = node.get(&pred) {
+                graph.add_edge(from, to, ());
+            }
+        }
+    }
+
+    // The edges only the schedule knows: consecutive actions of one bot.
+    let mut previous: BTreeMap<BotId, NodeIndex> = BTreeMap::new();
+    for step in steps {
+        let Some(id) = act_id(step) else { continue };
+        let ix = node[&id];
+        if let Some(before) = previous.insert(step.bot, ix) {
+            graph.add_edge(before, ix, ());
+        }
+    }
+
+    match toposort(&graph, None) {
+        Ok(_) => Ok(()),
+        Err(cycle) => Err(ExecutionError::CircularWait(graph[cycle.node_id()])),
+    }
 }
 
 /// Convenience wrapper for callers that only want the final state.
-pub async fn run(act: &dyn Actuator, sched: &Schedule, net: &ActionNetwork) -> ExecutionLog {
+pub async fn run(
+    act: &dyn Actuator,
+    sched: &Schedule,
+    net: &ActionNetwork,
+) -> Result<ExecutionLog, ExecutionError> {
     let progress = Mutex::new(ExecutionLog::default());
-    run_into(act, sched, net, &progress).await;
-    progress.into_inner().unwrap_or_else(|e| e.into_inner())
+    run_into(act, sched, net, &progress).await?;
+    Ok(progress.into_inner().unwrap_or_else(|e| e.into_inner()))
 }
 
 /// Walk one bot's slice of the schedule, in order, waiting on the completion
@@ -91,13 +190,13 @@ pub async fn run(act: &dyn Actuator, sched: &Schedule, net: &ActionNetwork) -> E
 async fn run_bot_signalled(
     act: &dyn Actuator,
     bot: BotId,
-    sched: &Schedule,
+    steps: &[&ScheduledStep],
     net: &ActionNetwork,
     log: &Mutex<ExecutionLog>,
     senders: &BTreeMap<ActionId, watch::Sender<Status>>,
     receivers: &BTreeMap<ActionId, watch::Receiver<Status>>,
 ) {
-    let mine: Vec<&ScheduledStep> = sched.steps.iter().filter(|s| s.bot == bot).collect();
+    let mine: Vec<&ScheduledStep> = steps.iter().copied().filter(|s| s.bot == bot).collect();
 
     for (i, step) in mine.iter().enumerate() {
         match &step.what {
@@ -575,7 +674,9 @@ mod tests {
             .returning(|_, _, _| Ok(()));
 
         let (net, sched) = walk_then_mine_fixture();
-        let log = run(&act, &sched, &net).await;
+        let log = run(&act, &sched, &net)
+            .await
+            .expect("the run should have started");
 
         assert_eq!(log.failed(), vec![]);
         assert_eq!(log.status(mine_action_id()), Status::Success);
@@ -594,7 +695,9 @@ mod tests {
         act.expect_craft().times(0);
 
         let (net, sched) = walk_then_mine_fixture();
-        let log = run(&act, &sched, &net).await;
+        let log = run(&act, &sched, &net)
+            .await
+            .expect("the run should have started");
 
         assert_eq!(log.failed(), vec![mine_action_id()]);
         assert_eq!(
@@ -644,7 +747,9 @@ mod tests {
             end: 10,
         });
 
-        let log = run(&act, &sched, &net).await;
+        let log = run(&act, &sched, &net)
+            .await
+            .expect("the run should have started");
         assert_eq!(log.failed(), vec![]);
         assert_eq!(log.status(mine_action_id()), Status::Success);
         assert_eq!(log.status(craft_action_id()), Status::Success);
@@ -659,7 +764,9 @@ mod tests {
         act.expect_mine().times(0);
 
         let (net, sched) = walk_then_mine_fixture();
-        let log = run(&act, &sched, &net).await;
+        let log = run(&act, &sched, &net)
+            .await
+            .expect("the run should have started");
 
         // The action never even started: the log has no attempt for it at all,
         // not merely a non-Failed status.
@@ -684,7 +791,9 @@ mod tests {
             makespan: sched.makespan,
         };
 
-        let log = run(&act, &sched, &empty_net).await;
+        let log = run(&act, &sched, &empty_net)
+            .await
+            .expect("the run should have started");
         assert_eq!(log.failed(), vec![mine_action_id()]);
     }
 
@@ -730,7 +839,9 @@ mod tests {
 
         let act = RecordingAct::new(script);
         let (net, sched) = cross_bot_fixture(0);
-        let log = within_deadline(run(&act, &sched, &net)).await;
+        let log = within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
 
         assert_eq!(log.failed(), vec![]);
         assert_eq!(
@@ -746,7 +857,9 @@ mod tests {
 
         let act = RecordingAct::new(script);
         let (net, sched) = cross_bot_fixture(0);
-        let log = within_deadline(run(&act, &sched, &net)).await;
+        let log = within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
 
         assert_eq!(log.failed(), vec![first_action_id()]);
         assert_eq!(log.status(second_action_id()), Status::Pending);
@@ -781,7 +894,9 @@ mod tests {
         script.fail_mine.insert("iron-ore".to_string());
         let act = RecordingAct::new(script);
 
-        let log = within_deadline(run(&act, &sched, &net)).await;
+        let log = within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
 
         assert_eq!(log.failed(), vec![ActionId(0)]);
         assert_eq!(log.status(ActionId(1)), Status::Pending);
@@ -795,7 +910,9 @@ mod tests {
         let act = RecordingAct::new(script);
 
         let (net, sched) = cross_bot_fixture(0);
-        let log = within_deadline(run(&act, &sched, &net)).await;
+        let log = within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
 
         // Bot 0 never reached its action, so nothing is logged for it — but
         // bot 1 must still be released rather than waiting on a signal that
@@ -820,7 +937,9 @@ mod tests {
         };
 
         let act = RecordingAct::new(Script::default());
-        let log = within_deadline(run(&act, &sched, &net)).await;
+        let log = within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
 
         assert_eq!(log.failed(), vec![ActionId(99)]);
         assert_eq!(log.status(first_action_id()), Status::Pending);
@@ -839,7 +958,9 @@ mod tests {
         };
 
         let act = RecordingAct::new(Script::default());
-        let log = within_deadline(run(&act, &sched, &net)).await;
+        let log = within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
 
         assert_eq!(log.status(second_action_id()), Status::Pending);
         assert!(act.mine_starts().is_empty());
@@ -852,7 +973,9 @@ mod tests {
         // own completion signal does not cover that wait.
         let act = RecordingAct::new(Script::default());
         let (net, sched) = cross_bot_fixture(60);
-        within_deadline(run(&act, &sched, &net)).await;
+        within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
 
         let iron = act.mine_started_at("iron-ore").expect("iron-ore mined");
         let copper = act.mine_started_at("copper-ore").expect("copper-ore mined");
@@ -889,10 +1012,14 @@ mod tests {
         };
 
         let slow_iron = run_with(1_000, 10);
-        let log_a = within_deadline(run(&slow_iron, &sched, &net)).await;
+        let log_a = within_deadline(run(&slow_iron, &sched, &net))
+            .await
+            .expect("the run should have started");
 
         let slow_copper = run_with(10, 1_000);
-        let log_b = within_deadline(run(&slow_copper, &sched, &net)).await;
+        let log_b = within_deadline(run(&slow_copper, &sched, &net))
+            .await
+            .expect("the run should have started");
 
         assert_ne!(
             slow_iron.order(),
@@ -930,7 +1057,177 @@ mod tests {
             assert_eq!(seen.status(second_action_id()), Status::Running);
         }
 
-        within_deadline(running).await;
+        within_deadline(running)
+            .await
+            .expect("the run should have started");
         assert_eq!(lock(&progress).status(second_action_id()), Status::Success);
+    }
+
+    // ------------------------------------------------------ circular waits
+
+    #[tokio::test(start_paused = true)]
+    async fn a_schedule_that_runs_a_network_edge_backwards_is_rejected() {
+        // The network says 1 must precede 0, and `1 -> 0` on its own is a
+        // perfectly acyclic graph — validating the network would report
+        // success. But the schedule puts 0 first on the same bot, so the bot
+        // waits for 1 at its first step and can never reach the second step
+        // that would run it.
+        let mut net = ActionNetwork::new();
+        net.add(mine_of(ActionId(0), "iron-ore"));
+        net.add(mine_of(ActionId(1), "copper-ore"));
+        net.link(ActionId(1), ActionId(0), 0);
+        let sched = Schedule {
+            steps: vec![
+                act_step(ActionId(0), BotId(0), 0, 60),
+                act_step(ActionId(1), BotId(0), 60, 120),
+            ],
+            makespan: 120,
+        };
+
+        let act = RecordingAct::new(Script::default());
+        let err = within_deadline(run(&act, &sched, &net))
+            .await
+            .expect_err("a circular wait must be refused, not run");
+        assert!(
+            matches!(err, ExecutionError::CircularWait(id) if id == ActionId(0) || id == ActionId(1)),
+            "unexpected error: {err}"
+        );
+        assert!(
+            act.mine_starts().is_empty(),
+            "the run must be refused before anything reaches the game"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_circular_wait_that_spans_two_bots_is_rejected() {
+        // No cycle exists in the network (only `d -> a` and `b -> c`), and
+        // none exists in either bot's own sequence. The cycle appears only in
+        // their union: a -> b (bot 0's order) -> c (network) -> d (bot 1's
+        // order) -> a (network).
+        let (a, b, c, d) = (ActionId(0), ActionId(1), ActionId(2), ActionId(3));
+        let mut net = ActionNetwork::new();
+        for (id, item) in [
+            (a, "iron-ore"),
+            (b, "copper-ore"),
+            (c, "coal"),
+            (d, "stone"),
+        ] {
+            net.add(mine_of(id, item));
+        }
+        net.link(d, a, 0);
+        net.link(b, c, 0);
+        let sched = Schedule {
+            steps: vec![
+                act_step(a, BotId(0), 0, 60),
+                act_step(b, BotId(0), 60, 120),
+                act_step(c, BotId(1), 0, 60),
+                act_step(d, BotId(1), 60, 120),
+            ],
+            makespan: 120,
+        };
+
+        let act = RecordingAct::new(Script::default());
+        let err = within_deadline(run(&act, &sched, &net))
+            .await
+            .expect_err("a circular wait must be refused, not run");
+        assert!(
+            matches!(err, ExecutionError::CircularWait(_)),
+            "unexpected error: {err}"
+        );
+        assert!(act.mine_starts().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_schedule_that_merely_reorders_independent_actions_is_not_rejected() {
+        // The guard must reject circular waits, not "the schedule disagrees
+        // with the network's ordering". Bot 0 runs 1 before 0 with no edge
+        // between them at all, which is perfectly runnable.
+        let mut net = ActionNetwork::new();
+        net.add(mine_of(ActionId(0), "iron-ore"));
+        net.add(mine_of(ActionId(1), "copper-ore"));
+        let sched = Schedule {
+            steps: vec![
+                act_step(ActionId(1), BotId(0), 0, 60),
+                act_step(ActionId(0), BotId(0), 60, 120),
+            ],
+            makespan: 120,
+        };
+
+        let act = RecordingAct::new(Script::default());
+        let log = within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
+        assert_eq!(log.failed(), vec![]);
+        assert_eq!(
+            act.mine_starts(),
+            vec!["copper-ore".to_string(), "iron-ore".to_string()]
+        );
+    }
+
+    // ------------------------------------------------------ duplicate ids
+
+    #[tokio::test(start_paused = true)]
+    async fn an_action_scheduled_twice_for_one_bot_runs_once() {
+        let (net, _) = cross_bot_fixture(0);
+        let sched = Schedule {
+            steps: vec![
+                act_step(first_action_id(), BotId(0), 0, 60),
+                // Same id again, with a very different span, so "the first
+                // occurrence's timing survived" is distinguishable from "the
+                // second's did".
+                act_step(first_action_id(), BotId(0), 60, 500),
+                act_step(second_action_id(), BotId(1), 500, 560),
+            ],
+            makespan: 560,
+        };
+
+        let act = RecordingAct::new(Script::default());
+        let log = within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
+        assert_eq!(
+            act.mine_starts(),
+            vec!["iron-ore".to_string(), "copper-ore".to_string()],
+            "the duplicated action must reach the game exactly once"
+        );
+        assert_eq!(
+            log.observed_duration(first_action_id()),
+            Some(60),
+            "the first occurrence is the one recorded"
+        );
+        assert_eq!(log.status(second_action_id()), Status::Success);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_action_scheduled_for_two_bots_runs_once_without_taking_down_the_run() {
+        // Both bots used to complete the same log key, and `ExecutionLog`'s
+        // double-completion `debug_assert!` panicked — inside `join_all`,
+        // which unwinds every other bot with it.
+        let mut net = ActionNetwork::new();
+        net.add(mine_of(first_action_id(), "iron-ore"));
+        net.add(mine_of(second_action_id(), "copper-ore"));
+        let sched = Schedule {
+            steps: vec![
+                act_step(first_action_id(), BotId(0), 0, 60),
+                act_step(first_action_id(), BotId(1), 60, 500),
+                act_step(second_action_id(), BotId(1), 500, 560),
+            ],
+            makespan: 560,
+        };
+
+        let act = RecordingAct::new(Script::default());
+        let log = within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
+        assert_eq!(
+            act.mine_starts(),
+            vec!["iron-ore".to_string(), "copper-ore".to_string()]
+        );
+        assert_eq!(log.observed_duration(first_action_id()), Some(60));
+        assert_eq!(
+            log.status(second_action_id()),
+            Status::Success,
+            "the other bot's remaining work must survive the bad input"
+        );
     }
 }

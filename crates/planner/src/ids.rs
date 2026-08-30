@@ -36,9 +36,13 @@ impl ActionIdGen {
 
 /// Identifies a chain of actions that must all run on the same bot.
 ///
-/// A chain is the expansion of one `Goal::Have { whose: Holder::Bot(_) }`
-/// subtree: its steps hand items to each other through a single inventory, so
-/// splitting it across bots leaves the consumer empty-handed. The scheduler
+/// A chain is the expansion of one subtree whose steps hand items to each
+/// other through a single inventory, so splitting it across bots leaves the
+/// consumer empty-handed. The driver opens one in exactly two situations: a
+/// caller names a bot (`Goal::Have { whose: Holder::Bot(_) }`, which also gives
+/// the chain an owner — see `ActionNetwork::owner_of`), or a method reports
+/// that its decomposition converges, meaning several produced items must meet
+/// in one inventory (`Method::converges`). The scheduler
 /// still chooses *which* bot — it just chooses once per chain instead of once
 /// per action. Chain identity is a property of the network's structure, so it
 /// lives in `ActionNetwork`, not on `Action`.

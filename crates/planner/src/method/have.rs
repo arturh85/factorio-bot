@@ -4,9 +4,14 @@
 //! scheduler decides who runs each one — see the plan's note on why nothing is
 //! pinned.
 //!
-//! A chain stays with one bot because the driver stamps everything it expands
-//! under a `Holder::Bot` goal with one `ChainId`, and the scheduler assigns
-//! chains rather than actions. `HasItem` preconditions alone are not enough:
+//! A chain stays with one bot because the driver stamps a whole subtree with
+//! one `ChainId`, and the scheduler assigns chains rather than actions. Two
+//! things open a chain, and only these two: a caller naming a bot
+//! (`Holder::Bot`), which additionally records that bot as the chain's owner,
+//! and a method whose decomposition makes several *produced* items meet in one
+//! inventory (`Method::converges`). A goal that merely sits inside a split
+//! opens none, because welding it would serialise work that could have run in
+//! parallel. `HasItem` preconditions alone are not enough:
 //! they keep a *linear* chain together, since only the bot holding the items
 //! can run the next step, but a recipe with two ingredients that each need
 //! producing is a chain with two roots, and neither root has a `HasItem`

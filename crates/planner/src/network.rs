@@ -55,8 +55,9 @@ impl ActionNetwork {
 
     /// Record that `action` belongs to `chain`.
     ///
-    /// The driver stamps every action it emits inside a per-bot subtree, and
-    /// the scheduler reads it back to bind the whole chain to one bot.
+    /// The driver stamps every action it emits inside a chained subtree — one
+    /// a caller named a bot for, or one whose method `converges` — and the
+    /// scheduler reads it back to bind the whole chain to one bot.
     pub fn set_chain(&mut self, action: ActionId, chain: ChainId) {
         self.chains.insert(action, chain);
     }

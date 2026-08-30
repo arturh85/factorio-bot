@@ -42,9 +42,11 @@ pub enum Step {
 /// different inventories, this driver must be revisited.**
 ///
 /// `chain` is the other half of the same story, and the half that outlives
-/// expansion: every action emitted inside a per-bot subtree is stamped with it
+/// expansion: every action emitted inside a chained subtree is stamped with it
 /// in the network, so the scheduler can bind the whole chain to one bot instead
-/// of choosing per action. It is `None` outside such a subtree, which leaves an
+/// of choosing per action. A subtree is chained when a caller named a bot for
+/// it (`Holder::Bot`) or when the method claiming its root `converges` — see
+/// `expand_goal_body`. It is `None` outside such a subtree, which leaves an
 /// action freely assignable.
 ///
 /// `top_level` records whether the goal being expanded is one the *caller*

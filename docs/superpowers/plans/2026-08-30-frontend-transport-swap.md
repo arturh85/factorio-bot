@@ -2166,6 +2166,13 @@ git commit -m "refactor(app): move rconStore onto POST /api/v1/rcon and drop res
 
 ## Task 9: The SSE job-event consumer
 
+> **Contract note from plan 4 Task 7, which shipped after this plan was written.**
+>
+> **A stream cut short by server shutdown ends without a `finished` event.** The consumer must treat EOF-without-`finished` as **unknown**, not as success — otherwise a shutdown mid-script silently reports every running job as having completed. Resolve the real outcome with one `GET /api/v1/jobs/{id}` after the stream ends, which this task already does for the reconnect case; the same call covers this one.
+>
+> **The backlog replays all stdout, then all stderr** — not interleaved in the order they were produced. `Job` keeps two separate buffers, so a late subscriber sees the two streams concatenated rather than in real time order. Live events after attach *are* in order. If the output pane interleaves them, say so in the UI or accept that a replayed run reads differently from a watched one.
+
+
 **Files:**
 - Create: `app/src/api/jobEvents.ts`
 - Create: `app/src/api/jobEvents.spec.ts`

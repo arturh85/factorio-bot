@@ -7,8 +7,9 @@ pub mod util;
 use crate::action::Action;
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
-use crate::ids::{ActionId, ActionIdGen, BotId, ChainId, ChainIdGen, Ticks};
+use crate::ids::{ActionId, ActionIdGen, BotId, ChainId, ChainIdGen, ItemId, Ticks};
 use crate::state::PlanState;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One element of a method's expansion.
 #[derive(Clone, Debug)]
@@ -198,6 +199,7 @@ pub fn expand(
     if state.bot(chain_actor).is_none() {
         return Err(PlannerError::UnknownBot(chain_actor));
     }
+    check_bots_interchangeable(state)?;
     let mut ctx = ExpansionCtx::new(state.fork(), chain_actor);
     let mut net = ActionNetwork::new();
     for goal in goals {
@@ -206,6 +208,52 @@ pub fn expand(
     net.infer_edges();
     net.validate()?;
     Ok(net)
+}
+
+/// The driver sizes each bot's share of a goal against one bot's inventory and
+/// assumes any bot would do (see `ExpansionCtx` docs). Enforce that before
+/// forking the state: comparing inventories only, never positions, since
+/// travel cost is exactly what legitimately makes bots sit apart.
+fn check_bots_interchangeable(state: &PlanState) -> Result<(), PlannerError> {
+    let bot_ids = state.bot_ids();
+    let Some((&first, rest)) = bot_ids.split_first() else {
+        return Ok(());
+    };
+    // `bot_ids` come from a `BTreeMap`, so `first` is deterministic and the
+    // caller's `chain_actor` need not be it.
+    let first_inventory = &state
+        .bot(first)
+        .expect("bot_ids only returns ids present in the state")
+        .inventory;
+    for &other in rest {
+        let other_inventory = &state
+            .bot(other)
+            .expect("bot_ids only returns ids present in the state")
+            .inventory;
+        if let Some(item) = first_differing_item(first_inventory, other_inventory) {
+            return Err(PlannerError::BotsNotInterchangeable {
+                a: first,
+                b: other,
+                item,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The lexicographically first item whose count differs between two
+/// inventories, or `None` if they agree on every item. Both maps are
+/// `BTreeMap`s, so walking their union in key order is deterministic.
+fn first_differing_item(a: &BTreeMap<ItemId, u32>, b: &BTreeMap<ItemId, u32>) -> Option<ItemId> {
+    let items: BTreeSet<&ItemId> = a.keys().chain(b.keys()).collect();
+    for item in items {
+        let in_a = a.get(item).copied().unwrap_or(0);
+        let in_b = b.get(item).copied().unwrap_or(0);
+        if in_a != in_b {
+            return Some(item.clone());
+        }
+    }
+    None
 }
 
 fn expand_goal(
@@ -974,5 +1022,51 @@ mod tests {
             "the binding must survive an error"
         );
         assert_eq!(ctx.depth, 0, "the depth must survive an error");
+    }
+
+    #[test]
+    fn expansion_rejects_bots_that_are_not_interchangeable() {
+        let bots = [BotId(1), BotId(2)];
+        let mut state = PlanState::from_world(Arc::new(fixture_world()), &bots);
+        state.gain(BotId(1), "iron-plate", 12);
+        let reg = MethodRegistry::new().with(Box::new(Nothing));
+        let goal = Goal::Have {
+            item: "coal".into(),
+            count: 1,
+            whose: Holder::Anyone,
+        };
+        assert!(matches!(
+            expand(&[goal], &state, &reg, BotId(1)),
+            Err(PlannerError::BotsNotInterchangeable { .. })
+        ));
+    }
+
+    #[test]
+    fn identical_bots_are_accepted() {
+        let bots = [BotId(1), BotId(2)];
+        let mut state = PlanState::from_world(Arc::new(fixture_world()), &bots);
+        for b in bots {
+            state.gain(b, "stone-furnace", 2);
+        }
+        let reg = MethodRegistry::new().with(Box::new(Nothing));
+        let goal = Goal::Have {
+            item: "coal".into(),
+            count: 1,
+            whose: Holder::Anyone,
+        };
+        assert!(expand(&[goal], &state, &reg, BotId(1)).is_ok());
+    }
+
+    #[test]
+    fn a_single_bot_is_trivially_interchangeable() {
+        let mut state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
+        state.gain(BotId(1), "iron-plate", 12);
+        let reg = MethodRegistry::new().with(Box::new(Nothing));
+        let goal = Goal::Have {
+            item: "coal".into(),
+            count: 1,
+            whose: Holder::Anyone,
+        };
+        assert!(expand(&[goal], &state, &reg, BotId(1)).is_ok());
     }
 }

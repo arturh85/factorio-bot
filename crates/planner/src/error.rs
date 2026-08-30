@@ -71,4 +71,11 @@ pub enum PlannerError {
     )]
     #[diagnostic(code(planner::expansion_too_deep))]
     ExpansionTooDeep { goal: String, depth: u32 },
+
+    #[error("{a} and {b} hold different amounts of {item}; expansion sizes each share against one bot's inventory and assumes any bot would do")]
+    #[diagnostic(
+        code(planner::bots_not_interchangeable),
+        help("re-plan per bot, or extend the driver to size shares against the bot that will run them")
+    )]
+    BotsNotInterchangeable { a: BotId, b: BotId, item: ItemId },
 }

@@ -1333,16 +1333,22 @@ mod tests {
 
     #[test]
     fn a_share_is_added_to_what_the_bot_already_holds() {
-        // Bot 1 holds three of the five wanted, so two remain. A `Have` goal
-        // states a holding rather than a delivery: asking bot 1 for "one"
-        // would be a goal it already meets, and its share would evaporate.
+        // Every bot holds one of the six wanted, so two remain. A `Have` goal
+        // states a holding rather than a delivery: asking a bot for "one" when
+        // it already holds one would be a goal it already meets, and its share
+        // would evaporate. The holdings are equal across the roster because
+        // expansion sizes each share against one bot's inventory and assumes
+        // any bot would do — an asymmetric fixture here would describe a plan
+        // whose chains are only feasible on the bot they were sized for.
         let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
         let mut s = state(&bots);
-        s.gain(BotId(1), "iron-ore", 3);
+        for bot in bots {
+            s.gain(bot, "iron-ore", 1);
+        }
         let net = expand(
             &[Goal::Have {
                 item: "iron-ore".into(),
-                count: 5,
+                count: 6,
                 whose: Holder::Anyone,
             }],
             &s,

@@ -1575,7 +1575,11 @@ Write that test's body in full using the existing `SHORT_GRACE_PERIOD` constant:
 
 Use `axum::response::sse::{Event, KeepAlive, Sse}` over a `tokio_stream::wrappers::BroadcastStream`, prefixed with the job's buffered output so a late subscriber sees the whole run. Terminate the stream on `JobEvent::Finished`. Add `KeepAlive::default()` so proxies do not drop an idle connection.
 
-`tokio-stream` (with the `sync` feature) and `futures-util` are new dependencies of `crates/server`.
+**Verified against the vendored sources, not from memory** — all three types exist in `axum-0.8.9/src/response/sse.rs` (`Sse` at `:53`, `Event` at `:173`, `KeepAlive` at `:517`), and `BroadcastStream` at `tokio-stream-0.1.17/src/wrappers/broadcast.rs:16`.
+
+**One signature detail that will not compile if you miss it:** `Sse::new` requires `S: TryStream<Ok = Event>` — i.e. a stream of **`Result<Event, E>`**, not of bare `Event`. `BroadcastStream` already yields `Result<T, BroadcastStreamRecvError>`, so the natural pipeline lines up, but the buffered-replay prefix you prepend must be wrapped in `Ok(..)` to match. The `Lagged` arm of `BroadcastStreamRecvError` is the input that produces the `lagged` event in the table above — do not `filter_map` it away, which is the tidy-looking mistake that silently deletes the gap the user is supposed to see.
+
+`tokio-stream` (with the `sync` feature — confirmed present at `tokio-stream-0.1.17/Cargo.toml:159`, and it pulls `tokio-util`) and `futures-util` are new **direct** dependencies of `crates/server`. Both are already in `Cargo.lock` transitively, so this adds no new third-party code to the build — only a declared edge.
 
 - [ ] **Step 4: Bound the stream by shutdown**
 

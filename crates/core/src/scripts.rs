@@ -41,28 +41,22 @@ pub fn scripts_dir(workspace_path: &Path) -> Result<PathBuf> {
 /// verified to live under `root`, so `..` segments (and symlinks) cannot escape
 /// it — this is a network-reachable boundary, not a local convenience.
 ///
-/// The returned path is always strictly inside `root`: a request that
-/// resolves to `root` itself (e.g. `"."`) is rejected rather than silently
-/// handed back. This keeps the contract unambiguous for callers that build
-/// both file-reading and directory-listing endpoints on top of it — "list the
-/// root" is the caller's own default, never a value this function returns.
+/// This function only answers "is this path inside the scripts root, and
+/// where does it land" — it does not decide whether the result must be a file
+/// or a directory; callers check that themselves after resolving, same as the
+/// original handlers did. In particular, `""` and `"/"` both mean "the root"
+/// once the leading slash is stripped, so both resolve to `root` itself
+/// (rather than one of them erroring while the other doesn't) — this is what
+/// lets a directory-listing endpoint pass either straight through to list the
+/// scripts root.
 pub fn resolve_script_path(root: &Path, requested: &str) -> Result<PathBuf> {
     let relative = requested.trim_start_matches('/');
-    if relative.is_empty() {
-        return Err(miette!("empty path"));
-    }
 
     let joined = root.join(relative);
     // canonicalize resolves `..` and symlinks, and fails if the target is absent
     let canonical = std::fs::canonicalize(&joined)
         .into_diagnostic()
         .map_err(|_| miette!("path not found: {requested}"))?;
-
-    if canonical == root {
-        return Err(miette!(
-            "path resolves to the scripts root itself: {requested}"
-        ));
-    }
 
     if !canonical.starts_with(root) {
         return Err(miette!("path escapes the scripts directory: {requested}"));
@@ -111,11 +105,16 @@ mod tests {
         assert_eq!(resolved, root.join("a.lua"));
     }
 
-    /// The old caller did `&path[1..]`, which panics on an empty string.
+    /// The old caller did `&path[1..]`, which panics on an empty string. Both
+    /// `""` and `"/"` reduce to the same string once the leading slash is
+    /// stripped, so both deliberately resolve to `root` itself — this is the
+    /// guarantee a directory-listing endpoint relies on to list the scripts
+    /// root (`GET /api/v1/scripts?path=/`).
     #[test]
-    fn rejects_an_empty_path_without_panicking() {
+    fn resolves_an_empty_or_slash_path_to_the_root() {
         let (_dir, root) = root();
-        assert!(resolve_script_path(&root, "").is_err());
+        assert_eq!(resolve_script_path(&root, "").expect("resolves"), root);
+        assert_eq!(resolve_script_path(&root, "/").expect("resolves"), root);
     }
 
     /// The old caller did `&path[1..]`, which panics when the first character
@@ -177,17 +176,6 @@ mod tests {
             resolve_script_path(&root, "/escape.lua").is_err(),
             "a symlink escaping the root should not resolve"
         );
-    }
-
-    /// A request that resolves to the scripts root itself (e.g. `"."`) is
-    /// rejected rather than silently returning `root`. Callers that want "the
-    /// root directory" (a directory-listing endpoint's default) special-case
-    /// that themselves instead of relying on this function to hand it back.
-    #[test]
-    fn rejects_a_path_that_resolves_to_the_root_itself() {
-        let (_dir, root) = root();
-        let result = resolve_script_path(&root, ".");
-        assert!(result.is_err(), "expected a miss, got {result:?}");
     }
 
     /// A substring check on ".." rejects this legitimate name; a canonicalising

@@ -81,6 +81,11 @@ impl Candidate {
 struct Rejected {
     candidate: Candidate,
     condition: String,
+    /// Set when the rejected candidate was the sole candidate of a
+    /// caller-owned chain, so the final error can name the caller's
+    /// instruction as the cause instead of reporting a bare precondition
+    /// failure.
+    owned_chain: Option<ChainId>,
 }
 
 /// Assign every action in `net` to one of `bots`, travel-aware and greedy.
@@ -161,9 +166,11 @@ pub fn schedule(
                 .max()
                 .unwrap_or(0);
 
-            // The chain this action belongs to, and the bot already running it.
+            // The chain this action belongs to, the bot already running it,
+            // and the bot a caller pinned it to, if any.
             let chain = net.chain_of(action.id);
             let bound = chain.and_then(|c| chain_binding.get(&c).copied());
+            let owner = chain.and_then(|c| net.owner_of(c));
 
             // Candidate bots in preference tiers, tried in order. A later tier
             // is reached only when no bot in an earlier one can *feasibly* run
@@ -197,6 +204,11 @@ pub fn schedule(
                     // second tier to fall back to.
                     vec![vec![pinned]]
                 }
+                // A chain owner is a caller's instruction, so it is a hard
+                // constraint: no tier falls back past it. The spread
+                // preference below is a preference precisely because nobody
+                // asked for it.
+                None if owner.is_some() => vec![vec![owner.expect("just checked")]],
                 // An action already in a running chain follows it. Also not a
                 // preference — the items are in that bot's inventory and
                 // nowhere else.
@@ -293,6 +305,13 @@ pub fn schedule(
                             {
                                 best_rejected = Some(Rejected {
                                     condition: condition.to_string(),
+                                    // `owner` names this action's chain owner
+                                    // when it has one; pair it with `chain`
+                                    // (guaranteed `Some` whenever `owner` is)
+                                    // so a caller's instruction is what the
+                                    // final error blames, not a bare
+                                    // precondition.
+                                    owned_chain: owner.and(chain),
                                     candidate,
                                 });
                             }
@@ -307,10 +326,20 @@ pub fn schedule(
             Some(candidate) => candidate,
             None => {
                 let rejected = best_rejected.expect("ready and bots are both non-empty");
-                return Err(PlannerError::PreconditionUnsatisfied {
-                    action: rejected.candidate.action,
-                    bot: rejected.candidate.bot,
-                    condition: rejected.condition,
+                return Err(match rejected.owned_chain {
+                    // A caller named this bot, so a precondition that fails
+                    // for it is not "the world was not as planned" — it is
+                    // the caller's own instruction that cannot be met.
+                    Some(chain) => PlannerError::ChainOwnerInfeasible {
+                        chain,
+                        bot: rejected.candidate.bot,
+                        condition: rejected.condition,
+                    },
+                    None => PlannerError::PreconditionUnsatisfied {
+                        action: rejected.candidate.action,
+                        bot: rejected.candidate.bot,
+                        condition: rejected.condition,
+                    },
                 });
             }
         };

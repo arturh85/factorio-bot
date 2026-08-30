@@ -52,6 +52,16 @@ pub enum PlannerError {
     #[diagnostic(code(planner::no_bots))]
     NoBots,
 
+    #[error(
+        "{bot} owns chain {chain:?} because a caller named it, but {condition} does not hold there"
+    )]
+    #[diagnostic(code(planner::chain_owner_infeasible))]
+    ChainOwnerInfeasible {
+        chain: ChainId,
+        bot: BotId,
+        condition: String,
+    },
+
     #[error("no method can satisfy goal: {goal}")]
     #[diagnostic(code(planner::no_applicable_method))]
     NoApplicableMethod { goal: String },

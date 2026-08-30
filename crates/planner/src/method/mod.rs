@@ -127,6 +127,18 @@ pub trait Method {
         true
     }
 
+    /// Does this method's decomposition require several *produced* items to
+    /// meet in one inventory?
+    ///
+    /// If so the driver opens a chain over its subtree, welding the producers
+    /// to the consumer that needs them together. Defaults to `false`, which is
+    /// right for every method whose inputs arrive through separate actions —
+    /// a furnace is loaded by one insert per ingredient, so three bots can each
+    /// supply one and nothing has to converge.
+    fn converges(&self, _goal: &Goal, _state: &PlanState) -> bool {
+        false
+    }
+
     fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError>;
 }
 
@@ -218,7 +230,7 @@ fn expand_goal(
     let previous_chain = ctx.chain;
     let previous_top_level = ctx.top_level;
     if let Goal::Have {
-        whose: Holder::Bot(bot),
+        whose: Holder::Bot(bot) | Holder::Share(bot),
         ..
     } = goal
     {
@@ -229,24 +241,12 @@ fn expand_goal(
         if ctx.state.bot(*bot).is_none() {
             return Err(PlannerError::UnknownBot(*bot));
         }
+        // `whose` is propagated verbatim into subgoals — a per-bot science
+        // pack asks for per-bot plates — so simulated effects must land in
+        // the same inventory the shortfall checks read for the whole subtree
+        // this goal sits above, not just for this goal alone. Chain opening
+        // itself happens in `expand_goal_body`, once the method is known.
         ctx.chain_actor = *bot;
-        // The *outermost* per-bot goal opens the chain; everything below it
-        // belongs to that same chain. `whose` is propagated verbatim into
-        // subgoals — a per-bot science pack asks for per-bot plates — so
-        // allocating on every match instead would give each ingredient its own
-        // chain and scatter a branching recipe across bots again, which is the
-        // failure this exists to prevent.
-        //
-        // The flip side: any goal inside this subtree that is *not* addressed
-        // to a bot silently inherits this chain, and so gets welded to this
-        // chain's runner. `Holder` has only `Anyone` and `Bot` today and no
-        // method emits `Anyone` beneath a `Bot`, so nothing inherits wrongly.
-        // The moment a holder names somewhere reachable by every bot — a chest,
-        // once `Consolidate` exists — inheriting is the wrong default and this
-        // is the line to revisit.
-        if ctx.chain.is_none() {
-            ctx.chain = Some(ctx.chains.next());
-        }
     }
     ctx.depth += 1;
 
@@ -287,6 +287,29 @@ fn expand_goal_body(
             .ok_or_else(|| PlannerError::NoApplicableMethod {
                 goal: goal.to_string(),
             })?;
+
+    // A chain welds actions to one runner. Two things ask for that: a caller
+    // naming a bot, and a method whose decomposition makes several produced
+    // items meet in one inventory. Nothing else — a goal that merely sits
+    // inside a split does not need welding, and welding it serialises work
+    // that could have run in parallel.
+    if ctx.chain.is_none() {
+        let owner = match goal {
+            Goal::Have {
+                whose: Holder::Bot(bot),
+                ..
+            } => Some(*bot),
+            _ => None,
+        };
+        if owner.is_some() || method.converges(goal, &ctx.state) {
+            let chain = ctx.chains.next();
+            ctx.chain = Some(chain);
+            if let Some(bot) = owner {
+                net.set_chain_owner(chain, bot);
+            }
+        }
+    }
+
     let steps = method.expand(goal, ctx)?;
 
     // Everything below this line was asked for by a method, not by the caller,

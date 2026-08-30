@@ -28,7 +28,7 @@ use factorio_bot_core::types::FactorioEntity;
 fn shortfall(state: &PlanState, item: &str, count: u32, whose: &Holder) -> u32 {
     let held = match whose {
         Holder::Anyone => state.total_count(item),
-        Holder::Bot(id) => state.inventory_count(*id, item),
+        Holder::Bot(id) | Holder::Share(id) => state.inventory_count(*id, item),
     };
     count.saturating_sub(held)
 }
@@ -401,6 +401,26 @@ impl Method for HandCraft {
         "hand-craft"
     }
 
+    fn converges(&self, goal: &Goal, state: &PlanState) -> bool {
+        let Goal::Have { item, count, whose } = goal else {
+            return false;
+        };
+        if shortfall(state, item, *count, whose) == 0 {
+            return false;
+        }
+        let Some(recipe) = recipe_for(state, item) else {
+            return false;
+        };
+        // One craft action carries a `HasItem` for every ingredient, so each
+        // one that still has to be produced is a separate sub-chain that must
+        // land in the same inventory. Two or more of those is a convergence.
+        ingredients_of(&recipe)
+            .iter()
+            .filter(|(ingredient, amount)| shortfall(state, ingredient, *amount, whose) > 0)
+            .count()
+            >= 2
+    }
+
     fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
         let Goal::Have { item, count, whose } = goal else {
             return false;
@@ -505,10 +525,12 @@ impl Method for SplitAcrossBots {
     /// inventory: `Smelt` and `HandCraft` propagate `whose` verbatim, so a
     /// shared goal stays `Holder::Anyone` all the way down, and claiming an
     /// *intermediate* one hands two bots half the ingredients each for a craft
-    /// that needs them together. `in_chain` is redundant given `top_level` —
-    /// only a `Holder::Bot` goal opens a chain and this method declines those —
-    /// but it states the rule the whole way round: never scatter what a chain
-    /// is already gathering.
+    /// that needs them together. `in_chain` is redundant given `top_level`
+    /// here — a top-level goal can never itself be `in_chain`, because
+    /// `in_chain` reflects only the chain a goal *inherited*, computed before
+    /// this goal's own method (this one, or a converging one) gets to open
+    /// one — but it states the rule the whole way round: never scatter what a
+    /// chain is already gathering.
     fn claims(&self, site: GoalSite) -> bool {
         site.top_level && !site.in_chain
     }
@@ -549,7 +571,7 @@ impl Method for SplitAcrossBots {
             steps.push(Step::Subgoal(Goal::Have {
                 item: item.clone(),
                 count: held.saturating_add(share),
-                whose: Holder::Bot(*bot),
+                whose: Holder::Share(*bot),
             }));
         }
         Ok(steps)
@@ -576,6 +598,7 @@ mod tests {
     use crate::schedule::schedule;
     use crate::state::PlanState;
     use factorio_bot_core::test_utils::fixture_world;
+    use factorio_bot_core::types::Position;
     use std::sync::Arc;
 
     fn state(bots: &[BotId]) -> PlanState {
@@ -1205,7 +1228,7 @@ mod tests {
     }
 
     #[test]
-    fn a_single_unit_goal_becomes_one_chain_rather_than_a_split() {
+    fn a_single_unit_goal_becomes_one_action_not_a_split() {
         let bots = [BotId(1), BotId(2)];
         let s = state(&bots);
         let net = expand(
@@ -1219,13 +1242,13 @@ mod tests {
             BotId(1),
         )
         .unwrap();
-        assert_eq!(net.len(), 1);
-        // One share is still a chain. That is what a shortfall of one needs:
-        // not a split, but an owner.
+        assert_eq!(net.len(), 1, "a shortfall of one is one share, not several");
+        // Mining never converges, so the single share needs no chain either:
+        // nothing downstream needs its output gathered with anything else.
         let only = net.actions().next().expect("one action");
         assert!(
-            net.chain_of(only.id).is_some(),
-            "the single share must still belong to a chain"
+            net.chain_of(only.id).is_none(),
+            "a non-converging single share has nothing to weld to a runner"
         );
     }
 
@@ -1325,5 +1348,158 @@ mod tests {
             })
             .collect();
         assert_eq!(mined, vec![1, 1], "the two missing units, one per chain");
+    }
+
+    #[test]
+    fn a_split_emits_shares_not_bot_instructions() {
+        let bots = [BotId(1), BotId(2)];
+        let s = state(&bots);
+        // Reach into the method directly: the driver rewrites nothing, so what
+        // SplitAcrossBots emits is what the rest of the plan sees.
+        let split = SplitAcrossBots {
+            bots: bots.to_vec(),
+        };
+        let mut ctx = ExpansionCtx::new(s, BotId(1));
+        let goal = Goal::Have {
+            item: "iron-ore".into(),
+            count: 4,
+            whose: Holder::Anyone,
+        };
+        let steps = split.expand(&goal, &mut ctx).unwrap();
+        for step in steps {
+            match step {
+                Step::Subgoal(Goal::Have { whose, .. }) => {
+                    assert!(
+                        matches!(whose, Holder::Share(_)),
+                        "a split emits shares, not instructions: {:?}",
+                        whose
+                    );
+                }
+                other => panic!("expected only subgoals, got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn hand_crafting_converges_only_when_two_ingredients_need_producing() {
+        let mut s = state(&[BotId(1)]);
+        let asp = Goal::Have {
+            item: "automation-science-pack".into(),
+            count: 1,
+            whose: Holder::Anyone,
+        };
+        // Both copper-plate and iron-gear-wheel must be produced: they have to
+        // meet in one inventory, so this converges.
+        assert!(HandCraft.converges(&asp, &s));
+
+        // With the copper already held, only the gear needs producing, so
+        // nothing has to meet anything.
+        s.gain(BotId(1), "copper-plate", 5);
+        assert!(!HandCraft.converges(&asp, &s));
+
+        // A single-ingredient recipe never converges.
+        let gear = Goal::Have {
+            item: "iron-gear-wheel".into(),
+            count: 1,
+            whose: Holder::Anyone,
+        };
+        assert!(!HandCraft.converges(&gear, &s));
+    }
+
+    #[test]
+    fn smelting_never_converges() {
+        let s = state(&[BotId(1)]);
+        // A furnace is fed by three separate actions — place, insert ore,
+        // insert coal — so three different bots can each supply one input.
+        // Nothing has to meet in a single inventory.
+        let plate = Goal::Have {
+            item: "iron-plate".into(),
+            count: 2,
+            whose: Holder::Anyone,
+        };
+        assert!(!Smelt.converges(&plate, &s));
+    }
+
+    #[test]
+    fn a_linear_goal_gets_no_chain_and_stays_parallel() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let mut s = state(&bots);
+        for b in bots {
+            s.gain(b, "stone-furnace", 1);
+        }
+        let net = expand(
+            &[Goal::Have {
+                item: "iron-plate".into(),
+                count: 1,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .unwrap();
+        assert!(
+            net.actions().all(|a| net.chain_of(a.id).is_none()),
+            "a smelt converges nowhere, so nothing needs welding to one bot"
+        );
+        let plan = schedule(&net, &s, &bots).expect("schedulable");
+        let used: std::collections::BTreeSet<_> = plan.steps.iter().map(|s| s.bot).collect();
+        assert!(
+            used.len() > 1,
+            "the mining roots must not serialise onto one bot"
+        );
+    }
+
+    #[test]
+    fn a_converging_goal_gets_one_chain_over_its_whole_subtree() {
+        let bots = [BotId(1), BotId(2)];
+        let mut s = state(&bots);
+        for b in bots {
+            s.gain(b, "stone-furnace", 2);
+        }
+        let net = expand(
+            &[Goal::Have {
+                item: "automation-science-pack".into(),
+                count: 1,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .unwrap();
+        let chains: std::collections::BTreeSet<_> =
+            net.actions().filter_map(|a| net.chain_of(a.id)).collect();
+        assert_eq!(chains.len(), 1, "one convergence point, one chain");
+        assert!(
+            net.actions().all(|a| net.chain_of(a.id).is_some()),
+            "the ingredients must be welded to the craft that consumes them"
+        );
+        let plan = schedule(&net, &s, &bots).expect("schedulable");
+        let used: std::collections::BTreeSet<_> = plan.steps.iter().map(|s| s.bot).collect();
+        assert_eq!(used.len(), 1, "a chain runs on one bot");
+    }
+
+    #[test]
+    fn a_caller_naming_a_bot_gets_that_bot() {
+        let bots = [BotId(1), BotId(2)];
+        let mut s = state(&bots);
+        // Park bot 2 far away, so the scheduler would otherwise never choose it.
+        s.set_position(BotId(2), Position::new(300., 0.));
+        let net = expand(
+            &[Goal::Have {
+                item: "iron-ore".into(),
+                count: 3,
+                whose: Holder::Bot(BotId(2)),
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .unwrap();
+        let plan = schedule(&net, &s, &bots).expect("schedulable");
+        for step in &plan.steps {
+            assert_eq!(step.bot, BotId(2), "the caller named bot 2");
+        }
     }
 }

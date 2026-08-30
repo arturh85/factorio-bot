@@ -10,8 +10,18 @@ pub enum Holder {
     /// gathering parallel: the count can be split into independent per-bot
     /// chains that never coordinate.
     Anyone,
-    /// One named bot's inventory.
+    /// A caller's instruction: this bot must end up holding the items. The
+    /// scheduler honours it — the chain this goal opens is owned by this bot.
     Bot(BotId),
+    /// One share of a split. Sized against this bot's starting inventory, but
+    /// carrying no commitment about who runs it: the scheduler is free to give
+    /// the work to whichever bot suits.
+    ///
+    /// Naming a bot here is how the driver keeps each share's simulated
+    /// inventory separate. That it *works* rests on bots starting
+    /// interchangeable — the assumption `ExpansionCtx` documents, made visible
+    /// in the type rather than left in prose.
+    Share(BotId),
 }
 
 impl std::fmt::Display for Holder {
@@ -19,6 +29,7 @@ impl std::fmt::Display for Holder {
         match self {
             Holder::Anyone => write!(f, "anyone"),
             Holder::Bot(id) => write!(f, "{}", id),
+            Holder::Share(id) => write!(f, "a share sized for {}", id),
         }
     }
 }
@@ -119,5 +130,20 @@ mod tests {
             whose: Holder::Anyone,
         };
         assert_eq!(g.to_string(), "have 4 coal (anyone)");
+    }
+
+    #[test]
+    fn a_share_is_not_an_instruction_to_a_bot() {
+        assert_ne!(Holder::Share(BotId(1)), Holder::Bot(BotId(1)));
+    }
+
+    #[test]
+    fn holders_render_distinguishably() {
+        assert_eq!(Holder::Bot(BotId(2)).to_string(), "bot 2");
+        assert_eq!(
+            Holder::Share(BotId(2)).to_string(),
+            "a share sized for bot 2"
+        );
+        assert_eq!(Holder::Anyone.to_string(), "anyone");
     }
 }

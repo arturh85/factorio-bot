@@ -62,11 +62,34 @@ print("gantt bytes: " .. tostring(#gantt))
 
 -- The capability this whole increment buys: a plan's shape can be asserted on
 -- directly, with no running game involved.
-local p2 = goal.plan(goal.all { goal.have("iron-plate", 5), goal.researched("automation") })
-assert(p2:count { kind = "place", entity = "stone-furnace" } <= #p2.bots,
-       "no more furnaces than bots")
-for _, s in ipairs(p2:find { kind = "mine" }) do
-    assert(s.count > 0, "a mine step for nothing is a planner bug")
+--
+-- This deliberately does NOT use goal.researched. Factorio 2.0 introduced
+-- `research_trigger` technologies -- unlocked by doing something rather than by
+-- feeding science packs -- and Space Age's whole early tree uses them.
+-- FactorioTechnology models only research_unit_ingredients/research_unit_count,
+-- the pack-based path, and the mod never serialises a trigger at all. So the
+-- planner computes an empty bill for those technologies and goal.researched
+-- cannot be satisfied for anything depending on them, "automation" included.
+-- Tracked as its own increment; goal.all is exercised here with two item goals.
+local p2 = goal.plan(goal.all { goal.have("iron-plate", 5), goal.have("iron-gear-wheel", 2) })
+print("composed plan: " .. #p2.steps .. " steps over " .. #p2.bots .. " bots"
+      .. ", " .. p2:count { kind = "place", entity = "stone-furnace" } .. " furnaces")
+
+-- goal.all really composed: the plan contains work for both sub-goals.
+assert(p2:count { kind = "mine", item = "iron-ore" } > 0, "iron is mined")
+assert(p2:count { kind = "place", entity = "stone-furnace" } > 0, "smelting is set up")
+assert(p2:count { kind = "craft", item = "iron-gear-wheel" } > 0, "gears are crafted")
+
+-- Every step belongs to a bot in the roster. This is the invariant the old API
+-- could violate: a plan expanded for one roster and scheduled onto another.
+local in_roster = {}
+for _, b in ipairs(p2.bots) do in_roster[b] = true end
+for _, st in ipairs(p2.steps) do
+    assert(in_roster[st.bot], "step assigned to bot " .. st.bot .. ", outside the roster")
+end
+
+for _, st in ipairs(p2:find { kind = "mine" }) do
+    assert(st.count > 0, "a mine step for nothing is a planner bug")
 end
 
 print("end goal smoke")

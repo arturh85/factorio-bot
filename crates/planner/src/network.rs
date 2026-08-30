@@ -2,7 +2,7 @@
 
 use crate::action::Action;
 use crate::error::PlannerError;
-use crate::ids::{ActionId, Ticks};
+use crate::ids::{ActionId, ChainId, Ticks};
 use factorio_bot_core::petgraph::algo::toposort;
 use factorio_bot_core::petgraph::graph::{DiGraph, NodeIndex};
 use std::collections::BTreeMap;
@@ -14,11 +14,15 @@ pub struct Edge {
     pub lag: Ticks,
 }
 
-/// A partially ordered set of actions. No bot appears anywhere in it.
+/// A partially ordered set of actions. No bot appears anywhere in it: a
+/// `ChainId` says which actions must share a runner, never which bot that is.
 #[derive(Clone, Debug, Default)]
 pub struct ActionNetwork {
     actions: BTreeMap<ActionId, Action>,
     edges: Vec<Edge>,
+    /// Which chain each action belongs to, where it belongs to one at all.
+    /// A `BTreeMap` because everything that can reach the output is ordered.
+    chains: BTreeMap<ActionId, ChainId>,
 }
 
 impl ActionNetwork {
@@ -41,6 +45,19 @@ impl ActionNetwork {
             return;
         }
         self.edges.push(Edge { from, to, lag });
+    }
+
+    /// Record that `action` belongs to `chain`.
+    ///
+    /// The driver stamps every action it emits inside a per-bot subtree, and
+    /// the scheduler reads it back to bind the whole chain to one bot.
+    pub fn set_chain(&mut self, action: ActionId, chain: ChainId) {
+        self.chains.insert(action, chain);
+    }
+
+    /// The chain `action` belongs to, or `None` if it is freely assignable.
+    pub fn chain_of(&self, action: ActionId) -> Option<ChainId> {
+        self.chains.get(&action).copied()
     }
 
     pub fn action(&self, id: ActionId) -> Option<&Action> {
@@ -307,6 +324,35 @@ mod tests {
         action.pinned = Some(BotId(2));
         let id = net.add(action);
         assert_eq!(net.action(id).unwrap().pinned, Some(BotId(2)));
+    }
+
+    #[test]
+    fn a_chain_stamp_survives_the_round_trip() {
+        use crate::ids::ChainIdGen;
+        let mut gen = ActionIdGen::new();
+        let mut chains = ChainIdGen::new();
+        let mut net = ActionNetwork::new();
+        let a = net.add(mine(&mut gen, "coal", 1));
+        let b = net.add(mine(&mut gen, "stone", 1));
+        let first = chains.next();
+        let second = chains.next();
+        net.set_chain(a, first);
+        net.set_chain(b, second);
+        assert_eq!(net.chain_of(a), Some(first));
+        assert_eq!(net.chain_of(b), Some(second));
+        assert_ne!(first, second, "the generator must not repeat itself");
+    }
+
+    #[test]
+    fn an_unstamped_action_belongs_to_no_chain() {
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let a = net.add(mine(&mut gen, "coal", 1));
+        assert_eq!(
+            net.chain_of(a),
+            None,
+            "an action outside any per-bot subtree stays freely assignable"
+        );
     }
 
     #[test]

@@ -33,3 +33,29 @@ impl ActionIdGen {
         id
     }
 }
+
+/// Identifies a chain of actions that must all run on the same bot.
+///
+/// A chain is the expansion of one `Goal::Have { whose: Holder::Bot(_) }`
+/// subtree: its steps hand items to each other through a single inventory, so
+/// splitting it across bots leaves the consumer empty-handed. The scheduler
+/// still chooses *which* bot — it just chooses once per chain instead of once
+/// per action. Chain identity is a property of the network's structure, so it
+/// lives in `ActionNetwork`, not on `Action`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ChainId(pub u32);
+
+#[derive(Debug, Default)]
+pub struct ChainIdGen(u32);
+
+impl ChainIdGen {
+    pub fn new() -> Self {
+        ChainIdGen(0)
+    }
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> ChainId {
+        let id = ChainId(self.0);
+        self.0 += 1;
+        id
+    }
+}

@@ -243,7 +243,7 @@ async fn run_bot_signalled(
                 }
             }
             StepKind::Act { action, .. } => {
-                if let PredOutcome::Abandoned = await_preds(net, *action, receivers).await {
+                if let PredOutcome::Abandoned = await_preds(act, net, *action, receivers).await {
                     abandon_rest(&mine[i..], senders);
                     return;
                 }
@@ -296,6 +296,7 @@ fn abandon_rest(rest: &[&ScheduledStep], senders: &BTreeMap<ActionId, watch::Sen
 }
 
 async fn await_preds(
+    act: &dyn Actuator,
     net: &ActionNetwork,
     id: ActionId,
     receivers: &BTreeMap<ActionId, watch::Receiver<Status>>,
@@ -326,18 +327,29 @@ async fn await_preds(
     // predecessor's own completion signal does not cover that wait, so honour
     // the lag once every predecessor has succeeded.
     if max_lag > 0 {
-        tokio::time::sleep(ticks_to_wall_clock(max_lag)).await;
+        // A speed the actuator cannot report falls back to normal speed
+        // rather than aborting the run over a missing nicety: a wrong-but-
+        // finite wait is recoverable (recovery re-checks preconditions before
+        // dispatching the next action), a hung run is not.
+        let speed = act.game_speed().await.unwrap_or(1.0);
+        tokio::time::sleep(ticks_to_wall_clock(max_lag, speed)).await;
     }
     PredOutcome::Ready
 }
 
-/// Factorio runs at 60 ticks per second at normal speed.
+/// Factorio runs at `60 * speed` ticks per second; `speed` is `game.speed`
+/// (`Actuator::game_speed`), where `1.0` is normal. A non-default speed
+/// scales how fast machine time passes without changing how many ticks a lag
+/// edge represents, so wall-clock time is `ticks / (60 * speed)`.
 ///
-/// See the open questions: a server running at a non-default `game.speed`
-/// makes this conversion wrong, and the fix is to read the speed rather than
-/// assume it.
-fn ticks_to_wall_clock(ticks: Ticks) -> std::time::Duration {
-    std::time::Duration::from_millis((u64::from(ticks) * 1000) / 60)
+/// `speed` is defensively floored to normal rather than trusted blindly:
+/// Factorio's own minimum is `0.01`, but an actuator stub or a future bug
+/// could still hand this `0.0` or negative, and dividing by that would sleep
+/// forever or panic rather than degrade to the old (wrong-but-bounded)
+/// behaviour.
+fn ticks_to_wall_clock(ticks: Ticks, speed: f64) -> std::time::Duration {
+    let speed = if speed > 0.0 { speed } else { 1.0 };
+    std::time::Duration::from_secs_f64(f64::from(ticks) / (60.0 * speed))
 }
 
 async fn perform<A: Actuator + ?Sized>(
@@ -531,12 +543,29 @@ mod tests {
 
     /// What the actuator should do, keyed so a test can reverse the timing of
     /// two bots without touching anything else.
-    #[derive(Clone, Default)]
+    #[derive(Clone)]
     struct Script {
         walk_delay_ms: BTreeMap<BotId, u64>,
         mine_delay_ms: BTreeMap<String, u64>,
         fail_walk: BTreeSet<BotId>,
         fail_mine: BTreeSet<String>,
+        /// What `RecordingAct::game_speed` reports. Defaults to `1.0`, not the
+        /// derived `f64` default of `0.0` — a script nobody configures must
+        /// behave exactly like normal speed, the same as every test written
+        /// before this field existed.
+        speed: f64,
+    }
+
+    impl Default for Script {
+        fn default() -> Self {
+            Script {
+                walk_delay_ms: BTreeMap::new(),
+                mine_delay_ms: BTreeMap::new(),
+                fail_walk: BTreeSet::new(),
+                fail_mine: BTreeSet::new(),
+                speed: 1.0,
+            }
+        }
     }
 
     /// A hand-written actuator rather than `MockAct`: mockall's `returning`
@@ -674,6 +703,10 @@ mod tests {
 
         async fn research(&self, _tech: &str) -> Result<(), ActuatorError> {
             Ok(())
+        }
+
+        async fn game_speed(&self) -> Result<f64, ActuatorError> {
+            Ok(self.script.speed)
         }
     }
 
@@ -1020,6 +1053,33 @@ mod tests {
             "expected the 60-tick lag to be honoured, but copper started \
              {:?} after iron",
             copper - iron
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_faster_game_speed_shortens_the_lag_wait() {
+        // Same 60-tick lag as the test above, but the actuator reports the
+        // game running at double speed. Machine time passes twice as fast, so
+        // the same number of ticks is half the wall-clock wait: this is what
+        // distinguishes "the executor reads game speed" from "the executor
+        // still assumes 1.0 and this is a hardcoded 1-second wait dressed up
+        // with an unread speed field".
+        let script = Script {
+            speed: 2.0,
+            ..Default::default()
+        };
+        let act = RecordingAct::new(script);
+        let (net, sched) = cross_bot_fixture(60);
+        within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
+
+        let iron = act.mine_started_at("iron-ore").expect("iron-ore mined");
+        let copper = act.mine_started_at("copper-ore").expect("copper-ore mined");
+        let gap = copper - iron;
+        assert!(
+            gap >= Duration::from_millis(500) && gap < Duration::from_millis(1_000),
+            "expected a ~500ms wait at double speed, got {gap:?}"
         );
     }
 

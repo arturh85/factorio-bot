@@ -62,6 +62,31 @@ pub trait Actuator: Send + Sync {
     ) -> Result<(), ActuatorError>;
     /// Research is server-wide in Factorio: it takes no player id.
     async fn research(&self, tech: &str) -> Result<(), ActuatorError>;
+
+    /// The game's simulation speed multiplier — Factorio's own `game.speed`,
+    /// where `1.0` is normal (60 ticks/second) and the game accepts anything
+    /// from `0.01` up.
+    ///
+    /// `run::ticks_to_wall_clock` uses this to convert a lag edge (machine
+    /// time — a furnace keeps smelting after the bot walks away) into a sleep
+    /// duration. Getting it wrong makes every such wait wrong: at half speed
+    /// a wait computed for `1.0` fires while the furnace still has plates
+    /// left to make, and the executor collects from a furnace too early.
+    ///
+    /// **Stubbed at `1.0` deliberately.** A real answer needs an RCON round
+    /// trip through `FactorioRcon` (`crates/core`), which this crate does not
+    /// own and is not touching while another change is in flight there.
+    /// `crates/core::factorio::rcon::FactorioRcon` needs a dedicated method
+    /// to read `game.speed` — the same shape as the existing
+    /// `RconActuator::new`'s `DEFINES_QUERY` silent-command round trip — and
+    /// `RconActuator` (`crates/executor/src/rcon_actuator.rs`) should then
+    /// override this default to call it. Until that lands every schedule
+    /// keeps assuming normal speed, exactly as before this change, but the
+    /// assumption now lives in one named, overridable place instead of a bare
+    /// `60` a reader had to know to distrust.
+    async fn game_speed(&self) -> Result<f64, ActuatorError> {
+        Ok(1.0)
+    }
 }
 
 #[cfg(test)]

@@ -91,6 +91,27 @@ impl Default for BotState {
 pub struct PlanState {
     base: Arc<FactorioWorld>,
     bots: BTreeMap<BotId, BotState>,
+    /// Bots `from_world` was asked for that `base` has no player for.
+    ///
+    /// Every bot in here got a `BotState::default()` instead of the world's
+    /// real inventory and reach distances — an empty inventory and guessed
+    /// reach limits, not "this bot has none of that yet". Today that never
+    /// happens on the production path: `initiate_missing_players_with_default_inventory`
+    /// (`crates/core/src/plan/planner.rs`) seeds every player id the run's
+    /// roster names before `from_world` ever sees it, and every planner
+    /// fixture that constructs a `PlanState` directly relies on the very
+    /// fallback this records (`fixture_world()` never has players, so every
+    /// existing test is "unknown" by this definition).
+    ///
+    /// That is exactly why `from_world` cannot turn this into a hard error
+    /// without also rewriting every one of those fixtures, several of which
+    /// (`tests/scheduling.rs`, `tests/red_science.rs`) are pinned byte-for-byte.
+    /// So the substitution stays, but stops being silent: a caller that names
+    /// a `BotId` the world does not have — the per-bot goal API this was
+    /// flagged against — can check `unknown_bots()` and refuse to build a plan
+    /// against invented reach distances, which `crates/scripting_lua` (out of
+    /// this crate's scope) is where that refusal belongs.
+    unknown_bots: BTreeSet<BotId>,
     /// Entities added by the plan, keyed by tile.
     added: BTreeMap<Pos, FactorioEntity>,
     /// Positions whose base-world entity the plan has removed.
@@ -145,6 +166,7 @@ pub struct PlanState {
 impl PlanState {
     pub fn from_world(base: Arc<FactorioWorld>, bots: &[BotId]) -> PlanState {
         let mut map = BTreeMap::new();
+        let mut unknown_bots = BTreeSet::new();
         for id in bots {
             let state = match base.players.get(&id.0) {
                 Some(player) => BotState {
@@ -154,7 +176,10 @@ impl PlanState {
                     reach_distance: player.reach_distance as f64,
                     resource_reach_distance: player.resource_reach_distance as f64,
                 },
-                None => BotState::default(),
+                None => {
+                    unknown_bots.insert(*id);
+                    BotState::default()
+                }
             };
             map.insert(*id, state);
         }
@@ -173,6 +198,7 @@ impl PlanState {
         PlanState {
             base,
             bots: map,
+            unknown_bots,
             added: Default::default(),
             removed: Default::default(),
             consumed: Default::default(),
@@ -188,6 +214,16 @@ impl PlanState {
 
     pub fn base(&self) -> &Arc<FactorioWorld> {
         &self.base
+    }
+
+    /// Bots passed to [`PlanState::from_world`] that `base` had no player
+    /// for, and so were seeded with `BotState::default()` — an empty
+    /// inventory and guessed reach distances — instead of the world's own
+    /// data. Empty whenever every requested bot was a real player, which is
+    /// every production call today; see the field doc for why this is a
+    /// detectable flag rather than a hard error.
+    pub fn unknown_bots(&self) -> &BTreeSet<BotId> {
+        &self.unknown_bots
     }
 
     /// Technology `name` as the acting force defines it.
@@ -687,6 +723,32 @@ mod tests {
         let other = s.bot(BotId(2)).expect("bot 2 exists");
         assert_eq!(other.position, Position::new(0., 0.));
         assert_eq!(other.build_distance, 10.0);
+
+        // The fallback is recorded: bot 2 got invented data, bot 1 did not.
+        assert_eq!(s.unknown_bots(), &BTreeSet::from([BotId(2)]));
+    }
+
+    #[test]
+    fn a_bot_with_a_real_player_is_not_unknown() {
+        // Guards the flag in isolation from the fallback-data test above: a
+        // `PlanState` built entirely from real players must report no unknown
+        // bots at all, not merely "fewer than requested".
+        use factorio_bot_core::types::FactorioPlayer;
+
+        let world = fixture_world();
+        world.players.insert(
+            1,
+            FactorioPlayer {
+                player_id: 1,
+                ..Default::default()
+            },
+        );
+
+        let s = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+        assert!(
+            s.unknown_bots().is_empty(),
+            "bot 1 has a real player and must not be flagged unknown"
+        );
     }
 
     #[test]

@@ -1,3 +1,5 @@
+#[cfg(feature = "lua")]
+pub mod execute;
 pub mod fs;
 pub mod instance;
 pub mod rcon;
@@ -9,7 +11,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 pub fn router() -> OpenApiRouter<AppState> {
-    OpenApiRouter::new()
+    let router = OpenApiRouter::new()
         .routes(routes!(settings::get_settings))
         .routes(routes!(settings::put_settings))
         .routes(routes!(instance::get_instance))
@@ -20,5 +22,18 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(scripts::write_script))
         .routes(routes!(scripts::create_script))
         .routes(routes!(scripts::delete_script))
-        .routes(routes!(fs::exists))
+        .routes(routes!(fs::exists));
+
+    // Script execution and the job history it produces exist only in a build
+    // that has an interpreter: `factorio-bot-scripting-lua` is an optional
+    // dependency here, and `cargo build --no-default-features` (a precommit
+    // gate) leaves it out entirely. Registering the routes anyway would publish
+    // operations in the OpenAPI document that can answer nothing but an error.
+    #[cfg(feature = "lua")]
+    let router = router
+        .routes(routes!(execute::post_execute))
+        .routes(routes!(execute::list_jobs))
+        .routes(routes!(execute::get_job));
+
+    router
 }

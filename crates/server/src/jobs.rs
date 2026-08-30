@@ -418,6 +418,38 @@ mod tests {
             .expect("slot is free after a dropped handle");
     }
 
+    /// Why a detached run has to capture a strong `Arc<JobRegistry>` of its
+    /// own, and not merely its [`JobHandle`].
+    ///
+    /// The handle carries a `Weak` (the registry is built with
+    /// `Arc::new_cyclic`, so a strong reference back would be a cycle), and
+    /// [`JobHandle::finish`] silently does nothing when that upgrade fails --
+    /// no panic, no log, the outcome simply goes nowhere. The server drops
+    /// `AppState`, and with it the registry, together with the router at
+    /// shutdown, while a spawned script keeps running.
+    ///
+    /// The loss itself is not observable through this API -- once the registry
+    /// is gone there is nothing left to read the outcome out of, which is the
+    /// point -- so what is asserted is the property that causes it: a live
+    /// handle is not what keeps the registry alive.
+    #[test]
+    fn a_job_handle_does_not_keep_its_registry_alive() {
+        let registry = JobRegistry::new(8);
+        let weak = Arc::downgrade(&registry);
+        let handle = registry.try_start(Some("a.lua".into())).expect("start");
+
+        drop(registry);
+        assert!(
+            weak.upgrade().is_none(),
+            "a JobHandle must not be what keeps its registry alive"
+        );
+
+        // And so this outcome goes nowhere at all. It must at least not panic:
+        // under `panic = "abort"` it would take the process down at shutdown.
+        handle.finish(Ok(("lost".into(), String::new())));
+        assert!(weak.upgrade().is_none());
+    }
+
     #[test]
     fn a_finished_job_records_its_output_and_status() {
         let registry = JobRegistry::new(8);

@@ -89,6 +89,38 @@ const QUERY_OPERATIONS: &[QueryOperation] = &[
     ("/api/v1/fs/exists", "get", &[("path", true)]),
 ];
 
+/// Operations that exist only in a build that has an interpreter.
+///
+/// `factorio-bot-scripting-lua` is an optional dependency of this crate and
+/// `cargo build --no-default-features` leaves it out, so `manage::router`
+/// registers these behind the same `cfg`. `cargo test` over the workspace
+/// turns the feature on through `app/src-tauri`, so the list is exercised
+/// rather than skipped in practice.
+#[cfg(feature = "lua")]
+const SCRIPTING_OPERATIONS: &[(&str, &str)] = &[
+    ("/api/v1/scripts/execute", "post"),
+    ("/api/v1/jobs", "get"),
+    ("/api/v1/jobs/{id}", "get"),
+];
+#[cfg(not(feature = "lua"))]
+const SCRIPTING_OPERATIONS: &[(&str, &str)] = &[];
+
+/// The operations that legitimately publish a templated path segment, as
+/// `(method, path)`.
+///
+/// `no_operation_publishes_an_unexpected_path_parameter` below started life
+/// asserting that *nothing* in this API was templated, with a message naming
+/// that premise so whoever first added a templated route would have to make a
+/// decision instead of patching around it. `GET /api/v1/jobs/{id}` is that
+/// route. The decision is to keep the sweep and narrow it rather than relax
+/// it: a templated path that is not listed here still fails, and an entry
+/// listed here that does *not* actually publish a path parameter fails too, so
+/// a stale entry cannot silently widen the guard.
+#[cfg(feature = "lua")]
+const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[("get", "/api/v1/jobs/{id}")];
+#[cfg(not(feature = "lua"))]
+const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[];
+
 #[tokio::test]
 async fn openapi_json_lists_every_route() {
     let spec = openapi_spec().await;
@@ -143,6 +175,15 @@ async fn openapi_json_lists_every_route() {
     ] {
         assert!(
             paths[path].get(method).is_some(),
+            "spec is missing {} {path}",
+            method.to_uppercase()
+        );
+    }
+
+    for (path, method) in SCRIPTING_OPERATIONS {
+        assert!(paths.contains_key(*path), "spec is missing {path}");
+        assert!(
+            paths[*path].get(*method).is_some(),
             "spec is missing {} {path}",
             method.to_uppercase()
         );
@@ -213,25 +254,40 @@ async fn query_parameters_are_published_as_query_parameters() {
     }
 }
 
-/// Sweep of the whole document rather than an enumerated list: no route in
-/// this API takes a templated path segment, so *any* `in: path` parameter
-/// anywhere in the spec is the `ApiQuery` inference bug resurfacing on a
-/// handler that `QUERY_OPERATIONS` above does not yet know about.
+/// Sweep of the whole document rather than an enumerated list: apart from the
+/// handful of operations in `OPERATIONS_WITH_A_PATH_PARAMETER`, no route in
+/// this API takes a templated path segment, so *any* other `in: path`
+/// parameter anywhere in the spec is the `ApiQuery` inference bug resurfacing
+/// on a handler that `QUERY_OPERATIONS` above does not yet know about.
+///
+/// Renamed from `no_operation_publishes_a_path_parameter`, which asserted the
+/// stronger "none at all". That premise stopped holding when `GET
+/// /api/v1/jobs/{id}` landed; the guard was narrowed to an allow-list rather
+/// than relaxed, so it still fails on an *unexpected* path parameter.
 #[tokio::test]
-async fn no_operation_publishes_a_path_parameter() {
+async fn no_operation_publishes_an_unexpected_path_parameter() {
     let spec = openapi_spec().await;
     let paths = spec["paths"].as_object().expect("paths object");
 
     for (path, methods) in paths {
-        assert!(
-            !path.contains('{'),
-            "{path} is templated; this test's premise no longer holds"
-        );
         for (method, operation) in methods.as_object().expect("operations object") {
+            let expected =
+                OPERATIONS_WITH_A_PATH_PARAMETER.contains(&(method.as_str(), path.as_str()));
+            assert!(
+                !path.contains('{') || expected,
+                "{} {path} is templated and is not listed in \
+                 OPERATIONS_WITH_A_PATH_PARAMETER; publishing a path parameter is a \
+                 decision this test exists to force, so list it there rather than \
+                 relaxing the sweep",
+                method.to_uppercase()
+            );
             let Some(parameters) = operation.get("parameters").and_then(|p| p.as_array()) else {
                 continue;
             };
             for parameter in parameters {
+                if expected {
+                    continue;
+                }
                 assert_ne!(
                     parameter["in"],
                     "path",
@@ -241,6 +297,31 @@ async fn no_operation_publishes_a_path_parameter() {
                 );
             }
         }
+    }
+}
+
+/// The other half of the allow-list above: an entry that does not correspond
+/// to an operation which really does publish a path parameter is a stale
+/// exemption, and a stale exemption silently widens the sweep for whatever
+/// path happens to match it next.
+#[tokio::test]
+async fn every_allowed_path_parameter_is_really_published_as_one() {
+    let spec = openapi_spec().await;
+    let paths = spec["paths"].as_object().expect("paths object");
+
+    for (method, path) in OPERATIONS_WITH_A_PATH_PARAMETER {
+        let operation = paths
+            .get(*path)
+            .and_then(|methods| methods.get(*method))
+            .unwrap_or_else(|| panic!("spec is missing {} {path}", method.to_uppercase()));
+        let parameters = operation["parameters"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{} {path} publishes no parameters", method.to_uppercase()));
+        assert!(
+            parameters.iter().any(|parameter| parameter["in"] == "path"),
+            "{} {path} is exempted as carrying a path parameter but publishes none: {parameters:?}",
+            method.to_uppercase()
+        );
     }
 }
 

@@ -74,7 +74,10 @@ fn scripts_root_path(workspace_path: &str) -> Result<PathBuf, ErrorResponse> {
     Ok(workspace_path.join("scripts"))
 }
 
-async fn scripts_root(state: &AppState) -> Result<PathBuf, ErrorResponse> {
+/// Crate-visible because `manage::execute` resolves the same root: a script
+/// run over HTTP and a script read over HTTP must mean the same file, and a
+/// second copy of this lookup is how they would come to disagree.
+pub(crate) async fn scripts_root(state: &AppState) -> Result<PathBuf, ErrorResponse> {
     let workspace_path = state.settings.read().await.factorio.workspace_path.clone();
     let root = scripts_root_path(workspace_path.as_ref())?;
     std::fs::canonicalize(&root).map_err(|_| {

@@ -24,6 +24,13 @@ fn default_status() -> StatusCode {
 pub struct ErrorResponse {
     pub message: String,
     pub code: u32,
+    /// The job holding the single execution slot, on the `409` from
+    /// `POST /api/v1/scripts/execute`. Skipped when absent so every other
+    /// error body is byte-for-byte what it was before this field existed --
+    /// a client that switched on the presence of a key would otherwise start
+    /// seeing `"running_job_id": null` on unrelated failures.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub running_job_id: Option<String>,
     #[serde(skip, default = "default_status")]
     #[schema(ignore)]
     pub status: StatusCode,
@@ -34,6 +41,7 @@ impl ErrorResponse {
         ErrorResponse {
             message,
             code,
+            running_job_id: None,
             status: default_status(),
         }
     }
@@ -52,8 +60,39 @@ impl ErrorResponse {
     }
 
     /// No Factorio instance is running.
+    ///
+    /// Answers `400`, which is what `POST /api/v1/rcon` and
+    /// `POST /api/v1/instance/stop` have always done. See [`not_running`] for
+    /// the `503` reading of the same condition.
+    ///
+    /// [`not_running`]: ErrorResponse::not_running
     pub fn not_started() -> Self {
         ErrorResponse::new("not started".into(), 2)
+    }
+
+    /// No Factorio instance is running, for an endpoint that treats that as a
+    /// temporary condition of the server rather than a malformed request.
+    ///
+    /// Deliberately a second constructor rather than a change to
+    /// [`not_started`]: "start a script" is not something the caller can fix by
+    /// sending a better request, so `503` is the honest answer -- but the two
+    /// older endpoints have answered `400` since before this crate carried a
+    /// status at all, and their tests pin it.
+    ///
+    /// [`not_started`]: ErrorResponse::not_started
+    pub fn not_running(message: impl Into<String>) -> Self {
+        ErrorResponse::new(message.into(), 2).with_status(StatusCode::SERVICE_UNAVAILABLE)
+    }
+
+    /// The single script-execution slot is taken, and by whom.
+    ///
+    /// The id is carried in its own field rather than only in the message so a
+    /// client can follow it (to `GET /api/v1/jobs/{id}`) without parsing prose.
+    pub fn already_running(running: crate::jobs::JobId) -> Self {
+        let mut response =
+            ErrorResponse::conflict(format!("a script is already running as job {running}"));
+        response.running_job_id = Some(running.to_string());
+        response
     }
 
     /// A query parameter could not be parsed.
@@ -100,6 +139,29 @@ impl From<ScriptPathError> for ErrorResponse {
         match err {
             ScriptPathError::NotFound { .. } => ErrorResponse::not_found(err.to_string()),
             ScriptPathError::EscapesRoot { .. } => ErrorResponse::bad_request(err.to_string()),
+        }
+    }
+}
+
+/// Maps the script runner's typed failure onto statuses.
+///
+/// The `Path` arm delegates to the [`ScriptPathError`] conversion above rather
+/// than restating it, so the 404/400 split has exactly one definition. This is
+/// the whole reason `run_script_file` reports a typed error instead of a
+/// formatted string: recovering the split by matching on message text would
+/// turn rewording an error into a silent status-code regression that no test
+/// could catch.
+#[cfg(feature = "lua")]
+impl From<factorio_bot_scripting_lua::RunScriptError> for ErrorResponse {
+    fn from(err: factorio_bot_scripting_lua::RunScriptError) -> Self {
+        use factorio_bot_scripting_lua::RunScriptError;
+        match err {
+            RunScriptError::Path(err) => ErrorResponse::from(err),
+            RunScriptError::Run(report) => ErrorResponse::from(report),
+            // A name that is not a file, or whose extension names no
+            // interpreter, is a request this server will never accept -- the
+            // caller's mistake, not a missing resource.
+            other => ErrorResponse::bad_request(other.to_string()),
         }
     }
 }

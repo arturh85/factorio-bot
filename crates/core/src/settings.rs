@@ -1,7 +1,12 @@
 use std::borrow::Cow;
 
 #[derive(
-    Debug, Clone, typescript_definitions::TypeScriptify, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    typescript_definitions::TypeScriptify,
+    serde::Serialize,
+    serde::Deserialize,
+    utoipa::ToSchema,
 )]
 #[allow(non_camel_case_types)]
 pub struct FactorioSettings {
@@ -33,7 +38,12 @@ impl Default for FactorioSettings {
 }
 
 #[derive(
-    Debug, Clone, typescript_definitions::TypeScriptify, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    typescript_definitions::TypeScriptify,
+    serde::Serialize,
+    serde::Deserialize,
+    utoipa::ToSchema,
 )]
 pub struct RestApiSettings {
     pub port: i64,

@@ -23,6 +23,7 @@ pub fn build_router(state: AppState, web_root: Option<&str>) -> Router {
     let (router, api) = OpenApiRouter::with_openapi(crate::openapi::ApiDoc::openapi())
         .route("/api/v1/health", get(health))
         .merge(crate::game::router())
+        .merge(crate::manage::router())
         .with_state(state)
         .split_for_parts();
 

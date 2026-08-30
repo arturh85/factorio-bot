@@ -8,14 +8,14 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[allow(clippy::module_name_repetitions)]
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GuiSettings {
     pub enable_autostart: bool,
     pub enable_restapi: bool,
 }
 
 #[allow(clippy::module_name_repetitions)]
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AppSettings {
     pub factorio: FactorioSettings,
     pub restapi: RestApiSettings,

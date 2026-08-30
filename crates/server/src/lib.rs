@@ -1,6 +1,7 @@
 pub mod error;
 mod extract;
 pub mod game;
+pub mod manage;
 pub mod openapi;
 pub mod settings;
 pub mod spa;

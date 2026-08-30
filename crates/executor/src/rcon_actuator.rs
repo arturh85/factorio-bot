@@ -31,10 +31,6 @@ impl InventoryDefines {
             .copied()
             .ok_or(ActuatorError::UnknownInventorySlot(key))
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.by_name.is_empty()
-    }
 }
 
 /// The Lua the game runs to report its inventory defines.
@@ -69,14 +65,13 @@ impl RconActuator {
         rcon: Arc<FactorioRcon>,
         world: Arc<FactorioWorld>,
     ) -> Result<Self, ActuatorError> {
-        let mut ids: Vec<PlayerId> = rcon
+        let ids: Vec<PlayerId> = rcon
             .connected_players()
             .await
             .map_err(|e| ActuatorError::Rejected(e.to_string()))?
             .into_iter()
             .map(|p| p.player_id)
             .collect();
-        ids.sort_unstable();
         let players = Self::bot_mapping(ids);
         if players.is_empty() {
             return Err(ActuatorError::Rejected("no connected players".to_string()));
@@ -100,10 +95,15 @@ impl RconActuator {
         })
     }
 
-    /// Ascending player ids become `BotId(0..n)`. Factored out of `new` so the
-    /// numbering is testable without a game.
-    fn bot_mapping(sorted_player_ids: Vec<PlayerId>) -> BTreeMap<BotId, PlayerId> {
-        sorted_player_ids
+    /// Player ids become `BotId(0..n)` in ascending order.
+    ///
+    /// The sort lives here, with the function that promises the ordering, so
+    /// the guarantee cannot be lost by a caller collecting ids in whatever
+    /// order the game listed them. Factored out of `new` so the numbering is
+    /// testable without a game.
+    fn bot_mapping(mut player_ids: Vec<PlayerId>) -> BTreeMap<BotId, PlayerId> {
+        player_ids.sort_unstable();
+        player_ids
             .into_iter()
             .enumerate()
             .map(|(i, pid)| (BotId(i as u8), pid))
@@ -115,15 +115,6 @@ impl RconActuator {
             .get(&bot)
             .copied()
             .ok_or(ActuatorError::UnknownBot(bot))
-    }
-
-    /// The bots this actuator discovered, lowest first.
-    pub fn bots(&self) -> Vec<BotId> {
-        self.players.keys().copied().collect()
-    }
-
-    pub fn defines(&self) -> &InventoryDefines {
-        &self.defines
     }
 }
 
@@ -295,8 +286,11 @@ mod tests {
 
     #[test]
     fn bots_are_numbered_from_zero_in_player_id_order() {
-        let mut ids: Vec<PlayerId> = vec![7, 2, 5];
-        ids.sort_unstable();
+        // Deliberately unsorted: the ordering, not `enumerate`, is what this
+        // guards. Bot identity must be a function of who is connected, not of
+        // the order the game happened to list them, or a re-plan would hand a
+        // chain to a different body midway.
+        let ids: Vec<PlayerId> = vec![7, 2, 5];
         let map = RconActuator::bot_mapping(ids);
         assert_eq!(map.get(&BotId(0)).copied(), Some(2));
         assert_eq!(map.get(&BotId(1)).copied(), Some(5));

@@ -4,8 +4,6 @@ use factorio_bot_planner::{BotId, InventorySlot};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ActuatorError {
-    #[error("no RCON connection available")]
-    NotConnected,
     #[error("bot {0:?} has no mapped Factorio player")]
     UnknownBot(BotId),
     #[error("the game does not define inventory slot {0}")]

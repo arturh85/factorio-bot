@@ -19,10 +19,8 @@ use factorio_bot_planner::{BotId, Goal, Holder};
 /// Lua table is refcounted) onto every value the three functions return -- so
 /// `tostring(g)` renders the same way regardless of which of them built `g`.
 ///
-/// Not yet called from `create_lua_goal_with`: this task only makes goals
-/// into inspectable values, a later task wires them into the `goal` table
-/// that scripts see.
-#[allow(dead_code)]
+/// Called by `create_lua_goal_with`: these three *are* `goal.have`,
+/// `goal.researched` and `goal.all` as a script sees them.
 pub(crate) fn install_goal_constructors(lua: &Lua, table: &LuaTable) -> LuaResult<()> {
     let metatable = lua.create_table()?;
     metatable.set(
@@ -97,9 +95,8 @@ pub(crate) fn install_goal_constructors(lua: &Lua, table: &LuaTable) -> LuaResul
 /// internal marker for one bot's slice of a split goal, not a shape a caller
 /// can name.
 ///
-/// Not yet called outside this module's own tests; a later task is what has
-/// `goal.schedule`/`goal.execute` accept a goal value through this.
-#[allow(dead_code)]
+/// `goal.plan` is the caller: it is the boundary where a goal value stops
+/// being a script's table and becomes something the planner can expand.
 pub(crate) fn goal_from_lua(value: &LuaTable) -> LuaResult<Goal> {
     match require_kind(value)?.as_str() {
         "have" => {

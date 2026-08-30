@@ -179,17 +179,45 @@ mod tests {
         (
             "goal.lua",
             &[
-                "function goal.execute(",
-                "function goal.gantt(",
-                "function goal.graphviz(",
+                "function goal.all(",
                 "function goal.have(",
-                "function goal.progress(",
+                "function goal.plan(",
                 "function goal.researched(",
-                "function goal.schedule(",
-                "function goal.wait(",
+                "function goal.run(",
+                "function goal.start(",
             ],
         ),
     ];
+
+    /// `goal.lua`, in **both** directions.
+    ///
+    /// [`every_documented_binding_reaches_the_generated_file`] asserts only
+    /// that each listed entry is present, so it catches a function that is
+    /// *removed* and stays silent on one that is *added* — the list is then a
+    /// mirror of the code rather than a check on it, and it stays green when
+    /// a seventh function appears. This compares the set the generator
+    /// actually emitted against the set that is meant to exist, so an
+    /// undocumented addition fails as loudly as a lost entry.
+    ///
+    /// Only `goal.lua`: it is the file this change churns, and the other
+    /// three carry longer lists that nothing here is renaming.
+    #[test]
+    fn the_goal_doc_entries_are_exactly_the_goal_surface() {
+        use std::collections::BTreeSet;
+
+        let (_dir, target) = generate();
+        let body = fs::read_to_string(target.join("goal.lua")).expect("goal.lua");
+        let emitted: BTreeSet<&str> = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("function goal."))
+            .filter_map(|rest| rest.split('(').next())
+            .collect();
+        let expected: BTreeSet<&str> = ["all", "have", "plan", "researched", "run", "start"].into();
+        assert_eq!(
+            emitted, expected,
+            "goal.lua doc entries drifted from the goal table"
+        );
+    }
 
     fn generate() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -44,9 +44,8 @@ const KNOWN_PREDICATE_KEYS: &[&str] = &[
 /// side of the join `step_to_lua` performs.
 ///
 /// `net` and `schedule` are `Arc`s rather than owned values because
-/// `goal.execute` (a later task, mirroring today's `Plans::scheduled` in
-/// `mod.rs`) needs exactly these two handed to the executor without cloning
-/// the graph or the schedule.
+/// `goal.start`/`goal.run` need exactly these two handed to the executor
+/// without cloning the graph or the schedule.
 pub(crate) struct PlanValue {
     net: Arc<ActionNetwork>,
     schedule: Arc<Schedule>,
@@ -56,8 +55,8 @@ pub(crate) struct PlanValue {
     /// Set the first time [`PlanValue::take_for_run`] succeeds. A plan may
     /// only be run once -- running it twice would dispatch every action
     /// against the game a second time -- and this flag is where that rule
-    /// lives, which is why the run side (`RunValue`, a later task) needs no
-    /// registry of its own to enforce it.
+    /// lives, which is why the run side (`RunValue`) needs no registry of
+    /// its own to enforce it.
     consumed: AtomicBool,
 }
 
@@ -77,7 +76,6 @@ impl PlanValue {
 
     /// Hands the plan's network and schedule to a caller about to execute it,
     /// refusing a second call with an error naming the reason.
-    #[allow(dead_code)]
     pub(crate) fn take_for_run(&self) -> LuaResult<(Arc<ActionNetwork>, Arc<Schedule>)> {
         if self.consumed.swap(true, Ordering::SeqCst) {
             return Err(goal_error("plan has already been taken for a run"));
@@ -160,8 +158,8 @@ pub(crate) fn install_goal_plan(
             let roster = resolve_roster(opts.as_ref(), &default_roster)?;
             // Built once and reused for the scheduler below; `expand_goal`
             // builds its own copy internally to run the same refusal, which
-            // is redundant but harmless -- see `goal.schedule` in `mod.rs`
-            // for the existing precedent of doing both.
+            // is redundant but harmless: `PlanState::from_world` is a pure
+            // read of the world snapshot.
             let state = PlanState::from_world(world.clone(), &roster);
             refuse_unknown_bots(&state)?;
             let net = expand_goal(goal, &world, &roster)?;
@@ -417,8 +415,8 @@ impl LuaUserData for PlanValue {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::globals::goal::create_lua_goal_with;
     use crate::globals::goal::tests::{factory, seeded_world_for, Failure, StubActuator};
-    use crate::globals::goal::{create_lua_goal_with, value::install_goal_constructors};
 
     /// A hand-built network and schedule covering every step kind, so the
     /// step-shape test does not depend on what the planner happens to emit.
@@ -688,13 +686,10 @@ mod tests {
     /// The real `goal` table over a world seeded with `roster`, in a sandbox.
     ///
     /// Reuses `seeded_world_for`, `factory` and `StubActuator` from
-    /// `goal::tests` (bumped to `pub(crate)` for this). Also installs the
-    /// value-based goal constructors from `goal::value` on top of the table
-    /// `create_lua_goal_with` returns: production does not wire those onto
-    /// `have`/`researched` until the old handle surface is deleted, but
-    /// `goal.plan` consumes a goal *value*, and every other test in this
-    /// crate gets its own fresh table from `create_lua_goal_with` too, so
-    /// installing the constructors here changes nothing they see.
+    /// `goal::tests` (bumped to `pub(crate)` for this). The table is the one
+    /// `create_lua_goal_with` returns, unmodified: it now carries the
+    /// value-based `have`/`researched`/`all` that `goal.plan` consumes, so
+    /// nothing has to be installed on top of it any more.
     fn lua_with_world(roster: &[u8]) -> Lua {
         let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
         lua.set_app_data(crate::lua_runner::PendingWork::default());
@@ -705,7 +700,6 @@ mod tests {
             roster.to_vec(),
         )
         .expect("goal table");
-        install_goal_constructors(&lua, &table).expect("goal values");
         lua.globals().set("goal", table).expect("install");
         lua
     }

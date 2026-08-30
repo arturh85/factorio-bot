@@ -74,9 +74,7 @@ function build_starter_miner_furnace(bots, ore, count)
     -- itself is the planner's job now.
     starter_craft(bots[1], ENTITIES.BURNER_MINING_DRILL, 1)
 
-    local plan = goal.have(plate, count)
-    goal.schedule(plan, #bots)
-    return plan
+    return goal.plan(goal.have(plate, count), { bots = bots })
 end
 
 function starter_craft(bot, entity_name, count)
@@ -132,10 +130,10 @@ function main()
     -- asserted here instead, so a planner that stops producing a plan fails.
     -- `world.draw` keeps its coverage in Rust, where the drawn PNG is checked
     -- rather than merely written.
-    local dot = goal.graphviz(plan)
+    local dot = plan:graphviz()
     assert(string.find(dot, "digraph", 1, true), "expected a graphviz digraph, got: " .. dot)
 
-    local gantt = goal.gantt(plan, bot_count .. " bots")
+    local gantt = plan:gantt(bot_count .. " bots")
     assert(string.find(gantt, "gantt", 1, true), "expected a mermaid gantt chart, got: " .. gantt)
     assert(string.find(gantt, "section bot 1", 1, true),
            "bot 1 must have work in the chart, got: " .. gantt)

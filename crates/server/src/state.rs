@@ -1,6 +1,13 @@
+use crate::jobs::JobRegistry;
 use factorio_bot_core::app_settings::SharedAppSettings;
 use factorio_bot_core::process::process_control::SharedFactorioInstance;
 use std::path::PathBuf;
+use std::sync::Arc;
+
+/// How many finished script runs the server remembers. Past this, the oldest
+/// is evicted: a job keeps its whole transcript, so an uncapped history grows
+/// without bound on a long-lived server.
+const JOB_HISTORY_LIMIT: usize = 50;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -12,6 +19,10 @@ pub struct AppState {
     /// a path inside a `tempfile::TempDir` instead, so the suite never
     /// overwrites a real developer's settings file.
     pub settings_path: PathBuf,
+    /// Script executions, live and historical. Shared rather than cloned with
+    /// the state: `AppState` is cloned per request, and every clone must see
+    /// the same single execution slot.
+    pub jobs: Arc<JobRegistry>,
 }
 
 impl AppState {
@@ -25,6 +36,7 @@ impl AppState {
             instance,
             settings,
             settings_path: factorio_bot_core::paths::settings_file(),
+            jobs: JobRegistry::new(JOB_HISTORY_LIMIT),
         }
     }
 }

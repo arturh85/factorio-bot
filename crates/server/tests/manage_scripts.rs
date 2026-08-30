@@ -21,6 +21,7 @@ fn state_with_scripts(dir: &std::path::Path) -> AppState {
         instance: FactorioInstance::new_shared(),
         settings: settings.into_shared(),
         settings_path: dir.join("AppSettings.toml"),
+        jobs: factorio_bot_server::jobs::JobRegistry::new(8),
     }
 }
 
@@ -326,6 +327,7 @@ async fn a_freshly_bootstrapped_workspace_serves_the_scripts_endpoints() {
         instance: FactorioInstance::new_shared(),
         settings: settings.into_shared(),
         settings_path: dir.path().join("AppSettings.toml"),
+        jobs: factorio_bot_server::jobs::JobRegistry::new(8),
     };
 
     let (status, body) = get(state.clone(), "/api/v1/scripts?path=/").await;

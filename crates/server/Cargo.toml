@@ -11,6 +11,8 @@ publish = false
 
 [dependencies]
 factorio-bot-core = { path = "../core" }
+factorio-bot-scripting = { path = "../scripting" }
+factorio-bot-scripting-lua = { path = "../scripting_lua", optional = true }
 axum = { version = "0.8.9", features = ["json", "tokio", "http1"] }
 tower = "0.5.3"
 tower-http = { version = "0.6.11", features = ["fs", "trace", "catch-panic"] }
@@ -24,6 +26,16 @@ miette = { version = "7.4", features = ["fancy"] }
 thiserror = "2.0"
 num-traits = "0.2"
 tracing = "0.1"
+
+# Deliberately no `default` set: `app/src-tauri` has separate `lua` and
+# `restapi` features, both on by default. If `lua` defaulted on here, building
+# the app as `--no-default-features --features restapi` -- server but no
+# scripting -- would still pull `factorio-bot-scripting-lua` in through this
+# crate's defaults, contradicting the feature the operator turned off.
+# `cargo build --no-default-features` is a precommit gate, so the combination
+# is exercised rather than theoretical.
+[features]
+lua = ["dep:factorio-bot-scripting-lua"]
 
 [dev-dependencies]
 tempfile = "3"

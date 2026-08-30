@@ -2272,6 +2272,14 @@ git commit -m "refactor(app): move rconStore onto POST /api/v1/rcon and drop res
 
 ---
 
+> **Refinement to the `code: 2` rule, from Task 8 — it is about detection, not about action.**
+>
+> I stated it as "branch on `code`, never on status", and Task 8's implementer correctly declined to add a `code: 2` branch to `rconStore`. Unlike `stopInstances`, a command that never ran has no "already in the desired state" reading, so swallowing the error would recreate the bug the task fixed. They pinned **status-independence** instead: the same `code: 2` driven through as both 400 and 503 in an `it.each`, with a mutation (`if (err.status === 400) success = true`) killing only the 400 case and leaving 503 green — proving the two cases distinguish rather than duplicate.
+>
+> The rule is: **use `code` to identify the condition; decide separately whether that condition means anything to this store.** Blanket-branching on `code: 2` would be as wrong as branching on status.
+>
+> **Two things carried for Task 11:** `rconStore.lastError` is currently **write-only** — implemented as the brief specified, but `RconPage.vue` reads the thrown error's `message` instead. Either wire it or delete it; do not leave state nothing reads. And `SettingsPage.vue` has **lost its "port already in use" red-invalid state** — that was a Tauri `is_port_available` host probe with no HTTP analogue, so a clash now surfaces only at the next `factorio-bot serve`. Decide whether that warrants a server-side check or an accepted loss.
+
 ## Task 9: The SSE job-event consumer
 
 > **Contract note from plan 4 Task 7, which shipped after this plan was written.**

@@ -1407,9 +1407,13 @@ Cover the handle registry separately, in Rust, where the actuator can be mocked:
 Run: `cargo test -p factorio-bot-scripting-lua`
 Expected: FAIL first (`goal` is nil), PASS after implementation.
 
-- [ ] **Step 4: Fix the long-standing unbound binding**
+- [ ] **Step 4: Record the unbound binding for Task 8, do not fix it here**
 
-`PlanBuilder::add_insert_into_inventory` exists in Rust but was never bound to Lua, while `scripts/test_phase_2_1.lua` and `scripts/test_phase_2_2.lua` call `plan.insert_into_inventory` — those scripts fail at runtime today. Since Task 8 may not run, fix it here on the old API: bind `plan.insert_into_inventory` in `crates/scripting_lua/src/globals/plan.rs` following the neighbouring bindings, and verify both scripts parse.
+`PlanBuilder::add_insert_into_inventory` exists in Rust but was never bound to Lua, while `scripts/test_phase_2_1.lua` and `scripts/test_phase_2_2.lua` call `plan.insert_into_inventory`. Those two scripts fail at runtime today and always have.
+
+An earlier draft fixed this by binding it into `globals/plan.rs`. Do **not** do that: Task 8 deletes that file, so the binding would live for one task and be deleted unread. Building something in order to delete it two tasks later is not caution, it is waste.
+
+What matters instead is the consequence for Task 8, so write it into your report: **those two scripts have never successfully run.** Their `plan.*` calls were never all valid, so there is no observed behaviour to preserve when migrating them. Task 8 must port them from their evident intent and say so, rather than claiming behaviour preservation it cannot verify.
 
 - [ ] **Step 5: Commit**
 

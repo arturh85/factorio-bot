@@ -38,7 +38,6 @@ import AppFooter from './AppFooter.vue'
 import {useAppStore} from '@/store/appStore';
 import AppConfig from '@/AppConfig.vue';
 import Toast from 'primevue/toast';
-import {useRestApiStore} from '@/store/restapiStore';
 import {useInstanceStore} from '@/store/instanceStore';
 import {computed, onBeforeUpdate, onMounted, ref} from 'vue';
 import {onBeforeRouteLeave} from 'vue-router';
@@ -177,13 +176,10 @@ onMounted(async () => {
   // a browser tab can do, and there is no HTTP route that could stand in.
   const settings = await appStore.loadSettings()
   if (settings) {
-    if (settings.gui.enable_restapi) {
-      const restApiStore = useRestApiStore()
-      await restApiStore.init()
-      if (!restApiStore.started) {
-        await restApiStore.startRestApi()
-      }
-    }
+    // No REST API to start on mount any more. The server this page just
+    // fetched its settings from *is* the REST API, so it is running by
+    // definition; `settings.gui.enable_restapi` no longer gates anything the
+    // browser can act on.
     if (!started && settings.gui.enable_autostart) {
       await instanceStore.startInstances();
     }

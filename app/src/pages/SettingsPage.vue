@@ -6,10 +6,8 @@ import InputText from 'primevue/inputtext';
 import Slider from 'primevue/slider';
 import Button from 'primevue/button';
 import Checkbox from 'primevue/checkbox';
-import {useRestApiStore} from '@/store/restapiStore';
 
 const appStore = useAppStore();
-const restApiStore = useRestApiStore();
 const factorioArchivePath = computed({
   get(): string {
     return appStore.getFactorioArchivePath as string
@@ -125,7 +123,10 @@ async function testIsFactorioArchivePathValid(path: string): Promise<boolean> {
 
 const isWorkspacePathValid = ref(true)
 const isFactorioArchivePathValid = ref(true)
-const isPortAvaiable = computed(() => restApiStore.isPortAvailable)
+// The port field no longer shows an "already in use" invalid state: the check
+// behind it was a Tauri `is_port_available` call, and a browser cannot probe
+// the server host's ports. The port is persisted only and is bound at the next
+// `factorio-bot serve`, which is where a clash would surface.
 
 if (appStore.settings) {
   watch(() => appStore.getWorkspacePath, async () => {
@@ -205,7 +206,7 @@ const settings = computed(() => appStore.getSettings)
           <div class="p-field p-col">
             <div class="p-inputgroup">
               Port
-              <InputText v-model="restapiPort"  :class="isPortAvaiable ? '' : 'p-invalid'" type="number" min="1" max="65535" />
+              <InputText v-model="restapiPort" type="number" min="1" max="65535" />
             </div>
           </div>
         </div>

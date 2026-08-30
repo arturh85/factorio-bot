@@ -1,3 +1,4 @@
+use crate::factorio::snapshot::WorldSnapshot;
 use crate::graph::entity_graph::EntityGraph;
 use crate::graph::flow_graph::FlowGraph;
 use crate::types::{
@@ -172,6 +173,26 @@ impl FactorioWorld {
             }
         };
         self.players.insert(event.player_id, player);
+        Ok(())
+    }
+
+    /// Loads the static half of a world out of a [`WorldSnapshot`].
+    ///
+    /// The RCON equivalent of the four `entity_prototypes` / `item_prototypes` /
+    /// `recipes` / `force` arms of [`crate::process::output_parser::OutputParser`],
+    /// routed through the very same `update_*` methods so an attached world is
+    /// built by the same code that builds an owned one.
+    ///
+    /// Additive, like every `update_*` here: calling it again on a live world
+    /// refreshes what the snapshot covers and leaves players and the entity
+    /// graph alone.
+    pub fn apply_snapshot(&self, snapshot: WorldSnapshot) -> Result<()> {
+        self.update_entity_prototypes(snapshot.entity_prototypes)?;
+        self.update_item_prototypes(snapshot.item_prototypes)?;
+        self.update_recipes(snapshot.recipes)?;
+        for force in snapshot.forces {
+            self.update_force(force)?;
+        }
         Ok(())
     }
 

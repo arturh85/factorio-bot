@@ -3,6 +3,7 @@ use crate::errors::{
     RconPlayerNotFound, RconRadiusLimitReached, RconTimeout, RconUnexpectedEmptyResponse,
     RconUnexpectedOutput,
 };
+use crate::factorio::snapshot::WorldSnapshot;
 use crate::factorio::util::{
     blueprint_build_area, build_entity_path, calculate_distance, hashmap_to_lua, map_blocked_tiles,
     move_pos, move_position, position_to_lua, rect_to_lua, span_rect, str_to_lua, value_to_lua,
@@ -583,6 +584,42 @@ impl FactorioRcon {
             json = String::from("[]");
         }
         serde_json::from_str(json.as_str()).into_diagnostic()
+    }
+
+    /// The bulk static world data — prototypes, recipes and the player force —
+    /// in one reply.
+    ///
+    /// The RCON counterpart of the mod's `writeout_*` functions, which only a
+    /// server this process spawned can be read from. Both transports share the
+    /// `collect_*` functions in `control.lua`, so this returns the same records
+    /// the stdout path parses.
+    ///
+    /// One call rather than a paged protocol. Measured on Factorio 2.1.17 with
+    /// Space Age on a fresh freeplay map, the whole reply is 393 kB
+    /// (235 kB of entity prototypes, 56 kB of item prototypes, 131 kB for the
+    /// player force's technologies, 8 kB of recipes) and takes 100 ms; a probe
+    /// of `rcon.print(string.rep('x', n))` against the same server returned
+    /// 16 MB in a single RCON packet, so the payload has two orders of
+    /// magnitude of headroom. Note that this crate configures the `rcon`
+    /// connection with `enable_factorio_quirks(true)`, which reads exactly one
+    /// packet per command — a chunked reply would need multi-packet reads that
+    /// this client does not do.
+    pub async fn world_snapshot(&self) -> Result<WorldSnapshot> {
+        let lines = self.remote_call("world_snapshot", vec![]).await?;
+        let Some(mut lines) = lines else {
+            return Err(RconUnexpectedEmptyResponse {}.into());
+        };
+        let json = lines.pop().ok_or(RconUnexpectedEmptyResponse {})?;
+        // A server whose BotBridge predates this call answers with the game's
+        // own "Cannot execute command. Error: No such function: ..." rather
+        // than with JSON. Reporting that text is the difference between
+        // "expected value at line 1 column 1" and a message naming the cause.
+        if !json.starts_with('{') {
+            return Err(RconUnexpectedOutput { output: json }.into());
+        }
+        serde_json::from_str(json.as_str())
+            .into_diagnostic()
+            .wrap_err("failed to parse the world_snapshot reply")
     }
 
     pub async fn player_force(&self) -> Result<FactorioForce> {

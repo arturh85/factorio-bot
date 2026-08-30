@@ -4,7 +4,7 @@ use crate::scripting::run_script_file;
 use crate::settings::load_app_settings_with;
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command};
 use factorio_bot_core::factorio::rcon::{FactorioRcon, RconSettings};
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::snapshot::attach_world;
 use factorio_bot_core::miette::{Context as _, Result};
 use factorio_bot_core::paris::{info, warn};
 use factorio_bot_core::parking_lot::RwLock;
@@ -32,7 +32,19 @@ Fast planning loop (no graphical client, no 90s connect wait):
 
 Note that --clients 0 plans and simulates only: nothing moves in the game
 world, because there are no real players to move. Use it to iterate on goal
-decomposition and task graphs, then re-run with --clients N to execute.";
+decomposition and task graphs, then re-run with --clients N to execute.
+
+--connect attaches to a Factorio server this program did not start -- one you
+are already playing on -- over RCON alone:
+
+  factorio-bot lua myscript.lua --connect
+
+The world is read with a single `world_snapshot` RCON call plus the connected
+players and the entities within 200 tiles of them, so world.* and goal.* work.
+What it cannot give you is the live event stream an owned server prints on its
+stdout: the world is a point-in-time read, so research finished, entities built
+and players moved after the snapshot are invisible until the script is run
+again. The server must have the BotBridge mod loaded and RCON enabled.";
 
 impl Subcommand for ThisCommand {
   fn name(&self) -> &'static str {
@@ -40,83 +52,83 @@ impl Subcommand for ThisCommand {
   }
   fn build_command(&self) -> Command {
     Command::new("lua")
-            .about("Start Factorio and run a Lua script")
-            .after_help(format!("{LUA_AFTER_HELP}\n\n{SETTINGS_PRECEDENCE_HELP}"))
-            .arg(
-                Arg::new("script")
-                    .help("Path to the Lua script to run (relative to scripts/ folder)")
-                    .required(true)
-                    .value_parser(value_parser!(String)),
-            )
-            .arg(
-                Arg::new("clients")
-                    .short('c')
-                    .long("clients")
-                    .default_value("1")
-                    .value_parser(value_parser!(u8))
-                    .help("number of graphical Factorio clients to start (0 = server only)"),
-            )
-            .arg(
-                Arg::new("bots")
-                    .short('b')
-                    .long("bots")
-                    .value_name("bots")
-                    .required(false)
-                    .value_parser(value_parser!(u8))
-                    .help("number of bots the script plans for [default: same as --clients]"),
-            )
-            .arg(
-                Arg::new("server")
-                    .short('s')
-                    .long("server")
-                    .value_name("server")
-                    .required(false)
-                    .value_parser(value_parser!(String))
-                    .help("connect to server instead of starting a server"),
-            )
-            .arg(
-                Arg::new("seed")
-                    .long("seed")
-                    .value_name("seed")
-                    .required(false)
-                    .value_parser(value_parser!(String))
-                    .help("use given seed to recreate level"),
-            )
-            .arg(
-                Arg::new("map")
-                    .long("map")
-                    .value_name("map")
-                    .required(false)
-                    .value_parser(value_parser!(String))
-                    .help("use given map exchange string"),
-            )
-            .arg(
-                Arg::new("new")
-                    .long("new")
-                    .short('n')
-                    .action(ArgAction::SetTrue)
-                    .help("recreate level by deleting server map if exists"),
-            )
-            .arg(
-                Arg::new("logs")
-                    .short('l')
-                    .long("logs")
-                    .action(ArgAction::SetTrue)
-                    .help("enabled writing server & client logs to workspace"),
-            )
-            .arg(
-                Arg::new("verbose")
-                    .short('v')
-                    .long("verbose")
-                    .action(ArgAction::SetTrue)
-                    .help("Log server output to console"),
-            )
-            .arg(
-                Arg::new("connect")
-                    .long("connect")
-                    .action(ArgAction::SetTrue)
-                    .help("Connect to already-running Factorio (fast iteration mode - world.* functions won't work, only rcon.*)"),
-            )
+      .about("Start Factorio and run a Lua script")
+      .after_help(format!("{LUA_AFTER_HELP}\n\n{SETTINGS_PRECEDENCE_HELP}"))
+      .arg(
+        Arg::new("script")
+          .help("Path to the Lua script to run (relative to scripts/ folder)")
+          .required(true)
+          .value_parser(value_parser!(String)),
+      )
+      .arg(
+        Arg::new("clients")
+          .short('c')
+          .long("clients")
+          .default_value("1")
+          .value_parser(value_parser!(u8))
+          .help("number of graphical Factorio clients to start (0 = server only)"),
+      )
+      .arg(
+        Arg::new("bots")
+          .short('b')
+          .long("bots")
+          .value_name("bots")
+          .required(false)
+          .value_parser(value_parser!(u8))
+          .help("number of bots the script plans for [default: same as --clients]"),
+      )
+      .arg(
+        Arg::new("server")
+          .short('s')
+          .long("server")
+          .value_name("server")
+          .required(false)
+          .value_parser(value_parser!(String))
+          .help("connect to server instead of starting a server"),
+      )
+      .arg(
+        Arg::new("seed")
+          .long("seed")
+          .value_name("seed")
+          .required(false)
+          .value_parser(value_parser!(String))
+          .help("use given seed to recreate level"),
+      )
+      .arg(
+        Arg::new("map")
+          .long("map")
+          .value_name("map")
+          .required(false)
+          .value_parser(value_parser!(String))
+          .help("use given map exchange string"),
+      )
+      .arg(
+        Arg::new("new")
+          .long("new")
+          .short('n')
+          .action(ArgAction::SetTrue)
+          .help("recreate level by deleting server map if exists"),
+      )
+      .arg(
+        Arg::new("logs")
+          .short('l')
+          .long("logs")
+          .action(ArgAction::SetTrue)
+          .help("enabled writing server & client logs to workspace"),
+      )
+      .arg(
+        Arg::new("verbose")
+          .short('v')
+          .long("verbose")
+          .action(ArgAction::SetTrue)
+          .help("Log server output to console"),
+      )
+      .arg(
+        Arg::new("connect")
+          .long("connect")
+          .action(ArgAction::SetTrue)
+          .help("Attach to an already-running Factorio server instead of starting one"),
+      )
   }
 
   fn build_callback(&self) -> SubcommandCallback {
@@ -172,9 +184,23 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
         )
       })?;
 
-    // Create empty world for connect mode
-    let world = Arc::new(FactorioWorld::new());
-    let mut planner = Planner::new(world, Some(Arc::new(rcon)));
+    // Read the world over RCON rather than leaving it empty.
+    //
+    // This used to hand the planner a `FactorioWorld::new()` -- no recipes, no
+    // prototypes, no entity graph -- because all of that arrived by parsing the
+    // stdout of a server *this process spawned*, which an attached session does
+    // not have. Every world.* and goal.* call therefore found nothing, which is
+    // what the old help text meant by "only rcon.*". `attach_world` asks the
+    // mod for the same records over RCON instead.
+    let rcon = Arc::new(rcon);
+    let world = attach_world(&rcon, None).await?;
+    info!(
+      "Attached: {} entity prototypes, {} recipes, {} player(s)",
+      world.entity_prototypes.len(),
+      world.recipes.len(),
+      world.players.len()
+    );
+    let mut planner = Planner::new(world, Some(rcon));
 
     let (stdout, stderr) = run_script_file(&mut planner, script_path, bots, None).await?;
     print_script_output(&stdout, &stderr);
@@ -323,6 +349,32 @@ mod tests {
     ]);
     assert_eq!(clients, 0, "no graphical client process may be launched");
     assert_eq!(bots, 4, "the planner must still get bots to plan for");
+  }
+
+  /// `--connect` used to advertise its own limitation -- "world.* functions
+  /// won't work, only rcon.*" -- and that sentence is now false: the world is
+  /// read over RCON with `world_snapshot`. A stale help string is worse than
+  /// none, so the old claim must be gone *and* the new behaviour, including the
+  /// point-in-time caveat that replaces it, must be stated.
+  #[test]
+  fn help_describes_connect_as_attaching_not_as_rcon_only() {
+    let mut lua = build_app()
+      .find_subcommand("lua")
+      .expect("lua subcommand exists")
+      .clone();
+    let help = lua.render_long_help().to_string();
+    assert!(
+      !help.contains("only rcon."),
+      "the old --connect limitation is still advertised:\n{help}"
+    );
+    assert!(
+      help.contains("world.* and goal.* work"),
+      "missing what --connect now permits:\n{help}"
+    );
+    assert!(
+      help.contains("point-in-time"),
+      "missing the snapshot caveat that replaces the old limitation:\n{help}"
+    );
   }
 
   /// `--bots` is documented, and so is the planning-only loop it enables. The

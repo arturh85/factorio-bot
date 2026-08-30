@@ -386,14 +386,6 @@ function writeout_proto_picture(name, picspec)
 	return name.."*"..table.concat(result, "*")
 end
 
-function writeout_entity_prototypes()
-	local result = {}
-	for k, v in pairs(prototypes.entity) do
-		table.insert(result, serialize_entity_prototype(v))
-	end
-	rcon.print(helpers.table_to_json(result))
-end
-
 function writeout_pictures()
 	-- this is dirty. in data-final-fixes.lua, we wrote out "serpent.dump(data.raw)" into the
 	-- order strings of the "DATA_RAW"..i entities. We had to use multiple of those, because
@@ -461,22 +453,70 @@ function writeout_pictures()
 	writeout(0, "graphics", table.concat(lines, "|"))
 end
 
-function writeout_entity_prototypes()
-	local lines = {}
+-- The static world data, collected once and shared by both transports.
+--
+-- These four collectors are the single definition of *what the world is made
+-- of*: which prototypes count, which recipes count, and which force we act
+-- for. `writeout_*` prints them on stdout for a server this process started;
+-- `rcon_world_snapshot` returns the same records over RCON for a server it
+-- merely attached to. Neither transport gets to decide the contents, because
+-- two copies of a collector drift and the Rust side cannot tell which one it
+-- is looking at.
+
+function collect_entity_prototypes()
+	local result = {}
 	for name, prot in pairs(prototypes.entity) do
+		-- DATA_RAW* are the fake prototypes data-final-fixes.lua stuffs the
+		-- serialised data.raw into for writeout_pictures; they are not world.
 		if string.sub(name, 1, 8) ~= "DATA_RAW" then
-			table.insert(lines, helpers.table_to_json(serialize_entity_prototype(prot)))
+			table.insert(result, serialize_entity_prototype(prot))
 		end
 	end
-	writeout(0, "entity_prototypes" ,table.concat(lines, "$"))
+	return result
+end
+
+function collect_item_prototypes()
+	local result = {}
+	for name, prot in pairs(prototypes.item) do
+		table.insert(result, serialize_item_prototype(prot))
+	end
+	return result
+end
+
+-- FIXME: this assumes that there is only one player force
+function collect_recipes()
+	local result = {}
+	for name, rec in pairs(game.forces["player"].recipes) do
+		if rec.enabled then
+			table.insert(result, serialize_recipe(rec))
+		end
+	end
+	return result
+end
+
+-- Only the force the bots act for. `game.forces` also holds `enemy` and
+-- `neutral`, whose technology tables cost ~120kB each and describe nobody the
+-- planner plans for.
+function collect_player_force()
+	return serialize_force(game.forces["player"])
+end
+
+-- The stdout transport's framing: one JSON record per element, "$"-joined,
+-- because writeout is line-oriented and a record may not contain a newline.
+function writeout_records(key, records)
+	local lines = {}
+	for _, record in ipairs(records) do
+		table.insert(lines, helpers.table_to_json(record))
+	end
+	writeout(0, key, table.concat(lines, "$"))
+end
+
+function writeout_entity_prototypes()
+	writeout_records("entity_prototypes", collect_entity_prototypes())
 end
 
 function writeout_item_prototypes()
-	local lines = {}
-	for name, prot in pairs(prototypes.item) do
-		table.insert(lines, helpers.table_to_json(serialize_item_prototype(prot)))
-	end
-	writeout(0, "item_prototypes", table.concat(lines,"$"))
+	writeout_records("item_prototypes", collect_item_prototypes())
 end
 
 -- Expected number of items a product yields per craft.
@@ -503,14 +543,7 @@ function simplify_amount(prod)
 end
 
 function writeout_recipes()
-	-- FIXME: this assumes that there is only one player force
-	local lines = {}
-	for name, rec in pairs(game.forces["player"].recipes) do
-		if rec.enabled then
-			table.insert(lines, helpers.table_to_json(serialize_recipe(rec)))
-		end
-	end
-	writeout(0, "recipes", table.concat(lines,"$"))
+	writeout_records("recipes", collect_recipes())
 end
 function writeout_forces()
 	local lines = {}
@@ -1477,7 +1510,34 @@ function rcon_players()
 end
 
 function rcon_player_force()
-	rcon.print(helpers.table_to_json(serialize_force(game.forces["player"])))
+	rcon.print(helpers.table_to_json(collect_player_force()))
+end
+
+-- Everything about the world that used to reach Rust only on the server's
+-- stdout, returned in one RCON reply.
+--
+-- This is what makes attaching to a server this process did not start useful:
+-- without prototypes, recipes and a force there are no collision boxes, no
+-- crafting graph and no technologies, so the planner cannot plan at all.
+--
+-- Deliberately *not* included, because each is already reachable over RCON and
+-- duplicating it here would be a second definition to drift:
+--   * entities and resources -- `find_entities_filtered`, which is area-bound;
+--     a whole surface would be unbounded.
+--   * players                -- `players` / `player_info`.
+--   * tiles                  -- `find_tiles_filtered`.
+--   * graphics               -- sprite atlas paths, for drawing, not planning.
+--
+-- One reply, not a paged protocol: Factorio answers an RCON command in a single
+-- packet whose length header is a 32-bit int, and this payload is well under a
+-- megabyte.
+function rcon_world_snapshot()
+	rcon.print(helpers.table_to_json({
+		entity_prototypes = collect_entity_prototypes(),
+		item_prototypes = collect_item_prototypes(),
+		recipes = collect_recipes(),
+		forces = {collect_player_force()},
+	}))
 end
 
 function rcon_add_research(technology_name)
@@ -1857,6 +1917,7 @@ remote.add_interface("botbridge", {
 	retrieve_map_data=rcon_retrieve_map_data,
 	players=rcon_players,
 	player_force=rcon_player_force,
+	world_snapshot=rcon_world_snapshot,
 	add_research=rcon_add_research,
 	player_info=rcon_player_info,
 	place_entity=rcon_place_entity,

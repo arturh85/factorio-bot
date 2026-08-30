@@ -56,6 +56,22 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// One expanded plan, plus its schedule once `goal.schedule` has run.
 struct PlanEntry {
     net: Arc<ActionNetwork>,
+    /// The goal the network was expanded from, kept so that `goal.schedule` can
+    /// expand it again when it is asked for a roster the network was not built
+    /// for. See `roster`.
+    goal: Goal,
+    /// The bots the network was expanded over.
+    ///
+    /// A network is only schedulable on the roster it was expanded for.
+    /// `SplitAcrossBots` hands each bot a share sized against *that bot's own
+    /// inventory* — with a roster of four seeded players, each holding one
+    /// stone furnace, the four smelting chains each place the furnace their own
+    /// bot already carries. Assigning all four to one bot then asks that bot for
+    /// four furnaces it never had, and the plan dies on the first `Place` whose
+    /// turn came last: "precondition has 1 stone-furnace of action ActionId(0)
+    /// does not hold for bot 1". Nothing in the network records who it was
+    /// split for, so this does.
+    roster: Vec<BotId>,
     /// `None` until scheduled. `goal.gantt` and `goal.execute` both need it and
     /// both say so rather than inventing an empty one.
     schedule: Option<Arc<Schedule>>,
@@ -94,13 +110,15 @@ struct Plans {
 }
 
 impl Plans {
-    fn insert(&mut self, net: ActionNetwork) -> u32 {
+    fn insert(&mut self, net: ActionNetwork, goal: Goal, roster: Vec<BotId>) -> u32 {
         let handle = self.next;
         self.next = self.next.saturating_add(1);
         self.plans.insert(
             handle,
             PlanEntry {
                 net: Arc::new(net),
+                goal,
+                roster,
                 schedule: None,
             },
         );
@@ -361,16 +379,13 @@ end
     map_table.set(
         "have",
         lua.create_function(move |_lua, (item_name, count): (String, u32)| {
-            let net = expand_goal(
-                Goal::Have {
-                    item: item_name,
-                    count,
-                    whose: Holder::Anyone,
-                },
-                &world,
-                &bots,
-            )?;
-            Ok(lock(&_plans).insert(net))
+            let goal = Goal::Have {
+                item: item_name,
+                count,
+                whose: Holder::Anyone,
+            };
+            let net = expand_goal(goal.clone(), &world, &bots)?;
+            Ok(lock(&_plans).insert(net, goal, bots.clone()))
         })?,
     )?;
 
@@ -406,8 +421,9 @@ end
     map_table.set(
         "researched",
         lua.create_function(move |_lua, technology_name: String| {
-            let net = expand_goal(Goal::Researched(technology_name), &world, &bots)?;
-            Ok(lock(&_plans).insert(net))
+            let goal = Goal::Researched(technology_name);
+            let net = expand_goal(goal.clone(), &world, &bots)?;
+            Ok(lock(&_plans).insert(net, goal, bots.clone()))
         })?,
     )?;
 
@@ -426,6 +442,12 @@ end
 -- @number bot_count how many of the run's bots to spread the work over; they
 --   are taken from the front of the run's roster, and asking for more bots than
 --   the run has is an error rather than an invented bot
+--
+-- Scheduling over fewer bots than the run has re-expands the goal for exactly
+-- those bots first: a plan split across four bots spends four bots' starting
+-- items, and cannot be run by one of them. The plan handle then names the
+-- re-expanded network, so `goal.graphviz`, `goal.gantt` and `goal.execute` all
+-- describe the plan that was actually scheduled.
 -- @treturn number the makespan in ticks
 function goal.schedule(plan_handle, bot_count)
 end
@@ -450,10 +472,30 @@ end
             }
             let state = PlanState::from_world(world.clone(), &bots);
             let mut plans = lock(&_plans);
-            let net = plans.get(plan_handle)?.net.clone();
+            let entry = plans.get(plan_handle)?;
+            // A network is only schedulable on the roster it was expanded for
+            // (see `PlanEntry::roster`). When the caller asks for fewer bots
+            // than `goal.have` split over, the plan they hold was built to
+            // spend items that the bots they named do not have, so the goal is
+            // expanded again for the bots that will actually run it. Same
+            // roster, same network: the common call re-expands nothing and the
+            // makespans it produces are unchanged.
+            let re_expand = entry.roster != bots;
+            let net = if re_expand {
+                Arc::new(expand_goal(entry.goal.clone(), &world, &bots)?)
+            } else {
+                entry.net.clone()
+            };
             let scheduled = schedule(&net, &state, &bots).map_err(goal_error)?;
             let makespan: Ticks = scheduled.makespan;
             if let Some(entry) = plans.plans.get_mut(&plan_handle) {
+                if re_expand {
+                    // The schedule names action ids, so the network it names
+                    // has to be the one the handle carries from here on —
+                    // `goal.execute` looks both up through the same handle.
+                    entry.net = net;
+                    entry.roster = bots;
+                }
                 entry.schedule = Some(Arc::new(scheduled));
             }
             Ok(makespan)
@@ -631,11 +673,16 @@ end
     Ok(map_table)
 }
 
-/// Expands one goal against the run's roster.
+/// Expands one goal against a roster.
 ///
-/// The roster is the bots the script was started with, because
-/// `SplitAcrossBots` needs to know who exists before it can split anything. `goal.schedule`'s `bot_count` chooses how many bots the
-/// resulting actions are *assigned* to, which is a later and separate decision.
+/// `SplitAcrossBots` needs to know who exists before it can split anything, so
+/// `goal.have` expands against the bots the script was started with. That is a
+/// default, **not** a separate decision from assignment: the split sizes each
+/// share against the holdings of the bot it names, so the network it produces
+/// only makes sense on that same roster. When `goal.schedule` is given fewer
+/// bots it calls this again for those bots, rather than assigning a four-bot
+/// plan to one bot and failing on a precondition about a furnace three other
+/// bots were carrying.
 fn expand_goal(goal: Goal, world: &Arc<FactorioWorld>, bots: &[BotId]) -> LuaResult<ActionNetwork> {
     let chain_actor = *bots
         .first()
@@ -1458,6 +1505,81 @@ mod tests {
                     "roster {roster:?}: {bot} drove player {player}, who is not in this run"
                 );
             }
+        }
+    }
+
+    /// A world whose players are seeded exactly the way a run seeds them.
+    ///
+    /// `Planner::initiate_missing_players_with_default_inventory` gives each
+    /// bot **one** stone furnace, one burner mining drill and one piece of
+    /// wood, and `lua_runner` calls it and then `update_plan_world` before the
+    /// bindings ever see the world. Handing every bot everything the plan needs
+    /// is what let this bug live under 400-odd green tests, so the seeding is
+    /// taken from the production call rather than written out here, and the
+    /// assertion below states the property the test depends on.
+    fn seeded_world(bot_count: u8) -> Arc<FactorioWorld> {
+        use factorio_bot_core::plan::planner::Planner;
+
+        let mut planner = Planner::new(Arc::new(fixture_world()), None);
+        let roster = planner.initiate_missing_players_with_default_inventory(bot_count);
+        planner.update_plan_world();
+        let world = planner.world();
+        for id in roster {
+            let player = world.players.get(&id).expect("the run seeded this player");
+            assert_eq!(
+                player.main_inventory.get("stone-furnace").copied(),
+                Some(1),
+                "bot {id} must hold exactly one furnace, or this test cannot reach the bug"
+            );
+        }
+        world
+    }
+
+    /// A plan split across the run's roster is scheduled over fewer bots.
+    ///
+    /// `goal.have` expands against every bot the run has, and `SplitAcrossBots`
+    /// gives each of them a chain that spends *its own* starting stone furnace.
+    /// `goal.schedule(p, 1)` then asks one bot to run all of them, which asks
+    /// that bot for as many furnaces as the roster had between them. Live, with
+    /// `scripts/goal_smoke.lua`, that was:
+    ///
+    /// ```text
+    /// goal: precondition has 1 stone-furnace of action ActionId(0) does not hold for bot 1
+    /// ```
+    ///
+    /// identically for `--bots 2` and `--bots 4`, while `--bots 1` — the only
+    /// roster where expansion and assignment agree — succeeded.
+    ///
+    /// Rosters of 2 and 4 are both here because the split's arithmetic differs
+    /// between them: a shortfall of five over two bots is 3 + 2, over four bots
+    /// 2 + 1 + 1 + 1, and only the second lets a share of one reach the chain
+    /// that a share of one is supposed to open.
+    #[tokio::test]
+    async fn a_plan_split_across_the_roster_schedules_over_fewer_bots() {
+        for bot_count in [1u8, 2, 4] {
+            let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+            lua.set_app_data(crate::lua_runner::PendingWork::default());
+            let table = create_lua_goal_with(
+                &lua,
+                seeded_world(bot_count),
+                factory(Arc::new(StubActuator::new(Failure::Never))),
+                (1..=bot_count).collect(),
+            )
+            .expect("goal table");
+            lua.globals().set("goal", table).expect("install");
+
+            // The smoke script's own shape: expand over the whole run, then
+            // schedule over one bot, then render what was scheduled.
+            exec_bounded(
+                &lua,
+                r#"
+                local p = goal.have("iron-plate", 5)
+                local makespan = goal.schedule(p, 1)
+                assert(makespan > 0, "a real plan takes a positive number of ticks")
+                assert(#goal.gantt(p, "smoke") > 0, "the gantt must describe what was scheduled")
+                "#,
+            )
+            .await;
         }
     }
 

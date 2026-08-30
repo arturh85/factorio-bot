@@ -30,6 +30,10 @@
             atk
             librsvg
             fuse # libfuse2, needed for AppImage bundling
+            dbus # libdbus-1, pulled in by tauri -> tao -> dbus on Linux;
+                 # without it a default-feature `cargo test --workspace`
+                 # fails to link, which is the gate CLAUDE.md documents.
+                 # Goes away with tauri itself (plan 5 task 14).
           ]);
         in {
           # Only native/system libraries live here; the language toolchains are

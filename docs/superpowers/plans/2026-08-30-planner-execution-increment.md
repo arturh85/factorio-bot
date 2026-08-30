@@ -1985,6 +1985,24 @@ All seven are still actively regenerated, so none of them is merely dead. The fo
 
 Either way, do not leave a file in the repo that regenerates differently on every run and is compared to nothing — it reads as a snapshot test to the next person and is not one.
 
+**Migration strategy, decided from a script-by-script survey.** The groundwork report is at `.superpowers/sdd/2026-08-30-planner-execution-increment/task-8-groundwork.md` — read it before starting; it lists every call site with line numbers.
+
+The survey found three scripts whose behaviour "cannot be expressed in `goal.*`". That framing is right but the conclusion is wrong: they do not need `goal.*`. **`rcon.*` survives untouched and already provides the primitives they use** — `rcon.move(player_id, position, radius)`, `rcon.mine(player_id, name, position, count)`, `rcon.craft`, `rcon.place_entity`. The distinction that matters is that `plan.walk` was *scheduled* work the planner reasoned about, while `rcon.move` is an immediate command. For a test or demo script driving specific bots to specific places, immediate is what it actually wanted.
+
+So migrate by intent, not mechanically:
+
+| script | disposition |
+| --- | --- |
+| `lib.lua` | `mine_with_bots` / `find_mine_with_bots` → `goal.have`. `mine_rocks` → `rcon.mine`; rocks are not an item-count goal. |
+| `scripting_lua/tests/script.lua` | `build_starter_miner_furnace` → `goal.have`. **Delete `build_starter_coal_loop`** — it is dead and references an undefined global `ore`. This is the only script with a live test asserting on it; keep that test passing. |
+| `api_test.lua`, `example.lua` | locomotion → `rcon.move`; `plan.task_graph_mermaid_gantt` → `goal.gantt`. |
+| `multi_client_test.lua` | pins specific bots to specific destinations — that is `rcon.move` per bot, not a goal. Migrate wholly onto `rcon.*`. |
+| `test_phase_2_1.lua`, `test_phase_2_2.lua` | Both call `plan.insert_into_inventory`, which was never bound, so **neither has ever run past that line**. Port from evident intent onto `goal.have` where it fits, and say in the commit that behaviour preservation was impossible to verify because the scripts never ran. Do not claim otherwise. |
+
+**`roll_best_seed`: delete the `TaskGraph`-dependent scoring, do not port it.** The survey found it is already unreachable — its only caller loop is commented out and `score_seed`/`find_nearest_entities` have zero live callers. Porting would require new plumbing to read a `Schedule` back out of the handle-based Lua runtime, for a feature nothing exercises. Delete `score_seed`, `find_nearest_entities`, and the dead caller; leave a comment naming what was removed and why, so the intent is recoverable.
+
+Also update the stale prose in `PLAN.md` (7 locations per the survey), including the now-moot TODO about resurrecting `roll_best_seed`.
+
 - [ ] **Step 1: Migrate the Lua scripts first**
 
 Rewrite each script's `plan.*` calls onto `goal.*`. Run each one that has a test harness. A script whose behaviour cannot be preserved gets a comment at the top naming what changed and why — do not silently drop functionality.

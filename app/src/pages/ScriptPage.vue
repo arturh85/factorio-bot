@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {computed} from 'vue';
+import {computed, onUnmounted} from 'vue';
 import ansiHTML from 'ansi-html';
 import {useScriptStore} from '@/store/scriptStore';
 import {useToast} from 'primevue/usetoast';
@@ -37,6 +37,15 @@ const execute = async () => {
 }
 const isExecuting = computed(() => scriptStore.isExecuting)
 const loadScriptFile = (path: string) => scriptStore.loadScriptFile(path)
+
+// The SSE connection outlives this component otherwise: the store is a
+// singleton, so navigating away would leave an open stream appending into
+// state nothing renders, and the job keeps running on the server either way.
+// Coming back re-runs, or -- if that run still holds the slot -- attaches to
+// it from the 409.
+onUnmounted(() => {
+  scriptStore.stopWatching()
+})
 
 </script>
 

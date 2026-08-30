@@ -1,8 +1,79 @@
 import {defineStore} from 'pinia'
-import {invoke} from '@tauri-apps/api/core';
-import {ScriptTreeNode} from '@/models/types';
 import {languageFromPath} from '@/utils';
+import {executeScript as postExecute, listScripts, readScript, writeScript} from '@/api/client';
+import {subscribeJobEvents} from '@/api/jobEvents';
+import {ApiError} from '@/api/http';
+import {ExecuteRequest, JobStatus, OutputStream} from '@/api/types';
 
+/**
+ * One node of the scripts tree, as `GET /api/v1/scripts` returns it.
+ *
+ * Taken from the client's own return type rather than imported by name: the
+ * nominal `ScriptTreeNode` currently lives in the *generated*
+ * `@/models/types`, which is deleted when the TypeScript emitter goes, and
+ * `@/api/types` does not carry it. Deriving it here keeps this store out of
+ * that move entirely -- it follows whatever the client says the route returns.
+ */
+type ScriptTreeNode = Awaited<ReturnType<typeof listScripts>>[number];
+
+/**
+ * The unsubscribe callback of the live stream. Kept outside the Pinia state on
+ * purpose: it is a closure, not serialisable data, and putting a function in
+ * `state` makes it reactive for no reason.
+ */
+let unsubscribe: (() => void) | null = null;
+
+/**
+ * A line the *page* wrote into the transcript, not the script.
+ *
+ * One shape for all three (a reported gap, a gap of unknown size, a dead
+ * stream) so a reader can tell at a glance which lines came from the run and
+ * which came from the connection carrying it.
+ */
+function notice(text: string): string {
+    return '... ' + text + ' ...\n';
+}
+
+/**
+ * The job holding the execution slot, from a rejected execute request.
+ *
+ * Keyed on the 409 specifically. `code` cannot be used instead -- `code: 5` is
+ * also the "script already exists" conflict from `POST /api/v1/scripts/file`
+ * -- and neither can the presence of the field alone: attaching the output
+ * pane to a job named by some *other* failure would show the user a run that
+ * has nothing to do with what they just asked for.
+ */
+function runningJobIdOf(err: unknown): string | null {
+    if (!(err instanceof ApiError) || err.status !== 409) {
+        return null;
+    }
+    const body = err.body;
+    if (body === null || typeof body !== 'object') {
+        return null;
+    }
+    const id = (body as Record<string, unknown>).running_job_id;
+    return typeof id === 'string' ? id : null;
+}
+
+/**
+ * Scripts: the tree, the editor buffer, and the run.
+ *
+ * Running a script is a **job**, not a request that returns output.
+ * `POST /api/v1/scripts/execute` answers `202` with a job id and the run
+ * proceeds detached; the output arrives over SSE from
+ * `GET /api/v1/jobs/{id}/events`, and the outcome with it. So `executeScript`
+ * resolving means the run *started* -- `success` is set later, by the stream,
+ * and only ever from a `finished` event.
+ *
+ * **The two output buffers are kept separate, and the page renders them as two
+ * blocks, deliberately.** A subscriber that attaches to a run already in
+ * progress receives the backlog as all of stdout and then all of stderr: the
+ * server keeps two buffers and their relative interleaving is not recoverable
+ * (`crates/server/src/manage/execute.rs::backlog`). Merging them into one pane
+ * would therefore present an order that, for every replayed run, is invented.
+ * Live events do keep their real order, which is why each buffer on its own is
+ * honest.
+ */
 export const useScriptStore = defineStore('script', {
     state: () => ({
         code: '',
@@ -12,6 +83,8 @@ export const useScriptStore = defineStore('script', {
         error: false,
         stdout: '',
         stderr: '',
+        /** The job being watched, or `null` when no run has started. */
+        jobId: null as string | null,
 
         activeScriptPath: '',
         loadingScriptsInDirectory: false
@@ -43,72 +116,139 @@ export const useScriptStore = defineStore('script', {
         async loadScriptsInDirectory(path: string): Promise<ScriptTreeNode[]> {
             this.loadingScriptsInDirectory = true
             try {
-                const result = await invoke('load_scripts_in_directory', {path}) as ScriptTreeNode[]
+                return await listScripts(path)
+            } finally {
+                // In `finally`, not after the await: the tree expands one
+                // directory at a time, and a listing that failed with the flag
+                // left set would leave the node spinning forever.
                 this.loadingScriptsInDirectory = false
-                return result
-            } catch(err) {
-                this.loadingScriptsInDirectory = false
-                throw err
             }
         },
         async loadScriptFile(path: string): Promise<string> {
-            try {
-                this.activeScriptPath = path
-                const result = await invoke('load_script', {path}) as string
-                this.code = result
-                this.language = languageFromPath(path)
-                return result
-            } catch(err) {
-                console.error('failed', err)
-                throw err
-            }
+            this.activeScriptPath = path
+            const content = await readScript(path)
+            this.code = content.code
+            this.language = languageFromPath(path)
+            return content.code
         },
-        async setCode(code: string) {
+        /**
+         * Updates the buffer and saves it back to the file it came from.
+         *
+         * Inline code typed with no file selected has nowhere to go --
+         * `PUT /api/v1/scripts/file` requires a path and answers 400 without
+         * one -- so it stays in the buffer, from where `executeCode` can run it.
+         */
+        async setCode(code: string): Promise<void> {
             this.code = code
-            await invoke('save_script', {code: this.code, path: this.activeScriptPath})
+            if (!this.activeScriptPath) {
+                return
+            }
+            await writeScript(this.activeScriptPath, this.code)
         },
-        async executeCode() {
-            if(!this.code) {
+        /**
+         * Watches a job: subscribes to its event stream and mirrors it into
+         * state.
+         *
+         * The buffers are cleared first because the server replays the job's
+         * whole backlog to every new subscriber; keeping what was on screen
+         * would interleave two runs in one pane.
+         */
+        attachToJob(jobId: string): void {
+            this.stopWatching()
+            this.stdout = ''
+            this.stderr = ''
+            this.success = false
+            this.error = false
+            this.jobId = jobId
+            this.executing = true
+            unsubscribe = subscribeJobEvents(jobId, {
+                onOutput: (stream: OutputStream, text: string) => {
+                    if (stream === 'stderr') {
+                        this.stderr += text + '\n'
+                    } else {
+                        this.stdout += text + '\n'
+                    }
+                },
+                onLagged: (skipped: number) => {
+                    // A visible gap beats silently missing lines. `0` is the
+                    // count being *unknown*, not zero -- the server sent the
+                    // event precisely because something was dropped, so
+                    // printing "0 lines skipped" would deny the one fact it
+                    // came to report.
+                    this.stdout += skipped > 0
+                        ? notice(skipped + ' lines skipped (the page could not keep up with the output)')
+                        : notice('some lines skipped (the server did not say how many)')
+                },
+                onFinished: (status: JobStatus) => {
+                    this.executing = false
+                    this.success = status === 'succeeded'
+                    this.error = status === 'failed'
+                },
+                onError: (err: Error) => {
+                    this.executing = false
+                    this.success = false
+                    this.error = true
+                    this.stderr += notice(err.message)
+                }
+            })
+        },
+        /**
+         * Stops watching the current job.
+         *
+         * `executing` is cleared with it: the store is no longer being told
+         * anything about the run, so it cannot claim one is in progress -- and
+         * a flag stuck at `true` would leave the Run button disabled for the
+         * rest of the session, since nothing else ever clears it. The job may
+         * well still be running on the server, which is what the 409 path in
+         * `_execute` is for.
+         */
+        stopWatching(): void {
+            if (unsubscribe !== null) {
+                unsubscribe()
+                unsubscribe = null
+            }
+            this.executing = false
+        },
+        async executeCode(): Promise<void> {
+            if (!this.code) {
                 throw new Error('no code to execute?')
             }
-            this.stdout = ''
-            this.stderr = ''
-            this.error = false
-            this.executing = true
-            try {
-                const outputs = await invoke('execute_code', {code: this.code, language: this.language}) as string[]
-                this.stdout = outputs[0]
-                this.stderr = outputs[1]
-                this.executing = false
-                this.success = true
-            } catch(err) {
-                console.error('failed to execute script', err)
-                this.executing = false
-                this.success = true
-                this.error = true
-                throw new Error(err as string)
-            }
+            await this._execute({code: this.code, language: this.language})
         },
-        async executeScript() {
-            if(!this.activeScriptPath) {
+        async executeScript(): Promise<void> {
+            if (!this.activeScriptPath) {
                 throw new Error('no script to execute?')
             }
-            this.stdout = ''
-            this.stderr = ''
-            this.error = false
+            await this._execute({path: this.activeScriptPath})
+        },
+        /**
+         * Starts a run and attaches to it.
+         *
+         * The guards above run before anything here, so an accidental Run on
+         * an empty buffer leaves the previous run's transcript on screen
+         * instead of blanking it.
+         */
+        async _execute(body: ExecuteRequest): Promise<void> {
             this.executing = true
+            this.jobId = null
             try {
-                const outputs = await invoke('execute_script', {path: this.activeScriptPath}) as any
-                this.stdout = outputs[0]
-                this.stderr = outputs[1]
-                this.executing = false
-                this.success = true
-            } catch(err) {
-                console.error('failed to execute script', err)
-                this.executing = false
-                this.success = true
-                this.error = true
-                throw new Error(err as string)
+                const accepted = await postExecute(body)
+                this.attachToJob(accepted.job_id)
+            } catch (err) {
+                // One script runs at a time. When the slot is taken the server
+                // names the occupant, so follow it: the user sees the run that
+                // is actually going rather than an error with no way forward.
+                // The rejection still stands -- *this* run did not start, and
+                // the page reports that from its own catch.
+                const runningJobId = runningJobIdOf(err)
+                if (runningJobId !== null) {
+                    this.attachToJob(runningJobId)
+                } else {
+                    this.executing = false
+                    this.success = false
+                    this.error = true
+                }
+                throw err
             }
         }
     }

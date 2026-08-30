@@ -42,7 +42,13 @@ for line in dot:gmatch("[^\n]+") do
   end
 end
 
-local makespan = goal.schedule(p, 1)
+-- Schedule over the ACTUAL roster, not a hardcoded 1. Scheduling a plan that
+-- was expanded for N bots onto fewer used to fail on a per-bot precondition --
+-- goal.schedule now re-expands for the bots asked for, and this is what proves
+-- it, because a hardcoded 1 only ever exercises the single-bot path.
+local bots = (type(all_bots) == "table" and #all_bots > 0) and #all_bots or 1
+print("scheduling over " .. tostring(bots) .. " bot(s)")
+local makespan = goal.schedule(p, bots)
 print("scheduled: makespan=" .. tostring(makespan))
 assert(makespan > 0, "a real plan must take a positive number of ticks")
 

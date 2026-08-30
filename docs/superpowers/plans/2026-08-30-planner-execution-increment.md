@@ -1420,6 +1420,488 @@ An earlier draft fixed this by binding it into `globals/plan.rs`. Do **not** do 
 
 What matters instead is the consequence for Task 8, so write it into your report: **those two scripts have never successfully run.** Their `plan.*` calls were never all valid, so there is no observed behaviour to preserve when migrating them. Task 8 must port them from their evident intent and say so, rather than claiming behaviour preservation it cannot verify.
 
+- [ ] **Step 4b: Do NOT touch the Lua filesystem sandbox — it is another plan's task**
+
+An earlier draft of this plan hardened `world.draw`'s save path here. **That work has been ceded** to the concurrent web-server effort, whose plan `docs/superpowers/plans/2026-08-30-script-execution-jobs-and-sse.md` Task 1 owns it.
+
+The reason is that `world.draw` is not one hole but four of identical shape — a caller-supplied string joined onto a root and handed to the filesystem with no bounds check:
+
+| binding | sink |
+| --- | --- |
+| `world.draw(save_path)` | `globals/world.rs:200` → `core/test_utils.rs:232` |
+| `globals.include(source_path)` | `globals/globals.rs:52` — reads AND executes arbitrary Lua |
+| `globals.file_read(source_path)` | `globals/globals.rs:78` |
+| `globals.file_write(target, body)` | `globals/globals.rs:99` |
+
+Fixing one in isolation leaves three identical holes, and the correct fix is a single shared bounded resolver rather than four local patches. Do not write a fourth variant of it here.
+
+If you are in `globals/` for the `goal.*` binding and notice another path-shaped sink not in that table, report it — do not fix it.
+
+- [ ] **Step 5: Commit**
+
+```bash
+cargo fmt -p factorio-bot-executor
+cargo clippy -p factorio-bot-executor --all-targets -- --deny warnings
+git commit -m "feat(executor): run one bot's slice of a schedule" -- crates/executor crates/planner
+```
+
+---
+
+### Task 5: Run every bot, with cross-bot dependencies
+
+The old executor polled every 100 ms (`crates/core/src/plan/execute.rs:79`). The spec calls for a per-action completion signal instead.
+
+**Files:**
+- Modify: `crates/executor/src/run.rs`, `crates/executor/src/lib.rs`
+- Test: inline in `run.rs`
+
+**Delete `run_bot` from Task 4 as part of this task**, re-pointing its two tests at `run_into` with a single-bot schedule. Two near-identical per-bot loops in one file is exactly the duplication that drifts.
+
+**Interfaces:**
+- Produces: `async fn run_into(act: &dyn Actuator, sched: &Schedule, net: &ActionNetwork, progress: &Mutex<ExecutionLog>)` plus the wrapper `async fn run(...) -> ExecutionLog`. Task 7 calls `run_into` so it can read progress mid-run.
+
+- [ ] **Step 1: Write the failing test**
+
+```rust
+#[tokio::test]
+async fn a_bot_waits_for_another_bots_action_before_its_own() {
+    // net: action A (bot 0) -> action B (bot 1). B must not start until A ends.
+    let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut act = MockAct::new();
+    {
+        let order = order.clone();
+        act.expect_mine().returning(move |_, item, _, _| {
+            order.lock().unwrap().push(item.to_string());
+            Ok(())
+        });
+    }
+    act.expect_walk().returning(|_, _| Ok(()));
+
+    let (net, sched) = cross_bot_fixture();
+    let log = run(&act, &sched, &net).await;
+
+    assert_eq!(log.failed(), vec![]);
+    assert_eq!(
+        *order.lock().unwrap(),
+        vec!["iron-ore".to_string(), "copper-ore".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn a_dependent_action_is_abandoned_when_its_predecessor_fails() {
+    let mut act = MockAct::new();
+    act.expect_walk().returning(|_, _| Ok(()));
+    act.expect_mine().returning(|_, item, _, _| {
+        if item == "iron-ore" {
+            Err(ActuatorError::Rejected("no ore".into()))
+        } else {
+            Ok(())
+        }
+    });
+
+    let (net, sched) = cross_bot_fixture();
+    let log = run(&act, &sched, &net).await;
+
+    assert_eq!(log.status(second_action_id()), Status::Pending);
+}
+```
+
+`cross_bot_fixture()` builds a two-action network where the second action has an edge from the first, assigned to different bots.
+
+- [ ] **Step 2: Run it to make sure it fails**
+
+Run: `cargo test -p factorio-bot-executor a_bot_waits_for_another`
+Expected: FAIL — `run` not found.
+
+- [ ] **Step 3: Implement orchestration**
+
+Each action gets a `tokio::sync::watch` channel carrying its `Status`. A bot awaits every predecessor of an action before starting it. Concurrency comes from `join_all` over borrowed futures rather than `tokio::spawn`, which keeps `&Schedule` and `&ActionNetwork` as plain borrows — no `Arc`, no `'static` bound.
+
+Add `futures = "0.3"` to the crate's dependencies.
+
+```rust
+use crate::log::{ExecutionLog, Status};
+use futures::future::join_all;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Mutex;
+use tokio::sync::watch;
+
+enum PredOutcome {
+    Ready,
+    Abandoned,
+}
+
+/// Run every bot, recording progress into `progress` as it happens.
+///
+/// The log is shared rather than merged at the end because `goal.progress(h)`
+/// must be able to read it mid-run. Keys are disjoint — each action belongs to
+/// exactly one bot — so concurrent writers never collide on a key, and because
+/// `ExecutionLog` is a `BTreeMap` the finished state is identical regardless of
+/// the order the writes landed. That is what keeps this deterministic despite
+/// being concurrent.
+///
+/// `std::sync::Mutex`, not tokio's: every critical section is a few map
+/// operations with no `.await` inside. Never hold this guard across an await.
+pub async fn run_into(
+    act: &dyn Actuator,
+    sched: &Schedule,
+    net: &ActionNetwork,
+    progress: &Mutex<ExecutionLog>,
+) {
+    let mut senders: BTreeMap<ActionId, watch::Sender<Status>> = BTreeMap::new();
+    let mut receivers: BTreeMap<ActionId, watch::Receiver<Status>> = BTreeMap::new();
+    for id in net.actions().map(|a| a.id) {
+        let (tx, rx) = watch::channel(Status::Pending);
+        senders.insert(id, tx);
+        receivers.insert(id, rx);
+    }
+
+    // BTreeSet, so the future order is a function of the schedule alone, not of
+    // task completion timing.
+    let bots: BTreeSet<BotId> = sched.steps.iter().map(|s| s.bot).collect();
+    join_all(
+        bots.iter()
+            .map(|&bot| run_bot_signalled(act, bot, sched, net, progress, &senders, &receivers)),
+    )
+    .await;
+}
+
+/// Convenience wrapper for callers that only want the final state.
+pub async fn run(act: &dyn Actuator, sched: &Schedule, net: &ActionNetwork) -> ExecutionLog {
+    let progress = Mutex::new(ExecutionLog::default());
+    run_into(act, sched, net, &progress).await;
+    progress
+        .into_inner()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+async fn run_bot_signalled(
+    act: &dyn Actuator,
+    bot: BotId,
+    sched: &Schedule,
+    net: &ActionNetwork,
+    log: &Mutex<ExecutionLog>,
+    senders: &BTreeMap<ActionId, watch::Sender<Status>>,
+    receivers: &BTreeMap<ActionId, watch::Receiver<Status>>,
+) {
+    let mine: Vec<&ScheduledStep> = sched.steps.iter().filter(|s| s.bot == bot).collect();
+
+    for (i, step) in mine.iter().enumerate() {
+        match &step.what {
+            StepKind::Walk { to } => {
+                if act.walk(bot, to.clone()).await.is_err() {
+                    abandon_rest(&mine[i..], senders);
+                    return;
+                }
+            }
+            StepKind::Act { action, .. } => {
+                if let PredOutcome::Abandoned = await_preds(net, *action, receivers).await {
+                    abandon_rest(&mine[i..], senders);
+                    return;
+                }
+                lock(log).start(*action, step.start);
+                let Some(a) = net.action(*action) else {
+                    lock(log).fail(*action, step.start, "action not in network".to_string());
+                    abandon_rest(&mine[i..], senders);
+                    return;
+                };
+                // `perform` awaits, so the guard is taken and dropped around
+                // it, never held across it.
+                match perform(act, bot, &a.kind).await {
+                    Ok(()) => {
+                        lock(log).succeed(*action, step.end);
+                        let _ = senders[action].send(Status::Success);
+                    }
+                    Err(e) => {
+                        lock(log).fail(*action, step.end, e.to_string());
+                        abandon_rest(&mine[i..], senders);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One place to take the log guard, so poisoning is handled identically
+/// everywhere. A panic mid-run should not turn every later write into a second
+/// panic; the log is observational, so recovering the inner value is right.
+fn lock(log: &Mutex<ExecutionLog>) -> std::sync::MutexGuard<'_, ExecutionLog> {
+    log.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Publish `Failed` for every action this bot will now never reach.
+///
+/// Without this the executor deadlocks: a bot that stops early leaves its
+/// remaining actions at `Pending` forever, and any bot waiting on one of them
+/// waits forever too. Abandonment has to propagate for the run to terminate.
+fn abandon_rest(rest: &[&ScheduledStep], senders: &BTreeMap<ActionId, watch::Sender<Status>>) {
+    for step in rest {
+        if let StepKind::Act { action, .. } = &step.what {
+            if let Some(tx) = senders.get(action) {
+                let _ = tx.send(Status::Failed);
+            }
+        }
+    }
+}
+
+async fn await_preds(
+    net: &ActionNetwork,
+    id: ActionId,
+    receivers: &BTreeMap<ActionId, watch::Receiver<Status>>,
+) -> PredOutcome {
+    let mut max_lag: Ticks = 0;
+    for (pred, lag) in net.preds(id) {
+        let Some(rx) = receivers.get(&pred) else {
+            continue;
+        };
+        let mut rx = rx.clone();
+        loop {
+            // Bind by value so the watch borrow is dropped before the await.
+            let status = *rx.borrow_and_update();
+            match status {
+                Status::Success => break,
+                Status::Failed => return PredOutcome::Abandoned,
+                Status::Pending | Status::Running => {}
+            }
+            if rx.changed().await.is_err() {
+                return PredOutcome::Abandoned;
+            }
+        }
+        max_lag = max_lag.max(lag);
+    }
+
+    // A lag edge is machine time, not bot time: the furnace keeps working after
+    // the bot walks away, and the plate is not there until it has. The
+    // predecessor's own completion signal does not cover that wait, so honour
+    // the lag once every predecessor has succeeded.
+    if max_lag > 0 {
+        tokio::time::sleep(ticks_to_wall_clock(max_lag)).await;
+    }
+    PredOutcome::Ready
+}
+
+/// Factorio runs at 60 ticks per second at normal speed.
+///
+/// See the open questions: a server running at a non-default `game.speed`
+/// makes this conversion wrong, and the fix is to read the speed rather than
+/// assume it.
+fn ticks_to_wall_clock(ticks: Ticks) -> std::time::Duration {
+    std::time::Duration::from_millis((u64::from(ticks) * 1000) / 60)
+}
+```
+
+Add a determinism test: run the same fixture twice with the mock actuator's per-action delays reversed, and assert the two final `ExecutionLog`s are equal. Concurrent writers must not be able to change the finished state.
+
+Both accessors the loop needs already exist in `crates/planner/src/network.rs`: `actions()` returns an iterator over `&Action` (line 84) and `preds(id)` returns `Vec<(ActionId, Ticks)>` (line 97). Do not add new ones.
+
+Use `tokio::time::pause()` in the tests so lag sleeps do not make the suite slow — that is why `test-util` is in the dev-dependencies.
+
+- [ ] **Step 4: Run the tests, then the whole workspace**
+
+Run: `cargo test -p factorio-bot-executor` then `cargo test --workspace`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+cargo fmt -p factorio-bot-executor
+cargo clippy --workspace --all-features --all-targets -- --deny warnings
+git commit -m "feat(executor): orchestrate every bot with per-action completion signals" -- crates/executor crates/planner
+```
+
+---
+
+### Task 6: Recovery tiers one and two
+
+**Files:**
+- Create: `crates/executor/src/recover.rs`
+- Modify: `crates/executor/src/lib.rs`
+- Test: inline in `recover.rs`
+
+**Interfaces:**
+- Produces: `enum Recovery { Rescheduled(Schedule), Reexpanded { net: ActionNetwork, sched: Schedule }, Surfaced(Vec<ActionId>) }` and `fn recover(goal, net, observed_state, bots, log) -> Recovery`.
+
+This function is **pure** — it takes observed state as a value and returns a decision. It performs no I/O, which is what makes the three tiers testable.
+
+- [ ] **Step 1: Write the failing test**
+
+```rust
+#[test]
+fn a_recoverable_failure_reschedules_without_reexpanding() {
+    let (goal, net, state, bots, log) = one_failed_mine_but_ore_still_reachable();
+    match recover(&goal, &net, &state, &bots, &log) {
+        Recovery::Rescheduled(s) => assert!(s.makespan > 0),
+        other => panic!("expected a reschedule, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_unschedulable_state_triggers_reexpansion() {
+    let (goal, net, state, bots, log) = ore_patch_exhausted();
+    assert!(matches!(
+        recover(&goal, &net, &state, &bots, &log),
+        Recovery::Reexpanded { .. }
+    ));
+}
+
+#[test]
+fn an_unexpandable_goal_is_surfaced_with_the_failures_that_caused_it() {
+    let (goal, net, state, bots, log) = nothing_can_satisfy_the_goal();
+    match recover(&goal, &net, &state, &bots, &log) {
+        Recovery::Surfaced(ids) => assert_eq!(ids, log.failed()),
+        other => panic!("expected surfacing, got {other:?}"),
+    }
+}
+```
+
+- [ ] **Step 2: Run it to make sure it fails**
+
+Run: `cargo test -p factorio-bot-executor a_recoverable_failure`
+Expected: FAIL — `recover` not found.
+
+- [ ] **Step 3: Implement the tiers**
+
+```rust
+/// Decide what to do about a partially failed execution.
+///
+/// Tier 1 is cheap: keep the network, re-run `schedule` against observed state.
+/// Tier 2 re-expands from layer 2, which is what you need when the world no
+/// longer affords the plan's approach at all (the ore patch is gone, not merely
+/// further away). Tier 3 gives up and names the failures — this is the seam an
+/// LLM plugs into later: rare, high level, not time critical.
+pub fn recover(
+    goal: &Goal,
+    net: &ActionNetwork,
+    state: &PlanState,
+    bots: &[BotId],
+    log: &ExecutionLog,
+) -> Recovery {
+    let remaining = net.without_completed(log);
+    if let Ok(s) = schedule(&remaining, state, bots) {
+        return Recovery::Rescheduled(s);
+    }
+    let mut fresh = ActionNetwork::default();
+    let mut ctx = ExpansionCtx::new(state);
+    if expand(goal, &mut ctx, &mut fresh, &registry_for(bots)).is_ok() {
+        if let Ok(s) = schedule(&fresh, state, bots) {
+            return Recovery::Reexpanded { net: fresh, sched: s };
+        }
+    }
+    Recovery::Surfaced(log.failed())
+}
+```
+
+`ActionNetwork::without_completed(&ExecutionLog)` does not exist and must not: the planner may not depend on the executor. Instead give the planner `ActionNetwork::retaining(&BTreeSet<ActionId>) -> ActionNetwork` and have the executor compute the retained set from the log. Fix the call above accordingly when you implement it.
+
+`ExpansionCtx::new` and `registry_for` signatures are as the planner already defines them — check, do not assume.
+
+- [ ] **Step 4: Run the tests and commit**
+
+Run: `cargo test -p factorio-bot-executor` then `cargo test --workspace`
+
+```bash
+cargo fmt -p factorio-bot-executor
+cargo clippy --workspace --all-features --all-targets -- --deny warnings
+git commit -m "feat(executor): add reschedule and re-expand recovery tiers" -- crates/executor crates/planner
+```
+
+---
+
+### Task 7: The new Lua goal API (additive)
+
+Adds a `goal.*` table beside the existing `plan.*`. Nothing is removed in this task — both APIs work, and the old scripts keep running.
+
+**Files:**
+- Create: `crates/scripting_lua/src/globals/goal.rs`
+- Modify: `crates/scripting_lua/src/globals/mod.rs`, `crates/scripting_lua/src/lua_runner.rs`
+- Modify: `crates/scripting_lua/Cargo.toml` (add planner + executor deps)
+- Test: `crates/scripting_lua/tests/goal_script.lua` plus a Rust test that runs it
+
+**Interfaces:**
+- Consumes: `planner::{Goal, Holder, expand, schedule, registry_for}`, `executor::run`.
+
+- [ ] **Step 1: Write the Lua-facing functions**
+
+Follow the existing idiom in `crates/scripting_lua/src/globals/plan.rs` exactly — including the `__doc_entry_*` documentation strings, which is where the published Lua API docs come from.
+
+Bind seven functions:
+
+```lua
+-- @treturn number a plan handle
+function goal.have(item_name, count)
+-- @treturn number a plan handle
+function goal.researched(technology_name)
+-- @treturn number the makespan in ticks
+function goal.schedule(plan_handle, bot_count)
+-- @treturn string graphviz source
+function goal.graphviz(plan_handle)
+-- starts execution and returns immediately
+-- @treturn number a run handle
+function goal.execute(plan_handle)
+-- @treturn table {pending=n, running=n, success=n, failed=n, done=bool}
+function goal.progress(run_handle)
+-- blocks until the run finishes; returns the same table as goal.progress
+-- @treturn table
+function goal.wait(run_handle)
+```
+
+`goal.have` and `goal.researched` build a `Goal`, run `expand`, and return a handle holding the `ActionNetwork`. `goal.schedule` runs `schedule` and stores the result on the handle.
+
+**Execution is handle-based, not blocking** — this was an explicit decision, so do not "simplify" it back to a blocking call. `goal.execute` builds an `RconActuator` from the live `FactorioInstance` (which discovers its own bots — it takes no mapping), spawns a tokio task running `executor::run_into`, and returns a run handle immediately. `goal.progress` reads a snapshot of that run's shared `ExecutionLog`; `goal.wait` blocks on the join handle and then returns the final snapshot.
+
+Handles are `u32` keys into a registry the Lua globals own, not Lua tables holding Rust pointers:
+
+```rust
+/// Live runs, keyed by the handle Lua holds.
+///
+/// A registry rather than userdata because the shared log outlives any single
+/// Lua call and must be readable from `goal.progress` on a later call. Bots
+/// keep working while the script does something else — that is the point of
+/// the handle-based API.
+struct Runs {
+    next: u32,
+    runs: BTreeMap<u32, RunEntry>,
+}
+
+struct RunEntry {
+    progress: Arc<Mutex<ExecutionLog>>,
+    join: tokio::task::JoinHandle<()>,
+}
+```
+
+`goal.execute` needs owned values to move into the spawned task, so it clones the handle's `Arc<Schedule>` and `Arc<ActionNetwork>` and calls `run_into(&*act, &*sched, &*net, &progress)` inside. This is the one place `Arc` is needed; `run_into` itself stays borrow-based.
+
+**There is no `goal.group`.** Manual grouping was dropped by decision: the planner's method expansion is the only source of grouping, and a manual bracket that disagreed with it would either be ignored or fight the scheduler. If a script needs to force specific work onto a specific bot, that is `Action::pinned`, which is a planner concern and not a Lua one.
+
+- [ ] **Step 2: Write the failing test script**
+
+`crates/scripting_lua/tests/goal_script.lua`:
+
+```lua
+local p = goal.have("automation-science-pack", 10)
+local makespan = goal.schedule(p, 4)
+assert(makespan > 0, "expected a positive makespan")
+assert(#goal.graphviz(p) > 0, "expected graphviz output")
+```
+
+Add a Rust test that runs it through the same harness `lua_runner.rs`'s existing `test_script` uses. Do not call `goal.execute`, `goal.progress` or `goal.wait` in this script — they need a live game.
+
+Cover the handle registry separately, in Rust, where the actuator can be mocked: assert that `goal.execute` returns a handle without waiting, that `goal.progress` on it reports counts that sum to the action total, and that `goal.wait` returns with `done = true`. That is the part of this task most likely to be wrong, and it is the part the Lua fixture cannot reach.
+
+- [ ] **Step 3: Run it to make sure it fails, then implement, then pass**
+
+Run: `cargo test -p factorio-bot-scripting-lua`
+Expected: FAIL first (`goal` is nil), PASS after implementation.
+
+- [ ] **Step 4: Record the unbound binding for Task 8, do not fix it here**
+
+`PlanBuilder::add_insert_into_inventory` exists in Rust but was never bound to Lua, while `scripts/test_phase_2_1.lua` and `scripts/test_phase_2_2.lua` call `plan.insert_into_inventory`. Those two scripts fail at runtime today and always have.
+
+An earlier draft fixed this by binding it into `globals/plan.rs`. Do **not** do that: Task 8 deletes that file, so the binding would live for one task and be deleted unread. Building something in order to delete it two tasks later is not caution, it is waste.
+
+What matters instead is the consequence for Task 8, so write it into your report: **those two scripts have never successfully run.** Their `plan.*` calls were never all valid, so there is no observed behaviour to preserve when migrating them. Task 8 must port them from their evident intent and say so, rather than claiming behaviour preservation it cannot verify.
+
 - [ ] **Step 4b: Constrain `world.draw`'s save path**
 
 While you are in `crates/scripting_lua/src/globals/`, fix a sandbox escape in the neighbouring `world.draw` binding. It takes a path string straight from the Lua script and `crates/core/src/test_utils.rs:232` does `buffer.save(cwd.join(save_path)).unwrap()`.
@@ -1458,6 +1940,8 @@ git commit -m "feat(lua): add the goal api backed by the new planner and executo
 - Delete: `crates/core/src/plan/` (4 files, 602 lines), `crates/core/src/graph/task_graph.rs` (655 lines)
 - Modify: `crates/core/src/lib.rs:41` (drop `pub mod plan;`), `crates/core/src/graph/mod.rs`, `crates/core/src/gantt_mermaid.rs` (test-only use), `crates/core/src/errors.rs:176` (cosmetic diagnostic string)
 - Modify: `app/src-tauri/src/{scripting.rs, cli/lua.rs, gui/command/script.rs, repl/run_script.rs}`
+
+**These four files are contested — re-read them before editing.** The concurrent web-server effort is moving `run_script_file` out of `app/src-tauri/src/scripting.rs` into `crates/scripting_lua`, giving it a `scripts_root` argument, and every one of these call sites changes signature as a result. That work is expected to land BEFORE this task. Do not work from the signatures quoted anywhere in this plan; open each file and read what is actually there. If `run_script_file` still lives in `app/src-tauri`, coordinate before touching it rather than racing.
 - Delete: `crates/scripting_lua/src/globals/plan.rs`; modify `lua_runner.rs`, `roll_best_seed.rs`, `lua_docs.rs`
 - Migrate: `scripts/{test_phase_2_1,test_phase_2_2,api_test,example,multi_client_test,lib}.lua`, `crates/scripting_lua/tests/script.lua`
 

@@ -155,10 +155,11 @@ fn the_plan_renders_as_a_gantt_chart() {
 /// scheduler re-derives it — was never checked against a real expansion. This
 /// replays twelve of them: four goal sizes over one, two and four bots.
 ///
-/// It is the only test that would catch a dropped edge as such: a missing
-/// dependency does not make `schedule()` fail, it makes `schedule()` return a
-/// plan whose precondition is false at the tick the action starts, which
-/// nothing else here looks at.
+/// It is the only test *in this file* that would catch a dropped edge as such:
+/// a missing dependency does not make `schedule()` fail, it makes `schedule()`
+/// return a plan whose precondition is false at the tick the action starts.
+/// Two hand-built replays in `tests/scheduling.rs` check the same property, but
+/// only over networks they construct themselves — never over a real expansion.
 ///
 /// **On today's fixture it does not yet discriminate**, and saying so is the
 /// point of writing it down. Stubbing `infer_edges` to return immediately was

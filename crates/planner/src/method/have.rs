@@ -1577,8 +1577,16 @@ mod tests {
         // `to_ore < to_origin` alone passes for an anchor anywhere in the half
         // of the map nearer the ore than the origin, which is most of it. The
         // siting is `free_tile_near` from the ore tile itself, and that
-        // searches at most 12 tiles out, so 20 is both correct and tight
-        // enough to fail if the anchor ever slips back towards the bot.
+        // searches at most 12 tiles out, so 20 catches the regression this
+        // guards: the anchor slipping back towards the bot's start, 49.5 away.
+        //
+        // It is structural, not tight. The measured `to_ore` here is **0** —
+        // `is_position_free` cannot see resource entities, so the furnace is
+        // sited on the ore tile itself — and no ore-anchored siting can exceed
+        // ~17. So this bound discriminates ore-anchored from origin-anchored
+        // and nothing finer. The zero is a real defect for execution, not for
+        // planning arithmetic; it is recorded as a blocker in
+        // docs/superpowers/plans/2026-08-30-planner-execution-increment.md.
         assert!(
             to_ore < 20.,
             "the furnace must be within reach of the ore, not merely nearer it: {}",

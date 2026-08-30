@@ -17,8 +17,8 @@ use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::ids::{BotId, Ticks};
 use crate::method::util::{
-    free_tile_near, ingredients_of, mining_ticks, output_per_craft, recipe_for, recipe_ticks,
-    resource_tiles_for,
+    free_tile_near, ingredients_of, mining_ticks, nearest_resource_tile, output_per_craft,
+    recipe_for, recipe_ticks, resource_tiles_for,
 };
 use crate::method::{ExpansionCtx, GoalSite, Method, MethodRegistry, Step};
 use crate::state::PlanState;
@@ -116,10 +116,18 @@ impl Method for Smelt {
             .bot(ctx.chain_actor)
             .map(|b| b.position.clone())
             .unwrap_or_default();
-        let pos =
-            free_tile_near(&ctx.state, &from).ok_or_else(|| PlannerError::NoApplicableMethod {
+        // Site the furnace by the ore rather than by the bot's start, which
+        // never advances during expansion — otherwise every chain walks
+        // ore-patch, origin, ore-patch.
+        let anchor = ingredients
+            .first()
+            .and_then(|(ingredient, _)| nearest_resource_tile(&ctx.state, ingredient, &from, 1))
+            .unwrap_or(from.clone());
+        let pos = free_tile_near(&ctx.state, &anchor).ok_or_else(|| {
+            PlannerError::NoApplicableMethod {
                 goal: goal.to_string(),
-            })?;
+            }
+        })?;
         let build = ctx
             .state
             .bot(ctx.chain_actor)
@@ -598,6 +606,7 @@ mod tests {
     use crate::method::expand;
     use crate::schedule::schedule;
     use crate::state::PlanState;
+    use factorio_bot_core::factorio::util::calculate_distance;
     use factorio_bot_core::test_utils::fixture_world;
     use factorio_bot_core::types::Position;
     use std::sync::Arc;
@@ -1504,6 +1513,47 @@ mod tests {
             .sum();
         assert_eq!(mined, 1200);
         assert_eq!(net.len(), 3, "500 + 500 + 200");
+    }
+
+    #[test]
+    fn a_furnace_is_sited_near_the_ore_it_smelts() {
+        let mut s = state(&[BotId(1)]);
+        s.gain(BotId(1), "stone-furnace", 1);
+        let net = expand(
+            &[Goal::Have {
+                item: "iron-plate".into(),
+                count: 2,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &default_registry(),
+            BotId(1),
+        )
+        .unwrap();
+
+        let furnace = net
+            .actions()
+            .find_map(|a| match &a.kind {
+                ActionKind::Place { entity } => Some(entity.position.clone()),
+                _ => None,
+            })
+            .expect("a placement");
+        let ore = net
+            .actions()
+            .find_map(|a| match &a.kind {
+                ActionKind::Mine { pos, item, .. } if item == "iron-ore" => Some(pos.clone()),
+                _ => None,
+            })
+            .expect("an iron-ore mine");
+
+        let to_ore = calculate_distance(&furnace, &ore);
+        let to_origin = calculate_distance(&furnace, &Position::new(0., 0.));
+        assert!(
+            to_ore < to_origin,
+            "the furnace should sit by the ore ({} away) not the bot's start ({} away)",
+            to_ore,
+            to_origin
+        );
     }
 
     #[test]

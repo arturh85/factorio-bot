@@ -17,12 +17,12 @@ use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::ids::{BotId, Ticks};
 use crate::method::util::{
-    free_tile_near, ingredients_of, mining_ticks, nearest_resource_tile, output_per_craft,
-    recipe_for, recipe_ticks,
+    free_tile_near, ingredients_of, mining_ticks, output_per_craft, recipe_for, recipe_ticks,
+    resource_tiles_for,
 };
 use crate::method::{ExpansionCtx, GoalSite, Method, MethodRegistry, Step};
 use crate::state::PlanState;
-use factorio_bot_core::types::FactorioEntity;
+use factorio_bot_core::types::{FactorioEntity, Position};
 
 /// How much of `item` still needs producing, given what is already held.
 fn shortfall(state: &PlanState, item: &str, count: u32, whose: &Holder) -> u32 {
@@ -326,16 +326,12 @@ impl Method for Mine {
         if need == 0 {
             return false;
         }
-        // Position-independent on purpose: applicability asks only whether a
-        // tile with enough left exists anywhere. Which one is nearest is
-        // `expand`'s business, and depends on the chain actor it has and this
-        // method does not.
-        state.resource_patches(item).iter().any(|patch| {
-            patch
-                .elements
-                .iter()
-                .any(|tile| state.resource_available(tile, item) >= need)
-        })
+        // Position-independent, as before: `resource_tiles_for` returns empty
+        // exactly when the patches cannot supply `need` in total, whatever the
+        // origin, so applicability does not depend on which bot is asking.
+        // Which tiles are nearest is `expand`'s business, where the chain actor
+        // is known.
+        !resource_tiles_for(state, item, &Position::default(), need).is_empty()
     }
 
     fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
@@ -348,48 +344,53 @@ impl Method for Mine {
         let bot = ctx.state.bot(ctx.chain_actor);
         let from = bot.map(|b| b.position.clone()).unwrap_or_default();
         let reach = bot.map(|b| b.resource_reach_distance).unwrap_or(3.0);
-        let pos = nearest_resource_tile(&ctx.state, item, &from, need).ok_or_else(|| {
-            PlannerError::NoApplicableMethod {
+        let tiles = resource_tiles_for(&ctx.state, item, &from, need);
+        if tiles.is_empty() {
+            return Err(PlannerError::NoApplicableMethod {
                 goal: goal.to_string(),
-            }
-        })?;
+            });
+        }
 
-        let action = Action {
-            id: ctx.ids.next(),
-            kind: ActionKind::Mine {
-                pos: pos.clone(),
-                item: item.clone(),
-                count: need,
-            },
-            pre: vec![
-                Condition::AtPosition {
-                    who: Actor::Role,
-                    pos: pos.clone(),
-                    radius: reach,
-                },
-                Condition::ResourceAvailable {
+        let mut steps: Vec<Step> = Vec::new();
+        for (pos, take) in tiles {
+            let action = Action {
+                id: ctx.ids.next(),
+                kind: ActionKind::Mine {
                     pos: pos.clone(),
                     item: item.clone(),
-                    count: need,
+                    count: take,
                 },
-            ],
-            eff: vec![
-                Effect::ConsumeResource {
-                    pos,
-                    item: item.clone(),
-                    count: need,
-                },
-                Effect::GainItem {
-                    who: Actor::Role,
-                    item: item.clone(),
-                    count: need,
-                },
-            ],
-            duration: mining_ticks(&ctx.state, item).saturating_mul(need),
-            pinned: None,
-            label: format!("mine {} {}", need, item),
-        };
-        Ok(vec![Step::Act(Box::new(action))])
+                pre: vec![
+                    Condition::AtPosition {
+                        who: Actor::Role,
+                        pos: pos.clone(),
+                        radius: reach,
+                    },
+                    Condition::ResourceAvailable {
+                        pos: pos.clone(),
+                        item: item.clone(),
+                        count: take,
+                    },
+                ],
+                eff: vec![
+                    Effect::ConsumeResource {
+                        pos,
+                        item: item.clone(),
+                        count: take,
+                    },
+                    Effect::GainItem {
+                        who: Actor::Role,
+                        item: item.clone(),
+                        count: take,
+                    },
+                ],
+                duration: mining_ticks(&ctx.state, item).saturating_mul(take),
+                pinned: None,
+                label: format!("mine {} {}", take, item),
+            };
+            steps.push(Step::Act(Box::new(action)));
+        }
+        Ok(steps)
     }
 }
 
@@ -1478,6 +1479,31 @@ mod tests {
         let plan = schedule(&net, &s, &bots).expect("schedulable");
         let used: std::collections::BTreeSet<_> = plan.steps.iter().map(|s| s.bot).collect();
         assert_eq!(used.len(), 1, "a chain runs on one bot");
+    }
+
+    #[test]
+    fn a_request_larger_than_one_tile_mines_several() {
+        let s = state(&[BotId(1)]);
+        let net = expand(
+            &[Goal::Have {
+                item: "iron-ore".into(),
+                count: 1200,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &default_registry(),
+            BotId(1),
+        )
+        .unwrap();
+        let mined: u32 = net
+            .actions()
+            .map(|a| match &a.kind {
+                ActionKind::Mine { count, .. } => *count,
+                other => panic!("expected only mines, got {:?}", other),
+            })
+            .sum();
+        assert_eq!(mined, 1200);
+        assert_eq!(net.len(), 3, "500 + 500 + 200");
     }
 
     #[test]

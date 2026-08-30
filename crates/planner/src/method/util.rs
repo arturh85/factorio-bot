@@ -73,6 +73,49 @@ pub fn nearest_resource_tile(
     best.map(|(_, tile)| tile)
 }
 
+/// Tiles of `item` to draw `need` from, nearest first, with how much to take
+/// from each. Empty when the patches cannot supply `need` in total.
+///
+/// Ties on distance break on `(x, y)`, like `nearest_resource_tile`, so the
+/// result depends only on the tile set and the origin.
+pub fn resource_tiles_for(
+    state: &PlanState,
+    item: &str,
+    from: &Position,
+    need: u32,
+) -> Vec<(Position, u32)> {
+    let mut candidates: Vec<(f64, Position, u32)> = Vec::new();
+    for patch in state.resource_patches(item) {
+        for tile in patch.elements {
+            let available = state.resource_available(&tile, item);
+            if available == 0 {
+                continue;
+            }
+            candidates.push((calculate_distance(from, &tile), tile, available));
+        }
+    }
+    candidates.sort_by(|a, b| {
+        a.0.total_cmp(&b.0)
+            .then(a.1.x.total_cmp(&b.1.x))
+            .then(a.1.y.total_cmp(&b.1.y))
+    });
+
+    let mut out = Vec::new();
+    let mut remaining = need;
+    for (_, tile, available) in candidates {
+        if remaining == 0 {
+            break;
+        }
+        let take = available.min(remaining);
+        remaining -= take;
+        out.push((tile, take));
+    }
+    if remaining > 0 {
+        return Vec::new();
+    }
+    out
+}
+
 /// The nearest unoccupied tile to `from`, searched in rings so the result is
 /// close and reproducible.
 pub fn free_tile_near(state: &PlanState, from: &Position) -> Option<Position> {
@@ -267,6 +310,46 @@ mod tests {
             "must have moved past the blocked 3x3, got {}",
             found
         );
+    }
+
+    #[test]
+    fn one_tile_is_enough_for_a_small_request() {
+        let s = state();
+        let tiles = resource_tiles_for(&s, "iron-ore", &Position::new(0., 0.), 5);
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].1, 5);
+    }
+
+    #[test]
+    fn a_large_request_spans_tiles_nearest_first() {
+        let s = state();
+        // 500 per tile, so 1200 needs three: 500 + 500 + 200.
+        let tiles = resource_tiles_for(&s, "iron-ore", &Position::new(0., 0.), 1200);
+        assert_eq!(tiles.len(), 3);
+        assert_eq!(tiles.iter().map(|(_, n)| *n).sum::<u32>(), 1200);
+        assert_eq!(tiles[0].1, 500);
+        assert_eq!(tiles[1].1, 500);
+        assert_eq!(tiles[2].1, 200);
+        // Nearest first: distances must be non-decreasing.
+        let origin = Position::new(0., 0.);
+        for pair in tiles.windows(2) {
+            let a = calculate_distance(&origin, &pair[0].0);
+            let b = calculate_distance(&origin, &pair[1].0);
+            assert!(a <= b, "tiles must come nearest-first: {} then {}", a, b);
+        }
+    }
+
+    #[test]
+    fn a_request_larger_than_the_patch_yields_nothing() {
+        let s = state();
+        let tiles = resource_tiles_for(&s, "iron-ore", &Position::new(0., 0.), 10_000_000);
+        assert!(tiles.is_empty());
+    }
+
+    #[test]
+    fn an_absent_resource_yields_nothing() {
+        let s = state();
+        assert!(resource_tiles_for(&s, "uranium-ore", &Position::new(0., 0.), 1).is_empty());
     }
 
     #[test]

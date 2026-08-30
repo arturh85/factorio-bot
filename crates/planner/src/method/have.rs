@@ -8,7 +8,7 @@
 use crate::action::{Action, ActionKind, Actor, Condition, Effect};
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
-use crate::ids::Ticks;
+use crate::ids::{BotId, Ticks};
 use crate::method::util::{
     free_tile_near, ingredients_of, mining_ticks, nearest_resource_tile, output_per_craft,
     recipe_for, recipe_ticks,
@@ -462,6 +462,67 @@ pub fn default_registry() -> MethodRegistry {
         .with(Box::new(Mine))
 }
 
+/// Split a shared goal into one independent chain per bot.
+///
+/// The chains never coordinate: each mines, smelts and crafts its own share.
+/// They are emitted as `Holder::Bot(_)` subgoals so the other methods handle
+/// them without recursing back into this one.
+pub struct SplitAcrossBots {
+    pub bots: Vec<BotId>,
+}
+
+impl Method for SplitAcrossBots {
+    fn name(&self) -> &'static str {
+        "split-across-bots"
+    }
+
+    fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
+        let Goal::Have { item, count, whose } = goal else {
+            return false;
+        };
+        if !matches!(whose, Holder::Anyone) {
+            return false;
+        }
+        // Only worth splitting when there is more than one share to give out.
+        self.bots.len() > 1 && shortfall(state, item, *count, whose) > 1
+    }
+
+    fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+        let Goal::Have { item, count, whose } = goal else {
+            return Err(PlannerError::NoApplicableMethod {
+                goal: goal.to_string(),
+            });
+        };
+        let need = shortfall(&ctx.state, item, *count, whose);
+        let chains = (self.bots.len() as u32).min(need);
+        let base = need / chains;
+        let remainder = need % chains;
+
+        let mut steps = Vec::new();
+        for (index, bot) in self.bots.iter().take(chains as usize).enumerate() {
+            let share = base + if (index as u32) < remainder { 1 } else { 0 };
+            steps.push(Step::Subgoal(Goal::Have {
+                item: item.clone(),
+                count: share,
+                whose: Holder::Bot(*bot),
+            }));
+        }
+        Ok(steps)
+    }
+}
+
+/// The registry to use for a given bot roster.
+pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
+    MethodRegistry::new()
+        .with(Box::new(AlreadySatisfied))
+        .with(Box::new(SplitAcrossBots {
+            bots: bots.to_vec(),
+        }))
+        .with(Box::new(Smelt))
+        .with(Box::new(HandCraft))
+        .with(Box::new(Mine))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -899,5 +960,95 @@ mod tests {
             net.len(),
             "every action is scheduled"
         );
+    }
+
+    #[test]
+    fn a_shared_goal_splits_into_one_chain_per_bot() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let mut s = state(&bots);
+        for b in bots {
+            s.gain(b, "iron-ore", 0);
+        }
+        let net = expand(
+            &[Goal::Have {
+                item: "iron-ore".into(),
+                count: 8,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .unwrap();
+        assert_eq!(net.len(), 4, "one mine per bot");
+        for action in net.actions() {
+            match &action.kind {
+                ActionKind::Mine { count, .. } => assert_eq!(*count, 2, "8 split four ways"),
+                other => panic!("expected mines, got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn an_uneven_split_distributes_the_remainder() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let s = state(&bots);
+        let net = expand(
+            &[Goal::Have {
+                item: "iron-ore".into(),
+                count: 10,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .unwrap();
+        let mut counts: Vec<u32> = net
+            .actions()
+            .map(|a| match &a.kind {
+                ActionKind::Mine { count, .. } => *count,
+                other => panic!("expected mines, got {:?}", other),
+            })
+            .collect();
+        counts.sort_unstable();
+        assert_eq!(counts, vec![2, 2, 3, 3], "10 across four bots");
+        assert_eq!(counts.iter().sum::<u32>(), 10);
+    }
+
+    #[test]
+    fn a_count_smaller_than_the_roster_uses_only_as_many_chains_as_needed() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let s = state(&bots);
+        let net = expand(
+            &[Goal::Have {
+                item: "iron-ore".into(),
+                count: 2,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .unwrap();
+        assert_eq!(net.len(), 2, "two chains for two units");
+    }
+
+    #[test]
+    fn a_single_unit_goal_is_not_split() {
+        let bots = [BotId(1), BotId(2)];
+        let s = state(&bots);
+        let net = expand(
+            &[Goal::Have {
+                item: "iron-ore".into(),
+                count: 1,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .unwrap();
+        assert_eq!(net.len(), 1);
     }
 }

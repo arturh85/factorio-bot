@@ -80,6 +80,65 @@ async fn scripts_root(state: &AppState) -> Result<PathBuf, ErrorResponse> {
     })
 }
 
+/// Resolves the destination for a script that is about to be *created*.
+///
+/// `resolve_script_path` canonicalises, and `canonicalize` fails when the
+/// target does not exist — so it cannot be used on the path of a file that
+/// is not there yet. Instead this splits the requested path into a parent
+/// directory and a final path component: the parent is resolved through
+/// `resolve_script_path` (which is what keeps the traversal guard in
+/// force, exactly as for read/write/delete), and the final component is
+/// validated on its own before being joined back on.
+///
+/// A final component that is empty, `.`, `..`, or that contains a path
+/// separator (`/` or `\`) is rejected outright, rather than relying on
+/// `resolve_script_path`'s bounds check on the parent alone. In this
+/// implementation that check on the parent is already sufficient by
+/// itself to stop a traversal attempt landing in `parent_part` (it fully
+/// canonicalises and rejects anything outside `root`, however many `..`
+/// segments are embedded in it — verified by deliberately deleting the
+/// check below and confirming no attempted escape produces a file outside
+/// `root`: a bare `.`/`..`/empty component always joins onto an
+/// already-verified, already-*existing* directory, and `std::fs::write`
+/// refuses to write file contents onto a directory). The check below is
+/// still kept because `component.contains('/')` can only ever be false
+/// after `rsplit_once('/')`, so it is inert today, but it is one line of
+/// defense-in-depth against a future change to the split above (e.g. one
+/// that stops guaranteeing a slash-free component), against `\`-based
+/// traversal on Windows, and it turns a bare `.`/`..`/empty request into a
+/// clear "invalid script name" 400 instead of an incidental
+/// `std::fs::write` I/O error.
+fn resolve_new_script_path(
+    root: &std::path::Path,
+    requested: &str,
+) -> Result<PathBuf, ErrorResponse> {
+    let trimmed = requested.trim_end_matches('/');
+    let (parent_part, component) = match trimmed.rsplit_once('/') {
+        Some((parent, component)) => (parent, component),
+        None => ("", trimmed),
+    };
+
+    if component.is_empty()
+        || component == "."
+        || component == ".."
+        || component.contains('/')
+        || component.contains('\\')
+    {
+        return Err(ErrorResponse::bad_request(format!(
+            "invalid script name: {requested}"
+        )));
+    }
+
+    let parent = resolve_script_path(root, parent_part).map_err(ErrorResponse::from)?;
+    if !parent.is_dir() {
+        return Err(ErrorResponse::bad_request(format!(
+            "not a directory: {parent_part}"
+        )));
+    }
+
+    Ok(parent.join(component))
+}
+
 /// Lists a directory under the scripts root as a `PrimeVue` tree
 #[utoipa::path(
     get,
@@ -203,6 +262,65 @@ pub async fn write_script(
     }
     std::fs::write(&resolved, body.code)
         .map_err(|err| ErrorResponse::bad_request(format!("failed to write script: {err}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Creates a new script file. Rejects the request if the target already
+/// exists — use `PUT` to overwrite an existing script instead.
+#[utoipa::path(
+    post,
+    path = "/api/v1/scripts/file",
+    tag = "Admin",
+    params(ScriptPathQuery),
+    request_body = ScriptContent,
+    responses(
+        (status = 204),
+        (status = 400, body = crate::error::ErrorResponse),
+    )
+)]
+pub async fn create_script(
+    State(state): State<AppState>,
+    ApiQuery(query): ApiQuery<ScriptPathQuery>,
+    ApiJson(body): ApiJson<ScriptContent>,
+) -> Result<StatusCode, ErrorResponse> {
+    let root = scripts_root(&state).await?;
+    let target = resolve_new_script_path(&root, &query.path)?;
+    if target.exists() {
+        return Err(ErrorResponse::bad_request(format!(
+            "already exists: {}",
+            query.path
+        )));
+    }
+    std::fs::write(&target, body.code)
+        .map_err(|err| ErrorResponse::bad_request(format!("failed to write script: {err}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Deletes an existing script file. Deleting a directory is not supported.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/scripts/file",
+    tag = "Admin",
+    params(ScriptPathQuery),
+    responses(
+        (status = 204),
+        (status = 400, body = crate::error::ErrorResponse),
+    )
+)]
+pub async fn delete_script(
+    State(state): State<AppState>,
+    ApiQuery(query): ApiQuery<ScriptPathQuery>,
+) -> Result<StatusCode, ErrorResponse> {
+    let root = scripts_root(&state).await?;
+    let resolved = resolve_script_path(&root, &query.path).map_err(ErrorResponse::from)?;
+    if !resolved.is_file() {
+        return Err(ErrorResponse::bad_request(format!(
+            "not a file: {}",
+            query.path
+        )));
+    }
+    std::fs::remove_file(&resolved)
+        .map_err(|err| ErrorResponse::bad_request(format!("failed to delete script: {err}")))?;
     Ok(StatusCode::NO_CONTENT)
 }
 

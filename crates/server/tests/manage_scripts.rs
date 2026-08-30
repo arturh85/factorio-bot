@@ -99,3 +99,117 @@ async fn writes_a_script() {
     let written = std::fs::read_to_string(dir.path().join("scripts").join("hello.lua")).unwrap();
     assert_eq!(written, "-- replaced");
 }
+
+#[tokio::test]
+async fn creates_a_new_script() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_with_scripts(dir.path());
+
+    let response = build_router(state, None)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/scripts/file?path=/fresh.lua")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"code":"-- fresh"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success(), "got {}", response.status());
+    let written = std::fs::read_to_string(dir.path().join("scripts").join("fresh.lua")).unwrap();
+    assert_eq!(written, "-- fresh");
+}
+
+#[tokio::test]
+async fn refuses_to_create_over_an_existing_script() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_with_scripts(dir.path());
+
+    let response = build_router(state, None)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/scripts/file?path=/hello.lua")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"code":"-- clobber"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let kept = std::fs::read_to_string(dir.path().join("scripts").join("hello.lua")).unwrap();
+    assert_eq!(kept, "-- hello", "existing script must not be overwritten");
+}
+
+/// The parent resolves legitimately; the escape is in the final component.
+#[tokio::test]
+async fn creating_cannot_escape_via_the_final_component() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_with_scripts(dir.path());
+
+    for attempt in [
+        "/sub/../../escaped.lua",
+        "/../escaped.lua",
+        "/sub/..%2F..%2Fescaped.lua",
+    ] {
+        let response = build_router(state.clone(), None)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/scripts/file?path={attempt}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"code":"-- escaped"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{attempt}");
+    }
+    assert!(
+        !dir.path().join("escaped.lua").exists(),
+        "a file escaped the scripts root"
+    );
+}
+
+#[tokio::test]
+async fn deletes_a_script() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_with_scripts(dir.path());
+
+    let response = build_router(state, None)
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/v1/scripts/file?path=/hello.lua")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success(), "got {}", response.status());
+    assert!(!dir.path().join("scripts").join("hello.lua").exists());
+}
+
+#[tokio::test]
+async fn deleting_a_directory_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_with_scripts(dir.path());
+
+    let response = build_router(state, None)
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/v1/scripts/file?path=/sub")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(dir.path().join("scripts").join("sub").exists());
+}

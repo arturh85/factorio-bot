@@ -18,5 +18,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(scripts::list_scripts))
         .routes(routes!(scripts::read_script))
         .routes(routes!(scripts::write_script))
+        .routes(routes!(scripts::create_script))
+        .routes(routes!(scripts::delete_script))
         .routes(routes!(fs::exists))
 }

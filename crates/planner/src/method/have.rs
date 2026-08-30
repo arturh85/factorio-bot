@@ -8,9 +8,14 @@
 use crate::action::{Action, ActionKind, Actor, Condition, Effect};
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
-use crate::method::util::{mining_ticks, nearest_resource_tile};
+use crate::ids::Ticks;
+use crate::method::util::{
+    free_tile_near, ingredients_of, mining_ticks, nearest_resource_tile, output_per_craft,
+    recipe_for, recipe_ticks,
+};
 use crate::method::{ExpansionCtx, Method, MethodRegistry, Step};
 use crate::state::PlanState;
+use factorio_bot_core::types::FactorioEntity;
 
 /// How much of `item` still needs producing, given what is already held.
 fn shortfall(state: &PlanState, item: &str, count: u32, whose: &Holder) -> u32 {
@@ -38,6 +43,253 @@ impl Method for AlreadySatisfied {
 
     fn expand(&self, _goal: &Goal, _ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
         Ok(vec![])
+    }
+}
+
+/// How many plates one coal will smelt in a stone furnace.
+///
+/// A coal carries 4 MJ and a stone furnace draws 90 kW, so one coal sustains
+/// about 44 seconds of smelting — roughly 13 plates at 3.2 s each. This is an
+/// approximation: it ignores partial burns carried between smelts, and it
+/// assumes stone-furnace speed. Calibrating it against observed burn rates is
+/// follow-up work for the execution increment.
+pub const PLATES_PER_COAL: u32 = 13;
+
+/// Time to put items into or take them out of a machine.
+const TRANSFER_TICKS: Ticks = 10;
+
+/// Time to place an entity.
+const PLACE_TICKS: Ticks = 30;
+
+/// Smelt the shortfall in a stone furnace.
+pub struct Smelt;
+
+impl Method for Smelt {
+    fn name(&self) -> &'static str {
+        "smelt"
+    }
+
+    fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
+        let Goal::Have { item, count, whose } = goal else {
+            return false;
+        };
+        if shortfall(state, item, *count, whose) == 0 {
+            return false;
+        }
+        matches!(recipe_for(state, item), Some(r) if r.category == "smelting")
+    }
+
+    fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+        let Goal::Have { item, count, whose } = goal else {
+            return Err(PlannerError::NoApplicableMethod {
+                goal: goal.to_string(),
+            });
+        };
+        let need = shortfall(&ctx.state, item, *count, whose);
+        let recipe =
+            recipe_for(&ctx.state, item).ok_or_else(|| PlannerError::NoApplicableMethod {
+                goal: goal.to_string(),
+            })?;
+        let per_craft = output_per_craft(&recipe, item);
+        let runs = need.div_ceil(per_craft);
+        let coal = runs.div_ceil(PLATES_PER_COAL).max(1);
+
+        let from = ctx
+            .state
+            .bot(ctx.chain_actor)
+            .map(|b| b.position.clone())
+            .unwrap_or_default();
+        let pos =
+            free_tile_near(&ctx.state, &from).ok_or_else(|| PlannerError::NoApplicableMethod {
+                goal: goal.to_string(),
+            })?;
+        let build = ctx
+            .state
+            .bot(ctx.chain_actor)
+            .map(|b| b.build_distance)
+            .unwrap_or(10.0);
+        let reach = ctx
+            .state
+            .bot(ctx.chain_actor)
+            .map(|b| b.reach_distance)
+            .unwrap_or(10.0);
+
+        let furnace = FactorioEntity {
+            name: "stone-furnace".into(),
+            entity_type: "furnace".into(),
+            position: pos.clone(),
+            ..Default::default()
+        };
+
+        let mut steps: Vec<Step> = Vec::new();
+
+        // Ingredients, fuel, and the furnace itself, as subgoals.
+        for (ingredient, amount) in ingredients_of(&recipe) {
+            steps.push(Step::Subgoal(Goal::Have {
+                item: ingredient,
+                count: amount.saturating_mul(runs),
+                whose: whose.clone(),
+            }));
+        }
+        steps.push(Step::Subgoal(Goal::Have {
+            item: "coal".into(),
+            count: coal,
+            whose: whose.clone(),
+        }));
+        steps.push(Step::Subgoal(Goal::Have {
+            item: "stone-furnace".into(),
+            count: 1,
+            whose: whose.clone(),
+        }));
+
+        let place_id = ctx.ids.next();
+        steps.push(Step::Act(Box::new(Action {
+            id: place_id,
+            kind: ActionKind::Place {
+                entity: Box::new(furnace.clone()),
+            },
+            pre: vec![
+                Condition::AtPosition {
+                    who: Actor::Role,
+                    pos: pos.clone(),
+                    radius: build,
+                },
+                Condition::PositionFree { pos: pos.clone() },
+                Condition::HasItem {
+                    who: Actor::Role,
+                    item: "stone-furnace".into(),
+                    count: 1,
+                },
+            ],
+            eff: vec![
+                Effect::LoseItem {
+                    who: Actor::Role,
+                    item: "stone-furnace".into(),
+                    count: 1,
+                },
+                Effect::CreateEntity(Box::new(furnace)),
+            ],
+            duration: PLACE_TICKS,
+            pinned: None,
+            label: format!("place stone-furnace at {}", pos),
+        })));
+
+        let mut insert_ids = Vec::new();
+        for (ingredient, amount) in ingredients_of(&recipe) {
+            let total = amount.saturating_mul(runs);
+            let id = ctx.ids.next();
+            insert_ids.push(id);
+            steps.push(Step::Act(Box::new(Action {
+                id,
+                kind: ActionKind::Insert {
+                    pos: pos.clone(),
+                    item: ingredient.clone(),
+                    count: total,
+                },
+                pre: vec![
+                    Condition::AtPosition {
+                        who: Actor::Role,
+                        pos: pos.clone(),
+                        radius: reach,
+                    },
+                    Condition::EntityAt {
+                        pos: pos.clone(),
+                        name: "stone-furnace".into(),
+                    },
+                    Condition::HasItem {
+                        who: Actor::Role,
+                        item: ingredient.clone(),
+                        count: total,
+                    },
+                ],
+                eff: vec![Effect::LoseItem {
+                    who: Actor::Role,
+                    item: ingredient.clone(),
+                    count: total,
+                }],
+                duration: TRANSFER_TICKS,
+                pinned: None,
+                label: format!("insert {} {}", total, ingredient),
+            })));
+        }
+
+        let fuel_id = ctx.ids.next();
+        insert_ids.push(fuel_id);
+        steps.push(Step::Act(Box::new(Action {
+            id: fuel_id,
+            kind: ActionKind::Insert {
+                pos: pos.clone(),
+                item: "coal".into(),
+                count: coal,
+            },
+            pre: vec![
+                Condition::AtPosition {
+                    who: Actor::Role,
+                    pos: pos.clone(),
+                    radius: reach,
+                },
+                Condition::EntityAt {
+                    pos: pos.clone(),
+                    name: "stone-furnace".into(),
+                },
+                Condition::HasItem {
+                    who: Actor::Role,
+                    item: "coal".into(),
+                    count: coal,
+                },
+            ],
+            eff: vec![Effect::LoseItem {
+                who: Actor::Role,
+                item: "coal".into(),
+                count: coal,
+            }],
+            duration: TRANSFER_TICKS,
+            pinned: None,
+            label: format!("fuel the furnace with {} coal", coal),
+        })));
+
+        let remove_id = ctx.ids.next();
+        steps.push(Step::Act(Box::new(Action {
+            id: remove_id,
+            kind: ActionKind::Remove {
+                pos: pos.clone(),
+                item: item.clone(),
+                count: need,
+            },
+            pre: vec![
+                Condition::AtPosition {
+                    who: Actor::Role,
+                    pos: pos.clone(),
+                    radius: reach,
+                },
+                Condition::EntityAt {
+                    pos: pos.clone(),
+                    name: "stone-furnace".into(),
+                },
+            ],
+            eff: vec![Effect::GainItem {
+                who: Actor::Role,
+                item: item.clone(),
+                count: need,
+            }],
+            duration: TRANSFER_TICKS,
+            pinned: None,
+            label: format!("take {} {} from the furnace", need, item),
+        })));
+
+        // The furnace runs between the last insert and the removal. The bot is
+        // free to do other work across this lag — that is what it is for.
+        let smelt_lag = recipe_ticks(&recipe).saturating_mul(runs);
+        for id in insert_ids {
+            let lag = if id == fuel_id { 0 } else { smelt_lag };
+            steps.push(Step::Link {
+                from: id,
+                to: remove_id,
+                lag,
+            });
+        }
+
+        Ok(steps)
     }
 }
 
@@ -128,6 +380,7 @@ impl Method for Mine {
 pub fn default_registry() -> MethodRegistry {
     MethodRegistry::new()
         .with(Box::new(AlreadySatisfied))
+        .with(Box::new(Smelt))
         .with(Box::new(Mine))
 }
 
@@ -306,5 +559,122 @@ mod tests {
             result,
             Err(PlannerError::NoApplicableMethod { .. })
         ));
+    }
+
+    #[test]
+    fn smelting_emits_place_insert_insert_remove() {
+        let mut s = state(&[BotId(1)]);
+        s.gain(BotId(1), "stone-furnace", 1);
+        let net = expand(
+            &[Goal::Have {
+                item: "iron-plate".into(),
+                count: 2,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &default_registry(),
+            BotId(1),
+        )
+        .unwrap();
+        let kinds: Vec<&str> = net
+            .actions()
+            .map(|a| match &a.kind {
+                ActionKind::Mine { .. } => "mine",
+                ActionKind::Craft { .. } => "craft",
+                ActionKind::Place { .. } => "place",
+                ActionKind::Insert { .. } => "insert",
+                ActionKind::Remove { .. } => "remove",
+                ActionKind::Research { .. } => "research",
+            })
+            .collect();
+        assert_eq!(kinds.iter().filter(|k| **k == "place").count(), 1);
+        assert_eq!(
+            kinds.iter().filter(|k| **k == "insert").count(),
+            2,
+            "ore and fuel"
+        );
+        assert_eq!(kinds.iter().filter(|k| **k == "remove").count(), 1);
+        assert_eq!(
+            kinds.iter().filter(|k| **k == "mine").count(),
+            2,
+            "iron ore and coal"
+        );
+    }
+
+    #[test]
+    fn the_removal_waits_for_the_smelting_time() {
+        let mut s = state(&[BotId(1)]);
+        s.gain(BotId(1), "stone-furnace", 1);
+        let net = expand(
+            &[Goal::Have {
+                item: "iron-plate".into(),
+                count: 2,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &default_registry(),
+            BotId(1),
+        )
+        .unwrap();
+        let remove = net
+            .actions()
+            .find(|a| matches!(a.kind, ActionKind::Remove { .. }))
+            .expect("a removal");
+        // iron-plate is 3.2s each, so two plates lag 2 * 192 = 384 ticks.
+        let lag = net
+            .preds(remove.id)
+            .into_iter()
+            .map(|(_, lag)| lag)
+            .max()
+            .expect("the removal has predecessors");
+        assert_eq!(lag, 384);
+    }
+
+    #[test]
+    fn smelting_without_a_furnace_crafts_one_first() {
+        let s = state(&[BotId(1)]);
+        let net = expand(
+            &[Goal::Have {
+                item: "iron-plate".into(),
+                count: 1,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &default_registry(),
+            BotId(1),
+        )
+        .unwrap();
+        assert!(
+            net.actions().any(
+                |a| matches!(&a.kind, ActionKind::Craft { item, .. } if item == "stone-furnace")
+            ),
+            "the bot has no furnace, so it must make one"
+        );
+        assert!(
+            net.actions()
+                .any(|a| matches!(&a.kind, ActionKind::Mine { item, .. } if item == "stone")),
+            "and mine the stone for it"
+        );
+    }
+
+    #[test]
+    fn a_smelted_goal_schedules() {
+        let bots = [BotId(1), BotId(2)];
+        let mut s = state(&bots);
+        s.gain(BotId(1), "stone-furnace", 1);
+        s.gain(BotId(2), "stone-furnace", 1);
+        let net = expand(
+            &[Goal::Have {
+                item: "iron-plate".into(),
+                count: 2,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &default_registry(),
+            BotId(1),
+        )
+        .unwrap();
+        let plan = schedule(&net, &s, &bots).expect("schedulable");
+        assert!(plan.makespan > 384, "at least the smelting time");
     }
 }

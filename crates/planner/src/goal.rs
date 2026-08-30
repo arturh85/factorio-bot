@@ -1,9 +1,10 @@
 //! What we want, stated declaratively and without reference to any bot.
 
 use crate::ids::{BotId, ItemId};
+use serde::{Deserialize, Serialize};
 
 /// Who must end up holding the items.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Holder {
     /// Satisfied by the sum across every bot. This is what makes multi-bot
     /// gathering parallel: the count can be split into independent per-bot
@@ -22,7 +23,7 @@ impl std::fmt::Display for Holder {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Goal {
     Have {
         item: ItemId,
@@ -80,6 +81,28 @@ mod tests {
         };
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn goals_survive_a_json_round_trip() {
+        // The next increment ships schedules to an HTTP server and a Vue
+        // frontend; a goal is what a caller sends in.
+        use factorio_bot_core::serde_json;
+        let goal = Goal::All(vec![
+            Goal::Have {
+                item: "iron-plate".into(),
+                count: 4,
+                whose: Holder::Bot(BotId(2)),
+            },
+            Goal::Researched("automation".into()),
+            Goal::Producing {
+                item: "iron-plate".into(),
+                rate: 30.0,
+            },
+        ]);
+        let json = serde_json::to_string(&goal).expect("serialises");
+        let back: Goal = serde_json::from_str(&json).expect("deserialises");
+        assert_eq!(back, goal);
     }
 
     #[test]

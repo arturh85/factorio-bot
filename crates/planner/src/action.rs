@@ -5,13 +5,14 @@ use crate::ids::{ActionId, BotId, ItemId, Ticks};
 use crate::state::PlanState;
 use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::types::{FactorioEntity, Pos, Position};
+use serde::{Deserialize, Serialize};
 
 /// Who an action's condition or effect applies to.
 ///
 /// `Role` means "whichever bot runs this action" and is bound by the
 /// scheduler. Nothing outside `schedule()` may resolve it without an
 /// explicit binding.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Actor {
     Bound(BotId),
     Role,
@@ -26,7 +27,7 @@ impl Actor {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Condition {
     HasItem {
         who: Actor,
@@ -105,7 +106,7 @@ impl std::fmt::Display for Condition {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Effect {
     GainItem {
         who: Actor,
@@ -174,7 +175,7 @@ impl Effect {
 
 /// What a bot physically does. Carries the payload the executor needs;
 /// the planner reasons from `pre` and `eff`, never from this.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ActionKind {
     Mine {
         pos: Position,
@@ -203,7 +204,7 @@ pub enum ActionKind {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Action {
     pub id: ActionId,
     pub kind: ActionKind,
@@ -385,6 +386,75 @@ mod tests {
         // Research is global, not per bot, so the binding is irrelevant.
         assert!(cond.holds(&s, BotId(2)));
         assert!(!Condition::Researched("logistics".into()).holds(&s, BotId(1)));
+    }
+
+    #[test]
+    fn an_action_survives_a_json_round_trip() {
+        // Every payload an action can carry, including the boxed core entity.
+        use factorio_bot_core::serde_json;
+        let action = Action {
+            id: crate::ids::ActionId(7),
+            kind: ActionKind::Place {
+                entity: Box::new(FactorioEntity {
+                    name: "stone-furnace".into(),
+                    entity_type: "furnace".into(),
+                    position: Position::new(3., 4.),
+                    ..Default::default()
+                }),
+            },
+            pre: vec![
+                Condition::HasItem {
+                    who: Actor::Role,
+                    item: "stone-furnace".into(),
+                    count: 1,
+                },
+                Condition::AtPosition {
+                    who: Actor::Bound(BotId(1)),
+                    pos: Position::new(3., 4.),
+                    radius: 10.0,
+                },
+                Condition::PositionFree {
+                    pos: Position::new(3., 4.),
+                },
+                Condition::Researched("automation".into()),
+                Condition::ResourceAvailable {
+                    pos: Position::new(3., 4.),
+                    item: "iron-ore".into(),
+                    count: 2,
+                },
+                Condition::EntityAt {
+                    pos: Position::new(3., 4.),
+                    name: "stone-furnace".into(),
+                },
+            ],
+            eff: vec![
+                Effect::LoseItem {
+                    who: Actor::Role,
+                    item: "stone-furnace".into(),
+                    count: 1,
+                },
+                Effect::GainItem {
+                    who: Actor::Role,
+                    item: "iron-plate".into(),
+                    count: 1,
+                },
+                Effect::RemoveEntity {
+                    pos: Position::new(3., 4.),
+                },
+                Effect::ConsumeResource {
+                    pos: Position::new(3., 4.),
+                    item: "iron-ore".into(),
+                    count: 1,
+                },
+                Effect::Researched("automation".into()),
+            ],
+            duration: 30,
+            pinned: Some(BotId(1)),
+            label: "place stone-furnace".into(),
+        };
+        let json = serde_json::to_string(&action).expect("serialises");
+        let back: Action = serde_json::from_str(&json).expect("deserialises");
+        assert_eq!(back, action);
     }
 
     #[test]

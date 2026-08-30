@@ -6,6 +6,7 @@ use crate::network::ActionNetwork;
 use crate::state::PlanState;
 use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::types::Position;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Character walking speed in tiles per tick (roughly 9 tiles/second).
@@ -20,13 +21,13 @@ pub fn travel_ticks(from: &Position, to: &Position, radius: f64) -> Ticks {
     ((distance - radius) / WALK_TILES_PER_TICK).ceil() as Ticks
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum StepKind {
     Act { action: ActionId, label: String },
     Walk { to: Position },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ScheduledStep {
     pub what: StepKind,
     pub bot: BotId,
@@ -35,7 +36,7 @@ pub struct ScheduledStep {
 }
 
 /// An immutable assignment of actions to bots over time.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Schedule {
     pub steps: Vec<ScheduledStep>,
     pub makespan: Ticks,
@@ -441,6 +442,37 @@ mod tests {
             pinned: None,
             label: label.into(),
         }
+    }
+
+    #[test]
+    fn a_schedule_survives_a_json_round_trip() {
+        // A schedule is the artefact the next increment serves over HTTP.
+        use factorio_bot_core::serde_json;
+        let plan = Schedule {
+            steps: vec![
+                ScheduledStep {
+                    what: StepKind::Walk {
+                        to: Position::new(10., 20.),
+                    },
+                    bot: BotId(1),
+                    start: 0,
+                    end: 60,
+                },
+                ScheduledStep {
+                    what: StepKind::Act {
+                        action: ActionId(3),
+                        label: "mine 5 iron-ore".into(),
+                    },
+                    bot: BotId(2),
+                    start: 60,
+                    end: 360,
+                },
+            ],
+            makespan: 360,
+        };
+        let json = serde_json::to_string(&plan).expect("serialises");
+        let back: Schedule = serde_json::from_str(&json).expect("deserialises");
+        assert_eq!(back, plan);
     }
 
     #[test]

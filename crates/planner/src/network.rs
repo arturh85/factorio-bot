@@ -5,9 +5,10 @@ use crate::error::PlannerError;
 use crate::ids::{ActionId, ChainId, Ticks};
 use factorio_bot_core::petgraph::algo::toposort;
 use factorio_bot_core::petgraph::graph::{DiGraph, NodeIndex};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Edge {
     pub from: ActionId,
     pub to: ActionId,
@@ -189,6 +190,21 @@ mod tests {
     use crate::action::{Action, ActionKind, Actor, Condition, Effect};
     use crate::ids::{ActionIdGen, BotId};
     use factorio_bot_core::types::{FactorioEntity, Position};
+
+    #[test]
+    fn an_edge_survives_a_json_round_trip() {
+        use factorio_bot_core::serde_json;
+        let edge = Edge {
+            from: crate::ids::ActionId(1),
+            to: crate::ids::ActionId(2),
+            lag: 192,
+        };
+        let json = serde_json::to_string(&edge).expect("serialises");
+        assert_eq!(
+            serde_json::from_str::<Edge>(&json).expect("deserialises"),
+            edge
+        );
+    }
 
     fn mine(gen: &mut ActionIdGen, item: &str, count: u32) -> Action {
         let id = gen.next();

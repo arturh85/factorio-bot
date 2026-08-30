@@ -36,4 +36,14 @@ pub enum PlannerError {
     #[error("no bots supplied to the scheduler")]
     #[diagnostic(code(planner::no_bots))]
     NoBots,
+
+    #[error("no method can satisfy goal: {goal}")]
+    #[diagnostic(code(planner::no_applicable_method))]
+    NoApplicableMethod { goal: String },
+
+    #[error(
+        "expansion of {goal} exceeded {depth} levels; a method is probably expanding into itself"
+    )]
+    #[diagnostic(code(planner::expansion_too_deep))]
+    ExpansionTooDeep { goal: String, depth: u32 },
 }

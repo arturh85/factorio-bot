@@ -3,7 +3,7 @@
 
 use crate::action::Action;
 use crate::error::PlannerError;
-use crate::goal::Goal;
+use crate::goal::{Goal, Holder};
 use crate::ids::{ActionId, ActionIdGen, BotId, Ticks};
 use crate::state::PlanState;
 
@@ -89,6 +89,102 @@ impl MethodRegistry {
             .find(|m| m.applicable(goal, state))
             .map(|m| m.as_ref())
     }
+}
+
+use crate::network::ActionNetwork;
+
+/// Recipe chains in this domain are shallow — science pack to gear to plate to
+/// ore is four levels, plus one for a per-bot split. This bound exists to turn
+/// a method that expands into itself into an error rather than a hang.
+pub const MAX_EXPANSION_DEPTH: u32 = 32;
+
+/// Expand `goals` into a schedulable network.
+///
+/// Each goal is expanded by the first applicable method, recursively, until
+/// only actions remain. The context's state is advanced as actions are emitted,
+/// so a later sibling sees what an earlier one produced — that progression is
+/// what lets hand-written methods compose without knowing about each other.
+///
+/// Ordering edges are inferred at the end, on top of whatever explicit `Link`
+/// steps the methods emitted for dependencies inference cannot see.
+pub fn expand(
+    goals: &[Goal],
+    state: &PlanState,
+    registry: &MethodRegistry,
+    chain_actor: BotId,
+) -> Result<ActionNetwork, PlannerError> {
+    let mut ctx = ExpansionCtx::new(state.fork(), chain_actor);
+    let mut net = ActionNetwork::new();
+    for goal in goals {
+        expand_goal(goal, &mut ctx, &mut net, registry)?;
+    }
+    net.infer_edges();
+    net.validate()?;
+    Ok(net)
+}
+
+fn expand_goal(
+    goal: &Goal,
+    ctx: &mut ExpansionCtx,
+    net: &mut ActionNetwork,
+    registry: &MethodRegistry,
+) -> Result<(), PlannerError> {
+    if ctx.depth >= MAX_EXPANSION_DEPTH {
+        return Err(PlannerError::ExpansionTooDeep {
+            goal: goal.to_string(),
+            depth: MAX_EXPANSION_DEPTH,
+        });
+    }
+
+    if let Goal::All(inner) = goal {
+        ctx.depth += 1;
+        for g in inner {
+            expand_goal(g, ctx, net, registry)?;
+        }
+        ctx.depth -= 1;
+        return Ok(());
+    }
+
+    // A goal addressed to one bot rebinds the chain actor for its whole
+    // subtree, so that simulated effects land in the same inventory the
+    // shortfall checks read. Without this the driver would credit a chain's
+    // mining to one bot while asking whether a different one was satisfied.
+    let previous_actor = ctx.chain_actor;
+    if let Goal::Have {
+        whose: Holder::Bot(bot),
+        ..
+    } = goal
+    {
+        ctx.chain_actor = *bot;
+    }
+
+    let method =
+        registry
+            .find(goal, &ctx.state)
+            .ok_or_else(|| PlannerError::NoApplicableMethod {
+                goal: goal.to_string(),
+            })?;
+    let steps = method.expand(goal, ctx)?;
+
+    ctx.depth += 1;
+    for step in steps {
+        match step {
+            Step::Subgoal(g) => expand_goal(&g, ctx, net, registry)?,
+            Step::Act(action) => {
+                // Simulate against the chain actor so later siblings see this
+                // action's results. The emitted action stays unpinned.
+                let binding = ctx.chain_actor;
+                for effect in &action.eff {
+                    effect.apply(&mut ctx.state, binding)?;
+                }
+                net.add(*action);
+            }
+            Step::Link { from, to, lag } => net.link(from, to, lag),
+        }
+    }
+    ctx.depth -= 1;
+    ctx.chain_actor = previous_actor;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -199,5 +295,247 @@ mod tests {
             whose: Holder::Anyone,
         };
         assert_eq!(reg.find(&goal, &c.state).map(|m| m.name()), Some("nothing"));
+    }
+
+    use crate::action::{Action, ActionKind, Actor, Effect};
+
+    fn gain_action(ctx: &mut ExpansionCtx, item: &str, count: u32) -> Action {
+        Action {
+            id: ctx.ids.next(),
+            kind: ActionKind::Craft {
+                item: item.into(),
+                count,
+            },
+            pre: vec![],
+            eff: vec![Effect::GainItem {
+                who: Actor::Role,
+                item: item.into(),
+                count,
+            }],
+            duration: 60,
+            pinned: None,
+            label: format!("make {} {}", count, item),
+        }
+    }
+
+    /// Expands `Have` into one action that produces the requested count.
+    struct Produce;
+    impl Method for Produce {
+        fn name(&self) -> &'static str {
+            "produce"
+        }
+        fn applicable(&self, goal: &Goal, _s: &PlanState) -> bool {
+            matches!(goal, Goal::Have { .. })
+        }
+        fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+            let Goal::Have { item, count, .. } = goal else {
+                unreachable!()
+            };
+            let a = gain_action(ctx, item, *count);
+            Ok(vec![Step::Act(Box::new(a))])
+        }
+    }
+
+    #[test]
+    fn the_driver_turns_a_goal_into_a_network() {
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
+        let reg = MethodRegistry::new().with(Box::new(Produce));
+        let goal = Goal::Have {
+            item: "coal".into(),
+            count: 3,
+            whose: Holder::Anyone,
+        };
+        let net = expand(&[goal], &state, &reg, BotId(1)).unwrap();
+        assert_eq!(net.len(), 1);
+    }
+
+    #[test]
+    fn the_driver_advances_its_state_so_siblings_see_earlier_effects() {
+        // `Produce` runs for the first goal; the second is already satisfied by
+        // the first one's simulated effect, so `Satisfied` claims it and emits
+        // nothing. Two identical goals must therefore yield ONE action.
+        struct Satisfied;
+        impl Method for Satisfied {
+            fn name(&self) -> &'static str {
+                "satisfied"
+            }
+            fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
+                match goal {
+                    Goal::Have { item, count, .. } => state.total_count(item) >= *count,
+                    _ => false,
+                }
+            }
+            fn expand(&self, _g: &Goal, _c: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+                Ok(vec![])
+            }
+        }
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
+        let reg = MethodRegistry::new()
+            .with(Box::new(Satisfied))
+            .with(Box::new(Produce));
+        let goal = Goal::Have {
+            item: "coal".into(),
+            count: 3,
+            whose: Holder::Anyone,
+        };
+        let net = expand(&[goal.clone(), goal], &state, &reg, BotId(1)).unwrap();
+        assert_eq!(net.len(), 1, "the second goal was already satisfied");
+    }
+
+    #[test]
+    fn the_driver_recurses_through_subgoals() {
+        struct ViaSubgoal;
+        impl Method for ViaSubgoal {
+            fn name(&self) -> &'static str {
+                "via-subgoal"
+            }
+            fn applicable(&self, goal: &Goal, _s: &PlanState) -> bool {
+                matches!(goal, Goal::Have { item, .. } if item == "iron-gear-wheel")
+            }
+            fn expand(&self, _g: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+                let a = gain_action(ctx, "iron-gear-wheel", 1);
+                Ok(vec![
+                    Step::Subgoal(Goal::Have {
+                        item: "iron-plate".into(),
+                        count: 2,
+                        whose: Holder::Anyone,
+                    }),
+                    Step::Act(Box::new(a)),
+                ])
+            }
+        }
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
+        let reg = MethodRegistry::new()
+            .with(Box::new(ViaSubgoal))
+            .with(Box::new(Produce));
+        let goal = Goal::Have {
+            item: "iron-gear-wheel".into(),
+            count: 1,
+            whose: Holder::Anyone,
+        };
+        let net = expand(&[goal], &state, &reg, BotId(1)).unwrap();
+        assert_eq!(net.len(), 2, "the subgoal's action and the gear itself");
+    }
+
+    #[test]
+    fn an_unclaimed_goal_is_an_error() {
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
+        let reg = MethodRegistry::new().with(Box::new(Produce));
+        let result = expand(
+            &[Goal::Researched("automation".into())],
+            &state,
+            &reg,
+            BotId(1),
+        );
+        assert!(matches!(
+            result,
+            Err(PlannerError::NoApplicableMethod { .. })
+        ));
+    }
+
+    #[test]
+    fn producing_has_no_method_in_this_increment() {
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
+        let reg = MethodRegistry::new().with(Box::new(Produce));
+        let goal = Goal::Producing {
+            item: "automation-science-pack".into(),
+            rate: 150.0,
+        };
+        assert!(matches!(
+            expand(&[goal], &state, &reg, BotId(1)),
+            Err(PlannerError::NoApplicableMethod { .. })
+        ));
+    }
+
+    #[test]
+    fn runaway_recursion_is_an_error_not_a_hang() {
+        struct Forever;
+        impl Method for Forever {
+            fn name(&self) -> &'static str {
+                "forever"
+            }
+            fn applicable(&self, goal: &Goal, _s: &PlanState) -> bool {
+                matches!(goal, Goal::Have { .. })
+            }
+            fn expand(
+                &self,
+                goal: &Goal,
+                _c: &mut ExpansionCtx,
+            ) -> Result<Vec<Step>, PlannerError> {
+                Ok(vec![Step::Subgoal(goal.clone())])
+            }
+        }
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
+        let reg = MethodRegistry::new().with(Box::new(Forever));
+        let goal = Goal::Have {
+            item: "coal".into(),
+            count: 1,
+            whose: Holder::Anyone,
+        };
+        assert!(matches!(
+            expand(&[goal], &state, &reg, BotId(1)),
+            Err(PlannerError::ExpansionTooDeep { .. })
+        ));
+    }
+
+    #[test]
+    fn a_bot_addressed_goal_rebinds_the_chain_actor() {
+        // `Record` reports which actor the driver was simulating against.
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        struct Record(Rc<RefCell<Vec<BotId>>>);
+        impl Method for Record {
+            fn name(&self) -> &'static str {
+                "record"
+            }
+            fn applicable(&self, goal: &Goal, _s: &PlanState) -> bool {
+                matches!(goal, Goal::Have { .. })
+            }
+            fn expand(&self, _g: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+                self.0.borrow_mut().push(ctx.chain_actor);
+                Ok(vec![])
+            }
+        }
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let reg = MethodRegistry::new().with(Box::new(Record(seen.clone())));
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1), BotId(2)]);
+        let goals = vec![
+            Goal::Have {
+                item: "coal".into(),
+                count: 1,
+                whose: Holder::Bot(BotId(2)),
+            },
+            Goal::Have {
+                item: "stone".into(),
+                count: 1,
+                whose: Holder::Anyone,
+            },
+        ];
+        expand(&goals, &state, &reg, BotId(1)).unwrap();
+        assert_eq!(
+            *seen.borrow(),
+            vec![BotId(2), BotId(1)],
+            "a Bot-addressed goal rebinds, and the binding is restored afterwards"
+        );
+    }
+
+    #[test]
+    fn all_expands_each_of_its_goals() {
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
+        let reg = MethodRegistry::new().with(Box::new(Produce));
+        let goal = Goal::All(vec![
+            Goal::Have {
+                item: "coal".into(),
+                count: 1,
+                whose: Holder::Anyone,
+            },
+            Goal::Have {
+                item: "stone".into(),
+                count: 1,
+                whose: Holder::Anyone,
+            },
+        ]);
+        let net = expand(&[goal], &state, &reg, BotId(1)).unwrap();
+        assert_eq!(net.len(), 2);
     }
 }

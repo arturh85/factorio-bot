@@ -46,7 +46,21 @@ async fn run(matches: &ArgMatches, context: &mut Context) -> Result<()> {
     bind,
     shutdown,
   )
-  .await
+  .await?;
+
+  // `run()` in lib.rs falls through after any subcommand into the REPL (or
+  // GUI) start-up, which is correct for setup commands like `start` that
+  // intentionally hand off to an interactive session. `serve` is different:
+  // it's a long-running foreground command, and by the time
+  // `start_with_shutdown` has returned here the Factorio instance has
+  // already been stopped and the user has explicitly asked (via Ctrl-C) for
+  // the process to end. Falling through would instead start a REPL with no
+  // TTY behind it and panic. Exit explicitly instead.
+  //
+  // Interim: plan 4 deletes the GUI and reworks `run()`'s control flow, at
+  // which point this should become proper control flow rather than a
+  // process exit.
+  std::process::exit(0);
 }
 
 struct ThisCommand {}

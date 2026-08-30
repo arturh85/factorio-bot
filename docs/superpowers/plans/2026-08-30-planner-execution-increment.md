@@ -808,7 +808,7 @@ git commit -m "feat(executor): add the actuator trait and its rcon implementatio
 
 **Interfaces:**
 - Consumes: `Actuator` (Task 3), `ExecutionLog` (Task 2), `planner::{Schedule, ScheduledStep, StepKind, ActionNetwork}`.
-- Produces: `async fn run_bot(...) -> ExecutionLog`. Task 5 calls it once per bot.
+- Produces: `async fn run_bot(...) -> ExecutionLog`. **Task 5 supersedes this** with `run_bot_signalled`, which takes a shared log and waits on predecessors. Write `run_bot` here anyway: it is the single-bot core, its tests pin the per-step dispatch, and Task 5's version is a small delta on it. When Task 5 lands, delete `run_bot` and keep its two tests pointed at the new function — do not leave two near-identical loops in the file.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -967,6 +967,8 @@ The old executor polled every 100 ms (`crates/core/src/plan/execute.rs:79`). The
 **Files:**
 - Modify: `crates/executor/src/run.rs`, `crates/executor/src/lib.rs`
 - Test: inline in `run.rs`
+
+**Delete `run_bot` from Task 4 as part of this task**, re-pointing its two tests at `run_into` with a single-bot schedule. Two near-identical per-bot loops in one file is exactly the duplication that drifts.
 
 **Interfaces:**
 - Produces: `async fn run_into(act: &dyn Actuator, sched: &Schedule, net: &ActionNetwork, progress: &Mutex<ExecutionLog>)` plus the wrapper `async fn run(...) -> ExecutionLog`. Task 7 calls `run_into` so it can read progress mid-run.
@@ -1419,9 +1421,9 @@ git commit -m "feat(lua): add the goal api backed by the new planner and executo
 
 ---
 
-### Task 8: Retire the old planner — REQUIRES SIGN-OFF
+### Task 8: Retire the old planner
 
-**Do not start this task without explicit approval from the repository owner.** It deletes 1257 lines of user-facing code and removes a published Lua API. Tasks 1–7 stand on their own if approval is withheld.
+**Approved.** This deletes 1257 lines of user-facing code and removes the published Lua `plan.*` API. Sign-off was given for all eight tasks; proceed. Because it is the destructive task, it goes last and only after Tasks 1–7 are green — never fold any of it forward into an earlier task.
 
 **Files:**
 - Delete: `crates/core/src/plan/` (4 files, 602 lines), `crates/core/src/graph/task_graph.rs` (655 lines)

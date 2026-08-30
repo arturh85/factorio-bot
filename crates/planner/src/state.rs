@@ -97,6 +97,17 @@ pub struct PlanState {
     consumed: BTreeMap<Pos, u32>,
     /// Technologies the plan has completed.
     researched: BTreeSet<String>,
+    /// Half the diagonal of the largest collision box among `base`'s known
+    /// entity prototypes, or `0.` if it carries none.
+    ///
+    /// Computed once from `base` in [`PlanState::from_world`] rather than on
+    /// every [`PlanState::is_area_clear`] call: `base` never changes after
+    /// construction (see the struct doc), so the value cannot go stale, and
+    /// this avoids rescanning the prototype table for every candidate
+    /// placement a search considers. `entity_prototypes` is a `DashMap` with
+    /// no defined iteration order, but a maximum over its values does not
+    /// depend on that order, so this stays deterministic.
+    max_prototype_half_diagonal: f64,
 }
 
 impl PlanState {
@@ -115,6 +126,17 @@ impl PlanState {
             };
             map.insert(*id, state);
         }
+        let max_prototype_half_diagonal = base
+            .entity_prototypes
+            .iter()
+            .map(|entry| {
+                let b = &entry.value().collision_box;
+                (b.width() / 2.).hypot(b.height() / 2.)
+            })
+            .fold(
+                0.0_f64,
+                |acc, d| if d.total_cmp(&acc).is_gt() { d } else { acc },
+            );
         PlanState {
             base,
             bots: map,
@@ -122,6 +144,7 @@ impl PlanState {
             removed: Default::default(),
             consumed: Default::default(),
             researched: Default::default(),
+            max_prototype_half_diagonal,
         }
     }
 
@@ -266,10 +289,21 @@ impl PlanState {
                 return false;
             }
         }
-        // The query box is the smallest square covering `area`, so nothing
-        // overlapping `area` can be outside it; the exact test is the
-        // `boxes_overlap` below, this only narrows the search.
-        let radius = area.width().max(area.height()) / 2. + 1.;
+        // `find_entities_in_radius` keeps only entities whose *centre* point
+        // falls within `radius` of `search_center` (see
+        // `EntityGraph::find_entities_in_radius`,
+        // `core/src/graph/entity_graph.rs:132`) — it does not know the
+        // entity's own footprint, so a neighbour whose box overlaps `area`
+        // while its centre sits outside `radius` would silently be skipped.
+        // By the triangle inequality for the Euclidean norm, an entity whose
+        // box overlaps `area` has its centre no further from `area`'s centre
+        // than `area`'s own half-diagonal plus that entity's half-diagonal.
+        // Widening the radius by the largest half-diagonal among the world's
+        // known prototypes therefore cannot miss a genuine overlap, as long
+        // as no unknown prototype is wider than every known one. The exact
+        // test is the `boxes_overlap` below; this only narrows the search.
+        let area_half_diagonal = (area.width() / 2.).hypot(area.height() / 2.);
+        let radius = area_half_diagonal + self.max_prototype_half_diagonal + TOUCH_SLACK;
         for entity in
             self.base
                 .entity_graph
@@ -405,7 +439,7 @@ impl PlanState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use factorio_bot_core::test_utils::fixture_world;
+    use factorio_bot_core::test_utils::{fixture_entity_prototypes, fixture_world};
     use factorio_bot_core::types::{FactorioEntity, Position};
 
     fn state() -> PlanState {
@@ -442,6 +476,45 @@ mod tests {
         assert!(
             s.is_area_free("stone-furnace", &Position::new(0., 1.)),
             "two tiles of clearance is enough for a 1.398-wide entity"
+        );
+    }
+
+    #[test]
+    fn a_wide_base_world_neighbour_outside_the_old_radius_still_blocks() {
+        // Reviewer's case. `find_entities_in_radius`
+        // (`core/src/graph/entity_graph.rs:132`) filters candidates on each
+        // entity's *centre* point, not its footprint. A real `rock-huge` is
+        // 3 tiles across (half-extent 1.5, per its prototype's collision
+        // box), so a copy of it centred 1.75 tiles from the query centre
+        // geometrically overlaps a stone furnace placed there -- but the old
+        // radius, half the query box's own span plus a flat `1.`, topped out
+        // at ~1.699 and so never asked about a neighbour that far out. This
+        // builds the neighbour with its *real* collision box rather than
+        // going through `spawn_rocks`/`new_rock`, which hard-codes every rock
+        // to 1.2 wide regardless of name and would not reproduce the defect.
+        let world = fixture_world();
+        let neighbour_pos = Position::new(1.75, 0.);
+        let collision_box = fixture_entity_prototypes()
+            .get("rock-huge")
+            .expect("fixture has rock-huge")
+            .collision_box
+            .clone();
+        world
+            .update_chunk_entities(vec![FactorioEntity {
+                name: "rock-huge".into(),
+                entity_type: "simple-entity".into(),
+                position: neighbour_pos.clone(),
+                bounding_box: add_to_rect(&collision_box, &neighbour_pos),
+                ..Default::default()
+            }])
+            .unwrap();
+        let s = PlanState::from_world(Arc::new(world), &[]);
+
+        assert!(
+            !s.is_area_free("stone-furnace", &Position::new(0., 0.)),
+            "a stone furnace at the origin overlaps the rock-huge's real \
+             footprint, even though the rock's centre is 1.75 away and the \
+             old query radius topped out at ~1.70"
         );
     }
 

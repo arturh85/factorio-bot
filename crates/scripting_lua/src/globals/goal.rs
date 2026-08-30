@@ -395,6 +395,7 @@ end
     // `goal.schedule`
     let _plans = plans.clone();
     let world = plan_world.clone();
+    let bots = roster.clone();
     map_table.set(
         "__doc_entry_schedule",
         String::from(
@@ -403,7 +404,9 @@ end
 -- Stores the schedule on the plan handle, which `goal.gantt` and
 -- `goal.execute` both need. Scheduling the same plan again replaces it.
 -- @number plan_handle handle returned by `goal.have` or `goal.researched`
--- @number bot_count how many bots to spread the work over
+-- @number bot_count how many of the run's bots to spread the work over; they
+--   are taken from the front of the run's roster, and asking for more bots than
+--   the run has is an error rather than an invented bot
 -- @treturn number the makespan in ticks
 function goal.schedule(plan_handle, bot_count)
 end
@@ -413,7 +416,19 @@ end
     map_table.set(
         "schedule",
         lua.create_function(move |_lua, (plan_handle, bot_count): (u32, u8)| {
-            let bots: Vec<BotId> = (1..=bot_count).map(BotId).collect();
+            // Derived from the run's roster, never counted from one: a `BotId`
+            // is a Factorio player id, and the run's players are whatever
+            // `initiate_missing_players_with_default_inventory` handed us. A
+            // literal `(1..=bot_count)` here would be a second, independent
+            // claim about who exists, which is precisely the mismatch that had
+            // the executor driving the wrong player.
+            let bots: Vec<BotId> = bots.iter().copied().take(bot_count as usize).collect();
+            if bots.len() < bot_count as usize {
+                return Err(goal_error(format!(
+                    "this run has {} bot(s); cannot schedule over {bot_count}",
+                    bots.len()
+                )));
+            }
             let state = PlanState::from_world(world.clone(), &bots);
             let mut plans = lock(&_plans);
             let net = plans.get(plan_handle)?.net.clone();
@@ -1106,6 +1121,146 @@ mod tests {
         assert!(done, "goal.wait must return a finished run");
         assert!(waited > 0, "the run must have executed something");
         assert_eq!(waited, polled, "a poll after a wait reports the same run");
+    }
+
+    // --------------------------------------------- the scheduler/executor seam
+
+    /// Records the bot named by every command it is asked to perform.
+    #[derive(Default)]
+    struct RecordingActuator {
+        bots: std::sync::Mutex<Vec<BotId>>,
+    }
+
+    impl RecordingActuator {
+        fn note(&self, bot: BotId) -> Result<(), ActuatorError> {
+            #[allow(clippy::unwrap_used)]
+            self.bots.lock().unwrap().push(bot);
+            Ok(())
+        }
+        fn recorded(&self) -> Vec<BotId> {
+            #[allow(clippy::unwrap_used)]
+            self.bots.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl Actuator for RecordingActuator {
+        async fn walk(&self, bot: BotId, _to: Position) -> Result<(), ActuatorError> {
+            self.note(bot)
+        }
+        async fn mine(
+            &self,
+            bot: BotId,
+            _item: &str,
+            _at: Position,
+            _count: u32,
+        ) -> Result<(), ActuatorError> {
+            self.note(bot)
+        }
+        async fn craft(&self, bot: BotId, _recipe: &str, _count: u32) -> Result<(), ActuatorError> {
+            self.note(bot)
+        }
+        async fn place(
+            &self,
+            bot: BotId,
+            _item: &str,
+            _at: Position,
+            _direction: u8,
+        ) -> Result<(), ActuatorError> {
+            self.note(bot)
+        }
+        async fn insert(
+            &self,
+            bot: BotId,
+            _entity: &str,
+            _at: Position,
+            _slot: InventorySlot,
+            _item: &str,
+            _count: u32,
+        ) -> Result<(), ActuatorError> {
+            self.note(bot)
+        }
+        async fn remove(
+            &self,
+            bot: BotId,
+            _entity: &str,
+            _at: Position,
+            _slot: InventorySlot,
+            _item: &str,
+            _count: u32,
+        ) -> Result<(), ActuatorError> {
+            self.note(bot)
+        }
+        async fn research(&self, _tech: &str) -> Result<(), ActuatorError> {
+            Ok(())
+        }
+    }
+
+    /// The seam between the half of the stack that *assigns* work and the half
+    /// that *performs* it.
+    ///
+    /// When this was broken both halves were internally consistent: the
+    /// schedule numbered bots `1..=n` and the actuator numbered them `0..n-1`,
+    /// and each had a passing test against its own convention. So this test
+    /// states neither. It gives the bindings a roster of player ids — the same
+    /// thing `Planner::initiate_missing_players_with_default_inventory` returns
+    /// to `run_lua` — drives the real `goal.*` bindings all the way through
+    /// `goal.execute`, and then asks the *executor's own* resolution function
+    /// whether each bot it was handed names a player that is in the game.
+    ///
+    /// The `[3, 4]` roster is the discriminating one, and it fails against
+    /// either side's old convention: a schedule built from `1..=bot_count`
+    /// dispatches to players 1 and 2, who are not in the game, and an actuator
+    /// that renumbers the connected players `0..n-1` has no bot 3 or 4.
+    #[tokio::test]
+    async fn every_bot_the_bindings_dispatch_to_is_a_player_the_actuator_can_drive() {
+        use factorio_bot_core::types::PlayerId;
+        use std::collections::BTreeSet;
+
+        for roster in [vec![1u8], vec![1, 2], vec![3, 4], vec![1, 2, 3, 4]] {
+            let rec = Arc::new(RecordingActuator::default());
+            let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+            let table = create_lua_goal_with(
+                &lua,
+                Arc::new(fixture_world()),
+                factory(rec.clone()),
+                roster.clone(),
+            )
+            .expect("goal table");
+            lua.globals().set("goal", table).expect("install");
+
+            exec_bounded(
+                &lua,
+                &format!(
+                    r#"
+                    local p = goal.have("iron-ore", 20)
+                    goal.schedule(p, {})
+                    goal.wait(goal.execute(p))
+                    "#,
+                    roster.len()
+                ),
+            )
+            .await;
+
+            let dispatched = rec.recorded();
+            assert!(
+                !dispatched.is_empty(),
+                "roster {roster:?}: nothing was dispatched, so the loop below would \
+                 hold for any numbering at all"
+            );
+            // The game has exactly the run's players in it — that is what the
+            // roster means. `RconActuator::new` builds this same set from
+            // `connected_players()`.
+            let connected: BTreeSet<PlayerId> = roster.iter().copied().collect();
+            for bot in &dispatched {
+                let player = RconActuator::resolve_player(&connected, *bot)
+                    .unwrap_or_else(|err| panic!("roster {roster:?}: {err}"));
+                assert!(
+                    roster.contains(&player),
+                    "roster {roster:?}: {bot} drove player {player}, who is not in this run"
+                );
+            }
+        }
     }
 
     /// Runs `tests/goal_script.lua` through the real interpreter and the real

@@ -4,7 +4,7 @@ use factorio_bot_core::factorio::rcon::FactorioRcon;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::types::{PlayerId, Position};
 use factorio_bot_planner::{BotId, InventorySlot};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// The game's own `defines.inventory` table, read once at construction.
@@ -117,33 +117,30 @@ pub struct RconActuator {
     rcon: Arc<FactorioRcon>,
     world: Arc<FactorioWorld>,
     defines: InventoryDefines,
-    /// Planner bot ids to Factorio player ids. Bots are interchangeable to the
-    /// planner; this is where they acquire an identity in the game.
-    players: BTreeMap<BotId, PlayerId>,
+    /// The players the game reported as connected when this actuator was built.
+    ///
+    /// Not a mapping: a `BotId` *is* a player id (see [`BotId`]). This set is
+    /// only the membership test, so a schedule naming a player who is not in
+    /// the game fails as `UnknownBot` rather than being silently renumbered
+    /// onto whoever happens to be present.
+    connected: BTreeSet<PlayerId>,
 }
 
 impl RconActuator {
-    /// Discovers its own bots: every connected player becomes a bot, numbered
-    /// `BotId(0..n)` in ascending player-id order.
-    ///
-    /// Sorted, so the mapping is a function of who is connected and not of the
-    /// order the game happened to list them. The planner treats bots as
-    /// interchangeable, so which player gets which id does not affect the plan
-    /// — but it must be stable across a re-plan within one run, or the executor
-    /// would hand a chain to a different body midway.
+    /// Reads the roster the game actually has, so `player` can reject a bot
+    /// that is not in it. It does **not** renumber: see [`BotId`].
     pub async fn new(
         rcon: Arc<FactorioRcon>,
         world: Arc<FactorioWorld>,
     ) -> Result<Self, ActuatorError> {
-        let ids: Vec<PlayerId> = rcon
+        let connected: BTreeSet<PlayerId> = rcon
             .connected_players()
             .await
             .map_err(|e| ActuatorError::Rejected(e.to_string()))?
             .into_iter()
             .map(|p| p.player_id)
             .collect();
-        let players = Self::bot_mapping(ids);
-        if players.is_empty() {
+        if connected.is_empty() {
             return Err(ActuatorError::Rejected("no connected players".to_string()));
         }
         // `FactorioRcon::send` is `async fn send(&self, command: &str)
@@ -161,30 +158,30 @@ impl RconActuator {
             rcon,
             world,
             defines,
-            players,
+            connected,
         })
     }
 
-    /// Player ids become `BotId(0..n)` in ascending order.
+    /// The Factorio player a `BotId` names: itself.
     ///
-    /// The sort lives here, with the function that promises the ordering, so
-    /// the guarantee cannot be lost by a caller collecting ids in whatever
-    /// order the game listed them. Factored out of `new` so the numbering is
-    /// testable without a game.
-    fn bot_mapping(mut player_ids: Vec<PlayerId>) -> BTreeMap<BotId, PlayerId> {
-        player_ids.sort_unstable();
-        player_ids
-            .into_iter()
-            .enumerate()
-            .map(|(i, pid)| (BotId(i as u8), pid))
-            .collect()
+    /// The identity is the whole point — see [`BotId`]. All this adds is the
+    /// membership check, and it is a free function over the roster so the seam
+    /// between "who the scheduler assigns work to" and "who the executor
+    /// drives" can be exercised without a running game.
+    pub fn resolve_player(
+        connected: &BTreeSet<PlayerId>,
+        bot: BotId,
+    ) -> Result<PlayerId, ActuatorError> {
+        let player: PlayerId = bot.0;
+        if connected.contains(&player) {
+            Ok(player)
+        } else {
+            Err(ActuatorError::UnknownBot(bot))
+        }
     }
 
     fn player(&self, bot: BotId) -> Result<PlayerId, ActuatorError> {
-        self.players
-            .get(&bot)
-            .copied()
-            .ok_or(ActuatorError::UnknownBot(bot))
+        Self::resolve_player(&self.connected, bot)
     }
 }
 
@@ -416,21 +413,38 @@ mod tests {
     }
 
     #[test]
-    fn bots_are_numbered_from_zero_in_player_id_order() {
-        // Deliberately unsorted: the ordering, not `enumerate`, is what this
-        // guards. Bot identity must be a function of who is connected, not of
-        // the order the game happened to list them, or a re-plan would hand a
-        // chain to a different body midway.
-        let ids: Vec<PlayerId> = vec![7, 2, 5];
-        let map = RconActuator::bot_mapping(ids);
-        assert_eq!(map.get(&BotId(0)).copied(), Some(2));
-        assert_eq!(map.get(&BotId(1)).copied(), Some(5));
-        assert_eq!(map.get(&BotId(2)).copied(), Some(7));
+    fn a_bot_id_is_the_player_id_and_is_never_renumbered() {
+        // A gappy roster is the case that tells identity apart from any
+        // position-based numbering: under `enumerate` these would come out as
+        // players 2, 5 and 7 for bots 0, 1 and 2, and bot 7 would not exist.
+        let connected: BTreeSet<PlayerId> = [2, 5, 7].into_iter().collect();
+        for id in [2u8, 5, 7] {
+            assert_eq!(
+                RconActuator::resolve_player(&connected, BotId(id)).unwrap(),
+                id,
+                "bot {id} must drive player {id}"
+            );
+        }
     }
 
     #[test]
-    fn no_connected_players_yields_no_bots() {
-        assert!(RconActuator::bot_mapping(vec![]).is_empty());
+    fn a_bot_whose_player_is_not_in_the_game_is_rejected_not_substituted() {
+        let connected: BTreeSet<PlayerId> = [2, 5, 7].into_iter().collect();
+        for absent in [0u8, 1, 3, 8] {
+            assert!(
+                matches!(
+                    RconActuator::resolve_player(&connected, BotId(absent)),
+                    Err(ActuatorError::UnknownBot(BotId(b))) if b == absent
+                ),
+                "player {absent} is not connected, so bot {absent} must be unknown"
+            );
+        }
+    }
+
+    #[test]
+    fn no_connected_players_means_every_bot_is_unknown() {
+        let connected: BTreeSet<PlayerId> = BTreeSet::new();
+        assert!(RconActuator::resolve_player(&connected, BotId(1)).is_err());
     }
 
     #[test]

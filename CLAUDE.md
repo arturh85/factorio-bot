@@ -79,9 +79,21 @@ BotBridge Mod (Factorio mod for RPC)
   - `factorio/rcon.rs` - RCON protocol implementation
   - `graph/entity_graph.rs` - Spatial entity relationships
   - `graph/flow_graph.rs` - Material flow throughput
-  - `graph/task_graph.rs` - Bot task DAG with time estimates
   - `process/` - Factorio process spawning/control
-  - `plan/` - Goal decomposition and task execution
+  - `plan/planner.rs` - `Planner`, the Lua runtime's context holder (rcon,
+    real_world, plan_world). NOT a planner any more: the task-graph planner it
+    was named for was deleted, and goal decomposition now lives in
+    `crates/planner`. The name is kept because `run_lua` takes it.
+
+- **crates/planner**: the goal planner. Pure and deterministic — no I/O, no
+  async, no wall-clock, ordered collections only, floats via `total_cmp`.
+  `Goal` -> `expand()` -> `ActionNetwork` -> `schedule()` -> `Schedule`.
+  Methods live in `method/`; `state.rs` overlays a `FactorioWorld` snapshot.
+
+- **crates/executor**: runs a `Schedule` across bots over RCON. Per-action
+  completion signals (`tokio::sync::watch`, not polling), lag edges modelling
+  machine time, pre-flight wait-graph cycle rejection, and recovery tiers in
+  `recover.rs`. Issues only legitimate player actions — no `cheat_*` calls.
 
 - **crates/scripting_lua**: Lua 5.4 bindings exposing host functions for task queuing, graph queries, and RCON commands
   - `sandbox.rs` - the restricted interpreter every user script runs in

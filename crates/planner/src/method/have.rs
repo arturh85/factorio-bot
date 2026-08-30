@@ -24,7 +24,7 @@ use crate::ids::{BotId, Ticks};
 use crate::method::util::{
     free_area_near, ingredients_of, mining_ticks, nearest_resource_tile, output_per_craft,
     recipe_for, recipe_ticks, research_ingredients, research_ticks, resource_supply_at_least,
-    resource_tiles_for, technology_for,
+    resource_tiles_for,
 };
 use crate::method::{ExpansionCtx, GoalSite, Method, MethodRegistry, Step};
 use crate::state::PlanState;
@@ -594,7 +594,7 @@ impl Method for Researched {
         let Goal::Researched(name) = goal else {
             return false;
         };
-        let Some(tech) = technology_for(state, name) else {
+        let Some(tech) = state.technology(name) else {
             return false;
         };
         // One research action carries a `HasItem` for every pack, exactly like
@@ -632,8 +632,10 @@ impl Method for Researched {
                 goal: goal.to_string(),
             });
         };
-        let tech =
-            technology_for(&ctx.state, name).ok_or_else(|| PlannerError::UnknownTechnology {
+        let tech = ctx
+            .state
+            .technology(name)
+            .ok_or_else(|| PlannerError::UnknownTechnology {
                 technology: name.clone(),
             })?;
 
@@ -1140,12 +1142,19 @@ mod tests {
             BotId(1),
         )
         .expect_err("a prerequisite cycle cannot be planned");
+        // Not `depth == MAX_EXPANSION_DEPTH`: the error is *built from* that
+        // constant, so the clause cannot fail whatever the code does. What the
+        // code could get wrong is *which* goal it blames — reporting the
+        // caller's goal, or the last `Have` it happened to hold — so that is
+        // what is asserted. The two cycle members carry no ingredients, so the
+        // only goals in this recursion are the two research goals, and naming
+        // either is right.
+        let PlannerError::ExpansionTooDeep { goal, .. } = &err else {
+            panic!("expected ExpansionTooDeep, got {err:?}");
+        };
         assert!(
-            matches!(
-                &err,
-                PlannerError::ExpansionTooDeep { depth, .. } if *depth == crate::method::MAX_EXPANSION_DEPTH
-            ),
-            "expected ExpansionTooDeep, got {err:?}"
+            goal == "research loop-a" || goal == "research loop-b",
+            "the error must blame the research goal that ran too deep, got {goal:?}"
         );
     }
 
@@ -1202,6 +1211,125 @@ mod tests {
         .expect("a stocked roster must not make the research unplannable");
         assert_eq!(research_actions(&net).len(), 1);
         schedule(&net, &s, &bots).expect("and it must still schedule");
+    }
+
+    /// D1, end to end. Two forces disagree about `automation`: `alpha`, which
+    /// sorts first and is therefore the one this plan acts for, has not
+    /// researched it; `zeta` has. The plan must research it.
+    ///
+    /// Before the acting force was fixed, `is_researched` answered over *any*
+    /// force and said yes, `AlreadySatisfied` claimed the goal, and `expand`
+    /// returned an empty network — the planner silently declining to research
+    /// something the acting force lacks. An empty network is the failure mode,
+    /// so the assertion is on what the plan contains, not on it being `Ok`.
+    #[test]
+    fn a_force_that_lacks_a_technology_researches_it_whatever_other_forces_have() {
+        let bots = [BotId(1)];
+        let world = Arc::new(crate::test_world::world_with_forces(&[
+            ("alpha", false),
+            ("zeta", true),
+        ]));
+        let s = PlanState::from_world(world, &bots);
+        let net = expand(
+            &[Goal::Researched("automation".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("the acting force can research it");
+        assert_eq!(
+            research_actions(&net).len(),
+            1,
+            "the acting force has not researched automation, so the plan must"
+        );
+        assert!(
+            net.actions()
+                .any(|a| matches!(&a.kind, ActionKind::Mine { .. })),
+            "and it must pay alpha's price rather than assume zeta's stock"
+        );
+    }
+
+    /// The mirror, so neither half is a constant: when the acting force *has*
+    /// researched it, nothing is planned even though another force has not.
+    #[test]
+    fn a_force_that_has_a_technology_plans_nothing_whatever_other_forces_lack() {
+        let bots = [BotId(1)];
+        let world = Arc::new(crate::test_world::world_with_forces(&[
+            ("alpha", true),
+            ("zeta", false),
+        ]));
+        let s = PlanState::from_world(world, &bots);
+        let net = expand(
+            &[Goal::Researched("automation".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("an already-researched technology is satisfiable");
+        assert_eq!(net.len(), 0, "nothing to do");
+    }
+
+    /// `default_registry()` is a public export, and its wiring is separate
+    /// from `registry_for`'s: deleting `Researched` from one leaves the other
+    /// working, so every other research test here passes with the export
+    /// broken. This is the only test that would notice.
+    #[test]
+    fn the_default_registry_can_satisfy_a_research_goal() {
+        let bots = [BotId(1)];
+        let s = tech_state(&bots);
+        let net = expand(
+            &[Goal::Researched("automation".into())],
+            &s,
+            &default_registry(),
+            BotId(1),
+        )
+        .expect("the default registry must hold a research method");
+        assert_eq!(research_actions(&net).len(), 1);
+    }
+
+    /// A legal, acyclic prerequisite chain 20 deep expands, one research per
+    /// link. `MAX_EXPANSION_DEPTH` is shared between recipe nesting and this
+    /// recursion now, and this is the half that can grow without bound in real
+    /// game data — Factorio's own tree runs to roughly this depth.
+    ///
+    /// Stated as a chain length the planner must cope with rather than as
+    /// arithmetic on the constant, so raising or lowering `MAX_EXPANSION_DEPTH`
+    /// cannot make this pass by definition.
+    #[test]
+    fn a_twenty_deep_prerequisite_chain_expands() {
+        let bots = [BotId(1)];
+        let world = Arc::new(crate::test_world::world_with_prerequisite_chain(20));
+        let s = PlanState::from_world(world, &bots);
+        let net = expand(
+            &[Goal::Researched("chain-0".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a legal chain of twenty must be plannable");
+        assert_eq!(research_actions(&net).len(), 20);
+    }
+
+    /// And a chain past the bound is refused rather than run forever. The
+    /// cycle test above proves an *illegal* tree terminates; this proves the
+    /// bound is what stops it, by hitting it with a tree that is perfectly
+    /// legal and merely too deep.
+    #[test]
+    fn a_prerequisite_chain_past_the_bound_is_refused_not_run() {
+        let bots = [BotId(1)];
+        let world = Arc::new(crate::test_world::world_with_prerequisite_chain(64));
+        let s = PlanState::from_world(world, &bots);
+        let err = expand(
+            &[Goal::Researched("chain-0".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect_err("a chain of sixty-four is past the bound");
+        assert!(
+            matches!(&err, PlannerError::ExpansionTooDeep { goal, .. } if goal.starts_with("research chain-")),
+            "expected ExpansionTooDeep naming a chain link, got {err:?}"
+        );
     }
 
     /// End to end: a research goal reaches a schedule, with the whole science

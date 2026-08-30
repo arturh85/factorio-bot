@@ -53,7 +53,7 @@ local ok, err = pcall(goal.researched, "teleportation")
 assert(not ok, "goal.researched must refuse a technology no force defines")
 assert(string.find(tostring(err), "teleportation", 1, true),
        "the error must name the technology asked for, got: " .. tostring(err))
-assert(string.find(tostring(err), "no technology named", 1, true),
+assert(string.find(tostring(err), "defines no technology named", 1, true),
        "the error must say the technology is unknown, got: " .. tostring(err))
 
 -- An unknown handle is likewise an error, not a crash.

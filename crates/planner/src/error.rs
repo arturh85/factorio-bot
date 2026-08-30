@@ -79,7 +79,7 @@ pub enum PlannerError {
     /// world defines is not a routing problem at all — the name itself is
     /// wrong, or the world was never told about the technology — and no amount
     /// of mining will fix it.
-    #[error("no technology named {technology} is known to any force in this world")]
+    #[error("the force this plan acts for defines no technology named {technology}")]
     #[diagnostic(
         code(planner::unknown_technology),
         help("check the spelling, or whether the world's forces have been loaded yet")

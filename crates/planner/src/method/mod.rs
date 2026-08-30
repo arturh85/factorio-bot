@@ -171,9 +171,31 @@ impl MethodRegistry {
 
 use crate::network::ActionNetwork;
 
-/// Recipe chains in this domain are shallow — science pack to gear to plate to
-/// ore is four levels, plus one for a per-bot split. This bound exists to turn
-/// a method that expands into itself into an error rather than a hang.
+/// How many nested goals one expansion may reach before it is treated as a
+/// runaway. Exists to turn a method that expands into itself into an error
+/// rather than a hang.
+///
+/// Two independent things spend this budget, and they add up:
+///
+/// * **Recipe nesting.** Science pack to gear to plate to ore is four levels,
+///   plus one for a per-bot split.
+/// * **Research prerequisites.** `method::have::Researched` emits a
+///   `Researched` subgoal per prerequisite, so a technology's prerequisite
+///   chain costs one level per link, on top of the recipe nesting under
+///   whichever link's science packs run deepest.
+///
+/// Measured against the fixtures, not derived: a prerequisite chain of
+/// technologies that cost no science packs expands to 32 links and fails at
+/// 33; one whose every link costs an automation science pack expands to 27 and
+/// fails at 28, the difference being the pack's own recipe nesting. Both are
+/// pinned by tests in `method::have` that state a chain length rather than
+/// arithmetic on this constant, so changing it here cannot make them pass by
+/// definition.
+///
+/// **Not raised for research.** Factorio's own technology tree runs to roughly
+/// eighteen links at its deepest, which fits inside 27 with room to spare, and
+/// the bound is only useful while it is low enough to catch a runaway quickly.
+/// Raise it when a real tree is shown not to fit, and say which one.
 pub const MAX_EXPANSION_DEPTH: u32 = 32;
 
 /// Expand `goals` into a schedulable network.

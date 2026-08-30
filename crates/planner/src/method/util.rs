@@ -204,30 +204,6 @@ pub fn recipe_ticks(recipe: &FactorioRecipe) -> Ticks {
     seconds_to_ticks(recipe.energy.to_f64().unwrap_or(0.5))
 }
 
-/// The definition of technology `name`, taken from the alphabetically first
-/// force that carries it.
-///
-/// `FactorioWorld::forces` is a `DashMap`, so "the first force that has it" is
-/// not a deterministic answer — iteration order moves with the hash seed, and
-/// planning is required to give the same plan for the same world every time.
-/// Ordering by force name makes it one. In practice every world here has a
-/// single force, so the tie-break never fires; it exists so that a world with
-/// two could not make planning irreproducible.
-pub fn technology_for(state: &PlanState, name: &str) -> Option<FactorioTechnology> {
-    state
-        .base()
-        .forces
-        .iter()
-        .filter_map(|force| {
-            force
-                .technologies
-                .get(name)
-                .map(|tech| (force.value().name.clone(), tech.clone()))
-        })
-        .min_by(|(a, _), (b, _)| a.cmp(b))
-        .map(|(_, tech)| tech)
-}
-
 /// What a whole research costs, as (item, total count) pairs in the order the
 /// technology lists them.
 ///

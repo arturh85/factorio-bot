@@ -154,6 +154,117 @@ const FIXTURE_FORCE_JSON: &str = r#"
 }
 "#;
 
+/// A force named `{name}` in which `automation` is researched iff `{done}`.
+///
+/// Deliberately minimal and deliberately *disagreeing* between instances: the
+/// point of a multi-force world here is that the forces answer differently, so
+/// a planner that consulted the wrong one gives a different answer rather than
+/// the same one by luck.
+fn one_technology_force(name: &str, done: bool) -> FactorioForce {
+    let json = format!(
+        r#"
+        {{
+          "name": "{name}",
+          "force_id": 1,
+          "current_research": null,
+          "research_progress": null,
+          "technologies": {{
+            "automation": {{
+              "name": "automation",
+              "enabled": true,
+              "upgrade": false,
+              "researched": {done},
+              "prerequisites": [],
+              "research_unit_ingredients": [
+                {{ "name": "automation-science-pack", "ingredient_type": "item", "amount": 1 }}
+              ],
+              "research_unit_count": {count},
+              "research_unit_energy": 600.0,
+              "order": "a-a",
+              "level": 1,
+              "valid": true
+            }}
+          }}
+        }}
+        "#,
+        name = name,
+        done = done,
+        // The unit count differs with `researched` too, so a test can tell
+        // which force a *cost* was read from and not only which was asked
+        // about researched-ness.
+        count = if done { 99 } else { 10 },
+    );
+    serde_json::from_str(&json).expect("the generated force must parse")
+}
+
+/// `fixture_world()` with several forces, each defining `automation`
+/// differently.
+///
+/// `forces` is a `DashMap`, so this is also the fixture that says whether the
+/// planner's answer depends on the hash seed. The names are passed in so a
+/// caller can put the researched one first or last alphabetically.
+pub(crate) fn world_with_forces(forces: &[(&str, bool)]) -> FactorioWorld {
+    let world = fixture_world();
+    for (name, done) in forces {
+        world
+            .update_force(one_technology_force(name, *done))
+            .expect("update_force cannot fail for a well-formed force");
+    }
+    world
+}
+
+/// `fixture_world()` with a straight prerequisite chain `chain-0` requires
+/// `chain-1` requires ... `chain-{len-1}`.
+///
+/// Ingredient-free on purpose: the depth an expansion reaches is the sum of the
+/// prerequisite recursion and the recipe nesting under each technology's
+/// science packs, and this fixture isolates the first by removing the second.
+pub(crate) fn world_with_prerequisite_chain(len: u32) -> FactorioWorld {
+    let mut technologies = Vec::new();
+    for level in 0..len {
+        let prerequisites = if level + 1 < len {
+            format!(r#"["chain-{}"]"#, level + 1)
+        } else {
+            "[]".to_string()
+        };
+        technologies.push(format!(
+            r#"
+            "chain-{level}": {{
+              "name": "chain-{level}",
+              "enabled": true,
+              "upgrade": false,
+              "researched": false,
+              "prerequisites": {prerequisites},
+              "research_unit_ingredients": [],
+              "research_unit_count": 1,
+              "research_unit_energy": 60.0,
+              "order": "c-{level}",
+              "level": 1,
+              "valid": true
+            }}"#
+        ));
+    }
+    let json = format!(
+        r#"
+        {{
+          "name": "player",
+          "force_id": 1,
+          "current_research": null,
+          "research_progress": null,
+          "technologies": {{ {} }}
+        }}
+        "#,
+        technologies.join(",")
+    );
+    let world = fixture_world();
+    let force: FactorioForce =
+        serde_json::from_str(&json).expect("the generated chain force must parse");
+    world
+        .update_force(force)
+        .expect("update_force cannot fail for a well-formed force");
+    world
+}
+
 /// `fixture_world()` plus the force above. Nothing else differs.
 pub(crate) fn world_with_technologies() -> FactorioWorld {
     let world = fixture_world();
@@ -168,7 +279,10 @@ pub(crate) fn world_with_technologies() -> FactorioWorld {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::BotId;
+    use crate::state::PlanState;
     use factorio_bot_core::test_utils::fixture_world;
+    use std::sync::Arc;
 
     /// The premise the whole fixture rests on. If `fixture_world` ever grows a
     /// force of its own, `world_with_technologies` would be layering on top of
@@ -177,6 +291,98 @@ mod tests {
     #[test]
     fn the_shared_fixture_world_still_carries_no_forces() {
         assert_eq!(fixture_world().forces.len(), 0);
+    }
+
+    /// The seam D1 named: `is_researched` used to answer over *any* force
+    /// while costs were read from the alphabetically first one. `alpha` has
+    /// not researched automation and `zeta` has, so the two questions have
+    /// opposite answers and only a planner that asks one force gets a
+    /// consistent pair.
+    ///
+    /// Written against the *acting* force rather than against either literal
+    /// answer: `alpha` sorts first, so the acting force has not researched it,
+    /// and the cost read must be `alpha`'s 10 rather than `zeta`'s 99.
+    #[test]
+    fn a_world_of_disagreeing_forces_is_answered_by_one_of_them() {
+        let world = Arc::new(world_with_forces(&[("alpha", false), ("zeta", true)]));
+        let state = PlanState::from_world(world, &[BotId(1)]);
+
+        assert_eq!(state.force(), Some("alpha"));
+        assert!(
+            !state.is_researched("automation"),
+            "the acting force has not researched it, whatever the other force says"
+        );
+        assert_eq!(
+            state
+                .technology("automation")
+                .expect("the acting force defines it")
+                .research_unit_count,
+            10,
+            "the cost must come from the same force that answered is_researched"
+        );
+    }
+
+    /// The other direction, so neither result can be a constant: with the
+    /// researched force sorting *first*, both answers flip together.
+    #[test]
+    fn the_acting_force_decides_both_answers_together() {
+        let world = Arc::new(world_with_forces(&[("alpha", true), ("zeta", false)]));
+        let state = PlanState::from_world(world, &[BotId(1)]);
+
+        assert_eq!(state.force(), Some("alpha"));
+        assert!(state.is_researched("automation"));
+        assert_eq!(
+            state
+                .technology("automation")
+                .expect("the acting force defines it")
+                .research_unit_count,
+            99,
+        );
+    }
+
+    /// `forces` is a `DashMap`, whose iteration order moves with the hash
+    /// seed. Choosing the acting force by `min` collapses that order by
+    /// construction, so the answer must be identical across freshly built
+    /// worlds rather than merely usually the same.
+    ///
+    /// Six forces so that "first by iteration" and "first by name" are very
+    /// unlikely to coincide, and fifty fresh worlds so a seed-dependent
+    /// implementation has room to show it. This is the same fixture the two
+    /// tests above use, run for a different property.
+    #[test]
+    fn the_acting_force_does_not_depend_on_map_order() {
+        let names = [
+            ("mu", true),
+            ("zeta", true),
+            ("alpha", false),
+            ("kappa", true),
+            ("beta", true),
+            ("omega", true),
+        ];
+        for _ in 0..50 {
+            let world = Arc::new(world_with_forces(&names));
+            let state = PlanState::from_world(world, &[BotId(1)]);
+            assert_eq!(state.force(), Some("alpha"));
+            assert!(!state.is_researched("automation"));
+            assert_eq!(
+                state
+                    .technology("automation")
+                    .expect("the acting force defines it")
+                    .research_unit_count,
+                10,
+            );
+        }
+    }
+
+    /// A world with no forces acts for none, and knows no technology. This is
+    /// what the shared `fixture_world` is, so it is the state every
+    /// non-research test in the crate plans against.
+    #[test]
+    fn a_world_without_forces_acts_for_no_force() {
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
+        assert_eq!(state.force(), None);
+        assert!(state.technology("automation").is_none());
+        assert!(!state.is_researched("automation"));
     }
 
     /// Guards the JSON against a rename or a type change in

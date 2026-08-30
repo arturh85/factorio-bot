@@ -2,7 +2,9 @@ use crate::error::PlannerError;
 use crate::ids::{BotId, ItemId};
 use factorio_bot_core::factorio::util::add_to_rect;
 use factorio_bot_core::factorio::world::FactorioWorld;
-use factorio_bot_core::types::{FactorioEntity, Pos, Position, Rect, ResourcePatch};
+use factorio_bot_core::types::{
+    FactorioEntity, FactorioTechnology, Pos, Position, Rect, ResourcePatch,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -95,7 +97,37 @@ pub struct PlanState {
     removed: BTreeSet<Pos>,
     /// Ore taken from a tile by the plan, subtracted from the base amount.
     consumed: BTreeMap<Pos, u32>,
+    /// The one force this plan acts for, or `None` if `base` carries no forces.
+    ///
+    /// Chosen once, here, and read by everything that asks a question about
+    /// technology — `is_researched` and `technology` both. That single
+    /// selection site is the point. Before it there were two: `is_researched`
+    /// answered "yes" if *any* force had the technology researched, while the
+    /// cost of that same technology was read from whichever force sorted
+    /// first. Each was individually defensible and together they disagreed
+    /// about who we are planning for, so a world where `alpha` has not
+    /// researched automation and `zeta` has made the planner silently emit
+    /// nothing for `Researched("automation")` — refusing to research something
+    /// the acting force does not have.
+    ///
+    /// The planner has no concept of acting for several forces at once, and
+    /// inventing one to fix this would be speculative. So it acts for exactly
+    /// one, and the type says so: there is nowhere else to make the choice and
+    /// nothing else to disagree with.
+    ///
+    /// Which force: the alphabetically first, because `FactorioWorld::forces`
+    /// is a `DashMap` whose iteration order moves with the hash seed and
+    /// planning has to be reproducible. Every world this plans against has a
+    /// single force, so the tie-break decides nothing in practice; it exists so
+    /// that a world with several cannot make planning depend on the seed.
+    force: Option<String>,
     /// Technologies the plan has completed.
+    ///
+    /// Keyed by bare technology name, which is unambiguous precisely because a
+    /// `PlanState` acts for one force: the overlay cannot mean a different
+    /// force's copy of the technology than `force` above names. If the planner
+    /// ever learns to act for several, this has to become `(force, tech)` at
+    /// the same time — the two are one decision, not two.
     researched: BTreeSet<String>,
     /// Half the diagonal of the largest collision box among `base`'s known
     /// entity prototypes, or `0.` if it carries none.
@@ -137,12 +169,14 @@ impl PlanState {
                 0.0_f64,
                 |acc, d| if d.total_cmp(&acc).is_gt() { d } else { acc },
             );
+        let force = base.forces.iter().map(|entry| entry.key().clone()).min();
         PlanState {
             base,
             bots: map,
             added: Default::default(),
             removed: Default::default(),
             consumed: Default::default(),
+            force,
             researched: Default::default(),
             max_prototype_half_diagonal,
         }
@@ -154,6 +188,24 @@ impl PlanState {
 
     pub fn base(&self) -> &Arc<FactorioWorld> {
         &self.base
+    }
+
+    /// The force this plan acts for. See the field.
+    pub fn force(&self) -> Option<&str> {
+        self.force.as_deref()
+    }
+
+    /// Technology `name` as the acting force defines it.
+    ///
+    /// The only way to reach a `FactorioTechnology` from a `PlanState`, so
+    /// that a caller cannot read one force's cost while `is_researched`
+    /// answers about another's.
+    pub fn technology(&self, name: &str) -> Option<FactorioTechnology> {
+        let force = self.force.as_deref()?;
+        self.base
+            .forces
+            .get(force)
+            .and_then(|entry| entry.technologies.get(name).cloned())
     }
 
     pub fn bot_ids(&self) -> Vec<BotId> {
@@ -391,14 +443,19 @@ impl PlanState {
         Ok(())
     }
 
+    /// Has the acting force finished `tech`, either already or under this plan?
+    ///
+    /// The union of the plan's overlay and what the acting force reports. The
+    /// two cannot contradict each other on the *time* axis, because research
+    /// is monotone: nothing in the game or in this planner un-researches a
+    /// technology, so the overlay can only add. They could once contradict
+    /// each other on the *force* axis, which is what `force` above fixes —
+    /// this asks the same force `technology` reads costs from, and no other.
     pub fn is_researched(&self, tech: &str) -> bool {
         if self.researched.contains(tech) {
             return true;
         }
-        self.base
-            .forces
-            .iter()
-            .any(|force| matches!(force.technologies.get(tech), Some(t) if t.researched))
+        matches!(self.technology(tech), Some(t) if t.researched)
     }
 
     pub fn set_researched(&mut self, tech: &str) {

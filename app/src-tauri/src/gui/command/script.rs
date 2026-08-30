@@ -1,10 +1,12 @@
 #![allow(clippy::module_name_repetitions)]
 #[cfg(feature = "lua")]
-use crate::scripting::{run_script, run_script_file};
+use crate::scripting::run_script_file;
 use crate::settings::SharedAppSettings;
 use factorio_bot_core::paris::warn;
 use factorio_bot_core::process::process_control::SharedFactorioInstance;
 use factorio_bot_core::types::PrimeVueTreeNode;
+#[cfg(feature = "lua")]
+use factorio_bot_scripting_lua::run_script;
 use tauri::State;
 
 #[tauri::command]
@@ -29,7 +31,10 @@ pub async fn execute_script(
         let mut planner = Planner::new(world, Some(rcon));
         let app_settings = &app_settings.read().await;
         let bot_count = app_settings.factorio.client_count;
-        let (stdout, stderr) = run_script_file(&mut planner, &path[1..], bot_count, None)
+        // Not `&path[1..]`: that panics on an empty `path` and on a leading
+        // multi-byte character. `resolve_script_path` strips the leading `/`
+        // itself, char-aware.
+        let (stdout, stderr) = run_script_file(&mut planner, &path, bot_count, None)
           .await
           .map_err(|e| format!("error: {e:?}"))?;
         return Ok((stdout, stderr));
@@ -75,7 +80,6 @@ pub async fn execute_code(
           &mut planner,
           &language,
           &code,
-          None,
           &scripts_root,
           bot_count,
           None,
@@ -106,8 +110,12 @@ pub async fn load_scripts_in_directory(
     let app_settings = &app_settings.read().await;
     let workspace_path = app_settings.factorio.workspace_path.to_string();
     let workspace_path = Path::new(&workspace_path);
+    // Must be the same root `execute_script` runs from, or this lists one
+    // directory while the executor reads another. `scripts_dir` prefers
+    // `./scripts` relative to the process CWD; `ensure_scripts_dir` is
+    // workspace-only.
     let workspace_plans_path =
-      factorio_bot_core::scripts::scripts_dir(workspace_path).map_err(|e| format!("{e}"))?;
+      factorio_bot_core::scripts::ensure_scripts_dir(workspace_path).map_err(|e| format!("{e}"))?;
 
     if path.contains("..") {
       return Err("invalid path".into());
@@ -162,8 +170,12 @@ pub async fn load_script(
     let app_settings = &app_settings.read().await;
     let workspace_path = app_settings.factorio.workspace_path.to_string();
     let workspace_path = Path::new(&workspace_path);
+    // Must be the same root `execute_script` runs from, or this lists one
+    // directory while the executor reads another. `scripts_dir` prefers
+    // `./scripts` relative to the process CWD; `ensure_scripts_dir` is
+    // workspace-only.
     let workspace_plans_path =
-      factorio_bot_core::scripts::scripts_dir(workspace_path).map_err(|e| format!("{e}"))?;
+      factorio_bot_core::scripts::ensure_scripts_dir(workspace_path).map_err(|e| format!("{e}"))?;
     if path.contains("..") {
       return Err("invalid path".into());
     }
@@ -197,8 +209,12 @@ pub async fn save_script(
     let app_settings = &app_settings.read().await;
     let workspace_path = app_settings.factorio.workspace_path.to_string();
     let workspace_path = Path::new(&workspace_path);
+    // Must be the same root `execute_script` runs from, or this lists one
+    // directory while the executor reads another. `scripts_dir` prefers
+    // `./scripts` relative to the process CWD; `ensure_scripts_dir` is
+    // workspace-only.
     let workspace_plans_path =
-      factorio_bot_core::scripts::scripts_dir(workspace_path).map_err(|e| format!("{e}"))?;
+      factorio_bot_core::scripts::ensure_scripts_dir(workspace_path).map_err(|e| format!("{e}"))?;
     if path.contains("..") {
       return Err("invalid path".into());
     }

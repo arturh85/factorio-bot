@@ -46,8 +46,11 @@ impl Subcommand for ThisCommand {
     let app_settings = load_app_settings().unwrap();
     let workspace_path = app_settings.factorio.workspace_path.to_string();
     let workspace_path = Path::new(&workspace_path);
+    // Must be the same root `run_script_file` executes from, or the REPL lists
+    // one directory and runs from another. `scripts_dir` prefers `./scripts`
+    // relative to the process CWD; `ensure_scripts_dir` is workspace-only.
     let dir = std::fs::read_dir(
-      factorio_bot_core::scripts::scripts_dir(workspace_path).expect("failed to prepare"),
+      factorio_bot_core::scripts::ensure_scripts_dir(workspace_path).expect("failed to prepare"),
     )
     .expect("failed to read script dir");
     let _entries: Vec<String> = dir

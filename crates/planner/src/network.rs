@@ -117,8 +117,13 @@ impl ActionNetwork {
     /// serialises work that could have run in parallel. Choosing *which*
     /// producers satisfy a consumer is an assignment problem that belongs with
     /// the methods that build the network, not with inference over a finished
-    /// one: before scheduling, `Actor::Role` is unbound, so nothing here can
-    /// know whose inventory a producer's output lands in.
+    /// one.
+    ///
+    /// A pair is skipped when both actions carry a `ChainId` and the chains
+    /// differ: a chain is welded to one runner and is self-sufficient, so a
+    /// consumer never legitimately depends on a foreign chain's producer.
+    /// When either side carries no chain, nothing says they are separate work,
+    /// so the edge stands.
     ///
     /// **Inferred edges enforce order, never location.** Ordering a consumer
     /// after ten producers spread across four bots does not put the items in
@@ -151,6 +156,16 @@ impl ActionNetwork {
                     .any(|cond| self.actions[producer].eff.iter().any(|e| e.satisfies(cond)));
                 if !produces {
                     continue;
+                }
+                // Two actions in different chains are different pieces of work:
+                // chain binding guarantees each runs on one bot and each is
+                // self-sufficient, so a consumer never depends on a foreign
+                // chain's producer. When either side has no chain, nothing says
+                // they are separate and the edge stands.
+                if let (Some(p), Some(c)) = (self.chain_of(*producer), self.chain_of(*consumer)) {
+                    if p != c {
+                        continue;
+                    }
                 }
                 if self
                     .edges
@@ -582,5 +597,37 @@ mod tests {
         net.set_chain_owner(ChainId(0), BotId(3));
         assert_eq!(net.owner_of(ChainId(0)), Some(BotId(3)));
         assert_eq!(net.owner_of(ChainId(1)), None);
+    }
+
+    #[test]
+    fn inference_does_not_link_across_chains() {
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let a_mine = net.add(mine(&mut gen, "iron-plate", 2));
+        let a_craft = net.add(craft(&mut gen, "iron-plate", 2, "iron-gear-wheel"));
+        let b_mine = net.add(mine(&mut gen, "iron-plate", 2));
+        let b_craft = net.add(craft(&mut gen, "iron-plate", 2, "iron-gear-wheel"));
+        net.set_chain(a_mine, ChainId(0));
+        net.set_chain(a_craft, ChainId(0));
+        net.set_chain(b_mine, ChainId(1));
+        net.set_chain(b_craft, ChainId(1));
+
+        net.infer_edges();
+
+        assert_eq!(net.preds(a_craft), vec![(a_mine, 0)], "chain 0 only");
+        assert_eq!(net.preds(b_craft), vec![(b_mine, 0)], "chain 1 only");
+    }
+
+    #[test]
+    fn inference_still_links_when_either_side_has_no_chain() {
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let m = net.add(mine(&mut gen, "iron-plate", 2));
+        let c = net.add(craft(&mut gen, "iron-plate", 2, "iron-gear-wheel"));
+        net.set_chain(c, ChainId(0));
+        // The producer belongs to no chain, so nothing says these are separate
+        // work — the edge must stand.
+        net.infer_edges();
+        assert_eq!(net.preds(c), vec![(m, 0)]);
     }
 }

@@ -110,6 +110,17 @@ fn more_bots_finish_sooner() {
         many,
         one
     );
+    // Measured after restricting `infer_edges` to same-chain pairs
+    // (task 2 of the planner-hardening pass): one bot = 6173 ticks, four
+    // bots = 2717 ticks, a 2.27x improvement. Pin a looser 2x factor so this
+    // survives later tasks' makespan movement without regressing toward the
+    // near-linear scaling this crate started from.
+    assert!(
+        many.saturating_mul(2) < one,
+        "four bots ({} ticks) must beat one ({} ticks) by more than 2x",
+        many,
+        one
+    );
 }
 
 #[test]

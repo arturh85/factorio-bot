@@ -84,6 +84,35 @@ pub async fn start_instance(
     if state.instance.read().await.is_some() {
         return Err(ErrorResponse::conflict("instance already started"));
     }
+    // One resolution rule for `workspace_path`, shared with the scripts routes
+    // through `paths::resolve_workspace`: empty means the data-local
+    // workspace, relative is refused. Without it this route handed the raw
+    // settings string to `setup_factorio_instance`, which rejects an empty one
+    // with "no workspace configured" -- so a browser could list and edit
+    // scripts under the data-local workspace and then fail to start Factorio
+    // in that same workspace.
+    //
+    // Resolved here rather than in the task so a misconfiguration answers on
+    // the request that caused it, instead of surfacing minutes later in
+    // `last_error`.
+    let workspace_path = {
+        let settings = state.settings.read().await;
+        factorio_bot_core::paths::resolve_workspace(&settings.factorio.workspace_path)
+            .map_err(|err| ErrorResponse::bad_request(err.to_string()))?
+    };
+    // `FactorioSettings::workspace_path` is a `str`, so a path that is not
+    // UTF-8 cannot be handed on at all. Vanishingly unlikely and still not
+    // worth a silent `to_string_lossy`, which would start Factorio in a
+    // *different* directory than the one configured.
+    let workspace_path = workspace_path
+        .into_os_string()
+        .into_string()
+        .map_err(|raw| {
+            ErrorResponse::internal(format!(
+                "workspace path is not valid utf-8: {}",
+                std::path::PathBuf::from(raw).display()
+            ))
+        })?;
     // *This* is what serialises concurrent starts: `AppState::claim_start_slot`
     // takes the slot in a single `compare_exchange`, where a read-then-write
     // pair would leave a window in which two requests both see `false` and
@@ -94,6 +123,10 @@ pub async fn start_instance(
         return Err(ErrorResponse::conflict("instance is already starting"));
     }
     *state.last_start_error.write().await = None;
+    // Captured before the start begins: `complete_start` publishes only if this
+    // has not moved, so a stop pressed during the 8-10 minutes an extraction
+    // takes is not undone by the start eventually succeeding.
+    let stop_requests_before = state.stop_requests();
 
     // The whole state moves into the task: it outlives this request by minutes
     // and has to publish its result somewhere the next `GET /api/v1/instance`
@@ -114,33 +147,70 @@ pub async fn start_instance(
                 },
                 ..FactorioParams::default()
             };
-            (settings.factorio.clone(), params)
+            // The *resolved* workspace, not the configured one: this is the
+            // single value that makes `setup_factorio_instance` agree with
+            // every other route about where the workspace is.
+            let mut factorio_settings = settings.factorio.clone();
+            factorio_settings.workspace_path = std::borrow::Cow::Owned(workspace_path);
+            (factorio_settings, params)
         };
 
-        match FactorioInstance::start(&factorio_settings, params).await {
-            Ok(started) => {
-                // Publish the instance before clearing `starting`, for the
-                // same reason the error arm publishes its message first: a
-                // poller that catches `starting == false` with neither an
-                // instance nor an error would report "not started, no
-                // problem" for a start that actually succeeded.
-                *state.instance.write().await = Some(started);
-            }
-            Err(err) => {
-                tracing::error!("failed to start factorio instance: {err:?}");
-                // Written *before* `starting` is cleared. The other order has
-                // a window in which a poll sees `starting == false` and
-                // `last_error == None` and concludes the start succeeded --
-                // the failure would be invisible until the next attempt.
-                *state.last_start_error.write().await = Some(format!("{err:?}"));
-            }
-        }
-        // Released on every path, including the error path: leaving it set
-        // would wedge the server into permanent 409s with nothing running.
-        state.release_start_slot();
+        let started = FactorioInstance::start(&factorio_settings, params);
+        complete_start(state, stop_requests_before, started).await;
     });
 
     Ok((StatusCode::ACCEPTED, Json(StartAccepted { accepted: true })))
+}
+
+/// Everything the spawned start does once `FactorioInstance::start` returns:
+/// publish or discard the instance, record a failure, release the slot.
+///
+/// Split out of [`start_instance`] and generic over the start future so a test
+/// can drive it with a Factorio that starts (`empty_factorio_instance`), which
+/// no test can otherwise obtain -- the real one needs an installed game and
+/// eight minutes. Without this seam the entire success path, including the
+/// stop-during-start race below, is unreachable from the suite.
+pub async fn complete_start(
+    state: AppState,
+    stop_requests_before: u64,
+    start: impl std::future::Future<Output = miette::Result<FactorioInstance>>,
+) {
+    match start.await {
+        Ok(started) => {
+            // Publish before clearing `starting`, for the same reason the error
+            // arm publishes its message first: a poller that catches
+            // `starting == false` with neither an instance nor an error would
+            // report "not started, no problem" for a start that succeeded.
+            if let Some(orphan) = state
+                .publish_started_instance(stop_requests_before, started)
+                .await
+            {
+                // A stop arrived while this was starting. The user asked for
+                // no Factorio, so it is not published -- but it is running,
+                // and nothing else holds a handle to it, so this is the only
+                // place it can be shut down. `last_error` stays clear: "not
+                // started, no error" is the honest report of a start the user
+                // cancelled.
+                tracing::info!("start cancelled by a stop; shutting the new instance down again");
+                if let Err(err) = orphan.stop() {
+                    tracing::error!("failed to stop the cancelled instance: {err:?}");
+                    *state.last_start_error.write().await =
+                        Some(format!("failed to stop the cancelled instance: {err:?}"));
+                }
+            }
+        }
+        Err(err) => {
+            tracing::error!("failed to start factorio instance: {err:?}");
+            // Written *before* `starting` is cleared. The other order has a
+            // window in which a poll sees `starting == false` and
+            // `last_error == None` and concludes the start succeeded -- the
+            // failure would be invisible until the next attempt.
+            *state.last_start_error.write().await = Some(format!("{err:?}"));
+        }
+    }
+    // Released on every path, including the error path: leaving it set would
+    // wedge the server into permanent 409s with nothing running.
+    state.release_start_slot();
 }
 
 /// Stops the running Factorio instance
@@ -155,7 +225,17 @@ pub async fn start_instance(
     )
 )]
 pub async fn stop_instance(State(state): State<AppState>) -> Result<StatusCode, ErrorResponse> {
-    let taken = state.instance.write().await.take();
+    let taken = {
+        let mut instance = state.instance.write().await;
+        // Under the same lock the start publishes through, and *whether or not*
+        // there is anything to take: a start that is still extracting has not
+        // published yet, so the 400 below is the answer to "is one running"
+        // while this is the answer to "did the user ask for one to stop".
+        // Without it, Stop during a start looks like it worked and Factorio
+        // appears minutes later.
+        state.note_stop_request(&mut instance);
+        instance.take()
+    };
     match taken {
         // stop() consumes self and is synchronous; propagate its error rather
         // than unwrapping, which would abort the process under panic = "abort"

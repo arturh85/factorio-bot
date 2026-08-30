@@ -1,8 +1,8 @@
 use crate::jobs::JobRegistry;
 use factorio_bot_core::app_settings::SharedAppSettings;
-use factorio_bot_core::process::process_control::SharedFactorioInstance;
+use factorio_bot_core::process::process_control::{FactorioInstance, SharedFactorioInstance};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -33,6 +33,14 @@ pub struct AppState {
     /// when a new attempt is accepted. Without it a failed background start
     /// is invisible to the browser: `starting` simply goes false again.
     pub last_start_error: Arc<RwLock<Option<String>>>,
+    /// How many stops have been requested. Bumped by
+    /// `POST /api/v1/instance/stop`, read by an in-flight start just before it
+    /// publishes: if the count moved, the user pressed Stop while Factorio was
+    /// still coming up and the finished instance must be thrown away instead
+    /// of published. A counter rather than a flag so a stop cannot be
+    /// "consumed" by the wrong start, and read under the `instance` write lock
+    /// rather than beside it -- see [`AppState::publish_started_instance`].
+    pub stop_generation: Arc<AtomicU64>,
     /// Script executions, live and historical. Shared rather than cloned with
     /// the state: `AppState` is cloned per request, and every clone must see
     /// the same single execution slot.
@@ -52,6 +60,7 @@ impl AppState {
             settings_path: factorio_bot_core::paths::settings_file(),
             starting: Arc::new(AtomicBool::new(false)),
             last_start_error: Arc::new(RwLock::new(None)),
+            stop_generation: Arc::new(AtomicU64::new(0)),
             jobs: JobRegistry::new(JOB_HISTORY_LIMIT),
         }
     }
@@ -76,6 +85,53 @@ impl AppState {
                 std::sync::atomic::Ordering::SeqCst,
             )
             .is_ok()
+    }
+
+    /// The number of stops requested so far. A start captures this before it
+    /// begins and hands it back to [`AppState::publish_started_instance`].
+    pub fn stop_requests(&self) -> u64 {
+        self.stop_generation
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Records a stop request.
+    ///
+    /// Takes the locked instance slot rather than just `&self` so it cannot be
+    /// called without holding the write lock -- the same lock
+    /// [`AppState::publish_started_instance`] reads the count under. That is
+    /// what makes the two atomic with respect to each other: a check beside
+    /// the lock instead of under it is the read-then-write shape
+    /// [`AppState::claim_start_slot`] exists to avoid.
+    pub fn note_stop_request(&self, _under_instance_lock: &mut Option<FactorioInstance>) {
+        self.stop_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Publishes a freshly started instance, unless a stop arrived while it
+    /// was starting.
+    ///
+    /// Returns `None` when it published, or `Some(started)` -- handing the
+    /// instance straight back -- when it did not, in which case the caller
+    /// owns it and must stop it: the user pressed Stop, and a Factorio the
+    /// state does not know about is one nothing can ever shut down.
+    ///
+    /// `started_after` is [`AppState::stop_requests`] as it was before the
+    /// start began. The comparison happens while the write lock is held, so
+    /// the two orderings are the only ones possible: either this publishes and
+    /// a later stop takes the instance away, or the stop lands first and this
+    /// sees the bumped count. There is no interleaving in which a stop
+    /// observes no instance and then one appears behind it.
+    pub async fn publish_started_instance(
+        &self,
+        started_after: u64,
+        started: FactorioInstance,
+    ) -> Option<FactorioInstance> {
+        let mut instance = self.instance.write().await;
+        if self.stop_requests() != started_after {
+            return Some(started);
+        }
+        *instance = Some(started);
+        None
     }
 
     /// Releases a slot taken by [`AppState::claim_start_slot`]. Called on every

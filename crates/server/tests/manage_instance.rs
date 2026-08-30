@@ -213,3 +213,178 @@ async fn a_failed_start_releases_the_slot_and_records_why() {
         "a failed start must not publish an instance"
     );
 }
+
+/// POSTs a start and waits for the detached task to finish, returning whatever
+/// it left in `last_error`.
+///
+/// Every assertion about a start is made on this, never on the `202`: the
+/// response is written before the spawned task has done anything at all, so it
+/// cannot distinguish a start that worked from one that died immediately.
+async fn start_and_settle(state: &AppState) -> Option<String> {
+    let response = build_router(state.clone(), None)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/instance/start")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    for _ in 0..200 {
+        if !state.starting.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        !state.starting.load(std::sync::atomic::Ordering::SeqCst),
+        "the starting slot was never released, so every later start would 409"
+    );
+    state.last_start_error.read().await.clone()
+}
+
+/// `workspace_path` defaults to `""`, and stays `""` in every settings value
+/// that did not come through `load_app_settings` -- most reachably a
+/// `PUT /api/v1/settings` whose body leaves the field blank, which is what the
+/// settings screen sends when the user clears it.
+///
+/// The scripts routes resolve that (empty means the data-local workspace, see
+/// `manage::scripts::scripts_root_path`); the start route must resolve it the
+/// same way rather than handing the raw string to `setup_factorio_instance`,
+/// which rejects it out of hand. Two copies of one rule is the defect --
+/// `GET /api/v1/scripts` working while `POST /api/v1/instance/start` fails on
+/// the same configured value is the symptom.
+///
+/// The start still fails here: no Factorio archive is configured either. That
+/// is the point -- the failure has to have moved *past* the workspace.
+#[tokio::test]
+async fn a_start_resolves_an_unconfigured_workspace_like_every_other_route() {
+    let state = state_with(FactorioInstance::new_shared());
+    assert!(
+        state
+            .settings
+            .read()
+            .await
+            .factorio
+            .workspace_path
+            .is_empty(),
+        "this test is about the empty default; the fixture no longer provides it"
+    );
+
+    let last_error = start_and_settle(&state).await.expect("the start failed");
+
+    assert!(
+        !last_error.contains("no workspace configured"),
+        "the start rejected the same empty workspace_path the scripts routes \
+         resolve happily: {last_error}"
+    );
+    assert!(
+        !last_error.contains("failed to find workspace"),
+        "the start looked for a workspace it never resolved: {last_error}"
+    );
+    assert!(
+        last_error.contains("archive"),
+        "expected the failure to have moved on to the unconfigured archive, got: {last_error}"
+    );
+}
+
+/// The Stop button, pressed while Factorio is still coming up, must win.
+///
+/// A start is accepted, the archive extraction runs for minutes, the user gives
+/// up and presses Stop — and then the start finally succeeds. Publishing at
+/// that point hands the user a running game they explicitly cancelled, and one
+/// `GET /api/v1/instance` has no way to explain.
+///
+/// The stop goes through the real route, so a `stop_instance` that stopped
+/// recording the request would fail this test rather than pass it on a counter
+/// the test bumped itself. The start is simulated: `FactorioInstance::start`
+/// needs an installed game and eight minutes, so `complete_start` — the same
+/// function the route spawns — is driven with an instance that owns no child
+/// processes.
+#[tokio::test]
+async fn a_stop_during_a_start_is_not_undone_by_the_start_finishing() {
+    let state = state_with(FactorioInstance::new_shared());
+    assert!(state.claim_start_slot(), "the slot starts free");
+    // What `start_instance` captures before handing off to the start.
+    let stop_requests_before = state.stop_requests();
+
+    // The user presses Stop. Nothing is published yet — the start is still
+    // extracting — so the route answers 400; the cancellation is the part that
+    // matters here.
+    let response = build_router(state.clone(), None)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/instance/stop")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // ... and only now does Factorio finish coming up.
+    factorio_bot_server::manage::instance::complete_start(state.clone(), stop_requests_before, {
+        async { Ok(empty_factorio_instance()) }
+    })
+    .await;
+
+    assert!(
+        state.instance.read().await.is_none(),
+        "the start published an instance after the user stopped it"
+    );
+    assert!(
+        !state.starting.load(std::sync::atomic::Ordering::SeqCst),
+        "the starting slot was never released"
+    );
+    assert_eq!(
+        *state.last_start_error.read().await,
+        None,
+        "a start the user cancelled is not an error to report"
+    );
+
+    let response = build_router(state.clone(), None)
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/instance")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let status: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(status["started"], false, "{status}");
+    assert_eq!(status["starting"], false, "{status}");
+}
+
+/// The other half of the test above: without a stop, the start *must* publish.
+///
+/// Without this, "never publish anything" passes the whole suite — and the
+/// route would answer 202 forever while `GET /api/v1/instance` reported
+/// nothing running.
+#[tokio::test]
+async fn a_start_that_finishes_without_a_stop_publishes_its_instance() {
+    let state = state_with(FactorioInstance::new_shared());
+    assert!(state.claim_start_slot(), "the slot starts free");
+    let stop_requests_before = state.stop_requests();
+
+    factorio_bot_server::manage::instance::complete_start(state.clone(), stop_requests_before, {
+        async { Ok(empty_factorio_instance()) }
+    })
+    .await;
+
+    assert!(
+        state.instance.read().await.is_some(),
+        "an uninterrupted start published nothing"
+    );
+    assert!(
+        !state.starting.load(std::sync::atomic::Ordering::SeqCst),
+        "the starting slot was never released"
+    );
+}

@@ -45,12 +45,13 @@ pub struct ScriptContent {
 /// reintroducing, on an unconfigured install, exactly the CWD-dependent
 /// hazard this function exists to avoid (running the server from this
 /// repository's checkout would bind every request to the repository's own
-/// `scripts/` directory). An empty `workspace_path` instead falls back to
-/// `factorio_bot_core::paths::workspace_dir()`, the data-local workspace an
-/// unconfigured install genuinely uses. Belt and braces: any *other*
-/// relative `workspace_path` (e.g. a future settings value like `"./foo"`)
-/// is rejected outright before it ever reaches the filesystem, rather than
-/// silently canonicalizing against the CWD.
+/// `scripts/` directory). That fallback, and the refusal of any *other*
+/// relative `workspace_path`, now live in
+/// `factorio_bot_core::paths::resolve_workspace`, which this function calls
+/// rather than restates: `POST /api/v1/instance/start` needs the same rule,
+/// and a second copy of it is how the two routes would come to disagree about
+/// where the workspace is (they did -- the start route used to reject the
+/// empty default outright).
 ///
 /// Split out from `scripts_root` (which canonicalizes and requires the
 /// result to exist) so the fallback and the absolute-path guard can be
@@ -60,17 +61,8 @@ pub struct ScriptContent {
 /// outright if it (or its `scripts` subdirectory) happens not to exist on
 /// the machine running the tests.
 fn scripts_root_path(workspace_path: &str) -> Result<PathBuf, ErrorResponse> {
-    let workspace_path = if workspace_path.is_empty() {
-        factorio_bot_core::paths::workspace_dir()
-    } else {
-        PathBuf::from(workspace_path)
-    };
-    if workspace_path.is_relative() {
-        return Err(ErrorResponse::bad_request(format!(
-            "workspace_path must be absolute, got: {}",
-            workspace_path.display()
-        )));
-    }
+    let workspace_path = factorio_bot_core::paths::resolve_workspace(workspace_path)
+        .map_err(|err| ErrorResponse::bad_request(err.to_string()))?;
     Ok(workspace_path.join("scripts"))
 }
 

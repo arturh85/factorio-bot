@@ -81,6 +81,7 @@ fn state_for(dir: &tempfile::TempDir, instance: Option<FactorioInstance>) -> App
         settings_path: dir.path().join("AppSettings.toml"),
         starting: Default::default(),
         last_start_error: Default::default(),
+        stop_generation: Default::default(),
         jobs: factorio_bot_server::jobs::JobRegistry::new(8),
     }
 }

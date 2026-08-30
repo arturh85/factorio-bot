@@ -123,7 +123,7 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
     let world = Arc::new(FactorioWorld::new());
     let mut planner = Planner::new(world, Some(Arc::new(rcon)));
 
-    let (stdout, stderr) = run_script_file(&mut planner, script_path, clients, false).await?;
+    let (stdout, stderr) = run_script_file(&mut planner, script_path, clients, None).await?;
 
     if !stdout.is_empty() {
       print!("{stdout}");
@@ -165,7 +165,7 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
 
       let mut planner = Planner::new(world.clone(), Some(rcon.clone()));
 
-      let (stdout, stderr) = run_script_file(&mut planner, script_path, clients, false).await?;
+      let (stdout, stderr) = run_script_file(&mut planner, script_path, clients, None).await?;
 
       if !stdout.is_empty() {
         print!("{stdout}");

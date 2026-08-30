@@ -29,7 +29,7 @@ pub async fn execute_script(
         let mut planner = Planner::new(world, Some(rcon));
         let app_settings = &app_settings.read().await;
         let bot_count = app_settings.factorio.client_count;
-        let (stdout, stderr) = run_script_file(&mut planner, &path[1..], bot_count, true)
+        let (stdout, stderr) = run_script_file(&mut planner, &path[1..], bot_count, None)
           .await
           .map_err(|e| format!("error: {e:?}"))?;
         return Ok((stdout, stderr));
@@ -78,7 +78,7 @@ pub async fn execute_code(
           None,
           &scripts_root,
           bot_count,
-          true,
+          None,
         )
         .await
         .map_err(|e| format!("error: {e:?}"))?;

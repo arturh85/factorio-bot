@@ -3,16 +3,21 @@ use factorio_bot_core::miette;
 use factorio_bot_core::miette::{miette, IntoDiagnostic};
 use factorio_bot_core::plan::planner::Planner;
 #[cfg(feature = "lua")]
-use factorio_bot_scripting_lua::run_lua;
+use factorio_bot_scripting_lua::{run_lua, OutputSink};
 // #[cfg(feature = "rhai")]
 // use factorio_bot_scripting_rhai::run_rhai;
 // #[cfg(feature = "rune")]
 // use factorio_bot_scripting_rune::run_rune;
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "lua")]
+use std::sync::Arc;
 
 /// `scripts_root` is the sandbox boundary handed to the interpreter: every
 /// filesystem operation the script can reach is bounded by it.
+///
+/// `sink`, when present, receives the script's output line by line while it
+/// runs; the full transcript is returned either way.
 #[allow(unused_variables)]
 pub async fn run_script(
   planner: &mut Planner,
@@ -21,11 +26,11 @@ pub async fn run_script(
   filename: Option<&str>,
   scripts_root: &Path,
   bot_count: u8,
-  redirect: bool,
+  #[cfg(feature = "lua")] sink: Option<Arc<dyn OutputSink>>,
 ) -> miette::Result<(String, String)> {
   match language {
     #[cfg(feature = "lua")]
-    "lua" => run_lua(planner, code, filename, scripts_root, bot_count, redirect)
+    "lua" => run_lua(planner, code, filename, scripts_root, bot_count, sink)
       .await
       .map(|n| n.1),
     // #[cfg(feature = "rune")]
@@ -42,7 +47,7 @@ pub async fn run_script_file(
   planner: &mut Planner,
   path: &str,
   bot_count: u8,
-  redirect: bool,
+  #[cfg(feature = "lua")] sink: Option<Arc<dyn OutputSink>>,
 ) -> miette::Result<(String, String)> {
   let app_settings = load_app_settings().unwrap();
   let workspace_path = app_settings.factorio.workspace_path.to_string();
@@ -79,7 +84,8 @@ pub async fn run_script_file(
     Some(full_path),
     &workspace_plans_path,
     bot_count,
-    redirect,
+    #[cfg(feature = "lua")]
+    sink,
   )
   .await
 }

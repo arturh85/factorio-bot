@@ -1128,7 +1128,7 @@ mod tests {
             None,
             &root,
             4,
-            false,
+            None,
         )
         .await
         .expect("goal_script.lua failed");

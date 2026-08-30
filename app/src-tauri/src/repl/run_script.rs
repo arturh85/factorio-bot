@@ -26,7 +26,7 @@ async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String
         instance_state.world.clone().unwrap(),
         Some(instance_state.rcon.clone()),
       );
-      if let Err(err) = run_script_file(&mut planner, &filename, bot_count, false).await {
+      if let Err(err) = run_script_file(&mut planner, &filename, bot_count, None).await {
         error!("failed to execute: {:?}", err);
       }
     }

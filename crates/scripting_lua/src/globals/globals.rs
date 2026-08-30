@@ -12,6 +12,7 @@ use factorio_bot_core::paris::{error, info, warn};
 use factorio_bot_core::parking_lot::Mutex;
 use factorio_bot_core::scripts::{resolve_script_path, resolve_write_path};
 use factorio_bot_core::types::{Direction, PlayerId};
+use factorio_bot_scripting::{OutputSink, Stream};
 use itertools::Itertools;
 use std::collections::HashMap;
 use std::fs;
@@ -40,6 +41,12 @@ fn direction_to_u8(direction: Direction) -> LuaResult<u8> {
 /// against, so `include("lib.lua")` from `scripts/sub/foo.lua` still finds
 /// `scripts/sub/lib.lua`. Collapsing the two would break either nested scripts
 /// or the boundary.
+///
+/// `sink`, when present, receives each printed line as it happens. The
+/// accumulated `stdout`/`stderr` strings are still filled in beside it: the
+/// transcript returned at the end of a run and the lines streamed during it
+/// must stay identical.
+#[allow(clippy::too_many_arguments)]
 pub fn create_lua_globals(
     lua: &Lua,
     all_bots: Vec<PlayerId>,
@@ -48,6 +55,7 @@ pub fn create_lua_globals(
     stdout: Arc<Mutex<String>>,
     stderr: Arc<Mutex<String>>,
     code_by_path: Arc<Mutex<HashMap<String, String>>>,
+    sink: Option<Arc<dyn OutputSink>>,
 ) -> LuaResult<()> {
     let map_table = lua.globals();
 
@@ -148,6 +156,7 @@ end
     )?;
 
     let _stdout = stdout.clone();
+    let _sink = sink.clone();
     map_table.set(
         "__doc_entry_print",
         String::from(
@@ -162,14 +171,19 @@ end
     map_table.set(
         "print",
         lua.create_function(move |_, strings: LuaVariadic<String>| {
-            info!("<cyan>lua</>   ⮞ {}", strings.iter().join(" "));
+            let text = strings.iter().join(" ");
+            info!("<cyan>lua</>   ⮞ {text}");
+            if let Some(sink) = _sink.as_ref() {
+                sink.line(Stream::Stdout, &text);
+            }
             let mut stdout_lock = _stdout.lock();
-            *stdout_lock += &strings.iter().join(" ");
+            *stdout_lock += &text;
             *stdout_lock += "\n";
             Ok(())
         })?,
     )?;
     let _stderr = stderr;
+    let _sink = sink.clone();
     map_table.set(
         "__doc_entry_print_err",
         String::from(
@@ -184,15 +198,24 @@ end
     map_table.set(
         "print_err",
         lua.create_function(move |_, strings: LuaVariadic<String>| {
-            error!("<cyan>lua</>   ⮞ {}", strings.iter().join(" "));
+            let text = strings.iter().join(" ");
+            error!("<cyan>lua</>   ⮞ {text}");
+            if let Some(sink) = _sink.as_ref() {
+                sink.line(Stream::Stderr, &text);
+            }
             let mut stderr_lock = _stderr.lock();
             *stderr_lock += "ERROR: ";
-            *stderr_lock += &strings.iter().join(" ");
+            *stderr_lock += &text;
             *stderr_lock += "\n";
             Ok(())
         })?,
     )?;
     let _stdout = stdout;
+    // `print_warn` accumulates into *stdout*, not stderr. Preserved
+    // deliberately: the SSE consumer splits on stream, so moving it would
+    // silently relocate a script's warnings. If the assignment is wrong it is
+    // wrong today and belongs in its own change.
+    let _sink = sink;
     map_table.set(
         "__doc_entry_print_warn",
         String::from(
@@ -207,10 +230,14 @@ end
     map_table.set(
         "print_warn",
         lua.create_function(move |_, strings: LuaVariadic<String>| {
-            warn!("<cyan>lua</>   ⮞ {}", strings.iter().join(" "));
+            let text = strings.iter().join(" ");
+            warn!("<cyan>lua</>   ⮞ {text}");
+            if let Some(sink) = _sink.as_ref() {
+                sink.line(Stream::Stdout, &text);
+            }
             let mut stdout_lock = _stdout.lock();
             *stdout_lock += "WARN: ";
-            *stdout_lock += &strings.iter().join(" ");
+            *stdout_lock += &text;
             *stdout_lock += "\n";
             Ok(())
         })?,

@@ -36,7 +36,16 @@ pub fn write_lua_docs(target_path: PathBuf) -> LuaResult<()> {
     let rcon_table = create_lua_rcon(&lua, rcon, planner.real_world)?;
     let code_by_path: HashMap<String, String> = HashMap::new();
     let code_by_path: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(code_by_path));
-    create_lua_globals(&lua, vec![], cwd.clone(), cwd, stdout, stderr, code_by_path)?;
+    create_lua_globals(
+        &lua,
+        vec![],
+        cwd.clone(),
+        cwd,
+        stdout,
+        stderr,
+        code_by_path,
+        None,
+    )?;
 
     write_lua_doc(target_path.join("globals.lua"), &lua.globals());
     write_lua_doc(target_path.join("world.lua"), &world_table);

@@ -1,34 +1,20 @@
-use factorio_bot_core::miette::{IntoDiagnostic, Result};
-use gag::BufferRedirect;
-use std::io::Read;
-
-pub fn redirect_buffers(redirect: bool) -> Option<(BufferRedirect, BufferRedirect)> {
-    if !redirect {
-        return None;
-    }
-    if let Ok(stdout) = BufferRedirect::stdout() {
-        if let Ok(stderr) = BufferRedirect::stderr() {
-            return Some((stdout, stderr));
-        }
-    }
-    None
+/// Which of a script's two output streams a line came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stream {
+    Stdout,
+    Stderr,
 }
 
-pub fn buffers_to_string(
-    stdout: &str,
-    stderr: &str,
-    buffers: Option<(BufferRedirect, BufferRedirect)>,
-) -> Result<(String, String)> {
-    let mut stdout_str = String::new();
-    let mut stderr_str = String::new();
-    if let Some((mut stdout, mut stderr)) = buffers {
-        stdout.read_to_string(&mut stdout_str).into_diagnostic()?;
-        stderr.read_to_string(&mut stderr_str).into_diagnostic()?;
-    } else {
-        stdout_str = stdout.to_owned();
-        stderr_str = stderr.to_owned();
-    }
-    Ok((stdout_str, stderr_str))
+/// Receives a script's output one line at a time, as it is produced.
+///
+/// This exists because the previous implementation redirected the *process's*
+/// file descriptors with `gag`, which is unusable in a server: it captures the
+/// server's own logging along with the script's, it cannot say which job a
+/// line belongs to, and it only yields anything once the run is over. An
+/// implementation must be cheap and must not block — it is called from inside
+/// the Lua interpreter, with the interpreter's lock held.
+pub trait OutputSink: Send + Sync {
+    fn line(&self, stream: Stream, text: &str);
 }
 
 ///  Returns byte offset for given line if found

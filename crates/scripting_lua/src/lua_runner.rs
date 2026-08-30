@@ -9,7 +9,7 @@ use factorio_bot_core::parking_lot::Mutex;
 use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_core::serde_json;
 use factorio_bot_core::tokio::runtime::Runtime;
-use factorio_bot_scripting::{buffers_to_string, redirect_buffers};
+use factorio_bot_scripting::OutputSink;
 use miette::{miette, IntoDiagnostic, Result};
 use std::collections::HashMap;
 use std::path::Path;
@@ -20,17 +20,21 @@ use std::thread;
 /// `filename` is only used for error messages and for resolving `include`
 /// relative to the script's own directory; a `None` filename (inline code
 /// from the editor) simply resolves relative to the root.
+///
+/// `sink` receives each printed line as the script produces it. It replaces a
+/// `gag` redirect of the *process's* fd 1 and 2, which captured the host's own
+/// logging along with the script's, could not say which run a line belonged
+/// to, and handed back a single string only once the run had finished. The
+/// full transcript is still returned; the sink is the same text, live.
 pub async fn run_lua(
     planner: &mut Planner,
     lua_code: &str,
     filename: Option<&str>,
     scripts_root: &Path,
     bot_count: u8,
-    // Task 2 replaces this with an OutputSink
-    redirect: bool,
+    sink: Option<Arc<dyn OutputSink>>,
 ) -> Result<(Option<serde_json::Value>, (String, String))> {
     let scripts_root = scripts_root.to_path_buf();
-    let buffers = redirect_buffers(redirect);
     let stdout: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     let stderr: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     let filename = filename.unwrap_or("<inline>").to_owned();
@@ -88,6 +92,7 @@ pub async fn run_lua(
                 thread_stdout,
                 thread_stderr,
                 _code_by_path,
+                sink,
             )?;
 
             let globals = lua.globals();
@@ -123,8 +128,7 @@ pub async fn run_lua(
     .map_err(|_| miette!("lua thread panicked"))??;
     let stdout: String = stdout.lock().to_owned();
     let stderr: String = stderr.lock().to_owned();
-    let buffers = buffers_to_string(&stdout, &stderr, buffers)?;
-    Ok((result, buffers))
+    Ok((result, (stdout, stderr)))
 }
 
 #[cfg(test)]
@@ -132,6 +136,7 @@ mod tests {
     use factorio_bot_core::factorio::rcon::FactorioRcon;
     use factorio_bot_core::serde_json::json;
     use factorio_bot_core::test_utils::fixture_world;
+    use factorio_bot_scripting::Stream;
     use std::sync::Arc;
     use tokio::fs;
 
@@ -153,7 +158,7 @@ mod tests {
         let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
         let world = Arc::new(fixture_world());
         let mut planner = Planner::new(world, None);
-        let outcome = run_lua(&mut planner, code, None, &root, 1, false)
+        let outcome = run_lua(&mut planner, code, None, &root, 1, None)
             .await
             .map(|_| ());
         (dir, outcome)
@@ -170,7 +175,7 @@ mod tests {
         seed(&root);
         let world = Arc::new(fixture_world());
         let mut planner = Planner::new(world, None);
-        let outcome = run_lua(&mut planner, code, None, &root, 1, false)
+        let outcome = run_lua(&mut planner, code, None, &root, 1, None)
             .await
             .map(|_| ());
         (dir, outcome)
@@ -190,7 +195,7 @@ mod tests {
         let world = Arc::new(fixture_world());
         let rcon = Arc::new(FactorioRcon::new_empty());
         let mut planner = Planner::new(world, Some(rcon));
-        let outcome = run_lua(&mut planner, code, None, &root, 1, false)
+        let outcome = run_lua(&mut planner, code, None, &root, 1, None)
             .await
             .map(|_| ());
         (dir, outcome)
@@ -516,7 +521,7 @@ mod tests {
 
         let world = Arc::new(fixture_world());
         let mut planner = Planner::new(world, None);
-        let result = run_lua(&mut planner, &code, None, &root, 1, false)
+        let result = run_lua(&mut planner, &code, None, &root, 1, None)
             .await
             .map(|_| ());
 
@@ -667,6 +672,86 @@ mod tests {
         assert_reported_not_panicked(&result);
     }
 
+    /// The sink is what makes per-job SSE possible: the previous
+    /// implementation redirected the *process's* fd 1 and 2 with `gag`, which
+    /// captured the server's own logging, could not attribute a line to a job,
+    /// and yielded nothing until the run was over.
+    #[derive(Default)]
+    struct RecordingSink {
+        lines: Mutex<Vec<(Stream, String)>>,
+    }
+
+    impl OutputSink for RecordingSink {
+        fn line(&self, stream: Stream, text: &str) {
+            self.lines.lock().push((stream, text.to_owned()));
+        }
+    }
+
+    #[tokio::test]
+    async fn script_output_reaches_the_sink_as_it_is_printed() {
+        let sink = Arc::new(RecordingSink::default());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let world = Arc::new(fixture_world());
+        let mut planner = Planner::new(world, None);
+        run_lua(
+            &mut planner,
+            "print(\"first\")\nprint(\"second\")",
+            None,
+            &root,
+            1,
+            Some(sink.clone()),
+        )
+        .await
+        .expect("run_lua failed");
+
+        let lines = sink.lines.lock().clone();
+        assert_eq!(
+            lines,
+            vec![
+                (Stream::Stdout, "first".to_owned()),
+                (Stream::Stdout, "second".to_owned()),
+            ],
+            "both prints should have reached the sink, in order"
+        );
+    }
+
+    /// `print_warn` accumulates into *stdout*, which is not what its name
+    /// suggests, and `print`/`print_err` split the usual way. The SSE consumer
+    /// splits on stream, so each binding must report to the sink the same
+    /// stream it writes into the transcript -- and the transcript, prefixes
+    /// and all, must survive the sink being added beside it.
+    #[tokio::test]
+    async fn each_print_binding_reports_the_stream_it_accumulates_into() {
+        let sink = Arc::new(RecordingSink::default());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let world = Arc::new(fixture_world());
+        let mut planner = Planner::new(world, None);
+        let (_result, (stdout, stderr)) = run_lua(
+            &mut planner,
+            "print(\"out\")\nprint_err(\"bad\")\nprint_warn(\"careful\")",
+            None,
+            &root,
+            1,
+            Some(sink.clone()),
+        )
+        .await
+        .expect("run_lua failed");
+
+        assert_eq!(
+            sink.lines.lock().clone(),
+            vec![
+                (Stream::Stdout, "out".to_owned()),
+                (Stream::Stderr, "bad".to_owned()),
+                (Stream::Stdout, "careful".to_owned()),
+            ],
+            "each binding must report the stream it accumulates into"
+        );
+        assert_eq!(stdout, "out\nWARN: careful\n", "stdout transcript");
+        assert_eq!(stderr, "ERROR: bad\n", "stderr transcript");
+    }
+
     #[tokio::test]
     async fn test_script() {
         let world = Arc::new(fixture_world());
@@ -690,7 +775,7 @@ mod tests {
                 Some(relative_path),
                 &repo_root(),
                 bot_count,
-                false,
+                None,
             )
             .await
             .expect("run_lua failed");
@@ -789,7 +874,7 @@ result = world.find_free_resource_rect("iron-ore", 2, 2, {x=0,y=200})
         let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
         let world = Arc::new(fixture_world());
         let mut planner = Planner::new(world, None);
-        let (result, _) = run_lua(&mut planner, code, None, &root, bot_count, false)
+        let (result, _) = run_lua(&mut planner, code, None, &root, bot_count, None)
             .await
             .expect("run_lua failed");
 

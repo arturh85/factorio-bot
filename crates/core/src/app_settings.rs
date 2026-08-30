@@ -96,4 +96,82 @@ mod tests {
             "expected a restapi section, got: {json}"
         );
     }
+
+    /// A binary built without the `restapi` feature wrote an `AppSettings.toml`
+    /// with no `[restapi]` section at all. Such a file must still load: the
+    /// values it does carry survive, and every section it omits falls back to
+    /// its default. This is the backward-compatibility claim the settings move
+    /// rests on.
+    #[test]
+    fn loads_a_toml_written_without_a_restapi_section() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file_path = dir.path().join("AppSettings.toml");
+        std::fs::write(
+            &file_path,
+            r#"
+[factorio]
+client_count = 4
+rcon_pass = "hunter2"
+rcon_port = 4444
+workspace_path = "/tmp/some-workspace"
+recreate = true
+"#,
+        )
+        .expect("writes the settings file");
+
+        let settings = AppSettings::load(file_path).expect("loads a partial settings file");
+
+        // the values the old file carried survive
+        assert_eq!(settings.factorio.client_count, 4);
+        assert_eq!(settings.factorio.rcon_pass, "hunter2");
+        assert_eq!(settings.factorio.rcon_port, 4444);
+        assert_eq!(settings.factorio.workspace_path, "/tmp/some-workspace");
+        assert!(settings.factorio.recreate);
+        // factorio keys the file did not mention keep their defaults
+        assert_eq!(
+            settings.factorio.seed,
+            FactorioSettings::default().seed,
+            "unmentioned keys must not be blanked"
+        );
+
+        // the whole missing section comes back as its default
+        assert_eq!(settings.restapi.port, 7492);
+        assert_eq!(settings.restapi.web_root, None);
+        assert!(!settings.gui.enable_autostart);
+        assert!(!settings.gui.enable_restapi);
+    }
+
+    /// A file that does not exist is not an error; the defaults stand in.
+    #[test]
+    fn load_falls_back_to_defaults_when_the_file_is_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = AppSettings::load(dir.path().join("missing.toml"))
+            .expect("absent file is not an error");
+        assert_eq!(settings.restapi.port, 7492);
+        assert_eq!(
+            settings.factorio.client_count,
+            FactorioSettings::default().client_count
+        );
+    }
+
+    /// `save` then `load` must be lossless, so the GUI's settings page and the
+    /// server read the same values.
+    #[test]
+    fn save_and_load_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file_path = dir.path().join("AppSettings.toml");
+        let mut settings = AppSettings::default();
+        settings.factorio.client_count = 7;
+        settings.restapi.port = 8123;
+        settings.restapi.web_root = Some("/srv/www".to_owned());
+        settings.gui.enable_autostart = true;
+
+        AppSettings::save(file_path.clone(), &settings).expect("saves");
+        let restored = AppSettings::load(file_path).expect("loads");
+
+        assert_eq!(restored.factorio.client_count, 7);
+        assert_eq!(restored.restapi.port, 8123);
+        assert_eq!(restored.restapi.web_root, Some("/srv/www".to_owned()));
+        assert!(restored.gui.enable_autostart);
+    }
 }

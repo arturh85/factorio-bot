@@ -74,3 +74,4 @@ toml = "*"
 [dev-dependencies]
 mockall = "0.14.0"
 mockall_double = "0.3.1"
+tempfile = "3"

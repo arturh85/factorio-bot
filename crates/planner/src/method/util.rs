@@ -38,8 +38,10 @@ pub fn mining_ticks(state: &PlanState, item: &str) -> Ticks {
 
 /// The tile of `item` nearest `from` that still holds at least `need`.
 ///
-/// Patch elements are sorted by `PlanState::resource_patches`, and ties here
-/// break on that order, so the result is reproducible across runs.
+/// Ties on distance are broken by `(x, y)`, so the result depends only on the
+/// tile set and the origin — never on the order `resource_patches` happens to
+/// return patches in, which is not stable across processes for patches of
+/// equal size.
 pub fn nearest_resource_tile(
     state: &PlanState,
     item: &str,
@@ -55,7 +57,13 @@ pub fn nearest_resource_tile(
             let distance = calculate_distance(from, &tile);
             let better = match &best {
                 None => true,
-                Some((d, _)) => distance < *d,
+                Some((best_distance, best_tile)) => matches!(
+                    distance
+                        .total_cmp(best_distance)
+                        .then(tile.x.total_cmp(&best_tile.x))
+                        .then(tile.y.total_cmp(&best_tile.y)),
+                    std::cmp::Ordering::Less
+                ),
             };
             if better {
                 best = Some((distance, tile));
@@ -214,5 +222,74 @@ mod tests {
     fn mining_a_fixture_ore_takes_one_second() {
         let s = state();
         assert_eq!(mining_ticks(&s, "iron-ore"), 60);
+    }
+
+    #[test]
+    fn an_exact_distance_tie_breaks_on_the_lower_position() {
+        let s = state();
+        // Exactly halfway between the ore tiles at x = -41 and x = -40 on row
+        // y = 40. Both are equidistant, so the lower (x, y) must win regardless of
+        // which patch was visited first.
+        let origin = Position::new(-40.5, 40.0);
+        let tile = nearest_resource_tile(&s, "iron-ore", &origin, 1).expect("iron ore");
+        assert_eq!(tile, Position::new(-41.0, 40.0));
+    }
+
+    #[test]
+    fn mining_time_comes_from_the_prototype_not_a_constant() {
+        let s = state();
+        // stone-furnace's prototype says 0.2 s; a hardcoded one-second default
+        // would give 60 instead.
+        assert_eq!(mining_ticks(&s, "stone-furnace"), 12);
+        // An item with no prototype at all falls back to one second.
+        assert_eq!(mining_ticks(&s, "not-a-real-entity"), 60);
+    }
+
+    #[test]
+    fn the_free_tile_search_moves_outward_through_rings() {
+        let mut s = state();
+        let origin = Position::new(0., 0.);
+        // Block the origin and the whole first ring.
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                s.create_entity(factorio_bot_core::types::FactorioEntity {
+                    name: "stone-furnace".into(),
+                    entity_type: "furnace".into(),
+                    position: Position::new(dx as f64, dy as f64),
+                    ..Default::default()
+                });
+            }
+        }
+        let found = free_tile_near(&s, &origin).expect("ring 2 is open");
+        assert!(s.is_position_free(&found));
+        assert!(
+            found.x.abs() >= 2.0 || found.y.abs() >= 2.0,
+            "must have moved past the blocked 3x3, got {}",
+            found
+        );
+    }
+
+    #[test]
+    fn recipe_helpers_read_ingredients_products_and_energy() {
+        let s = state();
+        let asp = recipe_for(&s, "automation-science-pack").unwrap();
+        let mut ingredients = ingredients_of(&asp);
+        ingredients.sort();
+        assert_eq!(
+            ingredients,
+            vec![
+                ("copper-plate".to_string(), 1),
+                ("iron-gear-wheel".to_string(), 1)
+            ]
+        );
+        assert_eq!(output_per_craft(&asp, "automation-science-pack"), 1);
+        assert_eq!(recipe_ticks(&asp), 300, "5 s");
+
+        let gear = recipe_for(&s, "iron-gear-wheel").unwrap();
+        assert_eq!(ingredients_of(&gear), vec![("iron-plate".to_string(), 2)]);
+        assert_eq!(recipe_ticks(&gear), 30, "0.5 s");
+
+        // An item this recipe does not produce defaults to one per craft.
+        assert_eq!(output_per_craft(&gear, "something-else"), 1);
     }
 }

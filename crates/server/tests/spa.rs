@@ -27,7 +27,8 @@ async fn serves_index_html_at_root() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("index.html"), "<html>spa</html>").unwrap();
 
-    let response = build_router(state_with_web_root(dir.path()))
+    let root = dir.path().to_string_lossy().into_owned();
+    let response = build_router(state_with_web_root(dir.path()), Some(&root))
         .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -47,7 +48,8 @@ async fn unknown_path_falls_back_to_index_html() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("index.html"), "<html>spa</html>").unwrap();
 
-    let response = build_router(state_with_web_root(dir.path()))
+    let root = dir.path().to_string_lossy().into_owned();
+    let response = build_router(state_with_web_root(dir.path()), Some(&root))
         .oneshot(
             Request::builder()
                 .uri("/settings")
@@ -72,7 +74,8 @@ async fn api_404_is_not_swallowed_by_the_spa_fallback() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("index.html"), "<html>spa</html>").unwrap();
 
-    let response = build_router(state_with_web_root(dir.path()))
+    let root = dir.path().to_string_lossy().into_owned();
+    let response = build_router(state_with_web_root(dir.path()), Some(&root))
         .oneshot(
             Request::builder()
                 .uri("/api/v1/does-not-exist")
@@ -95,7 +98,7 @@ fn state_without_web_root() -> AppState {
 /// The JSON error contract must not depend on whether a frontend is deployed.
 #[tokio::test]
 async fn api_404_is_json_without_a_web_root() {
-    let response = build_router(state_without_web_root())
+    let response = build_router(state_without_web_root(), None)
         .oneshot(
             Request::builder()
                 .uri("/api/v1/does-not-exist")
@@ -125,7 +128,7 @@ async fn api_404_is_json_without_a_web_root() {
 /// root has nothing to serve, so it points at the API docs instead.
 #[tokio::test]
 async fn root_redirects_to_swagger_ui_without_a_web_root() {
-    let response = build_router(state_without_web_root())
+    let response = build_router(state_without_web_root(), None)
         .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -142,7 +145,7 @@ async fn root_redirects_to_swagger_ui_without_a_web_root() {
 
 #[tokio::test]
 async fn server_starts_without_a_web_root() {
-    let response = build_router(state_without_web_root())
+    let response = build_router(state_without_web_root(), None)
         .oneshot(
             Request::builder()
                 .uri("/api/v1/health")

@@ -18,7 +18,7 @@ fn test_state() -> AppState {
 }
 
 async fn post(uri: &str, body: &str) -> (StatusCode, String) {
-    let response = build_router(test_state())
+    let response = build_router(test_state(), None)
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -85,7 +85,7 @@ async fn move_player_rejects_unparseable_goal() {
 
 #[tokio::test]
 async fn get_is_not_allowed_on_mutating_routes() {
-    let response = build_router(test_state())
+    let response = build_router(test_state(), None)
         .oneshot(
             Request::builder()
                 .uri("/api/v1/game/server-save")
@@ -129,7 +129,7 @@ fn unknown_player_state() -> AppState {
 /// not by a wrong-but-passing assertion.
 #[tokio::test]
 async fn move_player_rejects_an_unknown_player_before_calling_rcon() {
-    let response = build_router(unknown_player_state())
+    let response = build_router(unknown_player_state(), None)
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -160,7 +160,7 @@ async fn move_player_rejects_an_unknown_player_before_calling_rcon() {
 /// absent: only the guard's early return produces text without "(id".
 #[tokio::test]
 async fn place_entity_rejects_an_unknown_player_before_calling_rcon() {
-    let response = build_router(unknown_player_state())
+    let response = build_router(unknown_player_state(), None)
         .oneshot(
             Request::builder()
                 .method("POST")

@@ -15,7 +15,7 @@ fn test_state() -> AppState {
 }
 
 async fn get(uri: &str) -> (StatusCode, String) {
-    let response = build_router(test_state())
+    let response = build_router(test_state(), None)
         .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -141,7 +141,7 @@ async fn plan_path_without_running_instance_reports_not_started() {
 
 #[tokio::test]
 async fn malformed_query_parameters_return_json() {
-    let response = build_router(test_state())
+    let response = build_router(test_state(), None)
         .oneshot(
             Request::builder()
                 .uri("/api/v1/game/find-entities?position=0,0&radius=notanumber")

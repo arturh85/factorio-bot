@@ -16,7 +16,7 @@ fn test_state() -> AppState {
 
 #[tokio::test]
 async fn openapi_json_lists_every_route() {
-    let response = build_router(test_state())
+    let response = build_router(test_state(), None)
         .oneshot(
             Request::builder()
                 .uri("/openapi.json")
@@ -57,7 +57,7 @@ async fn openapi_json_lists_every_route() {
 
 #[tokio::test]
 async fn swagger_ui_is_served() {
-    let response = build_router(test_state())
+    let response = build_router(test_state(), None)
         .oneshot(
             Request::builder()
                 .uri("/swagger-ui/")

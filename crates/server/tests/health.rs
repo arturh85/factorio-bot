@@ -16,7 +16,7 @@ fn test_state() -> AppState {
 
 #[tokio::test]
 async fn health_returns_ok() {
-    let app = build_router(test_state());
+    let app = build_router(test_state(), None);
     let response = app
         .oneshot(
             Request::builder()

@@ -14,13 +14,12 @@ async fn health() -> &'static str {
     "ok"
 }
 
-pub fn build_router(state: AppState) -> Router {
-    let web_root = state
-        .settings
-        .try_read()
-        .ok()
-        .and_then(|settings| settings.restapi.web_root.clone());
-
+/// Builds the router. `web_root` is passed in rather than read back out of
+/// `state.settings`: that lock is the process-wide `SharedAppSettings` that
+/// `update_settings` also writes to, so a `try_read()` here could lose the race
+/// and silently build a router with no SPA. Callers read it once, `await`ing
+/// the lock properly, and hand the value over.
+pub fn build_router(state: AppState, web_root: Option<&str>) -> Router {
     let (router, api) = OpenApiRouter::with_openapi(crate::openapi::ApiDoc::openapi())
         .route("/api/v1/health", get(health))
         .merge(crate::game::router())
@@ -33,7 +32,7 @@ pub fn build_router(state: AppState) -> Router {
         // not a frontend is deployed.
         .route("/api/v1/{*rest}", axum::routing::any(api_not_found));
 
-    match crate::spa::service(web_root.as_deref()) {
+    match crate::spa::service(web_root) {
         Some(spa) => router.fallback_service(spa),
         // Without a frontend `/` has nothing to serve, so point it at the docs.
         None => router.route("/", get(|| async { Redirect::temporary("/swagger-ui/") })),
@@ -52,11 +51,12 @@ pub async fn start_with_shutdown(
     bind: SocketAddr,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
+    let web_root = settings.read().await.restapi.web_root.clone();
     let state = AppState {
         instance: instance_state.clone(),
         settings,
     };
-    let app = build_router(state);
+    let app = build_router(state, web_root.as_deref());
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .into_diagnostic()?;

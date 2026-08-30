@@ -265,7 +265,7 @@ impl Progress {
 /// Builds the `goal` table.
 ///
 /// `plan_world` is what goals are planned against (the same hypothetical world
-/// `plan.*` and `world.*` see); `real_world` is what the executor drives.
+/// `world.*` sees); `real_world` is what the executor drives.
 /// `bots` is the run's roster, as player ids.
 pub fn create_lua_goal(
     lua: &Lua,
@@ -586,9 +586,8 @@ end
 
 /// Expands one goal against the run's roster.
 ///
-/// The roster is the bots the script was started with — the same set `plan.*`
-/// addresses — because `SplitAcrossBots` needs to know who exists before it can
-/// split anything. `goal.schedule`'s `bot_count` chooses how many bots the
+/// The roster is the bots the script was started with, because
+/// `SplitAcrossBots` needs to know who exists before it can split anything. `goal.schedule`'s `bot_count` chooses how many bots the
 /// resulting actions are *assigned* to, which is a later and separate decision.
 fn expand_goal(goal: Goal, world: &Arc<FactorioWorld>, bots: &[BotId]) -> LuaResult<ActionNetwork> {
     let chain_actor = *bots

@@ -1,15 +1,10 @@
-use crate::lua_runner::run_lua;
-use factorio_bot_core::factorio::rcon::{FactorioRcon, RconSettings};
-use factorio_bot_core::factorio::util::calculate_distance;
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::rcon::RconSettings;
 use factorio_bot_core::miette::{IntoDiagnostic, Result};
 use factorio_bot_core::paris::{error, info};
-use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_core::process::instance_setup::setup_factorio_instance;
 use factorio_bot_core::settings::FactorioSettings;
 use factorio_bot_core::tokio::sync::Mutex;
-use factorio_bot_core::types::{AreaFilter, FactorioEntity, PlayerId, Position};
-use std::cmp::Ordering;
+use factorio_bot_core::types::PlayerId;
 use std::fs::read_to_string;
 use std::path::Path;
 use std::sync::Arc;
@@ -170,73 +165,20 @@ pub async fn roll_seed(
     Ok(*best_seed_with_score)
 }
 
-pub async fn score_seed(
-    rcon: Arc<FactorioRcon>,
-    world: Arc<FactorioWorld>,
-    _seed: u32,
-    lua_code: String,
-    scripts_root: &Path,
-    bot_count: PlayerId,
-) -> Result<f64> {
-    let _rcon = rcon.clone();
-    let mut planner = Planner::new(world, Some(_rcon.clone()));
-    run_lua(&mut planner, &lua_code, None, scripts_root, bot_count, None).await?;
-    let mut score = 0.0;
-
-    let weight = planner.graph().shortest_path().expect("no path found");
-    score -= weight;
-    let center = Position::new(0., 0.);
-    let resources = vec![
-        "rock-huge",
-        "iron-ore",
-        "coal",
-        "copper-ore",
-        "stone",
-        "crude-oil",
-    ];
-    for resource in resources {
-        let nearest =
-            find_nearest_entities(rcon.clone(), &center, 3000., Some(resource.into()), None)
-                .await?;
-        match nearest.is_empty() {
-            false => {
-                // info!("nearest {} @ {}/{}", resource, nearest.x(), nearest.y());
-                // score -= calculate_distance(&center, &nearest[0].position);
-            }
-            true => {
-                // warn!("not found: {}", resource);
-                score -= 10000.;
-            }
-        }
-    }
-    // info!("scored {} in <yellow>{:?}</>", seed, started.elapsed());
-    Ok(score.floor())
-}
-
-pub async fn find_nearest_entities(
-    rcon: Arc<FactorioRcon>,
-    search_center: &Position,
-    search_radius: f64,
-    name: Option<String>,
-    entity_type: Option<String>,
-) -> Result<Vec<FactorioEntity>> {
-    let mut entities = rcon
-        .find_entities_filtered(
-            &AreaFilter::PositionRadius((search_center.clone(), Some(search_radius))),
-            name,
-            entity_type,
-        )
-        .await?;
-    entities.sort_by(|a, b| {
-        let da = calculate_distance(&a.position, search_center);
-        let db = calculate_distance(&b.position, search_center);
-        if da < db {
-            Ordering::Less
-        } else if da > db {
-            Ordering::Greater
-        } else {
-            Ordering::Equal
-        }
-    });
-    Ok(entities)
-}
+// `score_seed` and `find_nearest_entities` were removed here along with the old
+// task-graph planner.
+//
+// What they did: `score_seed` ran a plan script against a freshly generated map
+// and scored the seed as `-planner.graph().shortest_path()` (a shorter critical
+// path through the old task graph meant a cheaper start) minus 10000 for every
+// resource type `find_nearest_entities` could not find within 3000 tiles of
+// spawn. `roll_seed` above was meant to keep the highest-scoring seed.
+//
+// Why they were deleted rather than ported to `Schedule::makespan`, which is
+// plausibly the same fitness quantity: the loop that called `score_seed` is
+// commented out above and has been for a long time, so neither function had a
+// live caller and `roll-seed` already reports "no seed found" without scoring
+// anything. Reading a `Schedule` back out of the new handle-based Lua runtime
+// would need cross-boundary plumbing that nothing else wants, built to serve a
+// path that does not run. Resurrecting seed rolling is tracked as its own work;
+// it needs a real design, not a mechanical substitution.

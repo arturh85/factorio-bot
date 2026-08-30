@@ -1,6 +1,5 @@
 use crate::globals::create_lua_globals;
 use crate::globals::goal::create_lua_goal;
-use crate::globals::plan::create_lua_plan_builder;
 use crate::globals::rcon::create_lua_rcon;
 use crate::globals::world::create_lua_world;
 use factorio_bot_core::factorio::rcon::FactorioRcon;
@@ -24,8 +23,6 @@ pub fn write_lua_docs(target_path: PathBuf) -> LuaResult<()> {
     // be a real directory; the bindings are introspected, not called.
     let cwd = target_path.parent().unwrap_or(&target_path).to_path_buf();
     let world_table = create_lua_world(&lua, planner.plan_world.clone(), cwd.clone(), cwd.clone())?;
-    let plan_table =
-        create_lua_plan_builder(&lua, planner.graph.clone(), planner.plan_world.clone())?;
     let goal_table = create_lua_goal(
         &lua,
         planner.plan_world.clone(),
@@ -49,7 +46,6 @@ pub fn write_lua_docs(target_path: PathBuf) -> LuaResult<()> {
 
     write_lua_doc(target_path.join("globals.lua"), &lua.globals());
     write_lua_doc(target_path.join("world.lua"), &world_table);
-    write_lua_doc(target_path.join("plan.lua"), &plan_table);
     write_lua_doc(target_path.join("goal.lua"), &goal_table);
     write_lua_doc(target_path.join("rcon.lua"), &rcon_table);
     Ok(())

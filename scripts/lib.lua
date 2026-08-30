@@ -1,42 +1,52 @@
+-- Shared helper library.
+--
+-- Migration note: the Lua `plan.*` table is gone. Work that used to be
+-- hand-scheduled step by step is now *declared* as a goal (`goal.have`) and the
+-- planner derives the mining, walking and placing itself. Work that was really
+-- an immediate command against a live game is now `rcon.*`.
+
 function find_mine_with_bots(bots, search_center, name, type, count)
     local entities = world.find_entities_in_radius(search_center, 300, name, type)
     local label = name or type
     if #entities < #bots then
         error("not enough " .. label .. " in radius 300")
     end
-    mine_with_bots(bots, entities, label, count)
+    -- The old code asked each bot for `count`, so the goal asks for the sum.
+    return mine_with_bots(bots, label, count * #bots)
 end
 
--- FIXME: use all bots
-function mine_with_bots(bots, entities, label, count)
-    --plan.group_start("Mine " .. label .. "x" .. tostring(count) .. " with " .. tostring(#bots) .. " Bots")
-    for idx,playerId in pairs(bots) do
-        for i=1,count do
-            local entityIdx = ((idx - 1) * count) + i
-            if entityIdx >= #entities then
-                break
-            end
-            plan.mine(playerId, entities[entityIdx].position, entities[entityIdx].name, 1)
-        end
-    end
-    --plan.group_end()
+-- Was: one `plan.mine` per bot per entity, round-robining a list of nearby
+-- entities by index arithmetic -- and carrying a `FIXME: use all bots`, because
+-- it never used them all. `goal.have` owns both of those choices now, which
+-- entity and which bot, so the caller only says how many it wants in the end.
+-- The `entities` argument is gone with the index math that consumed it.
+function mine_with_bots(bots, item_name, count)
+    local plan = goal.have(item_name, count)
+    goal.schedule(plan, #bots)
+    return plan
 end
 
+-- Rocks are terrain to clear, not an item count: there is no meaningful
+-- "have N rocks", so this stayed an immediate command instead of becoming a
+-- goal. `rcon.mine` needs a live game -- without one there is no `rcon` global,
+-- and nothing to clear either.
 function mine_rocks(bots, count)
-    plan.group_start("Mine Rocks x" .. tostring(count) .. " with " .. tostring(#bots) .. " Bots")
-    for idx, bot_id in pairs(bots) do
+    if rcon == nil then
+        print("SKIP mine_rocks: no game connected, nothing to clear")
+        return
+    end
+    for _, bot_id in pairs(bots) do
         local player = world.player(bot_id)
-        local huge_rocks = world.find_entities_in_radius(player.position, 100, ENTITIES.ROCK_HUGE)
-        if #huge_rocks > 0 then
-            mine_with_bots({ bot_id }, huge_rocks, "rocks", count)
-        else
-            local big_rocks = world.find_entities_in_radius(player.position, 100, ENTITIES.ROCK_BIG)
-            if #big_rocks > 0 then
-                mine_with_bots({ bot_id }, huge_rocks, "rocks", count)
-            end
+        local rocks = world.find_entities_in_radius(player.position, 100, ENTITIES.ROCK_HUGE)
+        if #rocks == 0 then
+            -- The old fallback searched for ROCK_BIG and then re-passed the
+            -- *empty* huge-rock list, so it never mined anything.
+            rocks = world.find_entities_in_radius(player.position, 100, ENTITIES.ROCK_BIG)
+        end
+        for i = 1, math.min(count, #rocks) do
+            rcon.mine(bot_id, rocks[i].name, rocks[i].position, 1)
         end
     end
-    plan.group_end()
 end
 
 function required_ingredients(recipe, search_ingredient, count)

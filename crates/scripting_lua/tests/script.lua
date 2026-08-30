@@ -45,60 +45,38 @@ TECHS = {
     ROCKET_SILO = "rocket-silo",
 }
 
-starter_mining_drills = {
-    [ENTITIES.IRON_ORE] = {},
-    [ENTITIES.COPPER_ORE] = {},
-    [ENTITIES.STONE] = {},
-    [ENTITIES.COAL] = {},
+-- The planner derives mining, smelting, placement and facing from the goal, so
+-- the ore a starter base is built *on* is expressed as the plate it is built
+-- *for*.
+STARTER_PLATE = {
+    [ENTITIES.IRON_ORE] = ENTITIES.IRON_PLATE,
+    [ENTITIES.COPPER_ORE] = ENTITIES.COPPER_PLATE,
+    [ENTITIES.STONE] = ENTITIES.STONE_BRICK,
 }
 
-starter_furnaces = {
-    [ENTITIES.IRON_ORE] = {},
-    [ENTITIES.COPPER_ORE] = {},
-    [ENTITIES.STONE] = {},
-}
-
-starter_coal_loop_rect = nil
-starter_coal_loop_target = 8
-starter_coal_loop_cnt = 0
-
-function build_starter_coal_loop(bots, count)
-    -- can only build pairs of coal miners for the loop
-    assert(count % 2 == 0)
-
-    if starter_coal_loop_rect == nil then
-        local player = world.player(bots[1])
-        starter_coal_loop_rect = world.find_free_resource_rect("coal", 2*starter_coal_loop_target, 4, player.position)
-    end
-
-    plan.group_start("Build Starter Coal Loop")
-    local anchor = starter_coal_loop_rect.left_top
-    for idx=1,count do
-        local mining_drill = plan.place(bots[1], ENTITIES.BURNER_MINING_DRILL, { x=anchor.x + ((idx + starter_coal_loop_cnt - 1) * 2), y=anchor.y})
-        table.insert(starter_mining_drills[ore], mining_drill)
-
-        starter_coal_loop_cnt = starter_coal_loop_cnt + 1
-    end
-    plan.group_end()
-
-end
-
+-- Was: `plan.place` of a burner-mining-drill / stone-furnace pair per index, at
+-- literal offsets off `world.find_free_resource_rect`, with hand-picked facing
+-- numbers, bracketed by `plan.group_start`/`plan.group_end`.
+--
+-- Three things are genuinely lost, not renamed. The hand-tuned even spacing and
+-- the explicit facings: the planner chooses both now, and it also checks that
+-- what it places fits, which the literal offsets never did. And the grouping:
+-- there is no `goal.group`, because the planner derives grouping from the goal
+-- decomposition itself.
+--
+-- `build_starter_coal_loop` was deleted rather than migrated. It was never
+-- called (`build_starter_mining` had it commented out) and it referenced an
+-- undefined global `ore`, so it would have errored the first time it ran.
 function build_starter_miner_furnace(bots, ore, count)
-    local player = world.player(bots[1])
-    local rect = world.find_free_resource_rect(ore, 2*count, 2, player.position)
-    plan.group_start("Build Starter Miner/Furnace")
+    local plate = STARTER_PLATE[ore]
+    assert(plate ~= nil, "no plate known for " .. tostring(ore))
+    -- Kept for the recipe and inventory queries it exercises; the crafting
+    -- itself is the planner's job now.
+    starter_craft(bots[1], ENTITIES.BURNER_MINING_DRILL, 1)
 
-    local anchor = rect.left_top
-    for idx=1,count do
-        local bot_id = bots[((idx - 1) * 2 % #bots) + 1];
-        local mining_drill = starter_craft_place(bot_id, ENTITIES.BURNER_MINING_DRILL, { x=anchor.x + ((idx - 1) * 2), y=anchor.y}, 1) -- down
-        table.insert(starter_mining_drills[ore], mining_drill)
-
-        local stone_furnace = starter_craft_place(bot_id, ENTITIES.STONE_FURNACE, { x=anchor.x + ((idx - 1) * 2), y=anchor.y-2}, 4 ) -- up
-        table.insert(starter_furnaces[ore], stone_furnace)
-    end
-
-    plan.group_end()
+    local plan = goal.have(plate, count)
+    goal.schedule(plan, #bots)
+    return plan
 end
 
 function starter_craft(bot, entity_name, count)
@@ -110,31 +88,13 @@ function starter_craft(bot, entity_name, count)
     dump(inventory, "bot inventory")
 end
 
-
-function starter_craft_place(bot, entity_name, position, direction)
-    starter_craft(bot, entity_name, 1)
-    plan.place(bot, entity_name, position, direction)
-
-    ---- loop get min 2x coal from rocks or coal ore -> place in iron burner-mining-drill & stone-furnace -> get all iron-plate until enough for second burner-mining-drill
-    --local required_iron_plate = required_ingredients(recipe_bmd, "iron-plate", 1)
-    --local required_stone_plate = required_ingredients(recipe_bmd, "stone", 1)
-    --print("required_iron_plate: " .. tostring(required_iron_plate))
-    --print("required_stone_plate: " .. tostring(required_stone_plate))
-    --dump(player, "player")
-    --dump(inventory, "inventory")
-end
-
 function craft_place_blueprint(bots, blueprint, position, direction)
 
 end
 
 function build_starter_mining(bots)
     mine_rocks(bots, 3)
-    build_starter_miner_furnace(bots, ENTITIES.IRON_ORE, 1)
-    --build_starter_coal_loop(bots, 2)
-    --build_starter_miner_furnace(bots, ENTITIES.IRON_ORE, 2)
-    --build_starter_miner_furnace(bots, ENTITIES.STONE, 2)
-    --build_starter_miner_furnace(bots, ENTITIES.COPPER_ORE, 2)
+    return build_starter_miner_furnace(bots, ENTITIES.IRON_ORE, 1)
 end
 
 function build_starter_power(bots)
@@ -158,24 +118,29 @@ function main()
     local bot_count = tostring(#all_bots)
     print("start script for " .. bot_count .. " bots")
     include("../../../scripts/lib.lua")
-    world.draw("world_start.png")
 
     -- Milestone 1: Research Automation
-    --   Sub Target 1: Starter Mine for Iron & Stone & Copper & Coal
-    build_starter_mining(all_bots)
+    --   Sub Target 1: Starter Mine for Iron
+    local plan = build_starter_mining(all_bots)
     --   Sub Target 2: Build Power Production near Water
     --build_starter_power(all_bots)
-    --   Sub Target 3: Build Science Facilities
-    --build_starter_science(all_bots)
 
-    -- Milestone 2: Research Logistics
+    -- Was `file_write("task_graph-N.dot", plan.task_graph_graphviz())` and a
+    -- mermaid `.md` beside it, plus `world.draw` before and after: five files
+    -- nothing ever read or compared, which regenerated differently on every
+    -- run and so read as snapshot tests without being any. The renderings are
+    -- asserted here instead, so a planner that stops producing a plan fails.
+    -- `world.draw` keeps its coverage in Rust, where the drawn PNG is checked
+    -- rather than merely written.
+    local dot = goal.graphviz(plan)
+    assert(string.find(dot, "digraph", 1, true), "expected a graphviz digraph, got: " .. dot)
 
+    local gantt = goal.gantt(plan, bot_count .. " bots")
+    assert(string.find(gantt, "gantt", 1, true), "expected a mermaid gantt chart, got: " .. gantt)
+    assert(string.find(gantt, "section bot 1", 1, true),
+           "bot 1 must have work in the chart, got: " .. gantt)
 
-    file_write("task_graph-" .. bot_count .. ".dot", plan.task_graph_graphviz())
-    file_write("task_graph-" .. bot_count .. ".md", "```mermaid\n" .. plan.task_graph_mermaid_gantt(all_bots, bot_count .. " bots") .. "\n```\n")
-    world.draw("world_end-" .. bot_count .. ".png")
     print("end script")
 end
 
 main()
---assert(false)

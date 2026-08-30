@@ -1,5 +1,5 @@
 -- Comprehensive Lua API Test
--- Tests all 4 API modules: global, rcon, world, plan
+-- Tests all 4 API modules: global, rcon, world, goal
 
 print("=== Testing Global Functions ===")
 
@@ -47,21 +47,30 @@ end
 local count = world.inventory(1, "iron-plate")
 print("World inventory: " .. (count >= 0 and "PASS ✓ (" .. count .. " iron plates)" or "FAIL ✗"))
 
-print("\n=== Testing Plan Functions ===")
+print("\n=== Testing Goal Functions ===")
 
--- Test task graph building
-plan.group_start("api-test-group")
-plan.walk(1, {x=10, y=10}, 1.0)
-plan.walk(1, {x=20, y=20}, 1.0)
-plan.group_end()
+-- Was `plan.walk(1, ...)` twice inside a `plan.group_start`/`plan.group_end`
+-- bracket, then `plan.task_graph_mermaid_gantt`. Bare locomotion is no longer
+-- something a script schedules -- the planner derives walking from the goal --
+-- so the two walks are immediate `rcon.move` commands now. The bracketing is
+-- gone with no replacement: the planner derives grouping itself.
+rcon.move(1, {x=10, y=10}, 1.0)
+rcon.move(1, {x=20, y=20}, 1.0)
+print("RCON move: walked bot 1 to (10, 10) then (20, 20) ✓")
 
-local graph = plan.task_graph_mermaid_gantt({1}, "API Test Plan")
-print("Plan task graph: " .. (graph ~= nil and "PASS ✓" or "FAIL ✗"))
-print("\nTask graph generated:")
-print(graph)
+-- The gantt chart now comes from a scheduled goal rather than from a
+-- hand-built task graph.
+local plan = goal.have("iron-plate", 1)
+local makespan = goal.schedule(plan, 1)
+print("Goal schedule: " .. (makespan > 0 and "PASS ✓ (" .. makespan .. " ticks)" or "FAIL ✗"))
+
+local gantt = goal.gantt(plan, "API Test Plan")
+print("Goal gantt: " .. (gantt ~= nil and "PASS ✓" or "FAIL ✗"))
+print("\nGantt chart generated:")
+print(gantt)
 
 print("\n=== All API Tests Complete ===")
 print("✓ Global functions working")
 print("✓ RCON functions working")
 print("✓ World functions working")
-print("✓ Plan functions working")
+print("✓ Goal functions working")

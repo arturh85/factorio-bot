@@ -161,25 +161,3 @@ pub struct RconNoPathFound {}
 pub struct RectInvalid {
     pub invalid_input: String,
 }
-
-#[derive(Error, Debug, Diagnostic)]
-#[error("player {player_id} does not have item '{item}' in inventory")]
-#[diagnostic(code(factorio::workspace::not_found), help("fix logic"))]
-pub struct PlayerMissingItem {
-    pub player_id: PlayerId,
-    pub item: String,
-}
-
-#[derive(Error, Debug, Diagnostic)]
-#[error("Task '{task_name}' (player {player_id}) requires {required} {item_name}, but only {available} available")]
-#[diagnostic(
-    code(factorio::task_graph::resource_flow),
-    help("ensure tasks produce required resources before consumption")
-)]
-pub struct InsufficientResources {
-    pub task_name: String,
-    pub player_id: PlayerId,
-    pub item_name: String,
-    pub required: u32,
-    pub available: u32,
-}

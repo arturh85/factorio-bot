@@ -28,46 +28,29 @@ for i, bot_id in ipairs(all_bots) do
     rcon.print("Testing bot " .. bot_id .. " via RCON")
 end
 
-print("\n=== Testing Plan with Multiple Bots ===")
+print("\n=== Testing Per-Bot Movement ===")
 
--- Create a simple plan with different tasks for each bot
-plan.group_start("multi-bot-test")
+-- Was one `plan.walk` per bot inside a `plan.group_start`/`plan.group_end`
+-- bracket, followed by `plan.task_graph_mermaid_gantt`. Pinning a *named* bot
+-- to a *literal* destination is not a goal: `goal.have` deliberately lets the
+-- planner choose who does what, and there is no way to force bot N to a point.
+-- So this is an immediate `rcon.move` per bot now, and the gantt chart goes
+-- with the plan it used to render -- there is no schedule here to chart.
+local destinations = {
+    { x = 0, y = -10 },  -- north
+    { x = 0, y = 10 },   -- south
+    { x = 10, y = 0 },   -- east
+    { x = -10, y = 0 },  -- west
+}
 
-if #all_bots >= 1 then
-    -- Bot 1: walk north
-    plan.walk(all_bots[1], {x=0, y=-10}, 1.0)
-    print("Bot " .. all_bots[1] .. " assigned: walk to (0, -10)")
-end
-
-if #all_bots >= 2 then
-    -- Bot 2: walk south
-    plan.walk(all_bots[2], {x=0, y=10}, 1.0)
-    print("Bot " .. all_bots[2] .. " assigned: walk to (0, 10)")
-end
-
-if #all_bots >= 3 then
-    -- Bot 3: walk east
-    plan.walk(all_bots[3], {x=10, y=0}, 1.0)
-    print("Bot " .. all_bots[3] .. " assigned: walk to (10, 0)")
-end
-
-if #all_bots >= 4 then
-    -- Bot 4: walk west
-    plan.walk(all_bots[4], {x=-10, y=0}, 1.0)
-    print("Bot " .. all_bots[4] .. " assigned: walk to (-10, 0)")
-end
-
-plan.group_end()
-
--- Generate visualization showing all bots
-local bot_ids = {}
 for i, bot_id in ipairs(all_bots) do
-    table.insert(bot_ids, bot_id)
+    -- As before, only the first four bots get a destination.
+    local destination = destinations[i]
+    if destination then
+        rcon.move(bot_id, destination, 1.0)
+        print("Bot " .. bot_id .. " moving to (" .. destination.x .. ", " .. destination.y .. ")")
+    end
 end
-
-local graph = plan.task_graph_mermaid_gantt(bot_ids, "Multi-Bot Test Plan")
-print("\nTask graph:")
-print(graph)
 
 print("\n=== Multi-Client Test Complete ===")
 print("Tested " .. #all_bots .. " bots successfully")

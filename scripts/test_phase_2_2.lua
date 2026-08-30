@@ -1,97 +1,59 @@
--- Integration Test for Phase 2.2: Multi-Bot Executor
--- Tests all 6 task types with proper execution flow
+-- Integration test for the executor: running a scheduled plan against a live
+-- game. Needs a connected Factorio server -- `goal.execute` has nothing to
+-- drive without one.
+--
+-- MIGRATION HONESTY NOTE. This file used to assert on the old multi-bot
+-- executor's internals: that all six task types (Mine/Walk/Craft/Place/Insert/
+-- Remove) existed, that each task moved Planned -> Running -> Success/Failed,
+-- and that dependency gating held per task. None of that is observable from Lua
+-- any more: `goal.progress`/`goal.wait` report aggregate counts across the whole
+-- run (pending/running/success/failed/done), not a per-task-type breakdown.
+--
+-- It also never ran. Every version of this script called
+-- `plan.insert_into_inventory`, which was never bound in Rust, so execution
+-- stopped at that line with "attempt to call a nil value". Nothing after it has
+-- ever been observed to work, and this port is from the script's evident intent
+-- rather than from preserved behaviour: no behaviour parity is claimed here,
+-- because there was none to preserve.
+--
+-- The `plan.group_start`/`plan.group_end` bracketing is gone with no
+-- replacement; the planner derives grouping from the goal decomposition.
 
-print("=== Phase 2.2 Integration Test ===\n")
+print("=== Executor Integration Test ===\n")
 
-print("[Scenario] Multi-Bot Task Execution")
-print("Testing: All 6 task types (Mine, Walk, Craft, Place, Insert, Remove)\n")
+print("Phase 1: planning...")
+local plan = goal.have("iron-plate", 10)
+local makespan = goal.schedule(plan, #all_bots)
+assert(makespan > 0, "a plan must take time, got " .. tostring(makespan))
+print("  scheduled over " .. #all_bots .. " bot(s), makespan " .. makespan .. " ticks")
 
--- Phase 1: Resource gathering
-print("Phase 1: Mining resources...")
-plan.group_start("resource gathering")
+print("\nPhase 2: executing...")
+-- Execution is non-blocking now: `goal.execute` returns a run handle straight
+-- away and the bots keep working while the script does something else.
+local run = goal.execute(plan)
 
--- Bot 1 mines iron ore
-plan.mine(1, {x = 10.5, y = 10.5}, "iron-ore", 50)
-print("  - Bot 1: Mine 50 iron-ore at (10.5, 10.5)")
+local progress = goal.progress(run)
+local total = progress.pending + progress.running + progress.success + progress.failed
+assert(total > 0, "the run must cover at least one action")
+print("  started: " .. total .. " actions, " .. progress.pending .. " pending")
 
--- Bot 2 mines copper ore
-plan.mine(2, {x = 20.5, y = 10.5}, "copper-ore", 30)
-print("  - Bot 2: Mine 30 copper-ore at (20.5, 10.5)")
+print("\nPhase 3: waiting for completion...")
+local final = goal.wait(run)
+assert(final.done, "goal.wait must only return once the run is over")
+print("  success: " .. final.success)
+print("  failed:  " .. final.failed)
+print("  pending: " .. final.pending .. " (a bot that fails abandons the rest of its work)")
 
-plan.group_end()
+-- The four counts always cover every action in the plan, both before and after
+-- the run: that is what makes a partial run legible rather than a mystery.
+local final_total = final.pending + final.running + final.success + final.failed
+assert(final_total == total,
+       "progress must account for every action; started with " .. total .. ", ended with " .. final_total)
 
--- Phase 2: Storage (using InsertToInventory)
-print("\nPhase 2: Storing resources...")
-plan.group_start("storage")
-
--- Bot 1 stores 25 iron-ore
-plan.insert_into_inventory(1, {
-    entity_name = "wooden-chest",
-    position = {x = 15.5, y = 15.5},
-    inventory_type = 1
-}, {name = "iron-ore", count = 25})
-print("  - Bot 1: Insert 25 iron-ore into chest at (15.5, 15.5)")
-
--- Bot 2 stores 15 copper-ore
-plan.insert_into_inventory(2, {
-    entity_name = "wooden-chest",
-    position = {x = 25.5, y = 15.5},
-    inventory_type = 1
-}, {name = "copper-ore", count = 15})
-print("  - Bot 2: Insert 15 copper-ore into chest at (25.5, 15.5)")
-
-plan.group_end()
-
--- Finalize the plan
-print("\nPhase 3: Finalizing task graph...")
-print("  - Resolving dependencies...")
-print("  - Validating resource flow...")
-
-local success, err = pcall(function()
-    plan.finalize()
-end)
-
-if success then
-    print("\n✓ SUCCESS: Task graph validated successfully!")
-    print("\nExpected Execution Flow:")
-    print("  1. All 6 task types have implementations:")
-    print("     - Mine: Extract resources from ground")
-    print("     - Walk: Move to target position (auto-inserted by plan builder)")
-    print("     - Craft: Create items from recipes (deferred to Phase 2.3)")
-    print("     - Place: Place entities in world")
-    print("     - InsertToInventory: Store items in chests/entities")
-    print("     - RemoveFromInventory: Retrieve items from storage")
-    print("  2. Status transitions working:")
-    print("     - Tasks start as Planned")
-    print("     - Transition to Running when executing")
-    print("     - End as Success or Failed")
-    print("  3. Dependency checking ensures:")
-    print("     - mine(iron-ore) completes before insert(iron-ore)")
-    print("     - mine(copper-ore) completes before insert(copper-ore)")
-    print("  4. Error handling:")
-    print("     - No panic on errors")
-    print("     - Graceful failure propagation")
-    print("     - Bot stops on first error (fail-fast)")
+if final.failed > 0 then
+    print("\n" .. final.failed .. " action(s) failed -- see the log above for why")
 else
-    print("\n✗ FAILED: " .. tostring(err))
+    print("\nAll actions succeeded")
 end
 
--- Display the task graph
-print("\n" .. string.rep("=", 60))
-print("Task Graph Visualization (DOT format):")
-print(string.rep("=", 60))
-print(plan.task_graph_graphviz())
-print(string.rep("=", 60))
-
-print("\n=== Phase 2.2 Integration Test Complete ===")
-print("\nKey Features Implemented:")
-print("  ✓ All 6 task types execute via RCON")
-print("  ✓ Status transitions (Planned → Running → Success/Failed)")
-print("  ✓ Dependency checking with resource flow")
-print("  ✓ Error handling (no .expect() panics)")
-print("  ✓ Multi-bot coordination via groups")
-print("\nDeferred to Phase 2.3:")
-print("  - Re-planning on failure")
-print("  - Task assignment optimization")
-print("  - Real game tick tracking")
-print("  - Craft API exposed to Lua")
+print("\n=== Executor Integration Test Complete ===")

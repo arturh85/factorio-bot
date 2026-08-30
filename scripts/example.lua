@@ -41,16 +41,24 @@ else
     print("SKIP: No cached world data (expected in --connect mode)")
 end
 
-print("\n=== Testing Plan API ===")
+print("\n=== Testing Goal API ===")
 
--- Test task graph building (works in both modes)
-plan.group_start("test-walk")
-plan.walk(1, {x=5, y=5}, 1.0)
-plan.group_end()
+-- Was `plan.walk(1, {x=5,y=5}, 1.0)` inside a `plan.group_start`/`plan.group_end`
+-- bracket, then `plan.task_graph_mermaid_gantt`. A bare walk is not a goal in
+-- the new model, so it is an immediate rcon command; the bracketing is gone
+-- with no replacement, because the planner derives grouping from the goal.
+rcon.move(1, {x=5, y=5}, 1.0)
+print("Moved bot 1 towards (5, 5)")
 
--- Generate task graph visualization
-local graph = plan.task_graph_mermaid_gantt({1}, "Test Plan")
-print("\nTask graph (Mermaid Gantt):")
-print(graph)
+-- Planning needs the cached world (recipes, resources), which connect mode does
+-- not have -- hence the pcall rather than an unconditional call.
+local ok, plan = pcall(goal.have, "iron-plate", 1)
+if ok then
+    goal.schedule(plan, 1)
+    print("\nSchedule (Mermaid Gantt):")
+    print(goal.gantt(plan, "Test Plan"))
+else
+    print("SKIP: goal planning needs world data (expected in --connect mode): " .. tostring(plan))
+end
 
 print("\n=== All tests complete ===")

@@ -40,6 +40,8 @@
 - [x] Verify all RCON functions work (rcon.print, rcon.find_entities, rcon.cheat_*, etc.)
 - [x] Verify world.* functions work (world.recipe, world.player, world.inventory)
 - [x] Verify plan.* functions work (plan.walk, plan.group_start/end, task graph generation)
+      *(superseded: the `plan.*` table was removed with the old task-graph planner; the
+      equivalent surface is now `goal.*` plus `rcon.move`)*
 
 **Completed work:**
 - Fixed naming convention bug in `scripts/rcontest.lua` (camelCase → snake_case)
@@ -87,8 +89,15 @@
 
 ## Phase 2: Core Engine (Task Graph Execution)
 
-### 2.1 Task Graph Builder ✅ COMPLETE
-The existing system has:
+### 2.1 Task Graph Builder ✅ COMPLETE — *superseded and removed*
+
+This whole section describes the old `TaskGraph`/`PlanBuilder`, which has been
+deleted along with the Lua `plan.*` table it backed. It is kept as a record of
+what was built, not as a description of the current system. The replacement is
+the goal planner (`crates/planner`) and the executor (`crates/executor`),
+reached from Lua through `goal.*`.
+
+The old system had:
 - `plan.mine()`, `plan.walk()`, `plan.place()` - create task nodes
 - `plan.group_start()`, `plan.group_end()` - synchronization barriers
 - `plan.task_graph_graphviz()` - visualization
@@ -108,9 +117,9 @@ Implemented:
 - Updated `add_insert_into_inventory_node()` to populate inputs (task_graph.rs:131-151)
 - Implemented `resolve_dependencies()` - creates edges based on resource flow (task_graph.rs:166-213)
 - Implemented `validate_resource_flow()` - ensures resources are available (task_graph.rs:215-265)
-- Added `InsufficientResources` error type (errors.rs:173-182)
+- Added `InsufficientResources` error type (errors.rs:173-182) *(type deleted with its only caller)*
 - Added `PlanBuilder::finalize()` method (plan_builder.rs:186-193)
-- Exposed `plan.finalize()` to Lua (scripting_lua/src/globals/plan.rs:200-219)
+- Exposed `plan.finalize()` to Lua (scripting_lua/src/globals/plan.rs:200-219) *(file deleted)*
 - Created integration test script: `scripts/test_phase_2_1.lua`
 - ✅ All existing tests still pass (test_simple_group, test_diverging_group)
 
@@ -217,18 +226,15 @@ Given goal "research automation":
 goal("research_automation")
 
 -- System generates:
-plan.group_start("gather resources")
-plan.mine(bot1, iron_ore_pos, "iron-ore", 25)
-plan.mine(bot2, copper_ore_pos, "copper-ore", 12)
-plan.group_end()
+local plan = goal.researched("automation")
 
-plan.group_start("smelt")
-plan.walk(bot1, furnace_pos, 1.0)
-plan.insert(bot1, furnace_pos, "iron-ore", 25)
--- wait for smelting...
-plan.group_end()
+-- The planner decomposes it: mining, walking, smelting, crafting and
+-- inserting are all derived, and the scheduler spreads them over the bots.
+local makespan = goal.schedule(plan, #all_bots)
+print(goal.gantt(plan, "research automation"))
 
--- ... continue to crafting, inserting into lab, etc.
+local run = goal.execute(plan)
+goal.wait(run)
 ```
 
 ---
@@ -242,7 +248,9 @@ plan.group_end()
 - [ ] Progress visualization during execution
 
 ### 4.2 Seed Rolling (Performance Optimization)
-- [ ] Resurrect `roll_best_seed.rs` (currently commented out)
+- [ ] Redesign seed scoring on top of `Schedule::makespan` (the old `TaskGraph`-based
+      `score_seed` was deleted, not ported; its caller loop had been commented out for
+      a long time — see the note at the bottom of `roll_best_seed.rs`)
 - [ ] Parallel map seed evaluation
 - [ ] Scoring function for seed quality
 

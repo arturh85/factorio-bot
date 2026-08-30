@@ -1937,13 +1937,35 @@ git commit -m "feat(lua): add the goal api backed by the new planner and executo
 **Approved.** This deletes 1257 lines of user-facing code and removes the published Lua `plan.*` API. Sign-off was given for all eight tasks; proceed. Because it is the destructive task, it goes last and only after Tasks 1–7 are green — never fold any of it forward into an earlier task.
 
 **Files:**
-- Delete: `crates/core/src/plan/` (4 files, 602 lines), `crates/core/src/graph/task_graph.rs` (655 lines)
+- Delete: `crates/core/src/plan/{plan_builder.rs, execute.rs}` (489 lines), `crates/core/src/graph/task_graph.rs` (655 lines)
+- **KEEP `crates/core/src/plan/planner.rs`.** See the scope correction below — an earlier draft deleted it and that was wrong.
 - Modify: `crates/core/src/lib.rs:41` (drop `pub mod plan;`), `crates/core/src/graph/mod.rs`, `crates/core/src/gantt_mermaid.rs` (test-only use), `crates/core/src/errors.rs:176` (cosmetic diagnostic string)
 - Modify: `app/src-tauri/src/{scripting.rs, cli/lua.rs, gui/command/script.rs, repl/run_script.rs}`
 
 **These four files are contested — re-read them before editing.** The concurrent web-server effort is moving `run_script_file` out of `app/src-tauri/src/scripting.rs` into `crates/scripting_lua`, giving it a `scripts_root` argument, and every one of these call sites changes signature as a result. That work is expected to land BEFORE this task. Do not work from the signatures quoted anywhere in this plan; open each file and read what is actually there. If `run_script_file` still lives in `app/src-tauri`, coordinate before touching it rather than racing.
 - Delete: `crates/scripting_lua/src/globals/plan.rs`; modify `lua_runner.rs`, `roll_best_seed.rs`, `lua_docs.rs`
 - Migrate: `scripts/{test_phase_2_1,test_phase_2_2,api_test,example,multi_client_test,lib}.lua`, `crates/scripting_lua/tests/script.lua`
+
+### Scope correction: `Planner` survives
+
+An earlier draft of this plan said "delete `crates/core/src/plan/`" wholesale. That is wrong, and acting on it would break far more than this plan intends.
+
+`Planner` (`crates/core/src/plan/planner.rs`) holds four things, and this plan replaces exactly one of them:
+
+| field / method | fate |
+| --- | --- |
+| `rcon: Option<Arc<FactorioRcon>>` | **stays** — the Lua `rcon.*` global is built from it |
+| `real_world: Arc<FactorioWorld>` | **stays** — `rcon.*` needs it |
+| `plan_world: Arc<FactorioWorld>` | **stays** — the Lua `world.*` global is built from it |
+| `initiate_missing_players_with_default_inventory`, `update_plan_world`, `reset` | **stay** — general bot/world setup the new planner still needs |
+| `graph: Arc<RwLock<TaskGraph>>` | **deleted** — this is the old planner being replaced |
+
+So `Planner` remains the Lua runtime's context holder and **`run_lua(&mut Planner, ...)` keeps its signature**. Do not rename `Planner`; a rename here would be gratuitous churn across a crate another effort is actively editing.
+
+What actually changes in `crates/scripting_lua`:
+- `lua_runner.rs:43` — drop `let graph = planner.graph.clone();` and stop passing it.
+- `lua_docs.rs:25` — drop the `create_lua_plan_builder` call; document `goal.*` instead.
+- `roll_best_seed.rs:185` — `planner.graph().shortest_path()` has no replacement in the new planner. Either port it onto `Schedule::makespan` (a schedule's makespan is the same quantity this was using as a fitness score) or delete the seed-rolling path. Decide and say which; do not leave it referencing a deleted type.
 
 **Do not delete** `crates/core/src/graph/entity_graph.rs`, `crates/core/src/graph/flow_graph.rs`, or `crates/core/src/factorio/factorio_planner.rs` — despite the names, the first two are live and the third only decodes blueprint zlib.
 

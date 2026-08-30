@@ -27,6 +27,7 @@ Copied verbatim from the brief. Every task's requirements implicitly include thi
 - Commits go to `master`; no feature branches.
 - Rust: `cargo clippy --workspace --all-features --all-targets -- --deny warnings` and `cargo fmt --all -- --check` must pass.
 - Frontend: `pnpm run lint` and `pnpm run test:coverage` must pass. **The package manager is pnpm, not yarn** — yarn was removed today. Vite is 8, vitest 4, ESLint 10 flat config, Tailwind v4, PrimeVue 4.
+- **`git diff` in this repo lies to greps.** `diff.external` is set to difftastic, so `git diff` emits no `+`/`-` prefixed lines and any `grep "^+"` over it returns 0 — indistinguishable from "found nothing". Measured on a known one-line removal: `git diff … | grep -c "^-rusttype"` gives **0**, `git diff --no-ext-diff … | grep -c` gives **1**. `git show` and `git log` are *not* affected (they disable the external driver unless `--ext-diff` is passed), which is why review packages built with `git show` are genuine unified diffs. Pass `--no-ext-diff` to every `git diff` regardless — a verification command that cannot fail is worse than a wrong answer, because a wrong answer gets challenged and a false green does not.
 - Cargo and pnpm both need the Nix devShell: `nix develop --command bash -c 'eval "$(mise env -s bash)"; <command>'`
 
 ### Plan-specific constraints

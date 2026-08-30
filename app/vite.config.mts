@@ -5,6 +5,16 @@ import tailwindcss from '@tailwindcss/vite'
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// The axum backend serves both the SPA and the API from one origin in
+// production, but `vite --port 8080` (the `serve` script) is a second origin
+// with nothing behind `/api` or `/openapi.json` unless we forward it. This is
+// the alternative to `VITE_API_BASE`, not a replacement for it: `apiBase()` in
+// `src/api/http.ts` prefers that env var when set, making requests absolute
+// and bypassing this proxy entirely -- useful when the backend isn't
+// reachable at this default. Leave `VITE_API_BASE` unset to go through the
+// proxy below instead.
+const backendTarget = 'http://127.0.0.1:7492';
+
 export default defineConfig({
     plugins: [
         vue(),
@@ -16,6 +26,18 @@ export default defineConfig({
             brotliSize: true
         })
     ],
+    server: {
+        proxy: {
+            '/api': {
+                target: backendTarget,
+                changeOrigin: true
+            },
+            '/openapi.json': {
+                target: backendTarget,
+                changeOrigin: true
+            }
+        }
+    },
     test: {
         coverage: {
             reporter: ['html-spa', 'cobertura']

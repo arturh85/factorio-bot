@@ -788,7 +788,7 @@ mod tests {
         let s = state();
         let r = recipe_for(&s, "iron-gear-wheel").expect("fixture has iron-gear-wheel");
         assert_eq!(r.category, "crafting");
-        assert_eq!(recipe_for(&s, "nonexistent-thing").is_none(), true);
+        assert!(recipe_for(&s, "nonexistent-thing").is_none());
     }
 
     #[test]
@@ -909,8 +909,11 @@ pub fn mining_ticks(state: &PlanState, item: &str) -> Ticks {
 
 /// The tile of `item` nearest `from` that still holds at least `need`.
 ///
-/// Patch elements are sorted by `PlanState::resource_patches`, and ties here
-/// break on that order, so the result is reproducible across runs.
+/// Ties on distance are broken by `(x, y)`, so the result depends only on the
+/// tile set and the origin — never on the order `resource_patches` happens to
+/// return patches in, which is not stable across processes for patches of
+/// equal size (their ids come from a `HashMap`-seeded loop in `core`, and the
+/// size sort is stable).
 pub fn nearest_resource_tile(
     state: &PlanState,
     item: &str,
@@ -926,7 +929,13 @@ pub fn nearest_resource_tile(
             let distance = calculate_distance(from, &tile);
             let better = match &best {
                 None => true,
-                Some((d, _)) => distance < *d,
+                Some((best_distance, best_tile)) => matches!(
+                    distance
+                        .total_cmp(best_distance)
+                        .then(tile.x.total_cmp(&best_tile.x))
+                        .then(tile.y.total_cmp(&best_tile.y)),
+                    std::cmp::Ordering::Less
+                ),
             };
             if better {
                 best = Some((distance, tile));

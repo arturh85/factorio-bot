@@ -117,7 +117,9 @@ async fn creates_a_new_script() {
         .await
         .unwrap();
 
-    assert!(response.status().is_success(), "got {}", response.status());
+    // 201, not 204: a POST that creates a resource says so, and plan 5's
+    // frontend distinguishes them.
+    assert_eq!(response.status(), StatusCode::CREATED);
     let written = std::fs::read_to_string(dir.path().join("scripts").join("fresh.lua")).unwrap();
     assert_eq!(written, "-- fresh");
 }
@@ -139,7 +141,20 @@ async fn refuses_to_create_over_an_existing_script() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // A create over something that is already there is a conflict, not a
+    // malformed request.
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    // Not raw OS text ("File exists (os error 17)"), which a browser cannot
+    // show a user.
+    assert_eq!(
+        body["message"], "script already exists: /hello.lua",
+        "{body}"
+    );
+
     let kept = std::fs::read_to_string(dir.path().join("scripts").join("hello.lua")).unwrap();
     assert_eq!(kept, "-- hello", "existing script must not be overwritten");
 }
@@ -248,9 +263,88 @@ async fn creating_over_a_dangling_symlink_does_not_write_through_it() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // `create_new` reports EEXIST for a symlink standing in the way, dangling
+    // or not — the same refusal as creating over a real file, so the same 409.
+    assert_eq!(response.status(), StatusCode::CONFLICT);
     assert!(
         !outside.join("evil.lua").exists(),
         "wrote through a dangling symlink to outside the scripts root"
+    );
+}
+
+/// A script that is not there is the caller asking for something that does not
+/// exist, not a malformed request. Before `ErrorResponse` carried a status,
+/// every failure in this crate answered 400 — including this one.
+#[tokio::test]
+async fn reading_a_missing_script_is_a_404() {
+    let dir = tempfile::tempdir().unwrap();
+    let (status, body) = get(
+        state_with_scripts(dir.path()),
+        "/api/v1/scripts/file?path=/nope.lua",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}
+
+#[tokio::test]
+async fn deleting_a_missing_script_is_a_404() {
+    let dir = tempfile::tempdir().unwrap();
+    let response = build_router(state_with_scripts(dir.path()), None)
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/v1/scripts/file?path=/nope.lua")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// F2 end to end: a workspace that has only just been bootstrapped — exactly
+/// what `serve` does at startup, and exactly what a fresh install has — must
+/// serve the scripts endpoints instead of answering "missing scripts
+/// directory". Before the bootstrap existed, `workspace/scripts` was never
+/// created and every route here returned 400, including `POST`, so there was
+/// no way to reach a first script from a browser at all.
+#[tokio::test]
+async fn a_freshly_bootstrapped_workspace_serves_the_scripts_endpoints() {
+    let dir = tempfile::tempdir().unwrap();
+    // What `Context::new` leaves behind on a clean install: `workspace/`, and
+    // nothing inside it.
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    assert!(!workspace.join("scripts").exists());
+
+    // What `serve` now does before binding.
+    factorio_bot_core::scripts::ensure_scripts_dir(&workspace).expect("bootstraps");
+
+    let mut settings = AppSettings::default();
+    settings.factorio.workspace_path = workspace.to_string_lossy().into_owned().into();
+    let state = AppState {
+        instance: FactorioInstance::new_shared(),
+        settings: settings.into_shared(),
+        settings_path: dir.path().join("AppSettings.toml"),
+    };
+
+    let (status, body) = get(state.clone(), "/api/v1/scripts?path=/").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let response = build_router(state, None)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/scripts/file?path=/first.lua")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"code":"-- first"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("scripts").join("first.lua")).unwrap(),
+        "-- first"
     );
 }

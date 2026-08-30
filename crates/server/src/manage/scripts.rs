@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use utoipa::{IntoParams, ToSchema};
 
 #[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ScriptPathQuery {
     /// Slash-separated path relative to the scripts root, e.g. `/` or
     /// `/sub/example.lua`. A leading slash is optional.
@@ -91,24 +92,32 @@ async fn scripts_root(state: &AppState) -> Result<PathBuf, ErrorResponse> {
 /// force, exactly as for read/write/delete), and the final component is
 /// validated on its own before being joined back on.
 ///
-/// A final component that is empty, `.`, `..`, or that contains a path
-/// separator (`/` or `\`) is rejected outright, rather than relying on
-/// `resolve_script_path`'s bounds check on the parent alone. In this
-/// implementation that check on the parent is already sufficient by
-/// itself to stop a traversal attempt landing in `parent_part` (it fully
-/// canonicalises and rejects anything outside `root`, however many `..`
-/// segments are embedded in it — verified by deliberately deleting the
-/// check below and confirming no attempted escape produces a file outside
-/// `root`: a bare `.`/`..`/empty component always joins onto an
-/// already-verified, already-*existing* directory, and `std::fs::write`
-/// refuses to write file contents onto a directory). The check below is
-/// still kept because `component.contains('/')` can only ever be false
-/// after `rsplit_once('/')`, so it is inert today, but it is one line of
-/// defense-in-depth against a future change to the split above (e.g. one
-/// that stops guaranteeing a slash-free component), against `\`-based
-/// traversal on Windows, and it turns a bare `.`/`..`/empty request into a
-/// clear "invalid script name" 400 instead of an incidental
-/// `std::fs::write` I/O error.
+/// The final component must be exactly one *ordinary* path component, and the
+/// joined result is bounds-checked against `root` before it is returned.
+///
+/// The component check goes through `Path::components` rather than a
+/// hand-written list of forbidden strings, because a list is not complete.
+/// `Components` normalises `.` away to `CurDir`, yields `ParentDir` for `..`,
+/// `RootDir`/`Prefix` for an absolute or drive-qualified path, and more than
+/// one item for anything holding a separator — so "exactly one
+/// `Component::Normal`" subsumes every case the old five-way filter
+/// (`/`, `\`, `.`, `..`, empty) covered *and* rejects a drive prefix, which
+/// that filter did not.
+///
+/// The prefix case is not hypothetical, and this check is **not inert on
+/// Windows**: `PathBuf::push` (which `Path::join` uses) documents that pushing
+/// a path with a prefix but no root — `C:evil.lua` — *replaces* the existing
+/// path entirely rather than appending to it. Without this check, a request
+/// for `C:evil.lua` would therefore discard the already-verified `parent` and
+/// return a path outside the scripts root altogether. Unix is unaffected
+/// (there are no prefixes), which is exactly why a Unix-only reading of the
+/// old filter concluded it was dead code.
+///
+/// Belt and braces, the joined `target` is re-checked with
+/// `starts_with(root)`. This is the one script path that cannot be
+/// canonicalised before use — the file does not exist yet, and `canonicalize`
+/// fails on a missing path — so it is the one place where a bounds check has
+/// to be made on an unresolved path, and it is worth making twice.
 fn resolve_new_script_path(
     root: &std::path::Path,
     requested: &str,
@@ -119,12 +128,12 @@ fn resolve_new_script_path(
         None => ("", trimmed),
     };
 
-    if component.is_empty()
-        || component == "."
-        || component == ".."
-        || component.contains('/')
-        || component.contains('\\')
-    {
+    let mut components = std::path::Path::new(component).components();
+    let is_single_normal_component = matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    );
+    if !is_single_normal_component {
         return Err(ErrorResponse::bad_request(format!(
             "invalid script name: {requested}"
         )));
@@ -137,7 +146,13 @@ fn resolve_new_script_path(
         )));
     }
 
-    Ok(parent.join(component))
+    let target = parent.join(component);
+    if !target.starts_with(root) {
+        return Err(ErrorResponse::bad_request(format!(
+            "path escapes the scripts directory: {requested}"
+        )));
+    }
+    Ok(target)
 }
 
 /// Lists a directory under the scripts root as a `PrimeVue` tree
@@ -149,6 +164,8 @@ fn resolve_new_script_path(
     responses(
         (status = 200, body = Vec<PrimeVueTreeNode>),
         (status = 400, body = crate::error::ErrorResponse),
+        (status = 404, body = crate::error::ErrorResponse),
+        (status = 500, body = crate::error::ErrorResponse),
     )
 )]
 pub async fn list_scripts(
@@ -175,15 +192,15 @@ pub async fn list_scripts(
     };
 
     let read_dir = std::fs::read_dir(&resolved)
-        .map_err(|err| ErrorResponse::bad_request(format!("failed to list directory: {err}")))?;
+        .map_err(|err| ErrorResponse::internal(format!("failed to list directory: {err}")))?;
 
     let mut entries = Vec::new();
     for entry in read_dir {
-        let entry = entry
-            .map_err(|err| ErrorResponse::bad_request(format!("failed to read entry: {err}")))?;
-        let file_type = entry.file_type().map_err(|err| {
-            ErrorResponse::bad_request(format!("failed to read entry type: {err}"))
-        })?;
+        let entry =
+            entry.map_err(|err| ErrorResponse::internal(format!("failed to read entry: {err}")))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|err| ErrorResponse::internal(format!("failed to read entry type: {err}")))?;
         // A filename that is not valid UTF-8 must not abort the process:
         // fall back to a lossy conversion rather than `.to_str().unwrap()`.
         let file_name = entry.file_name().to_string_lossy().into_owned();
@@ -213,6 +230,8 @@ pub async fn list_scripts(
     responses(
         (status = 200, body = ScriptContent),
         (status = 400, body = crate::error::ErrorResponse),
+        (status = 404, body = crate::error::ErrorResponse),
+        (status = 500, body = crate::error::ErrorResponse),
     )
 )]
 pub async fn read_script(
@@ -228,7 +247,7 @@ pub async fn read_script(
         )));
     }
     let code = std::fs::read_to_string(&resolved)
-        .map_err(|err| ErrorResponse::bad_request(format!("failed to read script: {err}")))?;
+        .map_err(|err| ErrorResponse::internal(format!("failed to read script: {err}")))?;
     Ok(Json(ScriptContent { code }))
 }
 
@@ -246,6 +265,8 @@ pub async fn read_script(
     responses(
         (status = 204),
         (status = 400, body = crate::error::ErrorResponse),
+        (status = 404, body = crate::error::ErrorResponse),
+        (status = 500, body = crate::error::ErrorResponse),
     )
 )]
 pub async fn write_script(
@@ -262,7 +283,7 @@ pub async fn write_script(
         )));
     }
     std::fs::write(&resolved, body.code)
-        .map_err(|err| ErrorResponse::bad_request(format!("failed to write script: {err}")))?;
+        .map_err(|err| ErrorResponse::internal(format!("failed to write script: {err}")))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -290,8 +311,11 @@ pub async fn write_script(
     params(ScriptPathQuery),
     request_body = ScriptContent,
     responses(
-        (status = 204),
+        (status = 201),
         (status = 400, body = crate::error::ErrorResponse),
+        (status = 404, body = crate::error::ErrorResponse),
+        (status = 409, body = crate::error::ErrorResponse),
+        (status = 500, body = crate::error::ErrorResponse),
     )
 )]
 pub async fn create_script(
@@ -305,10 +329,24 @@ pub async fn create_script(
         .write(true)
         .create_new(true)
         .open(&target)
-        .map_err(|err| ErrorResponse::bad_request(format!("failed to create script: {err}")))?;
+        .map_err(|err| match err.kind() {
+            // `create_new` reports `EEXIST` both for a real file and for a
+            // symlink standing where the new script would go. Either way the
+            // caller's answer is the same, and raw OS text ("File exists (os
+            // error 17)") is not an answer a browser can show a user.
+            std::io::ErrorKind::AlreadyExists => {
+                ErrorResponse::conflict(format!("script already exists: {}", query.path))
+            }
+            // The parent resolved a moment ago; if it is gone now the client
+            // is asking for something that is not there.
+            std::io::ErrorKind::NotFound => {
+                ErrorResponse::not_found(format!("path not found: {}", query.path))
+            }
+            _ => ErrorResponse::internal(format!("failed to create script: {err}")),
+        })?;
     file.write_all(body.code.as_bytes())
-        .map_err(|err| ErrorResponse::bad_request(format!("failed to write script: {err}")))?;
-    Ok(StatusCode::NO_CONTENT)
+        .map_err(|err| ErrorResponse::internal(format!("failed to write script: {err}")))?;
+    Ok(StatusCode::CREATED)
 }
 
 /// Deletes an existing script file. Deleting a directory is not supported.
@@ -320,6 +358,8 @@ pub async fn create_script(
     responses(
         (status = 204),
         (status = 400, body = crate::error::ErrorResponse),
+        (status = 404, body = crate::error::ErrorResponse),
+        (status = 500, body = crate::error::ErrorResponse),
     )
 )]
 pub async fn delete_script(
@@ -335,7 +375,7 @@ pub async fn delete_script(
         )));
     }
     std::fs::remove_file(&resolved)
-        .map_err(|err| ErrorResponse::bad_request(format!("failed to delete script: {err}")))?;
+        .map_err(|err| ErrorResponse::internal(format!("failed to delete script: {err}")))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -378,6 +418,75 @@ mod tests {
     fn configured_workspace_path_is_joined_as_given() {
         let root = scripts_root_path("/configured/workspace").expect("resolves");
         assert_eq!(root, PathBuf::from("/configured/workspace/scripts"));
+    }
+
+    /// The bounds guarantee, stated as a property rather than a list of
+    /// forbidden strings: whatever `resolve_new_script_path` returns is inside
+    /// `root`, for every hostile shape of final component.
+    ///
+    /// `C:evil.lua` is the interesting one and the reason the old five-way
+    /// filter (`/`, `\`, `.`, `..`, empty) was not enough. On Windows it is a
+    /// prefixed-but-rootless path, and `PathBuf::push` *replaces* the whole
+    /// path with it — discarding the already-verified parent and landing
+    /// outside the root entirely. On Unix there are no prefixes, so it is an
+    /// ordinary (if odd) filename that stays inside the root; asserting
+    /// containment rather than rejection is what lets one test carry the
+    /// property on both platforms.
+    #[test]
+    fn a_resolved_new_script_path_always_stays_inside_the_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("scripts");
+        std::fs::create_dir_all(root.join("sub")).expect("mkdir");
+        let root = std::fs::canonicalize(&root).expect("canonicalize");
+
+        for requested in [
+            "",
+            "/",
+            ".",
+            "..",
+            "/.",
+            "/..",
+            "/sub/.",
+            "/sub/..",
+            "C:evil.lua",
+            "/C:evil.lua",
+            "/sub/C:evil.lua",
+            "C:/evil.lua",
+            "/etc/evil.lua",
+            "\\evil.lua",
+            "/sub/../../evil.lua",
+            "/ok.lua",
+            "/sub/ok.lua",
+        ] {
+            // Rejecting outright is always an acceptable answer here; what
+            // must never happen is *accepting* and landing outside the root.
+            if let Ok(target) = resolve_new_script_path(&root, requested) {
+                assert!(
+                    target.starts_with(&root),
+                    "{requested:?} resolved to {target:?}, outside {root:?}"
+                );
+            }
+        }
+    }
+
+    /// The cases that must be *rejected* on every platform, as opposed to
+    /// merely staying inside the root.
+    #[test]
+    fn a_new_script_name_must_be_a_single_ordinary_component() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("scripts");
+        std::fs::create_dir_all(root.join("sub")).expect("mkdir");
+        let root = std::fs::canonicalize(&root).expect("canonicalize");
+
+        for requested in ["", "/", ".", "..", "/.", "/..", "/sub/.", "/sub/.."] {
+            assert!(
+                resolve_new_script_path(&root, requested).is_err(),
+                "{requested:?} should not resolve to a creatable path"
+            );
+        }
+
+        let ok = resolve_new_script_path(&root, "/sub/ok.lua").expect("resolves");
+        assert_eq!(ok, root.join("sub").join("ok.lua"));
     }
 
     /// Belt and braces: a *non-empty* but still relative `workspace_path`

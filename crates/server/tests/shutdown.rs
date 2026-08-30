@@ -11,6 +11,13 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, RwLock};
 
+/// Grace period injected into these tests. `start_with_shutdown` no longer
+/// hardcodes ten seconds — the caller passes it in, production via
+/// `webserver::SHUTDOWN_GRACE_PERIOD` and tests via a value small enough
+/// that a test which needs to wait the grace period out (or well past it)
+/// does not have to sleep for ten real seconds to do so.
+const TEST_GRACE_PERIOD: Duration = Duration::from_millis(300);
+
 #[tokio::test]
 async fn server_returns_when_the_shutdown_future_resolves() {
     let settings = AppSettings::default().into_shared();
@@ -26,7 +33,7 @@ async fn server_returns_when_the_shutdown_future_resolves() {
             async {
                 let _ = rx.await;
             },
-            Duration::from_millis(200),
+            TEST_GRACE_PERIOD,
         )
         .await
     });
@@ -84,7 +91,7 @@ async fn shutdown_takes_and_stops_the_factorio_instance() {
             async {
                 let _ = rx.await;
             },
-            Duration::from_millis(200),
+            TEST_GRACE_PERIOD,
         )
         .await
     });
@@ -143,13 +150,6 @@ async fn free_addr() -> SocketAddr {
 /// long as the socket stays open. `with_graceful_shutdown` is documented to
 /// wait for exactly this kind of in-flight work to finish, which it never
 /// will here, so this is the real shape the plan-4 SSE streams will take.
-/// Grace period injected into these tests. `start_with_shutdown` no longer
-/// hardcodes ten seconds — the caller passes it in, production via
-/// `webserver::SHUTDOWN_GRACE_PERIOD` and tests via a value small enough
-/// that a test which needs to wait the grace period out (or well past it)
-/// does not have to sleep for ten real seconds to do so.
-const TEST_GRACE_PERIOD: Duration = Duration::from_millis(300);
-
 #[tokio::test]
 async fn shutdown_does_not_wait_forever_for_an_in_flight_request() {
     let settings = AppSettings::default().into_shared();

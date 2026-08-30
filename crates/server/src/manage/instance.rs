@@ -21,7 +21,6 @@ pub struct InstanceStatus {
     tag = "Admin",
     responses(
         (status = 200, body = InstanceStatus),
-        (status = 400, body = crate::error::ErrorResponse),
     )
 )]
 pub async fn get_instance(State(state): State<AppState>) -> ApiResult<InstanceStatus> {
@@ -51,6 +50,7 @@ pub async fn get_instance(State(state): State<AppState>) -> ApiResult<InstanceSt
     responses(
         (status = 204),
         (status = 400, body = crate::error::ErrorResponse),
+        (status = 500, body = crate::error::ErrorResponse),
     )
 )]
 pub async fn stop_instance(State(state): State<AppState>) -> Result<StatusCode, ErrorResponse> {
@@ -59,7 +59,11 @@ pub async fn stop_instance(State(state): State<AppState>) -> Result<StatusCode, 
         // stop() consumes self and is synchronous; propagate its error rather
         // than unwrapping, which would abort the process under panic = "abort"
         Some(instance) => {
-            instance.stop().map_err(ErrorResponse::from)?;
+            // Killing the child processes failing is a server-side fault, not
+            // the caller's: answer 500 rather than 400.
+            instance.stop().map_err(|err| {
+                ErrorResponse::internal(format!("failed to stop instance: {err}"))
+            })?;
             Ok(StatusCode::NO_CONTENT)
         }
         None => Err(ErrorResponse::not_started()),

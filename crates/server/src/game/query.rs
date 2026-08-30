@@ -39,6 +39,7 @@ fn area_filter_from(
 }
 
 #[derive(Debug, Default, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 #[serde(default)]
 pub struct FindEntitiesParams {
     pub area: Option<String>,
@@ -84,6 +85,7 @@ pub async fn find_entities(
 }
 
 #[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct PlanPathParams {
     pub entity_name: String,
     pub entity_type: String,
@@ -142,6 +144,7 @@ pub async fn plan_path(
 }
 
 #[derive(Debug, Default, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 #[serde(default)]
 pub struct FindTilesParams {
     pub area: Option<String>,
@@ -182,6 +185,7 @@ pub async fn find_tiles(
 }
 
 #[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct InventoryContentsAtParams {
     pub query: String,
 }
@@ -228,6 +232,7 @@ pub async fn inventory_contents_at(
 }
 
 #[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct PlayerInfoParams {
     pub player_id: PlayerId,
 }

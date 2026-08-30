@@ -42,7 +42,6 @@ impl AppSettings {
         }
     }
 
-    #[allow(dead_code)]
     pub fn save(file_path: PathBuf, app_settings: &AppSettings) -> Result<()> {
         let file_contents = ::toml::to_string(app_settings).into_diagnostic()?;
         ::std::fs::write(file_path, file_contents).into_diagnostic()?;

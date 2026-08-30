@@ -12,7 +12,6 @@ use factorio_bot_core::app_settings::AppSettings;
     tag = "Admin",
     responses(
         (status = 200, body = AppSettings),
-        (status = 400, body = crate::error::ErrorResponse),
     )
 )]
 pub async fn get_settings(State(state): State<AppState>) -> ApiResult<AppSettings> {
@@ -28,6 +27,7 @@ pub async fn get_settings(State(state): State<AppState>) -> ApiResult<AppSetting
     responses(
         (status = 200, body = AppSettings),
         (status = 400, body = crate::error::ErrorResponse),
+        (status = 500, body = crate::error::ErrorResponse),
     )
 )]
 pub async fn put_settings(
@@ -36,6 +36,9 @@ pub async fn put_settings(
 ) -> ApiResult<AppSettings> {
     let mut settings = state.settings.write().await;
     *settings = body;
-    AppSettings::save(state.settings_path.clone(), &settings).map_err(ErrorResponse::from)?;
+    // A failed write is the server's own disk problem, not a malformed
+    // request: answer 500 rather than blaming the caller.
+    AppSettings::save(state.settings_path.clone(), &settings)
+        .map_err(|err| ErrorResponse::internal(format!("failed to save settings: {err}")))?;
     Ok(Json(settings.clone()))
 }

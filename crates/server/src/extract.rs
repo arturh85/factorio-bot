@@ -9,13 +9,15 @@
 //! `axum::extract::{Query, Json}` and map the rejection via `ErrorResponse`'s
 //! existing `From` impls.
 //!
-//! Note this collapses status codes: `ErrorResponse::into_response` always
-//! answers 400, so a rejection that axum would otherwise have answered
-//! differently (an oversized body would be 413, a missing/wrong
-//! content-type would be 415) now answers 400 too. That is a real behavior
-//! change from axum's defaults. It is accepted here because every other
-//! error in this crate already collapses to 400 via `ErrorResponse`, and
-//! this keeps extractor rejections consistent with that.
+//! Note this collapses status codes: both rejections are mapped through
+//! `ErrorResponse::bad_request`, so a rejection that axum would otherwise have
+//! answered differently (an oversized body would be 413, a missing/wrong
+//! content-type would be 415) answers 400 here. That is a real behavior change
+//! from axum's defaults, accepted because a malformed request really is the
+//! caller's fault and one status keeps client handling simple. `ErrorResponse`
+//! itself does carry a status now (see `error.rs`), so handlers that know
+//! better — a missing script, a create over an existing file, a server-side
+//! failure — answer 404/409/500 rather than 400.
 
 use crate::error::ErrorResponse;
 use axum::extract::{FromRequest, FromRequestParts, Json, Query, Request};

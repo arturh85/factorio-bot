@@ -43,8 +43,9 @@ pub fn build_router(state: AppState, web_root: Option<&str>) -> Router {
 
 async fn api_not_found() -> axum::response::Response {
     use axum::response::IntoResponse;
-    let body = crate::error::ErrorResponse::new("not found".into(), 404);
-    (axum::http::StatusCode::NOT_FOUND, axum::Json(body)).into_response()
+    crate::error::ErrorResponse::new("not found".into(), 404)
+        .with_status(axum::http::StatusCode::NOT_FOUND)
+        .into_response()
 }
 
 /// Production value of the graceful-shutdown grace period: how long

@@ -10,20 +10,25 @@ use tower::ServiceExt;
 /// `AppState::new`'s real `paths::settings_file()`: a `PUT` that reaches
 /// `AppSettings::save` must never write to a developer's actual settings
 /// file just because the test suite ran.
-fn test_state() -> AppState {
-    AppState {
+///
+/// The `TempDir` is returned rather than `keep()`-ed: `keep()` disarms the
+/// deletion guard, so every run of this file left a directory behind in the
+/// system temp directory forever. Callers bind it for the length of the test
+/// and it is removed on drop.
+fn test_state() -> (tempfile::TempDir, AppState) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = AppState {
         instance: FactorioInstance::new_shared(),
         settings: AppSettings::default().into_shared(),
-        settings_path: tempfile::tempdir()
-            .expect("tempdir")
-            .keep()
-            .join("AppSettings.toml"),
-    }
+        settings_path: dir.path().join("AppSettings.toml"),
+    };
+    (dir, state)
 }
 
 #[tokio::test]
 async fn get_settings_returns_the_current_settings() {
-    let response = build_router(test_state(), None)
+    let (_dir, state) = test_state();
+    let response = build_router(state, None)
         .oneshot(
             Request::builder()
                 .uri("/api/v1/settings")
@@ -82,7 +87,8 @@ async fn put_settings_updates_the_shared_state() {
 
 #[tokio::test]
 async fn put_settings_rejects_a_malformed_body_with_json() {
-    let response = build_router(test_state(), None)
+    let (_dir, state) = test_state();
+    let response = build_router(state, None)
         .oneshot(
             Request::builder()
                 .method("PUT")

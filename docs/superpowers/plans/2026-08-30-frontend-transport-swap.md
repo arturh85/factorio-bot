@@ -1863,6 +1863,14 @@ git commit -m "refactor(app): move appStore onto the settings and fs http routes
 
 ---
 
+> **Two things Task 6 found that apply to every remaining store task.**
+>
+> **1. A test whose input and expected output are the same value cannot see the transformation between them.** Task 6's PUT test set the server's answer to `/srv/workspace` and sent `/srv/workspace` — so `expect(store.getWorkspacePath).toBe('/srv/workspace')` passed even with `this.settings = await putSettings(...)` reduced to `await putSettings(...)`. **The one line the task added was untested by the test written for it.** Make the server's answer differ from the request (send `/srv/workspace/`, answer `/srv/workspace`) so the assignment is observable. Same family as `encodeURIComponent('7') === '7'`.
+>
+> **2. `expect(store.x).toBeNull()` after a *first* failed load is near-vacuous** — it was null before the call. Assert instead that a *previously loaded* value survives a failed reload.
+>
+> **Also carried from Task 6:** the swagger-ui link hardcodes `http://localhost:<port>`. A relative `/swagger-ui/` is production-correct but 404s under the dev proxy, which covers only `/api` and `/openapi.json`. Add `/swagger-ui` to `app/vite.config.mts`'s proxy, then make the link relative — one line each, and the hardcoded host is otherwise wrong the moment the server is not on localhost, which is exactly the LAN case this whole plan is for.
+
 ## Task 7: `instanceStore` over HTTP
 
 **Files:**

@@ -2,11 +2,6 @@ export type PlaceEntity = {
  position: Position;
  direction: number;
 }
-export enum InventoryType {
- chest_or_fuel = 1,
- furnace_source = 2, // or lab input apparently
- furnace_result = 3,
-}
 export enum Direction {
  north,
  northeast,

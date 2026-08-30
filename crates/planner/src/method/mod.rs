@@ -136,19 +136,10 @@ fn expand_goal(
         });
     }
 
-    if let Goal::All(inner) = goal {
-        ctx.depth += 1;
-        for g in inner {
-            expand_goal(g, ctx, net, registry)?;
-        }
-        ctx.depth -= 1;
-        return Ok(());
-    }
-
-    // A goal addressed to one bot rebinds the chain actor for its whole
-    // subtree, so that simulated effects land in the same inventory the
-    // shortfall checks read. Without this the driver would credit a chain's
-    // mining to one bot while asking whether a different one was satisfied.
+    // Save, run, restore — on every exit path, errors included. A completed
+    // call must leave `depth` and `chain_actor` exactly as it found them even
+    // when it fails, or a caller that continues past an error inherits a
+    // corrupted context and a comment claiming that cannot happen.
     let previous_actor = ctx.chain_actor;
     if let Goal::Have {
         whose: Holder::Bot(bot),
@@ -156,6 +147,32 @@ fn expand_goal(
     } = goal
     {
         ctx.chain_actor = *bot;
+    }
+    ctx.depth += 1;
+
+    let result = expand_goal_body(goal, ctx, net, registry);
+
+    ctx.depth -= 1;
+    ctx.chain_actor = previous_actor;
+    result
+}
+
+fn expand_goal_body(
+    goal: &Goal,
+    ctx: &mut ExpansionCtx,
+    net: &mut ActionNetwork,
+    registry: &MethodRegistry,
+) -> Result<(), PlannerError> {
+    // A goal addressed to one bot rebinds the chain actor for its whole
+    // subtree, so that simulated effects land in the same inventory the
+    // shortfall checks read. Without this the driver would credit a chain's
+    // mining to one bot while asking whether a different one was satisfied.
+    // (The rebind itself happens in `expand_goal`, which also restores it.)
+    if let Goal::All(inner) = goal {
+        for g in inner {
+            expand_goal(g, ctx, net, registry)?;
+        }
+        return Ok(());
     }
 
     let method =
@@ -166,7 +183,6 @@ fn expand_goal(
             })?;
     let steps = method.expand(goal, ctx)?;
 
-    ctx.depth += 1;
     for step in steps {
         match step {
             Step::Subgoal(g) => expand_goal(&g, ctx, net, registry)?,
@@ -182,8 +198,6 @@ fn expand_goal(
             Step::Link { from, to, lag } => net.link(from, to, lag),
         }
     }
-    ctx.depth -= 1;
-    ctx.chain_actor = previous_actor;
     Ok(())
 }
 
@@ -351,9 +365,12 @@ mod tests {
 
     #[test]
     fn the_driver_advances_its_state_so_siblings_see_earlier_effects() {
-        // `Produce` runs for the first goal; the second is already satisfied by
-        // the first one's simulated effect, so `Satisfied` claims it and emits
-        // nothing. Two identical goals must therefore yield ONE action.
+        // The two goals ask for different counts, so an implementation that
+        // merely deduplicated equal `Goal` values (without any state
+        // simulation) would also produce two actions here — that shortcut is
+        // ruled out by checking the second action's count below, which is
+        // only correct if the driver's state genuinely carries the first
+        // goal's 3 coal forward before `Satisfied` is asked about the second.
         struct Satisfied;
         impl Method for Satisfied {
             fn name(&self) -> &'static str {
@@ -373,13 +390,28 @@ mod tests {
         let reg = MethodRegistry::new()
             .with(Box::new(Satisfied))
             .with(Box::new(Produce));
-        let goal = Goal::Have {
-            item: "coal".into(),
-            count: 3,
-            whose: Holder::Anyone,
-        };
-        let net = expand(&[goal.clone(), goal], &state, &reg, BotId(1)).unwrap();
-        assert_eq!(net.len(), 1, "the second goal was already satisfied");
+        let net = expand(
+            &[
+                Goal::Have {
+                    item: "coal".into(),
+                    count: 3,
+                    whose: Holder::Anyone,
+                },
+                Goal::Have {
+                    item: "coal".into(),
+                    count: 5,
+                    whose: Holder::Anyone,
+                },
+            ],
+            &state,
+            &reg,
+            BotId(1),
+        )
+        .unwrap();
+        // The first goal produces 3. The second is not a duplicate and is not
+        // satisfied, so it produces too — but only because the driver's state
+        // actually carries the first goal's 3 coal forward.
+        assert_eq!(net.len(), 2);
     }
 
     #[test]
@@ -537,5 +569,45 @@ mod tests {
         ]);
         let net = expand(&[goal], &state, &reg, BotId(1)).unwrap();
         assert_eq!(net.len(), 2);
+    }
+
+    #[test]
+    fn a_failed_expansion_restores_the_context() {
+        /// Always claims the goal, always fails.
+        struct Fails;
+        impl Method for Fails {
+            fn name(&self) -> &'static str {
+                "fails"
+            }
+            fn applicable(&self, goal: &Goal, _s: &PlanState) -> bool {
+                matches!(goal, Goal::Have { .. })
+            }
+            fn expand(
+                &self,
+                goal: &Goal,
+                _c: &mut ExpansionCtx,
+            ) -> Result<Vec<Step>, PlannerError> {
+                Err(PlannerError::NoApplicableMethod {
+                    goal: goal.to_string(),
+                })
+            }
+        }
+        let reg = MethodRegistry::new().with(Box::new(Fails));
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1), BotId(2)]);
+        let mut ctx = ExpansionCtx::new(state, BotId(1));
+        let mut net = ActionNetwork::new();
+        let goal = Goal::Have {
+            item: "coal".into(),
+            count: 1,
+            whose: Holder::Bot(BotId(2)),
+        };
+
+        assert!(expand_goal(&goal, &mut ctx, &mut net, &reg).is_err());
+        assert_eq!(
+            ctx.chain_actor,
+            BotId(1),
+            "the binding must survive an error"
+        );
+        assert_eq!(ctx.depth, 0, "the depth must survive an error");
     }
 }

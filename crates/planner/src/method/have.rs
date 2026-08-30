@@ -93,6 +93,7 @@ impl Method for Smelt {
         let per_craft = output_per_craft(&recipe, item);
         let runs = need.div_ceil(per_craft);
         let coal = runs.div_ceil(PLATES_PER_COAL).max(1);
+        let ingredients = ingredients_of(&recipe);
 
         let from = ctx
             .state
@@ -124,9 +125,9 @@ impl Method for Smelt {
         let mut steps: Vec<Step> = Vec::new();
 
         // Ingredients, fuel, and the furnace itself, as subgoals.
-        for (ingredient, amount) in ingredients_of(&recipe) {
+        for (ingredient, amount) in &ingredients {
             steps.push(Step::Subgoal(Goal::Have {
-                item: ingredient,
+                item: ingredient.clone(),
                 count: amount.saturating_mul(runs),
                 whose: whose.clone(),
             }));
@@ -175,7 +176,7 @@ impl Method for Smelt {
         })));
 
         let mut insert_ids = Vec::new();
-        for (ingredient, amount) in ingredients_of(&recipe) {
+        for (ingredient, amount) in &ingredients {
             let total = amount.saturating_mul(runs);
             let id = ctx.ids.next();
             insert_ids.push(id);
@@ -616,18 +617,37 @@ mod tests {
             BotId(1),
         )
         .unwrap();
+
         let remove = net
             .actions()
             .find(|a| matches!(a.kind, ActionKind::Remove { .. }))
             .expect("a removal");
-        // iron-plate is 3.2s each, so two plates lag 2 * 192 = 384 ticks.
-        let lag = net
-            .preds(remove.id)
-            .into_iter()
-            .map(|(_, lag)| lag)
-            .max()
-            .expect("the removal has predecessors");
-        assert_eq!(lag, 384);
+
+        // Identify each insert by what it inserts, then check its own edge to
+        // the removal — a blind max() over all predecessors would pass even if
+        // the ore and fuel lags were swapped.
+        let lag_from = |item: &str| -> Ticks {
+            let insert = net
+                .actions()
+                .find(|a| matches!(&a.kind, ActionKind::Insert { item: i, .. } if i == item))
+                .unwrap_or_else(|| panic!("expected an insert of {}", item));
+            net.preds(remove.id)
+                .into_iter()
+                .find(|(from, _)| *from == insert.id)
+                .unwrap_or_else(|| {
+                    panic!("expected an edge from the {} insert to the removal", item)
+                })
+                .1
+        };
+
+        // iron-plate is 3.2 s each, so two plates lag 2 * 192 = 384 ticks.
+        assert_eq!(
+            lag_from("iron-ore"),
+            384,
+            "the ore insert carries the smelting time"
+        );
+        // Fuel must be in before the removal, but does not itself take smelting time.
+        assert_eq!(lag_from("coal"), 0, "the fuel insert carries no lag");
     }
 
     #[test]

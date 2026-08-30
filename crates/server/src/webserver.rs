@@ -61,18 +61,24 @@ pub async fn start_with_shutdown(
         .await
         .into_diagnostic()?;
     tracing::info!("listening on http://{bind}");
-    axum::serve(listener, app)
+    let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await
-        .into_diagnostic()?;
+        .into_diagnostic();
 
-    // FactorioInstance has no Drop impl, so a server that is signalled would
-    // otherwise leave the Factorio server and every client process orphaned.
-    if let Some(instance) = instance_state.write().await.take() {
+    // FactorioInstance has no Drop impl, so a server that is signalled — or
+    // one whose accept loop returns an error — would otherwise leave the
+    // Factorio server and every client process orphaned. Stop it whether
+    // `serve_result` is Ok or Err, then propagate the original error first.
+    let stop_result = if let Some(instance) = instance_state.write().await.take() {
         tracing::info!("stopping factorio instance");
-        instance.stop()?;
-    }
-    Ok(())
+        instance.stop()
+    } else {
+        Ok(())
+    };
+
+    serve_result?;
+    stop_result
 }
 
 pub async fn start(

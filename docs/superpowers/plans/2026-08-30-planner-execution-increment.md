@@ -18,6 +18,7 @@
 - **A second agent is working in this repo concurrently** (dependency/stack modernization, mostly `app/` and `crates/server`). Therefore: commit with explicit paths — `git commit -m "..." -- <paths>` — never a bare `git commit` or `git add -A`, which would sweep their staged work into your commit. Run `cargo fmt` scoped: `cargo fmt -p <crate>`, never `--all`.
 - **Branch:** work on `master`, committing directly, per the repository owner's instruction.
 - Conventional commit messages. Every task ends with at least one commit.
+- **Running the workspace suite dirties seven files you must not commit.** `crates/scripting_lua/tests/` holds `task_graph-{1,2}.{dot,md}` and three `.png` files that the fixture script rewrites on every run. Nothing reads or compares them (see Task 8). After any `cargo test --workspace`, `git status` will show them modified — revert with `git checkout -- crates/scripting_lua/tests/` and never include them in a commit. This matters most in Task 7, whose commit path is `-- crates/scripting_lua` and would otherwise sweep them in.
 - Verification command for the whole workspace: `cargo clippy --workspace --all-features --all-targets -- --deny warnings` then `cargo test --workspace`.
 
 ## Sign-off — granted

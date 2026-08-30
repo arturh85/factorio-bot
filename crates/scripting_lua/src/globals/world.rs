@@ -201,8 +201,11 @@ end
         String::from(
             r#"
 --- draw world and save as image at given path
--- Sends 
--- @string save_path save path 
+-- Bounded to the scripts directory exactly like `globals.file_write`: the
+-- path is relative to the calling script, its parent directory must already
+-- exist, an existing symlink at the target is refused, and a path that would
+-- leave the scripts directory is refused rather than clamped.
+-- @string save_path where to write the image, relative to the scripts directory
 function world.draw(save_path)
 end
 "#,

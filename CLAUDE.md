@@ -78,6 +78,12 @@ BotBridge Mod (Factorio mod for RPC)
   - `plan/` - Goal decomposition and task execution
 
 - **crates/scripting_lua**: Lua 5.4 bindings exposing host functions for task queuing, graph queries, and RCON commands
+  - `sandbox.rs` - the restricted interpreter every user script runs in
+  - `lua_docs.rs` - generates `docs/lua/src/{globals,world,rcon,goal}.lua` from
+    the `__doc_entry_*` strings in `globals/`. Those four files are build
+    artifacts (gitignored) written by `app/src-tauri/build.rs`; edit the Rust
+    strings, never the `.lua`. `docs/lua/src/types.lua` is the exception — it
+    is hand-written and tracked, mirroring `crates/core/src/types.rs`.
 
 - **crates/server**: axum HTTP server (replaces the former Rocket `crates/restapi`)
   - `webserver.rs` - router assembly, static SPA serving, `start()` entry point
@@ -113,6 +119,35 @@ Restoring the intended layout is open work.
 3. Executor assigns tasks to bots based on availability/travel time
 4. RCON commands sent to Factorio via BotBridge mod
 5. Entity/event data streams back to update graphs
+
+### Script Execution (HTTP)
+
+`POST /api/v1/scripts/execute` takes either a `path` under the scripts
+directory or inline `code`, answers `202` with a `job_id`, and runs the script
+detached (`crates/server/src/manage/execute.rs`, `crates/server/src/jobs.rs`).
+
+- **One script at a time.** The job registry holds a single execution slot.
+  While one script runs, a second request is refused with `409`, whose body
+  carries `running_job_id` — the id of the job actually holding the slot, so a
+  caller can attach to it rather than guess. The slot is taken *last*, after
+  the body, the running Factorio instance and the script path have all been
+  checked, so a request that was going to fail anyway never holds it.
+- **Output comes over SSE, not in the response**, at
+  `GET /api/v1/jobs/{id}/events`. A subscriber that attaches mid-run receives
+  the backlog of lines already printed and then the live ones, so nothing is
+  lost by attaching after the `202`. The stream carries *script* output only,
+  not the Factorio process's stdout. `GET /api/v1/jobs/{id}` is the polling
+  alternative and returns the job's status.
+- **Scripts are sandboxed to the scripts directory.** The endpoint is
+  unauthenticated, so this boundary is what stands between an HTTP caller and
+  the host. `crates/scripting_lua/src/sandbox.rs` builds the interpreter with
+  `table`, `string`, `math` and `coroutine` only — no `io`, `os` or `package`,
+  with `require`, `dofile` and `loadfile` removed and `load` restricted to
+  text chunks (Lua 5.4's bytecode loader does not validate untrusted input).
+  That leaves `include`, `file_read`, `file_write` and `world.draw` as the
+  only filesystem access, and each resolves through `resolve_script_path` /
+  `resolve_write_path` (`crates/core/src/scripts.rs`), which refuse any path
+  that leaves the scripts root.
 
 ## Lua Scripts
 

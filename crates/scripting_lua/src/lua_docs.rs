@@ -206,8 +206,8 @@ mod tests {
         let mut missing: Vec<String> = Vec::new();
         for (file, entries) in EXPECTED {
             let path = target.join(file);
-            let body = fs::read_to_string(&path)
-                .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+            let body =
+                fs::read_to_string(&path).unwrap_or_else(|err| panic!("{}: {err}", path.display()));
             for entry in *entries {
                 if !body.contains(entry) {
                     missing.push(format!("{file} is missing `{entry}`"));
@@ -237,6 +237,39 @@ mod tests {
                 fs::read_to_string(first.join(file)).expect("first"),
                 fs::read_to_string(second.join(file)).expect("second"),
                 "{file} differs between two generations"
+            );
+        }
+    }
+
+    /// The sandbox notes that Task 1 bounded are the part of these strings a
+    /// reader has to see; assert they are actually in the shipped text rather
+    /// than only in the source.
+    #[test]
+    fn sandbox_notes_are_documented() {
+        let (_dir, target) = generate();
+        let globals = fs::read_to_string(target.join("globals.lua")).expect("globals.lua");
+        let world = fs::read_to_string(target.join("world.lua")).expect("world.lua");
+        // Backticked, because the bare names are substrings of ordinary words
+        // in this file — `direction` contains "io", `position` contains "os" —
+        // and an assertion that passes on `direction` is worse than no
+        // assertion, since it reads as coverage.
+        for missing in [
+            "`io`",
+            "`os`",
+            "`package`",
+            "`require`",
+            "`dofile`",
+            "`loadfile`",
+        ] {
+            assert!(
+                globals.contains(missing),
+                "globals.lua does not mention that {missing} is unavailable"
+            );
+        }
+        for body in [&globals, &world] {
+            assert!(
+                body.contains("scripts directory"),
+                "a bounded binding does not say paths are relative to the scripts directory"
             );
         }
     }

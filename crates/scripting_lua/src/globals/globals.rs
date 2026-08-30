@@ -64,6 +64,18 @@ pub fn create_lua_globals(
         String::from(
             r#"
 --- Global functions
+-- Scripts run in a restricted interpreter, because they are reachable from an
+-- unauthenticated HTTP API. `table`, `string`, `math` and `coroutine` are
+-- available; `io`, `os` and `package` are not loaded at all, and `require`,
+-- `dofile` and `loadfile` are removed. `load` is still there but compiles
+-- source text only — it refuses binary chunks, which Lua's bytecode loader
+-- does not validate.
+--
+-- That leaves `include`, `file_read` and `file_write` below (and
+-- `world.draw`) as the only way to reach the filesystem, and each of them is
+-- bounded to the scripts directory: paths are relative to the calling script,
+-- and a path that would leave the scripts directory is refused rather than
+-- clamped.
 --
 -- @module globals
 
@@ -78,7 +90,13 @@ local globals = {}
         String::from(
             r#"
 --- include lua code files
--- @string source_path
+-- The path is relative to the scripts directory, or to the including script's
+-- own directory for a relative path — so `include("lib.lua")` from
+-- `sub/foo.lua` finds `sub/lib.lua`. `..` segments and symlinks are resolved
+-- first and the result is then checked to still be inside the scripts
+-- directory; anything that leaves it, including an absolute path, is refused.
+-- The file must already exist.
+-- @string source_path path to a Lua file, relative to the scripts directory
 function globals.include(source_path)
 end
 "#,
@@ -107,7 +125,11 @@ end
         String::from(
             r#"
 --- reads file to string
--- @string source_path
+-- Bounded the same way as `globals.include`: the path is relative to the
+-- calling script, `..` and symlinks are resolved and the result is checked to
+-- still be inside the scripts directory, and a path that leaves it is
+-- refused. There is no other way to read a file — `io` is not available.
+-- @string source_path path to the file, relative to the scripts directory
 -- @return string contents of file
 function globals.file_read(source_path)
 end
@@ -133,8 +155,13 @@ end
         String::from(
             r#"
 --- writes string to file
--- @string target_path path to file
--- @string contents contenst of file
+-- Bounded to the scripts directory: the path is relative to the calling
+-- script, and one that leaves the scripts directory is refused. The target
+-- does not have to exist, but its parent directory does — no directories are
+-- created on a script's behalf. An existing symlink at the target is refused
+-- as well, since writing through it would land outside.
+-- @string target_path path to the file, relative to the scripts directory
+-- @string contents contents of file
 function globals.file_write(target_path, contents)
 end
 "#,

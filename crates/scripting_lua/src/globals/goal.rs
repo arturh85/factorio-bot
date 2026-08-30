@@ -7,9 +7,11 @@
 //! and planner/executor failures on the `LuaError` path.
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
+use crate::lua_runner::PendingWork;
 use factorio_bot_core::factorio::rcon::FactorioRcon;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::mlua::prelude::*;
+use factorio_bot_core::tokio::sync::watch;
 use factorio_bot_core::tokio::task::JoinHandle;
 use factorio_bot_executor::{run_into, Actuator, ExecutionLog, RconActuator, Status};
 use factorio_bot_planner::{
@@ -143,10 +145,14 @@ struct RunEntry {
     /// The network the run is against, so `goal.progress` can count every
     /// action rather than only the ones the log has heard about.
     net: Arc<ActionNetwork>,
-    /// Taken by the first `goal.wait`; `None` afterwards, because a
-    /// `JoinHandle` can only be awaited once. A second `wait` on a finished run
-    /// still answers, from the log.
-    join: Option<JoinHandle<()>>,
+    /// Flips to `true` once the run's task returns. A `watch::Receiver`
+    /// rather than the task's own `JoinHandle`, because the `JoinHandle`
+    /// itself is handed to `goal.execute`'s caller for registration into
+    /// [`PendingWork`] — a `JoinHandle` can only be awaited by one owner, but
+    /// `goal.wait`/`goal.progress` need to observe completion independently
+    /// of that, and possibly more than once (a second `wait` on a finished
+    /// run still answers).
+    finished_rx: watch::Receiver<bool>,
     /// Set if `run_into` refused to start the run at all. Nothing was executed
     /// in that case, so reporting `done` with everything pending would be a lie.
     error: Arc<Mutex<Option<String>>>,
@@ -162,7 +168,9 @@ struct RunEntry {
 }
 
 impl Runs {
-    /// Spawns the run and returns its handle **without awaiting it**.
+    /// Spawns the run and returns its handle **without awaiting it**, plus the
+    /// task's own `JoinHandle` so the caller can register it into
+    /// [`PendingWork`].
     ///
     /// Split out from the Lua binding so it can be driven against a stub
     /// `Actuator`: everything above this line needs a live Factorio server,
@@ -172,10 +180,11 @@ impl Runs {
         act: Arc<dyn Actuator>,
         sched: Arc<Schedule>,
         net: Arc<ActionNetwork>,
-    ) -> u32 {
+    ) -> (u32, JoinHandle<()>) {
         let progress = Arc::new(Mutex::new(ExecutionLog::default()));
         let error = Arc::new(Mutex::new(None));
         let finished = Arc::new(AtomicBool::new(false));
+        let (finished_tx, finished_rx) = watch::channel(false);
         let task_progress = progress.clone();
         let task_net = net.clone();
         let task_error = error.clone();
@@ -185,6 +194,9 @@ impl Runs {
                 *lock(&task_error) = Some(err.to_string());
             }
             task_finished.store(true, Ordering::SeqCst);
+            // No receiver is an ordinary outcome, not a failure: it just means
+            // nothing (goal.wait, PendingWork's drain) is waiting on this run.
+            let _ = finished_tx.send(true);
         });
         let handle = self.next;
         self.next = self.next.saturating_add(1);
@@ -193,12 +205,12 @@ impl Runs {
             RunEntry {
                 progress,
                 net,
-                join: Some(join),
+                finished_rx,
                 error,
                 finished,
             },
         );
-        handle
+        (handle, join)
     }
 
     fn get(&self, handle: u32) -> LuaResult<&RunEntry> {
@@ -499,8 +511,12 @@ end
             r#"
 --- starts executing a scheduled plan and returns immediately
 -- The bots keep working while the script does something else; poll with
--- `goal.progress` or block with `goal.wait`. The run is bound to the script's
--- lifetime, so a script that exits without waiting abandons it.
+-- `goal.progress` or block with `goal.wait`. "Returns immediately" is about
+-- this call, not about the script as a whole: a run that is still going when
+-- the script ends is not abandoned. The script's *own* end blocks until every
+-- run it started this way has finished, so a script that never calls
+-- `goal.wait` still has its bots run to completion -- it just finds out how
+-- they went one call later than a script that waited would.
 -- @number plan_handle handle returned by `goal.have` or `goal.researched`
 -- @treturn number a run handle
 -- @raise error if the plan has not been scheduled, or no game is connected
@@ -511,7 +527,7 @@ end
     )?;
     map_table.set(
         "execute",
-        lua.create_async_function(move |_lua, plan_handle: u32| {
+        lua.create_async_function(move |lua, plan_handle: u32| {
             let plans = _plans.clone();
             let runs = _runs.clone();
             let actuator = actuator.clone();
@@ -523,7 +539,20 @@ end
                 // script should hear about at the call, not a run that silently
                 // never happened.
                 let actuator = actuator().await.map_err(goal_error)?;
-                Ok(lock(&runs).spawn(actuator, scheduled, net))
+                let (handle, join) = lock(&runs).spawn(actuator, scheduled, net);
+                // Registers the run's task into the seam `run_lua` drains
+                // before its runtime is dropped (see `PendingWork` in
+                // `lua_runner.rs`). Without this, a script that returns
+                // without a matching `goal.wait` would have this run aborted
+                // mid-plan the moment the interpreter's runtime goes away —
+                // silently, with no error. `app_data_ref` is `None` only for
+                // callers that build this table without going through
+                // `run_lua` (this module's own tests), and there is nothing
+                // to register into in that case.
+                if let Some(pending) = lua.app_data_ref::<PendingWork>() {
+                    pending.register(join);
+                }
+                Ok(handle)
             }
         })?,
     )?;
@@ -622,28 +651,32 @@ fn expand_goal(goal: Goal, world: &Arc<FactorioWorld>, bots: &[BotId]) -> LuaRes
 
 /// Awaits a run's task, then reports on it.
 ///
-/// The `JoinHandle` is taken out of the registry before the await rather than
-/// held across it: the guard is a plain `std::sync::Mutex`, and holding one
-/// across an await point is what turns a second `goal.progress` on another run
-/// into a deadlock.
+/// The `watch::Receiver` is cloned out of the registry before the await
+/// rather than held across it: the guard is a plain `std::sync::Mutex`, and
+/// holding one across an await point is what turns a second `goal.progress`
+/// on another run into a deadlock. Cloning (rather than taking, the way the
+/// run's `JoinHandle` itself is taken exactly once by `PendingWork`) is what
+/// lets a second `wait` on the same handle answer instead of hanging: unlike
+/// a `JoinHandle`, a `watch::Receiver` can be awaited by any number of
+/// independent clones.
 ///
-/// An unknown handle needs no check of its own: it yields no `JoinHandle`, so
+/// An unknown handle needs no check of its own: it yields no receiver, so
 /// nothing is awaited, and the `snapshot` at the end is what reports it. An
 /// earlier version guarded the lookup twice; the redundant guard was removed
 /// after a mutation of it changed no observable behaviour, which is the only
 /// honest verdict available on code that cannot be made to matter.
 async fn wait_for_run(runs: &Mutex<Runs>, handle: u32) -> LuaResult<Progress> {
-    let join = {
-        let mut guard = lock(runs);
-        guard
-            .runs
-            .get_mut(&handle)
-            .and_then(|entry| entry.join.take())
-    };
-    if let Some(join) = join {
-        // A panicking run is already recorded in the log; joining it is not the
-        // place to re-raise, and aborting the process here would be worse.
-        let _ = join.await;
+    let finished_rx = lock(runs)
+        .get(handle)
+        .ok()
+        .map(|entry| entry.finished_rx.clone());
+    if let Some(mut finished_rx) = finished_rx {
+        // A panicking run is already recorded in the log; observing its end
+        // here is not the place to re-raise, and aborting the process here
+        // would be worse. A dropped sender (the task ended without ever
+        // sending `true`) reports as an error we also ignore, for the same
+        // reason.
+        let _ = finished_rx.wait_for(|done| *done).await;
     }
     lock(runs).snapshot(handle)
 }
@@ -871,7 +904,7 @@ mod tests {
         let (net, scheduled) = science_plan();
         let total = net.len() as u32;
         let runs = Mutex::new(Runs::default());
-        let handle = lock(&runs).spawn(
+        let (handle, _join) = lock(&runs).spawn(
             Arc::new(StubActuator::new(Failure::First(AtomicBool::new(false)))),
             scheduled,
             net,
@@ -917,7 +950,7 @@ mod tests {
         };
 
         let runs = Mutex::new(Runs::default());
-        let handle = lock(&runs).spawn(Arc::new(stub), scheduled, net);
+        let (handle, _join) = lock(&runs).spawn(Arc::new(stub), scheduled, net);
 
         entered_rx.recv().await.expect("an action was dispatched");
         let snapshot = lock(&runs).snapshot(handle).expect("known handle");
@@ -941,7 +974,8 @@ mod tests {
         assert!(total > 0, "the fixture plan must contain actions");
 
         let runs = Mutex::new(Runs::default());
-        let handle = lock(&runs).spawn(Arc::new(StubActuator::new(Failure::Never)), scheduled, net);
+        let (handle, _join) =
+            lock(&runs).spawn(Arc::new(StubActuator::new(Failure::Never)), scheduled, net);
 
         let snapshot = wait_for_run(&runs, handle).await.expect("known handle");
         assert!(
@@ -969,7 +1003,7 @@ mod tests {
         assert!(total > 0, "the fixture plan must contain actions");
 
         let runs = Mutex::new(Runs::default());
-        let handle =
+        let (handle, _join) =
             lock(&runs).spawn(Arc::new(StubActuator::new(Failure::Always)), scheduled, net);
 
         let snapshot = wait_for_run(&runs, handle).await.expect("known handle");
@@ -988,11 +1022,13 @@ mod tests {
 
     #[tokio::test]
     async fn waiting_twice_answers_twice() {
-        // The `JoinHandle` is taken by the first wait; a second one must still
-        // report rather than error or hang.
+        // The completion signal is a cloned `watch::Receiver`, not a taken
+        // `JoinHandle`; a second wait must still report rather than error or
+        // hang.
         let (net, scheduled) = mining_plan();
         let runs = Mutex::new(Runs::default());
-        let handle = lock(&runs).spawn(Arc::new(StubActuator::new(Failure::Never)), scheduled, net);
+        let (handle, _join) =
+            lock(&runs).spawn(Arc::new(StubActuator::new(Failure::Never)), scheduled, net);
 
         let first = wait_for_run(&runs, handle).await.expect("known handle");
         // Without this the equality below would hold on two empty snapshots.
@@ -1092,6 +1128,92 @@ mod tests {
             pending + running > 0,
             "the plan's actions must all still be outstanding"
         );
+    }
+
+    /// The regression this whole change closes: a script that calls
+    /// `goal.execute` and never calls `goal.wait` must still have its run
+    /// finish, because `goal.execute` registers the run's task into
+    /// [`PendingWork`] — the seam `run_lua` drains before dropping the
+    /// runtime that owns it. A test that also called `goal.wait` would prove
+    /// nothing about this: the wait would carry the run to completion on its
+    /// own regardless of whether `goal.execute` registered anything.
+    ///
+    /// This drives `create_lua_goal_with`'s real binding under a real
+    /// sandboxed interpreter (`lua_with_goal` / `exec_bounded`, the same
+    /// harness the test above uses) and installs a real `PendingWork` as
+    /// `run_lua` does, rather than reaching around the binding into
+    /// `Runs::spawn`. The gate keeps every dispatched action blocked, so a
+    /// `pending.drain()` that returned before the gate opened could only mean
+    /// the run's `JoinHandle` was never actually registered — proving the
+    /// drain is genuinely awaiting the registered task, not merely that it
+    /// returns eventually.
+    #[tokio::test]
+    async fn a_fire_and_forget_execute_registers_its_run_so_it_still_finishes() {
+        let (gate_tx, gate_rx) = watch::channel(false);
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+        let stub = StubActuator {
+            entered: Some(entered_tx),
+            gate: Some(gate_rx),
+            ..StubActuator::new(Failure::Never)
+        };
+        let lua = lua_with_goal(Arc::new(stub));
+        let pending = crate::lua_runner::PendingWork::default();
+        lua.set_app_data(pending.clone());
+
+        // No `goal.wait` anywhere in this script -- `r` is left global so the
+        // test can still read progress on it afterwards.
+        exec_bounded(
+            &lua,
+            r#"
+            local p = goal.have("iron-ore", 20)
+            goal.schedule(p, 2)
+            r = goal.execute(p)
+            "#,
+        )
+        .await;
+
+        // The chunk has already returned. Confirm the run has actually
+        // started (and is now blocked on the shut gate) before reasoning
+        // about whether draining waits for it.
+        entered_rx.recv().await.expect("an action was dispatched");
+        let progress: LuaTable = lua
+            .load("return goal.progress(r)")
+            .eval()
+            .expect("progress");
+        let done: bool = progress.get("done").expect("done");
+        assert!(
+            !done,
+            "the run must not have finished yet: the gate is shut"
+        );
+
+        let mut drain_task = factorio_bot_core::tokio::spawn({
+            let pending = pending.clone();
+            async move { pending.drain().await }
+        });
+        let premature =
+            factorio_bot_core::tokio::time::timeout(Duration::from_millis(200), &mut drain_task)
+                .await;
+        assert!(
+            premature.is_err(),
+            "pending.drain() returned while the run was still gated -- goal.execute \
+             did not register a handle for it to await"
+        );
+
+        gate_tx.send(true).expect("gate has a receiver");
+        let failures = factorio_bot_core::tokio::time::timeout(Duration::from_secs(5), drain_task)
+            .await
+            .expect("drain did not finish after the gate opened")
+            .expect("the drain task itself panicked");
+        assert!(failures.is_empty(), "unexpected failures: {failures:?}");
+
+        let progress: LuaTable = lua
+            .load("return goal.progress(r)")
+            .eval()
+            .expect("progress");
+        let done: bool = progress.get("done").expect("done");
+        let success: u32 = progress.get("success").expect("success");
+        assert!(done, "the run must have finished once drain() returned");
+        assert!(success > 0, "the run must have actually executed something");
     }
 
     #[tokio::test]

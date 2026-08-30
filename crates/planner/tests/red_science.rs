@@ -54,6 +54,28 @@ fn ten_red_science_across_four_bots_expands_and_schedules() {
     assert_eq!(acted, net.len(), "every action is scheduled exactly once");
 }
 
+/// The headline goal at its smallest: one pack, four bots.
+///
+/// A shortfall of one is not something to split, but it still has to open a
+/// chain. Without one the expansion runs on with `Holder::Anyone` all the way
+/// down, and the first intermediate goal wanting more than one unit — the two
+/// iron plates behind a gear — is scattered across bots that the gear craft
+/// needs in a single inventory. This is also every incremental plan's last
+/// iteration, where nine of ten packs are already held.
+#[test]
+fn a_single_pack_across_four_bots_expands_and_schedules() {
+    let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+    let state = world_with_furnaces(&bots);
+    let net = expand(&[goal(1)], &state, &registry_for(&bots), BotId(1)).expect("expands");
+    let plan = schedule(&net, &state, &bots).expect("schedulable");
+    let acted: usize = plan
+        .steps
+        .iter()
+        .filter(|s| matches!(s.what, StepKind::Act { .. }))
+        .count();
+    assert_eq!(acted, net.len(), "every action is scheduled exactly once");
+}
+
 #[test]
 fn every_bot_is_used() {
     let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];

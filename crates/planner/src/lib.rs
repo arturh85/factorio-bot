@@ -15,7 +15,7 @@ pub use ids::{ActionId, ActionIdGen, BotId, ChainId, ChainIdGen, ItemId, Ticks};
 pub use method::have::default_registry;
 pub use method::have::registry_for;
 pub use method::{expand, MAX_EXPANSION_DEPTH};
-pub use method::{ExpansionCtx, Method, MethodRegistry, Step};
+pub use method::{ExpansionCtx, GoalSite, Method, MethodRegistry, Step};
 pub use network::{ActionNetwork, Edge};
 pub use render::{graphviz, mermaid_gantt, ticks_to_timestamp};
 pub use schedule::{

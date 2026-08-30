@@ -20,7 +20,7 @@ use crate::method::util::{
     free_tile_near, ingredients_of, mining_ticks, nearest_resource_tile, output_per_craft,
     recipe_for, recipe_ticks,
 };
-use crate::method::{ExpansionCtx, Method, MethodRegistry, Step};
+use crate::method::{ExpansionCtx, GoalSite, Method, MethodRegistry, Step};
 use crate::state::PlanState;
 use factorio_bot_core::types::FactorioEntity;
 
@@ -473,7 +473,14 @@ pub fn default_registry() -> MethodRegistry {
 ///
 /// The chains never coordinate: each mines, smelts and crafts its own share.
 /// They are emitted as `Holder::Bot(_)` subgoals so the other methods handle
-/// them without recursing back into this one.
+/// them without recursing back into this one — and so that the driver opens a
+/// chain per share, which is what keeps each share's steps in one inventory.
+///
+/// A share of one is still worth emitting: it produces a single chain rather
+/// than a split, and that chain is the whole point. Without it a top-level goal
+/// with a shortfall of one — `Have(automation-science-pack, 1)`, or the last
+/// iteration of any incremental plan — would expand with no chain at all, and a
+/// branching recipe's two roots would land on different bots.
 pub struct SplitAcrossBots {
     pub bots: Vec<BotId>,
 }
@@ -483,6 +490,20 @@ impl Method for SplitAcrossBots {
         "split-across-bots"
     }
 
+    /// Only a goal the caller asked for may be scattered.
+    ///
+    /// A subgoal exists because some action downstream consumes it, out of one
+    /// inventory: `Smelt` and `HandCraft` propagate `whose` verbatim, so a
+    /// shared goal stays `Holder::Anyone` all the way down, and claiming an
+    /// *intermediate* one hands two bots half the ingredients each for a craft
+    /// that needs them together. `in_chain` is redundant given `top_level` —
+    /// only a `Holder::Bot` goal opens a chain and this method declines those —
+    /// but it states the rule the whole way round: never scatter what a chain
+    /// is already gathering.
+    fn claims(&self, site: GoalSite) -> bool {
+        site.top_level && !site.in_chain
+    }
+
     fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
         let Goal::Have { item, count, whose } = goal else {
             return false;
@@ -490,8 +511,9 @@ impl Method for SplitAcrossBots {
         if !matches!(whose, Holder::Anyone) {
             return false;
         }
-        // Only worth splitting when there is more than one share to give out.
-        self.bots.len() > 1 && shortfall(state, item, *count, whose) > 1
+        // An empty roster has no share to give out, and `expand` would divide
+        // by the chain count.
+        !self.bots.is_empty() && shortfall(state, item, *count, whose) > 0
     }
 
     fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
@@ -508,9 +530,16 @@ impl Method for SplitAcrossBots {
         let mut steps = Vec::new();
         for (index, bot) in self.bots.iter().take(chains as usize).enumerate() {
             let share = base + if (index as u32) < remainder { 1 } else { 0 };
+            // A `Have` goal states a holding, not a delivery, so a share of one
+            // handed to a bot already holding five is a goal that is already
+            // met — and the share evaporates. Ask for what the bot has *plus*
+            // its share, so the shortfall the other methods see is the share.
+            // Shares sum to the shortfall, so the roster ends up with at least
+            // `count` between them however the holdings started.
+            let held = ctx.state.inventory_count(*bot, item);
             steps.push(Step::Subgoal(Goal::Have {
                 item: item.clone(),
-                count: share,
+                count: held.saturating_add(share),
                 whose: Holder::Bot(*bot),
             }));
         }
@@ -1042,7 +1071,7 @@ mod tests {
     }
 
     #[test]
-    fn a_single_unit_goal_is_not_split() {
+    fn a_single_unit_goal_becomes_one_chain_rather_than_a_split() {
         let bots = [BotId(1), BotId(2)];
         let s = state(&bots);
         let net = expand(
@@ -1057,5 +1086,110 @@ mod tests {
         )
         .unwrap();
         assert_eq!(net.len(), 1);
+        // One share is still a chain. That is what a shortfall of one needs:
+        // not a split, but an owner.
+        let only = net.actions().next().expect("one action");
+        assert!(
+            net.chain_of(only.id).is_some(),
+            "the single share must still belong to a chain"
+        );
+    }
+
+    #[test]
+    fn a_single_pack_expands_and_schedules_on_a_roster_of_four() {
+        // The headline goal at its smallest. A shortfall of one is no split,
+        // but it must still open a chain: without one, `HandCraft` propagates
+        // `Holder::Anyone` into its ingredient subgoals, the first of those
+        // with a shortfall above one is scattered instead, and the craft that
+        // needs both ingredients in one inventory has nowhere to run.
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let mut s = state(&bots);
+        for bot in bots {
+            s.gain(bot, "stone-furnace", 2);
+        }
+        let net = expand(
+            &[Goal::Have {
+                item: "automation-science-pack".into(),
+                count: 1,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("one pack across four bots must expand");
+        assert!(net.len() > 10, "a real chain: {} actions", net.len());
+
+        let chains: std::collections::BTreeSet<Option<crate::ids::ChainId>> =
+            net.actions().map(|a| net.chain_of(a.id)).collect();
+        assert_eq!(chains.len(), 1, "one chain, not several: {:?}", chains);
+        assert!(
+            chains.iter().next().expect("one entry").is_some(),
+            "and a chain it is, not the chainless free-for-all"
+        );
+
+        schedule(&net, &s, &bots).expect("one pack across four bots must schedule");
+    }
+
+    #[test]
+    fn an_intermediate_goal_is_never_split() {
+        // A gear needs two plates, asked for as `Holder::Anyone` because
+        // `HandCraft` propagates `whose` verbatim. Splitting *that* goal hands
+        // each bot one plate for a craft that needs both, so the ore behind it
+        // must be mined in one place, not two.
+        let bots = [BotId(1), BotId(2)];
+        let s = state(&bots);
+        let net = expand(
+            &[Goal::Have {
+                item: "iron-gear-wheel".into(),
+                count: 1,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("one gear for two bots must expand");
+        let ore: Vec<u32> = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Mine { item, count, .. } if item == "iron-ore" => Some(*count),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ore,
+            vec![2],
+            "both plates' worth of ore is mined by one bot, in one action"
+        );
+    }
+
+    #[test]
+    fn a_share_is_added_to_what_the_bot_already_holds() {
+        // Bot 1 holds three of the five wanted, so two remain. A `Have` goal
+        // states a holding rather than a delivery: asking bot 1 for "one"
+        // would be a goal it already meets, and its share would evaporate.
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let mut s = state(&bots);
+        s.gain(BotId(1), "iron-ore", 3);
+        let net = expand(
+            &[Goal::Have {
+                item: "iron-ore".into(),
+                count: 5,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .unwrap();
+        let mined: Vec<u32> = net
+            .actions()
+            .map(|a| match &a.kind {
+                ActionKind::Mine { count, .. } => *count,
+                other => panic!("expected mines, got {:?}", other),
+            })
+            .collect();
+        assert_eq!(mined, vec![1, 1], "the two missing units, one per chain");
     }
 }

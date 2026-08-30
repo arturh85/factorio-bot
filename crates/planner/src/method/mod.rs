@@ -45,6 +45,9 @@ pub enum Step {
 /// in the network, so the scheduler can bind the whole chain to one bot instead
 /// of choosing per action. It is `None` outside such a subtree, which leaves an
 /// action freely assignable.
+///
+/// `top_level` records whether the goal being expanded is one the *caller*
+/// asked for rather than one a method asked for. See `GoalSite`.
 pub struct ExpansionCtx {
     pub state: PlanState,
     pub ids: ActionIdGen,
@@ -55,6 +58,10 @@ pub struct ExpansionCtx {
     pub chain_actor: BotId,
     /// The chain actions emitted right now belong to, if any. Driver-owned.
     pub(crate) chain: Option<ChainId>,
+    /// True while expanding a goal the caller handed to `expand` (or a member
+    /// of a top-level `Goal::All`), false beneath any method's subgoal.
+    /// Driver-owned, for the same reason `chain` is.
+    pub(crate) top_level: bool,
     pub depth: u32,
 }
 
@@ -66,7 +73,39 @@ impl ExpansionCtx {
             chains: ChainIdGen::new(),
             chain_actor,
             chain: None,
+            top_level: true,
             depth: 0,
+        }
+    }
+}
+
+/// Where in an expansion a goal sits.
+///
+/// `applicable` answers "can I satisfy this goal at all", which depends only on
+/// the goal and the world. Whether a method may *claim* a goal can also depend
+/// on where the goal came from, and that is a fact only the driver holds. One
+/// method needs it: `SplitAcrossBots` scatters a goal's shares across bots,
+/// which is sound only when nothing downstream needs the results gathered in
+/// one inventory — and every goal a method asked for has exactly such a
+/// consumer waiting for it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct GoalSite {
+    /// True for a goal the caller handed to `expand`, and for a member of a
+    /// top-level `Goal::All` — a bundle of independent goals is still a bundle
+    /// of goals nothing downstream consumes. False for any subgoal a method
+    /// asked for.
+    pub top_level: bool,
+    /// True when the goal is being expanded inside a per-bot chain, so its
+    /// actions will all be welded to that chain's single runner.
+    pub in_chain: bool,
+}
+
+impl GoalSite {
+    /// The site of a goal the caller asked for directly.
+    pub fn root() -> Self {
+        GoalSite {
+            top_level: true,
+            in_chain: false,
         }
     }
 }
@@ -80,6 +119,13 @@ pub trait Method {
     /// Can this method satisfy `goal` given `state`? Consulted in registration
     /// order, so a cheaper method registered earlier wins.
     fn applicable(&self, goal: &Goal, state: &PlanState) -> bool;
+
+    /// May this method claim a goal sitting *here*? Defaults to yes: almost
+    /// every method is indifferent to where a goal came from. Override it only
+    /// when a method's decomposition is unsound at some sites — see `GoalSite`.
+    fn claims(&self, _site: GoalSite) -> bool {
+        true
+    }
 
     fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError>;
 }
@@ -100,10 +146,10 @@ impl MethodRegistry {
         self
     }
 
-    pub fn find(&self, goal: &Goal, state: &PlanState) -> Option<&dyn Method> {
+    pub fn find(&self, goal: &Goal, state: &PlanState, site: GoalSite) -> Option<&dyn Method> {
         self.methods
             .iter()
-            .find(|m| m.applicable(goal, state))
+            .find(|m| m.claims(site) && m.applicable(goal, state))
             .map(|m| m.as_ref())
     }
 }
@@ -154,11 +200,13 @@ fn expand_goal(
     }
 
     // Save, run, restore — on every exit path, errors included. A completed
-    // call must leave `depth`, `chain_actor` and `chain` exactly as it found
-    // them even when it fails, or a caller that continues past an error
-    // inherits a corrupted context and a comment claiming that cannot happen.
+    // call must leave `depth`, `chain_actor`, `chain` and `top_level` exactly
+    // as it found them even when it fails, or a caller that continues past an
+    // error inherits a corrupted context and a comment claiming that cannot
+    // happen.
     let previous_actor = ctx.chain_actor;
     let previous_chain = ctx.chain;
+    let previous_top_level = ctx.top_level;
     if let Goal::Have {
         whose: Holder::Bot(bot),
         ..
@@ -190,6 +238,7 @@ fn expand_goal(
     ctx.depth -= 1;
     ctx.chain_actor = previous_actor;
     ctx.chain = previous_chain;
+    ctx.top_level = previous_top_level;
     result
 }
 
@@ -211,13 +260,23 @@ fn expand_goal_body(
         return Ok(());
     }
 
+    let site = GoalSite {
+        top_level: ctx.top_level,
+        in_chain: ctx.chain.is_some(),
+    };
     let method =
         registry
-            .find(goal, &ctx.state)
+            .find(goal, &ctx.state, site)
             .ok_or_else(|| PlannerError::NoApplicableMethod {
                 goal: goal.to_string(),
             })?;
     let steps = method.expand(goal, ctx)?;
+
+    // Everything below this line was asked for by a method, not by the caller,
+    // so nothing in the subtree is top level. `expand_goal` restores the flag
+    // for our own caller. A `Goal::All` never reaches here — it returns above,
+    // so its members keep the site the bundle itself had.
+    ctx.top_level = false;
 
     for step in steps {
         match step {
@@ -280,7 +339,11 @@ mod tests {
             count: 1,
             whose: Holder::Anyone,
         };
-        assert_eq!(reg.find(&goal, &c.state).map(|m| m.name()), Some("nothing"));
+        assert_eq!(
+            reg.find(&goal, &c.state, GoalSite::root())
+                .map(|m| m.name()),
+            Some("nothing")
+        );
     }
 
     #[test]
@@ -288,7 +351,11 @@ mod tests {
         let reg = MethodRegistry::new().with(Box::new(Nothing));
         let c = ctx();
         assert!(reg
-            .find(&Goal::Researched("automation".into()), &c.state)
+            .find(
+                &Goal::Researched("automation".into()),
+                &c.state,
+                GoalSite::root()
+            )
             .is_none());
     }
 
@@ -315,7 +382,11 @@ mod tests {
             count: 1,
             whose: Holder::Anyone,
         };
-        assert_eq!(reg.find(&goal, &c.state).map(|m| m.name()), Some("nothing"));
+        assert_eq!(
+            reg.find(&goal, &c.state, GoalSite::root())
+                .map(|m| m.name()),
+            Some("nothing")
+        );
     }
 
     #[test]
@@ -350,7 +421,11 @@ mod tests {
             count: 1,
             whose: Holder::Anyone,
         };
-        assert_eq!(reg.find(&goal, &c.state).map(|m| m.name()), Some("nothing"));
+        assert_eq!(
+            reg.find(&goal, &c.state, GoalSite::root())
+                .map(|m| m.name()),
+            Some("nothing")
+        );
     }
 
     use crate::action::{Action, ActionKind, Actor, Effect};

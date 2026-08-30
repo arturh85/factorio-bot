@@ -2,6 +2,7 @@ use crate::cli::{Subcommand, SubcommandCallback};
 use crate::context::Context;
 use clap::{value_parser, Arg, ArgMatches, Command};
 use factorio_bot_core::miette::{IntoDiagnostic, Result};
+use factorio_bot_core::paris::info;
 use std::net::SocketAddr;
 
 impl Subcommand for ThisCommand {
@@ -54,8 +55,15 @@ async fn run(matches: &ArgMatches, context: &mut Context) -> Result<()> {
     {
       let _ = tokio::signal::ctrl_c().await;
     }
-    log::info!("shutdown signal received");
+    info!("shutdown signal received, stopping ...");
   };
+
+  // `crates/server` logs through `tracing`, which is correct for a library but
+  // has no subscriber installed in CLI mode, so nothing it logs ever reaches a
+  // terminal. `serve` is a long-running foreground command: it has to tell the
+  // user which address it is about to bind. `paris` writes straight to stdout
+  // and is what the rest of the binary already uses.
+  info!("serving http://{} - press Ctrl-C to stop", bind);
 
   factorio_bot_server::webserver::start_with_shutdown(
     context.app_settings.clone(),
@@ -64,6 +72,8 @@ async fn run(matches: &ArgMatches, context: &mut Context) -> Result<()> {
     shutdown,
   )
   .await?;
+
+  info!("server stopped");
 
   // `run()` in lib.rs falls through after any subcommand into the REPL (or
   // GUI) start-up, which is correct for setup commands like `start` that

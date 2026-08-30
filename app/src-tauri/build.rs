@@ -18,6 +18,11 @@ fn main() {
       .compile()
       .expect("Failed to run the Windows resource compiler (rc.exe)");
   }
+  // `tauri_build::build()` declares this cfg, but it only runs with the `gui`
+  // feature; without it `#[cfg_attr(mobile, ..)]` in lib.rs warns. Declare it
+  // unconditionally so `cargo build --no-default-features --features cli,..`
+  // is warning-free too.
+  println!("cargo::rustc-check-cfg=cfg(mobile)");
   println!("cargo:rerun-if-changed=../../crates/core/src/types.rs");
   println!("cargo:rerun-if-changed=../../crates/scripting_lua/src/");
 }

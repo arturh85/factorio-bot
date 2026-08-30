@@ -128,7 +128,9 @@ export type InventoryResponse = { name: string; position: Position; output_inven
 export type FactorioRecipe = { name: string; valid: boolean; enabled: boolean; category: string; ingredients: FactorioIngredient [] | null; products: FactorioProduct []; hidden: boolean; energy: number; order: string; group: string; subgroup: string };
 export type PlaceEntityResult = { player: FactorioPlayer; entity: FactorioEntity };
 export type PlaceEntitiesResult = { player: FactorioPlayer; entities: FactorioEntity [] };
+// One input of a recipe.
 export type FactorioIngredient = { name: string; ingredient_type: string; amount: number };
+// One output of a recipe: how much of what, and how likely it is produced.
 export type FactorioProduct = { name: string; product_type: string; amount: number; probability: number };
 export type FactorioPlayer = { player_id: PlayerId; position: Position; main_inventory: { [key: string]: number };
  build_distance: number; reach_distance: number; drop_item_distance: number; item_pickup_distance: number; loot_pickup_distance: number; resource_reach_distance: number };
@@ -143,6 +145,6 @@ export type FactorioEntity = { name: string; entity_type: string; position: Posi
 export type FactorioEntityPrototype = { name: string; entity_type: string; collision_mask: string [] | null; collision_box: Rect; mine_result: { [key: string]: number } | null; mining_time: number | null; mining_speed: number | null; crafting_speed: number | null; max_underground_distance: number | null; fluidbox_prototypes: FactorioFluidBoxPrototype [] | null };
 export type FactorioItemPrototype = { name: string; item_type: string; stack_size: number; fuel_value: number; place_result: string; group: string; subgroup: string };
 export type FactorioResult = { success: boolean; output: string [] };
-export type PrimeVueTreeNode = { key: string; label: string; leaf: boolean; children: PrimeVueTreeNode [] };
-export type FactorioSettings = { client_count: number; factorio_archive_path: string; map_exchange_string: string; rcon_pass: string; rcon_port: number; recreate: boolean; restapi_port: number; seed: string; workspace_path: string };
+export type ScriptTreeNode = { key: string; label: string; leaf: boolean; children: ScriptTreeNode [] };
+export type FactorioSettings = { client_count: number; factorio_archive_path: string; map_exchange_string: string; rcon_pass: string; rcon_port: number; recreate: boolean; seed: string; workspace_path: string };
 export type RestApiSettings = { port: number; web_root: string | null };

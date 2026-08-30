@@ -407,3 +407,32 @@ async fn swagger_ui_is_served() {
         response.status()
     );
 }
+
+/// The script listing's response type is named for what it is, not for the
+/// UI library that happened to consume it first. A published schema name is
+/// part of the API contract, so this is what stops it drifting back.
+#[tokio::test]
+async fn the_script_listing_publishes_a_script_tree_node_schema() {
+    let spec = openapi_spec().await;
+    let schemas = spec["components"]["schemas"]
+        .as_object()
+        .expect("schemas object");
+    assert!(
+        schemas.contains_key("ScriptTreeNode"),
+        "spec has no ScriptTreeNode schema: {:?}",
+        schemas.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !schemas.contains_key("PrimeVueTreeNode"),
+        "the old ui-library-shaped name is still published"
+    );
+    let properties = schemas["ScriptTreeNode"]["properties"]
+        .as_object()
+        .expect("ScriptTreeNode properties");
+    for field in ["key", "label", "leaf", "children"] {
+        assert!(
+            properties.contains_key(field),
+            "the wire format must not change: {field} is missing"
+        );
+    }
+}

@@ -5,7 +5,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use factorio_bot_core::scripts::resolve_script_path;
-use factorio_bot_core::types::PrimeVueTreeNode;
+use factorio_bot_core::types::ScriptTreeNode;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::PathBuf;
@@ -150,14 +150,14 @@ fn resolve_new_script_path(
     Ok(target)
 }
 
-/// Lists a directory under the scripts root as a `PrimeVue` tree
+/// Lists a directory under the scripts root as a script tree
 #[utoipa::path(
     get,
     path = "/api/v1/scripts",
     tag = "Admin",
     params(ScriptPathQuery),
     responses(
-        (status = 200, body = Vec<PrimeVueTreeNode>),
+        (status = 200, body = Vec<ScriptTreeNode>),
         (status = 400, body = crate::error::ErrorResponse),
         (status = 404, body = crate::error::ErrorResponse),
         (status = 500, body = crate::error::ErrorResponse),
@@ -166,7 +166,7 @@ fn resolve_new_script_path(
 pub async fn list_scripts(
     State(state): State<AppState>,
     ApiQuery(query): ApiQuery<ScriptPathQuery>,
-) -> ApiResult<Vec<PrimeVueTreeNode>> {
+) -> ApiResult<Vec<ScriptTreeNode>> {
     let root = scripts_root(&state).await?;
     let resolved = resolve_script_path(&root, &query.path).map_err(ErrorResponse::from)?;
     if !resolved.is_dir() {
@@ -205,7 +205,7 @@ pub async fn list_scripts(
 
     let nodes = entries
         .into_iter()
-        .map(|(file_name, is_dir)| PrimeVueTreeNode {
+        .map(|(file_name, is_dir)| ScriptTreeNode {
             key: format!("{key_prefix}/{file_name}"),
             label: file_name,
             leaf: !is_dir,

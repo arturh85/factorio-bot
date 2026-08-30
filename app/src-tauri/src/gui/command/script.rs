@@ -4,7 +4,7 @@ use crate::scripting::run_script_file;
 use crate::settings::SharedAppSettings;
 use factorio_bot_core::paris::warn;
 use factorio_bot_core::process::process_control::SharedFactorioInstance;
-use factorio_bot_core::types::PrimeVueTreeNode;
+use factorio_bot_core::types::ScriptTreeNode;
 #[cfg(feature = "lua")]
 use factorio_bot_scripting_lua::run_script;
 use tauri::State;
@@ -103,7 +103,7 @@ pub async fn execute_code(
 pub async fn load_scripts_in_directory(
   app_settings: State<'_, SharedAppSettings>,
   path: String,
-) -> Result<Vec<PrimeVueTreeNode>, String> {
+) -> Result<Vec<ScriptTreeNode>, String> {
   #[cfg(feature = "lua")]
   {
     use std::path::{Path, PathBuf};
@@ -137,7 +137,7 @@ pub async fn load_scripts_in_directory(
       .map(|entry| {
         let entry = entry.unwrap();
         let file_type = entry.file_type().unwrap();
-        PrimeVueTreeNode {
+        ScriptTreeNode {
           key: path
             .join(entry.file_name().to_str().unwrap())
             .to_str()

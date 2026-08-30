@@ -1267,16 +1267,16 @@ pub struct PlayerLeftEvent {
     Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq, utoipa::ToSchema,
 )]
 #[serde(rename_all = "snake_case")]
-pub struct PrimeVueTreeNode {
+pub struct ScriptTreeNode {
     pub key: String,
     pub label: String,
     pub leaf: bool,
-    // Self-referential (`PrimeVueTreeNode` -> `PrimeVueTreeNode`): without
+    // Self-referential (`ScriptTreeNode` -> `ScriptTreeNode`): without
     // `no_recursion`, utoipa's OpenAPI schema generation recurses into this
     // field forever and aborts the process with a stack overflow the first
     // time any route referencing this type builds its schema.
     #[schema(no_recursion)]
-    pub children: Vec<PrimeVueTreeNode>,
+    pub children: Vec<ScriptTreeNode>,
 }
 
 impl IntoLua for InventoryResponse {

@@ -90,7 +90,7 @@ fn typescriptify() {
   output += &FactorioEntityPrototype::type_script_ify();
   output += &FactorioItemPrototype::type_script_ify();
   output += &FactorioResult::type_script_ify();
-  output += &PrimeVueTreeNode::type_script_ify();
+  output += &ScriptTreeNode::type_script_ify();
   output += &FactorioSettings::type_script_ify();
   #[cfg(feature = "restapi")]
   {

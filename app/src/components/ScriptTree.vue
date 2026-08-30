@@ -2,9 +2,9 @@
 import {ref, onMounted, computed} from 'vue';
 import Tree from 'primevue/tree';
 import {useScriptStore} from '@/store/scriptStore';
-import {PrimeVueTreeNode} from '@/models/types';
+import {ScriptTreeNode} from '@/models/types';
 
-const nodes = ref(null as PrimeVueTreeNode[] | null)
+const nodes = ref(null as ScriptTreeNode[] | null)
 
 const scriptStore = useScriptStore()
 const loadingScriptsInDirectory = computed(() => scriptStore.getLoadingScriptsInDirectory)
@@ -15,9 +15,9 @@ onMounted(async() => {
 
 const emit = defineEmits(['select']);
 
-function mergeNodes(nodes: PrimeVueTreeNode[], new_key: string, new_nodes: PrimeVueTreeNode[]):PrimeVueTreeNode[] {
+function mergeNodes(nodes: ScriptTreeNode[], new_key: string, new_nodes: ScriptTreeNode[]):ScriptTreeNode[] {
   const parts = new_key.substr(1).split('/')
-  let pointer: PrimeVueTreeNode | null = null;
+  let pointer: ScriptTreeNode | null = null;
   for (let part of parts) {
     if (pointer) {
       pointer = pointer.children.find(node => node.label === part) || null
@@ -32,11 +32,11 @@ function mergeNodes(nodes: PrimeVueTreeNode[], new_key: string, new_nodes: Prime
 }
 
 
-const onNodeExpand = async(node: PrimeVueTreeNode) => {
+const onNodeExpand = async(node: ScriptTreeNode) => {
   const subNodes = await scriptStore.loadScriptsInDirectory(node.key)
-  nodes.value = mergeNodes(nodes.value as PrimeVueTreeNode[], node.key, subNodes)
+  nodes.value = mergeNodes(nodes.value as ScriptTreeNode[], node.key, subNodes)
 }
-const onNodeSelect = async(node: PrimeVueTreeNode) => {
+const onNodeSelect = async(node: ScriptTreeNode) => {
   if (node.leaf) {
     emit('select', node.key)
   }

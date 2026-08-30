@@ -1913,6 +1913,7 @@ dependencies = [
  "async-trait",
  "factorio-bot-core",
  "factorio-bot-planner",
+ "futures",
  "miette",
  "mockall 0.13.1",
  "serde",

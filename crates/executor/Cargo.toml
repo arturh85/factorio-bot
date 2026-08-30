@@ -7,6 +7,7 @@ edition = "2021"
 factorio-bot-core = { path = "../core", version = "0.2.4-dev" }
 factorio-bot-planner = { path = "../planner", version = "0.2.4-dev" }
 async-trait = "0.1"
+futures = "0.3"
 miette = { version = "7.4", features = ["fancy"] }
 thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }

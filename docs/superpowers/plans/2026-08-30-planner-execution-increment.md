@@ -1331,6 +1331,10 @@ git commit -m "feat(lua): add the goal api backed by the new planner and executo
 
 **One trap in `resolve_script_path`:** it deliberately resolves `"/"` and `""` to the root directory itself, because a directory-listing endpoint needs that. It does not distinguish a file from a directory — that check belongs to the caller. So a migration step that resolves a script path and then reads it must verify it got a file, or it will try to read the scripts directory and fail with a confusing error. Related additive modules that landed in core during this work and may save you effort: `factorio_bot_core::paths`, `factorio_bot_core::app_settings` (`AppSettings`, `GuiSettings`, `SharedAppSettings`, `load_app_settings`), and `factorio_bot_core::settings::RestApiSettings`.
 
+**Clean up seven write-only snapshot artifacts while you are here.** `crates/scripting_lua/tests/` contains `task_graph-1.dot`, `task_graph-1.md`, `task_graph-2.dot`, `task_graph-2.md`, `world_end-1.png`, `world_end-2.png` and `world_start.png`. Nothing reads or compares them: `lua_runner.rs:133` writes `stdout-N.txt`, the fixture script emits the rest, and no assertion touches any of them. They were last regenerated 122 commits ago (`4b68a8b`) and have drifted since — running the suite today rewrites them with different entity positions, and every test still passes.
+
+They are also specifically *task-graph* renderings, so this task deletes their producer anyway. Delete the four `task_graph-*` files outright. For the three PNGs, either delete them too or make them real assertions — but do not leave a file in the repo that regenerates differently on every run and is compared to nothing, because it reads as a snapshot test to the next person and is not one.
+
 - [ ] **Step 1: Migrate the Lua scripts first**
 
 Rewrite each script's `plan.*` calls onto `goal.*`. Run each one that has a test harness. A script whose behaviour cannot be preserved gets a comment at the top naming what changed and why — do not silently drop functionality.

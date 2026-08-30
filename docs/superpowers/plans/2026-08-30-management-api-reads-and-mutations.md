@@ -1084,9 +1084,182 @@ git commit -- crates/server/src/manage crates/server/src/webserver.rs crates/ser
 
 ---
 
+### Task 7: Creating and deleting scripts
+
+**Files:**
+- Modify: `crates/server/src/manage/scripts.rs`, `crates/server/src/manage/mod.rs`
+- Test: `crates/server/tests/manage_scripts.rs`
+
+**Interfaces:**
+- Consumes: `factorio_bot_core::scripts::resolve_script_path`, `scripts_root`/`scripts_root_path` (Task 5).
+- Produces: `POST /api/v1/scripts/file?path=…` accepting `{ "code": string }`, creating a file that must **not** already exist; `DELETE /api/v1/scripts/file?path=…`, removing a file that must exist.
+
+Today the web UI cannot add or remove a script — `PUT` only overwrites, faithfully preserving the Tauri behavior. On a desktop that was tolerable because the files were on the same machine; for a remote browser it means you need shell access on the server to add a script, which defeats the point. The owner asked for both verbs.
+
+**The design point that makes this non-trivial.** `resolve_script_path` canonicalises, and `canonicalize` fails when the target does not exist. So it cannot resolve the path of a file you are about to create. Creating therefore resolves the **parent directory** instead, and validates the final component separately:
+
+1. Split the requested path into a parent part and a final component.
+2. Resolve the parent through `resolve_script_path` — this is what keeps the traversal guard in force — and require it to be a directory.
+3. Reject a final component that is empty, `.`, `..`, or contains a path separator (`/` or `\\`). Without this, `path=/sub/../../evil.lua` would resolve a legitimate parent and then escape via the component.
+4. Join, require the result does **not** exist, and write.
+
+Deleting is simpler: resolve through `resolve_script_path` as the read and write handlers do, require `is_file()`, and remove it. Deleting a directory is not supported.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `crates/server/tests/manage_scripts.rs`, following the helpers already there:
+
+```rust
+#[tokio::test]
+async fn creates_a_new_script() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_with_scripts(dir.path());
+
+    let response = build_router(state, None)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/scripts/file?path=/fresh.lua")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"code":"-- fresh"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success(), "got {}", response.status());
+    let written =
+        std::fs::read_to_string(dir.path().join("scripts").join("fresh.lua")).unwrap();
+    assert_eq!(written, "-- fresh");
+}
+
+#[tokio::test]
+async fn refuses_to_create_over_an_existing_script() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_with_scripts(dir.path());
+
+    let response = build_router(state, None)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/scripts/file?path=/hello.lua")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"code":"-- clobber"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let kept = std::fs::read_to_string(dir.path().join("scripts").join("hello.lua")).unwrap();
+    assert_eq!(kept, "-- hello", "existing script must not be overwritten");
+}
+
+/// The parent resolves legitimately; the escape is in the final component.
+#[tokio::test]
+async fn creating_cannot_escape_via_the_final_component() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_with_scripts(dir.path());
+
+    for attempt in [
+        "/sub/../../escaped.lua",
+        "/../escaped.lua",
+        "/sub/..%2F..%2Fescaped.lua",
+    ] {
+        let response = build_router(state.clone(), None)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&format!("/api/v1/scripts/file?path={attempt}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"code":"-- escaped"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{attempt}");
+    }
+    assert!(
+        !dir.path().join("escaped.lua").exists(),
+        "a file escaped the scripts root"
+    );
+}
+
+#[tokio::test]
+async fn deletes_a_script() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_with_scripts(dir.path());
+
+    let response = build_router(state, None)
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/v1/scripts/file?path=/hello.lua")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success(), "got {}", response.status());
+    assert!(!dir.path().join("scripts").join("hello.lua").exists());
+}
+
+#[tokio::test]
+async fn deleting_a_directory_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_with_scripts(dir.path());
+
+    let response = build_router(state, None)
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/v1/scripts/file?path=/sub")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(dir.path().join("scripts").join("sub").exists());
+}
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo test -p factorio-bot-server --test manage_scripts'`
+Expected: FAIL — 405 or 404 on both new methods.
+
+- [ ] **Step 3: Implement the two handlers**
+
+In `crates/server/src/manage/scripts.rs`, add `create_script` and `delete_script` following the shape of the existing `read_script`/`write_script`: `ApiQuery` for the path, `ApiJson` for the create body, `#[utoipa::path]` with tag `"Admin"`, and `ErrorResponse::bad_request` for every rejection.
+
+Factor the parent-plus-component resolution into a small helper rather than inlining it, since it is the security-relevant part and wants to be readable on its own.
+
+Register both in `crates/server/src/manage/mod.rs`.
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo test -p factorio-bot-server'`
+Expected: PASS — five new tests plus everything existing.
+
+- [ ] **Step 5: Prove the component guard**
+
+Delete the final-component validation (step 3 of the design point) and run the suite. `creating_cannot_escape_via_the_final_component` must fail, and the escaped file must appear outside the scripts root. Report the full failure set, restore, and confirm green. A guard is only proven by a red test when it is removed.
+
+- [ ] **Step 6: Commit**
+
+```bash
+nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt -p factorio-bot-server'
+git commit -- crates/server/src/manage/scripts.rs crates/server/src/manage/mod.rs crates/server/tests/manage_scripts.rs -m "feat(server): create and delete scripts over HTTP"
+```
+
+---
+
 ## Self-Review
 
-**Spec coverage.** This plan implements the spec's management endpoints for every operation that completes quickly: settings (GET/PUT), instance status and stop, RCON, script listing/read/write, and `fs/exists`. It also closes `--web-root`, which the spec's Process section requires and which fell between plans 1 and 2, and adds the shutdown timeout the plan-2 review asked be scoped here. Deliberately deferred to plan 4: `start_instances`, `execute_script` and `execute_code`, the job registry, SSE, script-execution serialization, `spawn_blocking` for `run_lua` and `extract_archive`, and removing the `gag` stdout redirect — all of which hang together and are useless separately. Deferred to plan 5: the frontend and deleting Tauri. Not ported at all, per the spec: `maximize_window`, `open_in_browser`, `is_port_available`, `start_restapi`/`stop_restapi`/`is_restapi_started`, and `save_settings` (no caller).
+**Spec coverage.** This plan implements the spec's management endpoints for every operation that completes quickly: settings (GET/PUT), instance status and stop, RCON, script listing/read/write/create/delete, and `fs/exists`. Create and delete go beyond the ported Tauri surface, at the owner's request — a browser-only UI otherwise needs shell access on the server to add a script. It also closes `--web-root`, which the spec's Process section requires and which fell between plans 1 and 2, and adds the shutdown timeout the plan-2 review asked be scoped here. Deliberately deferred to plan 4: `start_instances`, `execute_script` and `execute_code`, the job registry, SSE, script-execution serialization, `spawn_blocking` for `run_lua` and `extract_archive`, and removing the `gag` stdout redirect — all of which hang together and are useless separately. Deferred to plan 5: the frontend and deleting Tauri. Not ported at all, per the spec: `maximize_window`, `open_in_browser`, `is_port_available`, `start_restapi`/`stop_restapi`/`is_restapi_started`, and `save_settings` (no caller).
 
 **Placeholder scan.** No TBD entries. Three steps deliberately ask the implementer to decide and report rather than prescribing: how `scripts_dir` avoids picking up the repository's own `scripts/` during tests (Task 5 Step 1), whether the shutdown-timeout test drives a stuck request or an idle keep-alive (Task 6 Step 1), and the exact `--web-root` override mechanism (Task 6 Step 4). Each is a real judgment call that depends on code shape the plan cannot pin down in advance. Task 5 Step 3 describes the three handlers in prose rather than full code because they are near-identical to the originals being ported; the file:line of each original is given, and every non-mechanical part — the lossy filename conversion, the sort, the path resolution — is called out explicitly.
 

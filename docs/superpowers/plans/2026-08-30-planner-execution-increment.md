@@ -1369,12 +1369,9 @@ git commit -m "feat!: replace the task-graph planner with the goal planner and e
 
 This is harmless to the planner's arithmetic, which is why it survived three plans of review, but it is fatal to Task 4: `place_entity` on an ore tile will be rejected by the game, every smelting plan will fail at its first `Place`, and recovery will re-expand into the same invalid site forever — tier 2 cannot fix a defect in the method itself.
 
-**This must be fixed before Task 4 is worth running.** Two candidate fixes, neither yet chosen:
+**This must be fixed before Task 4 is worth running**, and the fix is narrower than it first appears. `is_position_free` is a method on the planner's own `PlanState` (`crates/planner/src/state.rs:158`), not on core's `EntityGraph`, so correcting it changes behaviour for planner callers only — there is no core blast radius. It needs one small read-only accessor on `EntityGraph` ("is any resource at this tile"), because the existing `resource_contains` is per-resource-name.
 
-1. Index resource entities into `EntityGraph::entity_tree` so `is_position_free` sees them. Correct, but touches a live core data structure that other code reads, and changes what `is_position_free` means everywhere.
-2. Give `Smelt` a siting predicate that excludes resource tiles explicitly, via `resource_contains` — narrower, no blast radius, but leaves `is_position_free` misleading for the next caller.
-
-Recommendation: (2) for this increment, with (1) filed as follow-up. Confirm before Task 4.
+**Status: being fixed now, ahead of this plan**, since the defect is real independently of whether this plan ever runs. Expect it to move the recorded red-science makespans — furnaces relocating off ore changes travel distances — and expect `to_ore` in the furnace-proximity assertion to become non-zero.
 
 ## Open questions for the repository owner
 

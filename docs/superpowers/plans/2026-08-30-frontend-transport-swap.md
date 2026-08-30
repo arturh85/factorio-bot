@@ -1127,6 +1127,32 @@ git commit -m "feat(app): add the fetch transport that replaces tauri invoke"
 
 ---
 
+## Task 3c: Make an unresolved workspace path unable to reach the filesystem
+
+Carried from the review of the `c30a77b` regression fix, which found the "point of use" set is **not** what three of my briefs and two doc comments claimed.
+
+Four sites refuse a relative `workspace_path`. **At least four more pass the raw configured string to `factorio_bot_core::scripts::ensure_scripts_dir`**, which does `create_dir_all(workspace_path.join("scripts"))` and therefore joins it against the process CWD:
+
+    app/src-tauri/src/scripting.rs:28
+    app/src-tauri/src/repl/run_script.rs:53      (and `.expect("failed to prepare")`s)
+    app/src-tauri/src/cli/lua.rs:221             (the --connect path)
+    app/src-tauri/src/gui/command/script.rs      (seven call sites)
+
+**Concrete failure, reproduced by the reviewer:** with `workspace_path = "relative-ws"` and the desktop app launched from `~`, the script editor lists, creates and executes scripts in `~/relative-ws/scripts`, while pressing Start refuses the same setting with 400. *The app writes into a workspace it will not start in.*
+
+This is pre-`c30a77b` behaviour that the over-broad refusal masked and the fix reopened for these paths, so the tip is no worse than the last good release. It is a follow-up, not a regression.
+
+**Fix by construction, not by enumeration.** Three briefs and two doc comments have now listed "the points of use" and been wrong every time; a sixth list will be wrong too.
+
+- [ ] **Step 1: Change `ensure_scripts_dir` to take the *configured* value and resolve internally** — `ensure_scripts_dir(configured: &str) -> Result<PathBuf>` calling `paths::resolve_workspace` itself. Then an unresolved path cannot reach the filesystem, because there is no signature that accepts one. Prefer this to a newtype: it changes one function and every caller becomes correct without being visited.
+- [ ] **Step 2:** Update the call sites the compiler names. Do not go looking for them — the compiler enumerating them is the point.
+- [ ] **Step 3: The test is the concrete failure above.** With a relative `workspace_path`, `ensure_scripts_dir` must refuse rather than create `<cwd>/<relative>/scripts`. Assert the directory does **not** exist afterwards, not merely that an error was returned.
+- [ ] **Step 4: Mutation.** Restore the raw-path signature at one call site. Input class: *a relative configured workspace*. The new test must fail by name, and the stray directory must appear.
+
+**Sequencing:** `gui/command/script.rs` is deleted by Task 14 and `cli/lua.rs` belongs to the other session — announce before touching it. Doing this *after* Task 14 removes seven of the call sites for free, so it is cheaper late than early; it is listed here because the hazard is live now and must not be forgotten.
+
+---
+
 ## Task 3b: Add the Vite dev proxy the plan assumed existed
 
 **Files:** `app/vite.config.mts`

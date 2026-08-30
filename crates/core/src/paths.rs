@@ -102,10 +102,17 @@ pub fn workspace_to_string(path: PathBuf) -> Result<String, NonUtf8WorkspacePath
 /// an empty one outright, so a browser could list and edit scripts under the
 /// data-local workspace and then fail to start Factorio in it.
 ///
-/// Called at the point of **use** -- the scripts bootstrap, `scripts_root_path`,
-/// the start route, `setup_factorio_instance` -- never at settings load. A
-/// relative path has to be loadable, or `config show` and `config init --force`
-/// cannot report or rewrite it.
+/// Called at the point of **use**, not at settings load -- asking at load turned
+/// every subcommand into a startup gate and took `config init --force`, the
+/// documented repair path, down with it.
+///
+/// **The callers that ask are not all the callers that should.** Four refuse a
+/// relative path: the `serve` scripts bootstrap, `scripts_root_path`,
+/// `POST /api/v1/instance/start` and `setup_factorio_instance`. At least four
+/// more reach `scripts::ensure_scripts_dir` with the raw configured string and
+/// join it against the process CWD. Treat any enumeration here as a snapshot,
+/// not a contract -- an earlier version of this comment listed four sites as
+/// though that were the whole set, and a reader trusted it.
 ///
 /// Deliberately does not create the directory. Whether a missing workspace is
 /// an error or something to bootstrap differs per caller, and the callers that

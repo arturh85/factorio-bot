@@ -67,11 +67,24 @@ impl AppSettings {
 /// The only workspace question settings **load** is allowed to ask. Whether a
 /// configured path is *usable* -- absolute, and therefore not dependent on the
 /// process's working directory -- is decided at the point of use, by
-/// `paths::resolve_workspace`: the scripts bootstrap in `serve`,
-/// `manage::scripts::scripts_root_path`, `POST /api/v1/instance/start` and
-/// `setup_factorio_instance`.
+/// `paths::resolve_workspace`.
 ///
 /// Asking it here instead is the regression this function exists to close.
+///
+/// **The set of points of use is NOT complete, and this comment used to claim
+/// it was.** Four sites refuse a relative path: the scripts bootstrap in
+/// `serve`, `manage::scripts::scripts_root_path`, `POST /api/v1/instance/start`
+/// and `setup_factorio_instance`. At least four more pass the raw configured
+/// string to `scripts::ensure_scripts_dir` and join it against the process CWD:
+/// `app/src-tauri/src/scripting.rs`, `repl/run_script.rs`, `cli/lua.rs`'s
+/// `--connect` path, and seven call sites in `gui/command/script.rs`. With a
+/// relative `workspace_path` the script editor reads and writes
+/// `<cwd>/<relative>/scripts` while `start` refuses the same value -- the app
+/// writes into a workspace it will not start in.
+///
+/// Do not read the list above as exhaustive either. The durable fix is to make
+/// an unresolved path unable to reach `ensure_scripts_dir` at all, rather than
+/// to enumerate callers.
 /// `Context::new` loads the settings before clap has even chosen a subcommand,
 /// so a load that fails on a relative `workspace_path` fails `config show` and
 /// `config init --force` too -- the two commands whose whole job is to report

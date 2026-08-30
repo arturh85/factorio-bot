@@ -39,7 +39,17 @@ Tests live beside their subject in each file's `mod tests`.
 
 **Files:**
 - Create: `crates/scripting_lua/src/globals/goal/value.rs`
-- Modify: `crates/scripting_lua/src/globals/goal.rs` → becomes `goal/mod.rs` (move the file; add `mod value;`)
+- Move: `crates/scripting_lua/src/globals/goal.rs` → `crates/scripting_lua/src/globals/goal/mod.rs`
+
+Do the move with `git mv` as the **first** action of this task, before any edit, so the
+history follows the file:
+
+```bash
+mkdir -p crates/scripting_lua/src/globals/goal
+git mv crates/scripting_lua/src/globals/goal.rs crates/scripting_lua/src/globals/goal/mod.rs
+```
+
+Then add `mod value;` to it. Nothing else in `mod.rs` changes in this task.
 
 **Interfaces:**
 - Consumes: `factorio_bot_planner::{Goal, Holder, ids::BotId}`; `goal_error` from `goal/mod.rs`.
@@ -208,8 +218,61 @@ mod tests {
 
     /// A hand-built network and schedule covering every step kind, so the
     /// step-shape test does not depend on what the planner happens to emit.
-    fn every_kind() -> PlanValue { /* build one Action per ActionKind variant,
-        one Walk step, and a Schedule placing them; see Step 3 */ }
+    ///
+    /// Bot 1 takes every action step; bot 2 takes the walk, which also gives
+    /// `for_bot` two bots to separate.
+    fn every_kind() -> PlanValue {
+        use factorio_bot_planner::{Action, ActionKind, ScheduledStep, StepKind};
+        use factorio_bot_core::types::{FactorioEntity, Position};
+
+        let kinds = vec![
+            ActionKind::Mine { pos: Position::new(1.0, 1.0), item: "iron-ore".into(), count: 3 },
+            ActionKind::Craft { item: "iron-plate".into(), count: 2 },
+            ActionKind::Place {
+                entity: Box::new(FactorioEntity::new_stone_furnace(&Position::new(2.0, 2.0), 0.0)),
+            },
+            ActionKind::Insert {
+                pos: Position::new(2.0, 2.0), entity: "stone-furnace".into(),
+                slot: InventorySlot::CrafterInput, item: "iron-ore".into(), count: 3,
+            },
+            ActionKind::Remove {
+                pos: Position::new(2.0, 2.0), entity: "stone-furnace".into(),
+                slot: InventorySlot::CrafterOutput, item: "iron-plate".into(), count: 2,
+            },
+            ActionKind::Research { tech: "automation".into() },
+        ];
+
+        let mut net = ActionNetwork::default();
+        let mut steps = Vec::new();
+        for (i, kind) in kinds.into_iter().enumerate() {
+            let id = ActionId(i as u32);
+            let label = format!("step {i}");
+            net.push(Action {
+                id, kind, pre: vec![], eff: vec![],
+                duration: 10, pinned: None, label: label.clone(),
+            });
+            steps.push(ScheduledStep {
+                what: StepKind::Act { action: id, label },
+                bot: BotId(1),
+                start: (i as Ticks) * 10,
+                end: (i as Ticks) * 10 + 10,
+            });
+        }
+        steps.push(ScheduledStep {
+            what: StepKind::Walk { to: Position::new(5.0, 5.0) },
+            bot: BotId(2), start: 0, end: 34,
+        });
+
+        let schedule = Schedule { makespan: 60, steps };
+        PlanValue::new(Arc::new(net), Arc::new(schedule), vec![BotId(1), BotId(2)])
+    }
+
+    /// Installs one plan as the global `p` in a sandboxed interpreter.
+    fn lua_with_plan(plan: PlanValue) -> Lua {
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        lua.globals().set("p", plan).expect("install p");
+        lua
+    }
 
     #[test]
     fn every_step_kind_carries_its_documented_fields() {
@@ -257,11 +320,29 @@ mod tests {
 
     #[test]
     fn for_bot_returns_that_bots_steps_in_start_order() {
-        // two bots, interleaved starts
+        let lua = lua_with_plan(every_kind());
+        lua.load(r#"
+            local one = p:for_bot(1)
+            assert(#one == 6, "bot 1 has every action step, got " .. #one)
+            for i = 2, #one do
+                assert(one[i].start >= one[i - 1].start, "steps come back in start order")
+                assert(one[i].bot == 1, "for_bot(1) returns only bot 1")
+            end
+            assert(#p:for_bot(2) == 1, "bot 2 has only the walk")
+            assert(p:for_bot(2)[1].kind == "walk")
+            assert(#p:for_bot(99) == 0, "a bot with no steps is empty, not an error")
+        "#).exec().expect("script");
     }
 
     #[test]
-    fn makespan_and_bots_are_readable_fields() { /* p.makespan, p.bots */ }
+    fn makespan_and_bots_are_readable_fields() {
+        let lua = lua_with_plan(every_kind());
+        lua.load(r#"
+            assert(p.makespan == 60, "makespan, got " .. tostring(p.makespan))
+            assert(#p.bots == 2 and p.bots[1] == 1 and p.bots[2] == 2, "roster")
+            assert(#p.steps == 7, "six actions and one walk, got " .. #p.steps)
+        "#).exec().expect("script");
+    }
 
     #[test]
     fn a_plan_can_only_be_taken_for_a_run_once() {
@@ -345,15 +426,41 @@ git commit -m "feat(lua): plans as inspectable values with one filterable step c
 - [ ] **Step 1: Write the failing tests**
 
 ```rust
+/// The real `goal` table over a world seeded with `roster`, in a sandbox.
+/// Reuses `seeded_world_for` and `factory` from the existing tests.
+fn lua_with_world(roster: &[u8]) -> Lua {
+    let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+    lua.set_app_data(crate::lua_runner::PendingWork::default());
+    let table = create_lua_goal_with(
+        &lua,
+        seeded_world_for(roster),
+        factory(Arc::new(AlwaysOk::default())),
+        roster.to_vec(),
+    ).expect("goal table");
+    lua.globals().set("goal", table).expect("install");
+    lua
+}
+
 #[test]
 fn plan_defaults_to_the_whole_roster() {
-    // world seeded with bots 1..4; goal.plan(g).bots == {1,2,3,4}
+    let lua = lua_with_world(&[1, 2, 3, 4]);
+    lua.load(r#"
+        local p = goal.plan(goal.have("iron-plate", 8))
+        assert(#p.bots == 4, "defaults to every bot, got " .. #p.bots)
+        for i = 1, 4 do assert(p.bots[i] == i, "roster is 1..4 in order") end
+    "#).exec().expect("script");
 }
 
 #[test]
 fn plan_honours_a_bot_subset() {
-    // goal.plan(g, { bots = {1, 2} }).bots == {1,2}
-    // and no step is assigned to bot 3 or 4
+    let lua = lua_with_world(&[1, 2, 3, 4]);
+    lua.load(r#"
+        local p = goal.plan(goal.have("iron-plate", 8), { bots = { 1, 2 } })
+        assert(#p.bots == 2, "two bots asked for, got " .. #p.bots)
+        for _, s in ipairs(p.steps) do
+            assert(s.bot == 1 or s.bot == 2, "no step may land on bot " .. s.bot)
+        end
+    "#).exec().expect("script");
 }
 
 #[test]
@@ -373,17 +480,41 @@ fn expansion_and_scheduling_always_share_one_roster() {
 
 #[test]
 fn semantic_errors_raise_at_plan_time_not_construction() {
-    // goal.have("not-an-item", 1) constructs fine; goal.plan on it raises
-    // and names the item. Likewise goal.researched("no-such-tech").
+    let lua = lua_with_world(&[1, 2]);
+    lua.load(r#"
+        -- Constructing is pure: an unknown item is not a shape error.
+        local g = goal.have("not-a-real-item", 1)
+        assert(g.item == "not-a-real-item", "construction succeeds")
+        local ok, err = pcall(goal.plan, g)
+        assert(not ok, "planning an unknown item must raise")
+        assert(tostring(err):find("not%-a%-real%-item"), "the error names it: " .. tostring(err))
+
+        local t = goal.researched("no-such-technology")
+        local ok2, err2 = pcall(goal.plan, t)
+        assert(not ok2, "planning an unknown technology must raise")
+        assert(tostring(err2):find("no%-such%-technology"), "names it: " .. tostring(err2))
+    "#).exec().expect("script");
 }
 
 #[test]
 fn an_unknown_bot_raises_and_names_it() {
-    // { bots = { 99 } } -> error mentioning 99, via refuse_unknown_bots
+    let lua = lua_with_world(&[1, 2]);
+    lua.load(r#"
+        local ok, err = pcall(goal.plan, goal.have("iron-plate", 1), { bots = { 99 } })
+        assert(not ok, "bot 99 is not a connected player")
+        assert(tostring(err):find("99"), "the error names the bot: " .. tostring(err))
+    "#).exec().expect("script");
 }
 
 #[test]
-fn an_empty_bot_list_raises() { /* { bots = {} } */ }
+fn an_empty_bot_list_raises() {
+    let lua = lua_with_world(&[1, 2]);
+    lua.load(r#"
+        local ok, err = pcall(goal.plan, goal.have("iron-plate", 1), { bots = {} })
+        assert(not ok, "an empty roster cannot plan anything")
+        assert(tostring(err):find("bot"), "the error is about bots: " .. tostring(err))
+    "#).exec().expect("script");
+}
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -434,6 +565,16 @@ git commit -m "feat(lua): goal.plan expands and schedules against one roster"
 - Consumes: `PlanValue::take_for_run`; `factorio_bot_executor::{run_into, ExecutionLog, Status, Attempt}`; the existing `ActuatorFactory` type in `goal/mod.rs`.
 - Produces: `goal.start(plan) -> RunValue`, `goal.run(plan) -> observation`, and `RunValue` userdata with `:progress()` and `:wait()`.
 
+**Test infrastructure.** The old `goal.rs` tests already carry what these need — reuse
+them rather than writing new ones: `seeded_world_for(&[u8])`, `seed_players`,
+`factory(stub)`, `lua_with_goal(stub)`, the `StubActuator` with its `Failure` modes, and
+the timeout runner that turns a hang into a named assertion failure. Two details from
+`lua_with_goal` that are easy to lose in the move and fatal to lose: it builds the
+interpreter with `crate::sandbox::new_sandboxed_lua()`, and it sets
+`crate::lua_runner::PendingWork::default()` as app data — **without that app data a run
+cannot start at all**. If no `AlwaysOk` stub exists, add one as the trivial `Actuator`
+that returns `Ok(())`.
+
 **Background.** Lift the run machinery from the old `Runs`/`RunEntry` — the `tokio::sync::watch` completion signal and the reason `wait_for_run` clones the receiver rather than holding a lock across the await. That reasoning still applies; only the handle indirection goes. `RunValue` holds `Arc<Mutex<ExecutionLog>>`, the `watch::Receiver<bool>`, and the network (to size the observation).
 
 - [ ] **Step 1: Write the failing tests**
@@ -443,14 +584,38 @@ Drive the real bindings against the existing actuator stub (see the old `goal.rs
 ```rust
 #[test]
 fn run_reports_a_finished_observation() {
-    // all actions succeed; obs.done, obs.success == #actions, obs.failed == 0,
-    // obs.first_error == nil
+    let lua = lua_with_goal(Arc::new(AlwaysOk::default()));
+    lua.load(r#"
+        local p = goal.plan(goal.have("iron-ore", 2))
+        local obs = goal.run(p)
+        assert(obs.done, "a returned run is finished")
+        assert(obs.failed == 0, "nothing failed, got " .. obs.failed)
+        assert(obs.success > 0, "something succeeded")
+        assert(obs.pending == 0 and obs.running == 0, "nothing left outstanding")
+        assert(obs.first_error == nil, "no error on a clean run")
+    "#).exec().expect("script");
 }
 
 #[test]
 fn an_observation_carries_per_action_outcomes_keyed_by_step_id() {
-    // for each action step in the plan, obs.actions[s.id] exists with
-    // status == "success", attempts == 1, planned_start and planned_end numbers
+    let lua = lua_with_goal(Arc::new(AlwaysOk::default()));
+    lua.load(r#"
+        local p = goal.plan(goal.have("iron-ore", 2))
+        local obs = goal.run(p)
+        local checked = 0
+        for _, s in ipairs(p.steps) do
+            if s.kind ~= "walk" then
+                local a = obs.actions[s.id]
+                assert(a, "no outcome for action " .. tostring(s.id))
+                assert(a.status == "success", "status for " .. s.id .. ": " .. a.status)
+                assert(a.attempts == 1, "one attempt")
+                assert(type(a.planned_start) == "number", "planned_start")
+                assert(type(a.planned_end) == "number", "planned_end once finished")
+                checked = checked + 1
+            end
+        end
+        assert(checked > 0, "the plan had action steps to check")
+    "#).exec().expect("script");
 }
 
 #[test]
@@ -468,18 +633,48 @@ fn tick_fields_are_named_planned_not_observed() {
 
 #[test]
 fn failures_are_reported_with_their_errors() {
-    // stub fails one action: obs.failed == 1, obs.first_error names it,
-    // #obs:failures() == 1, obs:failures()[1].error is a non-empty string
+    // `Failure::First` is the existing stub mode that fails the first action
+    // dispatched and succeeds thereafter.
+    let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::First)));
+    lua.load(r#"
+        local obs = goal.run(goal.plan(goal.have("iron-ore", 2)))
+        assert(obs.failed >= 1, "the stub failed an action, got " .. obs.failed)
+        assert(type(obs.first_error) == "string", "first_error is set")
+        assert(#obs.first_error > 0, "first_error is not empty")
+        local fs = obs:failures()
+        assert(#fs == obs.failed, "failures() agrees with the count")
+        assert(type(fs[1].error) == "string" and #fs[1].error > 0, "each failure carries its error")
+        assert(fs[1].id ~= nil, "each failure names its action")
+    "#).exec().expect("script");
 }
 
 #[test]
 fn start_is_non_blocking_and_progress_reads_it() {
-    // goal.start returns before the run finishes; :progress() answers;
-    // :wait() returns the same observation shape with done == true
+    let lua = lua_with_goal(Arc::new(AlwaysOk::default()));
+    lua.load(r#"
+        local run = goal.start(goal.plan(goal.have("iron-ore", 2)))
+        -- Returning at all is the assertion: a blocking start could not reach
+        -- this line before the run finished.
+        local snap = run:progress()
+        assert(type(snap.done) == "boolean", "progress answers with an observation")
+        assert(type(snap.success) == "number", "and it carries counts")
+        local obs = run:wait()
+        assert(obs.done, "wait returns only once the run is over")
+        assert(obs.failed == 0, "clean run")
+    "#).exec().expect("script");
 }
 
 #[test]
-fn wait_is_idempotent() { /* two waits on one run both return */ }
+fn wait_is_idempotent() {
+    let lua = lua_with_goal(Arc::new(AlwaysOk::default()));
+    lua.load(r#"
+        local run = goal.start(goal.plan(goal.have("iron-ore", 2)))
+        local a = run:wait()
+        local b = run:wait()
+        assert(a.done and b.done, "both waits return a finished observation")
+        assert(a.success == b.success, "and they agree")
+    "#).exec().expect("script");
+}
 
 #[test]
 fn running_one_plan_twice_raises() {
@@ -489,7 +684,14 @@ fn running_one_plan_twice_raises() {
 
 #[test]
 fn goal_run_equals_start_then_wait() {
-    // same observation fields from both routes on identical plans
+    let lua = lua_with_goal(Arc::new(AlwaysOk::default()));
+    lua.load(r#"
+        local direct = goal.run(goal.plan(goal.have("iron-ore", 2)))
+        local staged = goal.start(goal.plan(goal.have("iron-ore", 2))):wait()
+        assert(direct.done == staged.done, "done")
+        assert(direct.success == staged.success, "success")
+        assert(direct.failed == staged.failed, "failed")
+    "#).exec().expect("script");
 }
 ```
 

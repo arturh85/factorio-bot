@@ -39,9 +39,12 @@ const recreateLevel = computed({
 })
 const startInstances = async() => {
   try {
-    toast.add({severity:'success', summary: 'starting!', life: 1000});
     await instanceStore.startInstances()
-    toast.add({severity:'success', summary: 'Started!', life: 1000});
+    // Not "Started!": the server answers 202 the moment it accepts the start
+    // and then runs it detached, because a first-run archive extraction takes
+    // minutes. The button's "Starting ..." label and the poll of
+    // GET /api/v1/instance are what report the outcome.
+    toast.add({severity:'success', summary: 'Starting ...', detail: 'the first start extracts the archive, which can take several minutes', life: 4000});
   } catch(err) {
     if (err instanceof Error) {
       toast.add({severity: 'error', summary: 'Failed to start instances', detail: err.message, life: 10000});

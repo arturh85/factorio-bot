@@ -9,6 +9,8 @@ use factorio_bot_planner::schedule::StepKind;
 use factorio_bot_planner::{mermaid_gantt, schedule, BotId, PlanState};
 use std::sync::Arc;
 
+mod common;
+
 fn world_with_furnaces(bots: &[BotId]) -> PlanState {
     let mut state = PlanState::from_world(Arc::new(fixture_world()), bots);
     for bot in bots {
@@ -143,6 +145,48 @@ fn the_plan_renders_as_a_gantt_chart() {
     assert!(chart.contains("section bot 1"));
     assert!(chart.contains("section bot 2"));
     assert!(chart.contains("mine"));
+}
+
+/// The engine's own property test, run against the engine's own output.
+///
+/// `assert_preconditions_hold_over_time` had only ever been pointed at
+/// hand-built networks with no chains set, so the whole cross-chain path in
+/// `infer_edges` — where an edge is *dropped* on the argument that the
+/// scheduler re-derives it — was never checked against a real expansion. This
+/// replays twelve of them: four goal sizes over one, two and four bots.
+///
+/// It is the only test that would catch a dropped edge as such: a missing
+/// dependency does not make `schedule()` fail, it makes `schedule()` return a
+/// plan whose precondition is false at the tick the action starts, which
+/// nothing else here looks at.
+///
+/// **On today's fixture it does not yet discriminate**, and saying so is the
+/// point of writing it down. Stubbing `infer_edges` to return immediately was
+/// measured to leave all seven tests in this file passing, this one included,
+/// while eleven `network` unit tests fail. Red science's chains have no
+/// cross-chain dependency — `free_tile_near` hands each chain its own furnace
+/// tile — and inside one chain the scheduler's per-bot feasibility check plus
+/// a single `free_at` cursor reconstruct the order an edge would have stated.
+/// So this guards the moment that stops being true (a method reusing an
+/// existing furnace, an `Actor::Bound` holder, a `Consolidate`), not anything
+/// the crate does today.
+#[test]
+fn every_expansion_replays_in_time_order() {
+    let rosters: [Vec<BotId>; 3] = [
+        vec![BotId(1)],
+        vec![BotId(1), BotId(2)],
+        vec![BotId(1), BotId(2), BotId(3), BotId(4)],
+    ];
+    for bots in &rosters {
+        for count in [1u32, 2, 4, 10] {
+            let state = world_with_furnaces(bots);
+            let net = expand(&[goal(count)], &state, &registry_for(bots), BotId(1))
+                .unwrap_or_else(|e| panic!("{} packs on {} bots: {}", count, bots.len(), e));
+            let plan = schedule(&net, &state, bots)
+                .unwrap_or_else(|e| panic!("{} packs on {} bots: {}", count, bots.len(), e));
+            common::assert_preconditions_hold_over_time(&net, &state, &plan);
+        }
+    }
 }
 
 #[test]

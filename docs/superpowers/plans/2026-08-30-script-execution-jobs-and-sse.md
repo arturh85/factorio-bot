@@ -973,12 +973,14 @@ argument. Closes finding I3 of the management-API plan."
 ## Task 4: Run scripts off the async executor
 
 **Files:**
-- Modify: `crates/scripting_lua/src/lua_runner.rs:80-95`
+- Modify: `crates/scripting_lua/src/lua_runner.rs` (the `thread::spawn` at ~`:68`, its `.join()` at ~`:127`, and the `Runtime::new` at ~`:114`) — **re-read before editing; Tasks 1 and 2 both moved this file and every line number here is advisory**
 - Test: `crates/scripting_lua/src/lua_runner.rs`
 
 ### The defect
 
-`run_lua` is `async`, but its body is `thread::spawn(…).join().unwrap()` — a synchronous block for the entire duration of the script. Awaiting it parks a tokio worker thread until the script finishes. With axum's default worker count, a handful of concurrent long scripts starve the whole server, including the health endpoint. The `.join().unwrap()` also re-panics on the calling thread, which under `panic = "abort"` kills the process rather than failing the request.
+`run_lua` is `async`, but its body is `thread::spawn(…).join()` — a synchronous block for the entire duration of the script. Awaiting it parks a tokio worker thread until the script finishes. With axum's default worker count, a handful of concurrent long scripts starve the whole server, including the health endpoint.
+
+**Correction to an earlier draft of this task:** it also claimed the `.join()` was `.join().unwrap()` and therefore re-panicked on the calling thread. That is no longer true — Task 1's fix round changed it to `.join().map_err(|_| miette!("lua thread panicked"))??`, and the tests added there (`assert_reported_not_panicked`) assert precisely that a script panic is *reported* rather than propagated. Do not "fix" a panic that is already handled, and do not weaken that error mapping: `spawn_blocking`'s `JoinError` must be mapped the same way, because those tests depend on the message.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1020,7 +1022,7 @@ On two worker threads this may pass by luck even before the fix — the test's v
 
 ### Runtime ownership — decided here, because Task 5 inherits it
 
-`run_lua` builds its own runtime inside the spawned thread (`lua_runner.rs:109`) and drops it when `block_on` returns. Dropping a tokio runtime aborts every task spawned onto it that has not finished — **silently**, with no error and no log line. So any asynchronous work a binding starts and the script does not explicitly wait for is killed the moment the script returns.
+`run_lua` builds its own runtime inside the spawned thread (~`lua_runner.rs:114`) and drops it when `block_on` returns. Dropping a tokio runtime aborts every task spawned onto it that has not finished — **silently**, with no error and no log line. So any asynchronous work a binding starts and the script does not explicitly wait for is killed the moment the script returns.
 
 That is invisible today because every binding awaits its own work inline. It stops being invisible the moment a binding hands the script a handle and lets it walk away, which is the shape the other session's `goal.execute` takes: `goal.execute(..)` returns a run handle and `goal.wait(h)` blocks. A script that calls the first and not the second gets its bots stopped mid-plan with no diagnostic.
 
@@ -1067,7 +1069,7 @@ impl PendingWork {
 
 - [ ] **Step 3: Move the work onto `spawn_blocking`**
 
-Replace `thread::spawn(move || { … }).join().unwrap()?` with:
+Replace the `thread::spawn(move || { … }).join()` construction with:
 
 ```rust
     // `spawn_blocking`, not `thread::spawn().join()`: the old form blocked the

@@ -939,6 +939,26 @@ mod tests {
 
     #[test]
     fn the_whole_science_chain_expands() {
+        /// The one action whose kind matches, or a panic naming what was
+        /// wanted. Uniqueness matters: `preds` membership means nothing if
+        /// there are three candidates and the test picked whichever came first.
+        fn only(
+            net: &crate::network::ActionNetwork,
+            what: &str,
+            matching: impl Fn(&ActionKind) -> bool,
+        ) -> crate::ids::ActionId {
+            let hits: Vec<&Action> = net.actions().filter(|a| matching(&a.kind)).collect();
+            match hits.as_slice() {
+                [one] => one.id,
+                other => panic!(
+                    "wanted exactly one {}, found {:?} among {:?}",
+                    what,
+                    other.iter().map(|a| &a.label).collect::<Vec<_>>(),
+                    net.actions().map(|a| &a.label).collect::<Vec<_>>()
+                ),
+            }
+        }
+
         let mut s = state(&[BotId(1)]);
         s.gain(BotId(1), "stone-furnace", 1);
         let net = expand(
@@ -952,30 +972,60 @@ mod tests {
             BotId(1),
         )
         .unwrap();
-        let labels: Vec<String> = net.actions().map(|a| a.label.clone()).collect();
+
+        // Both ores are dug.
+        only(
+            &net,
+            "iron-ore mine",
+            |k| matches!(k, ActionKind::Mine { item, .. } if item == "iron-ore"),
+        );
+        only(
+            &net,
+            "copper-ore mine",
+            |k| matches!(k, ActionKind::Mine { item, .. } if item == "copper-ore"),
+        );
+
+        // The shape, not the spelling. Label substrings are blind to exactly
+        // the defect this chain keeps hitting: actions that exist but are not
+        // ordered against each other, or are ordered against the wrong thing.
+        let gear = only(
+            &net,
+            "gear craft",
+            |k| matches!(k, ActionKind::Craft { item, .. } if item == "iron-gear-wheel"),
+        );
+        let pack = only(
+            &net,
+            "science craft",
+            |k| matches!(k, ActionKind::Craft { item, .. } if item == "automation-science-pack"),
+        );
+        let iron_out = only(
+            &net,
+            "iron-plate removal",
+            |k| matches!(k, ActionKind::Remove { item, .. } if item == "iron-plate"),
+        );
+        let copper_out = only(
+            &net,
+            "copper-plate removal",
+            |k| matches!(k, ActionKind::Remove { item, .. } if item == "copper-plate"),
+        );
+
+        let preds = |id| -> Vec<crate::ids::ActionId> {
+            net.preds(id).into_iter().map(|(p, _)| p).collect()
+        };
         assert!(
-            labels
-                .iter()
-                .any(|l| l.contains("mine") && l.contains("iron-ore")),
-            "{:?}",
-            labels
+            preds(gear).contains(&iron_out),
+            "the gear craft must wait for its plates to come out of the furnace: {:?}",
+            preds(gear)
         );
         assert!(
-            labels
-                .iter()
-                .any(|l| l.contains("mine") && l.contains("copper-ore")),
-            "{:?}",
-            labels
+            preds(pack).contains(&gear),
+            "the science craft must wait for the gear: {:?}",
+            preds(pack)
         );
         assert!(
-            labels.iter().any(|l| l.contains("iron-gear-wheel")),
-            "{:?}",
-            labels
-        );
-        assert!(
-            labels.iter().any(|l| l.contains("automation-science-pack")),
-            "{:?}",
-            labels
+            preds(pack).contains(&copper_out),
+            "and for the copper plate: {:?}",
+            preds(pack)
         );
     }
 

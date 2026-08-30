@@ -65,16 +65,32 @@ pub fn mermaid_gantt(schedule: &Schedule, title: &str) -> String {
     out
 }
 
+/// Fill colours for chains, cycled by chain id. Pale on purpose: graphviz
+/// draws labels in black over the fill.
+const CHAIN_COLOURS: [&str; 8] = [
+    "#a6cee3", "#b2df8a", "#fdbf6f", "#cab2d6", "#fb9a99", "#ffff99", "#d9d9d9", "#bc80bd",
+];
+
 /// The action network as a graphviz digraph, edges labelled with their lag.
+///
+/// Nodes are filled by the chain they belong to, so a plan whose chains have
+/// been scattered — this crate's dominant failure mode, and one that otherwise
+/// only shows up as a precondition error much later — is visible on sight. A
+/// node belonging to no chain is drawn plain, exactly as before.
 pub fn graphviz(net: &ActionNetwork) -> String {
     let mut out = String::from("digraph {\n");
     for action in net.actions() {
-        let _ = writeln!(
-            out,
-            "    {} [label=\"{}\"];",
-            action.id.0,
-            action.label.replace('"', "'")
-        );
+        let label = action.label.replace('"', "'");
+        let _ = match net.chain_of(action.id) {
+            Some(chain) => writeln!(
+                out,
+                "    {} [label=\"{}\", style=filled, fillcolor=\"{}\"];",
+                action.id.0,
+                label,
+                CHAIN_COLOURS[chain.0 as usize % CHAIN_COLOURS.len()]
+            ),
+            None => writeln!(out, "    {} [label=\"{}\"];", action.id.0, label),
+        };
     }
     for action in net.actions() {
         for (pred, lag) in net.preds(action.id) {
@@ -234,6 +250,54 @@ mod tests {
         let first = out.find("section bot 1").expect("bot 1 section");
         let second = out.find("section bot 2").expect("bot 2 section");
         assert!(first < second, "sections must be ordered by bot id");
+    }
+
+    #[test]
+    fn graphviz_fills_nodes_by_chain() {
+        use crate::action::{Action, ActionKind};
+        use crate::ids::{ActionIdGen, ChainIdGen};
+        use crate::network::ActionNetwork;
+
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let node = |gen: &mut ActionIdGen| Action {
+            id: gen.next(),
+            kind: ActionKind::Craft {
+                item: "iron-gear-wheel".into(),
+                count: 1,
+            },
+            pre: vec![],
+            eff: vec![],
+            duration: 60,
+            pinned: None,
+            label: "craft".into(),
+        };
+        let first = net.add(node(&mut gen));
+        let second = net.add(node(&mut gen));
+        let loose = net.add(node(&mut gen));
+
+        let mut chains = ChainIdGen::new();
+        net.set_chain(first, chains.next());
+        net.set_chain(second, chains.next());
+
+        let out = graphviz(&net);
+        // Two chains, two different fills.
+        assert!(
+            out.contains("0 [label=\"craft\", style=filled, fillcolor=\"#a6cee3\"];"),
+            "unexpected dot:\n{}",
+            out
+        );
+        assert!(
+            out.contains("1 [label=\"craft\", style=filled, fillcolor=\"#b2df8a\"];"),
+            "unexpected dot:\n{}",
+            out
+        );
+        // A chainless action is drawn exactly as it was before chains existed.
+        assert!(
+            out.contains(&format!("{} [label=\"craft\"];", loose.0)),
+            "unexpected dot:\n{}",
+            out
+        );
     }
 
     #[test]

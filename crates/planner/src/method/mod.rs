@@ -1,6 +1,7 @@
 //! How to get what we want: hand-written decompositions, and the driver that
 //! runs them until only actions remain.
 
+pub mod have;
 pub mod util;
 
 use crate::action::Action;

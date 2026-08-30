@@ -1371,15 +1371,15 @@ git commit -m "feat!: replace the task-graph planner with the goal planner and e
 
 ---
 
-## Known blocker discovered during planning
+## Resolved before this plan: furnace siting
 
-**Furnace siting is not executable.** The planner's `Smelt` method sites its furnace with `is_position_free`, which consults `EntityGraph`'s `entity_tree` — and that tree never receives resource entities (the same blind spot behind the earlier `resource_available` bug). The measured distance from a sited furnace to its ore patch is therefore **0**: the planner puts the furnace on top of the ore tile.
+Planning surfaced a defect that would have made this whole increment fail at its first `Place`, and it has been fixed ahead of the plan in commit `9dc6c7b`.
 
-This is harmless to the planner's arithmetic, which is why it survived three plans of review, but it is fatal to Task 4: `place_entity` on an ore tile will be rejected by the game, every smelting plan will fail at its first `Place`, and recovery will re-expand into the same invalid site forever — tier 2 cannot fix a defect in the method itself.
+`PlanState::is_position_free` consulted only the entity tree, and `EntityGraph::add` routes resource entities into `resources`/`resource_tree` instead — the same routing asymmetry behind the earlier `resource_available` bug. Ore tiles therefore read as free, and `Smelt` sited its furnace on top of the ore patch: measured furnace-to-ore distance **0**. Harmless to the planner's arithmetic, which is why it survived three plans of review, and fatal to execution, because the game rejects `place_entity` on an ore tile. Worse, it would have failed *silently* until the first live run — and recovery could not have helped, since tier 2 re-expands into the same invalid site.
 
-**This must be fixed before Task 4 is worth running**, and the fix is narrower than it first appears. `is_position_free` is a method on the planner's own `PlanState` (`crates/planner/src/state.rs:158`), not on core's `EntityGraph`, so correcting it changes behaviour for planner callers only — there is no core blast radius. It needs one small read-only accessor on `EntityGraph` ("is any resource at this tile"), because the existing `resource_contains` is per-resource-name.
+The fix adds a read-only `EntityGraph::any_resource_at` in core (`resource_contains` is per-resource-name and cannot answer "is anything here") and makes `is_position_free` consult it. Furnace-to-ore is now sqrt(2) — one diagonal tile off the patch — and a regression assertion pins `to_ore > 0`.
 
-**Status: being fixed now, ahead of this plan**, since the defect is real independently of whether this plan ever runs. Expect it to move the recorded red-science makespans — furnaces relocating off ore changes travel distances — and expect `to_ore` in the furnace-proximity assertion to become non-zero.
+It moved the recorded red-science makespans, as expected, because every ore-to-furnace trip gained that step: one bot 4749 -> 4751, four bots 1843 -> 1870, speedup 2.577x -> 2.541x. All re-measured, not computed.
 
 ## Open questions for the repository owner
 

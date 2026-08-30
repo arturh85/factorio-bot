@@ -146,114 +146,125 @@ impl FactorioInstance {
                 }
                 rcon
             }
-            Some(_) => Arc::new(
-                FactorioRcon::new(&rcon_settings, silent.clone())
-                    .await
-                    .expect("failed to connect"),
-            ),
+            Some(_) => Arc::new(FactorioRcon::new(&rcon_settings, silent.clone()).await?),
         };
-        // Spawn all clients first
-        for instance_number in 0..params.client_count {
-            let instance_name = format!("client{}", instance_number + 1);
-            let instance_path =
-                Path::new(settings.workspace_path.as_ref()).join(PathBuf::from(&instance_name));
-            let lock_path = instance_path.join(PathBuf::from(".lock"));
+        // Everything past this point runs with a server process (or a remote
+        // server) already live. Failures here used to propagate straight out,
+        // dropping `server_child` without killing it -- `InteractiveProcess` has
+        // no `Drop` -- so the orphaned server kept holding the factorio and rcon
+        // ports and the *next* run failed with "Host address is already in use"
+        // instead of reporting the real problem. The result is captured so the
+        // children can be killed before the error leaves this function.
+        let startup: Result<()> = async {
+            // Spawn all clients first
+            for instance_number in 0..params.client_count {
+                let instance_name = format!("client{}", instance_number + 1);
+                let instance_path =
+                    Path::new(settings.workspace_path.as_ref()).join(PathBuf::from(&instance_name));
+                let lock_path = instance_path.join(PathBuf::from(".lock"));
 
-            // Diagnostic logging
-            if !params.silent {
+                // Diagnostic logging
+                if !params.silent {
+                    info!(
+                        "Attempting to spawn <bright-blue>{}</> at {:?}",
+                        instance_name, instance_path
+                    );
+                    info!("  Instance directory exists: {}", instance_path.exists());
+                    info!("  Lock file exists: {}", lock_path.exists());
+                }
+
+                let started = Instant::now();
+                let child = Self::start_client(
+                    &settings,
+                    instance_name.clone(),
+                    params.server_host.clone(),
+                    params.write_logs,
+                    true,
+                )
+                .await?;
+
+                // Log process ID
+                if !params.silent {
+                    info!(
+                        "  Successfully spawned <bright-blue>{}</> (PID: {})",
+                        instance_name,
+                        child.pid()
+                    );
+                }
+
+                client_children.push(child);
+                if !params.silent {
+                    success!(
+                        "Spawned <bright-blue>{}</> in <yellow>{:?}</>",
+                        &instance_name,
+                        started.elapsed()
+                    );
+                }
+            }
+
+            // Wait for all clients to actually connect to the server
+            // Clients take 20-30 seconds to load sprites and connect
+            if params.client_count > 0 && !params.silent {
                 info!(
-                    "Attempting to spawn <bright-blue>{}</> at {:?}",
-                    instance_name, instance_path
-                );
-                info!("  Instance directory exists: {}", instance_path.exists());
-                info!("  Lock file exists: {}", lock_path.exists());
-            }
-
-            let started = Instant::now();
-            let child = Self::start_client(
-                &settings,
-                instance_name.clone(),
-                params.server_host.clone(),
-                params.write_logs,
-                true,
-            )
-            .await?;
-
-            // Log process ID
-            if !params.silent {
-                info!(
-                    "  Successfully spawned <bright-blue>{}</> (PID: {})",
-                    instance_name,
-                    child.pid()
+                    "Waiting for {} client(s) to connect...",
+                    params.client_count
                 );
             }
-
-            client_children.push(child);
-            if !params.silent {
-                success!(
-                    "Spawned <bright-blue>{}</> in <yellow>{:?}</>",
-                    &instance_name,
-                    started.elapsed()
-                );
-            }
-        }
-
-        // Wait for all clients to actually connect to the server
-        // Clients take 20-30 seconds to load sprites and connect
-        if params.client_count > 0 && !params.silent {
-            info!(
-                "Waiting for {} client(s) to connect...",
-                params.client_count
-            );
-        }
-        let wait_started = Instant::now();
-        let expected_players = params.client_count as usize;
-        loop {
-            // Poll connected player count
-            match rcon.connected_player_count().await {
-                Ok(count) => {
-                    if count >= expected_players {
-                        if !params.silent {
-                            success!(
-                                "All {} client(s) connected in <yellow>{:?}</>",
-                                params.client_count,
-                                wait_started.elapsed()
-                            );
+            let wait_started = Instant::now();
+            let expected_players = params.client_count as usize;
+            loop {
+                // Poll connected player count
+                match rcon.connected_player_count().await {
+                    Ok(count) => {
+                        if count >= expected_players {
+                            if !params.silent {
+                                success!(
+                                    "All {} client(s) connected in <yellow>{:?}</>",
+                                    params.client_count,
+                                    wait_started.elapsed()
+                                );
+                            }
+                            break;
                         }
-                        break;
+                        // Show progress
+                        if !params.silent {
+                            info!("Clients: {}/{} connected", count, expected_players);
+                        }
                     }
-                    // Show progress
-                    if !params.silent {
-                        info!("Clients: {}/{} connected", count, expected_players);
+                    Err(e) => {
+                        if !params.silent {
+                            warn!("Error checking player count: {:?}", e);
+                        }
                     }
                 }
-                Err(e) => {
-                    if !params.silent {
-                        warn!("Error checking player count: {:?}", e);
-                    }
+                // Timeout after 90 seconds (clients take 25-30s to load sprites)
+                if wait_started.elapsed() > std::time::Duration::from_secs(90) {
+                    error!(
+                        "Timeout waiting for clients to connect (expected {})",
+                        expected_players
+                    );
+                    break;
                 }
+                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
             }
-            // Timeout after 90 seconds (clients take 25-30s to load sprites)
-            if wait_started.elapsed() > std::time::Duration::from_secs(90) {
-                error!(
-                    "Timeout waiting for clients to connect (expected {})",
-                    expected_players
-                );
-                break;
+
+            // Register client names with BotBridge after they're connected
+            for instance_number in 0..params.client_count {
+                let instance_name = format!("client{}", instance_number + 1);
+                rcon.whoami(&instance_name).await?;
+                // Execute a dummy command to silence the warning about "using commands will
+                // disable achievements". If we don't do this, the first command will be lost
+                rcon.silent_print("").await?;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-        }
 
-        // Register client names with BotBridge after they're connected
-        for instance_number in 0..params.client_count {
-            let instance_name = format!("client{}", instance_number + 1);
-            rcon.whoami(&instance_name).await.unwrap();
-            // Execute a dummy command to silence the warning about "using commands will
-            // disable achievements". If we don't do this, the first command will be lost
-            rcon.silent_print("").await.unwrap();
+            arrange_windows(params.client_count).await?;
+            Ok(())
         }
-
-        arrange_windows(params.client_count).await?;
+        .await;
+        if let Err(err) = startup {
+            Self::kill_children(server_child, client_children);
+            return Err(err);
+        }
         Ok(FactorioInstance {
             client_processes: client_children,
             server_process: server_child,
@@ -478,17 +489,28 @@ impl FactorioInstance {
         Ok(proc)
     }
 
-    pub fn stop(mut self) -> Result<()> {
-        for child in self.client_processes {
+    /// Kills the clients, then the server. Shared by [`FactorioInstance::stop`]
+    /// and by the error path of [`FactorioInstance::start`], so a run that dies
+    /// half-way through startup releases the ports exactly like a clean shutdown
+    /// does.
+    fn kill_children(server: Option<InteractiveProcess>, clients: Vec<InteractiveProcess>) {
+        for child in clients {
             if child.close().kill().is_err() {
                 error!("failed to kill client");
             }
         }
-        if let Some(server) = self.server_process.take() {
+        if let Some(server) = server {
             if server.close().kill().is_err() {
                 error!("failed to kill server");
             }
         }
+    }
+
+    pub fn stop(mut self) -> Result<()> {
+        Self::kill_children(
+            self.server_process.take(),
+            std::mem::take(&mut self.client_processes),
+        );
         Ok(())
     }
 }

@@ -51,25 +51,57 @@ impl ExecutionLog {
         );
     }
 
+    /// Records a success. Upserts: if no `start()` was ever recorded for
+    /// `id`, an attempt is created rather than the write being dropped, so
+    /// completions are never lost from the log — the synthesized
+    /// `started_tick` is honest that we never actually observed a start.
+    /// The `debug_assert!` instead guards a genuine misuse: finishing an
+    /// action that was already finished, which would silently overwrite an
+    /// earlier result.
     pub fn succeed(&mut self, id: ActionId, tick: Ticks) {
-        if let Some(a) = self.attempts.get_mut(&id) {
-            a.status = Status::Success;
-            a.ended_tick = Some(tick);
-        }
+        let a = self.attempts.entry(id).or_insert_with(|| Attempt {
+            status: Status::Running,
+            started_tick: tick,
+            ended_tick: None,
+            error: None,
+        });
+        debug_assert!(
+            a.ended_tick.is_none(),
+            "succeed({id:?}) called on an action that already finished"
+        );
+        a.status = Status::Success;
+        a.ended_tick = Some(tick);
     }
 
+    /// Records a failure. Upserts for the same reason as `succeed()`, and
+    /// guards the same double-completion misuse.
     pub fn fail(&mut self, id: ActionId, tick: Ticks, error: String) {
-        if let Some(a) = self.attempts.get_mut(&id) {
-            a.status = Status::Failed;
-            a.ended_tick = Some(tick);
-            a.error = Some(error);
-        }
+        let a = self.attempts.entry(id).or_insert_with(|| Attempt {
+            status: Status::Running,
+            started_tick: tick,
+            ended_tick: None,
+            error: None,
+        });
+        debug_assert!(
+            a.ended_tick.is_none(),
+            "fail({id:?}) called on an action that already finished"
+        );
+        a.status = Status::Failed;
+        a.ended_tick = Some(tick);
+        a.error = Some(error);
     }
 
-    /// Wall-clock ticks the action actually took, once finished.
+    /// Game ticks the action actually took, once finished.
     pub fn observed_duration(&self, id: ActionId) -> Option<Ticks> {
         let a = self.attempts.get(&id)?;
-        a.ended_tick.map(|end| end.saturating_sub(a.started_tick))
+        a.ended_tick.map(|end| {
+            debug_assert!(
+                end >= a.started_tick,
+                "ended_tick {end} precedes started_tick {}",
+                a.started_tick
+            );
+            end.saturating_sub(a.started_tick)
+        })
     }
 
     /// Failed action ids, in ascending id order.
@@ -131,5 +163,23 @@ mod tests {
             log.fail(id(n), 1, "x".to_string());
         }
         assert_eq!(log.failed(), vec![id(3), id(5), id(9)]);
+    }
+
+    #[test]
+    fn succeed_without_a_prior_start_still_records_success() {
+        let mut log = ExecutionLog::default();
+        log.succeed(id(2), 50);
+        assert_eq!(log.status(id(2)), Status::Success);
+    }
+
+    #[test]
+    fn fail_without_a_prior_start_still_records_the_message() {
+        let mut log = ExecutionLog::default();
+        log.fail(id(3), 15, "never started".to_string());
+        assert_eq!(log.status(id(3)), Status::Failed);
+        assert_eq!(
+            log.attempt(id(3)).and_then(|a| a.error.as_deref()),
+            Some("never started")
+        );
     }
 }

@@ -620,9 +620,9 @@ fn an_observation_carries_per_action_outcomes_keyed_by_step_id() {
 
 #[test]
 fn tick_fields_are_named_planned_not_observed() {
-    let lua = /* … */;
+    let lua = lua_with_goal(Arc::new(AlwaysOk::default()));
     lua.load(r#"
-        local obs = goal.run(p)
+        local obs = goal.run(goal.plan(goal.have("iron-ore", 2)))
         for id, a in pairs(obs.actions) do
             assert(a.planned_start ~= nil, "planned_start")
             assert(a.observed_start == nil, "these are estimates, not measurements")

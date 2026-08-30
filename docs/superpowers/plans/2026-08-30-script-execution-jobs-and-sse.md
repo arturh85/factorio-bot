@@ -1405,6 +1405,42 @@ pub async fn post_execute(
 ) -> Result<(StatusCode, Json<ExecuteAccepted>), ErrorResponse> { … }
 ```
 
+### Prerequisite: `run_script_file` currently flattens its error type
+
+Carried from Task 3's review, and it must be fixed **in this task, before the handler is written**.
+
+`crates/scripting_lua/src/run_script.rs:42` does `.map_err(|err| miette!("{err}"))` on `resolve_script_path`'s result, collapsing `ScriptPathError::NotFound` and `ScriptPathError::EscapesRoot` into message text. `crates/server/src/error.rs:98-102` already has `impl From<ScriptPathError> for ErrorResponse` mapping `NotFound → 404` and `EscapesRoot → 400`, and the existing `/api/v1/scripts*` handlers get the right statuses because they call `resolve_script_path` directly.
+
+This handler goes through `run_script_file` instead, so it inherits a string. **Do not recover the distinction by matching on message text** — that turns a refactor of an error message into a silent status-code regression, and nothing would fail.
+
+Add a typed error to `crates/scripting_lua/src/run_script.rs`:
+
+```rust
+/// Why a script could not be run.
+///
+/// The path cases are kept distinct from everything else because the HTTP
+/// layer answers them differently -- a missing script is the caller's typo
+/// (404), a script outside the root is a refused traversal (400), and a Lua
+/// failure is neither. Flattening these into a string forced the server to
+/// re-derive them by matching on message text, which breaks silently the
+/// first time someone rewords an error.
+#[derive(Debug, thiserror::Error)]
+pub enum RunScriptError {
+    #[error(transparent)]
+    Path(#[from] factorio_bot_core::scripts::ScriptPathError),
+    #[error("unknown scripting file extension: {0}")]
+    UnknownExtension(String),
+    #[error("path is not a file: {0}")]
+    NotAFile(String),
+    #[error(transparent)]
+    Run(#[from] miette::Report),
+}
+```
+
+`run_script_file` returns `Result<(String, String), RunScriptError>`; `crates/server` adds `impl From<RunScriptError> for ErrorResponse` delegating the `Path` arm to the existing `ScriptPathError` conversion. Update the CLI and REPL call sites, which only format the error.
+
+**Test it as a status, not a message:** `POST /api/v1/scripts/execute` with `{"path": "/nope.lua"}` must answer **404**, and with `{"path": "../../etc/passwd"}` must answer **400**. Assert the status codes; a test asserting the body text would pass with the flattening still in place.
+
 Order matters and is part of the contract: validate the body first (400), then check for an instance (503), then resolve the script (404), and only then take the slot (409). Taking the slot before a check that can fail would leave it held by a request that never runs.
 
 `ErrorResponse` gains an optional `running_job_id: Option<String>` field, `#[serde(skip_serializing_if = "Option::is_none")]` so every other error body is unchanged.

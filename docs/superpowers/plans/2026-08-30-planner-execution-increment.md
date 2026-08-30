@@ -615,7 +615,7 @@ impl RconActuator {
 }
 ```
 
-Then the trait impl, mapping each method onto the RCON call. Two representative arms; write the rest by the same pattern:
+Then the trait impl, mapping each method onto the RCON call. Note that `move_player` takes `&world` first while `place_entity` takes it last — normalizing that inconsistency is one of the reasons this adapter exists:
 
 ```rust
 #[async_trait]
@@ -653,11 +653,79 @@ impl Actuator for RconActuator {
             .map_err(|e| ActuatorError::Rejected(e.to_string()))
     }
 
-    // mine -> player_mine(&world, p, item, &at, count)
-    // craft -> player_craft(&world, p, recipe, count)
-    // place -> place_entity(p, item.to_string(), at, direction, &world) — discard the returned entity
-    // remove -> remove_from_inventory(p, entity, at, inv, item, count, &world)
-    // research -> add_research(tech) — server-wide, takes no player id
+    async fn mine(
+        &self,
+        bot: BotId,
+        item: &str,
+        at: Position,
+        count: u32,
+    ) -> Result<(), ActuatorError> {
+        let p = self.player(bot)?;
+        self.rcon
+            .player_mine(&self.world, p, item, &at, count)
+            .await
+            .map_err(|e| ActuatorError::Rejected(e.to_string()))
+    }
+
+    async fn craft(&self, bot: BotId, recipe: &str, count: u32) -> Result<(), ActuatorError> {
+        let p = self.player(bot)?;
+        self.rcon
+            .player_craft(&self.world, p, recipe, count)
+            .await
+            .map_err(|e| ActuatorError::Rejected(e.to_string()))
+    }
+
+    async fn place(
+        &self,
+        bot: BotId,
+        item: &str,
+        at: Position,
+        direction: u8,
+    ) -> Result<(), ActuatorError> {
+        let p = self.player(bot)?;
+        // `place_entity` returns the created FactorioEntity; the executor does
+        // not need it, because the plan already knows what it placed and the
+        // world snapshot is refreshed by the event stream, not by this reply.
+        self.rcon
+            .place_entity(p, item.to_string(), at, direction, &self.world)
+            .await
+            .map(|_entity| ())
+            .map_err(|e| ActuatorError::Rejected(e.to_string()))
+    }
+
+    async fn remove(
+        &self,
+        bot: BotId,
+        entity: &str,
+        at: Position,
+        slot: InventorySlot,
+        item: &str,
+        count: u32,
+    ) -> Result<(), ActuatorError> {
+        let p = self.player(bot)?;
+        let inv = self.defines.get(slot)?;
+        self.rcon
+            .remove_from_inventory(
+                p,
+                entity.to_string(),
+                at,
+                inv,
+                item.to_string(),
+                count,
+                &self.world,
+            )
+            .await
+            .map_err(|e| ActuatorError::Rejected(e.to_string()))
+    }
+
+    /// Research is server-wide: it takes no player id, so `bot` is unused.
+    /// Two bots researching the same technology is idempotent in Factorio.
+    async fn research(&self, tech: &str) -> Result<(), ActuatorError> {
+        self.rcon
+            .add_research(tech)
+            .await
+            .map_err(|e| ActuatorError::Rejected(e.to_string()))
+    }
 }
 ```
 
@@ -1294,6 +1362,19 @@ git commit -m "feat!: replace the task-graph planner with the goal planner and e
 ```
 
 ---
+
+## Known blocker discovered during planning
+
+**Furnace siting is not executable.** The planner's `Smelt` method sites its furnace with `is_position_free`, which consults `EntityGraph`'s `entity_tree` — and that tree never receives resource entities (the same blind spot behind the earlier `resource_available` bug). The measured distance from a sited furnace to its ore patch is therefore **0**: the planner puts the furnace on top of the ore tile.
+
+This is harmless to the planner's arithmetic, which is why it survived three plans of review, but it is fatal to Task 4: `place_entity` on an ore tile will be rejected by the game, every smelting plan will fail at its first `Place`, and recovery will re-expand into the same invalid site forever — tier 2 cannot fix a defect in the method itself.
+
+**This must be fixed before Task 4 is worth running.** Two candidate fixes, neither yet chosen:
+
+1. Index resource entities into `EntityGraph::entity_tree` so `is_position_free` sees them. Correct, but touches a live core data structure that other code reads, and changes what `is_position_free` means everywhere.
+2. Give `Smelt` a siting predicate that excludes resource tiles explicitly, via `resource_contains` — narrower, no blast radius, but leaves `is_position_free` misleading for the next caller.
+
+Recommendation: (2) for this increment, with (1) filed as follow-up. Confirm before Task 4.
 
 ## Open questions for the repository owner
 

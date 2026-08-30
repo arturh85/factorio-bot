@@ -106,7 +106,7 @@ fn more_bots_finish_sooner() {
     let net_four = expand(&[goal(4)], &state_four, &registry_for(&four), BotId(1)).unwrap();
     let many = schedule(&net_four, &state_four, &four).unwrap().makespan;
 
-    // Measured on this scenario: one = 4751, many = 1870, a 2.541x speedup.
+    // Measured on this scenario: one = 4765, many = 1881, a 2.533x speedup.
     //
     // Both figures moved three times during the planner-hardening pass and this
     // comment is the crate's only record of them, so it states what was
@@ -118,9 +118,13 @@ fn more_bots_finish_sooner() {
     // from 2717 to 1843, lifting the ratio from 2.27x to 2.577x. Teaching
     // `is_position_free` to see ore then pushed the furnace off the patch it
     // had been standing on and one tile out, adding that step to every trip:
-    // one 4749 -> 4751, many 1843 -> 1870, ratio 2.577x -> 2.541x.
+    // one 4749 -> 4751, many 1843 -> 1870, ratio 2.577x -> 2.541x. Finally,
+    // reserving each entity's real collision box instead of a single tile —
+    // a stone furnace is 1.398 wide, so single-tile siting produced furnaces
+    // the game refuses to place — moved the first one off the copper patch
+    // edge: one 4751 -> 4765, many 1870 -> 1881, ratio 2.541x -> 2.533x.
     //
-    // The floor stays 2x rather than the measured 2.577x, so ordinary
+    // The floor stays 2x rather than the measured 2.533x, so ordinary
     // makespan movement does not trip it.
     assert!(
         many.saturating_mul(2) < one,
@@ -129,8 +133,8 @@ fn more_bots_finish_sooner() {
         one
     );
     // Absolute ceiling: catches a regression even if `one` also moves in a
-    // way that keeps the 2x ratio satisfied. 2100 sits 230 ticks (12%) above
-    // the measured 1870 — room for ordinary movement, but tight enough that a
+    // way that keeps the 2x ratio satisfied. 2100 sits 219 ticks (12%) above
+    // the measured 1881 — room for ordinary movement, but tight enough that a
     // repeat of task 2's 194-tick regression fails here instead of passing
     // silently. Retighten it whenever the measured figure drops again: a
     // ceiling with 74% headroom, which 3200 became, guards nothing.

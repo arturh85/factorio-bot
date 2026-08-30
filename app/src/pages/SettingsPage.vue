@@ -42,14 +42,6 @@ const recreateLevel = computed({
     appStore.updateRecreateLevel(val)
   }
 })
-const enableRestapi = computed({
-  get(): boolean {
-    return appStore.getEnableRestapi as boolean
-  },
-  set(val: boolean) {
-    appStore.updateEnableRestApi(val)
-  }
-})
 const enableAutostart = computed({
   get(): boolean {
     return appStore.getEnableAutostart as boolean
@@ -150,13 +142,9 @@ if (appStore.settings) {
   testIsFactorioArchivePathValid(appStore.settings.factorio.factorio_archive_path).then(valid => isFactorioArchivePathValid.value = valid)
 }
 
-const openInBrowser = (url: string, event: Event) => {
-  appStore.openInBrowser(url);
-  if (event) {
-    event.preventDefault()
-  }
-  return false
-}
+// `openInBrowser` is gone with the rest of the Tauri surface. The links below
+// are plain anchors now -- a page that is already in a browser does not need a
+// host command to open one.
 const settings = computed(() => appStore.getSettings)
 </script>
 
@@ -171,7 +159,8 @@ const settings = computed(() => appStore.getSettings)
 
       <div class="card p-fluid">
         <h5>Factorio Archive - Download from <a href="https://factorio.com/download"
-                                                @click="openInBrowser('https://factorio.com/download', $event)">https://factorio.com/download</a>
+                                                target="_blank"
+                                                rel="noopener noreferrer">https://factorio.com/download</a>
         </h5>
         <div class="p-formgrid p-grid">
           <div class="p-field p-col">
@@ -202,18 +191,19 @@ const settings = computed(() => appStore.getSettings)
           </div>
         </div>
       </div>
+      <!--
+        No "Enable REST API" checkbox any more: the REST API is the server that
+        served this page, so it cannot be switched off from here. The port is
+        persisted only and takes effect on the next `factorio-bot serve`.
+      -->
       <div class="card p-fluid">
-        <h5>Enable REST API
-          <a v-if="enableRestapi" :href="'http://localhost:' + restapiPort + '/swagger-ui/'"
-             @click="openInBrowser('http://localhost:' + restapiPort, $event)">{{ 'http://localhost:' + restapiPort }}</a>
-          &nbsp;
-          <a v-if="enableRestapi" :href="'http://localhost:' + restapiPort + '/swagger-ui/'"
-             @click="openInBrowser('http://localhost:' + restapiPort + '/swagger-ui/', $event)">{{ 'swagger-ui' }}</a>
+        <h5>REST API
+          <a :href="'http://localhost:' + restapiPort + '/swagger-ui/'"
+             target="_blank" rel="noopener noreferrer">{{ 'swagger-ui' }}</a>
         </h5>
         <div class="p-formgrid p-grid">
           <div class="p-field p-col">
             <div class="p-inputgroup">
-              <Checkbox v-model="enableRestapi" :binary="true" label="Enable"/>
               Port
               <InputText v-model="restapiPort"  :class="isPortAvaiable ? '' : 'p-invalid'" type="number" min="1" max="65535" />
             </div>

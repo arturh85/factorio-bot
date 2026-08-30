@@ -173,7 +173,8 @@ onMounted(async () => {
   const instanceStore = useInstanceStore()
   const started = await instanceStore.checkInstanceState()
   const appStore = useAppStore()
-  await appStore.maximizeWindow()
+  // `maximizeWindow` is gone: sizing the OS window is not something a page in
+  // a browser tab can do, and there is no HTTP route that could stand in.
   const settings = await appStore.loadSettings()
   if (settings) {
     if (settings.gui.enable_restapi) {

@@ -2618,6 +2618,8 @@ git commit -m "feat(app): consume job output over server-sent events"
 
 ---
 
+> **Import `ScriptTreeNode` from `@/api/types`, not `@/models/types`.** The store currently imports it from `@/models/types` — the **generated** file that Task 13 deletes outright. Importing from there would compile today and break at Task 13 for a reason that looks unrelated. `@/api/types` is the hand-written DTO module the contract test pins.
+
 ## Task 10: `scriptStore` over HTTP and SSE, and the live output pane
 
 **Files:**
@@ -2994,6 +2996,14 @@ git commit -m "feat(app): run scripts over http and stream their output live"
 ```
 
 ---
+
+> **This task's scope has shrunk to roughly one file — measure before you plan work.** Tasks 6, 7 and 8 each deviated to fix the views they broke, rather than deferring them here, because leaving `pnpm run lint` red would have cost the following tasks their typecheck signal. Those deviations were accepted and they absorbed most of this task.
+>
+> As of now `grep -rln "@tauri-apps" app/src` returns exactly **two** files: `app/src/store/scriptStore.ts` (which Task 10 owns) and `app/src/pages/SettingsPage.vue`. So after Task 10 this task is `SettingsPage.vue` alone.
+>
+> What remains there is `@tauri-apps/plugin-dialog`, used for **two native file pickers that browse the *server's* filesystem** — which was already wrong in the desktop app whenever the server was remote, and is simply impossible in a browser. Replace with text inputs plus server-side validation; `GET /api/v1/fs/exists` already exists for exactly this and the typed client already wraps it.
+>
+> **Also decide the two things earlier tasks left here:** `rconStore.lastError` is write-only state that nothing reads (`RconPage.vue` uses the thrown error's `message`) — wire it or delete it. And `SettingsPage.vue` has lost its "port already in use" red-invalid state, which was a Tauri `is_port_available` host probe with no HTTP analogue.
 
 ## Task 11: Views — remove the last Tauri imports and the restapi UI
 

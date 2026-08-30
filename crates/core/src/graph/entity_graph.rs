@@ -93,6 +93,18 @@ impl EntityGraph {
         }
     }
 
+    /// Whether a resource of *any* name covers `pos`.
+    ///
+    /// `resource_contains` answers only for one named ore, which is no help to
+    /// a caller asking whether a tile is buildable: it would have to guess the
+    /// ore. Read-only and allocation-free — a short-circuiting scan of the same
+    /// `resources` map `resource_contains` indexes into.
+    pub fn any_resource_at(&self, pos: &Pos) -> bool {
+        self.resources
+            .iter()
+            .any(|entry| entry.value().contains(pos))
+    }
+
     pub fn find_entities_in_radius(
         &self,
         search_center: Position,

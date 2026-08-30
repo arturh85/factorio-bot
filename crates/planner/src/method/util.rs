@@ -337,6 +337,24 @@ mod tests {
     }
 
     #[test]
+    fn a_free_tile_near_ore_is_not_on_the_ore() {
+        // Siting a furnace by an ore patch starts the ring search on the ore
+        // tile itself. A tile carrying ore is not placeable in the game, so the
+        // search has to step off the patch rather than return where it started.
+        let s = state();
+        let ore = nearest_resource_tile(&s, "iron-ore", &Position::new(0., 0.), 1)
+            .expect("fixture has iron ore");
+        let tile = free_tile_near(&s, &ore).expect("open ground next to the patch");
+        assert_ne!(tile, ore, "the furnace was sited on the ore tile itself");
+        assert_eq!(
+            s.resource_available(&tile, "iron-ore"),
+            0,
+            "the chosen tile {:?} still holds ore",
+            tile
+        );
+    }
+
+    #[test]
     fn mining_a_fixture_ore_takes_one_second() {
         let s = state();
         assert_eq!(mining_ticks(&s, "iron-ore"), 60);

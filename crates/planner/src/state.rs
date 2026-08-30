@@ -155,8 +155,23 @@ impl PlanState {
             .and_then(|id| self.base.entity_graph.entity_by_id(id))
     }
 
+    /// Whether an entity could be placed on this tile.
+    ///
+    /// Ore counts as occupying its tile, and `entity_at` cannot report it:
+    /// `EntityGraph::add` routes resource entities into `resources`/`resource_tree`
+    /// only, so the entity tree `entity_at` queries never sees them. Asking
+    /// `entity_at` alone therefore calls an ore tile free, and `free_tile_near`
+    /// would site a furnace on top of the patch — arithmetic the planner is happy
+    /// with and the game rejects. `any_resource_at` closes that asymmetry.
+    ///
+    /// Presence, not quantity: a tile whose ore this plan has drained to zero is
+    /// still an ore tile in the ground, so it stays occupied. `remove_entity`
+    /// frees a placed entity's tile, but it does not clear ore.
     pub fn is_position_free(&self, position: &Position) -> bool {
-        self.entity_at(position).is_none()
+        if self.entity_at(position).is_some() {
+            return false;
+        }
+        !self.base.entity_graph.any_resource_at(&Pos::from(position))
     }
 
     pub fn create_entity(&mut self, entity: FactorioEntity) {
@@ -419,6 +434,26 @@ mod tests {
         a.remove_entity(&pos);
         assert!(a.is_position_free(&pos));
         assert!(a.entity_at(&pos).is_none());
+    }
+
+    #[test]
+    fn a_tile_holding_ore_is_not_free() {
+        let a = state();
+        let ore = a
+            .resource_patches("iron-ore")
+            .into_iter()
+            .flat_map(|p| p.elements)
+            .next()
+            .expect("fixture has iron ore");
+        assert!(a.resource_available(&ore, "iron-ore") > 0);
+        // Resources never reach the entity tree, so `entity_at` is blind to
+        // them; occupancy must still see them.
+        assert!(a.entity_at(&ore).is_none());
+        assert!(
+            !a.is_position_free(&ore),
+            "ore tile {:?} was reported free",
+            ore
+        );
     }
 
     #[test]

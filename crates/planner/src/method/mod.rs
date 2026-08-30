@@ -170,12 +170,22 @@ pub const MAX_EXPANSION_DEPTH: u32 = 32;
 ///
 /// Ordering edges are inferred at the end, on top of whatever explicit `Link`
 /// steps the methods emitted for dependencies inference cannot see.
+///
+/// Three rosters meet here and nothing else reconciles them: the one
+/// `registry_for` was built with, `chain_actor`, and the bots `state` was built
+/// with. A bot the state does not know has no position and no inventory, and
+/// the methods would quietly plan for a default one standing at the origin, so
+/// every bot this expansion simulates against must be a bot the state knows —
+/// `chain_actor` here, and each `Holder::Bot` the expansion meets below.
 pub fn expand(
     goals: &[Goal],
     state: &PlanState,
     registry: &MethodRegistry,
     chain_actor: BotId,
 ) -> Result<ActionNetwork, PlannerError> {
+    if state.bot(chain_actor).is_none() {
+        return Err(PlannerError::UnknownBot(chain_actor));
+    }
     let mut ctx = ExpansionCtx::new(state.fork(), chain_actor);
     let mut net = ActionNetwork::new();
     for goal in goals {
@@ -212,6 +222,13 @@ fn expand_goal(
         ..
     } = goal
     {
+        // The same reconciliation `expand` does for `chain_actor`, applied to
+        // the roster a method decomposes with: `SplitAcrossBots` addresses the
+        // bots the registry was built with, and nothing has checked those
+        // against the state until here.
+        if ctx.state.bot(*bot).is_none() {
+            return Err(PlannerError::UnknownBot(*bot));
+        }
         ctx.chain_actor = *bot;
         // The *outermost* per-bot goal opens the chain; everything below it
         // belongs to that same chain. `whose` is propagated verbatim into
@@ -625,6 +642,44 @@ mod tests {
             expand(&[goal], &state, &reg, BotId(1)),
             Err(PlannerError::ExpansionTooDeep { .. })
         ));
+    }
+
+    #[test]
+    fn expanding_against_a_bot_the_state_does_not_know_is_an_error() {
+        // `registry_for(bots)`, `expand(.., chain_actor)` and `schedule(.., bots)`
+        // each take a roster and nothing reconciles them. A bot the state does
+        // not know has no position and no inventory, so the methods would plan
+        // for a default one standing at the origin — a plan sited nowhere near
+        // the bot that has to run it. A Lua caller will make this mistake.
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
+        let goal = Goal::Have {
+            item: "coal".into(),
+            count: 1,
+            whose: Holder::Anyone,
+        };
+        let reg = MethodRegistry::new().with(Box::new(Nothing));
+        assert!(matches!(
+            expand(std::slice::from_ref(&goal), &state, &reg, BotId(9)),
+            Err(PlannerError::UnknownBot(BotId(9)))
+        ));
+        // And the same for a roster a method decomposes with: the state knows
+        // only bot 1, so bot 2's share cannot be planned.
+        let bots = [BotId(1), BotId(2)];
+        assert!(matches!(
+            expand(
+                &[Goal::Have {
+                    item: "iron-ore".into(),
+                    count: 4,
+                    whose: Holder::Anyone,
+                }],
+                &state,
+                &crate::method::have::registry_for(&bots),
+                BotId(1),
+            ),
+            Err(PlannerError::UnknownBot(BotId(2)))
+        ));
+        // The bot it does know is still fine.
+        assert!(expand(&[goal], &state, &reg, BotId(1)).is_ok());
     }
 
     #[test]

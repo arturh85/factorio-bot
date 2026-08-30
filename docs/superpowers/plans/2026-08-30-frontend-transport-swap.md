@@ -2120,6 +2120,18 @@ git commit -m "refactor(app): move instanceStore onto the instance http routes"
 
 ---
 
+> **The fixture-identity trap has now bitten three times. Check for it before writing any assertion.**
+>
+> A test cannot observe a value being set if the value it is set *to* already equals what it is compared *against*. Three real instances from this plan:
+>
+> - Task 4: an escaping test used id `'7'`, and `encodeURIComponent('7') === '7'` — green with the escaping deleted.
+> - Task 6: a PUT test sent `/srv/workspace` and expected `/srv/workspace` — green with the assignment deleted, and that assignment was the only line the task added.
+> - Task 7: a `status()` fixture defaulted `client_count: 0`, equal to the store's initial state — so the stop test could not see `clientCount` being assigned.
+>
+> **Rule: every fixture value must differ from the initial state *and* from any other fixture it is compared against.** Cheap to obey, and it is the difference between a test and a decoration.
+>
+> **Also carried from Task 7, for Task 11 to decide:** `starting` never clears on its own — `App.vue` calls `checkInstanceState()` once in `onMounted`, so until the poll exists the Start button is *worse* than before. And once the poll exists it will clear a locally-set `lastError` from a rejected start after ~2 s, which matters if that error is rendered as a banner.
+
 ## Task 8: `rconStore` over HTTP, and delete `restapiStore`
 
 **Files:**

@@ -19,11 +19,11 @@ use std::sync::Arc;
 ///
 /// The runtime that [`run_lua`] builds dies with the call. Dropping a tokio
 /// runtime aborts every task spawned onto it that has not finished — silently,
-/// with no error and no log line. A binding that hands a script a handle and
-/// lets it walk away (`goal.execute` without a matching `goal.wait`) would
+/// with no error and no log line. A binding that hands a script a run value and
+/// lets it walk away (`goal.start` without a matching `:wait()`) would
 /// therefore have its work killed the moment the script returned, and the run
 /// would report success while its bots were stopped mid-plan. Registering the
-/// handle here makes the run wait for it instead.
+/// run here makes the run wait for it instead.
 ///
 /// Two rules this encodes, decided at the job level rather than per binding:
 ///
@@ -244,14 +244,14 @@ pub async fn run_lua(
 /// Registers the probes the drain tests need.
 ///
 /// The input class the drain exists for is "work a binding spawned onto the
-/// run's own runtime that the script never awaited". No binding in this
-/// repository produces that yet — `goal.execute` is another session's and will
-/// register into [`PendingWork`] when it lands — so a test cannot reach the
-/// class through the real bindings, and a test that only checked `drain()`
-/// returns would pass against a `run_lua` that never called it. These probes
-/// are the smallest thing that manufactures the class: they spawn onto
-/// whatever runtime is current when the script calls them, which inside
-/// `rt.block_on` is precisely the runtime that is about to be dropped.
+/// run's own runtime that the script never awaited". `goal.start` produces
+/// exactly that when a script omits the matching `:wait()`, and it registers
+/// into [`PendingWork`] itself (`globals/goal/run.rs`'s `start_impl`) — but
+/// driving the drain through it would mean a real actuator and a real plan,
+/// more machinery than this module wants for a unit test of `drain()` alone.
+/// These probes are the smallest thing that manufactures the class: they
+/// spawn onto whatever runtime is current when the script calls them, which
+/// inside `rt.block_on` is precisely the runtime that is about to be dropped.
 ///
 /// `register = false` is the negative control: the same task, not registered,
 /// must be *lost*. Without it a passing positive test would not distinguish
@@ -1111,8 +1111,8 @@ mod tests {
 
     /// The fixture script builds a starter iron plan and asserts on the
     /// planner's own output; running it here is what proves the whole Lua
-    /// surface it touches -- `world.*`, `include`, `goal.have`,
-    /// `goal.schedule`, `goal.graphviz`, `goal.gantt` -- still composes.
+    /// surface it touches -- `world.*`, `include`, `goal.have`, `goal.plan`,
+    /// `plan:graphviz()`, `plan:gantt()` -- still composes.
     ///
     /// It used to write the transcript to `tests/stdout-N.txt` and assert
     /// nothing at all, so a script that silently stopped halfway still passed.

@@ -92,9 +92,9 @@ duration of a run.
 ### Lua automation path
 1. User writes `<workspace>/scripts/*.lua` using the Monaco editor embedded in the app.
 2. `scripting_lua` loads the script, injects helper libs from `scripts/lib.lua`, and validates against the exposed API (see docs/lua).
-3. The script declares a goal — `goal.have("iron-plate", 5)`, `goal.researched("automation")` — which the planner expands into an `ActionNetwork`.
-4. `goal.schedule(handle, bot_count)` assigns the network's actions to bots over time and returns the makespan in ticks.
-5. `goal.execute(handle)` hands the schedule to the executor and returns a run handle immediately; `goal.progress` polls it and `goal.wait` blocks on it.
+3. The script declares a goal value — `goal.have("iron-plate", 5)`, `goal.researched("automation")` — a plain Lua table the planner has not looked at yet.
+4. `goal.plan(goal, opts)` expands the goal into an `ActionNetwork` and schedules it against one roster in a single call, returning a `PlanValue` (`plan.makespan`, `plan.steps`, `plan:graphviz()`, `plan:gantt(title)`, ...).
+5. `goal.start(plan)` hands the schedule to the executor and returns a `RunValue` immediately; `run:progress()` polls it and `run:wait()` blocks on it. `goal.run(plan)` is `goal.start(plan):wait()` in one call.
 
 ### Planning: `crates/planner`
 
@@ -107,7 +107,8 @@ duration of a run.
 
 A network is only schedulable on the roster it was expanded for, because
 `SplitAcrossBots` sizes each share against the holdings of the bot it names.
-`goal.schedule` re-expands the goal when it is asked for a different roster.
+`goal.plan` expands and schedules against the same roster in one call, which is
+what makes that mismatch unrepresentable from Lua.
 
 ### Execution: `crates/executor`
 
@@ -168,7 +169,7 @@ The divergence is deliberate. Do not "fix" it by dropping the embedding.
 - Suggested prompts:
   - `Document BotBridge data flow and the entity/flow graphs` (for dev guide completeness).
   - `Add smoke test that runs "research automation" script headlessly`. `lua --clients 0 --bots N` makes this cheap: it starts the server, plans, and never waits for a graphical client.
-  - **Superseded**: "wire task graph events into Vue gantt view". There is no task graph to emit events from. `goal.gantt` renders a scheduled plan as mermaid gantt source; `app/src/components/GanttChart.vue` and `app/src/pages/TasksPage.vue` predate the change and have not been re-pointed at it.
+  - **Superseded**: "wire task graph events into Vue gantt view". There is no task graph to emit events from. `plan:gantt(title)` renders a scheduled `PlanValue` as mermaid gantt source; `app/src/components/GanttChart.vue` and `app/src/pages/TasksPage.vue` predate the change and have not been re-pointed at it.
 
 #### Mid-term automation (goal-aware planning)
 - Deliverables: recipe knowledge graph, supply/demand planner, dynamic task queue rebalancing, REST hooks for external planners.
@@ -183,7 +184,7 @@ The divergence is deliberate. Do not "fix" it by dropping the embedding.
 - Dependencies: mid-term planners, robust persistence, telemetry aggregation.
 - Status and next steps:
   1. **Done**: the declarative goal surface and the decomposition pipeline. `goal.have` / `goal.researched` are the DSL; `crates/planner` is the pipeline.
-  2. **Partly done**: "integrate feedback loop so bots adjust when tasks stall". `crates/executor/src/recover.rs` computes the decision (reschedule, re-expand, surface) but nothing calls it on a live run yet — `goal.execute` runs a schedule and reports the outcome.
+  2. **Partly done**: "integrate feedback loop so bots adjust when tasks stall". `crates/executor/src/recover.rs` computes the decision (reschedule, re-expand, surface) but nothing calls it on a live run yet — `goal.start`/`goal.run` run a schedule and report the outcome.
   3. **Superseded**: "Hungarian algorithm on task graph weights". Assignment is greedy and travel-aware at chain granularity in `crates/planner/src/schedule.rs`; a better assignment strategy would replace that loop, not a task graph.
 
 ### Where to go next

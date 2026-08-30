@@ -475,11 +475,14 @@ mod tests {
             &lua,
             r#"
             local obs = goal.run(goal.plan(goal.have("iron-ore", 2)))
+            local checked = 0
             for id, a in pairs(obs.actions) do
                 assert(a.planned_start ~= nil, "planned_start")
                 assert(a.observed_start == nil, "these are estimates, not measurements")
                 assert(a.observed_end == nil, "these are estimates, not measurements")
+                checked = checked + 1
             end
+            assert(checked > 0, "the run had actions to check, got " .. checked)
         "#,
         )
         .await;
@@ -538,7 +541,16 @@ mod tests {
             local a = run:wait()
             local b = run:wait()
             assert(a.done and b.done, "both waits return a finished observation")
-            assert(a.success == b.success, "and they agree")
+            assert(a.success > 0, "the run must have done something, got " .. a.success)
+            assert(a.success == b.success, "success agrees")
+            assert(a.failed == b.failed, "failed agrees")
+            assert(a.pending == b.pending, "pending agrees")
+            assert(a.running == b.running, "running agrees")
+            assert(a.first_error == b.first_error, "first_error agrees")
+            local a_ids, b_ids = 0, 0
+            for _ in pairs(a.actions) do a_ids = a_ids + 1 end
+            for _ in pairs(b.actions) do b_ids = b_ids + 1 end
+            assert(a_ids == b_ids, "same number of actions reported, got " .. a_ids .. " and " .. b_ids)
         "#,
         )
         .await;

@@ -44,7 +44,7 @@ Requires **Factorio 2.1** — see [Howto: Setup](https://arturh85.github.io/fact
 - [x] Declarative goals in Lua: `goal.have("iron-plate", 5)`, `goal.researched("automation")`
 - [x] Deterministic planner (`crates/planner`): goal → action network → travel-aware multi-bot schedule
 - [x] Executor (`crates/executor`): runs a schedule across bots over RCON, with per-action completion signals and lag edges for machine time
-- [x] Plan visualization: Graphviz (`goal.graphviz`) and Mermaid Gantt (`goal.gantt`)
+- [x] Plan visualization: Graphviz (`plan:graphviz()`) and Mermaid Gantt (`plan:gantt(title)`)
 - [x] Integrated [Monaco](https://microsoft.github.io/monaco-editor/) Lua editor for scripting
 - [x] Uses BotBridge mod to read game state:
   - [x] Recipes, entity prototypes, item prototypes

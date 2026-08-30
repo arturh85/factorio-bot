@@ -38,7 +38,7 @@ pub enum ExecutionError {
 
 /// Run every bot, recording progress into `progress` as it happens.
 ///
-/// The log is shared rather than merged at the end because `goal.progress(h)`
+/// The log is shared rather than merged at the end because `run:progress()`
 /// must be able to read it mid-run. Keys are disjoint — each action belongs to
 /// exactly one bot — so concurrent writers never collide on a key, and because
 /// `ExecutionLog` is a `BTreeMap` the finished state is identical regardless of

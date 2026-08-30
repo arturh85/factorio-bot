@@ -24,5 +24,13 @@ print("done="   .. tostring(final.done)
 
 if final.failed > 0 then
   print("FAILURES PRESENT -- inspect above for the actuator error")
+  print("first_error: " .. tostring(final.first_error))
+  local fs = final:failures()
+  for i = 1, #fs do
+    print("failure[" .. i .. "] id=" .. tostring(fs[i].id)
+      .. " status=" .. tostring(fs[i].status)
+      .. " attempts=" .. tostring(fs[i].attempts)
+      .. " error=" .. tostring(fs[i].error))
+  end
 end
 print("end exec smoke")

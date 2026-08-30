@@ -71,6 +71,64 @@ mod deserialize_helpers {
 
         deserializer.deserialize_any(VecOrEmptyMap(PhantomData))
     }
+
+    /// Deserializes an inventory into a name -> count map, accepting both shapes
+    /// the game reports it in.
+    ///
+    /// `LuaInventory.get_contents()` returned a `name -> count` dictionary
+    /// before Factorio 2.0 and returns an array of `{name, count, quality}`
+    /// since. The mod passes the result through untouched (see
+    /// `mods/BotBridge/types.lua`, `serialize_player`), so both arrive here.
+    /// Quality is dropped and equal names are summed, because this field counts
+    /// items by name.
+    pub fn item_counts_map_or_seq<'de, D>(
+        deserializer: D,
+    ) -> Result<std::collections::BTreeMap<String, u32>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use std::collections::BTreeMap;
+
+        #[derive(serde::Deserialize)]
+        struct ItemCount {
+            name: String,
+            count: u32,
+        }
+
+        struct MapOrSeq;
+
+        impl<'de> Visitor<'de> for MapOrSeq {
+            type Value = BTreeMap<String, u32>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a name -> count map or a sequence of {name, count}")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut out = BTreeMap::new();
+                while let Some((name, count)) = map.next_entry::<String, u32>()? {
+                    *out.entry(name).or_insert(0) += count;
+                }
+                Ok(out)
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut out = BTreeMap::new();
+                while let Some(item) = seq.next_element::<ItemCount>()? {
+                    *out.entry(item.name).or_insert(0) += item.count;
+                }
+                Ok(out)
+            }
+        }
+
+        deserializer.deserialize_any(MapOrSeq)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
@@ -130,6 +188,7 @@ pub type ActionId = u32;
 pub struct FactorioPlayer {
     pub player_id: PlayerId,
     pub position: Position,
+    #[serde(deserialize_with = "deserialize_helpers::item_counts_map_or_seq")]
     pub main_inventory: BTreeMap<String, u32>,
     pub build_distance: u32,          // for place_entity
     pub reach_distance: u32,          // for insert_to_inventory
@@ -1143,5 +1202,72 @@ impl IntoLua for Rect {
 impl IntoLua for FactorioEntity {
     fn into_lua(self, lua: &Lua) -> LuaResult<LuaValue> {
         lua.to_value(&self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shape `mods/BotBridge/types.lua` produces on Factorio 2.0, where
+    /// `LuaInventory.get_contents()` returns an array with quality.
+    #[test]
+    fn a_player_parses_with_a_2_0_inventory_array() {
+        let json = r#"{
+            "name": "client1",
+            "player_id": 2,
+            "position": {"x": 1.5, "y": -2.0},
+            "main_inventory": [
+                {"name": "iron-plate", "count": 5, "quality": "normal"},
+                {"name": "iron-plate", "count": 2, "quality": "uncommon"},
+                {"name": "coal", "count": 3, "quality": "normal"}
+            ],
+            "build_distance": 10,
+            "reach_distance": 10,
+            "drop_item_distance": 10,
+            "item_pickup_distance": 1,
+            "loot_pickup_distance": 2,
+            "resource_reach_distance": 3
+        }"#;
+        let player: FactorioPlayer = serde_json::from_str(json).expect("parses");
+        assert_eq!(player.player_id, 2);
+        // Qualities collapse into one count per name.
+        assert_eq!(player.main_inventory.get("iron-plate").copied(), Some(7));
+        assert_eq!(player.main_inventory.get("coal").copied(), Some(3));
+    }
+
+    #[test]
+    fn a_player_parses_with_a_name_to_count_inventory_map() {
+        let json = r#"{
+            "player_id": 0,
+            "position": {"x": 0.0, "y": 0.0},
+            "main_inventory": {"iron-plate": 4},
+            "build_distance": 10,
+            "reach_distance": 10,
+            "drop_item_distance": 10,
+            "item_pickup_distance": 1,
+            "loot_pickup_distance": 2,
+            "resource_reach_distance": 3
+        }"#;
+        let player: FactorioPlayer = serde_json::from_str(json).expect("parses");
+        assert_eq!(player.main_inventory.get("iron-plate").copied(), Some(4));
+    }
+
+    /// Lua serializes an empty table as `{}`, never `[]`.
+    #[test]
+    fn an_empty_inventory_arrives_as_an_empty_object() {
+        let json = r#"{
+            "player_id": 1,
+            "position": {"x": 0.0, "y": 0.0},
+            "main_inventory": {},
+            "build_distance": 10,
+            "reach_distance": 10,
+            "drop_item_distance": 10,
+            "item_pickup_distance": 1,
+            "loot_pickup_distance": 2,
+            "resource_reach_distance": 3
+        }"#;
+        let player: FactorioPlayer = serde_json::from_str(json).expect("parses");
+        assert!(player.main_inventory.is_empty());
     }
 }

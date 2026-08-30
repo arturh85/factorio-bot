@@ -12,10 +12,10 @@ use crate::factorio::world::FactorioWorld;
 use crate::num_traits::FromPrimitive;
 use crate::settings::FactorioSettings;
 use crate::types::{
-    ActionId, AreaFilter, Direction, FactorioEntity, FactorioForce, FactorioTile,
+    ActionId, AreaFilter, Direction, FactorioEntity, FactorioForce, FactorioPlayer, FactorioTile,
     InventoryResponse, PlayerId, Pos, Position, Rect, RequestEntity,
 };
-use miette::{IntoDiagnostic, Result};
+use miette::{Context, IntoDiagnostic, Result};
 use paris::info;
 use parking_lot::RwLock;
 use rcon::Connection;
@@ -157,27 +157,50 @@ impl FactorioRcon {
         Ok(())
     }
 
+    /// The mod's `players` reply as one JSON string, or `None` when nobody is
+    /// connected.
+    ///
+    /// Lua's `helpers.table_to_json({})` yields `"{}"` rather than `"[]"` for
+    /// an empty table, so an empty result arrives as an object. That is not an
+    /// error; it means nobody is connected. Shared by the two accessors below
+    /// so they cannot disagree about what an empty reply means.
+    async fn connected_players_json(&self) -> Result<Option<String>> {
+        let Some(lines) = self.remote_call("players", vec![]).await? else {
+            return Ok(None);
+        };
+        let json_str = lines.join("");
+        if json_str == "{}" || json_str.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(json_str))
+    }
+
+    /// Every connected player that has a character, as the mod reports them.
+    pub async fn connected_players(&self) -> Result<Vec<FactorioPlayer>> {
+        let Some(json_str) = self.connected_players_json().await? else {
+            return Ok(vec![]);
+        };
+        serde_json::from_str::<Vec<FactorioPlayer>>(&json_str)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("failed to parse players: {json_str}"))
+    }
+
     /// Returns the number of connected players (with characters)
+    ///
+    /// Counts the reply's elements without interpreting them: this drives the
+    /// startup wait for clients to connect, and a player object we cannot fully
+    /// deserialize is still a connected player. A malformed reply counts as
+    /// zero, as it always has, rather than failing the wait loop.
     pub async fn connected_player_count(&self) -> Result<usize> {
-        let response = self.remote_call("players", vec![]).await?;
-        if let Some(lines) = response {
-            // Response is JSON array of player objects, count them
-            // Note: Lua's helpers.table_to_json({}) returns "{}" for empty tables,
-            // not "[]", so we need to handle both cases
-            let json_str = lines.join("");
-            if json_str == "{}" || json_str.is_empty() {
-                // Empty table serialized as object, means no players
-                return Ok(0);
+        let Some(json_str) = self.connected_players_json().await? else {
+            return Ok(0);
+        };
+        match serde_json::from_str::<Vec<serde_json::Value>>(&json_str) {
+            Ok(players) => Ok(players.len()),
+            Err(e) => {
+                info!("rcon players parse error: {} for: {}", e, json_str);
+                Ok(0)
             }
-            match serde_json::from_str::<Vec<serde_json::Value>>(&json_str) {
-                Ok(players) => Ok(players.len()),
-                Err(e) => {
-                    info!("rcon players parse error: {} for: {}", e, json_str);
-                    Ok(0)
-                }
-            }
-        } else {
-            Ok(0)
         }
     }
 

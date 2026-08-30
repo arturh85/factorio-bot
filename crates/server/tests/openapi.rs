@@ -284,8 +284,24 @@ async fn no_operation_publishes_an_unexpected_path_parameter() {
             let Some(parameters) = operation.get("parameters").and_then(|p| p.as_array()) else {
                 continue;
             };
+            let mut allowed_so_far = 0;
             for parameter in parameters {
-                if expected {
+                // An allow-listed operation is exempted for exactly the one
+                // path parameter it is listed for -- `{id}` -- and for nothing
+                // else. Exempting the whole *operation* instead would blind
+                // this sweep on precisely the operation nobody would look at
+                // again: add `GET /api/v1/jobs/{id}?since=...` through
+                // `ApiQuery<T>` and plan 3's finding I1 resurfaces there,
+                // republishing `since` as a path parameter, with this file
+                // silently agreeing.
+                if expected && parameter["in"] == "path" && parameter["name"] == "id" {
+                    allowed_so_far += 1;
+                    assert_eq!(
+                        allowed_so_far,
+                        1,
+                        "{} {path} publishes more than one `id` path parameter",
+                        method.to_uppercase()
+                    );
                     continue;
                 }
                 assert_ne!(

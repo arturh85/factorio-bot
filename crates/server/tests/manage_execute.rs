@@ -1,9 +1,17 @@
 //! `POST /api/v1/scripts/execute` and the job-inspection endpoints.
 //!
 //! The whole module is gated: the execute routes only exist in a build that
-//! has an interpreter (`factorio-bot-scripting-lua` is optional for this
-//! crate), and `cargo test` over the workspace turns the feature on through
-//! `app/src-tauri`, so nothing here is silently skipped in practice.
+//! has an interpreter, and `factorio-bot-scripting-lua` is an optional
+//! dependency of this crate.
+//!
+//! **`cargo test -p factorio-bot-server` alone does not run any of this.** The
+//! crate declares no default features, so the `cfg` below empties the file and
+//! the run reports `0 passed` and exits `0` -- a silent green, which is exactly
+//! what you do not want while iterating on it. Use
+//! `cargo test -p factorio-bot-server --features lua`. A whole-workspace
+//! `cargo test` does turn the feature on, through `app/src-tauri`'s
+//! `lua = [..., "factorio-bot-server?/lua"]`, so CI and the precommit gate see
+//! these tests.
 #![cfg(feature = "lua")]
 
 use axum::body::Body;
@@ -120,11 +128,19 @@ async fn body_json(response: Response<Body>) -> serde_json::Value {
     })
 }
 
+/// The honest status for "the server is fine, the game is not running" -- and
+/// the 503-before-404 leg of the ordering contract.
+///
+/// The script deliberately does *not* exist. Asking for one that does cannot
+/// discriminate: both orderings answer `503`, so hoisting the script
+/// resolution above the instance check would fail nothing. With a missing
+/// script the mutation answers `404` instead, which is the leak it describes --
+/// the endpoint telling a caller what is and is not in the scripts root before
+/// it will admit the game is not running.
 #[tokio::test]
 async fn executing_without_a_running_instance_is_service_unavailable() {
-    // The honest status for "the server is fine, the game is not running".
     let (_dir, state) = test_state();
-    let response = post_execute(&state, serde_json::json!({ "path": "/hello.lua" })).await;
+    let response = post_execute(&state, serde_json::json!({ "path": "/nope.lua" })).await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
@@ -166,14 +182,20 @@ async fn executing_a_missing_script_is_not_found() {
 /// say what is on the other side.
 #[tokio::test]
 async fn executing_a_script_outside_the_scripts_root_is_a_bad_request() {
-    let (_dir, state) = running_state();
+    let (dir, state) = running_state();
     let response = post_execute(&state, serde_json::json!({ "path": "../outside.lua" })).await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = body_json(response).await;
     let message = body["message"].as_str().expect("message is a string");
+    // The workspace's absolute path, not the requested name: the request is
+    // echoed back deliberately (the caller sent it), so a test that only
+    // forbade `outside.lua` would forbid nothing the caller does not already
+    // know. What must not leak is where the server keeps its files -- a
+    // message like `(resolved to /srv/workspace/outside.lua)` passes a
+    // filename check and is a real disclosure.
     assert!(
-        !message.contains("outside.lua\""),
-        "the refusal should not echo what it found: {message}"
+        !message.contains(dir.path().to_string_lossy().as_ref()),
+        "the refusal must not disclose the server's filesystem layout: {message}"
     );
 }
 
@@ -223,6 +245,38 @@ async fn a_refused_execution_never_takes_the_slot() {
         .jobs
         .try_start(Some("after.lua".into()))
         .expect("the slot must still be free");
+}
+
+/// The fix in `spawn_run`, not the premise underneath it.
+///
+/// `a_job_handle_does_not_keep_its_registry_alive` (in `src/jobs.rs`) asserts
+/// that a `JobHandle` holds only a `Weak` -- which is true with or without the
+/// strong `Arc` the spawned task captures, so it constrains nothing here. This
+/// asserts the capture itself: after the request's `AppState` is gone, the
+/// detached run is the only thing left holding the registry, and `finish`
+/// silently discards the outcome if that upgrade fails.
+///
+/// Deterministic, not a race. `#[tokio::test]` runs a current-thread runtime,
+/// so the spawned task is not polled at all between `post_execute` returning
+/// and the assertion below -- there is no window in which the run could have
+/// completed and dropped its reference. The earlier belief that this needed a
+/// slow script was simply wrong.
+#[tokio::test]
+async fn a_spawned_run_keeps_the_registry_alive_after_state_is_dropped() {
+    let (_dir, state) = running_state();
+    let weak = Arc::downgrade(&state.jobs);
+    let response = post_execute(
+        &state,
+        serde_json::json!({ "code": "print(1)", "bot_count": 1 }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    drop(state);
+    assert!(
+        weak.upgrade().is_some(),
+        "the detached run must keep the registry alive after AppState is gone"
+    );
 }
 
 #[tokio::test]

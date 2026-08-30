@@ -266,6 +266,131 @@ mod tests {
             assert(require == nil, "require is reachable")
             assert(dofile == nil, "dofile is reachable")
             assert(loadfile == nil, "loadfile is reachable")
+            -- `load` is deliberately still present, so asserting it is
+            -- non-nil would prove nothing. What matters is that it is the
+            -- text-only replacement: it must refuse a binary chunk.
+            assert(type(load) == "function", "load is missing")
+            local refused, message = load(string.dump(function() return 1 end, true), "attack")
+            assert(refused == nil, "load accepted a binary chunk")
+            assert(message ~= nil, "load refused without a message")
+            "#,
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// Lua's `load` defaults to mode `"bt"`, so it accepted *bytecode* as well
+    /// as source. PUC Lua 5.4's bytecode loader does not validate untrusted
+    /// input, which makes crafted bytecode a route to type confusion and
+    /// arbitrary memory access — straight past the `io`/`os` lockdown.
+    /// `load(string.dump(f, true))` used to round-trip to a working function.
+    #[tokio::test]
+    async fn a_script_cannot_load_a_binary_chunk() {
+        let (_dir, result) = sandboxed(
+            r#"
+            local dumped = string.dump(function() return 41 + 1 end, true)
+            assert(#dumped > 0, "fixture bug: string.dump produced nothing")
+
+            -- The chunkname is explicit and NUL-free on purpose. Lua derives a
+            -- missing chunkname from the source, and bytecode contains NUL
+            -- bytes, which fails the CString conversion on the way to the
+            -- loader -- so an unnamed binary chunk is refused whether or not
+            -- the mode is pinned, and a test that omitted the name would pass
+            -- against the vulnerable build. Naming it is what forces the
+            -- refusal to come from the mode.
+            local loaded, message = load(dumped, "attack")
+            -- Assert on the refusal itself, not merely that something came
+            -- back: the vulnerable version returned a callable here.
+            assert(loaded == nil, "load returned a value for a binary chunk")
+            assert(type(message) == "string", "no error message for a binary chunk")
+
+            -- The unnamed path too, so both are covered.
+            local unnamed = load(dumped)
+            assert(unnamed == nil, "load returned a value for an unnamed binary chunk")
+            "#,
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// `string.dump` is not the vulnerability and removing it would fix
+    /// nothing — a script can spell the bytecode out as a literal. This pins
+    /// that the refusal is about the *chunk*, not about where it came from.
+    #[tokio::test]
+    async fn a_script_cannot_load_a_binary_chunk_written_as_a_literal() {
+        let (_dir, result) = sandboxed(
+            r#"
+            -- Rebuild the exact same bytes one `string.char` at a time. The
+            -- result is a plain string literal as far as `load` is concerned
+            -- -- nothing here is a `string.dump` return value -- and it is
+            -- still complete, valid bytecode, so the refusal has to come from
+            -- the mode rather than from a truncated header.
+            local dumped = string.dump(function() return 41 + 1 end, true)
+            local rebuilt = {}
+            for i = 1, #dumped do
+                rebuilt[i] = string.char(dumped:byte(i))
+            end
+            rebuilt = table.concat(rebuilt)
+            assert(rebuilt == dumped, "fixture bug: rebuilt bytes differ")
+
+            local loaded, message = load(rebuilt, "attack")
+            assert(loaded == nil, "load returned a value for a binary literal")
+            assert(type(message) == "string", "no error message for a binary literal")
+            "#,
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn a_script_can_still_load_source_text() {
+        // The counterpart that keeps the two tests above honest: a `load` that
+        // refused everything would pass them and break the product.
+        let (_dir, result) = sandboxed(
+            r#"
+            local f = load("return 1 + 1")
+            assert(type(f) == "function", "load did not return a function")
+            assert(f() == 2, "loaded chunk did not run")
+            "#,
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn a_syntax_error_in_a_loaded_chunk_returns_nil_and_a_message() {
+        // Real `load` reports a compile error by returning `nil, msg` rather
+        // than raising, and scripts test that second value. Turning it into a
+        // raised error would be a behaviour change beyond the security fix.
+        let (_dir, result) = sandboxed(
+            r#"
+            local f, message = load("this is not lua ==")
+            assert(f == nil, "a syntax error produced a function")
+            assert(type(message) == "string", "a syntax error produced no message")
+            "#,
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn the_replacement_load_keeps_the_rest_of_its_signature() {
+        // The reader-function form and the `env` argument are part of `load`.
+        // Silently dropping either would trade a security bug for a
+        // correctness one.
+        let (_dir, result) = sandboxed(
+            r#"
+            local pieces = {"return ", "7 * 6"}
+            local i = 0
+            local f = load(function() i = i + 1 return pieces[i] end)
+            assert(f ~= nil and f() == 42, "reader-function form broken")
+
+            local env = {answer = 42}
+            local g = load("return answer", "=chunk", "t", env)
+            assert(g ~= nil and g() == 42, "env argument ignored")
+
+            local named = load("error('x')", "custom-name")
+            assert(named ~= nil, "chunkname argument broke loading")
             "#,
         )
         .await;

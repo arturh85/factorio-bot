@@ -595,7 +595,7 @@ impl FactorioRcon {
         let action_id: ActionId = *next_action_id;
         *next_action_id = (*next_action_id + 1) % 1000;
         drop(next_action_id);
-        let resource_reach_distance = player.resource_reach_distance as f64;
+        let resource_reach_distance = player.resource_reach_distance;
         let distance = calculate_distance(&player.position, position);
         drop(player); // wow, without this factorio (?) freezes (!)
         if distance > resource_reach_distance {

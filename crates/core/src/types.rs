@@ -306,12 +306,21 @@ pub struct FactorioPlayer {
     pub position: Position,
     #[serde(deserialize_with = "deserialize_helpers::item_counts_map_or_seq")]
     pub main_inventory: BTreeMap<String, u32>,
-    pub build_distance: u32,          // for place_entity
-    pub reach_distance: u32,          // for insert_to_inventory
-    pub drop_item_distance: u32,      // remove_from_inventory
-    pub item_pickup_distance: u64,    // not in use, for picking up items from the ground
-    pub loot_pickup_distance: u64, // not in use, for picking up items from the ground automatically
-    pub resource_reach_distance: u64, // for mine
+    // Widths follow `LuaControl` in Factorio's `runtime-api.json`: the first
+    // three are `uint32`, the last three are `double`. Modelling the doubles as
+    // integers made every real player unparseable, because a character's
+    // `resource_reach_distance` is 2.7.
+    pub build_distance: u32,     // uint32 — for place_entity
+    pub reach_distance: u32,     // uint32 — for insert_to_inventory
+    pub drop_item_distance: u32, // uint32 — remove_from_inventory
+    /// `double`. Not in use; for picking up items from the ground.
+    pub item_pickup_distance: f64,
+    /// `double`. Not in use; for picking up items from the ground automatically.
+    pub loot_pickup_distance: f64,
+    /// `double`, for mine. Documented as "the resource reach distance of this
+    /// character **or max double** when not a character or player connected to
+    /// a character", so this is out of integer range as well as fractional.
+    pub resource_reach_distance: f64,
 }
 
 impl Default for FactorioPlayer {
@@ -323,9 +332,9 @@ impl Default for FactorioPlayer {
             build_distance: 10,
             reach_distance: 10,
             drop_item_distance: 10,
-            item_pickup_distance: 1,
-            loot_pickup_distance: 2,
-            resource_reach_distance: 3,
+            item_pickup_distance: 1.0,
+            loot_pickup_distance: 2.0,
+            resource_reach_distance: 3.0,
         }
     }
 }
@@ -1212,16 +1221,26 @@ pub struct PlaceEntitiesResult {
     pub entities: Vec<FactorioEntity>,
 }
 
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
+// The `on_player_changed_distance` payload: the same six `LuaControl`
+// distances as `FactorioPlayer`, and so the same widths.
+//
+// Not `Hash`/`Eq`: three of the six are `double`, which has neither. Nothing
+// keyed this type; it is only serialized to websocket clients and deserialized
+// from the mod.
+//
+// Deliberately a `//` comment, not `///`: `TypeScriptify` mirrors doc comments
+// into the generated `app/src/models/types.ts`, and this rationale is about
+// Rust trait derives, which mean nothing there.
+#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PlayerChangedDistanceEvent {
     pub player_id: PlayerId,
     pub build_distance: u32,
     pub reach_distance: u32,
     pub drop_item_distance: u32,
-    pub item_pickup_distance: u64,
-    pub loot_pickup_distance: u64,
-    pub resource_reach_distance: u64,
+    pub item_pickup_distance: f64,
+    pub loot_pickup_distance: f64,
+    pub resource_reach_distance: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]
@@ -1385,6 +1404,92 @@ mod tests {
         }"#;
         let player: FactorioPlayer = serde_json::from_str(json).expect("parses");
         assert!(player.main_inventory.is_empty());
+    }
+
+    /// The exact `players` reply a live Factorio 2.1.17 server sent, taken from
+    /// the `failed to parse players` error it caused. `LuaControl`'s
+    /// `resource_reach_distance` is a `double`, and a character's real value is
+    /// 2.7 — which serde cannot read into an integer, so *every* real player
+    /// failed to deserialize and `RconActuator::new` could never be built.
+    ///
+    /// Kept verbatim, fractional digits and all: a fixture with whole-number
+    /// distances parses fine even against the broken integer types and so
+    /// cannot detect this.
+    const LIVE_2_1_PLAYERS: &str = r#"[{"name":"client1","player_id":1,"position":{"y":0,"x":0},"build_distance":10,"reach_distance":10,"drop_item_distance":10,"item_pickup_distance":1,"loot_pickup_distance":2,"resource_reach_distance":2.70000000000000017763568394002504646778106689453125,"main_inventory":[{"name":"burner-mining-drill","quality":"normal","count":1},{"name":"stone-furnace","quality":"normal","count":1},{"name":"wood","quality":"normal","count":1}]}]"#;
+
+    #[test]
+    fn the_live_2_1_players_reply_parses_with_a_fractional_resource_reach() {
+        // Deserialized exactly as `RconClient::connected_players` does it.
+        let players: Vec<FactorioPlayer> = serde_json::from_str(LIVE_2_1_PLAYERS).expect("parses");
+        assert_eq!(players.len(), 1);
+        let player = &players[0];
+        assert_eq!(player.player_id, 1);
+
+        // The value the integer type could not hold, kept fractional rather
+        // than silently rounded to 3.
+        assert!(
+            (player.resource_reach_distance - 2.7).abs() < 1e-9,
+            "expected ~2.7, got {}",
+            player.resource_reach_distance
+        );
+        assert_ne!(
+            player.resource_reach_distance,
+            player.resource_reach_distance.trunc(),
+            "the fractional part must survive; rounding here is the bug"
+        );
+
+        // The three `uint32` distances stay whole.
+        assert_eq!(player.build_distance, 10);
+        assert_eq!(player.reach_distance, 10);
+        assert_eq!(player.drop_item_distance, 10);
+        // The other two `double` distances happened to arrive whole here.
+        assert_eq!(player.item_pickup_distance, 1.0);
+        assert_eq!(player.loot_pickup_distance, 2.0);
+
+        assert_eq!(
+            player.main_inventory.get("burner-mining-drill").copied(),
+            Some(1)
+        );
+        assert_eq!(player.main_inventory.get("stone-furnace").copied(), Some(1));
+        assert_eq!(player.main_inventory.get("wood").copied(), Some(1));
+    }
+
+    /// `LuaControl.resource_reach_distance` is documented as "the resource
+    /// reach distance of this character **or max double** when not a character
+    /// or player connected to a character", so the integer types were wrong on
+    /// range as well as on fractionality: this value does not fit in a `u64`.
+    ///
+    /// Written in scientific notation, which is how a JSON encoder emits a
+    /// double this large. Spelled out in full decimal digits it is a bare
+    /// integer literal, and serde_json rejects those above `u64::MAX` with
+    /// "number out of range" whatever the target field's type is — so that
+    /// spelling would test the parser's integer path, not this field.
+    #[test]
+    fn a_player_parses_with_the_documented_max_double_resource_reach() {
+        let json = format!(
+            r#"{{"player_id":1,"position":{{"x":0,"y":0}},"main_inventory":{{}},
+                "build_distance":10,"reach_distance":10,"drop_item_distance":10,
+                "item_pickup_distance":1,"loot_pickup_distance":2,
+                "resource_reach_distance":{:e}}}"#,
+            f64::MAX
+        );
+        let player: FactorioPlayer = serde_json::from_str(&json).expect("parses");
+        assert_eq!(player.resource_reach_distance, f64::MAX);
+        assert!(player.resource_reach_distance > u64::MAX as f64);
+    }
+
+    /// The `on_player_changed_distance` payload carries the same six
+    /// `LuaControl` distances and must accept the same doubles.
+    #[test]
+    fn a_distance_change_event_parses_with_a_fractional_resource_reach() {
+        let json = r#"{"player_id":1,"build_distance":10,"reach_distance":10,
+            "drop_item_distance":10,"item_pickup_distance":1.5,
+            "loot_pickup_distance":2.25,
+            "resource_reach_distance":2.70000000000000017763568394002504646778106689453125}"#;
+        let event: PlayerChangedDistanceEvent = serde_json::from_str(json).expect("parses");
+        assert!((event.resource_reach_distance - 2.7).abs() < 1e-9);
+        assert_eq!(event.item_pickup_distance, 1.5);
+        assert_eq!(event.loot_pickup_distance, 2.25);
     }
 
     /// The exact product object a live Factorio 2.1.17 server sent, taken from

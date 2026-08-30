@@ -174,7 +174,7 @@ impl PlanState {
                     inventory: player.main_inventory.clone(),
                     build_distance: player.build_distance as f64,
                     reach_distance: player.reach_distance as f64,
-                    resource_reach_distance: player.resource_reach_distance as f64,
+                    resource_reach_distance: player.resource_reach_distance,
                 },
                 None => {
                     unknown_bots.insert(*id);
@@ -694,7 +694,7 @@ mod tests {
     fn a_bot_takes_its_position_inventory_and_reach_from_its_player() {
         // The only path a real world takes into the planner: `fixture_world()`
         // has no players, so every other test exercises the `None` arm and the
-        // three `as f64` casts here run nowhere else.
+        // `Some` arm's field reads run nowhere else.
         use factorio_bot_core::types::FactorioPlayer;
 
         let world = fixture_world();
@@ -706,7 +706,7 @@ mod tests {
                 main_inventory: BTreeMap::from([("iron-plate".to_string(), 42u32)]),
                 build_distance: 12,
                 reach_distance: 8,
-                resource_reach_distance: 4,
+                resource_reach_distance: 4.0,
                 ..Default::default()
             },
         );

@@ -58,6 +58,7 @@ mlua = { version = "0.12", features = ["lua54", "serialize", "macros"] }
 miette = {version = "7.4", features = ["fancy"] }
 thiserror = "2.0"
 futures = "0.3"
+dirs-next = "2.0"
 #
 #[target.'cfg(unix)'.dependencies]
 #

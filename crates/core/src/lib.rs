@@ -36,6 +36,7 @@ pub mod draw;
 pub mod errors;
 pub mod factorio;
 pub mod graph;
+pub mod paths;
 pub mod plan;
 pub mod process;
 pub mod settings;

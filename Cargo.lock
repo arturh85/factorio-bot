@@ -1859,6 +1859,7 @@ dependencies = [
  "config 0.15.25",
  "config_struct",
  "dashmap",
+ "dirs-next",
  "enum-primitive-derive",
  "euclid",
  "factorio-blueprint",

@@ -678,6 +678,36 @@ git commit -m "feat(server): add POST /api/v1/instance/start; extract archives o
 
 ---
 
+## Task 1b: Close the two gaps Task 1's review left open
+
+Both surfaced by Task 1's implementer as concerns "for the plan that owns the frontend". **This is that plan**, so they are tasks rather than notes — a concern deferred to an unnamed future plan is a concern that does not get fixed.
+
+**Files:** `crates/server/src/manage/instance.rs`, `crates/server/tests/manage_instance.rs`
+
+### Gap 1 — a browser-only first run cannot start Factorio at all
+
+`POST /api/v1/instance/start` does not create `workspace_path`; the Tauri command does. So on a fresh machine the route answers `202`, the detached task fails, and `GET /api/v1/instance` reports `WorkspaceNotFound` in `last_error`. **That is the exact scenario this plan exists to make work** — browser-only, no desktop app — and it fails on first use.
+
+Worse, the implementer reports the two paths **disagree about which directory** they mean. Establish which is correct before writing code: `factorio_bot_core::paths::workspace_dir()` is the settings-derived answer and `ensure_scripts_dir` already bootstraps `workspace/scripts` at serve startup, so the server has a precedent for creating what it needs. Resolve the disagreement in favour of one, and say in the report which one and why.
+
+- [ ] **Step 1: Write the failing test** — a start against a workspace directory that does not exist must not leave `WorkspaceNotFound` in `last_error`. Assert on `last_error` being `None` and the directory existing, not merely on the 202: the 202 is returned before the failure happens and proves nothing.
+- [ ] **Step 2: Run it, confirm it fails with `WorkspaceNotFound`.**
+- [ ] **Step 3: Create the workspace at startup, beside `ensure_scripts_dir`**, not inside the request handler — a first run should not depend on someone having pressed Start.
+- [ ] **Step 4: Run it, confirm it passes.**
+- [ ] **Step 5: Mutation** — remove the creation. Input class: *a fresh install with no workspace directory*. The new test must fail by name.
+
+### Gap 2 — a stop racing an in-flight start publishes an instance the user just cleared
+
+`stop_instance` does not clear `starting` or `last_error`. So: start (202, extraction running) → stop → the detached task completes → it publishes the instance into `state.instance`. The user pressed Stop and got a running game.
+
+- [ ] **Step 1: Write the failing test** — begin a start, stop, let the spawned task complete, assert `GET /api/v1/instance` reports **not started**.
+- [ ] **Step 2: Run it, confirm the instance is published anyway.**
+- [ ] **Step 3: Fix it.** The spawned task must check, under the same lock that publishes, whether a stop intervened — a flag read before publishing is another read-then-write race, which is the defect Task 1's `compare_exchange` exists to avoid. Reuse that shape rather than inventing a second one.
+- [ ] **Step 4: Run it, confirm it passes.**
+- [ ] **Step 5: Mutation** — publish unconditionally. Input class: *a stop that arrives while a start is in flight*. The new test must fail by name.
+
+---
+
 ## Task 2: Rename `PrimeVueTreeNode` to `ScriptTreeNode`
 
 `GET /api/v1/scripts` publishes its response type as `PrimeVueTreeNode` — a name from a UI component library, with field names (`key`, `label`, `leaf`) that are the PrimeVue `Tree` component's props rather than anything about scripts. **Rename it now:** the OpenAPI snapshot is created two tasks from here and every consumer of the type is being rewritten in this plan anyway, so the rename costs one commit today and becomes a gratuitous breaking API change if it waits until the plan that removes PrimeVue.

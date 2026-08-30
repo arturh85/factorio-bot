@@ -7,6 +7,7 @@
 //! and planner/executor failures on the `LuaError` path.
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
+mod plan;
 mod value;
 
 use crate::lua_runner::PendingWork;

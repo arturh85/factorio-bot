@@ -686,15 +686,24 @@ Both surfaced by Task 1's implementer as concerns "for the plan that owns the fr
 
 ### Gap 1 — a browser-only first run cannot start Factorio at all
 
-`POST /api/v1/instance/start` does not create `workspace_path`; the Tauri command does. So on a fresh machine the route answers `202`, the detached task fails, and `GET /api/v1/instance` reports `WorkspaceNotFound` in `last_error`. **That is the exact scenario this plan exists to make work** — browser-only, no desktop app — and it fails on first use.
+`POST /api/v1/instance/start` answers `202`, the detached task fails, and `GET /api/v1/instance` reports `WorkspaceNotFound`. **The cause is not a missing directory** — an earlier draft of this task said it was, and that was wrong. Diagnosed before dispatch:
 
-Worse, the implementer reports the two paths **disagree about which directory** they mean. Establish which is correct before writing code: `factorio_bot_core::paths::workspace_dir()` is the settings-derived answer and `ensure_scripts_dir` already bootstraps `workspace/scripts` at serve startup, so the server has a precedent for creating what it needs. Resolve the disagreement in favour of one, and say in the report which one and why.
+- `settings.factorio.workspace_path` defaults to **`""`** (`crates/core/src/settings.rs:35`, and `AppSettings.toml:9` documents it as "defaults to local_data_dir/workspace").
+- `serve.rs:61-78` resolves that: empty → `factorio_bot_core::paths::workspace_dir()`, reject relative, then `ensure_scripts_dir` — which creates the directory as a side effect of creating `workspace/scripts`. **So the directory does exist after `serve` starts.**
+- But `serve` never writes the resolved value back to settings, and `FactorioInstance::start` passes the **raw settings string** down to `setup_factorio_instance`, which does `Path::new("").exists()` → false → `WorkspaceNotFound` (`instance_setup.rs:157-162`).
 
-- [ ] **Step 1: Write the failing test** — a start against a workspace directory that does not exist must not leave `WorkspaceNotFound` in `last_error`. Assert on `last_error` being `None` and the directory existing, not merely on the 202: the 202 is returned before the failure happens and proves nothing.
-- [ ] **Step 2: Run it, confirm it fails with `WorkspaceNotFound`.**
-- [ ] **Step 3: Create the workspace at startup, beside `ensure_scripts_dir`**, not inside the request handler — a first run should not depend on someone having pressed Start.
-- [ ] **Step 4: Run it, confirm it passes.**
-- [ ] **Step 5: Mutation** — remove the creation. Input class: *a fresh install with no workspace directory*. The new test must fail by name.
+So the defect is a **second, divergent copy of the resolution rule**, not a missing `create_dir_all`. Adding one would not fix it: creating `Path::new("")` does not help, and the route would still fail.
+
+This is the same defect class as plan 4's finding I3 — two code paths resolving one configured name differently — and it gets the same remedy: **one resolution, in one place, that both callers use.**
+
+- [ ] **Step 1: Extract the resolution.** Move `serve.rs:61-78`'s logic into `crates/core` beside `paths::workspace_dir()` — something like `paths::resolve_workspace(configured: &str) -> Result<PathBuf>`: empty → `workspace_dir()`, relative → error, absolute → as given. `serve.rs` then calls it instead of inlining it.
+- [ ] **Step 2: Write the failing test** — a start with `workspace_path = ""` must not report `WorkspaceNotFound`. Assert on `last_error` and on the instance state, **not** on the 202, which is returned before the failure happens and proves nothing.
+- [ ] **Step 3: Run it and confirm it fails with `WorkspaceNotFound`** — not with something else. A test that fails for a different reason is not evidence.
+- [ ] **Step 4: Have the route resolve through the shared helper** before handing the path to `FactorioInstance::start`.
+- [ ] **Step 5: Run it and confirm it passes.**
+- [ ] **Step 6: Mutation.** Revert the route to passing the raw settings string. Input class: *a default (empty) `workspace_path`*. The new test must fail by name. **Assert the edit landed first.**
+
+**Check before you build on any of this.** The diagnosis above was derived by reading, not by running the route. If `grep` disagrees with a line number or the resolution has moved, report that rather than working around it.
 
 ### Gap 2 — a stop racing an in-flight start publishes an instance the user just cleared
 

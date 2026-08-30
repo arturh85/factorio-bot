@@ -213,3 +213,44 @@ async fn deleting_a_directory_is_refused() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(dir.path().join("scripts").join("sub").exists());
 }
+
+/// `target.exists()` follows symlinks and reports `false` for a *dangling*
+/// one, and `File::create` (what `std::fs::write` uses) also follows
+/// symlinks when opening. A dangling symlink planted inside the scripts
+/// root, pointing at a path outside it that does not exist yet, would
+/// therefore pass an `exists()` guard and then have its target created and
+/// written by a naive `fs::write` — landing the new file's contents
+/// outside the scripts root through a name that was never itself resolved
+/// or bounds-checked. `create_script` must refuse this outright rather
+/// than writing through the symlink.
+#[cfg(unix)]
+#[tokio::test]
+async fn creating_over_a_dangling_symlink_does_not_write_through_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_with_scripts(dir.path());
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(
+        outside.join("evil.lua"),
+        dir.path().join("scripts").join("planted.lua"),
+    )
+    .unwrap();
+
+    let response = build_router(state, None)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/scripts/file?path=/planted.lua")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"code":"-- pwned"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        !outside.join("evil.lua").exists(),
+        "wrote through a dangling symlink to outside the scripts root"
+    );
+}

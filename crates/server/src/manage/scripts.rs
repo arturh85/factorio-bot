@@ -7,6 +7,7 @@ use axum::Json;
 use factorio_bot_core::scripts::resolve_script_path;
 use factorio_bot_core::types::PrimeVueTreeNode;
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::PathBuf;
 use utoipa::{IntoParams, ToSchema};
 
@@ -267,6 +268,21 @@ pub async fn write_script(
 
 /// Creates a new script file. Rejects the request if the target already
 /// exists — use `PUT` to overwrite an existing script instead.
+///
+/// Deliberately does not check `target.exists()` and then call
+/// `std::fs::write`: `exists()` follows symlinks and reports `false` for a
+/// *dangling* one, and `std::fs::write` (via `File::create`) also follows
+/// symlinks when opening. A dangling symlink planted inside the scripts
+/// root pointing outside it (e.g. `sub/evil.lua -> /etc/evil.lua`, where
+/// `/etc/evil.lua` does not exist yet) would therefore pass the `exists()`
+/// check and then have its *target* created and written by `fs::write` —
+/// a write outside the scripts root that neither `resolve_new_script_path`
+/// nor an `exists()` check catches, since neither one ever has reason to
+/// look at `evil.lua` once the parent has resolved. `OpenOptions::create_new`
+/// avoids this: POSIX `open` with `O_CREAT | O_EXCL` fails with `EEXIST`
+/// when the final path component is a symlink, dangling or not, so this
+/// never follows one to create a file. It also removes the
+/// check-then-write TOCTOU race between the `exists()` check and the write.
 #[utoipa::path(
     post,
     path = "/api/v1/scripts/file",
@@ -285,13 +301,12 @@ pub async fn create_script(
 ) -> Result<StatusCode, ErrorResponse> {
     let root = scripts_root(&state).await?;
     let target = resolve_new_script_path(&root, &query.path)?;
-    if target.exists() {
-        return Err(ErrorResponse::bad_request(format!(
-            "already exists: {}",
-            query.path
-        )));
-    }
-    std::fs::write(&target, body.code)
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+        .map_err(|err| ErrorResponse::bad_request(format!("failed to create script: {err}")))?;
+    file.write_all(body.code.as_bytes())
         .map_err(|err| ErrorResponse::bad_request(format!("failed to write script: {err}")))?;
     Ok(StatusCode::NO_CONTENT)
 }

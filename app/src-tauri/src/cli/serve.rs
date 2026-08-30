@@ -20,6 +20,14 @@ impl Subcommand for ThisCommand {
           .value_parser(value_parser!(String))
           .help("address to bind, defaults to 127.0.0.1 on the configured port"),
       )
+      .arg(
+        Arg::new("web-root")
+          .long("web-root")
+          .value_name("DIR")
+          .required(false)
+          .value_parser(value_parser!(String))
+          .help("directory to serve the web UI from, overrides settings.restapi.web_root"),
+      )
       .about("serve the web UI and HTTP API")
   }
 
@@ -35,6 +43,15 @@ async fn run(matches: &ArgMatches, context: &mut Context) -> Result<()> {
     let port = context.app_settings.read().await.restapi.port;
     SocketAddr::from(([127, 0, 0, 1], u16::try_from(port).into_diagnostic()?))
   };
+
+  // `start_with_shutdown` reads `settings.restapi.web_root` back out of this
+  // same `SharedAppSettings` at startup (see `webserver.rs`), so overriding
+  // it here — before the call below — is what actually reaches the router;
+  // setting it any later (e.g. after `build_router` has already run) would
+  // be a no-op.
+  if let Some(web_root) = matches.get_one::<String>("web-root") {
+    context.app_settings.write().await.restapi.web_root = Some(web_root.clone());
+  }
 
   // Orchestrators, systemd, and `docker stop` all send SIGTERM rather than
   // Ctrl-C's SIGINT. Waiting on ctrl_c() alone would let SIGTERM kill the

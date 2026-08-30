@@ -23,11 +23,11 @@ use crate::goal::{Goal, Holder};
 use crate::ids::{BotId, Ticks};
 use crate::method::util::{
     free_tile_near, ingredients_of, mining_ticks, nearest_resource_tile, output_per_craft,
-    recipe_for, recipe_ticks, resource_tiles_for,
+    recipe_for, recipe_ticks, resource_supply_at_least, resource_tiles_for,
 };
 use crate::method::{ExpansionCtx, GoalSite, Method, MethodRegistry, Step};
 use crate::state::PlanState;
-use factorio_bot_core::types::{FactorioEntity, Position};
+use factorio_bot_core::types::FactorioEntity;
 
 /// How much of `item` still needs producing, given what is already held.
 fn shortfall(state: &PlanState, item: &str, count: u32, whose: &Holder) -> u32 {
@@ -339,12 +339,12 @@ impl Method for Mine {
         if need == 0 {
             return false;
         }
-        // Position-independent, as before: `resource_tiles_for` returns empty
-        // exactly when the patches cannot supply `need` in total, whatever the
-        // origin, so applicability does not depend on which bot is asking.
-        // Which tiles are nearest is `expand`'s business, where the chain actor
-        // is known.
-        !resource_tiles_for(state, item, &Position::default(), need).is_empty()
+        // Position-independent, as before: whether the patches can supply
+        // `need` in total does not depend on which bot is asking. Which tiles
+        // are nearest is `expand`'s business, where the chain actor is known —
+        // so this asks the total directly instead of building and sorting the
+        // union of every tile of every patch only to test it for emptiness.
+        resource_supply_at_least(state, item, need)
     }
 
     fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
@@ -1515,15 +1515,24 @@ mod tests {
             BotId(1),
         )
         .unwrap();
-        let mined: u32 = net
+        let takes: Vec<(Position, u32)> = net
             .actions()
             .map(|a| match &a.kind {
-                ActionKind::Mine { count, .. } => *count,
+                ActionKind::Mine { pos, count, .. } => (pos.clone(), *count),
                 other => panic!("expected only mines, got {:?}", other),
             })
-            .sum();
+            .collect();
+        let mined: u32 = takes.iter().map(|(_, count)| count).sum();
         assert_eq!(mined, 1200);
-        assert_eq!(net.len(), 3, "500 + 500 + 200");
+        assert_eq!(takes.len(), 3, "500 + 500 + 200");
+        // Each action must draw from a *different* tile. Two actions on one
+        // tile would sum to more than it holds, so the totals above would
+        // still look right while `ResourceAvailable` failed at schedule time.
+        let tiles: std::collections::BTreeSet<factorio_bot_core::types::Pos> = takes
+            .iter()
+            .map(|(pos, _)| factorio_bot_core::types::Pos::from(pos))
+            .collect();
+        assert_eq!(tiles.len(), 3, "three distinct tiles, got {:?}", takes);
     }
 
     #[test]
@@ -1564,6 +1573,16 @@ mod tests {
             "the furnace should sit by the ore ({} away) not the bot's start ({} away)",
             to_ore,
             to_origin
+        );
+        // `to_ore < to_origin` alone passes for an anchor anywhere in the half
+        // of the map nearer the ore than the origin, which is most of it. The
+        // siting is `free_tile_near` from the ore tile itself, and that
+        // searches at most 12 tiles out, so 20 is both correct and tight
+        // enough to fail if the anchor ever slips back towards the bot.
+        assert!(
+            to_ore < 20.,
+            "the furnace must be within reach of the ore, not merely nearer it: {}",
+            to_ore
         );
     }
 

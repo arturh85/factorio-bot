@@ -116,6 +116,34 @@ pub fn resource_tiles_for(
     out
 }
 
+/// Can the map's remaining tiles of `item` supply `need` in total?
+///
+/// The same question `!resource_tiles_for(..).is_empty()` answers, without
+/// building the answer: applicability asks only whether enough exists
+/// anywhere, never which tiles are nearest, so there is nothing to collect,
+/// nothing to sort and no origin to measure from. Stops at the first tile that
+/// brings the running total up to `need`.
+///
+/// `need == 0` is trivially satisfiable and returns `true` — where
+/// `resource_tiles_for` returns an empty vector for it, because there is no
+/// tile to draw nothing from. Callers asking about a shortfall check it is
+/// non-zero first.
+pub fn resource_supply_at_least(state: &PlanState, item: &str, need: u32) -> bool {
+    let mut total: u32 = 0;
+    if need == 0 {
+        return true;
+    }
+    for patch in state.resource_patches(item) {
+        for tile in patch.elements {
+            total = total.saturating_add(state.resource_available(&tile, item));
+            if total >= need {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// The nearest unoccupied tile to `from`, searched in rings so the result is
 /// close and reproducible.
 pub fn free_tile_near(state: &PlanState, from: &Position) -> Option<Position> {
@@ -229,6 +257,53 @@ mod tests {
         let a = nearest_resource_tile(&s, "iron-ore", &origin, 1).unwrap();
         let b = nearest_resource_tile(&s, "iron-ore", &origin, 1).unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn a_supply_test_agrees_with_the_tiles_it_replaces() {
+        // `resource_supply_at_least` exists so `Mine::applicable` need not
+        // build a sorted union of every tile just to ask whether enough
+        // exists. It must answer exactly what that emptiness test answered.
+        let s = state();
+        let origin = Position::new(0., 0.);
+        for (item, need) in [
+            ("iron-ore", 1u32),
+            ("iron-ore", 500),
+            ("iron-ore", 100_000),
+            ("iron-ore", u32::MAX),
+            ("copper-ore", 1200),
+            ("uranium-ore", 1),
+        ] {
+            assert_eq!(
+                resource_supply_at_least(&s, item, need),
+                !resource_tiles_for(&s, item, &origin, need).is_empty(),
+                "disagreed on {} {}",
+                need,
+                item
+            );
+        }
+    }
+
+    #[test]
+    fn a_supply_test_follows_what_has_been_consumed() {
+        let mut s = state();
+        let tile = nearest_resource_tile(&s, "iron-ore", &Position::new(0., 0.), 1).unwrap();
+        let available = s.resource_available(&tile, "iron-ore");
+        assert!(resource_supply_at_least(&s, "iron-ore", available));
+        s.consume_resource(&tile, "iron-ore", available).unwrap();
+        assert_eq!(s.resource_available(&tile, "iron-ore"), 0);
+        // The rest of the field still holds plenty, so the emptied tile must
+        // not be counted and must not stop the walk either.
+        assert!(resource_supply_at_least(&s, "iron-ore", available));
+    }
+
+    #[test]
+    fn a_missing_resource_cannot_supply_anything() {
+        let s = state();
+        assert!(!resource_supply_at_least(&s, "uranium-ore", 1));
+        // Nothing is always available: the zero case is trivially satisfiable,
+        // which is why callers check the shortfall is non-zero first.
+        assert!(resource_supply_at_least(&s, "uranium-ore", 0));
     }
 
     #[test]

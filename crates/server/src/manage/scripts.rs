@@ -7,7 +7,7 @@ use axum::Json;
 use factorio_bot_core::scripts::resolve_script_path;
 use factorio_bot_core::types::PrimeVueTreeNode;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use utoipa::{IntoParams, ToSchema};
 
 #[derive(Debug, Deserialize, IntoParams)]
@@ -36,9 +36,45 @@ pub struct ScriptContent {
 /// makes the settings value the single source of truth and keeps tests
 /// (which point `workspace_path` at a temp directory) isolated from the
 /// repository's real scripts.
+///
+/// `FactorioSettings::default()` leaves `workspace_path` as an empty
+/// string, which would otherwise join down to the bare relative path
+/// `"scripts"` and canonicalize *that* against the server process's CWD —
+/// reintroducing, on an unconfigured install, exactly the CWD-dependent
+/// hazard this function exists to avoid (running the server from this
+/// repository's checkout would bind every request to the repository's own
+/// `scripts/` directory). An empty `workspace_path` instead falls back to
+/// `factorio_bot_core::paths::workspace_dir()`, the data-local workspace an
+/// unconfigured install genuinely uses. Belt and braces: any *other*
+/// relative `workspace_path` (e.g. a future settings value like `"./foo"`)
+/// is rejected outright before it ever reaches the filesystem, rather than
+/// silently canonicalizing against the CWD.
+///
+/// Split out from `scripts_root` (which canonicalizes and requires the
+/// result to exist) so the fallback and the absolute-path guard can be
+/// unit-tested in isolation: `paths::workspace_dir()` is a real,
+/// developer-specific directory that a test must not create, write into,
+/// or otherwise depend on the contents of, and canonicalize would fail
+/// outright if it (or its `scripts` subdirectory) happens not to exist on
+/// the machine running the tests.
+fn scripts_root_path(workspace_path: &str) -> Result<PathBuf, ErrorResponse> {
+    let workspace_path = if workspace_path.is_empty() {
+        factorio_bot_core::paths::workspace_dir()
+    } else {
+        PathBuf::from(workspace_path)
+    };
+    if workspace_path.is_relative() {
+        return Err(ErrorResponse::bad_request(format!(
+            "workspace_path must be absolute, got: {}",
+            workspace_path.display()
+        )));
+    }
+    Ok(workspace_path.join("scripts"))
+}
+
 async fn scripts_root(state: &AppState) -> Result<PathBuf, ErrorResponse> {
     let workspace_path = state.settings.read().await.factorio.workspace_path.clone();
-    let root = Path::new(workspace_path.as_ref()).join("scripts");
+    let root = scripts_root_path(workspace_path.as_ref())?;
     std::fs::canonicalize(&root).map_err(|_| {
         ErrorResponse::bad_request(format!("missing scripts directory: {}", root.display()))
     })
@@ -168,4 +204,56 @@ pub async fn write_script(
     std::fs::write(&resolved, body.code)
         .map_err(|err| ErrorResponse::bad_request(format!("failed to write script: {err}")))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The defect this guards against: on a default configuration
+    /// (`FactorioSettings::default()` leaves `workspace_path` empty),
+    /// `scripts_root_path` must not resolve to the bare relative path
+    /// `"scripts"` — canonicalizing that would bind against the server
+    /// process's current working directory, which in this repository's own
+    /// checkout is a real `scripts/` directory that `GET`/`PUT
+    /// /api/v1/scripts*` would then read from and write over.
+    ///
+    /// This asserts the weaker-but-safe property instead of exercising a
+    /// real filesystem fallback: with `workspace_path` empty, the resolved
+    /// root equals `paths::workspace_dir().join("scripts")` and is
+    /// absolute. A stronger test that actually points the server at the
+    /// test process's CWD and proves it does *not* read a `scripts/`
+    /// directory placed there would require writing into (or reading
+    /// preexisting contents of) either the real data-local workspace
+    /// directory or the test binary's CWD — both outside any temp
+    /// directory this test owns, which the constraint against tests
+    /// writing outside their own temp directory rules out.
+    #[test]
+    fn empty_workspace_path_falls_back_to_the_data_local_workspace_dir_not_the_cwd() {
+        let root = scripts_root_path("").expect("resolves");
+        assert_eq!(
+            root,
+            factorio_bot_core::paths::workspace_dir().join("scripts")
+        );
+        assert!(
+            root.is_absolute(),
+            "expected an absolute path, got {root:?}"
+        );
+    }
+
+    #[test]
+    fn configured_workspace_path_is_joined_as_given() {
+        let root = scripts_root_path("/configured/workspace").expect("resolves");
+        assert_eq!(root, PathBuf::from("/configured/workspace/scripts"));
+    }
+
+    /// Belt and braces: a *non-empty* but still relative `workspace_path`
+    /// (e.g. a future settings value like `"./foo"`) must be rejected
+    /// outright rather than silently canonicalized against the server's
+    /// CWD.
+    #[test]
+    fn relative_workspace_path_is_rejected() {
+        let result = scripts_root_path("./configured/workspace");
+        assert!(result.is_err(), "expected a relative path to be rejected");
+    }
 }

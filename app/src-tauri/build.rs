@@ -44,10 +44,10 @@ fn luaify() {
 fn typescriptify() {
   const TYPESCRIPT_SETTINGS_PATH: &str = "../src/models/types.ts";
 
-  use factorio_bot_core::settings::*;
-  use factorio_bot_core::types::*;
   #[cfg(feature = "restapi")]
   use factorio_bot_core::settings::RestApiSettings;
+  use factorio_bot_core::settings::*;
+  use factorio_bot_core::types::*;
   use std::fs;
   use typescript_definitions::TypeScriptifyTrait;
 

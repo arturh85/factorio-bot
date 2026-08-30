@@ -48,7 +48,7 @@ pub fn scripts_dir(workspace_path: &Path) -> Result<PathBuf> {
         crate::process::instance_setup::PLANS_CONTENT
             .extract(workspace_scripts.clone())
             .map_err(|err| miette!("failed to extract bundled scripts: {err:?}"))?;
-        return std::fs::canonicalize(workspace_scripts).into_diagnostic();
+        std::fs::canonicalize(workspace_scripts).into_diagnostic()
     }
 
     #[cfg(debug_assertions)]
@@ -73,10 +73,14 @@ pub fn scripts_dir(workspace_path: &Path) -> Result<PathBuf> {
 ///
 /// In release builds a *newly created* directory is seeded with the bundled
 /// scripts (`PLANS_CONTENT`), matching [`scripts_dir`]. An already-populated
-/// directory is left alone, so this is safe to call on every start. Debug
-/// builds deliberately skip the extraction: `include_dir!` bundles this
-/// repository's own `scripts/` directory, and a developer checkout already has
-/// them.
+/// directory is left alone -- editing `scripts/*.lua` in the repo has no
+/// effect on it -- so this is safe to call on every start; when it is already
+/// populated this also checks it for drift from the embedded snapshot (once
+/// per process, since callers such as the Tauri commands call this on every
+/// request) and warns if any script is stale, naming [`REFRESH_SCRIPTS_ENV`]
+/// as the way to refresh it. Debug builds deliberately skip the extraction
+/// and the check: `include_dir!` bundles this repository's own `scripts/`
+/// directory, and a developer checkout already has them.
 pub fn ensure_scripts_dir(workspace_path: &Path) -> Result<PathBuf> {
     let workspace_scripts = workspace_path.join("scripts");
     if !workspace_scripts.is_dir() {
@@ -95,8 +99,51 @@ pub fn ensure_scripts_dir(workspace_path: &Path) -> Result<PathBuf> {
         }
         #[cfg(debug_assertions)]
         std::fs::create_dir_all(&workspace_scripts).into_diagnostic()?;
+    } else {
+        #[cfg(not(debug_assertions))]
+        check_scripts_staleness_once(&workspace_scripts)?;
     }
     std::fs::canonicalize(&workspace_scripts).into_diagnostic()
+}
+
+/// Set to any value to overwrite stale files under `<workspace>/scripts` with
+/// the snapshot embedded in this binary. Not read automatically, for the same
+/// reason as `FACTORIO_BOT_REFRESH_MODS`: a script under the workspace may
+/// have been edited on purpose to unblock a run.
+#[cfg(not(debug_assertions))]
+pub const REFRESH_SCRIPTS_ENV: &str = "FACTORIO_BOT_REFRESH_SCRIPTS";
+
+/// `ensure_scripts_dir` runs on every Tauri command and every server request
+/// that touches scripts, so checking staleness unconditionally would print
+/// the same warning over and over for the life of the process. This runs the
+/// check (and an env-gated refresh) exactly once per process instead.
+#[cfg(not(debug_assertions))]
+fn check_scripts_staleness_once(workspace_scripts: &Path) -> Result<()> {
+    use std::sync::OnceLock;
+    static CHECKED: OnceLock<()> = OnceLock::new();
+    if CHECKED.set(()).is_err() {
+        return Ok(());
+    }
+    if crate::process::asset_sync::refresh_if_requested(
+        &crate::process::instance_setup::PLANS_CONTENT,
+        workspace_scripts,
+        REFRESH_SCRIPTS_ENV,
+    )
+    .into_diagnostic()?
+    {
+        info!(
+            "Refreshed <bright-blue>{:?}</> from the embedded snapshot ({}=1 was set)",
+            workspace_scripts, REFRESH_SCRIPTS_ENV
+        );
+    } else {
+        crate::process::asset_sync::warn_if_stale(
+            &crate::process::instance_setup::PLANS_CONTENT,
+            workspace_scripts,
+            "scripts",
+            REFRESH_SCRIPTS_ENV,
+        );
+    }
+    Ok(())
 }
 
 /// Resolves a client-supplied script path against the scripts root.

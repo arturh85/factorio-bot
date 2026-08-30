@@ -13,6 +13,8 @@ use crate::constants::{
 use crate::errors::*;
 use crate::factorio::rcon::RconSettings;
 use crate::factorio::util::{read_to_value, write_value_to};
+#[cfg(not(debug_assertions))]
+use crate::process::asset_sync;
 use crate::process::io_utils::{await_lock, extract_archive, get_factorio_binary_path, symlink};
 use crate::process::output_reader::read_output;
 use crate::process::process_control::FactorioStartCondition;
@@ -30,14 +32,26 @@ use tokio::fs::create_dir;
 //   * editing `mods/` has no effect on a release binary until it is rebuilt --
 //     the embedded copy is a snapshot taken by `include_dir!`;
 //   * it has no effect on an existing `workspace/mods` at all, in any build,
-//     because extraction is skipped once that directory exists. Delete it (or
-//     edit the copy in place) to pick up mod changes.
+//     because extraction is skipped once that directory exists.
 //
 // This divergence is deliberate; do not "fix" it by dropping the embedding.
+// What *is* fixed here: the second bullet used to fail silently. `asset_sync`
+// compares the embedded snapshot against whatever is already on disk and
+// warns when they differ, and `REFRESH_MODS_ENV` / `REFRESH_PLANS_ENV` are the
+// explicit, opt-in way to overwrite a stale copy (see their doc comments).
 #[cfg(not(debug_assertions))]
 pub const MODS_CONTENT: include_dir::Dir = include_dir!("mods");
 #[cfg(not(debug_assertions))]
 pub const PLANS_CONTENT: include_dir::Dir = include_dir!("scripts");
+
+/// Set to any value to overwrite a stale `<workspace>/mods` with the snapshot
+/// embedded in this binary. Not read automatically: refreshing on every run
+/// would silently discard a workspace copy someone edited on purpose.
+#[cfg(not(debug_assertions))]
+pub const REFRESH_MODS_ENV: &str = "FACTORIO_BOT_REFRESH_MODS";
+/// Same as [`REFRESH_MODS_ENV`], for `<workspace>/plans`.
+#[cfg(not(debug_assertions))]
+pub const REFRESH_PLANS_ENV: &str = "FACTORIO_BOT_REFRESH_PLANS";
 
 /// The mod this project ships and depends on: without it there is no RCON
 /// bridge, and every other feature is unreachable.
@@ -198,6 +212,10 @@ pub async fn setup_factorio_instance(
     // because "I edited mods/ and the game kept loading the old copy" has
     // already cost a live debugging session.
     #[allow(unused_mut, unused_assignments)]
+    #[cfg(not(debug_assertions))]
+    let mut mods_source = "pre-existing workspace copy; editing mods/ does NOT update it -- see the staleness warning below, or set FACTORIO_BOT_REFRESH_MODS=1 to refresh it";
+    #[allow(unused_mut, unused_assignments)]
+    #[cfg(debug_assertions)]
     let mut mods_source =
         "pre-existing workspace copy; editing mods/ does NOT update it, delete it to re-extract";
     if !workspace_mods_path.exists() {
@@ -223,6 +241,31 @@ pub async fn setup_factorio_instance(
                 return Err(MissingModsFolder {}.into());
             }
         }
+    } else {
+        // The directory already existed, so nothing above extracted into it.
+        // In a release build that copy can only ever be refreshed explicitly
+        // -- see `asset_sync` -- so check it for drift from the embedded
+        // snapshot rather than staying silent about it.
+        #[cfg(not(debug_assertions))]
+        {
+            if asset_sync::refresh_if_requested(
+                &MODS_CONTENT,
+                &workspace_mods_path,
+                REFRESH_MODS_ENV,
+            )
+            .into_diagnostic()?
+            {
+                mods_source =
+                    "refreshed from the compile-time snapshot embedded in this release binary";
+            } else {
+                asset_sync::warn_if_stale(
+                    &MODS_CONTENT,
+                    &workspace_mods_path,
+                    "mods",
+                    REFRESH_MODS_ENV,
+                );
+            }
+        }
     }
     #[cfg(not(debug_assertions))]
     {
@@ -233,6 +276,21 @@ pub async fn setup_factorio_instance(
                 error!("failed to extract static plans content: {:?}", err);
                 return Err(PlansExtractFailed {}.into());
             }
+        } else if asset_sync::refresh_if_requested(
+            &PLANS_CONTENT,
+            &data_plans_path,
+            REFRESH_PLANS_ENV,
+        )
+        .into_diagnostic()?
+        {
+            if !silent {
+                info!(
+                    "Refreshed <bright-blue>{:?}</> from the embedded snapshot ({}=1 was set)",
+                    data_plans_path, REFRESH_PLANS_ENV
+                );
+            }
+        } else {
+            asset_sync::warn_if_stale(&PLANS_CONTENT, &data_plans_path, "plans", REFRESH_PLANS_ENV);
         }
     }
 

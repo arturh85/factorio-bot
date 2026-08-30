@@ -1,0 +1,1 @@
+[{"name":"client1","player_id":1,"position":{"y":0,"x":0},"build_distance":10,"reach_distance":10,"drop_item_distance":10,"item_pickup_distance":1,"loot_pickup_distance":2,"resource_reach_distance":2.70000000000000017763568394002504646778106689453125,"main_inventory":[{"name":"burner-mining-drill","quality":"normal","count":1},{"name":"wood","quality":"normal","count":1}]}]

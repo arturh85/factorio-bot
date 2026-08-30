@@ -182,3 +182,98 @@ fn a_serialised_2_1_recipe_deserialises_into_factorio_recipe() {
         noisy_float::types::r64(1.0)
     );
 }
+
+/// Factorio 2.0 renamed every collision layer, dropping the `-layer` suffix.
+/// `collides_with('player-layer')` does not return false on 2.1, it **raises**
+/// ("Unknown collision-layer name"), which took the whole
+/// `find_tiles_filtered` RCON call down and returned an error string in place
+/// of JSON. Pinning the argument here is what keeps the name from drifting
+/// back: the stub fails the call for anything but the 2.x spelling.
+#[test]
+fn serialize_tile_asks_for_the_2_1_collision_layer_name() {
+    let lua = botbridge_types();
+    let position = lua.create_table().expect("table");
+    position.set("x", 3.5).expect("set");
+    position.set("y", -4.5).expect("set");
+
+    let tile = lua.create_table().expect("table");
+    tile.set("name", "water").expect("set");
+    tile.set("position", position).expect("set");
+    // Stands in for `LuaTile::collides_with`, which only accepts a
+    // `CollisionLayerID` the running game knows.
+    let collides_with = lua
+        .create_function(|_, layer: String| {
+            if layer != "player" {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "Unknown collision-layer name: {layer}"
+                )));
+            }
+            Ok(true)
+        })
+        .expect("function");
+    tile.set("collides_with", collides_with).expect("set");
+
+    let out = call(&lua, "serialize_tile", tile);
+    assert_eq!(out.get::<String>("name").expect("name"), "water");
+    assert!(
+        out.get::<bool>("player_collidable")
+            .expect("player_collidable"),
+        "water collides with the player layer"
+    );
+}
+
+fn inserter_table(lua: &Lua) -> Table {
+    let point = |x: f64, y: f64| {
+        let table = lua.create_table().expect("table");
+        table.set("x", x).expect("set");
+        table.set("y", y).expect("set");
+        table
+    };
+    let bounding_box = lua.create_table().expect("table");
+    bounding_box
+        .set("left_top", point(4.35, 2.35))
+        .expect("set");
+    bounding_box
+        .set("right_bottom", point(4.65, 2.65))
+        .expect("set");
+
+    let entity = lua.create_table().expect("table");
+    entity.set("name", "inserter").expect("set");
+    entity.set("type", "inserter").expect("set");
+    entity.set("direction", 4).expect("set");
+    entity.set("position", point(4.5, 2.5)).expect("set");
+    entity.set("drop_position", point(3.3, 2.5)).expect("set");
+    entity.set("pickup_position", point(5.5, 2.5)).expect("set");
+    entity.set("bounding_box", bounding_box).expect("set");
+    // An inserter has neither inventory; the serialiser calls both.
+    for getter in ["get_output_inventory", "get_fuel_inventory"] {
+        let nothing = lua
+            .create_function(|_, ()| Ok(Value::Nil))
+            .expect("function");
+        entity.set(getter, nothing).expect("set");
+    }
+    entity
+}
+
+/// `FactorioEntity` is `rename_all = "snake_case"` and its `pickup_position`
+/// is an `Option`, so the `pickupPosition` this used to emit did not fail — it
+/// silently arrived as `None` for every inserter in the world, and
+/// `EntityGraph::connect` never linked one to what it picks up from.
+#[test]
+fn serialize_entity_sends_an_inserter_pickup_position_in_snake_case() {
+    let lua = botbridge_types();
+    let out = call(&lua, "serialize_entity", inserter_table(&lua));
+
+    assert!(
+        matches!(
+            out.get::<Value>("pickupPosition").expect("pickupPosition"),
+            Value::Nil
+        ),
+        "nothing in the tree reads the camelCase spelling"
+    );
+    let pickup: Table = out
+        .get("pickup_position")
+        .expect("pickup_position must be sent");
+    assert_eq!(pickup.get::<f64>("x").expect("x"), 5.5);
+    assert_eq!(pickup.get::<f64>("y").expect("y"), 2.5);
+}

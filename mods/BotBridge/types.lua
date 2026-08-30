@@ -265,7 +265,13 @@ function serialize_entity(entity)
     if entity.type == "resource" then
         record.amount = entity.amount
     elseif entity.type == "inserter" then
-        record.pickupPosition = entity.pickup_position
+        -- snake_case: `FactorioEntity.pickup_position` is the name the Rust
+        -- side reads (`rename_all = "snake_case"`). It is an `Option`, so the
+        -- camelCase spelling this used to emit did not fail loudly -- every
+        -- inserter simply arrived with `pickup_position: None`, and
+        -- `EntityGraph::connect` (crates/core/src/graph/entity_graph.rs) then
+        -- silently never connected an inserter to what it picks up from.
+        record.pickup_position = entity.pickup_position
     elseif entity.type == "entity-ghost" then
         record.ghost_name = entity.ghost_name
         record.ghost_type = entity.ghost_type
@@ -284,9 +290,17 @@ function serialize_entity(entity)
     return record
 end
 
+-- Factorio 2.0 renamed every collision layer, dropping the `-layer` suffix:
+-- `player-layer` became `player` (see `prototypes.collision_layer` in a live
+-- 2.1 game, and the `LuaTile::collides_with` example in
+-- `workspace/factorio-api-docs/runtime-api.json`). The old name is not ignored,
+-- it *raises*: "Unknown collision-layer name: player-layer". That took
+-- `find_tiles_filtered` down entirely on 2.1 -- the whole RCON call returned an
+-- error string instead of JSON -- and nothing noticed, because no fixture had
+-- ever been captured for `FactorioTile`.
 function serialize_tile(tile)
     local record = table_properties(tile, {"name", "position"})
-    record.player_collidable = tile.collides_with('player-layer')
+    record.player_collidable = tile.collides_with('player')
     return record
 end
 

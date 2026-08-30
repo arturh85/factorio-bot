@@ -1553,18 +1553,27 @@ function rcon_inventory_contents_at(positions)
 	for k,v in pairs(positions) do
 		local entity = surface.find_entity(v.name, v.position)
 		if entity ~= nil then
+			-- snake_case, because that is what `InventoryResponse`
+			-- (crates/core/src/types.rs) reads: it is `rename_all =
+			-- "snake_case"`, and its two inventory fields are
+			-- `Box<Option<..>>`, which serde does *not* treat as optional --
+			-- a missing key is a hard "missing field" error, not a None. The
+			-- camelCase spellings this used to emit therefore meant every
+			-- `inventory_contents_at` reply failed to deserialise. Nothing
+			-- else in the tree spells them camelCase; `serialize_entity` in
+			-- types.lua already sends `output_inventory`/`fuel_inventory`.
 			local rec = {}
 			local output_inventory = entity.get_output_inventory()
 			if output_inventory ~= nil then
-				rec.outputInventory = output_inventory.get_contents()
+				rec.output_inventory = output_inventory.get_contents()
 			else
-				rec.outputInventory = nil
+				rec.output_inventory = nil
 			end
 			local fuel_inventory = entity.get_fuel_inventory()
 			if fuel_inventory ~= nil then
-				rec.fuelInventory = fuel_inventory.get_contents()
+				rec.fuel_inventory = fuel_inventory.get_contents()
 			else
-				rec.fuelInventory = nil
+				rec.fuel_inventory = nil
 			end
 			rec.name = v.name
 			rec.position = v.position

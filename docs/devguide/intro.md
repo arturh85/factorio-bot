@@ -29,11 +29,11 @@ This guide is intended to write down steps needed to develop this application be
 - Clone repository `git clone git@github.com:arturh85/factorio-bot.git`
 - Change directory to app/
 - `cd app/`
-- `yarn` or `npx yarn`
+- `pnpm` (installed by `mise install`, or `npm i -g pnpm`)
 
 ### Commands
 
-- `cd app/; npm start` starts the application while watching for changes
+- `cd app/; pnpm start` starts the application while watching for changes
 - `cargo repl` starts the repl version of the application which removes most features and builds quicker
 - `cargo nextest` starts rust test runnner
 - `cargo release` increments the version numbers, updates changelog and pushes release

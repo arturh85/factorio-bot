@@ -6,4 +6,4 @@ node.compile = false
 [tools]
 rust = "stable"
 node = "24"
-"npm:yarn" = "1"
+"npm:pnpm" = "10"

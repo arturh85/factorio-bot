@@ -1,5 +1,5 @@
 start:
-    cd app; yarn run tauri:serve
+    cd app; pnpm run tauri:serve
 
 repl *ARGS:
     cargo repl {{ARGS}}

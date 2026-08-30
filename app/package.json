@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
-    "start": "yarn run tauri:serve",
+    "start": "pnpm run tauri:serve",
     "test": "vitest",
     "test:coverage": "vitest run --coverage",
     "lint": "tsc --noEmit --skipLibCheck && vue-tsc --noEmit --skipLibCheck && eslint src/",
@@ -13,11 +13,11 @@
     "native:start": "tauri dev",
     "build:web": "vite build",
     "tauri:keygen": "tauri signer generate -w ../../factorio-bot.key",
-    "tauri:serve": "concurrently -r -n \"rust,VITE\" -k \"yarn tauri dev\" \"yarn run native:serve\"",
-    "tauri:serve:release": "concurrently -r -n \"rust,VITE\" -k \"yarn tauri dev --release\" \"yarn run native:serve\"",
+    "tauri:serve": "concurrently -r -n \"rust,VITE\" -k \"pnpm tauri dev\" \"pnpm run native:serve\"",
+    "tauri:serve:release": "concurrently -r -n \"rust,VITE\" -k \"pnpm tauri dev --release\" \"pnpm run native:serve\"",
     "tauri:dev": "tauri dev",
     "tauri:build": "cross-env VITE_HTTP_HANDLER=NATIVE vite build && tauri build",
-    "test:ci": "yarn run lint && yarn run test:coverage && yarn run tauri:build && yarn run cargo:test && yarn run cargo:clippy",
+    "test:ci": "pnpm run lint && pnpm run test:coverage && pnpm run tauri:build && pnpm run cargo:test && pnpm run cargo:clippy",
     "cargo:clippy": "cd .. && cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated",
     "cargo:test": "cd .. && cargo test",
     "cargo:tree": "cd .. && cargo tree --charset ascii > tree.txt",
@@ -25,7 +25,7 @@
     "cargo:userguide": "cd ../docs/userguide && mdbook serve -o",
     "cargo:devguide": "cd ../docs/devguide && mdbook serve -o",
     "changelog:update": "cd .. && git cliff --output CHANGELOG.md --config Cargo.toml",
-    "precommit:check": "yarn run lint && yarn run test:coverage && yarn run cargo:clippy && yarn run cargo:test && cd .. && cargo build --all-features && cargo build --no-default-features",
+    "precommit:check": "pnpm run lint && pnpm run test:coverage && pnpm run cargo:clippy && pnpm run cargo:test && cd .. && cargo build --all-features && cargo build --no-default-features",
     "dummy": "true"
   },
   "dependencies": {
@@ -76,5 +76,12 @@
     "last 2 versions",
     "not dead"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "packageManager": "pnpm@10.34.5",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "@parcel/watcher"
+    ]
+  }
 }

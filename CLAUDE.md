@@ -16,26 +16,26 @@ just test
 just factorio
 
 # Development (starts Tauri + Vite dev servers)
-cd app && npm start
+cd app && pnpm start
 
 # REPL mode (faster build, no GUI, for testing scripting)
 cargo repl
 
 # Run frontend tests
-cd app && yarn test
+cd app && pnpm test
 
 # or with nextest
 cargo nextest run
 
 # Lint everything
-cd app && yarn lint              # TypeScript + ESLint + Vue type checking
+cd app && pnpm lint              # TypeScript + ESLint + Vue type checking
 cargo clippy --workspace --all-features --all-targets -- --deny warnings
 
 # Pre-commit check (runs all CI checks locally)
-cd app && npm run precommit:check
+cd app && pnpm run precommit:check
 
 # Production build
-cd app && yarn tauri:build
+cd app && pnpm run tauri:build
 
 # Build with/without default features
 cargo build --all-features
@@ -97,7 +97,7 @@ BotBridge Mod (Factorio mod for RPC)
 - Vite config lives in `vite.config.mts` — `.mts` because the package is not
   `"type": "module"` and some plugins are ESM-only
 - ESLint uses flat config in `app/eslint.config.mjs`; `.eslintrc.js` no longer
-  works on ESLint 10. `yarn lint` runs `tsc`, `vue-tsc` and `eslint` over both
+  works on ESLint 10. `pnpm lint` runs `tsc`, `vue-tsc` and `eslint` over both
   `.ts` and `.vue` files
 
 Known gap: the templates still carry PrimeFlex 1/2 grid class names (`p-grid`,

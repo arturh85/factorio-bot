@@ -38,11 +38,22 @@ jobs:
           toolchain: stable
       - name: 💾 Cache rust dependencies
         uses: Swatinem/rust-cache@v2
+      - name: 🛠️ Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: app/package.json
+      - name: 🛠️ Resolve the pnpm store path
+        shell: bash
+        run: echo "PNPM_STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+      # pnpm's node_modules is a tree of symlinks into the content-addressed
+      # store, so caching node_modules without the store restores broken links.
+      # Cache the store and let `pnpm install` relink from it instead.
       - name: 💾 Cache javascript dependencies
         uses: actions/cache@v5
         with:
-          path: '**/node_modules'
-          key: ${{ runner.os }}-modules-${{ hashFiles('**/yarn.lock') }}
+          path: ${{ env.PNPM_STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('app/pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm-store-
       - name: 🛠️ Install tauri-cli
         run: |
           cargo install tauri-cli
@@ -95,16 +106,16 @@ jobs:
       # Javascript
       - name: 🛠️ Install nodejs dependencies
         run: |
-          cd app; yarn
+          cd app; pnpm install --frozen-lockfile
       - name: 🏗️ Build javascript code
         run: |
-          cd app; yarn build:web
+          cd app; pnpm run build:web
       - name: 🧪 Lint javascript code
         run: |
-          cd app; yarn lint
+          cd app; pnpm run lint
       - name: 🧪 Test javascript code
         run: |
-          cd app; yarn test:coverage
+          cd app; pnpm run test:coverage
 
       # Rust
       - name: 🏗️ Build rust code
@@ -115,7 +126,7 @@ jobs:
           # Disable incremental compilation to prevent LNK1123/CVT1100 errors on Windows
           CARGO_INCREMENTAL: 0
         run: |
-          cd app; yarn tauri:build
+          cd app; pnpm run tauri:build
       - name: 🧹 Clean release artifacts
         if: matrix.platform == 'ubuntu-latest'
         run: |
@@ -127,7 +138,7 @@ jobs:
       - name: 🧪 Lint rust code
         continue-on-error: true
         run: |
-          cd app; yarn cargo:clippy
+          cd app; pnpm run cargo:clippy
 
       # Upload coverage
       - name: 📤 Upload coverage reports to codecov.io

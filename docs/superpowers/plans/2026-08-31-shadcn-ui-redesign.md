@@ -16,6 +16,24 @@
 
 ## Global Constraints
 
+### Derive the constraint from the thing; never restate it
+
+**A check written as a list of expected names is a mirror of the code, and mirrors cannot fail.** They stay green when something is *added* — which is the drift they exist to catch. This was found independently in this project's TypeScript and its Lua within an hour of each other, so treat it as the default failure mode of any test that enumerates.
+
+Three real instances:
+
+- `app/src/api/types.ts` — the file the whole OpenAPI contract seam exists to protect — was an input to **no assertion**. Renaming a field there alone left `pnpm run lint` clean and 158 tests passing, because the contract spec compared the snapshot against its *own* hand-written table. A developer following the failure messages would have edited that table, gone green, and shipped a store reading `undefined`.
+- A Lua surface test asserted six named functions exist and four named ones are gone — green forever if a seventh appeared.
+- A predicate validator checked keys against a hand-written list of step fields, so adding a field left `count{ new_field = x }` raising "unknown key" for a field visibly present on the step, with the suite green.
+
+**The fix is always the same: make the compiler derive it.** `Record<keyof Props, …>` forces every declared key present and the excess-property check rejects extras, so `tsc` fails in *both* directions. `keyof paths` on a generated OpenAPI type means a wrapper naming a route the server does not publish stops compiling. Where a type cannot express it, compare **sets** in both directions rather than asserting membership.
+
+A test can be satisfied by editing the mirror. A type cannot.
+
+**For this plan specifically:** every component task is a place to write "assert these props/slots/emits exist". Do not. Type the test's expectations against the component's own prop types, or compare the rendered attribute set against the declared one. A component spec that asserts a fixed list of classes or props is a mirror with extra steps.
+
+
+
 Every task's requirements implicitly include this section.
 
 - **The package manager is pnpm 10.34.5.** yarn was removed from this repo; `yarn <anything>` is wrong here and will either fail or corrupt the lockfile.

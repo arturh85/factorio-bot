@@ -21,6 +21,11 @@ const BASE_FILE_LOADERS: [&str; 2] = ["dofile", "loadfile"];
 /// `load` stays too, but only after [`install_text_only_load`] takes its teeth
 /// out -- see there for why the obvious reason to keep it was wrong.
 pub(crate) fn new_sandboxed_lua() -> LuaResult<Lua> {
+    // The one permitted call. `clippy.toml` bans `Lua::new`/`Lua::new_with`
+    // workspace-wide so a second construction site cannot be added without
+    // tripping the build -- an unsandboxed interpreter looks like ordinary
+    // code, and this is the only place that is supposed to build one.
+    #[allow(clippy::disallowed_methods)]
     let lua = Lua::new_with(
         LuaStdLib::TABLE | LuaStdLib::STRING | LuaStdLib::MATH | LuaStdLib::COROUTINE,
         LuaOptions::default(),

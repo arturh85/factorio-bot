@@ -1,0 +1,16 @@
+# Every Lua interpreter that runs user scripts must come from
+# `factorio_bot_scripting_lua::sandbox::new_sandboxed_lua`.
+#
+# `Lua::new()` loads `StdLib::ALL_SAFE`, where "safe" means memory-safe, not
+# sandboxed: it hands a script `io`, `os` and `package`, plus a `load` that
+# accepts unverified bytecode. Scripts reach the interpreter from an
+# unauthenticated HTTP API, so a second construction site added later would
+# silently reopen every hole the sandbox closes -- and it would look like
+# perfectly ordinary code.
+#
+# `sandbox.rs` is the one place allowed to call the raw constructor and carries
+# a local `#[allow]` saying so.
+disallowed-methods = [
+    { path = "mlua::Lua::new", reason = "use factorio_bot_scripting_lua::sandbox::new_sandboxed_lua -- Lua::new loads io, os and package" },
+    { path = "mlua::Lua::new_with", reason = "use factorio_bot_scripting_lua::sandbox::new_sandboxed_lua -- construct the sandbox in one place only" },
+]

@@ -1,6 +1,5 @@
 use crate::globals::create_lua_globals;
 use crate::globals::goal::create_lua_goal;
-use crate::globals::plan::create_lua_plan_builder;
 use crate::globals::rcon::create_lua_rcon;
 use crate::globals::world::create_lua_world;
 use factorio_bot_core::mlua::prelude::*;
@@ -9,12 +8,68 @@ use factorio_bot_core::parking_lot::Mutex;
 use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_core::serde_json;
 use factorio_bot_core::tokio::runtime::Runtime;
-use factorio_bot_scripting::OutputSink;
+use factorio_bot_core::tokio::task::JoinHandle;
+use factorio_bot_scripting::{OutputSink, Stream};
 use miette::{miette, IntoDiagnostic, Result};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::thread;
+
+/// Work a binding spawned that must finish before the run is considered over.
+///
+/// The runtime that [`run_lua`] builds dies with the call. Dropping a tokio
+/// runtime aborts every task spawned onto it that has not finished — silently,
+/// with no error and no log line. A binding that hands a script a handle and
+/// lets it walk away (`goal.execute` without a matching `goal.wait`) would
+/// therefore have its work killed the moment the script returned, and the run
+/// would report success while its bots were stopped mid-plan. Registering the
+/// handle here makes the run wait for it instead.
+///
+/// Two rules this encodes, decided at the job level rather than per binding:
+///
+/// 1. A job is one `run_lua` call, and it is not finished while work it
+///    started is still running. "The script returned" is not the end of a job.
+/// 2. Outstanding work is awaited, never silently dropped.
+///
+/// The alternative — one runtime hoisted up to the job registry and shared
+/// across runs — is deliberately *not* what this does: it would couple every
+/// script's lifetime to every other's and let a runaway script's tasks outlive
+/// the job that owns them.
+///
+/// A binding reaches the running job's registry through the Lua state's app
+/// data, which [`run_lua`] populates before executing the chunk:
+///
+/// ```ignore
+/// if let Some(pending) = lua.app_data_ref::<PendingWork>() {
+///     pending.register(handle);
+/// }
+/// ```
+#[derive(Default, Clone)]
+pub struct PendingWork(Arc<Mutex<Vec<JoinHandle<()>>>>);
+
+impl PendingWork {
+    /// Registers a spawned task the run must outlive.
+    pub fn register(&self, handle: JoinHandle<()>) {
+        self.0.lock().push(handle);
+    }
+
+    /// Awaits everything registered, returning one message per task that did
+    /// not complete normally.
+    ///
+    /// A panicking task is reported, not propagated: one background task dying
+    /// must not take down the run — and under `panic = "abort"` a re-panic here
+    /// would take down the whole server process.
+    pub async fn drain(&self) -> Vec<String> {
+        let handles: Vec<_> = self.0.lock().drain(..).collect();
+        let mut failures = Vec::new();
+        for handle in handles {
+            if let Err(err) = handle.await {
+                failures.push(format!("background task failed: {err}"));
+            }
+        }
+        failures
+    }
+}
 
 /// `scripts_root` bounds every filesystem operation the script can reach.
 /// `filename` is only used for error messages and for resolving `include`
@@ -55,80 +110,184 @@ pub async fn run_lua(
     let lua_code = lua_code.to_owned();
 
     let plan_world = planner.plan_world.clone();
-    let graph = planner.graph.clone();
     let real_world = planner.real_world.clone();
     let rcon = planner.rcon.clone();
 
     let thread_stdout = stdout.clone();
     let thread_stderr = stderr.clone();
+    // A second handle on the same transcript: `thread_stderr` is moved into
+    // the print bindings, and the drain below reports into stderr too.
+    let failure_stderr = stderr.clone();
+    let failure_sink = sink.clone();
+
+    // The registry bindings register unawaited work into, awaited before the
+    // runtime that owns it is dropped. See [`PendingWork`].
+    let pending = PendingWork::default();
+    #[cfg(test)]
+    let test_pending = pending.clone();
+    #[cfg(test)]
+    let test_root = scripts_root.clone();
 
     // Every fallible step below returns instead of unwrapping: this crate is
     // built with `panic = "abort"`, so a panic anywhere in here is a remote
     // kill of the whole server process, not a failed script.
-    let result = thread::spawn(move || -> Result<Option<serde_json::Value>> {
-        let lua = crate::sandbox::new_sandboxed_lua()
-            .map_err(|err| miette!("failed to create the lua sandbox: {err}"))?;
-        let _code_by_path = code_by_path.clone();
-        let setup = (|| -> LuaResult<()> {
-            let world = create_lua_world(
-                &lua,
-                plan_world.clone(),
-                scripts_root.clone(),
-                script_dir.clone(),
-            )?;
-            let goal = create_lua_goal(
-                &lua,
-                plan_world.clone(),
-                real_world.clone(),
-                rcon.clone(),
-                all_bots.clone(),
-            )?;
-            let plan = create_lua_plan_builder(&lua, graph, plan_world)?;
-            create_lua_globals(
-                &lua,
-                all_bots,
-                scripts_root,
-                script_dir,
-                thread_stdout,
-                thread_stderr,
-                _code_by_path,
-                sink,
-            )?;
+    //
+    // `spawn_blocking`, not `thread::spawn().join()`: the old form ran a
+    // synchronous join inside an `async fn`, parking the calling tokio worker
+    // for the entire duration of the script. With axum's default worker count
+    // a handful of concurrent long scripts starved every other task on the
+    // runtime, `/api/v1/health` included. The blocking pool is where a
+    // long-running synchronous body belongs, and it is not an async context,
+    // so building a `Runtime` inside it below is still permitted.
+    let result = factorio_bot_core::tokio::task::spawn_blocking(
+        move || -> Result<Option<serde_json::Value>> {
+            let lua = crate::sandbox::new_sandboxed_lua()
+                .map_err(|err| miette!("failed to create the lua sandbox: {err}"))?;
+            // The seam bindings opt into. Set before the chunk runs so a binding
+            // called from the very first line can already reach it.
+            lua.set_app_data(pending.clone());
+            let _code_by_path = code_by_path.clone();
+            let setup = (|| -> LuaResult<()> {
+                let world = create_lua_world(
+                    &lua,
+                    plan_world.clone(),
+                    scripts_root.clone(),
+                    script_dir.clone(),
+                )?;
+                let goal = create_lua_goal(
+                    &lua,
+                    plan_world.clone(),
+                    real_world.clone(),
+                    rcon.clone(),
+                    all_bots.clone(),
+                )?;
+                create_lua_globals(
+                    &lua,
+                    all_bots,
+                    scripts_root,
+                    script_dir,
+                    thread_stdout,
+                    thread_stderr,
+                    _code_by_path,
+                    sink,
+                )?;
 
-            let globals = lua.globals();
-            globals.set("world", world)?;
-            globals.set("plan", plan)?;
-            globals.set("goal", goal)?;
-            if let Some(rcon) = rcon.as_ref() {
-                let rcon = create_lua_rcon(&lua, rcon.clone(), real_world.clone())?;
-                globals.set("rcon", rcon)?;
-            }
-            Ok(())
-        })();
-        let to_report = |err: LuaError| {
-            let code_by_path = code_by_path.lock().clone();
-            crate::error::to_lua_error(err, &code_by_path)
-        };
-        setup.map_err(to_report)?;
+                let globals = lua.globals();
+                globals.set("world", world)?;
+                globals.set("goal", goal)?;
+                if let Some(rcon) = rcon.as_ref() {
+                    let rcon = create_lua_rcon(&lua, rcon.clone(), real_world.clone())?;
+                    globals.set("rcon", rcon)?;
+                }
+                #[cfg(test)]
+                install_unawaited_work_probe(&lua, &globals, test_pending, test_root)?;
+                Ok(())
+            })();
+            let to_report = |err: LuaError| {
+                let code_by_path = code_by_path.lock().clone();
+                crate::error::to_lua_error(err, &code_by_path)
+            };
+            setup.map_err(to_report)?;
 
-        let rt: Runtime = Runtime::new().into_diagnostic()?;
-        rt.block_on(async {
-            let chunk = lua.load(&lua_code).set_name(&filename);
-            chunk.exec_async().await.map_err(to_report)?;
-            // `result` is whatever the script assigned, so it can be a value
-            // serde cannot represent (a function, a table with a cycle).
-            // Unwrapping here would let a script abort the process.
-            match lua.globals().get::<LuaValue>("result") {
-                Ok(LuaValue::Nil) | Err(_) => Ok(None),
-                Ok(value) => Ok(Some(lua.from_value(value).map_err(to_report)?)),
-            }
-        })
-    })
-    .join()
-    .map_err(|_| miette!("lua thread panicked"))??;
+            let rt: Runtime = Runtime::new().into_diagnostic()?;
+            rt.block_on(async {
+                let outcome = async {
+                    let chunk = lua.load(&lua_code).set_name(&filename);
+                    chunk.exec_async().await.map_err(to_report)?;
+                    // `result` is whatever the script assigned, so it can be a
+                    // value serde cannot represent (a function, a table with a
+                    // cycle). Unwrapping here would let a script abort the
+                    // process.
+                    match lua.globals().get::<LuaValue>("result") {
+                        Ok(LuaValue::Nil) | Err(_) => Ok(None),
+                        Ok(value) => Ok(Some(lua.from_value(value).map_err(to_report)?)),
+                    }
+                }
+                .await;
+                // Between the chunk finishing and `rt` being dropped is the only
+                // window in which work spawned onto `rt` can still be awaited.
+                // Unconditional, including on the error path: a chunk that raised
+                // halfway through may already have started bots, and abandoning
+                // them is exactly the silent abort this registry exists to stop.
+                for failure in pending.drain().await {
+                    if let Some(sink) = failure_sink.as_ref() {
+                        sink.line(Stream::Stderr, &failure);
+                    }
+                    let mut stderr = failure_stderr.lock();
+                    stderr.push_str("ERROR: ");
+                    stderr.push_str(&failure);
+                    stderr.push('\n');
+                }
+                outcome
+            })
+        },
+    )
+    .await
+    // Same message as the old `thread::spawn(..).join()` mapping, deliberately:
+    // `assert_reported_not_panicked` distinguishes "the script failed" from
+    // "the interpreter thread died" by this exact string, and renaming it would
+    // leave that guard asserting nothing. A `JoinError` here is a panic in the
+    // script host or a cancelled blocking task; both fail this one run rather
+    // than aborting the process.
+    .map_err(|err| {
+        if err.is_cancelled() {
+            miette!("lua task was cancelled")
+        } else {
+            miette!("lua thread panicked")
+        }
+    })??;
     let stdout: String = stdout.lock().to_owned();
     let stderr: String = stderr.lock().to_owned();
     Ok((result, (stdout, stderr)))
+}
+
+/// Registers the probes the drain tests need.
+///
+/// The input class the drain exists for is "work a binding spawned onto the
+/// run's own runtime that the script never awaited". No binding in this
+/// repository produces that yet — `goal.execute` is another session's and will
+/// register into [`PendingWork`] when it lands — so a test cannot reach the
+/// class through the real bindings, and a test that only checked `drain()`
+/// returns would pass against a `run_lua` that never called it. These probes
+/// are the smallest thing that manufactures the class: they spawn onto
+/// whatever runtime is current when the script calls them, which inside
+/// `rt.block_on` is precisely the runtime that is about to be dropped.
+///
+/// `register = false` is the negative control: the same task, not registered,
+/// must be *lost*. Without it a passing positive test would not distinguish
+/// "the drain waited" from "the task happened to finish first".
+#[cfg(test)]
+fn install_unawaited_work_probe(
+    lua: &Lua,
+    globals: &LuaTable,
+    pending: PendingWork,
+    root: std::path::PathBuf,
+) -> LuaResult<()> {
+    let spawn_pending = pending.clone();
+    let spawn = lua.create_function(move |_, (marker, register): (String, bool)| {
+        let path = root.join(marker);
+        let handle = factorio_bot_core::tokio::spawn(async move {
+            factorio_bot_core::tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            // Not `.expect`: a panic here would be reported as a drained
+            // failure and confuse the test it is meant to serve.
+            let _ = std::fs::write(path, "finished");
+        });
+        if register {
+            spawn_pending.register(handle);
+        }
+        Ok(())
+    })?;
+    globals.set("__spawn_unawaited_work", spawn)?;
+
+    let panic_pending = pending;
+    let spawn_panicking = lua.create_function(move |_, ()| {
+        panic_pending.register(factorio_bot_core::tokio::spawn(async {
+            panic!("background boom");
+        }));
+        Ok(())
+    })?;
+    globals.set("__spawn_panicking_work", spawn_panicking)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -138,7 +297,6 @@ mod tests {
     use factorio_bot_core::test_utils::fixture_world;
     use factorio_bot_scripting::Stream;
     use std::sync::Arc;
-    use tokio::fs;
 
     use super::*;
 
@@ -752,10 +910,218 @@ mod tests {
         assert_eq!(stderr, "ERROR: bad\n", "stderr transcript");
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_long_script_does_not_block_other_tasks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let world = Arc::new(fixture_world());
+        let mut planner = Planner::new(world, None);
+
+        // A pure-Lua busy loop: long enough to be unmistakable, no sleeping, so
+        // it genuinely occupies whatever thread it runs on.
+        let code = "local n = 0 for i = 1, 40000000 do n = n + i end result = n";
+
+        let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ticker = {
+            let ticks = ticks.clone();
+            tokio::spawn(async move {
+                for _ in 0..20 {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            })
+        };
+
+        run_lua(&mut planner, code, None, &root, 1, None)
+            .await
+            .expect("run_lua failed");
+        ticker.await.expect("ticker panicked");
+        assert!(
+            ticks.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "the runtime made no progress on other tasks while the script ran"
+        );
+    }
+
+    /// The variant that actually fails against `thread::spawn(..).join()`.
+    ///
+    /// Three things have to be true for a test to reproduce the production
+    /// failure, and the test above has none of them:
+    ///
+    /// * The script has to run *on a worker*. A `#[tokio::test]` body is driven
+    ///   by `block_on` on the calling thread, which is not one of the
+    ///   `worker_threads`, so blocking it starves nothing. `run_lua` has to be
+    ///   `spawn`ed, the way axum spawns a request handler.
+    /// * Every worker has to be occupied. With two workers the blocked one
+    ///   leaves a second free and the ticker still runs -- verified: the test
+    ///   above passes against `thread::spawn(..).join()`.
+    /// * The progress has to be counted *during* the script, not after it.
+    ///   Reading a counter once `run_lua` has returned is a race the defect
+    ///   wins: the worker is free again by then and drains the ticker's expired
+    ///   timers before the main thread is even woken -- which is why the
+    ///   obvious `assert!(ticks > 0)` after the await passes either way.
+    ///
+    /// Hence the flag: the ticker only counts while the script task says it is
+    /// inside `run_lua`, and the task clears the flag with no `.await` between,
+    /// so the ticker cannot see a stale `true`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_long_script_leaves_the_worker_free_while_it_runs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
+
+        let running = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ticker = {
+            let ticks = ticks.clone();
+            let running = running.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    if running.load(std::sync::atomic::Ordering::SeqCst) {
+                        ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+            })
+        };
+        // Let the ticker reach its first `sleep` on the worker before the
+        // script task is queued behind it.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let script = {
+            let running = running.clone();
+            tokio::spawn(async move {
+                let world = Arc::new(fixture_world());
+                let mut planner = Planner::new(world, None);
+                let code = "local n = 0 for i = 1, 40000000 do n = n + i end result = n";
+                running.store(true, std::sync::atomic::Ordering::SeqCst);
+                let outcome = run_lua(&mut planner, code, None, &root, 1, None).await;
+                running.store(false, std::sync::atomic::Ordering::SeqCst);
+                outcome.expect("run_lua failed");
+            })
+        };
+
+        script.await.expect("script task panicked");
+        ticker.abort();
+        assert!(
+            ticks.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "the only worker stayed inside the script for its whole duration, \
+             so nothing else on the runtime ran"
+        );
+    }
+
+    /// The rule this guards: a job is one `run_lua` call, and it is not
+    /// finished while work it started is still running. The script starts work
+    /// and returns immediately without waiting for it; `run_lua` must not
+    /// return until that work is done.
+    #[tokio::test]
+    async fn work_a_binding_registered_finishes_before_the_run_returns() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let world = Arc::new(fixture_world());
+        let mut planner = Planner::new(world, None);
+
+        run_lua(
+            &mut planner,
+            r#"__spawn_unawaited_work("registered.txt", true)"#,
+            None,
+            &root,
+            1,
+            None,
+        )
+        .await
+        .expect("run_lua failed");
+
+        // Asserting on the task's *effect*, not on `drain` returning: the
+        // question is whether the work ran to completion, and a `drain` that
+        // dropped its handles would still return.
+        assert_eq!(
+            std::fs::read_to_string(root.join("registered.txt"))
+                .expect("registered work did not finish before run_lua returned"),
+            "finished"
+        );
+    }
+
+    /// The negative control for the test above, and the reason the registry
+    /// exists at all: unregistered work spawned onto the run's runtime is
+    /// aborted when that runtime is dropped -- silently, with no error on the
+    /// run. If this ever passes with the marker present, the positive test
+    /// above stopped proving anything, because the task would be finishing on
+    /// its own rather than because the drain waited for it.
+    #[tokio::test]
+    async fn work_a_binding_did_not_register_is_lost_when_the_run_ends() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let world = Arc::new(fixture_world());
+        let mut planner = Planner::new(world, None);
+
+        let (_result, (_stdout, stderr)) = run_lua(
+            &mut planner,
+            r#"__spawn_unawaited_work("unregistered.txt", false)"#,
+            None,
+            &root,
+            1,
+            None,
+        )
+        .await
+        .expect("run_lua failed");
+
+        assert!(
+            !root.join("unregistered.txt").exists(),
+            "unregistered work survived the run, so the positive test proves nothing"
+        );
+        assert_eq!(stderr, "", "the abort really is silent");
+    }
+
+    /// A background task that panics must fail its own run's transcript, not
+    /// the run and not the process: under `panic = "abort"` a re-panic on the
+    /// draining thread is a remote kill of the server.
+    #[tokio::test]
+    async fn a_background_task_that_panics_is_reported_and_does_not_fail_the_run() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let world = Arc::new(fixture_world());
+        let mut planner = Planner::new(world, None);
+        let sink = Arc::new(RecordingSink::default());
+
+        let (_result, (_stdout, stderr)) = run_lua(
+            &mut planner,
+            "__spawn_panicking_work()",
+            None,
+            &root,
+            1,
+            Some(sink.clone()),
+        )
+        .await
+        .expect("a panicking background task must not fail the run");
+
+        assert!(
+            stderr.contains("background task failed"),
+            "the failure was swallowed instead of reported: {stderr:?}"
+        );
+        // The SSE consumer reads the sink, not the transcript, so a failure
+        // that reached only one of the two would be invisible live.
+        assert!(
+            sink.lines
+                .lock()
+                .iter()
+                .any(|(stream, text)| *stream == Stream::Stderr
+                    && text.contains("background task failed")),
+            "the failure never reached the sink"
+        );
+    }
+
+    /// The fixture script builds a starter iron plan and asserts on the
+    /// planner's own output; running it here is what proves the whole Lua
+    /// surface it touches -- `world.*`, `include`, `goal.have`,
+    /// `goal.schedule`, `goal.graphviz`, `goal.gantt` -- still composes.
+    ///
+    /// It used to write the transcript to `tests/stdout-N.txt` and assert
+    /// nothing at all, so a script that silently stopped halfway still passed.
+    /// The transcript is asserted instead: `end script` is the last line
+    /// `main()` prints, and it is only reached after every `assert` inside the
+    /// script has held.
     #[tokio::test]
     async fn test_script() {
         let world = Arc::new(fixture_world());
-        // draw_world(world.clone(), "tests/world_start.png");
 
         let tests_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests")
@@ -780,30 +1146,41 @@ mod tests {
             .await
             .expect("run_lua failed");
 
-            fs::write(
-                format!(
-                    "{}/tests/stdout-{}.txt",
-                    env!("CARGO_MANIFEST_DIR"),
-                    bot_count
-                ),
-                stdout,
-            )
-            .await
-            .expect("failed to write");
-
-            if !stderr.is_empty() {
-                fs::write(
-                    format!(
-                        "{}/tests/stderr-{}.txt",
-                        env!("CARGO_MANIFEST_DIR"),
-                        bot_count
-                    ),
-                    stderr,
-                )
-                .await
-                .expect("failed to write");
-            }
+            assert!(
+                stdout.contains(&format!("start script for {bot_count} bots")),
+                "the script must see the roster it was started with; stdout was:\n{stdout}"
+            );
+            assert!(
+                stdout.contains("end script"),
+                "the script must run to completion for {bot_count} bot(s); stdout was:\n{stdout}"
+            );
+            assert!(
+                stderr.is_empty(),
+                "the fixture script must not report errors; stderr was:\n{stderr}"
+            );
         }
+    }
+
+    /// `world.draw` was exercised only by the fixture writing
+    /// `world_start.png` and `world_end-N.png` into `tests/` -- files nothing
+    /// read or compared, which regenerated differently on every run and so read
+    /// as snapshot tests without being any. Drawing into a temp root and
+    /// checking a real PNG came out is the same coverage with an oracle: a
+    /// binding that wrote nothing, or wrote something that is not an image,
+    /// fails here instead of silently updating a tracked file.
+    #[tokio::test]
+    async fn world_draw_writes_a_png() {
+        let (dir, result) = sandboxed(r#"world.draw("drawn.png")"#).await;
+        result.expect("world.draw failed");
+
+        let drawn = std::fs::read(dir.path().join("drawn.png")).expect("world.draw wrote no file");
+        assert_eq!(
+            &drawn[..8],
+            b"\x89PNG\r\n\x1a\n",
+            "world.draw must write a PNG; got {} bytes starting {:?}",
+            drawn.len(),
+            &drawn[..8.min(drawn.len())]
+        );
     }
 
     // The fixture's iron-ore field (see `add_to_rect` in `test_utils.rs`) spans

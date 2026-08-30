@@ -110,10 +110,13 @@ struct Rejected {
 /// them together, so without this they land on different bots and the action
 /// consuming both has no feasible bot at all. A chain being opened prefers a
 /// bot not already carrying one, so independent chains spread rather than pile
-/// up on a bot that is merely nearby.
+/// up on a bot that is merely nearby — a *preference*, offered as a first tier
+/// and abandoned for the rest of the roster when no bot in it can feasibly run
+/// the action.
 ///
-/// Binding only ever *narrows the candidate set*: how a candidate is ranked and
-/// judged feasible is unchanged. Actions belonging to no chain stay
+/// Binding only ever *reorders and narrows the candidate set*: how a candidate
+/// is ranked and judged feasible is unchanged, and no preference can leave an
+/// action with no candidate at all. Actions belonging to no chain stay
 /// individually assignable and take exactly the path they took before chains
 /// existed.
 pub fn schedule(
@@ -161,7 +164,13 @@ pub fn schedule(
             let chain = net.chain_of(action.id);
             let bound = chain.and_then(|c| chain_binding.get(&c).copied());
 
-            let candidate_bots: Vec<BotId> = match action.pinned {
+            // Candidate bots in preference tiers, tried in order. A later tier
+            // is reached only when no bot in an earlier one can *feasibly* run
+            // the action, so a preference can cost time but can never cost a
+            // plan: ranking-then-checking is what the spec forbids, and a
+            // preference with no fallback is that same mistake wearing a
+            // narrower candidate set.
+            let candidate_tiers: Vec<Vec<BotId>> = match action.pinned {
                 Some(pinned) if !bots.contains(&pinned) => {
                     return Err(PlannerError::UnknownBot(pinned))
                 }
@@ -183,10 +192,14 @@ pub fn schedule(
                             });
                         }
                     }
-                    vec![pinned]
+                    // A pin is an instruction, not a preference: there is no
+                    // second tier to fall back to.
+                    vec![vec![pinned]]
                 }
-                // An action already in a running chain follows it.
-                None if bound.is_some() => vec![bound.expect("just checked")],
+                // An action already in a running chain follows it. Also not a
+                // preference — the items are in that bot's inventory and
+                // nowhere else.
+                None if bound.is_some() => vec![vec![bound.expect("just checked")]],
                 // A chain being *opened* prefers a bot that is not already
                 // carrying a different chain, so independent chains spread
                 // instead of piling onto whichever bot happens to be cheapest.
@@ -203,70 +216,85 @@ pub fn schedule(
                 // where a nearer busy one would have finished sooner. Failing
                 // to schedule at all is worse than scheduling slowly.
                 //
-                // Falls back to the full roster once every bot carries a chain.
-                // An action in no chain at all is unaffected — it has nothing to
-                // keep together, so it keeps the whole roster and the old path.
+                // Bots already carrying a chain are the *second* tier, not
+                // excluded: the opening action may need something only one of
+                // them holds, and offering it nobody is how a preference turns
+                // into a failed plan. An action in no chain at all is
+                // unaffected — it has nothing to keep together, so it keeps the
+                // whole roster in one tier and the path it took before chains
+                // existed.
                 None if chain.is_some() => {
                     let busy: BTreeSet<BotId> = chain_binding.values().copied().collect();
-                    let free: Vec<BotId> =
-                        bots.iter().copied().filter(|b| !busy.contains(b)).collect();
-                    if free.is_empty() {
-                        bots.to_vec()
-                    } else {
-                        free
-                    }
+                    let (carrying, free): (Vec<BotId>, Vec<BotId>) =
+                        bots.iter().copied().partition(|b| busy.contains(b));
+                    [free, carrying]
+                        .into_iter()
+                        .filter(|tier| !tier.is_empty())
+                        .collect()
                 }
-                None => bots.to_vec(),
+                None => vec![bots.to_vec()],
             };
 
-            for bot in candidate_bots {
-                let from = &sim.bot(bot).ok_or(PlannerError::UnknownBot(bot))?.position;
-                let travel = match action.required_position() {
-                    Some((ref pos, radius)) => travel_ticks(from, pos, radius),
-                    None => 0,
-                };
-                let walk_start = free_at[&bot];
-                let act_start = (walk_start + travel).max(deps_ready);
-                let end = act_start + action.duration;
-                let candidate = Candidate {
-                    action: action.id,
-                    bot,
-                    walk_start,
-                    travel,
-                    act_start,
-                    end,
-                };
-
-                // Feasibility is part of selection, not a check on the winner:
-                // a pair whose preconditions cannot hold is never offered, so
-                // another bot can take the action. A positional precondition is
-                // satisfied by the walk this very pair would emit, so it is
-                // tested against a fork with the bot already moved. Forking is
-                // an overlay clone — cheap enough to do per candidate, which is
-                // what the shared `Arc` base is for.
-                let mut trial = sim.fork();
-                if travel > 0 {
-                    if let Some((pos, _)) = action.required_position() {
-                        trial.set_position(bot, pos);
-                    }
+            // Feasibility is judged per action and per tier: another action
+            // finding a bot in tier one says nothing about this one.
+            let mut feasible_in_an_earlier_tier = false;
+            for tier in &candidate_tiers {
+                if feasible_in_an_earlier_tier {
+                    break;
                 }
-                let failing = action.pre.iter().find(|c| !c.holds(&trial, bot));
+                for bot in tier.iter().copied() {
+                    let from = &sim.bot(bot).ok_or(PlannerError::UnknownBot(bot))?.position;
+                    let travel = match action.required_position() {
+                        Some((ref pos, radius)) => travel_ticks(from, pos, radius),
+                        None => 0,
+                    };
+                    let walk_start = free_at[&bot];
+                    let act_start = (walk_start + travel).max(deps_ready);
+                    let end = act_start + action.duration;
+                    let candidate = Candidate {
+                        action: action.id,
+                        bot,
+                        walk_start,
+                        travel,
+                        act_start,
+                        end,
+                    };
 
-                match failing {
-                    None => {
-                        if best.as_ref().is_none_or(|b| candidate.key() < b.key()) {
-                            best = Some(candidate);
+                    // Feasibility is part of selection, not a check on the winner:
+                    // a pair whose preconditions cannot hold is never offered, so
+                    // another bot can take the action. A positional precondition is
+                    // satisfied by the walk this very pair would emit, so it is
+                    // tested against a fork with the bot already moved. Forking is
+                    // an overlay clone — cheap enough to do per candidate, which is
+                    // what the shared `Arc` base is for.
+                    let mut trial = sim.fork();
+                    if travel > 0 {
+                        if let Some((pos, _)) = action.required_position() {
+                            trial.set_position(bot, pos);
                         }
                     }
-                    Some(condition) => {
-                        if best_rejected
-                            .as_ref()
-                            .is_none_or(|r| candidate.key() < r.candidate.key())
-                        {
-                            best_rejected = Some(Rejected {
-                                condition: condition.to_string(),
-                                candidate,
-                            });
+                    let failing = action.pre.iter().find(|c| !c.holds(&trial, bot));
+
+                    match failing {
+                        None => {
+                            // This tier can run the action, so no later tier is
+                            // consulted for it — that is what makes the
+                            // preference a preference and not a restriction.
+                            feasible_in_an_earlier_tier = true;
+                            if best.as_ref().is_none_or(|b| candidate.key() < b.key()) {
+                                best = Some(candidate);
+                            }
+                        }
+                        Some(condition) => {
+                            if best_rejected
+                                .as_ref()
+                                .is_none_or(|r| candidate.key() < r.candidate.key())
+                            {
+                                best_rejected = Some(Rejected {
+                                    condition: condition.to_string(),
+                                    candidate,
+                                });
+                            }
                         }
                     }
                 }
@@ -716,6 +744,49 @@ mod tests {
         // chainless version of this network is `travel_cost_can_outweigh_an_idle_bot`,
         // which still asserts 1200 — the preference applies only to chains.
         assert_eq!(result.makespan, 1914);
+    }
+
+    #[test]
+    fn a_new_chain_takes_a_carrying_bot_when_no_free_bot_can_run_it() {
+        use crate::ids::ChainIdGen;
+        // The preference must stay a preference. Bot 2 is free of chains and
+        // idle at the same tile, so it wins the spread outright — but it does
+        // not hold the furnace the second chain's opening action consumes.
+        // Narrowing to the unbound bots and stopping there offers that action
+        // nobody, and the whole plan fails on a precondition that bot 1 meets.
+        let bots = [BotId(1), BotId(2)];
+        let mut s = state(&bots);
+        s.gain(BotId(1), "stone-furnace", 1);
+
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let first = net.add(free(&mut gen, "opens chain A", 10));
+        let mut needs_furnace = free(&mut gen, "opens chain B", 10);
+        needs_furnace.pre = vec![Condition::HasItem {
+            who: Actor::Role,
+            item: "stone-furnace".into(),
+            count: 1,
+        }];
+        needs_furnace.eff = vec![Effect::LoseItem {
+            who: Actor::Role,
+            item: "stone-furnace".into(),
+            count: 1,
+        }];
+        let second = net.add(needs_furnace);
+
+        let mut chains = ChainIdGen::new();
+        net.set_chain(first, chains.next());
+        net.set_chain(second, chains.next());
+
+        let result = schedule(&net, &s, &bots).expect("bot 1 can run both chains");
+        assert_eq!(result.assignment(first), Some(BotId(1)));
+        assert_eq!(
+            result.assignment(second),
+            Some(BotId(1)),
+            "the second chain falls back to the bot that holds the furnace"
+        );
+        // Bot 1 runs both, one after the other, at the origin.
+        assert_eq!(result.makespan, 20);
     }
 
     #[test]

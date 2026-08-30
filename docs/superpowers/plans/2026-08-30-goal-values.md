@@ -749,17 +749,38 @@ git commit -m "feat(lua): runs and observations as values"
 ```rust
 #[test]
 fn the_goal_table_offers_exactly_the_new_surface() {
-    let lua = /* full goal table installed */;
+    let lua = lua_with_world(&[1, 2]);
     lua.load(r#"
-        for _, name in ipairs{"have","researched","all","plan","run","start"} do
-            assert(type(goal[name]) == "function", name .. " must exist")
+        -- Compare the SET of callables, not a list of names. A test that only
+        -- checks "these exist and those are gone" is a hand mirror of the
+        -- surface: it stays green when a seventh function appears, which is
+        -- exactly the drift it is supposed to catch.
+        local expected = { have=true, researched=true, all=true,
+                           plan=true, run=true, start=true }
+        local actual = {}
+        for k, v in pairs(goal) do
+            -- the two __doc__ keys are strings consumed by the doc generator
+            if type(v) == "function" then actual[k] = true end
         end
+        for name in pairs(expected) do
+            assert(actual[name], "missing from the goal table: " .. name)
+        end
+        for name in pairs(actual) do
+            assert(expected[name], "unexpected function on the goal table: " .. name)
+        end
+        -- Named explicitly as well, so the failure message says *which* old
+        -- name survived rather than only that the set differs.
         for _, gone in ipairs{"schedule","graphviz","gantt","execute","progress","wait"} do
             assert(goal[gone] == nil, gone .. " must be gone, not merely deprecated")
         end
     "#).exec().expect("script");
 }
 ```
+
+Note the shape of that assertion: it fails in **both** directions. A missing function
+fails, and so does an extra one. A test that only iterates an expected list can be
+satisfied by editing the list, which makes it a mirror of the code rather than a check
+on it.
 
 - [ ] **Step 2: Run to verify failure**
 

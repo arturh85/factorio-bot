@@ -108,9 +108,14 @@ struct Rejected {
 /// inventory, and a branching chain — two ingredients that each need producing
 /// — has two roots whose first actions carry no `HasItem` precondition to hold
 /// them together, so without this they land on different bots and the action
-/// consuming both has no feasible bot at all. Binding only ever *narrows the
-/// candidate set*: how a candidate is ranked and judged feasible is unchanged.
-/// Actions belonging to no chain stay individually assignable.
+/// consuming both has no feasible bot at all. A chain being opened prefers a
+/// bot not already carrying one, so independent chains spread rather than pile
+/// up on a bot that is merely nearby.
+///
+/// Binding only ever *narrows the candidate set*: how a candidate is ranked and
+/// judged feasible is unchanged. Actions belonging to no chain stay
+/// individually assignable and take exactly the path they took before chains
+/// existed.
 pub fn schedule(
     net: &ActionNetwork,
     state: &PlanState,
@@ -152,10 +157,9 @@ pub fn schedule(
                 .max()
                 .unwrap_or(0);
 
-            // The bot this action's chain is already running on, if any.
-            let bound = net
-                .chain_of(action.id)
-                .and_then(|chain| chain_binding.get(&chain).copied());
+            // The chain this action belongs to, and the bot already running it.
+            let chain = net.chain_of(action.id);
+            let bound = chain.and_then(|c| chain_binding.get(&c).copied());
 
             let candidate_bots: Vec<BotId> = match action.pinned {
                 Some(pinned) if !bots.contains(&pinned) => {
@@ -169,24 +173,50 @@ pub fn schedule(
                 // is reported here, where its cause is still visible. Nothing
                 // sets `pinned` today, so this is defensive.
                 Some(pinned) => {
-                    if let Some(bound) = bound {
+                    if let (Some(chain), Some(bound)) = (chain, bound) {
                         if bound != pinned {
-                            return Err(PlannerError::PreconditionUnsatisfied {
+                            return Err(PlannerError::ChainConflict {
+                                chain,
                                 action: action.id,
-                                bot: pinned,
-                                condition: format!(
-                                    "pinned to {}, but its chain is already bound to {}",
-                                    pinned, bound
-                                ),
+                                bound_to: bound,
+                                pinned_to: pinned,
                             });
                         }
                     }
                     vec![pinned]
                 }
-                None => match bound {
-                    Some(bound) => vec![bound],
-                    None => bots.to_vec(),
-                },
+                // An action already in a running chain follows it.
+                None if bound.is_some() => vec![bound.expect("just checked")],
+                // A chain being *opened* prefers a bot that is not already
+                // carrying a different chain, so independent chains spread
+                // instead of piling onto whichever bot happens to be cheapest.
+                // Chains never outnumber bots today, but nothing makes
+                // `chain_binding` injective on its own: `free_at` is the only
+                // thing pushing the next chain elsewhere, and a bot parked far
+                // away can be dearer than a near one running work already —
+                // exactly what `travel_cost_can_outweigh_an_idle_bot` asserts.
+                // Two smelting chains on one bot then want four furnaces from a
+                // stock of two, and since binding leaves that action a single
+                // candidate there is no recovery from it.
+                //
+                // This can cost time: a chain may open on a distant idle bot
+                // where a nearer busy one would have finished sooner. Failing
+                // to schedule at all is worse than scheduling slowly.
+                //
+                // Falls back to the full roster once every bot carries a chain.
+                // An action in no chain at all is unaffected — it has nothing to
+                // keep together, so it keeps the whole roster and the old path.
+                None if chain.is_some() => {
+                    let busy: BTreeSet<BotId> = chain_binding.values().copied().collect();
+                    let free: Vec<BotId> =
+                        bots.iter().copied().filter(|b| !busy.contains(b)).collect();
+                    if free.is_empty() {
+                        bots.to_vec()
+                    } else {
+                        free
+                    }
+                }
+                None => bots.to_vec(),
             };
 
             for bot in candidate_bots {
@@ -648,6 +678,85 @@ mod tests {
             .expect("the iron producer is scheduled");
         assert_eq!(result.assignment(c), Some(bot), "both roots on one bot");
         assert_eq!(result.assignment(pack), Some(bot), "and the consumer too");
+    }
+
+    #[test]
+    fn a_new_chain_prefers_a_bot_that_is_not_carrying_one() {
+        use crate::ids::ChainIdGen;
+        // The shape of `travel_cost_can_outweigh_an_idle_bot`: bot 2 is parked
+        // 200 tiles from the work, so greedy hands *both* actions to bot 1
+        // (1200 beats 1914). Make them the roots of two different chains and
+        // that piles two chains onto one bot — which for two smelting chains
+        // means four furnaces from a stock of two, with no recovery, because
+        // binding leaves each later action a single candidate.
+        let bots = [BotId(1), BotId(2)];
+        let mut s = PlanState::from_world(Arc::new(fixture_world()), &bots);
+        s.set_position(BotId(1), Position::new(0., 0.));
+        s.set_position(BotId(2), Position::new(200., 0.));
+
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let first = net.add(at_for(&mut gen, "first", Position::new(0., 0.), 3.0, 600));
+        let second = net.add(at_for(&mut gen, "second", Position::new(0., 0.), 3.0, 600));
+
+        let mut chains = ChainIdGen::new();
+        net.set_chain(first, chains.next());
+        net.set_chain(second, chains.next());
+
+        let result = schedule(&net, &s, &bots).unwrap();
+
+        assert_eq!(result.assignment(first), Some(BotId(1)));
+        assert_eq!(
+            result.assignment(second),
+            Some(BotId(2)),
+            "the second chain must open on the bot carrying none, dear though it is"
+        );
+        // The price of that: bot 2 walks 197 tiles (1314 ticks) and finishes at
+        // 1914, where piling both onto bot 1 would have finished at 1200. The
+        // chainless version of this network is `travel_cost_can_outweigh_an_idle_bot`,
+        // which still asserts 1200 — the preference applies only to chains.
+        assert_eq!(result.makespan, 1914);
+    }
+
+    #[test]
+    fn a_chain_bound_elsewhere_refuses_a_contradicting_pin() {
+        use crate::ids::ChainIdGen;
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let first = net.add(free(&mut gen, "opens the chain", 10));
+        let mut pinned = free(&mut gen, "pinned elsewhere", 10);
+        pinned.pinned = Some(BotId(2));
+        let second = net.add(pinned);
+        net.link(first, second, 0);
+
+        let mut chains = ChainIdGen::new();
+        let chain = chains.next();
+        net.set_chain(first, chain);
+        net.set_chain(second, chain);
+
+        let bots = [BotId(1), BotId(2)];
+        // The chain opens on bot 1 (ties break on the lower id), so the pin to
+        // bot 2 contradicts it. That is a contradiction in the plan, not a
+        // surprise about the world, so it must not arrive as a
+        // `PreconditionUnsatisfied` — re-planning from observed state would
+        // meet the very same conflict again, forever.
+        match schedule(&net, &state(&bots), &bots) {
+            Err(PlannerError::ChainConflict {
+                chain: c,
+                action,
+                bound_to,
+                pinned_to,
+            }) => {
+                assert_eq!(c, chain);
+                assert_eq!(action, second);
+                assert_eq!(bound_to, BotId(1));
+                assert_eq!(pinned_to, BotId(2));
+            }
+            other => panic!(
+                "expected a ChainConflict, got {:?}",
+                other.map(|s| s.makespan)
+            ),
+        }
     }
 
     #[test]

@@ -123,9 +123,13 @@ pub async fn start_with_state(
     let mut fired_rx_for_axum = fired_rx;
     // No `JoinHandle` is kept: if `shutdown` never resolves (e.g. `start()`'s
     // `std::future::pending()`), this task simply lives for the remainder of
-    // the process — harmless, since it holds nothing but the `shutdown`
-    // future and a `watch::Sender`, both dropped together with the runtime
-    // on exit.
+    // the process. It captures the `shutdown` future, a `watch::Sender`, and
+    // a strong `Arc<JobRegistry>` — the last is the only one worth a second
+    // look, and it is harmless for the same reason as the others: the
+    // registry lives in `AppState`, which the router holds for exactly as
+    // long as this task can run, so this reference keeps nothing alive that
+    // was going to die first, and all three are dropped together with the
+    // runtime on exit.
     tokio::spawn(async move {
         shutdown.await;
         // Before the drain, not after: an SSE stream must already be ending

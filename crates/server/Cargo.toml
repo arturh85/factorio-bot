@@ -47,3 +47,9 @@ lua = ["dep:factorio-bot-scripting-lua", "dep:tokio-stream", "dep:futures-util"]
 
 [dev-dependencies]
 tempfile = "3"
+# `test-util` only, and only here: it is what `#[tokio::test(start_paused =
+# true)]` needs, and the keep-alive test uses a paused clock rather than
+# sleeping fifteen real seconds. Not added to the main `tokio` dependency --
+# `test-util` in a production build would let a stray `tokio::time::pause()`
+# stop the clock for the whole server.
+tokio = { version = "1", features = ["test-util"] }

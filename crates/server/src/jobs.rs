@@ -217,23 +217,18 @@ impl JobRegistry {
         })
     }
 
-    /// Watches a *running* job. `None` means the job is not running — either it
-    /// never existed or it has already finished; callers distinguish the two
-    /// with [`JobRegistry::get`].
-    pub fn subscribe(&self, id: JobId) -> Option<broadcast::Receiver<JobEvent>> {
-        self.lock()
-            .channels
-            .get(&id)
-            .map(broadcast::Sender::subscribe)
-    }
-
-    /// Snapshots a job *and* subscribes to it under one lock.
+    /// Snapshots a job *and* subscribes to it under one lock. The only way to
+    /// watch a job.
     ///
-    /// `None` means no such job -- and only that, which is the difference
-    /// from [`JobRegistry::subscribe`], whose `None` conflates "unknown" with
-    /// "already finished". The inner `Option` is the subscription: `Some` for
-    /// a running job, `None` for a finished one, whose channel was pruned by
-    /// [`JobRegistry::complete`].
+    /// `None` means no such job -- and *only* that, which is the whole point.
+    /// A bare `subscribe` returning the channel or nothing existed here until
+    /// this replaced it, and its `None` conflated "unknown" with "already
+    /// finished": the channel is pruned on completion, so an SSE handler that
+    /// read that `None` as a 404 answered 404 for every job that finished
+    /// before the client attached -- which is most of them, a fast script
+    /// being over long before a browser can open a stream. The inner `Option`
+    /// is the subscription: `Some` for a running job, `None` for a finished
+    /// one, whose channel [`JobRegistry::complete`] removed.
     ///
     /// One lock, not `get` followed by `subscribe`, because the two orderings
     /// are both wrong: `get` then `subscribe` loses a line recorded in
@@ -524,7 +519,8 @@ mod tests {
     fn subscribers_see_output_lines_and_the_terminal_event() {
         let registry = JobRegistry::new(8);
         let handle = registry.try_start(Some("a.lua".into())).expect("start");
-        let mut rx = registry.subscribe(handle.id()).expect("subscribed");
+        let (_job, rx) = registry.attach(handle.id()).expect("the job exists");
+        let mut rx = rx.expect("a running job has a live channel");
         handle.line(Stream::Stdout, "first");
         handle.finish(Ok(("first".into(), String::new())));
 
@@ -564,8 +560,9 @@ mod tests {
         );
     }
 
-    /// The two reasons [`JobRegistry::subscribe`] answers `None` -- and why
-    /// the SSE handler uses `attach` instead: only one of them is a 404.
+    /// The two conditions a bare `subscribe` would have conflated into one
+    /// `None`, kept apart: of "the job finished" and "there is no such job",
+    /// only the second is a 404.
     #[test]
     fn attaching_separates_a_finished_job_from_an_unknown_one() {
         let registry = JobRegistry::new(8);

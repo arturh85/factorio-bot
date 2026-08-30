@@ -450,9 +450,9 @@ fn job_event_stream(
 /// output is replayed first, and a job that already finished gets that
 /// backlog, a `finished` event and end-of-stream. That case is the common one
 /// -- a fast script is over before a browser can open the stream -- and it is
-/// why the handler distinguishes "no such job" from "the job's channel was
-/// pruned when it completed" via [`crate::jobs::JobRegistry::attach`]. Reading
-/// a missing subscription as `404` would fail almost every real request.
+/// why the handler goes through [`crate::jobs::JobRegistry::attach`], whose
+/// `None` means "no such job" and nothing else. Reading a missing
+/// *subscription* as `404` would fail almost every real request.
 #[utoipa::path(
     get,
     path = "/api/v1/jobs/{id}/events",

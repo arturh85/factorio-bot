@@ -517,8 +517,51 @@ async fn the_event_stream_replays_a_finished_job_and_ends() {
         .await
         .expect("the stream must end once the job has finished");
     assert!(body.contains("event: output"), "body was {body:?}");
-    assert!(body.contains("hello"), "body was {body:?}");
     assert!(body.contains("event: finished"), "body was {body:?}");
+    // The exact `data:` payload, not a substring of it. Every other SSE
+    // assertion in this file is a substring check, and a substring check
+    // survives the payload being re-shaped around the text it looks for:
+    // dropping `#[serde(untagged)]` from `WireEvent` emits
+    // `data: {"output":{"stream":..,"text":..}}` and still contains "hello",
+    // so the whole suite stays green while
+    // `addEventListener("output", e => JSON.parse(e.data).text)` reads
+    // `undefined` on every line and the output pane goes blank.
+    assert!(
+        body.contains(r#"data: {"stream":"stdout","text":"hello"}"#),
+        "the `data:` payload must be the event's own fields, unwrapped; body was {body:?}"
+    );
+}
+
+/// stderr, which nothing else in this file mentions.
+///
+/// `stream_name` has two arms and `backlog` chains two buffers, and until this
+/// existed both halves of that were free: inverting `stream_name` to answer
+/// `"stdout"` for `Stream::Stderr`, or dropping `backlog`'s second `chain`
+/// entirely, left the suite green. What that costs is specific -- a script
+/// that fails writes its diagnostic to stderr, so a late subscriber (the case
+/// this endpoint exists for) would see `failed` with no error text at all, and
+/// CI would agree that was fine.
+#[tokio::test]
+async fn the_event_stream_labels_stderr_as_its_own_stream() {
+    let (_dir, state) = test_state();
+    let handle = state.jobs.try_start(Some("bad.lua".into())).expect("start");
+    let id = handle.id();
+    handle.line(Stream::Stdout, "starting up");
+    handle.line(Stream::Stderr, "something went wrong");
+    handle.finish(Ok(("starting up".into(), "something went wrong".into())));
+
+    let response = get(&state, &format!("/api/v1/jobs/{id}/events")).await;
+    let body = tokio::time::timeout(Duration::from_secs(5), collect_body(response))
+        .await
+        .expect("the stream must end once the job has finished");
+    assert!(
+        body.contains(r#"data: {"stream":"stderr","text":"something went wrong"}"#),
+        "a diagnostic written to stderr must reach the stream labelled as stderr; body was {body:?}"
+    );
+    assert!(
+        body.contains(r#"data: {"stream":"stdout","text":"starting up"}"#),
+        "and stdout must not be mislabelled on the way; body was {body:?}"
+    );
 }
 
 #[tokio::test]
@@ -604,4 +647,47 @@ async fn the_event_stream_of_an_unknown_job_is_not_found() {
     // answers `404` with `code: 404`, so without this the test would pass
     // just as well against a build where the route was never registered.
     assert_eq!(body_json(response).await["code"], 4);
+}
+
+/// The keep-alive, which is otherwise free to delete.
+///
+/// Its consequence -- a proxy dropping a connection that has been idle through
+/// a long silent script -- is not reproducible in-process, but the thing that
+/// prevents it is: axum emits a comment frame on an idle stream, and without
+/// `.keep_alive(..)` an idle stream emits nothing at all, ever.
+///
+/// `start_paused` is what makes that a test rather than a fifteen-second
+/// sleep: with no other work to do, tokio's clock jumps straight to the next
+/// pending timer, so the await below returns immediately in real time. Delete
+/// the keep-alive and the only timer left is the `timeout`, which then fires
+/// instead and names this test.
+#[tokio::test(start_paused = true)]
+async fn an_idle_stream_is_kept_alive() {
+    use tokio_stream::StreamExt as _;
+
+    let (_dir, state) = test_state();
+    let handle = state
+        .jobs
+        .try_start(Some("quiet.lua".into()))
+        .expect("start");
+    let id = handle.id();
+    // Deliberately silent: no output, and the job never finishes, so the only
+    // thing that can ever come down this stream is a keep-alive.
+    let response = get(&state, &format!("/api/v1/jobs/{id}/events")).await;
+    let mut frames = response.into_body().into_data_stream();
+
+    let frame = tokio::time::timeout(Duration::from_secs(600), frames.next())
+        .await
+        .expect("an idle stream must be kept alive, not left silent")
+        .expect("the stream is still open")
+        .expect("the frame is readable");
+    assert!(
+        frame.starts_with(b":"),
+        "a keep-alive is an SSE comment; got {:?}",
+        String::from_utf8_lossy(&frame)
+    );
+
+    // Held to the end: dropping it completes the job, which would end the
+    // stream for a reason that is not the one under test.
+    drop(handle);
 }

@@ -14,9 +14,18 @@ lua SCRIPT *ARGS:
 lua-connect SCRIPT *ARGS:
     cargo run --release --no-default-features --features cli,lua -- lua --connect {{SCRIPT}} {{ARGS}}
 
+# Verify only -- never rewrites a file. Safe to run on a dirty tree, and safe
+# when more than one person or agent is working in the same checkout.
 test:
-    cargo fmt --all
     cargo fmt --all -- --check
-    cargo clippy --fix --workspace --tests --allow-dirty
+    cargo clippy --workspace --tests -- --deny warnings
     cargo test --workspace --quiet
     cargo build --release
+
+# Apply the fixes `test` only reports. Rewrites files across the whole
+# workspace, so run it on a tree whose uncommitted changes are all yours:
+# `clippy --fix --allow-dirty` deliberately overrides the guard that would
+# otherwise refuse, and `fmt --all` does not ask either.
+fix:
+    cargo fmt --all
+    cargo clippy --fix --workspace --tests --allow-dirty

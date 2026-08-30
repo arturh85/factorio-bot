@@ -10,7 +10,13 @@ Factorio Bot is a Tauri+Rust desktop application that orchestrates Factorio game
 
 ```bash
 # Master Check Tool, runs Rust clippy, tests, build, takes a few minutes, only run in the end to finalise a change
+# Verify only -- never rewrites a file, so it is safe on a dirty tree and when
+# another agent is working in the same checkout.
 just test
+
+# Apply what `just test` reports. Rewrites files workspace-wide -- only run it
+# when every uncommitted change in the tree is yours.
+just fix
 
 # Start Factorio server with BotBridge mod
 just factorio

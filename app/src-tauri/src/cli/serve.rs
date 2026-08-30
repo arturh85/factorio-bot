@@ -1,7 +1,7 @@
 use crate::cli::{Subcommand, SubcommandCallback};
 use crate::context::Context;
 use clap::{value_parser, Arg, ArgMatches, Command};
-use factorio_bot_core::miette::{miette, IntoDiagnostic, Result};
+use factorio_bot_core::miette::{IntoDiagnostic, Result};
 use factorio_bot_core::paris::info;
 use std::net::SocketAddr;
 
@@ -64,8 +64,18 @@ async fn run(matches: &ArgMatches, context: &mut Context) -> Result<()> {
     // rejects a relative path -- the local `is_relative` check that used to
     // follow this could no longer fire, and a guard that cannot fail is worse
     // than none, because the next reader trusts it.
-    let workspace_path = factorio_bot_core::paths::resolve_workspace(&configured)
-      .map_err(|err| miette!("{err}"))?;
+    //
+    // This is the *use*, which is where the refusal belongs: settings load
+    // only fills the default, so `config show` can still print a relative
+    // `workspace_path` and `config init --force` can still rewrite it.
+    //
+    // A bare `?` rather than `.map_err(|err| miette!("{err}"))?`:
+    // `RelativeWorkspacePath` is a `Diagnostic`, so `From<_> for Report`
+    // carries its `help` -- "set settings.factorio.workspace_path to an
+    // absolute path, or leave it empty ..." -- through to the terminal.
+    // Reformatting it through `miette!` drops exactly that sentence, which is
+    // the only actionable one in the message.
+    let workspace_path = factorio_bot_core::paths::resolve_workspace(&configured)?;
     let scripts_dir = factorio_bot_core::scripts::ensure_scripts_dir(&workspace_path)?;
     info!("scripts directory: {}", scripts_dir.display());
   }

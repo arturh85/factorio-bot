@@ -184,6 +184,60 @@ mod tests {
     );
   }
 
+  /// A relative `workspace_path` must not stop `config show` from printing it.
+  ///
+  /// Refusing a relative path at settings *load* put the refusal in front of
+  /// every command, because `Context::new` loads before clap has chosen one:
+  /// `config show`, `config init --force`, `start`, even
+  /// `--settings other.toml config show`, all aborted at `lib.rs`. The only
+  /// documented repair for a bad `workspace_path` is `config init --force`,
+  /// so the setting could only be fixed by hand-editing TOML.
+  ///
+  /// Asserted on the success -- the loaded value reaching the rendered output
+  /// -- rather than on the absence of a panic, which any error would also
+  /// satisfy. The refusal itself lives at the point of use and is pinned
+  /// separately (`paths::resolve_workspace`,
+  /// `instance_setup::tests::a_relative_workspace_is_refused_before_anything_is_created`).
+  #[test]
+  fn show_prints_a_relative_workspace_path_instead_of_refusing_to_load_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("AppSettings.toml");
+    std::fs::write(&path, "[factorio]\nworkspace_path = \"relative-ws\"\n").expect("writes");
+
+    let settings = load_app_settings_with(&SettingsOverrides {
+      settings_path: Some(path),
+      ..SettingsOverrides::default()
+    })
+    .expect("a relative workspace_path must still load; config show is how a user sees it");
+    let rendered = render(&settings).expect("renders");
+
+    assert!(
+      rendered.contains("workspace_path = \"relative-ws\""),
+      "config show must report the configured value verbatim, got:\n{rendered}"
+    );
+  }
+
+  /// The other half: `config init --force` must be able to *write* a repaired
+  /// file while the broken one is still in place. `initial_settings` never
+  /// reads the existing file, so this pins the override path that a user
+  /// running `config init --force --workspace-path /abs` depends on.
+  #[test]
+  fn init_can_overwrite_a_settings_file_holding_a_relative_workspace_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("AppSettings.toml");
+    std::fs::write(&path, "[factorio]\nworkspace_path = \"relative-ws\"\n").expect("writes");
+
+    let overrides = SettingsOverrides {
+      settings_path: Some(path.clone()),
+      workspace_path: Some("/repaired/workspace".to_owned()),
+      ..SettingsOverrides::default()
+    };
+    AppSettings::save(path.clone(), &initial_settings(&overrides)).expect("init --force writes");
+
+    let repaired = load_app_settings_with(&overrides).expect("loads the repaired file");
+    assert_eq!(repaired.factorio.workspace_path, "/repaired/workspace");
+  }
+
   /// `config init` defaults to writing the standard settings file, and honours
   /// `--settings` as its output path.
   #[test]

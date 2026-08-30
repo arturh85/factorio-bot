@@ -6,7 +6,7 @@ pub use factorio_bot_core::app_settings::{load_app_settings, SharedAppSettings};
 #[cfg(feature = "gui")]
 pub use factorio_bot_core::app_settings::AppSettings;
 
-use factorio_bot_core::app_settings::AppSettings as CoreAppSettings;
+use factorio_bot_core::app_settings::{fill_workspace_default, AppSettings as CoreAppSettings};
 use factorio_bot_core::miette::{miette, Result};
 use factorio_bot_core::paths;
 use std::borrow::Cow;
@@ -62,14 +62,17 @@ pub fn load_app_settings_with(overrides: &SettingsOverrides) -> Result<CoreAppSe
     None => CoreAppSettings::load(paths::settings_file())?,
   };
   overrides.apply(&mut settings);
-  // The same resolution every other caller uses, applied after the override so
-  // an explicit `--workspace-path` is never second-guessed. Shared rather than
-  // inlined: four copies of this rule had drifted apart, and the start route
-  // ended up resolving a workspace differently from the route listing its
-  // scripts.
-  let resolved = paths::resolve_workspace(&settings.factorio.workspace_path)
-    .map_err(|err| miette!("{err}"))?;
-  settings.factorio.workspace_path = Cow::Owned(resolved.to_string_lossy().into_owned());
+  // Applied after the override so an explicit `--workspace-path` is never
+  // second-guessed, and shared with `load_app_settings` rather than restated:
+  // four copies of this rule had drifted apart, and the start route ended up
+  // resolving a workspace differently from the route listing its scripts.
+  //
+  // Filling the default is *all* this does. Whether the resulting path is
+  // usable is decided at the point of use (`paths::resolve_workspace`), never
+  // here: `config show` and `config init --force` both load before they can
+  // report or rewrite a bad `workspace_path`, so a load that refuses one
+  // refuses its own repair.
+  fill_workspace_default(&mut settings)?;
   Ok(settings)
 }
 

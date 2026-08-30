@@ -62,20 +62,38 @@ impl AppSettings {
     }
 }
 
+/// Writes the data-local default into an unconfigured `workspace_path`.
+///
+/// The only workspace question settings **load** is allowed to ask. Whether a
+/// configured path is *usable* -- absolute, and therefore not dependent on the
+/// process's working directory -- is decided at the point of use, by
+/// `paths::resolve_workspace`: the scripts bootstrap in `serve`,
+/// `manage::scripts::scripts_root_path`, `POST /api/v1/instance/start` and
+/// `setup_factorio_instance`.
+///
+/// Asking it here instead is the regression this function exists to close.
+/// `Context::new` loads the settings before clap has even chosen a subcommand,
+/// so a load that fails on a relative `workspace_path` fails `config show` and
+/// `config init --force` too -- the two commands whose whole job is to report
+/// and rewrite that setting. Every documented repair path went through the
+/// thing being repaired.
+///
+/// Shared with `app/src-tauri`'s `load_app_settings_with` rather than restated
+/// there: two copies of one rule is how the loaders would come to disagree.
+pub fn fill_workspace_default(settings: &mut AppSettings) -> Result<()> {
+    // Not `to_string_lossy`: a non-UTF-8 data-local directory would be renamed
+    // by the replacement characters, and every caller would then run in a
+    // directory that is not the one the default names. `?` rather than
+    // `.into_diagnostic()` so the diagnostic's `help` reaches the user.
+    let filled = paths::fill_workspace_default(&settings.factorio.workspace_path);
+    settings.factorio.workspace_path = Cow::from(paths::workspace_to_string(filled)?);
+    Ok(())
+}
+
 #[allow(clippy::module_name_repetitions)]
 pub fn load_app_settings() -> Result<AppSettings> {
     let mut app_settings = AppSettings::load(paths::settings_file())?;
-    // One resolution rule, in `paths::resolve_workspace`. This used to inline
-    // it -- empty means the data-local workspace -- and four copies of that
-    // inline had drifted apart, which is how a start could resolve a workspace
-    // differently from the route that lists its scripts.
-    //
-    // `to_str().unwrap()` also went with it: a non-UTF-8 data-local directory
-    // panicked here, and with `panic = "abort"` in release that is a crash at
-    // load rather than an error.
-    let resolved = paths::resolve_workspace(&app_settings.factorio.workspace_path)
-        .into_diagnostic()?;
-    app_settings.factorio.workspace_path = Cow::from(resolved.to_string_lossy().into_owned());
+    fill_workspace_default(&mut app_settings)?;
     Ok(app_settings)
 }
 
@@ -145,6 +163,34 @@ recreate = true
         assert_eq!(settings.restapi.web_root, None);
         assert!(!settings.gui.enable_autostart);
         assert!(!settings.gui.enable_restapi);
+    }
+
+    /// Settings load fills the default and asks nothing else. A relative
+    /// `workspace_path` has to survive it verbatim: `Context::new` loads the
+    /// settings before clap picks a subcommand, so a load that refuses one
+    /// takes `config show` and `config init --force` down with it and leaves
+    /// hand-editing TOML as the only way back.
+    #[test]
+    fn a_relative_workspace_path_loads_unchanged() {
+        let mut settings = AppSettings::default();
+        settings.factorio.workspace_path = Cow::from("relative-ws");
+        fill_workspace_default(&mut settings).expect("a relative workspace_path must still load");
+        assert_eq!(settings.factorio.workspace_path, "relative-ws");
+    }
+
+    /// The half that load *does* own: an unset workspace means the data-local
+    /// one. Without this, "never touch workspace_path" would pass the test
+    /// above and leave the empty default to be joined against whatever
+    /// directory the process happened to start in.
+    #[test]
+    fn an_unset_workspace_path_is_filled_with_the_data_local_one() {
+        let mut settings = AppSettings::default();
+        assert!(settings.factorio.workspace_path.is_empty(), "the default");
+        fill_workspace_default(&mut settings).expect("fills");
+        assert_eq!(
+            settings.factorio.workspace_path,
+            paths::workspace_dir().to_string_lossy()
+        );
     }
 
     /// A file that does not exist is not an error; the defaults stand in.

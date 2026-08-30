@@ -167,7 +167,19 @@ pub async fn setup_factorio_instance(
     if factorio_archive_path.is_empty() {
         return Err(miette!("no factorio archive configured"));
     }
-    let workspace_path = Path::new(&workspace_path_str);
+    // The point of use for the workspace rule, and the one the CLI reaches:
+    // `factorio-bot start` and `factorio-bot lua` hand `settings.factorio`
+    // straight to `FactorioInstance::start`, and settings load deliberately no
+    // longer refuses a relative `workspace_path` (that refusal used to run
+    // inside `Context::new`, ahead of subcommand dispatch, and took `config
+    // show` and `config init --force` down with it). Without this check the
+    // relative path would be joined against whatever directory the process
+    // happened to start in -- the exact hazard `resolve_workspace` exists for.
+    //
+    // A bare `?`: `RelativeWorkspacePath` is a `Diagnostic`, so the `help`
+    // naming the setting and its fix survives into the report.
+    let workspace_path = crate::paths::resolve_workspace(workspace_path_str)?;
+    let workspace_path = workspace_path.as_path();
     if !workspace_path.exists() {
         error!(
             "Failed to find workspace at <bright-blue>{:?}</>",
@@ -915,6 +927,60 @@ mod extraction_tests {
             observed >= 3,
             "the runtime made no progress while the archive extracted ({observed} ticks in the \
              first {SAMPLE_AT:?}); the extraction is blocking an async worker"
+        );
+    }
+
+    /// Settings load no longer refuses a relative `workspace_path` -- it ran
+    /// inside `Context::new`, ahead of subcommand dispatch, and so refused
+    /// `config show` and `config init --force` as well. The refusal lives here
+    /// instead, at the point of use, which is what `factorio-bot start` and
+    /// `factorio-bot lua` reach: they hand `settings.factorio` straight to
+    /// `FactorioInstance::start`. Without it a relative path is joined against
+    /// the process's working directory, which is the whole reason the rule
+    /// exists.
+    ///
+    /// The `help` is asserted too, not just the message: it is the only
+    /// sentence that says what to do, and it is dropped by any conversion that
+    /// reformats the error (`miette!("{err}")`, `.into_diagnostic()`) instead
+    /// of letting `?` carry the `Diagnostic` through.
+    #[tokio::test]
+    async fn a_relative_workspace_is_refused_before_anything_is_created() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let archive = dir.path().join("factorio.tar.xz");
+        std::fs::write(&archive, b"not really an archive").expect("writes the archive");
+        let rcon_settings = RconSettings::new(4321, "foobar", None);
+
+        let report = setup_factorio_instance(
+            "relative-ws",
+            archive.to_str().expect("utf-8 archive path"),
+            &rcon_settings,
+            None,
+            "server",
+            true,
+            false,
+            None,
+            None,
+            true,
+        )
+        .await
+        .expect_err("a relative workspace_path must be refused");
+
+        assert!(
+            report.to_string().contains("must be absolute"),
+            "unexpected error: {report:?}"
+        );
+        let diagnostic: &dyn miette::Diagnostic = report.as_ref();
+        let help = diagnostic
+            .help()
+            .map(|help| help.to_string())
+            .expect("the report must keep the help that says how to fix it");
+        assert!(
+            help.contains("absolute path"),
+            "unexpected help text: {help}"
+        );
+        assert!(
+            !std::path::Path::new("relative-ws").exists(),
+            "the refusal must happen before anything is created next to the cwd"
         );
     }
 }

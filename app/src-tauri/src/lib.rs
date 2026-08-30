@@ -25,7 +25,26 @@ pub const APP_ABOUT: &str = env!("CARGO_PKG_DESCRIPTION");
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 #[allow(clippy::missing_panics_doc)]
 pub fn run() {
-  let context = Context::new().expect("failed to create context");
+  // Same treatment as `cli::start` below, and for the same reason: everything
+  // `Context::new` can fail at is operational -- an unwritable data directory,
+  // an `AppSettings.toml` that is not valid TOML. `.expect` turned those into
+  // "The application panicked (crashed)" with a backtrace hint, and under
+  // `panic = "abort"` into an abort, which is not a failure mode a
+  // configuration mistake deserves.
+  //
+  // This runs *before* clap has chosen a subcommand, so it is also the widest
+  // blast radius in the binary: whatever fails here fails `config show` and
+  // `config init --force` too, i.e. the commands a user reaches for to repair
+  // the configuration. That is why the workspace refusal was moved out of
+  // settings load and down to the point of use -- see
+  // `factorio_bot_core::app_settings::fill_workspace_default`.
+  let context = match Context::new() {
+    Ok(context) => context,
+    Err(report) => {
+      eprintln!("Error: {report:?}");
+      std::process::exit(1);
+    }
+  };
 
   #[cfg(feature = "cli")]
   {

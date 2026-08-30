@@ -105,41 +105,61 @@ impl OutputParser {
                     .collect();
                 self.world.update_graphics(graphics)?;
             }
+            // Startup data: a Factorio version bump or mod change can drift
+            // the schema of any one of these three the same way it can drift
+            // the events handled below (see the comment near line 191).
+            // `unwrap_or_else(panic!)` here means any single malformed
+            // element -- among potentially thousands -- aborts the whole
+            // bot process on startup under `panic = "abort"`. Log and skip
+            // just that element instead.
             "entity_prototypes" => {
                 let entity_prototypes: Vec<FactorioEntityPrototype> = rest
                     .split('$')
-                    .map(|entity_prototype| {
-                        serde_json::from_str(entity_prototype).unwrap_or_else(|err| {
-                            panic!(
-                                "failed to deserialize entity prototype: {:?} '{}'",
-                                err, entity_prototype
-                            )
-                        })
-                    })
+                    .filter_map(
+                        |entity_prototype| match serde_json::from_str(entity_prototype) {
+                            Ok(entity_prototype) => Some(entity_prototype),
+                            Err(err) => {
+                                error!(
+                                    "<red>failed to deserialize entity prototype</>: {:?} '{}'",
+                                    err, entity_prototype
+                                );
+                                None
+                            }
+                        },
+                    )
                     .collect();
                 self.world.update_entity_prototypes(entity_prototypes)?;
             }
             "item_prototypes" => {
                 let item_prototypes: Vec<FactorioItemPrototype> = rest
                     .split('$')
-                    .map(|item_prototype| {
-                        serde_json::from_str(item_prototype).unwrap_or_else(|err| {
-                            panic!(
-                                "failed to deserialize item prototype: {:?} '{}'",
-                                err, item_prototype
-                            )
-                        })
-                    })
+                    .filter_map(
+                        |item_prototype| match serde_json::from_str(item_prototype) {
+                            Ok(item_prototype) => Some(item_prototype),
+                            Err(err) => {
+                                error!(
+                                    "<red>failed to deserialize item prototype</>: {:?} '{}'",
+                                    err, item_prototype
+                                );
+                                None
+                            }
+                        },
+                    )
                     .collect();
                 self.world.update_item_prototypes(item_prototypes)?;
             }
             "recipes" => {
                 let recipes: Vec<FactorioRecipe> = rest
                     .split('$')
-                    .map(|recipe| {
-                        serde_json::from_str(recipe).unwrap_or_else(|err| {
-                            panic!("failed to deserialize recipe: {:?} '{}'", err, recipe)
-                        })
+                    .filter_map(|recipe| match serde_json::from_str(recipe) {
+                        Ok(recipe) => Some(recipe),
+                        Err(err) => {
+                            error!(
+                                "<red>failed to deserialize recipe</>: {:?} '{}'",
+                                err, recipe
+                            );
+                            None
+                        }
                     })
                     .collect();
                 self.world.update_recipes(recipes)?;
@@ -152,15 +172,36 @@ impl OutputParser {
                         Some(pos) => rest[0..pos].parse().into_diagnostic()?,
                         None => rest.parse().into_diagnostic()?,
                     };
+                    // An action status this parser doesn't recognize is not
+                    // evidence the action succeeded -- it's evidence we
+                    // can't tell either way. Recording it as completed
+                    // (e.g. defaulting to "ok") would make the executor
+                    // believe a running action finished when it may not
+                    // have, which is worse than the panic it replaces: the
+                    // old panic at least stopped the run rather than let it
+                    // continue on a false belief. So skip the insert
+                    // entirely and leave the action outstanding -- the same
+                    // "log loudly, do less" posture as the unparseable
+                    // events above, just applied to "don't record" instead
+                    // of "don't apply".
                     let result = match action_status {
-                        "ok" => "ok",
+                        "ok" => Some("ok"),
                         "fail" => {
                             let pos = rest.find(' ').unwrap();
-                            &rest[pos + 1..]
+                            Some(&rest[pos + 1..])
                         }
-                        _ => panic!("unexpected action_completed {}", action_status),
+                        _ => {
+                            error!(
+                                "<red>unexpected action_completed status</>: <bright-blue>{}</> \
+                                 for action {}",
+                                action_status, action_id
+                            );
+                            None
+                        }
                     };
-                    self.world.actions.insert(action_id, String::from(result));
+                    if let Some(result) = result {
+                        self.world.actions.insert(action_id, String::from(result));
+                    }
                 }
             }
             "on_script_path_request_finished" => {
@@ -197,37 +238,25 @@ impl OutputParser {
             "force" => match serde_json::from_str::<FactorioForce>(rest) {
                 Ok(force) => self.world.update_force(force)?,
                 Err(err) => {
-                    error!(
-                        "<red>failed to deserialize force</>: {:?} '{}'",
-                        err, rest
-                    );
+                    error!("<red>failed to deserialize force</>: {:?} '{}'", err, rest);
                 }
             },
             "on_some_entity_created" => match serde_json::from_str::<FactorioEntity>(rest) {
                 Ok(entity) => self.world.on_some_entity_created(entity)?,
                 Err(err) => {
-                    error!(
-                        "<red>failed to deserialize entity</>: {:?} '{}'",
-                        err, rest
-                    );
+                    error!("<red>failed to deserialize entity</>: {:?} '{}'", err, rest);
                 }
             },
             "on_some_entity_updated" => match serde_json::from_str::<FactorioEntity>(rest) {
                 Ok(entity) => self.world.on_some_entity_updated(entity)?,
                 Err(err) => {
-                    error!(
-                        "<red>failed to deserialize entity</>: {:?} '{}'",
-                        err, rest
-                    );
+                    error!("<red>failed to deserialize entity</>: {:?} '{}'", err, rest);
                 }
             },
             "on_some_entity_deleted" => match serde_json::from_str::<FactorioEntity>(rest) {
                 Ok(entity) => self.world.on_some_entity_deleted(entity)?,
                 Err(err) => {
-                    error!(
-                        "<red>failed to deserialize entity</>: {:?} '{}'",
-                        err, rest
-                    );
+                    error!("<red>failed to deserialize entity</>: {:?} '{}'", err, rest);
                 }
             },
             "on_player_main_inventory_changed" => {

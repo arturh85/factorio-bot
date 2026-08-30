@@ -807,6 +807,10 @@ git commit -m "feat(executor): add the actuator trait and its rcon implementatio
 - Modify: `crates/executor/src/lib.rs`
 - Test: inline in `run.rs`
 
+**Inherited hazard — `defines.inventory` integers collide across entity types.** `chest` and `fuel` are both **1**; `furnace_source`, `assembling_machine_input` and `lab_input` are all **2**. So an `InventorySlot` that is correct for one entity kind, paired with the wrong entity name, resolves to a plausible integer and fails *quietly* against the game rather than erroring.
+
+This is not defensible in the actuator, which sees only a name and a slot and cannot know the entity's type. It is defensible here, where the action came from a method that chose both together. When dispatching `Insert`/`Remove`, treat a mismatched (entity, slot) pair as a bug in the planner rather than something to paper over: the executor's job is to make it loud, not to guess. At minimum, do not silently substitute a slot.
+
 **Interfaces:**
 - Consumes: `Actuator` (Task 3), `ExecutionLog` (Task 2), `planner::{Schedule, ScheduledStep, StepKind, ActionNetwork}`.
 - Produces: `async fn run_bot(...) -> ExecutionLog`. **Task 5 supersedes this** with `run_bot_signalled`, which takes a shared log and waits on predecessors. Write `run_bot` here anyway: it is the single-bot core, its tests pin the per-step dispatch, and Task 5's version is a small delta on it. When Task 5 lands, delete `run_bot` and keep its two tests pointed at the new function — do not leave two near-identical loops in the file.

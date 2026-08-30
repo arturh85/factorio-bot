@@ -3,6 +3,7 @@ use axum::http::{Request, StatusCode};
 use factorio_bot_core::app_settings::AppSettings;
 use factorio_bot_server::state::AppState;
 use factorio_bot_server::webserver::build_router;
+use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower::ServiceExt;
@@ -14,7 +15,7 @@ fn test_state() -> AppState {
     )
 }
 
-async fn openapi_spec() -> serde_json::Value {
+async fn openapi_spec() -> Value {
     let response = build_router(test_state(), None)
         .oneshot(
             Request::builder()
@@ -433,6 +434,232 @@ async fn the_script_listing_publishes_a_script_tree_node_schema() {
         assert!(
             properties.contains_key(field),
             "the wire format must not change: {field} is missing"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The committed snapshot the frontend is pinned to.
+// ---------------------------------------------------------------------------
+
+/// Where the browser client's copy of this document lives.
+///
+/// `app/src/api/client.ts` and `app/src/api/types.ts` are hand-written against
+/// this API, and nothing in the TypeScript build can see `crates/server`. The
+/// committed snapshot is the seam between the two halves, and it only works as
+/// one if *both* ends are guarded:
+///
+/// * this test keeps the snapshot equal to what the server really publishes,
+///   so it cannot go stale the way `app/src/models/types.ts` did; and
+/// * `app/src/api/openapi.contract.spec.ts` checks the client's assumptions
+///   against the snapshot.
+///
+/// Either half alone is worthless. A snapshot nobody regenerates is a second
+/// `models/types.ts`; a frontend test with no upstream guard only ever proves
+/// that the snapshot matches itself.
+const SNAPSHOT_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../app/src/api/openapi.snapshot.json"
+);
+
+/// Printed on every failure below, because "the snapshot is out of date" is
+/// only half the instruction -- the other half is that a moved field is a
+/// *frontend* change, not a file to silently re-bless.
+const REGENERATE_HINT: &str = "\n\nRegenerating is a deliberate act with a visible diff:\n    \
+     UPDATE_OPENAPI_SNAPSHOT=1 cargo test -p factorio-bot-server --features lua --test openapi\n    \
+     git diff --no-ext-diff app/src/api/openapi.snapshot.json\n\
+     Whatever moved has to be mirrored in app/src/api/types.ts, app/src/api/client.ts\n\
+     and app/src/api/openapi.contract.spec.ts -- those are what fail next if it is not,\n\
+     and the browser is what fails if neither does.";
+
+fn read_snapshot() -> Value {
+    let raw = std::fs::read_to_string(SNAPSHOT_PATH).unwrap_or_else(|err| {
+        panic!("cannot read the committed snapshot at {SNAPSHOT_PATH}: {err}{REGENERATE_HINT}")
+    });
+    serde_json::from_str(&raw)
+        .unwrap_or_else(|err| panic!("{SNAPSHOT_PATH} is not valid JSON: {err}{REGENERATE_HINT}"))
+}
+
+/// Every `(path, method)` in a spec document, as flat strings, so two
+/// documents can be compared operation by operation instead of as one opaque
+/// blob.
+fn operations(spec: &Value) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    let Some(paths) = spec.get("paths").and_then(|paths| paths.as_object()) else {
+        return found;
+    };
+    for (path, methods) in paths {
+        let Some(methods) = methods.as_object() else {
+            continue;
+        };
+        for method in methods.keys() {
+            found.push((path.clone(), method.clone()));
+        }
+    }
+    found
+}
+
+fn operation<'a>(spec: &'a Value, path: &str, method: &str) -> Option<&'a Value> {
+    spec.get("paths")?.get(path)?.get(method)
+}
+
+/// A human-readable account of how two spec documents differ, listing the
+/// operations and schemas that moved rather than dumping two ~70 KB documents
+/// into the failure output.
+///
+/// Only the `lua` build compares whole documents; the subset guard below
+/// reports its own differences one operation at a time, so this would be dead
+/// code (and `-D warnings` an error) without the `cfg`.
+#[cfg(feature = "lua")]
+fn describe_differences(snapshot: &Value, published: &Value) -> String {
+    let mut lines = Vec::new();
+
+    let snapshot_ops = operations(snapshot);
+    let published_ops = operations(published);
+    for op @ (path, method) in &published_ops {
+        if !snapshot_ops.contains(op) {
+            lines.push(format!(
+                "  + {} {path} is published but missing from the snapshot",
+                method.to_uppercase()
+            ));
+        } else if operation(snapshot, path, method) != operation(published, path, method) {
+            lines.push(format!(
+                "  ~ {} {path} differs (parameters, request body or responses moved)",
+                method.to_uppercase()
+            ));
+        }
+    }
+    for (path, method) in &snapshot_ops {
+        if !published_ops.contains(&(path.clone(), method.clone())) {
+            lines.push(format!(
+                "  - {} {path} is in the snapshot but no longer published",
+                method.to_uppercase()
+            ));
+        }
+    }
+
+    let empty = serde_json::Map::new();
+    let snapshot_schemas = snapshot["components"]["schemas"]
+        .as_object()
+        .unwrap_or(&empty);
+    let published_schemas = published["components"]["schemas"]
+        .as_object()
+        .unwrap_or(&empty);
+    for (name, schema) in published_schemas {
+        match snapshot_schemas.get(name) {
+            None => lines.push(format!(
+                "  + schema {name} is published but not in the snapshot"
+            )),
+            Some(committed) if committed != schema => lines.push(format!(
+                "  ~ schema {name} differs\n      snapshot:  {committed}\n      published: {schema}"
+            )),
+            Some(_) => {}
+        }
+    }
+    for name in snapshot_schemas.keys() {
+        if !published_schemas.contains_key(name) {
+            lines.push(format!(
+                "  - schema {name} is in the snapshot but no longer published"
+            ));
+        }
+    }
+
+    if lines.is_empty() {
+        // Something outside `paths` and `components.schemas` moved: `info`,
+        // `tags`, a security scheme. Rare enough not to itemise, and a bare
+        // "they differ" with no detail would be useless, so fall back to both
+        // documents.
+        return format!("  the documents differ outside paths and component schemas\n    snapshot:  {snapshot}\n    published: {published}");
+    }
+    lines.join("\n")
+}
+
+/// The guard that makes the snapshot worth having: rename a field in a
+/// `crates/server` DTO, drop an operation from `manage::router`, or add a
+/// required request field, and this fails by name here -- in the same
+/// workspace `cargo test` run that made the change compile.
+///
+/// Gated on `lua` because `manage::router` registers `/api/v1/scripts/execute`
+/// and the three job routes behind the same feature, so a `--no-default-
+/// features` build genuinely publishes a smaller document. `cargo test
+/// --workspace` (what `just test` and `precommit:check` run) turns the feature
+/// on through `app/src-tauri`'s defaults, so this is the variant that actually
+/// runs. `the_snapshot_covers_every_operation_a_build_without_an_interpreter_publishes`
+/// below is the weaker guard that survives without it, so the no-default-
+/// features build is not silently unguarded.
+#[cfg(feature = "lua")]
+#[tokio::test]
+async fn the_committed_openapi_snapshot_matches_the_published_spec() {
+    let published = openapi_spec().await;
+
+    // Opt-in regeneration, never automatic: a snapshot a build rewrites on its
+    // own is a snapshot that agrees with every change, including the ones that
+    // break the browser.
+    if std::env::var_os("UPDATE_OPENAPI_SNAPSHOT").is_some() {
+        let mut rendered =
+            serde_json::to_string_pretty(&published).expect("the spec serialises back to JSON");
+        rendered.push('\n');
+        std::fs::write(SNAPSHOT_PATH, rendered)
+            .unwrap_or_else(|err| panic!("cannot write {SNAPSHOT_PATH}: {err}"));
+        eprintln!("wrote {SNAPSHOT_PATH}; review the diff before committing it");
+        return;
+    }
+
+    let snapshot = read_snapshot();
+    assert!(
+        snapshot == published,
+        "the committed OpenAPI snapshot no longer matches what this server publishes:\n{}{REGENERATE_HINT}",
+        describe_differences(&snapshot, &published)
+    );
+}
+
+/// The half of the guard above that survives `--no-default-features`.
+///
+/// Such a build publishes strictly fewer operations (no interpreter, so no
+/// `/api/v1/scripts/execute` and no jobs), which is why it cannot assert
+/// equality. Everything it *does* publish must still be byte-for-byte what
+/// the snapshot promises the frontend -- so a renamed field on, say,
+/// `InstanceStatus` fails here too rather than only in the `lua` build.
+#[tokio::test]
+async fn the_snapshot_covers_every_operation_a_build_without_an_interpreter_publishes() {
+    // The regenerating run is writing the very file this reads, from a sibling
+    // test thread. Reading it here would race the write and fail on a
+    // half-written document rather than on anything real.
+    if std::env::var_os("UPDATE_OPENAPI_SNAPSHOT").is_some() {
+        return;
+    }
+    let published = openapi_spec().await;
+    let snapshot = read_snapshot();
+
+    for (path, method) in operations(&published) {
+        let committed = operation(&snapshot, &path, &method).unwrap_or_else(|| {
+            panic!(
+                "{} {path} is published but missing from the committed snapshot{REGENERATE_HINT}",
+                method.to_uppercase()
+            )
+        });
+        assert_eq!(
+            committed,
+            operation(&published, &path, &method).expect("just enumerated"),
+            "{} {path} differs from the committed snapshot{REGENERATE_HINT}",
+            method.to_uppercase()
+        );
+    }
+
+    let empty = serde_json::Map::new();
+    let snapshot_schemas = snapshot["components"]["schemas"]
+        .as_object()
+        .unwrap_or(&empty);
+    for (name, schema) in published["components"]["schemas"]
+        .as_object()
+        .unwrap_or(&empty)
+    {
+        let committed = snapshot_schemas.get(name).unwrap_or_else(|| {
+            panic!("schema {name} is published but missing from the committed snapshot{REGENERATE_HINT}")
+        });
+        assert_eq!(
+            committed, schema,
+            "schema {name} differs from the committed snapshot{REGENERATE_HINT}"
         );
     }
 }

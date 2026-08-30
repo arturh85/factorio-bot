@@ -1,0 +1,2581 @@
+{
+  "components": {
+    "schemas": {
+      "AddResearchBody": {
+        "properties": {
+          "tech": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tech"
+        ],
+        "type": "object"
+      },
+      "AppSettings": {
+        "properties": {
+          "factorio": {
+            "$ref": "#/components/schemas/FactorioSettings"
+          },
+          "gui": {
+            "$ref": "#/components/schemas/GuiSettings"
+          },
+          "restapi": {
+            "$ref": "#/components/schemas/RestApiSettings"
+          }
+        },
+        "required": [
+          "factorio",
+          "restapi",
+          "gui"
+        ],
+        "type": "object"
+      },
+      "CheatItemBody": {
+        "properties": {
+          "count": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "player_id": {
+            "$ref": "#/components/schemas/u8"
+          }
+        },
+        "required": [
+          "name",
+          "count",
+          "player_id"
+        ],
+        "type": "object"
+      },
+      "CheatTechnologyBody": {
+        "properties": {
+          "tech": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tech"
+        ],
+        "type": "object"
+      },
+      "ErrorResponse": {
+        "description": "Error body returned by every failing endpoint.\n\n`status` is the HTTP status [`IntoResponse`] answers with. It is not part of\nthe JSON body — it would be redundant with the response line, and clients\ngenerated from the OpenAPI schema must not see a field the server never\nserializes — so it is `#[serde(skip)]`ped and defaults to 400 on both\nconstruction and deserialization.",
+        "properties": {
+          "code": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          },
+          "running_job_id": {
+            "description": "The job holding the single execution slot, on the `409` from\n`POST /api/v1/scripts/execute`. Skipped when absent so every other\nerror body is byte-for-byte what it was before this field existed --\na client that switched on the presence of a key would otherwise start\nseeing `\"running_job_id\": null` on unrelated failures.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "message",
+          "code"
+        ],
+        "type": "object"
+      },
+      "ExecuteAccepted": {
+        "description": "The `202` body: the job to poll or stream from.",
+        "properties": {
+          "job_id": {
+            "$ref": "#/components/schemas/JobId"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      },
+      "ExecuteRequest": {
+        "properties": {
+          "bot_count": {
+            "description": "Defaults to the configured `factorio.client_count`.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "code": {
+            "description": "Inline code to run. Mutually exclusive with `path`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "language": {
+            "description": "Defaults to `\"lua\"` when `code` is given; ignored when `path` is.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "Script to run, relative to the scripts root. Mutually exclusive with `code`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ExistsResponse": {
+        "properties": {
+          "exists": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "exists"
+        ],
+        "type": "object"
+      },
+      "FactorioEntity": {
+        "properties": {
+          "amount": {
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "bounding_box": {
+            "$ref": "#/components/schemas/Rect"
+          },
+          "direction": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "drop_position": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Position"
+              }
+            ]
+          },
+          "entity_type": {
+            "type": "string"
+          },
+          "fuel_inventory": {
+            "items": {
+              "$ref": "#/components/schemas/InventoryItemWithQuality"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "ghost_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ghost_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "output_inventory": {
+            "items": {
+              "$ref": "#/components/schemas/InventoryItemWithQuality"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "pickup_position": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Position"
+              }
+            ]
+          },
+          "position": {
+            "$ref": "#/components/schemas/Position"
+          },
+          "recipe": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "entity_type",
+          "position",
+          "bounding_box",
+          "direction"
+        ],
+        "type": "object"
+      },
+      "FactorioEntityPrototype": {
+        "properties": {
+          "collision_box": {
+            "$ref": "#/components/schemas/Rect"
+          },
+          "collision_mask": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "crafting_speed": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "entity_type": {
+            "type": "string"
+          },
+          "fluidbox_prototypes": {
+            "items": {
+              "$ref": "#/components/schemas/FactorioFluidBoxPrototype"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "max_underground_distance": {
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "mine_result": {
+            "additionalProperties": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "mining_speed": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "mining_time": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "entity_type",
+          "collision_box"
+        ],
+        "type": "object"
+      },
+      "FactorioFluidBoxConnection": {
+        "properties": {
+          "connection_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_underground_distance": {
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "positions": {
+            "items": {
+              "$ref": "#/components/schemas/Position"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "positions"
+        ],
+        "type": "object"
+      },
+      "FactorioFluidBoxPrototype": {
+        "properties": {
+          "pipe_connections": {
+            "items": {
+              "$ref": "#/components/schemas/FactorioFluidBoxConnection"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "production_type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pipe_connections",
+          "production_type"
+        ],
+        "type": "object"
+      },
+      "FactorioItemPrototype": {
+        "properties": {
+          "fuel_value": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "group": {
+            "type": "string"
+          },
+          "item_type": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "place_result": {
+            "type": "string"
+          },
+          "stack_size": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subgroup": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "item_type",
+          "stack_size",
+          "fuel_value",
+          "place_result",
+          "group",
+          "subgroup"
+        ],
+        "type": "object"
+      },
+      "FactorioPlayer": {
+        "properties": {
+          "build_distance": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "drop_item_distance": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "item_pickup_distance": {
+            "description": "`double`. Not in use; for picking up items from the ground.",
+            "format": "double",
+            "type": "number"
+          },
+          "loot_pickup_distance": {
+            "description": "`double`. Not in use; for picking up items from the ground automatically.",
+            "format": "double",
+            "type": "number"
+          },
+          "main_inventory": {
+            "additionalProperties": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "player_id": {
+            "$ref": "#/components/schemas/u8"
+          },
+          "position": {
+            "$ref": "#/components/schemas/Position"
+          },
+          "reach_distance": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "resource_reach_distance": {
+            "description": "`double`, for mine. Documented as \"the resource reach distance of this\ncharacter **or max double** when not a character or player connected to\na character\", so this is out of integer range as well as fractional.",
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "player_id",
+          "position",
+          "main_inventory",
+          "build_distance",
+          "reach_distance",
+          "drop_item_distance",
+          "item_pickup_distance",
+          "loot_pickup_distance",
+          "resource_reach_distance"
+        ],
+        "type": "object"
+      },
+      "FactorioSettings": {
+        "properties": {
+          "client_count": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "factorio_archive_path": {
+            "type": "string"
+          },
+          "map_exchange_string": {
+            "type": "string"
+          },
+          "rcon_pass": {
+            "type": "string"
+          },
+          "rcon_port": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "recreate": {
+            "type": "boolean"
+          },
+          "seed": {
+            "type": "string"
+          },
+          "workspace_path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "client_count",
+          "factorio_archive_path",
+          "map_exchange_string",
+          "rcon_pass",
+          "rcon_port",
+          "recreate",
+          "seed",
+          "workspace_path"
+        ],
+        "type": "object"
+      },
+      "FactorioTile": {
+        "properties": {
+          "color": {
+            "items": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "player_collidable": {
+            "type": "boolean"
+          },
+          "position": {
+            "$ref": "#/components/schemas/Position"
+          }
+        },
+        "required": [
+          "name",
+          "player_collidable",
+          "position"
+        ],
+        "type": "object"
+      },
+      "GuiSettings": {
+        "properties": {
+          "enable_autostart": {
+            "type": "boolean"
+          },
+          "enable_restapi": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enable_autostart",
+          "enable_restapi"
+        ],
+        "type": "object"
+      },
+      "InsertToInventoryBody": {
+        "properties": {
+          "entity_name": {
+            "type": "string"
+          },
+          "entity_position": {
+            "type": "string"
+          },
+          "inventory_type": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "item_count": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "item_name": {
+            "type": "string"
+          },
+          "player_id": {
+            "$ref": "#/components/schemas/u8"
+          }
+        },
+        "required": [
+          "player_id",
+          "entity_name",
+          "entity_position",
+          "inventory_type",
+          "item_name",
+          "item_count"
+        ],
+        "type": "object"
+      },
+      "InstanceStatus": {
+        "properties": {
+          "client_count": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "last_error": {
+            "description": "Why the last start attempt failed, or `null`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rcon_port": {
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "server_port": {
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "started": {
+            "type": "boolean"
+          },
+          "starting": {
+            "description": "A start accepted by `POST /api/v1/instance/start` is still running.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "started",
+          "starting",
+          "client_count"
+        ],
+        "type": "object"
+      },
+      "InventoryItemWithQuality": {
+        "description": "Inventory item with quality field (Factorio 2.0 format)",
+        "properties": {
+          "count": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "quality": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "quality",
+          "count"
+        ],
+        "type": "object"
+      },
+      "InventoryResponse": {
+        "properties": {
+          "fuel_inventory": {
+            "items": {
+              "$ref": "#/components/schemas/InventoryItemWithQuality"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "output_inventory": {
+            "items": {
+              "$ref": "#/components/schemas/InventoryItemWithQuality"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "position": {
+            "$ref": "#/components/schemas/Position"
+          }
+        },
+        "required": [
+          "name",
+          "position",
+          "output_inventory",
+          "fuel_inventory"
+        ],
+        "type": "object"
+      },
+      "Job": {
+        "description": "One script run, live or historical.",
+        "properties": {
+          "error": {
+            "description": "Set only for [`JobStatus::Failed`].",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "finished_at_ms": {
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "id": {
+            "$ref": "#/components/schemas/JobId"
+          },
+          "script": {
+            "description": "Path of the script that was run, or `None` for inline code from the\neditor, which has no path.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_at_ms": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          },
+          "stderr": {
+            "type": "string"
+          },
+          "stdout": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "started_at_ms",
+          "stdout",
+          "stderr"
+        ],
+        "type": "object"
+      },
+      "JobId": {
+        "description": "Identifier of a job.\n\nSerialized as a *string* even though it is a counter: a JSON number large\nenough to lose precision in a browser would silently rename a job, and the\nwire contract should not depend on the width of the counter behind it.",
+        "example": "1",
+        "type": "string"
+      },
+      "JobStatus": {
+        "description": "Where a job is in its life.",
+        "enum": [
+          "running",
+          "succeeded",
+          "failed"
+        ],
+        "type": "string"
+      },
+      "MovePlayerBody": {
+        "properties": {
+          "goal": {
+            "type": "string"
+          },
+          "player_id": {
+            "$ref": "#/components/schemas/u8"
+          },
+          "radius": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "player_id",
+          "goal"
+        ],
+        "type": "object"
+      },
+      "OperationResult": {
+        "properties": {
+          "success": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success"
+        ],
+        "type": "object"
+      },
+      "PlaceEntityBody": {
+        "properties": {
+          "direction": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "item": {
+            "type": "string"
+          },
+          "player_id": {
+            "$ref": "#/components/schemas/u8"
+          },
+          "position": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "player_id",
+          "item",
+          "position",
+          "direction"
+        ],
+        "type": "object"
+      },
+      "PlaceEntityResult": {
+        "properties": {
+          "entity": {
+            "$ref": "#/components/schemas/FactorioEntity"
+          },
+          "player": {
+            "$ref": "#/components/schemas/FactorioPlayer"
+          }
+        },
+        "required": [
+          "player",
+          "entity"
+        ],
+        "type": "object"
+      },
+      "Position": {
+        "properties": {
+          "x": {
+            "format": "double",
+            "type": "number"
+          },
+          "y": {
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "x",
+          "y"
+        ],
+        "type": "object"
+      },
+      "RconBody": {
+        "properties": {
+          "command": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      },
+      "Rect": {
+        "properties": {
+          "left_top": {
+            "$ref": "#/components/schemas/Position"
+          },
+          "right_bottom": {
+            "$ref": "#/components/schemas/Position"
+          }
+        },
+        "required": [
+          "left_top",
+          "right_bottom"
+        ],
+        "type": "object"
+      },
+      "RemoveFromInventoryBody": {
+        "properties": {
+          "entity_name": {
+            "type": "string"
+          },
+          "entity_position": {
+            "type": "string"
+          },
+          "inventory_type": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "item_count": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "item_name": {
+            "type": "string"
+          },
+          "player_id": {
+            "$ref": "#/components/schemas/u8"
+          }
+        },
+        "required": [
+          "player_id",
+          "entity_name",
+          "entity_position",
+          "inventory_type",
+          "item_name",
+          "item_count"
+        ],
+        "type": "object"
+      },
+      "RestApiSettings": {
+        "properties": {
+          "port": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "web_root": {
+            "description": "Directory containing the built SPA. Relative paths resolve against the\ncurrent working directory. When the directory does not exist, the server\nstill starts and serves the API only.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "port"
+        ],
+        "type": "object"
+      },
+      "ScriptContent": {
+        "properties": {
+          "code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "ScriptTreeNode": {
+        "properties": {
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/ScriptTreeNode"
+            },
+            "type": "array"
+          },
+          "key": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "leaf": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "key",
+          "label",
+          "leaf",
+          "children"
+        ],
+        "type": "object"
+      },
+      "StartAccepted": {
+        "properties": {
+          "accepted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "accepted"
+        ],
+        "type": "object"
+      },
+      "u8": {
+        "format": "int32",
+        "minimum": 0,
+        "type": "integer"
+      }
+    }
+  },
+  "info": {
+    "contact": {
+      "email": "arturh@arturh.de",
+      "name": "Artur Hallmann"
+    },
+    "description": "factorio-bot HTTP API",
+    "license": {
+      "name": ""
+    },
+    "title": "factorio-bot",
+    "version": "0.2.4-dev"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/fs/exists": {
+      "get": {
+        "operationId": "exists",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExistsResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Reports whether a path exists on the server",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/game/add-research": {
+      "post": {
+        "operationId": "add_research",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddResearchBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationResult"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Add Research to Queue",
+        "tags": [
+          "Control"
+        ]
+      }
+    },
+    "/api/v1/game/all-players": {
+      "get": {
+        "operationId": "all_players",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/FactorioPlayer"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "List all connected Players",
+        "tags": [
+          "Query"
+        ]
+      }
+    },
+    "/api/v1/game/cheat-all-technologies": {
+      "post": {
+        "operationId": "cheat_all_technologies",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationResult"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Cheat all Technologies",
+        "tags": [
+          "Control"
+        ]
+      }
+    },
+    "/api/v1/game/cheat-item": {
+      "post": {
+        "operationId": "cheat_item",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheatItemBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FactorioPlayer"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Cheat items and give them to player",
+        "tags": [
+          "Control"
+        ]
+      }
+    },
+    "/api/v1/game/cheat-technology": {
+      "post": {
+        "operationId": "cheat_technology",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheatTechnologyBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationResult"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Cheat Technology",
+        "tags": [
+          "Control"
+        ]
+      }
+    },
+    "/api/v1/game/entity-prototypes": {
+      "get": {
+        "operationId": "entity_prototypes",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "$ref": "#/components/schemas/FactorioEntityPrototype"
+                  },
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "List all EntityPrototypes",
+        "tags": [
+          "Query"
+        ]
+      }
+    },
+    "/api/v1/game/find-entities": {
+      "get": {
+        "operationId": "find_entities",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "area",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "position",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "radius",
+            "required": false,
+            "schema": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "name",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "entity_type",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/FactorioEntity"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Finds entities in given area/radius",
+        "tags": [
+          "Query"
+        ]
+      }
+    },
+    "/api/v1/game/find-tiles": {
+      "get": {
+        "operationId": "find_tiles",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "area",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "position",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "radius",
+            "required": false,
+            "schema": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "name",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/FactorioTile"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Finds tiles in given area/radius",
+        "tags": [
+          "Query"
+        ]
+      }
+    },
+    "/api/v1/game/insert-to-inventory": {
+      "post": {
+        "operationId": "insert_to_inventory",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InsertToInventoryBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FactorioPlayer"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Insert items into inventory",
+        "tags": [
+          "Control"
+        ]
+      }
+    },
+    "/api/v1/game/inventory-contents-at": {
+      "get": {
+        "operationId": "inventory_contents_at",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/InventoryResponse"
+                      }
+                    ]
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "List inventory contents at position",
+        "tags": [
+          "Query"
+        ]
+      }
+    },
+    "/api/v1/game/item-prototypes": {
+      "get": {
+        "operationId": "item_prototypes",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "$ref": "#/components/schemas/FactorioItemPrototype"
+                  },
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "List all ItemPrototypes",
+        "tags": [
+          "Query"
+        ]
+      }
+    },
+    "/api/v1/game/move-player": {
+      "post": {
+        "operationId": "move_player",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MovePlayerBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FactorioPlayer"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Move player to position",
+        "tags": [
+          "Control"
+        ]
+      }
+    },
+    "/api/v1/game/place-entity": {
+      "post": {
+        "operationId": "place_entity",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlaceEntityBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlaceEntityResult"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Place entity by given player",
+        "tags": [
+          "Control"
+        ]
+      }
+    },
+    "/api/v1/game/plan-path": {
+      "get": {
+        "operationId": "plan_path",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "entity_name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "entity_type",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "underground_entity_name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "underground_entity_type",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "underground_max",
+            "required": true,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from_position",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to_position",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to_direction",
+            "required": true,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/FactorioEntity"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Plan path from one position to another",
+        "tags": [
+          "Query"
+        ]
+      }
+    },
+    "/api/v1/game/player-info": {
+      "get": {
+        "operationId": "player_info",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "player_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/u8"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FactorioPlayer"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Player Information",
+        "tags": [
+          "Query"
+        ]
+      }
+    },
+    "/api/v1/game/remove-from-inventory": {
+      "post": {
+        "operationId": "remove_from_inventory",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoveFromInventoryBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FactorioPlayer"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Remove items from inventory",
+        "tags": [
+          "Control"
+        ]
+      }
+    },
+    "/api/v1/game/server-save": {
+      "post": {
+        "operationId": "server_save",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationResult"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Server Save",
+        "tags": [
+          "Control"
+        ]
+      }
+    },
+    "/api/v1/instance": {
+      "get": {
+        "operationId": "get_instance",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstanceStatus"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Reports whether a Factorio instance is running",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/instance/start": {
+      "post": {
+        "description": "Answers `202` and never blocks: `FactorioInstance::start` runs the\narchive extraction on first use, which takes 8-10 minutes, and a browser\n(or any proxy in front of it) would time out long before that. Progress is\nobserved through `GET /api/v1/instance`.",
+        "operationId": "start_instance",
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartAccepted"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Starts a Factorio instance in the background.",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/instance/stop": {
+      "post": {
+        "operationId": "stop_instance",
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Stops the running Factorio instance",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/jobs": {
+      "get": {
+        "operationId": "list_jobs",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Job"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Lists every remembered script run, newest first",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/jobs/{id}": {
+      "get": {
+        "description": "An id that does not parse is a `404` rather than a `400`: from the caller's\nside \"job `abc`\" and \"job `9999`\" are the same mistake, and there is nothing\nuseful to say about the difference.",
+        "operationId": "get_job",
+        "parameters": [
+          {
+            "description": "Job id, as returned by the execute endpoint",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Reports one script run",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/jobs/{id}/events": {
+      "get": {
+        "description": "Carries the script's output only -- not the Factorio server process's\nstdout, which belongs to the instance rather than to any one job.\n\nA subscriber that attaches late is not punished for it: the job's buffered\noutput is replayed first, and a job that already finished gets that\nbacklog, a `finished` event and end-of-stream. That case is the common one\n-- a fast script is over before a browser can open the stream -- and it is\nwhy the handler goes through [`crate::jobs::JobRegistry::attach`], whose\n`None` means \"no such job\" and nothing else. Reading a missing\n*subscription* as `404` would fail almost every real request.",
+        "operationId": "job_events",
+        "parameters": [
+          {
+            "description": "Job id, as returned by the execute endpoint",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {}
+            },
+            "description": "Server-Sent Events: `output`, `lagged`, then a terminal `finished`"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Streams one script run's output as Server-Sent Events",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/rcon": {
+      "post": {
+        "operationId": "send_rcon",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RconBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Sends a raw RCON command to the running Factorio server",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/scripts": {
+      "get": {
+        "operationId": "list_scripts",
+        "parameters": [
+          {
+            "description": "Slash-separated path relative to the scripts root, e.g. `/` or\n`/sub/example.lua`. A leading slash is optional.",
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ScriptTreeNode"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Lists a directory under the scripts root as a script tree",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/scripts/execute": {
+      "post": {
+        "description": "The order of the checks below is the contract, not an accident:\n\n1. the body (`400`) -- nothing else is knowable until it parses;\n2. a running Factorio instance (`503`) -- the server is fine, the game is\n   not, which is not the caller's fault;\n3. the script itself (`404` missing, `400` outside the scripts root);\n4. and only then the single execution slot (`409`).\n\nTaking the slot before a check that can still fail would leave it held by a\nrequest that never runs, and the slot is single: every later execution would\nanswer `409` until the process restarts. [`JobHandle`]'s `Drop` frees it on\nany exit path once it *is* taken, so the happy path is not what keeps this\nsafe -- but not taking it early is cheaper than relying on that.",
+        "operationId": "post_execute",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecuteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecuteAccepted"
+                }
+              }
+            },
+            "description": "Execution started"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Script not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "A script is already running"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "No running Factorio instance"
+          }
+        },
+        "summary": "Starts a script and answers immediately with the job that runs it",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/scripts/file": {
+      "delete": {
+        "operationId": "delete_script",
+        "parameters": [
+          {
+            "description": "Slash-separated path relative to the scripts root, e.g. `/` or\n`/sub/example.lua`. A leading slash is optional.",
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Deletes an existing script file. Deleting a directory is not supported.",
+        "tags": [
+          "Admin"
+        ]
+      },
+      "get": {
+        "operationId": "read_script",
+        "parameters": [
+          {
+            "description": "Slash-separated path relative to the scripts root, e.g. `/` or\n`/sub/example.lua`. A leading slash is optional.",
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScriptContent"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Reads the contents of a script file",
+        "tags": [
+          "Admin"
+        ]
+      },
+      "post": {
+        "description": "Deliberately does not check `target.exists()` and then call\n`std::fs::write`: `exists()` follows symlinks and reports `false` for a\n*dangling* one, and `std::fs::write` (via `File::create`) also follows\nsymlinks when opening. A dangling symlink planted inside the scripts\nroot pointing outside it (e.g. `sub/evil.lua -> /etc/evil.lua`, where\n`/etc/evil.lua` does not exist yet) would therefore pass the `exists()`\ncheck and then have its *target* created and written by `fs::write` —\na write outside the scripts root that neither `resolve_new_script_path`\nnor an `exists()` check catches, since neither one ever has reason to\nlook at `evil.lua` once the parent has resolved. `OpenOptions::create_new`\navoids this: POSIX `open` with `O_CREAT | O_EXCL` fails with `EEXIST`\nwhen the final path component is a symlink, dangling or not, so this\nnever follows one to create a file. It also removes the\ncheck-then-write TOCTOU race between the `exists()` check and the write.",
+        "operationId": "create_script",
+        "parameters": [
+          {
+            "description": "Slash-separated path relative to the scripts root, e.g. `/` or\n`/sub/example.lua`. A leading slash is optional.",
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScriptContent"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Creates a new script file. Rejects the request if the target already\nexists — use `PUT` to overwrite an existing script instead.",
+        "tags": [
+          "Admin"
+        ]
+      },
+      "put": {
+        "description": "Mirrors the original desktop command's behavior: this only writes to a\nfile that already exists under the scripts root. Creating new scripts is\nnot supported here; that would be a separate decision.",
+        "operationId": "write_script",
+        "parameters": [
+          {
+            "description": "Slash-separated path relative to the scripts root, e.g. `/` or\n`/sub/example.lua`. A leading slash is optional.",
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScriptContent"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Overwrites the contents of an existing script file",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/settings": {
+      "get": {
+        "operationId": "get_settings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppSettings"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Returns the current application settings",
+        "tags": [
+          "Admin"
+        ]
+      },
+      "put": {
+        "operationId": "put_settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AppSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppSettings"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Replaces the application settings and persists them",
+        "tags": [
+          "Admin"
+        ]
+      }
+    }
+  },
+  "tags": [
+    {
+      "description": "World queries",
+      "name": "Query"
+    },
+    {
+      "description": "Bot control",
+      "name": "Control"
+    },
+    {
+      "description": "Entity placement",
+      "name": "Place"
+    },
+    {
+      "description": "Cheats",
+      "name": "Cheat"
+    },
+    {
+      "description": "Inventory manipulation",
+      "name": "Inventory"
+    },
+    {
+      "description": "Server administration",
+      "name": "Admin"
+    },
+    {
+      "description": "Research",
+      "name": "Research"
+    }
+  ]
+}

@@ -1191,7 +1191,7 @@ mod tests {
             "the duplicated action must reach the game exactly once"
         );
         assert_eq!(
-            log.observed_duration(first_action_id()),
+            log.planned_duration(first_action_id()),
             Some(60),
             "the first occurrence is the one recorded"
         );
@@ -1223,7 +1223,7 @@ mod tests {
             act.mine_starts(),
             vec!["iron-ore".to_string(), "copper-ore".to_string()]
         );
-        assert_eq!(log.observed_duration(first_action_id()), Some(60));
+        assert_eq!(log.planned_duration(first_action_id()), Some(60));
         assert_eq!(
             log.status(second_action_id()),
             Status::Success,

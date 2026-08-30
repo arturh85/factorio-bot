@@ -16,8 +16,10 @@ use std::collections::BTreeSet;
 ///
 /// # Action ids are only comparable within one variant
 ///
-/// `Rescheduled` keeps the original network, so its ids mean what they meant
-/// before and the caller's existing `ExecutionLog` still describes them.
+/// `Rescheduled` carries a *subset* of the original network — the same actions
+/// with the same ids, minus the ones that already succeeded — so its ids mean
+/// what they meant before and the caller's existing `ExecutionLog` still
+/// describes them.
 ///
 /// **`Reexpanded` does not.** `expand` builds a fresh `ActionIdGen` starting at
 /// zero, so a re-expanded network numbers its actions from zero and its ids
@@ -74,13 +76,25 @@ pub enum Recovery {
     /// run, recover — cannot see a terminating condition without inspecting
     /// the schedule's insides. It would just keep dispatching nothing.
     Complete,
-    /// The plan still fits the world. Drop what already succeeded and run the
-    /// rest of the *same* network under this new schedule; the existing log
-    /// carries forward unchanged.
+    /// The plan still fits the world. `sched` runs the actions of the original
+    /// network that have not yet succeeded, and `net` is that network with the
+    /// succeeded ones removed. The existing `ExecutionLog` carries forward
+    /// unchanged — unlike `Reexpanded`, the ids still mean what they meant.
+    ///
+    /// **Run `sched` against this `net`, never against the network you passed
+    /// to `recover`.** `run_into` publishes `Failed` for every action of the
+    /// network its schedule does not assign, so handing it the original network
+    /// releases each already-succeeded action *as a failure*; `await_preds`
+    /// then abandons the retry that was waiting on it and the run returns
+    /// `Ok(())` having dispatched nothing at all. Carrying the retained network
+    /// here rather than leaving the caller to rebuild it is what makes that
+    /// mispairing unrepresentable — which is also why this variant is a struct
+    /// shaped exactly like `Reexpanded`: both are "here is a plan: a network
+    /// and a schedule over it", and nothing about handling one should differ.
     ///
     /// May contain interrupted (`Running`) actions — see the type-level note on
     /// double execution.
-    Rescheduled(Schedule),
+    Rescheduled { net: ActionNetwork, sched: Schedule },
     /// The world no longer affords the plan's approach, but it does afford the
     /// goal. This is a **new plan** — see the type-level note on ids, and start
     /// a fresh `ExecutionLog` for it.
@@ -173,7 +187,14 @@ pub fn recover(
     // Tier 1 — the same plan, minus what is already done.
     let remaining = net.retaining(&keep);
     if let Ok(sched) = schedule(&remaining, state, bots) {
-        return Recovery::Rescheduled(sched);
+        // The retained network travels with its schedule. `run_into` fails
+        // every network action its schedule does not assign, so a schedule
+        // paired with the *original* network abandons the retry behind each
+        // succeeded predecessor and dispatches nothing.
+        return Recovery::Rescheduled {
+            net: remaining,
+            sched,
+        };
     }
 
     // Tier 2 — the same goal, planned again from the method layer.
@@ -213,6 +234,7 @@ mod tests {
     use factorio_bot_planner::action::{Action, ActionKind, Actor, Condition, Effect};
     use factorio_bot_planner::goal::Holder;
     use factorio_bot_planner::ids::ActionIdGen;
+    use factorio_bot_planner::InventorySlot;
     use std::sync::Arc;
 
     const BOTS: [BotId; 2] = [BotId(1), BotId(2)];
@@ -391,11 +413,140 @@ mod tests {
         ));
     }
 
+    /// Counts every command that reaches "the game", and always succeeds.
+    #[derive(Default)]
+    struct CountingAct {
+        mined: std::sync::Mutex<Vec<(BotId, u32)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::actuator::Actuator for CountingAct {
+        async fn walk(&self, _: BotId, _: Position) -> Result<(), crate::ActuatorError> {
+            Ok(())
+        }
+        async fn mine(
+            &self,
+            bot: BotId,
+            _item: &str,
+            _at: Position,
+            count: u32,
+        ) -> Result<(), crate::ActuatorError> {
+            self.mined.lock().unwrap().push((bot, count));
+            Ok(())
+        }
+        async fn craft(&self, _: BotId, _: &str, _: u32) -> Result<(), crate::ActuatorError> {
+            Ok(())
+        }
+        async fn place(
+            &self,
+            _: BotId,
+            _: &str,
+            _: Position,
+            _: u8,
+        ) -> Result<(), crate::ActuatorError> {
+            Ok(())
+        }
+        async fn insert(
+            &self,
+            _: BotId,
+            _: &str,
+            _: Position,
+            _: InventorySlot,
+            _: &str,
+            _: u32,
+        ) -> Result<(), crate::ActuatorError> {
+            Ok(())
+        }
+        async fn remove(
+            &self,
+            _: BotId,
+            _: &str,
+            _: Position,
+            _: InventorySlot,
+            _: &str,
+            _: u32,
+        ) -> Result<(), crate::ActuatorError> {
+            Ok(())
+        }
+        async fn research(&self, _: &str) -> Result<(), crate::ActuatorError> {
+            Ok(())
+        }
+    }
+
+    /// The `recover` -> `run_into` seam, walked exactly as `Rescheduled`'s own
+    /// documentation instructs.
+    ///
+    /// This is the composition defect, and neither half could see it alone.
+    /// `run_into` publishes `Failed` for every action of *its* network that the
+    /// schedule does not assign — correct, so that a dependent waiting on an
+    /// unscheduled action is released rather than hanging. A tier-1 schedule
+    /// deliberately omits every already-succeeded action. Pair the two and the
+    /// succeeded predecessor is broadcast as a failure, `await_preds` abandons
+    /// the retry waiting behind it, and the run returns `Ok(())` having called
+    /// the actuator zero times: a silent no-op reported as success. Carrying
+    /// the retained network in the variant is what fixes it.
+    #[tokio::test]
+    async fn a_tier_one_proposal_run_as_documented_actually_reaches_the_game() {
+        let s = state();
+        let tile = ore_tile(&s);
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let done = net.add(mine_at(&mut gen, &tile, 2));
+        let stuck = net.add(mine_at(&mut gen, &tile, 2));
+        // The edge is the trigger: without it nothing waits on the succeeded
+        // action and the abandonment has nobody to strand.
+        net.link(done, stuck, 0);
+
+        let mut log = ExecutionLog::default();
+        log.start(done, 0);
+        log.succeed(done, 60);
+        log.start(stuck, 60);
+        log.fail(stuck, 90, "player was busy".to_string());
+
+        let Recovery::Rescheduled {
+            net: retained,
+            sched,
+        } = recover(&ore_goal(4), &net, &s, &BOTS, &log)
+        else {
+            panic!("expected a reschedule");
+        };
+        assert!(
+            sched.assignment(stuck).is_some(),
+            "the retry is in the proposal"
+        );
+
+        let act = CountingAct::default();
+        let progress = std::sync::Mutex::new(log.clone());
+        // Exactly what the variant's doc says to do: the schedule against the
+        // network it came back with.
+        crate::run::run_into(&act, &sched, &retained, &progress)
+            .await
+            .expect("the run should start");
+
+        assert_eq!(
+            act.mined.lock().unwrap().len(),
+            1,
+            "the retried action must actually reach the game"
+        );
+        let after = progress.into_inner().unwrap();
+        assert_eq!(
+            after.status(stuck),
+            Status::Success,
+            "and its success must be recorded, or tier 1 proposes it forever"
+        );
+        assert_eq!(after.attempts(stuck), 2, "recorded as the second attempt");
+        assert_eq!(
+            after.status(done),
+            Status::Success,
+            "the action that already succeeded is untouched"
+        );
+    }
+
     #[test]
     fn a_recoverable_failure_reschedules_without_reexpanding() {
         let (goal, net, state, bots, log) = one_failed_mine_but_ore_still_reachable();
         match recover(&goal, &net, &state, &bots, &log) {
-            Recovery::Rescheduled(s) => assert!(s.makespan > 0),
+            Recovery::Rescheduled { sched, .. } => assert!(sched.makespan > 0),
             other => panic!("expected a reschedule, got {other:?}"),
         }
     }
@@ -409,7 +560,8 @@ mod tests {
         let failed = ActionId(1);
         assert_eq!(log.status(succeeded), Status::Success);
 
-        let Recovery::Rescheduled(s) = recover(&goal, &net, &state, &bots, &log) else {
+        let Recovery::Rescheduled { sched: s, .. } = recover(&goal, &net, &state, &bots, &log)
+        else {
             panic!("expected a reschedule");
         };
         assert!(

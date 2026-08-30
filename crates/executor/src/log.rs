@@ -10,21 +10,49 @@ pub enum Status {
     Failed,
 }
 
-/// One execution attempt of one action.
+/// One execution attempt of one action — always the **latest** one.
+///
+/// # These ticks are scheduled, not observed
+///
+/// `planned_start_tick` and `planned_end_tick` are named for what they actually
+/// hold. The only writer is `run_into`, which passes `ScheduledStep::start` and
+/// `ScheduledStep::end` — numbers the *scheduler* computed from
+/// `Action::duration` before anything ran. They are the estimate, not a
+/// measurement of it.
+///
+/// So `planned_duration()` is a plan value round-tripped through the log, and
+/// an "estimated versus actual" comparison built on it would compare the
+/// estimate with itself and always agree. Real observed timings need the game's
+/// tick at dispatch and at reply, and **the executor has no game-clock source**:
+/// `Actuator` returns `Result<(), ActuatorError>` with no tick in it, and
+/// nothing in this crate reads `game.tick`. Getting one means widening
+/// `Actuator` (or a BotBridge change), and that is not this increment.
+///
+/// Naming them honestly is the point. A vacuous metric that reads like a real
+/// one is worse than an absent one, because a caller will build on it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attempt {
     pub status: Status,
-    pub started_tick: Ticks,
-    pub ended_tick: Option<Ticks>,
+    /// Which attempt this is, counting from 1. Greater than 1 means recovery
+    /// retried the action — see `ExecutionLog::start`.
+    pub number: u32,
+    /// The tick the *schedule* placed this attempt's start at. Not observed.
+    pub planned_start_tick: Ticks,
+    /// The tick the *schedule* placed this attempt's end at, once finished.
+    /// Not observed.
+    pub planned_end_tick: Option<Ticks>,
     pub error: Option<String>,
 }
 
-/// Observed execution state, keyed by action.
+/// Execution state, keyed by action.
 ///
 /// Deliberately separate from `Schedule`: the schedule is an immutable plan
-/// value, and estimated-versus-actual is a join over these two, not a mutation
-/// of the plan. `BTreeMap` because iteration order is part of the contract —
+/// value, and progress is a join over the two rather than a mutation of the
+/// plan. `BTreeMap` because iteration order is part of the contract —
 /// `failed()` returns ids in a stable order so recovery is reproducible.
+///
+/// Only the latest attempt of each action is kept; `Attempt::number` says how
+/// many there have been. See `start` for why a count rather than a history.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionLog {
     attempts: BTreeMap<ActionId, Attempt>,
@@ -39,40 +67,91 @@ impl ExecutionLog {
         self.attempts.get(&id).map_or(Status::Pending, |a| a.status)
     }
 
+    /// How many times `id` has been started. Zero if never.
+    ///
+    /// Greater than one means `recover` proposed the action again after a
+    /// failure and the caller ran it. A caller that wants to stop retrying a
+    /// hopeless action reads this — `recover` itself is pure and keeps no
+    /// memory across rounds, so this counter is the only record that a retry
+    /// happened at all.
+    pub fn attempts(&self, id: ActionId) -> u32 {
+        self.attempts.get(&id).map_or(0, |a| a.number)
+    }
+
     /// Records that an attempt has begun.
     ///
-    /// An action that already finished is left exactly as it is. A `Schedule`
-    /// naming the same `ActionId` in two steps is malformed input, and
-    /// re-opening a finished attempt would destroy the outcome and the
-    /// duration already observed for it. First completion wins — see
-    /// `succeed`.
+    /// Two cases hide behind "the attempt already finished", and they want
+    /// opposite answers:
+    ///
+    /// - **A duplicate dispatch.** One `ActionId` in two schedule steps, or two
+    ///   bots handed the same action. The action was meant to happen once, and
+    ///   re-opening the attempt would destroy the outcome already recorded for
+    ///   it. First completion wins.
+    /// - **A retry.** `recover` returns the failed action in its tier-1
+    ///   proposal *by design*, so the caller runs it again. Refusing the write
+    ///   here is what made a successful retry unrecordable: the attempt stayed
+    ///   `Failed` forever, `failed()` kept naming it, and the caller kept being
+    ///   handed the same proposal — an unbounded retry loop issuing real
+    ///   commands to a live server.
+    ///
+    /// The status separates them, and it separates them exactly. `run_into`
+    /// drops duplicate ids from a schedule before dispatching (`planned_steps`),
+    /// so within one run an action is started once; a second `start` on a
+    /// `Success` attempt can therefore only be a duplicate reaching the log by
+    /// some other route, and re-running succeeded work is a bug either way. A
+    /// `start` on a `Failed` attempt has no such reading: nothing re-dispatches
+    /// a failure inside one run, so it is a retry.
+    ///
+    /// Hence: **a retry supersedes a `Failed` attempt; a `Success` attempt is
+    /// left exactly as it is.** The superseding attempt inherits `number + 1`
+    /// so the fact of the retry outlives the attempt it replaced.
+    ///
+    /// A count, not a `Vec<Attempt>` history. The question anyone actually has
+    /// here is "was this retried, and how often" — a retry budget, a stuck-action
+    /// check — and a history answers it while forcing every reader (`status`,
+    /// `planned_duration`, `failed`, and every consumer of the serialized log)
+    /// to first answer "which attempt?", turning one field into a decision at
+    /// each of them. The cost is real and is stated rather than hidden: the
+    /// superseded attempt's error message is lost. That is tolerable because the
+    /// caller that chose to retry had that message in hand — `recover` surfaced
+    /// it in the round that produced the retry — and a `Vec` is the obvious
+    /// upgrade if diagnosing across attempts ever becomes the job.
     pub fn start(&mut self, id: ActionId, tick: Ticks) {
-        if self.has_finished(id) {
-            return;
-        }
+        let number = match self.attempts.get(&id) {
+            // A duplicate dispatch of work that already succeeded.
+            Some(a) if a.status == Status::Success => return,
+            // A retry of a failure: supersede it, and remember it happened.
+            Some(a) if a.status == Status::Failed => a.number + 1,
+            // Pending or already Running: the ordinary first start.
+            Some(a) => a.number,
+            None => 1,
+        };
         self.attempts.insert(
             id,
             Attempt {
                 status: Status::Running,
-                started_tick: tick,
-                ended_tick: None,
+                number,
+                planned_start_tick: tick,
+                planned_end_tick: None,
                 error: None,
             },
         );
     }
 
+    /// Whether this attempt has already reached an outcome. A superseding
+    /// `start` clears it, which is what lets a retry record its own.
     fn has_finished(&self, id: ActionId) -> bool {
         self.attempts
             .get(&id)
-            .is_some_and(|a| a.ended_tick.is_some())
+            .is_some_and(|a| a.planned_end_tick.is_some())
     }
 
     /// Records a success. Upserts: if no `start()` was ever recorded for
     /// `id`, an attempt is created rather than the write being dropped, so
     /// completions are never lost from the log — the synthesized
-    /// `started_tick` is honest that we never actually observed a start.
+    /// `planned_start_tick` is honest that we never observed a start either.
     ///
-    /// A second completion of an already-finished action is **ignored**, not
+    /// A second completion of an already-finished attempt is **ignored**, not
     /// asserted against. This used to be a `debug_assert!`, but the only way
     /// to reach it is malformed input — the same `ActionId` in two schedule
     /// steps — and the panic fired inside a `join_all`, unwinding every other
@@ -81,18 +160,24 @@ impl ExecutionLog {
     /// order-independent choice available here: overwriting would make the
     /// recorded outcome and duration depend on which writer the game answered
     /// first.
+    ///
+    /// This guard is about *concurrent duplicates within one run*, which is why
+    /// it is untouched by the retry rule above: a retry re-opens the attempt in
+    /// `start` first, so by the time it completes there is nothing finished to
+    /// ignore.
     pub fn succeed(&mut self, id: ActionId, tick: Ticks) {
         if self.has_finished(id) {
             return;
         }
         let a = self.attempts.entry(id).or_insert_with(|| Attempt {
             status: Status::Running,
-            started_tick: tick,
-            ended_tick: None,
+            number: 1,
+            planned_start_tick: tick,
+            planned_end_tick: None,
             error: None,
         });
         a.status = Status::Success;
-        a.ended_tick = Some(tick);
+        a.planned_end_tick = Some(tick);
     }
 
     /// Records a failure. Upserts, and ignores a second completion, for the
@@ -103,25 +188,32 @@ impl ExecutionLog {
         }
         let a = self.attempts.entry(id).or_insert_with(|| Attempt {
             status: Status::Running,
-            started_tick: tick,
-            ended_tick: None,
+            number: 1,
+            planned_start_tick: tick,
+            planned_end_tick: None,
             error: None,
         });
         a.status = Status::Failed;
-        a.ended_tick = Some(tick);
+        a.planned_end_tick = Some(tick);
         a.error = Some(error);
     }
 
-    /// Game ticks the action actually took, once finished.
-    pub fn observed_duration(&self, id: ActionId) -> Option<Ticks> {
+    /// Ticks the schedule allotted this attempt, once finished.
+    ///
+    /// **Not a measurement.** Both endpoints come from the schedule, so this is
+    /// `Action::duration` travelling back out of the log, and comparing it to
+    /// the estimate compares the estimate with itself. See `Attempt` for why
+    /// there is no observed duration to offer instead, and what it would take
+    /// to have one.
+    pub fn planned_duration(&self, id: ActionId) -> Option<Ticks> {
         let a = self.attempts.get(&id)?;
-        a.ended_tick.map(|end| {
+        a.planned_end_tick.map(|end| {
             debug_assert!(
-                end >= a.started_tick,
-                "ended_tick {end} precedes started_tick {}",
-                a.started_tick
+                end >= a.planned_start_tick,
+                "planned_end_tick {end} precedes planned_start_tick {}",
+                a.planned_start_tick
             );
-            end.saturating_sub(a.started_tick)
+            end.saturating_sub(a.planned_start_tick)
         })
     }
 
@@ -161,7 +253,7 @@ mod tests {
         assert_eq!(log.status(id(1)), Status::Running);
         log.succeed(id(1), 340);
         assert_eq!(log.status(id(1)), Status::Success);
-        assert_eq!(log.observed_duration(id(1)), Some(240));
+        assert_eq!(log.planned_duration(id(1)), Some(240));
     }
 
     #[test]
@@ -214,17 +306,76 @@ mod tests {
         log.succeed(id(1), 340);
         log.fail(id(1), 900, "a second runner finished it".to_string());
         assert_eq!(log.status(id(1)), Status::Success);
-        assert_eq!(log.observed_duration(id(1)), Some(240));
+        assert_eq!(log.planned_duration(id(1)), Some(240));
         assert_eq!(log.attempt(id(1)).and_then(|a| a.error.as_deref()), None);
     }
 
     #[test]
-    fn restarting_a_finished_action_does_not_reopen_it() {
+    fn re_dispatching_a_succeeded_action_does_not_reopen_it() {
+        // A duplicate dispatch, not a retry: re-running succeeded work is a
+        // bug, and reopening the attempt would destroy the outcome recorded
+        // for it.
         let mut log = ExecutionLog::default();
         log.start(id(1), 100);
         log.succeed(id(1), 340);
         log.start(id(1), 1_000);
         assert_eq!(log.status(id(1)), Status::Success);
-        assert_eq!(log.observed_duration(id(1)), Some(240));
+        assert_eq!(log.planned_duration(id(1)), Some(240));
+        assert_eq!(log.attempts(id(1)), 1, "a refused start is not an attempt");
+    }
+
+    #[test]
+    fn a_retry_after_a_failure_supersedes_it_and_can_record_success() {
+        // `recover` returns failed actions in its tier-1 proposal by design.
+        // While `start` refused to reopen a finished attempt, the retry's
+        // command reached the game but its outcome could never be written:
+        // the action stayed `Failed`, `failed()` kept naming it, and the
+        // caller kept being handed the same proposal — an unbounded retry
+        // loop against a live server.
+        let mut log = ExecutionLog::default();
+        log.start(id(1), 0);
+        log.fail(id(1), 60, "player was busy".to_string());
+        assert_eq!(log.failed(), vec![id(1)]);
+
+        log.start(id(1), 500);
+        assert_eq!(
+            log.status(id(1)),
+            Status::Running,
+            "a retry must reopen the attempt, or its outcome is unrecordable"
+        );
+        log.succeed(id(1), 560);
+
+        assert_eq!(log.status(id(1)), Status::Success);
+        assert!(
+            log.failed().is_empty(),
+            "a succeeded retry must stop being reported as a failure"
+        );
+        assert_eq!(
+            log.planned_duration(id(1)),
+            Some(60),
+            "the retry's own span"
+        );
+        assert_eq!(
+            log.attempt(id(1)).and_then(|a| a.error.as_deref()),
+            None,
+            "the superseded failure's message does not linger on a success"
+        );
+    }
+
+    #[test]
+    fn a_retry_is_counted_so_a_caller_can_tell_one_attempt_from_three() {
+        // The only record that a retry happened: `recover` is pure and keeps
+        // no memory across rounds, so a caller's retry budget has nothing else
+        // to read.
+        let mut log = ExecutionLog::default();
+        assert_eq!(log.attempts(id(1)), 0, "never started");
+        log.start(id(1), 0);
+        assert_eq!(log.attempts(id(1)), 1);
+        for round in 1..3 {
+            log.fail(id(1), 60 * round, "still busy".to_string());
+            log.start(id(1), 100 * round);
+        }
+        assert_eq!(log.attempts(id(1)), 3);
+        assert_eq!(log.status(id(1)), Status::Running);
     }
 }

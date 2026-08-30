@@ -37,15 +37,66 @@ use std::collections::BTreeSet;
 /// would quietly invite exactly the log reuse described above — a plan built
 /// from scratch is a different plan whether or not its numbering overlaps.
 /// Renumbering is not what makes the log invalid; re-expanding is.
+///
+/// # Re-running an interrupted action can execute it twice
+///
+/// Both `Rescheduled` and `Reexpanded` may contain work the game has **already
+/// done**. `recover` retires an action only on `Status::Success`, so an action
+/// left `Running` — started, never finished, because the run died mid-dispatch
+/// — comes back in the proposal. `Running` means precisely that nobody knows
+/// whether it landed, so this is a genuine double-execution risk and not a
+/// theoretical one.
+///
+/// Three `ActionKind`s are **not idempotent** and will visibly double if
+/// re-run: `Insert` (the items go into the chest or furnace a second time),
+/// `Remove` (a second withdrawal, or a failure because the first already
+/// emptied the slot), and `Place` (a second entity, or a blocked tile). `Mine`,
+/// `Craft` and `Research` are comparatively benign — re-running them
+/// over-produces or no-ops rather than corrupting the world.
+///
+/// Retrying is the default here on purpose: it is right for the common case
+/// (`Running` almost always means the dispatch never reached the game), and the
+/// alternative — surfacing every interrupted action for a decision — needs a
+/// caller that does not exist yet. But it is a default, not a guarantee.
+/// **A caller that cannot tolerate double execution must inspect the log for
+/// `Status::Running` itself, before dispatching either variant's schedule, and
+/// decide per action whether to run it, skip it, or ask a human.** `recover`
+/// hands back a proposal; it cannot make that call, because deciding needs a
+/// look at the world and this function is pure.
 #[derive(Debug)]
 pub enum Recovery {
+    /// Every action in the network already succeeded. There is nothing to
+    /// dispatch and nothing to decide.
+    ///
+    /// Distinct from `Rescheduled` with an empty schedule on purpose: "the work
+    /// is done" and "here is a new plan" are different answers, and collapsing
+    /// them into one with a zero in it means a caller that loops — recover,
+    /// run, recover — cannot see a terminating condition without inspecting
+    /// the schedule's insides. It would just keep dispatching nothing.
+    Complete,
     /// The plan still fits the world. Drop what already succeeded and run the
     /// rest of the *same* network under this new schedule; the existing log
     /// carries forward unchanged.
+    ///
+    /// May contain interrupted (`Running`) actions — see the type-level note on
+    /// double execution.
     Rescheduled(Schedule),
     /// The world no longer affords the plan's approach, but it does afford the
     /// goal. This is a **new plan** — see the type-level note on ids, and start
     /// a fresh `ExecutionLog` for it.
+    ///
+    /// **This variant has no loop breaker and cannot have one.** Tier 2 never
+    /// reads the failures: it re-expands the same goal against observed state,
+    /// so if the world has not changed in a way the methods can see, it will
+    /// propose the same shape again, and again. A pure function owns no retry
+    /// budget and no memory of what it proposed last time — that is the price
+    /// of being testable — so **the caller inherits the responsibility**: cap
+    /// the number of re-expansions, or check that a new proposal actually
+    /// differs from the one that just failed, before feeding it back in. A
+    /// caller that does neither will loop forever on an unwinnable goal.
+    ///
+    /// May contain interrupted (`Running`) actions — see the type-level note on
+    /// double execution.
     Reexpanded { net: ActionNetwork, sched: Schedule },
     /// Nothing mechanical is left to try: the remaining work will not schedule
     /// and the goal will not re-expand. The failed action ids are surfaced so a
@@ -57,10 +108,23 @@ pub enum Recovery {
 /// Actions of `net` that execution has not already completed successfully.
 ///
 /// `Success` is the only status that retires an action. `Failed` comes back
-/// because retrying it is the entire point; `Running` comes back because an
-/// action that started and never finished has no outcome, and re-running it
-/// against observed state is safer than assuming it landed; `Pending` never
-/// ran at all.
+/// because retrying it is the entire point; `Pending` never ran at all.
+///
+/// **`Running` comes back too, and that is the risky one.** An action is
+/// `Running` exactly when nobody knows whether it completed — the run died
+/// between dispatch and the reply — so putting it back in the plan may execute
+/// it a second time. For `Insert`, `Remove` and `Place` that is visible in the
+/// world: items inserted twice, a slot emptied twice, a second entity on the
+/// tile. `Mine`, `Craft` and `Research` merely over-produce.
+///
+/// It comes back anyway, because in practice a dead run almost never reached
+/// the game, and dropping the action would leave the plan silently
+/// under-executed — a missing furnace is harder to notice than a duplicate one,
+/// and the plan's own preconditions will catch the duplicate before the
+/// omission. This is a judgement about the common case, **not** a safety
+/// property, so it is stated rather than assumed: a caller that cannot tolerate
+/// double execution must filter `Status::Running` itself before dispatching
+/// what `recover` proposed. See the note on `Recovery`.
 fn unfinished(net: &ActionNetwork, log: &ExecutionLog) -> BTreeSet<ActionId> {
     net.actions()
         .map(|a| a.id)
@@ -83,8 +147,14 @@ fn unfinished(net: &ActionNetwork, log: &ExecutionLog) -> BTreeSet<ActionId> {
 /// Tier 3 gives up and names the failures. This is the seam an LLM plugs into
 /// later.
 ///
+/// Before any of them: if nothing is left unfinished, the answer is `Complete`.
+/// That case reaches no tier at all — there is no plan to propose, and saying so
+/// with a distinct variant is what lets a caller loop on `recover` and stop.
+///
 /// Pure: no I/O, no async, no wall clock. `state` is observed state passed in
 /// as a value, and the returned `Recovery` is a proposal the caller may ignore.
+/// In particular the caller, not this function, owns the retry budget that keeps
+/// repeated `Reexpanded` proposals from looping — see that variant.
 pub fn recover(
     goal: &Goal,
     net: &ActionNetwork,
@@ -92,8 +162,16 @@ pub fn recover(
     bots: &[BotId],
     log: &ExecutionLog,
 ) -> Recovery {
+    // Tier 0 — nothing to recover. Answered before tier 1 rather than falling
+    // out of it as a zero-makespan `Rescheduled`, so a caller looping on
+    // `recover` has a terminating condition it can match on.
+    let keep = unfinished(net, log);
+    if keep.is_empty() {
+        return Recovery::Complete;
+    }
+
     // Tier 1 — the same plan, minus what is already done.
-    let remaining = net.retaining(&unfinished(net, log));
+    let remaining = net.retaining(&keep);
     if let Ok(sched) = schedule(&remaining, state, bots) {
         return Recovery::Rescheduled(sched);
     }
@@ -264,6 +342,53 @@ mod tests {
             rate: 30.0,
         };
         (goal, net, s, bots, log)
+    }
+
+    /// Every action of the plan succeeded. Nothing is left to run.
+    fn everything_succeeded() -> (Goal, ActionNetwork, PlanState, Vec<BotId>, ExecutionLog) {
+        let s = state();
+        let tile = ore_tile(&s);
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let first = net.add(mine_at(&mut gen, &tile, 2));
+        let second = net.add(mine_at(&mut gen, &tile, 2));
+
+        let mut log = ExecutionLog::default();
+        for (id, start) in [(first, 0), (second, 60)] {
+            log.start(id, start);
+            log.succeed(id, start + 60);
+        }
+
+        (ore_goal(4), net, s, BOTS.to_vec(), log)
+    }
+
+    #[test]
+    fn a_fully_succeeded_plan_is_complete_rather_than_an_empty_reschedule() {
+        // A zero-makespan `Rescheduled` says "here is a new plan" when it means
+        // "the work is done". A caller looping recover-run-recover would keep
+        // dispatching nothing and never stop, so the two answers are different
+        // variants and not one variant with a zero in it.
+        let (goal, net, state, bots, log) = everything_succeeded();
+        assert!(
+            net.actions().all(|a| log.status(a.id) == Status::Success),
+            "the fixture must leave nothing unfinished"
+        );
+        // The trap this variant exists to avoid: tier 1 *would* have answered,
+        // and answered with an empty schedule.
+        let empty = net.retaining(&unfinished(&net, &log));
+        assert!(empty.is_empty());
+        assert_eq!(
+            schedule(&empty, &state, &bots)
+                .expect("an empty network schedules fine")
+                .makespan,
+            0,
+            "tier 1 would have returned a zero-makespan Rescheduled"
+        );
+
+        assert!(matches!(
+            recover(&goal, &net, &state, &bots, &log),
+            Recovery::Complete
+        ));
     }
 
     #[test]

@@ -2168,6 +2168,10 @@ git commit -m "refactor(app): move rconStore onto POST /api/v1/rcon and drop res
 
 > **Contract note from plan 4 Task 7, which shipped after this plan was written.**
 >
+> **Recorded dissent, and why the consumer-side rule still stands.** Task 7's implementer argued this should be a wire-level `interrupted` event rather than a documented consumer obligation: a 145-line gap gets an explicit `lagged`, while losing the entire remainder of a run gets silence, so the more severe failure is reported less. That is a fair objection and it is on the record.
+>
+> The reason it is not a blocker: **re-reading `GET /api/v1/jobs/{id}` after the stream ends is correct for every truncation cause**, not just shutdown — a dropped connection, a proxy timeout, and a killed server are indistinguishable from the client's side and all resolve the same way. An `interrupted` event would cover exactly the one case where the server survives long enough to send it, which is the case the client least needs help with. If a wire marker is ever added it should be treated as an optimisation, not as the thing that makes the contract sound.
+>
 > **A stream cut short by server shutdown ends without a `finished` event.** The consumer must treat EOF-without-`finished` as **unknown**, not as success — otherwise a shutdown mid-script silently reports every running job as having completed. Resolve the real outcome with one `GET /api/v1/jobs/{id}` after the stream ends, which this task already does for the reconnect case; the same call covers this one.
 >
 > **The backlog replays all stdout, then all stderr** — not interleaved in the order they were produced. `Job` keeps two separate buffers, so a late subscriber sees the two streams concatenated rather than in real time order. Live events after attach *are* in order. If the output pane interleaves them, say so in the UI or accept that a replayed run reads differently from a watched one.

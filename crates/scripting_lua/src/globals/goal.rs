@@ -75,6 +75,18 @@ struct PlanEntry {
     /// `None` until scheduled. `goal.gantt` and `goal.execute` both need it and
     /// both say so rather than inventing an empty one.
     schedule: Option<Arc<Schedule>>,
+    /// The run handle `goal.execute` produced for this plan, once it has been
+    /// executed.
+    ///
+    /// Set the moment a run is actually spawned, so a second `goal.execute`
+    /// on the same handle can be refused instead of silently dispatching
+    /// every action again — against a live game that means placing an entity
+    /// twice, inserting twice, mining a tile that is already gone. Left
+    /// `None` if the actuator itself could not be built (no connected
+    /// players, no reply to the defines query): nothing was dispatched in
+    /// that case, so a retry after fixing the connection is a legitimate
+    /// first execution, not a re-run.
+    run: Option<u32>,
 }
 
 /// Expanded plans, keyed by the handle Lua holds.
@@ -120,6 +132,7 @@ impl Plans {
                 goal,
                 roster,
                 schedule: None,
+                run: None,
             },
         );
         handle
@@ -140,6 +153,14 @@ impl Plans {
             ))
         })?;
         Ok((entry.net.clone(), schedule))
+    }
+
+    /// Records that `handle` has been dispatched as `run`, so a later
+    /// `goal.execute` on the same handle can be refused.
+    fn mark_executed(&mut self, handle: u32, run: u32) {
+        if let Some(entry) = self.plans.get_mut(&handle) {
+            entry.run = Some(run);
+        }
     }
 }
 
@@ -471,6 +492,7 @@ end
                 )));
             }
             let state = PlanState::from_world(world.clone(), &bots);
+            refuse_unknown_bots(&state)?;
             let mut plans = lock(&_plans);
             let entry = plans.get(plan_handle)?;
             // A network is only schedulable on the roster it was expanded for
@@ -581,7 +603,31 @@ end
             let runs = _runs.clone();
             let actuator = actuator.clone();
             async move {
-                let (net, scheduled) = lock(&plans).scheduled(plan_handle)?;
+                let (net, scheduled) = {
+                    let guard = lock(&plans);
+                    // Refused before anything else, including the schedule
+                    // lookup below: a plan that already has a run is not
+                    // something a second `goal.execute` should even parse as
+                    // "not yet scheduled" if scheduling were somehow undone --
+                    // the run having happened is the more specific fact.
+                    // Re-dispatching a plan's actions against a live game
+                    // means placing an entity twice, inserting twice, mining a
+                    // tile that is already gone, so this project's standing
+                    // preference (fail loudly on ambiguity rather than
+                    // silently proceed) points at refusing outright, not at
+                    // guessing that the caller wanted the first run's handle
+                    // back or a genuine restart. A script that means to run
+                    // the same goal again builds and schedules a fresh plan
+                    // handle for it, which is unambiguous.
+                    if let Some(run) = guard.get(plan_handle)?.run {
+                        return Err(goal_error(format!(
+                            "plan {plan_handle} was already executed as run {run}; \
+                             goal.execute refuses to dispatch its actions a second time \
+                             -- build and schedule a new plan if you mean to run it again"
+                        )));
+                    }
+                    guard.scheduled(plan_handle)?
+                };
                 // Checked before anything is spawned, not after: registration
                 // is what stops a fire-and-forget `goal.execute` from being
                 // killed mid-plan when `run_lua` drops its tokio runtime (see
@@ -611,6 +657,11 @@ end
                 // never happened.
                 let actuator = actuator().await.map_err(goal_error)?;
                 let (handle, join) = lock(&runs).spawn(actuator, scheduled, net);
+                // Recorded only now that a run genuinely exists: an actuator
+                // that failed to build above dispatched nothing, so that path
+                // must not be remembered as an execution a retry could be
+                // refused against.
+                lock(&plans).mark_executed(plan_handle, handle);
                 pending.register(join);
                 Ok(handle)
             }
@@ -673,6 +724,41 @@ end
     Ok(map_table)
 }
 
+/// Refuses to plan or schedule against a bot `PlanState::from_world` had to
+/// fabricate.
+///
+/// `PlanState::from_world` hands any roster id the world has no player for a
+/// `BotState::default()`: an empty inventory and guessed reach distances
+/// (`build_distance`/`reach_distance` 10.0, `resource_reach_distance` 3.0).
+/// Planning against that is not harmless — it schedules cleanly and then
+/// fails at execution against limits that were never real. Naming the bot
+/// here, before either the planner or the scheduler ever sees the fabricated
+/// state, turns that into an error a script can act on immediately.
+///
+/// This cannot fire on the ordinary path: `run_lua` always calls
+/// `Planner::initiate_missing_players_with_default_inventory` for every id in
+/// the run's roster before a `PlanState` is ever built from that world (see
+/// `lua_runner.rs`), so every id `goal.have`/`goal.researched`/`goal.schedule`
+/// pass to `PlanState::from_world` already has a real player and
+/// `unknown_bots()` comes back empty. It only fires when a roster names a
+/// player the world has never heard of at all, which is exactly the
+/// fabrication this closes.
+fn refuse_unknown_bots(state: &PlanState) -> LuaResult<()> {
+    let unknown = state.unknown_bots();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let names = unknown
+        .iter()
+        .map(|bot| bot.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(goal_error(format!(
+        "bot(s) {names} are not connected players in this world; refusing to plan \
+         against a fabricated inventory and guessed reach distances"
+    )))
+}
+
 /// Expands one goal against a roster.
 ///
 /// `SplitAcrossBots` needs to know who exists before it can split anything, so
@@ -688,6 +774,7 @@ fn expand_goal(goal: Goal, world: &Arc<FactorioWorld>, bots: &[BotId]) -> LuaRes
         .first()
         .ok_or_else(|| goal_error("no bots in this run; goals need at least one"))?;
     let state = PlanState::from_world(world.clone(), bots);
+    refuse_unknown_bots(&state)?;
     // No rewriting of the planner's own errors. There used to be one here,
     // because `registry_for` held no method for `Goal::Researched` and every
     // research goal came back as `NoApplicableMethod` — "no method can satisfy
@@ -1105,6 +1192,51 @@ mod tests {
 
     // ------------------------------------------------------------- the bindings
 
+    /// A world whose players are seeded exactly the way a run seeds them, for
+    /// an arbitrary roster of player ids.
+    ///
+    /// `Planner::initiate_missing_players_with_default_inventory` (used by
+    /// `seeded_world` below) only ever seeds `1..=bot_count`, so it cannot
+    /// stand in for a roster that deliberately names ids outside that range
+    /// (`every_bot_the_bindings_dispatch_to_is_a_player_the_actuator_can_drive`'s
+    /// `[3, 4]` case exists precisely to do that). This gives each id in
+    /// `roster` the same inventory production seeding gives, directly through
+    /// the same `FactorioWorld` event the real seeding uses, so
+    /// `PlanState::unknown_bots()` comes back empty for it — the property
+    /// `goal.have`, `goal.researched` and `goal.schedule` now require of every
+    /// bot they are asked to plan for. A bare `fixture_world()` never seeds
+    /// any player at all, so every bot named against it is "unknown" by that
+    /// same definition; tests that exercise the bindings above the refusal
+    /// need this instead.
+    fn seeded_world_for(roster: &[u8]) -> Arc<FactorioWorld> {
+        let world = fixture_world();
+        seed_players(&world, roster);
+        Arc::new(world)
+    }
+
+    /// Gives each id in `roster` the same inventory production seeding
+    /// gives, directly on an already-built `world` -- the piece
+    /// `seeded_world_for` cannot offer on its own when a test also needs to
+    /// set up something else on the same world first (e.g. a research
+    /// force), since `fixture_world()` cannot be seeded twice into two
+    /// different `FactorioWorld` values and then merged.
+    fn seed_players(world: &FactorioWorld, roster: &[u8]) {
+        use factorio_bot_core::types::{EntityName, PlayerChangedMainInventoryEvent};
+
+        for &player_id in roster {
+            let mut main_inventory: BTreeMap<String, u32> = BTreeMap::new();
+            main_inventory.insert(EntityName::Wood.to_string(), 1);
+            main_inventory.insert(EntityName::StoneFurnace.to_string(), 1);
+            main_inventory.insert(EntityName::BurnerMiningDrill.to_string(), 1);
+            world
+                .player_changed_main_inventory(PlayerChangedMainInventoryEvent::from_btreemap(
+                    player_id,
+                    main_inventory,
+                ))
+                .expect("seed player");
+        }
+    }
+
     /// Installs the real `goal` table, backed by `stub`, into a sandboxed
     /// interpreter — the same one user scripts get.
     ///
@@ -1115,11 +1247,16 @@ mod tests {
     /// (`execute_without_pending_work_installed_fails_loudly_instead_of_silently_losing_the_run`)
     /// builds its own `Lua` without this helper so it can leave `PendingWork`
     /// out on purpose.
+    ///
+    /// Seeded via `seeded_world_for`, not a bare `fixture_world()`: these
+    /// tests are about run/progress/execute mechanics, not about the unknown-
+    /// bot refusal, so bots 1 and 2 need to be real players or `goal.have`
+    /// refuses before any of that mechanics is ever reached.
     fn lua_with_goal(stub: Arc<dyn Actuator>) -> Lua {
         let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
         lua.set_app_data(crate::lua_runner::PendingWork::default());
         let table =
-            create_lua_goal_with(&lua, Arc::new(fixture_world()), factory(stub), vec![1, 2])
+            create_lua_goal_with(&lua, seeded_world_for(&[1, 2]), factory(stub), vec![1, 2])
                 .expect("goal table");
         lua.globals().set("goal", table).expect("install");
         lua
@@ -1215,11 +1352,14 @@ mod tests {
         };
         // Built directly rather than through `lua_with_goal`: that helper
         // installs `PendingWork` the way `run_lua` does, and this test is
-        // specifically about the caller that forgets to.
+        // specifically about the caller that forgets to. Seeded via
+        // `seeded_world_for`, not a bare `fixture_world()`, so `goal.have`
+        // reaches the `PendingWork` check this test is about instead of
+        // refusing earlier for bots 1 and 2 being unknown.
         let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
         let table = create_lua_goal_with(
             &lua,
-            Arc::new(fixture_world()),
+            seeded_world_for(&[1, 2]),
             factory(Arc::new(stub)),
             vec![1, 2],
         )
@@ -1465,9 +1605,15 @@ mod tests {
             let rec = Arc::new(RecordingActuator::default());
             let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
             lua.set_app_data(crate::lua_runner::PendingWork::default());
+            // Seeded via `seeded_world_for`, not a bare `fixture_world()`:
+            // `[3, 4]` is exactly the roster `seeded_world` (which only ever
+            // seeds `1..=bot_count`) cannot produce, and this test's whole
+            // point is that roster, so every id in it needs to be a real
+            // player or `goal.have` refuses before the seam below is ever
+            // exercised.
             let table = create_lua_goal_with(
                 &lua,
-                Arc::new(fixture_world()),
+                seeded_world_for(&roster),
                 factory(rec.clone()),
                 roster.clone(),
             )
@@ -1647,5 +1793,200 @@ mod tests {
         )
         .await
         .expect("goal_script.lua failed");
+    }
+
+    // ---------------------------------------------- the unknown-bot refusal
+
+    /// `goal.have` refuses a roster naming a bot the world has no player for,
+    /// rather than silently planning it with `BotState::default()`'s empty
+    /// inventory and guessed reach distances.
+    ///
+    /// Bot 1 is seeded and bot 2 is not, so this discriminates from a check
+    /// that only ever looks at "is the roster empty" or similar: a roster
+    /// with one real bot in it must still be refused for the other, unnamed
+    /// one, and the error must name it.
+    #[tokio::test]
+    async fn goal_have_refuses_a_roster_naming_a_bot_the_world_does_not_have() {
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        lua.set_app_data(crate::lua_runner::PendingWork::default());
+        let table = create_lua_goal_with(
+            &lua,
+            seeded_world_for(&[1]),
+            factory(Arc::new(StubActuator::new(Failure::Never))),
+            vec![1, 2],
+        )
+        .expect("goal table");
+        lua.globals().set("goal", table).expect("install");
+
+        let err = lua
+            .load(r#"return goal.have("iron-ore", 20)"#)
+            .eval_async::<u32>()
+            .await
+            .expect_err("bot 2 is not a player in this world");
+        let message = err.to_string();
+        // Not just "does the call error": a fabricated bot's empty inventory
+        // also trips unrelated planner errors (e.g. a mismatched starting
+        // inventory across bots) that happen to name "bot 2" too, so the
+        // assertion has to be on this refusal's own wording, not merely on
+        // the bot id appearing somewhere in the message.
+        assert!(
+            message.contains("bot 2") && message.contains("not connected players"),
+            "the error must be this refusal, naming the unknown bot: {message}"
+        );
+    }
+
+    /// `goal.researched` goes through the same `expand_goal` path as
+    /// `goal.have`, so the same refusal must fire for it, against a world
+    /// that actually has a technology to research (otherwise the planner's
+    /// own `UnknownTechnology` error would fire first and this would prove
+    /// nothing about the unknown-bot check specifically).
+    #[tokio::test]
+    async fn goal_researched_refuses_a_roster_naming_a_bot_the_world_does_not_have() {
+        use factorio_bot_core::types::FactorioForce;
+
+        let world = fixture_world();
+        let force: FactorioForce = factorio_bot_core::serde_json::from_str(RESEARCH_FORCE_JSON)
+            .expect("the research force fixture must parse");
+        world.update_force(force).expect("update_force");
+        // Bot 1 only; the roster below also names bot 2, which this world
+        // never seeds.
+        seed_players(&world, &[1]);
+        let world = Arc::new(world);
+
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        lua.set_app_data(crate::lua_runner::PendingWork::default());
+        let table = create_lua_goal_with(
+            &lua,
+            world,
+            factory(Arc::new(StubActuator::new(Failure::Never))),
+            vec![1, 2],
+        )
+        .expect("goal table");
+        lua.globals().set("goal", table).expect("install");
+
+        let err = lua
+            .load(r#"return goal.researched("automation")"#)
+            .eval_async::<u32>()
+            .await
+            .expect_err("bot 2 is not a player in this world");
+        let message = err.to_string();
+        assert!(
+            message.contains("bot 2") && message.contains("not connected players"),
+            "the error must be this refusal, naming the unknown bot: {message}"
+        );
+    }
+
+    /// `goal.schedule` has its own `PlanState::from_world` call, separate
+    /// from the one `goal.have` used to expand the plan, and must consult
+    /// `unknown_bots()` there too rather than trusting that `goal.have`
+    /// already checked.
+    ///
+    /// Proven to exercise `goal.schedule`'s own check, not a leftover from
+    /// `goal.have`'s: both bots are real players when the plan is made (so
+    /// `goal.have` succeeds), and bot 2 is only removed from the world
+    /// afterwards -- the same `FactorioWorld` the run's `goal` table already
+    /// closed over, so `goal.schedule`'s later `PlanState::from_world` call
+    /// sees the world as it is *now*, not as it was when the plan was
+    /// expanded.
+    #[tokio::test]
+    async fn goal_schedule_refuses_when_a_bot_becomes_unknown_after_the_plan_was_made() {
+        let world = seeded_world_for(&[1, 2]);
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        lua.set_app_data(crate::lua_runner::PendingWork::default());
+        let table = create_lua_goal_with(
+            &lua,
+            world.clone(),
+            factory(Arc::new(StubActuator::new(Failure::Never))),
+            vec![1, 2],
+        )
+        .expect("goal table");
+        lua.globals().set("goal", table).expect("install");
+
+        let p: u32 = lua
+            .load(r#"return goal.have("iron-ore", 20)"#)
+            .eval_async()
+            .await
+            .expect("both bots are real players; goal.have must succeed");
+
+        world.remove_player(2).expect("remove_player");
+
+        lua.globals().set("p", p).expect("set p");
+        let err = lua
+            .load("return goal.schedule(p, 2)")
+            .eval_async::<u32>()
+            .await
+            .expect_err("bot 2 was just removed from the world");
+        let message = err.to_string();
+        assert!(
+            message.contains("bot 2") && message.contains("not connected players"),
+            "the error must be this refusal, naming the now-unknown bot: {message}"
+        );
+    }
+
+    // ------------------------------------------- refusing a second execute
+
+    /// The regression this closes: calling `goal.execute` twice on the same
+    /// plan handle used to spawn a second, independent run against the same
+    /// schedule, dispatching every action again -- against a live game that
+    /// means placing an entity twice, inserting twice, mining an
+    /// already-mined tile. A plan that already produced a run must refuse a
+    /// second one instead.
+    ///
+    /// Proven to discriminate on dispatch, not just on the error: `rec`
+    /// records every command any run performs, so if the refused second
+    /// `goal.execute` had actually spawned a run anyway, the count taken
+    /// after it would be higher than the count taken after the first
+    /// `goal.wait`.
+    #[tokio::test]
+    async fn a_second_execute_on_the_same_plan_is_refused_and_dispatches_nothing_again() {
+        let rec = Arc::new(RecordingActuator::default());
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        lua.set_app_data(crate::lua_runner::PendingWork::default());
+        let table = create_lua_goal_with(
+            &lua,
+            seeded_world_for(&[1, 2]),
+            factory(rec.clone()),
+            vec![1, 2],
+        )
+        .expect("goal table");
+        lua.globals().set("goal", table).expect("install");
+
+        exec_bounded(
+            &lua,
+            r#"
+            p = goal.have("iron-ore", 20)
+            goal.schedule(p, 2)
+            r1 = goal.execute(p)
+            goal.wait(r1)
+            "#,
+        )
+        .await;
+        let after_first = rec.recorded().len();
+        assert!(
+            after_first > 0,
+            "the first run must have dispatched something"
+        );
+
+        exec_bounded(
+            &lua,
+            r#"
+            local ok, err = pcall(goal.execute, p)
+            result = { ok = ok, err = tostring(err) }
+            "#,
+        )
+        .await;
+        let result: LuaTable = lua.globals().get("result").expect("result");
+        let ok: bool = result.get("ok").expect("ok");
+        let err: String = result.get("err").expect("err");
+        assert!(!ok, "a second execute on the same plan must be refused");
+        assert!(
+            err.contains("already executed"),
+            "the error should say the plan already ran: {err}"
+        );
+        assert_eq!(
+            rec.recorded().len(),
+            after_first,
+            "the refused second execute must not have dispatched anything"
+        );
     }
 }

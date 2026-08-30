@@ -222,22 +222,22 @@ mod tests {
     /// Bot 1 takes every action step; bot 2 takes the walk, which also gives
     /// `for_bot` two bots to separate.
     fn every_kind() -> PlanValue {
-        use factorio_bot_planner::{Action, ActionKind, ScheduledStep, StepKind};
-        use factorio_bot_core::types::{FactorioEntity, Position};
+        use factorio_bot_planner::{Action, ActionKind, InventorySlot, ScheduledStep, StepKind};
+        use factorio_bot_core::types::{Direction, FactorioEntity, Position};
 
         let kinds = vec![
             ActionKind::Mine { pos: Position::new(1.0, 1.0), item: "iron-ore".into(), count: 3 },
             ActionKind::Craft { item: "iron-plate".into(), count: 2 },
             ActionKind::Place {
-                entity: Box::new(FactorioEntity::new_stone_furnace(&Position::new(2.0, 2.0), 0.0)),
+                entity: Box::new(FactorioEntity::new_stone_furnace(&Position::new(2.0, 2.0), Direction::North)),
             },
             ActionKind::Insert {
                 pos: Position::new(2.0, 2.0), entity: "stone-furnace".into(),
-                slot: InventorySlot::CrafterInput, item: "iron-ore".into(), count: 3,
+                slot: InventorySlot::FurnaceSource, item: "iron-ore".into(), count: 3,
             },
             ActionKind::Remove {
                 pos: Position::new(2.0, 2.0), entity: "stone-furnace".into(),
-                slot: InventorySlot::CrafterOutput, item: "iron-plate".into(), count: 2,
+                slot: InventorySlot::FurnaceResult, item: "iron-plate".into(), count: 2,
             },
             ActionKind::Research { tech: "automation".into() },
         ];
@@ -247,7 +247,7 @@ mod tests {
         for (i, kind) in kinds.into_iter().enumerate() {
             let id = ActionId(i as u32);
             let label = format!("step {i}");
-            net.push(Action {
+            net.add(Action {
                 id, kind, pre: vec![], eff: vec![],
                 duration: 10, pinned: None, label: label.clone(),
             });
@@ -434,7 +434,7 @@ fn lua_with_world(roster: &[u8]) -> Lua {
     let table = create_lua_goal_with(
         &lua,
         seeded_world_for(roster),
-        factory(Arc::new(AlwaysOk::default())),
+        factory(Arc::new(StubActuator::new(Failure::Never))),
         roster.to_vec(),
     ).expect("goal table");
     lua.globals().set("goal", table).expect("install");
@@ -584,7 +584,7 @@ Drive the real bindings against the existing actuator stub (see the old `goal.rs
 ```rust
 #[test]
 fn run_reports_a_finished_observation() {
-    let lua = lua_with_goal(Arc::new(AlwaysOk::default()));
+    let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never)));
     lua.load(r#"
         local p = goal.plan(goal.have("iron-ore", 2))
         local obs = goal.run(p)
@@ -598,7 +598,7 @@ fn run_reports_a_finished_observation() {
 
 #[test]
 fn an_observation_carries_per_action_outcomes_keyed_by_step_id() {
-    let lua = lua_with_goal(Arc::new(AlwaysOk::default()));
+    let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never)));
     lua.load(r#"
         local p = goal.plan(goal.have("iron-ore", 2))
         local obs = goal.run(p)
@@ -620,7 +620,7 @@ fn an_observation_carries_per_action_outcomes_keyed_by_step_id() {
 
 #[test]
 fn tick_fields_are_named_planned_not_observed() {
-    let lua = lua_with_goal(Arc::new(AlwaysOk::default()));
+    let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never)));
     lua.load(r#"
         local obs = goal.run(goal.plan(goal.have("iron-ore", 2)))
         for id, a in pairs(obs.actions) do
@@ -635,7 +635,7 @@ fn tick_fields_are_named_planned_not_observed() {
 fn failures_are_reported_with_their_errors() {
     // `Failure::First` is the existing stub mode that fails the first action
     // dispatched and succeeds thereafter.
-    let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::First)));
+    let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::First(AtomicBool::new(false)))));
     lua.load(r#"
         local obs = goal.run(goal.plan(goal.have("iron-ore", 2)))
         assert(obs.failed >= 1, "the stub failed an action, got " .. obs.failed)
@@ -650,7 +650,7 @@ fn failures_are_reported_with_their_errors() {
 
 #[test]
 fn start_is_non_blocking_and_progress_reads_it() {
-    let lua = lua_with_goal(Arc::new(AlwaysOk::default()));
+    let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never)));
     lua.load(r#"
         local run = goal.start(goal.plan(goal.have("iron-ore", 2)))
         -- Returning at all is the assertion: a blocking start could not reach
@@ -666,7 +666,7 @@ fn start_is_non_blocking_and_progress_reads_it() {
 
 #[test]
 fn wait_is_idempotent() {
-    let lua = lua_with_goal(Arc::new(AlwaysOk::default()));
+    let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never)));
     lua.load(r#"
         local run = goal.start(goal.plan(goal.have("iron-ore", 2)))
         local a = run:wait()
@@ -684,7 +684,7 @@ fn running_one_plan_twice_raises() {
 
 #[test]
 fn goal_run_equals_start_then_wait() {
-    let lua = lua_with_goal(Arc::new(AlwaysOk::default()));
+    let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never)));
     lua.load(r#"
         local direct = goal.run(goal.plan(goal.have("iron-ore", 2)))
         local staged = goal.start(goal.plan(goal.have("iron-ore", 2))):wait()

@@ -1,6 +1,6 @@
 //! A partially ordered set of actions. No bot appears here; ordering only.
 
-use crate::action::Action;
+use crate::action::{Action, Condition};
 use crate::error::PlannerError;
 use crate::ids::{ActionId, BotId, ChainId, Ticks};
 use factorio_bot_core::petgraph::algo::toposort;
@@ -119,11 +119,20 @@ impl ActionNetwork {
     /// the methods that build the network, not with inference over a finished
     /// one.
     ///
-    /// A pair is skipped when both actions carry a `ChainId` and the chains
-    /// differ: a chain is welded to one runner and is self-sufficient, so a
-    /// consumer never legitimately depends on a foreign chain's producer.
-    /// When either side carries no chain, nothing says they are separate work,
-    /// so the edge stands.
+    /// A pair is skipped when both actions carry a `ChainId`, the chains
+    /// differ, and the pairing is inventory-scoped (`Condition::HasItem`):
+    /// the scheduler re-derives that order on its own, since its per-bot
+    /// feasibility check only offers a consumer to a bot that actually holds
+    /// the items — which is the producer's bot — so an inferred item edge
+    /// across chains is redundant, not load-bearing. World-state conditions
+    /// (`EntityAt`, `Researched`, `PositionFree`, ...) are satisfied by *any*
+    /// bot, so nothing re-derives them; those edges must stand regardless of
+    /// chain, and two sibling chains can genuinely depend on each other's
+    /// output even by item (`shortfall` can credit one chain's simulated
+    /// production to another sharing a `chain_actor`), so the exclusion is
+    /// deliberately narrower than "different chain, drop it." When either
+    /// side carries no chain, nothing says they are separate work, so the
+    /// edge stands.
     ///
     /// **Inferred edges enforce order, never location.** Ordering a consumer
     /// after ten producers spread across four bots does not put the items in
@@ -157,14 +166,19 @@ impl ActionNetwork {
                 if !produces {
                     continue;
                 }
-                // Two actions in different chains are different pieces of work:
-                // chain binding guarantees each runs on one bot and each is
-                // self-sufficient, so a consumer never depends on a foreign
-                // chain's producer. When either side has no chain, nothing says
-                // they are separate and the edge stands.
-                if let (Some(p), Some(c)) = (self.chain_of(*producer), self.chain_of(*consumer)) {
-                    if p != c {
-                        continue;
+                // Only inventory-scoped pairings may be dropped across chains: a
+                // HasItem is re-derived by the scheduler's per-bot feasibility
+                // check, a world-state condition is not.
+                let world_scoped = self.actions[consumer].pre.iter().any(|cond| {
+                    !matches!(cond, Condition::HasItem { .. })
+                        && self.actions[producer].eff.iter().any(|e| e.satisfies(cond))
+                });
+                if !world_scoped {
+                    if let (Some(p), Some(c)) = (self.chain_of(*producer), self.chain_of(*consumer))
+                    {
+                        if p != c {
+                            continue;
+                        }
                     }
                 }
                 if self
@@ -629,5 +643,36 @@ mod tests {
         // work — the edge must stand.
         net.infer_edges();
         assert_eq!(net.preds(c), vec![(m, 0)]);
+
+        // Symmetric case: the consumer belongs to no chain this time.
+        let mut gen2 = ActionIdGen::new();
+        let mut net2 = ActionNetwork::new();
+        let m2 = net2.add(mine(&mut gen2, "iron-plate", 2));
+        let c2 = net2.add(craft(&mut gen2, "iron-plate", 2, "iron-gear-wheel"));
+        net2.set_chain(m2, ChainId(0));
+        net2.infer_edges();
+        assert_eq!(net2.preds(c2), vec![(m2, 0)]);
+    }
+
+    #[test]
+    fn inference_still_links_a_world_scoped_condition_across_chains() {
+        // Two sibling chains reuse the same tile: one places a furnace there,
+        // the other needs the furnace present to insert into it. A HasItem
+        // pairing may safely drop across chains because the scheduler
+        // re-derives it, but EntityAt is satisfied by any bot — nothing
+        // re-derives it — so this edge must stand even though the two
+        // actions are in different chains. This is the regression this
+        // task's original, too-broad exclusion would have produced (see
+        // `inference_does_not_link_across_chains` for the HasItem case that
+        // *should* drop).
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let pos = Position::new(5., 5.);
+        let p = net.add(place(&mut gen, pos.clone()));
+        let i = net.add(insert(&mut gen, pos));
+        net.set_chain(p, ChainId(0));
+        net.set_chain(i, ChainId(1));
+        net.infer_edges();
+        assert_eq!(net.preds(i), vec![(p, 0)]);
     }
 }

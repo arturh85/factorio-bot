@@ -674,6 +674,14 @@ fn expand_goal(
         return Ok(());
     }
 
+    // NOTE: as written below, the restore of `chain_actor` and the decrement of
+    // `depth` sit after several `?` early-returns, so an error skips them. That
+    // is inert today because `expand()` aborts on the first error and drops the
+    // context — but the invariant is claimed unconditionally in the comments and
+    // is not. Task 2's review corrected this; the shipped code brackets a single
+    // fallible `expand_goal_body` call with the save and restore instead. Follow
+    // the shipped code, not this listing, if you are re-deriving the driver.
+    //
     // A goal addressed to one bot rebinds the chain actor for its whole
     // subtree, so that simulated effects land in the same inventory the
     // shortfall checks read. Without this the driver would credit a chain's

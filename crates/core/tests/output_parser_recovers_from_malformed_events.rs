@@ -189,3 +189,158 @@ fn an_unrecognized_action_status_is_skipped_not_recorded_and_parsing_continues()
         "parsing must continue past the unrecognized status"
     );
 }
+
+/// A `fail` completion with no message at all: `"<action_id>"` with nothing
+/// after it. `rest.find(' ').unwrap()` panicked on exactly this shape --
+/// and a run whose expected outcome is failing actions is precisely the run
+/// that produces messageless failures under load, so this is the
+/// worst-placed panic in the file: the more the run fails, the more certain
+/// it is that no evidence survives. A missing message must still be
+/// recorded as a failure -- not dropped, and never silently upgraded to
+/// "ok", since that would tell the executor a failing action succeeded.
+#[test]
+fn a_fail_completion_with_no_message_is_recorded_as_failed_and_parsing_continues() {
+    let mut parser = OutputParser::new();
+
+    let result = parser.parse(1, "action_completed", "fail 7");
+    assert!(
+        result.is_ok(),
+        "a fail completion with no message must not propagate as an Err: {result:?}"
+    );
+
+    let world = parser.world();
+    let recorded = world.actions.get(&7).map(|v| v.clone());
+    assert!(
+        recorded.is_some(),
+        "a failure with no message is still a failure and must be recorded, not dropped"
+    );
+    assert_ne!(
+        recorded.as_deref(),
+        Some("ok"),
+        "a messageless failure must never be recorded as success"
+    );
+
+    // A subsequent, well-formed completion must still be recorded --
+    // proving the messageless failure only affected its own event.
+    let result = parser.parse(2, "action_completed", "ok 8");
+    assert!(
+        result.is_ok(),
+        "the well-formed event must parse: {result:?}"
+    );
+    assert_eq!(
+        world.actions.get(&8).map(|v| v.clone()),
+        Some(String::from("ok")),
+        "parsing must continue past the messageless failure"
+    );
+}
+
+/// A malformed `entities` line with no `:` separator between the rect and
+/// the JSON payload. `rest.find(':').unwrap()` panicked on this shape.
+#[test]
+fn a_malformed_entities_line_with_no_colon_is_skipped_and_parsing_continues() {
+    let mut parser = OutputParser::new();
+
+    let result = parser.parse(1, "entities", "no colon in this line at all");
+    assert!(result.is_ok(), "must not propagate as an Err: {result:?}");
+
+    let result = parser.parse(2, "on_some_entity_created", GOOD_ENTITY);
+    assert!(
+        result.is_ok(),
+        "the well-formed event must parse: {result:?}"
+    );
+
+    let world = parser.world();
+    assert!(
+        world
+            .entity_graph
+            .entity_at(&Position::new(10.0, 10.0))
+            .is_some(),
+        "parsing must continue past the malformed entities line"
+    );
+}
+
+/// The `tiles` arm has the same rect:payload shape and the same
+/// `rest.find(':').unwrap()` as `entities`.
+#[test]
+fn a_malformed_tiles_line_with_no_colon_is_skipped_and_parsing_continues() {
+    let mut parser = OutputParser::new();
+
+    let result = parser.parse(1, "tiles", "no colon in this line at all");
+    assert!(result.is_ok(), "must not propagate as an Err: {result:?}");
+
+    let result = parser.parse(2, "on_some_entity_created", GOOD_ENTITY);
+    assert!(
+        result.is_ok(),
+        "the well-formed event must parse: {result:?}"
+    );
+
+    let world = parser.world();
+    assert!(
+        world
+            .entity_graph
+            .entity_at(&Position::new(10.0, 10.0))
+            .is_some(),
+        "parsing must continue past the malformed tiles line"
+    );
+}
+
+/// One malformed tile in an otherwise well-formed `tiles` chunk. The tile
+/// mapper indexed `parts[1]` directly for `player_collidable`, which panics
+/// on a tile string with no `:` (a short split has no index 1), and also
+/// called `.unwrap()` on the `u8` parse.
+#[test]
+fn a_malformed_tile_in_a_chunk_is_skipped_and_the_rest_of_the_chunk_is_still_applied() {
+    let mut parser = OutputParser::new();
+
+    // "bogus" has no ':' at all (out-of-bounds parts[1]); "grass:0" is
+    // well-formed and must still reach the world.
+    let result = parser.parse(1, "tiles", "0,0;1,1: bogus,grass:0");
+    assert!(result.is_ok(), "must not propagate as an Err: {result:?}");
+
+    let world = parser.world();
+    let tiles: Vec<String> = world
+        .entity_graph
+        .tile_tree()
+        .iter()
+        .map(|(_, (tile, _))| tile.name.clone())
+        .collect();
+    assert_eq!(
+        tiles,
+        vec!["grass".to_string()],
+        "the malformed tile must be skipped while the well-formed tile in \
+         the same chunk is still applied"
+    );
+}
+
+/// The `graphics` format is `filename:width:height:...` (see the format
+/// comment on the arm and `mods/BotBridge/control.lua`'s
+/// `writeout_proto_picture_dir`), but the parser read `parts[1]` for both
+/// `width` and `height` -- `height` silently got `width`'s value. The only
+/// sample data present (`width == height == 1`, both in the format comment
+/// and in `FactorioGraphic`'s own `1:1:0:0:0:0:1` doc comment) cannot
+/// distinguish correct from buggy, so this test deliberately uses
+/// `width != height`.
+#[test]
+fn a_malformed_graphic_is_skipped_and_a_well_formed_one_keeps_distinct_width_and_height() {
+    let mut parser = OutputParser::new();
+
+    // "no-colon-here" has no ':' at all (out-of-bounds parts[1]/parts[2]);
+    // the second entry is well-formed with width=3, height=5.
+    let result = parser.parse(
+        1,
+        "graphics",
+        "no-colon-here|furnace*__core__/graphics/furnace.png:3:5:0:0:0:0:1",
+    );
+    assert!(result.is_ok(), "must not propagate as an Err: {result:?}");
+
+    let world = parser.world();
+    let graphic = world
+        .graphics
+        .get("furnace")
+        .expect("the well-formed graphic that followed the malformed one must reach the world");
+    assert_eq!(graphic.width, 3, "width must come from the width field");
+    assert_eq!(
+        graphic.height, 5,
+        "height must come from the height field, not be a copy of width"
+    );
+}

@@ -21,7 +21,13 @@ impl OutputParser {
     pub fn parse(&mut self, _tick: u64, action: &str, rest: &str) -> Result<()> {
         match action {
             "entities" => {
-                let colon_pos = rest.find(':').unwrap();
+                let colon_pos = match rest.find(':') {
+                    Some(pos) => pos,
+                    None => {
+                        error!("<red>malformed entities line, missing ':'</>: '{}'", rest);
+                        return Ok(());
+                    }
+                };
                 let rect: Rect = rest[0..colon_pos].parse()?;
                 let pos: Pos = (&rect.left_top).into();
                 let _chunk_position: ChunkPosition = (&pos).into();
@@ -34,16 +40,30 @@ impl OutputParser {
                 self.world.update_chunk_entities(entities)?;
             }
             "tiles" => {
-                let colon_pos = rest.find(':').unwrap();
+                let colon_pos = match rest.find(':') {
+                    Some(pos) => pos,
+                    None => {
+                        error!("<red>malformed tiles line, missing ':'</>: '{}'", rest);
+                        return Ok(());
+                    }
+                };
                 let rect: Rect = rest[0..colon_pos].parse()?;
                 let pos: Pos = (&rect.left_top).into();
                 let chunk_position: ChunkPosition = (&pos).into();
                 let tiles: Vec<FactorioTile> = rest[colon_pos + 1..]
                     .split(',')
                     .enumerate()
-                    .map(|(index, tile)| {
+                    .filter_map(|(index, tile)| {
                         let parts: Vec<&str> = tile.split(':').collect();
                         let name: String = parts[0].trim().into();
+                        let player_collidable =
+                            match parts.get(1).and_then(|p| p.parse::<u8>().ok()) {
+                                Some(value) => value == 1,
+                                None => {
+                                    error!("<red>malformed tile, skipping</>: '{}'", tile);
+                                    return None;
+                                }
+                            };
                         let color_name = match name.find('-') {
                             Some(pos) => {
                                 if &name[0..pos] == "red" {
@@ -57,7 +77,7 @@ impl OutputParser {
                             }
                             None => &name,
                         };
-                        FactorioTile {
+                        let tile = FactorioTile {
                             color: match color_name {
                                 "water" => Some([0u8, 162u8, 232u8, 255u8]),
                                 "deepwater" => Some([18u8, 16u8, 254u8, 255u8]),
@@ -78,29 +98,63 @@ impl OutputParser {
                                            // }
                             },
                             name,
-                            player_collidable: parts[1].parse::<u8>().unwrap() == 1,
+                            player_collidable,
                             position: Position::new(
                                 (chunk_position.x * 32 + (index % 32) as i32) as f64,
                                 (chunk_position.y * 32 + (index / 32) as i32) as f64,
                             ),
-                        }
+                        };
+                        Some(tile)
                     })
                     .collect();
                 self.world.update_chunk_tiles(tiles)?;
             }
             "graphics" => {
                 // 0 graphics: spark-explosion*__core__/graphics/empty.png:1:1:0:0:0:0:1|spark-explosion-higher*__core__/graphics/empty.png:1:1:0:0:0:0:1|
+                // filename:width:height:shiftx:shifty:xx:yy:scale (see
+                // mods/BotBridge/control.lua's writeout_proto_picture_dir),
+                // so width is field 1 and height is field 2 -- not both
+                // field 1.
                 let graphics: Vec<FactorioGraphic> = rest
                     .split('|')
-                    .map(|graphic| {
+                    .filter_map(|graphic| {
                         let parts: Vec<&str> = graphic.split(':').collect();
-                        let parts2: Vec<&str> = parts[0].split('*').collect();
-                        FactorioGraphic {
-                            entity_name: parts2[0].into(),
-                            image_path: parts2[1].into(),
-                            width: parts[1].parse().unwrap(),
-                            height: parts[1].parse().unwrap(),
-                        }
+                        let parts2: Vec<&str> = match parts.first() {
+                            Some(head) => head.split('*').collect(),
+                            None => {
+                                error!("<red>malformed graphic, skipping</>: '{}'", graphic);
+                                return None;
+                            }
+                        };
+                        let (entity_name, image_path) = match (parts2.first(), parts2.get(1)) {
+                            (Some(entity_name), Some(image_path)) => {
+                                (String::from(*entity_name), String::from(*image_path))
+                            }
+                            _ => {
+                                error!("<red>malformed graphic, skipping</>: '{}'", graphic);
+                                return None;
+                            }
+                        };
+                        let width = match parts.get(1).and_then(|p| p.parse().ok()) {
+                            Some(width) => width,
+                            None => {
+                                error!("<red>malformed graphic, skipping</>: '{}'", graphic);
+                                return None;
+                            }
+                        };
+                        let height = match parts.get(2).and_then(|p| p.parse().ok()) {
+                            Some(height) => height,
+                            None => {
+                                error!("<red>malformed graphic, skipping</>: '{}'", graphic);
+                                return None;
+                            }
+                        };
+                        Some(FactorioGraphic {
+                            entity_name,
+                            image_path,
+                            width,
+                            height,
+                        })
                     })
                     .collect();
                 self.world.update_graphics(graphics)?;
@@ -186,10 +240,23 @@ impl OutputParser {
                     // of "don't apply".
                     let result = match action_status {
                         "ok" => Some("ok"),
-                        "fail" => {
-                            let pos = rest.find(' ').unwrap();
-                            Some(&rest[pos + 1..])
-                        }
+                        "fail" => Some(match rest.find(' ') {
+                            Some(pos) => &rest[pos + 1..],
+                            None => {
+                                // A failure with no message is still a
+                                // failure -- the run must learn about it,
+                                // not lose it to a panic. This is the
+                                // shape the reject side of a live run
+                                // produces under load, so treat the
+                                // missing message as empty rather than
+                                // aborting.
+                                error!(
+                                    "<red>action_completed fail with no message</>: action {}",
+                                    action_id
+                                );
+                                ""
+                            }
+                        }),
                         _ => {
                             error!(
                                 "<red>unexpected action_completed status</>: <bright-blue>{}</> \

@@ -1618,7 +1618,14 @@ for (key, value) in doc_table.clone().pairs::<String, String>().flatten() {
 
 Every one of these tables holds both documentation strings *and* the bound functions. `pairs::<String, String>` demands a `String` value, so each function entry yields an `Err`. If mlua's `TablePairs` terminates on the first error rather than yielding it and continuing, then whether any entries survive depends on where the first function lands in Lua's hash order — exactly the pattern observed. `.flatten()` makes the truncation silent, because a stopped iterator and an empty one are indistinguishable.
 
-**Diagnose before fixing** — do not assume the above is correct. Then fix so a non-string value is skipped rather than ending iteration, and **add a test asserting a known entry appears in the generated output** for each of the four tables. Without that test this regresses invisibly: nothing reads these files, so nothing has ever contradicted them.
+**The diagnosis is already done — confirmed from the mlua source, not inferred.** `TablePairs::next` (`mlua-0.12.0/src/table.rs`) opens with `self.key.take()`, which sets `self.key = None`. On the success path it restores it (`self.key = Some(key)`); on the error path it returns `Some(Err(e))` and **never restores it**. So the next call falls into the `else { None }` branch and the iterator **terminates permanently at the first non-`String` value**.
+
+Two consequences, and the second is why this cannot be left as-is:
+
+1. `.flatten()` converts that termination into silence. A stopped iterator and an exhausted one are indistinguishable, which is why this has shipped empty docs with a green build and no warning.
+2. **`goal.lua` working is luck of Lua's hash order, not correctness.** The other session measured the source ordering and disproved the obvious hypothesis — `goal.rs` interleaves DOC/FUNC exactly like `world.rs` (`goal.rs:334 DOC, :351 FUNC, :370 DOC…` against `world.rs:48 DOC, :62 FUNC, :70 DOC…`) — so nothing about how `goal.rs` is written makes it safe. All eight of its entries simply happen to precede the first function in the table's internal iteration order. **Do not treat `goal.lua` as a working reference implementation.** It is one added binding away from silently emptying, and nothing would report it.
+
+Fix by making a non-string value a non-event rather than a terminator: iterate `pairs::<String, LuaValue>()` and keep entries whose value is a string, or collect the `__doc_entry_*` keys first and `get` each one individually. Then fix so a non-string value is skipped rather than ending iteration, and **add a test asserting a known entry appears in the generated output** for each of the four tables. Without that test this regresses invisibly: nothing reads these files, so nothing has ever contradicted them.
 
 Worth its own commit, before the string edits, so the fix and the content change stay separable.
 

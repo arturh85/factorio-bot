@@ -1,7 +1,7 @@
 use crate::cli::{Subcommand, SubcommandCallback};
 use crate::context::Context;
 use clap::{value_parser, Arg, ArgMatches, Command};
-use factorio_bot_core::miette::{IntoDiagnostic, Result};
+use factorio_bot_core::miette::{miette, IntoDiagnostic, Result};
 use factorio_bot_core::paris::info;
 use std::net::SocketAddr;
 
@@ -43,6 +43,41 @@ async fn run(matches: &ArgMatches, context: &mut Context) -> Result<()> {
     let port = context.app_settings.read().await.restapi.port;
     SocketAddr::from(([127, 0, 0, 1], u16::try_from(port).into_diagnostic()?))
   };
+
+  // `Context::new` creates `workspace/`, but nothing creates
+  // `workspace/scripts/`: the desktop app got that as a side effect of
+  // `scripts_dir`, which the HTTP handlers deliberately do not call (it would
+  // resolve `./scripts` against the server process's working directory). On a
+  // fresh install that left every `/api/v1/scripts*` route answering "missing
+  // scripts directory", with no way to create a first script from a browser.
+  // Bootstrap it here instead — once, at startup, from the configured
+  // workspace path only, never relative to the CWD.
+  {
+    let configured = context
+      .app_settings
+      .read()
+      .await
+      .factorio
+      .workspace_path
+      .to_string();
+    // Same resolution the handlers use: an empty `workspace_path` means the
+    // data-local workspace, and a relative one is never joined against the
+    // CWD. `load_app_settings` already fills the empty case in, so this only
+    // matters for settings built by other means.
+    let workspace_path = if configured.is_empty() {
+      factorio_bot_core::paths::workspace_dir()
+    } else {
+      std::path::PathBuf::from(configured)
+    };
+    if workspace_path.is_relative() {
+      return Err(miette!(
+        "settings.factorio.workspace_path must be absolute, got: {}",
+        workspace_path.display()
+      ));
+    }
+    let scripts_dir = factorio_bot_core::scripts::ensure_scripts_dir(&workspace_path)?;
+    info!("scripts directory: {}", scripts_dir.display());
+  }
 
   // `start_with_shutdown` reads `settings.restapi.web_root` back out of this
   // same `SharedAppSettings` at startup (see `webserver.rs`), so overriding

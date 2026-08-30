@@ -114,7 +114,10 @@ mod tests {
     use super::*;
 
     /// Every binding that carries a `__doc_entry_*` string, spelled the way it
-    /// appears in the rendered file.
+    /// appears in the rendered file, **in the order the generator must emit
+    /// them** — sorted by `__doc_entry_*` key, which is why `Direction` leads
+    /// `all_bots` (ASCII `D` < `a`) and `direction_opposite` leads
+    /// `directions_all` (`_` < `s`).
     ///
     /// This list is deliberately exhaustive rather than a spot check. The
     /// generator's failure mode was *truncation* — it emitted a prefix of each
@@ -126,8 +129,8 @@ mod tests {
         (
             "globals.lua",
             &[
-                "globals.all_bots",
                 "globals.Direction = {",
+                "globals.all_bots",
                 "function globals.direction_clockwise(",
                 "function globals.direction_opposite(",
                 "function globals.directions_all(",
@@ -222,15 +225,74 @@ mod tests {
         );
     }
 
-    /// Lua seeds its string hashes per interpreter state, so `pairs` visits a
-    /// table in a different order in different processes. A generated file
-    /// whose contents depend on that is not reproducible, and the ordering
-    /// alone would have hidden the truncation bug from anyone comparing two
-    /// runs. Generating twice in one process is the weaker half of this; the
-    /// sort is what makes it hold across processes too.
+    /// The generated files must be a function of the source, not of Lua's
+    /// hash seed — so the entries appear in sorted key order, always.
+    ///
+    /// This asserts the ordering *directly*, by position in the file, because
+    /// the obvious test for it cannot be trusted. See
+    /// [`generated_files_are_ordered_deterministically`] for what went wrong
+    /// with the obvious one; the short version is that comparing two
+    /// generations only discriminates when the two interpreters happen to draw
+    /// different seeds, which is a property of the allocator and the clock
+    /// rather than of anything the test does. Reading positions out of one
+    /// file draws no entropy at all: if `entries.sort()` goes, the emitted
+    /// order becomes Lua's hash order, and hash order matching sorted order
+    /// for twelve keys is 1 in 12! — repeated independently across four files.
+    #[test]
+    fn entries_are_emitted_in_sorted_key_order() {
+        let (_dir, target) = generate();
+        for (file, entries) in EXPECTED {
+            let body = fs::read_to_string(target.join(file)).expect("read generated file");
+            let mut previous: Option<(&str, usize)> = None;
+            for entry in *entries {
+                let at = body
+                    .find(entry)
+                    .unwrap_or_else(|| panic!("{file} is missing `{entry}`"));
+                if let Some((earlier, earlier_at)) = previous {
+                    assert!(
+                        earlier_at < at,
+                        "{file} emits `{entry}` before `{earlier}`; entries must be \
+                         sorted by their `__doc_entry_*` key, and are not when the \
+                         generator leaks Lua's per-state hash order into the output"
+                    );
+                }
+                previous = Some((entry, at));
+            }
+        }
+    }
+
+    /// Two generations in one process agree.
+    ///
+    /// **This test guards weakly and cannot be made to guard strongly.** It is
+    /// kept because it states the user-visible property — build twice, get the
+    /// same file — and removed reliance on it is exactly what
+    /// [`entries_are_emitted_in_sorted_key_order`] is for.
+    ///
+    /// The trap, which review caught: it only discriminates when the two
+    /// interpreters draw *different* seeds. PUC Lua's `luai_makeseed` mixes the
+    /// new `lua_State`'s heap address, a stack address and `time(NULL)`. Two
+    /// back-to-back generations can agree on all three — a quiet allocator
+    /// hands the second state the block the first just freed, and no clock
+    /// second is crossed — and then the test passes with the sort deleted. On
+    /// the reviewer's machine it did so 30 times out of 30 in isolation while
+    /// failing 15 out of 15 under the full crate suite, where neighbouring
+    /// tests perturb the allocator; on mine it failed 30 out of 30 in
+    /// isolation. Same test, same mutation, opposite verdicts: its
+    /// discriminating power was coming from the environment, not from itself.
+    ///
+    /// Holding the intervening states *alive* is what this can do about it:
+    /// the first generation's freed block is occupied when the second
+    /// generation allocates, so the addresses cannot coincide. That is a
+    /// guarantee about the allocator, not about the clock, which is why it is
+    /// the backup assertion and not the primary one.
     #[test]
     fn generated_files_are_ordered_deterministically() {
         let (_a, first) = generate();
+        // Kept alive across the second `generate()` on purpose: dropping these
+        // would hand the block straight back and restore the coincidence.
+        let _occupy_the_freed_states: Vec<Lua> = (0..8)
+            .map(|_| crate::sandbox::new_sandboxed_lua().expect("sandboxed lua"))
+            .collect();
         let (_b, second) = generate();
         for (file, _) in EXPECTED {
             assert_eq!(

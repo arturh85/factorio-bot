@@ -1946,7 +1946,32 @@ git commit -m "feat(lua): add the goal api backed by the new planner and executo
 - Modify: `crates/core/src/plan/mod.rs` (drop the `plan_builder` and `execute` lines; **KEEP `pub mod planner;`**), `crates/core/src/graph/mod.rs` (drop `task_graph`), `crates/core/src/gantt_mermaid.rs` (test-only use), `crates/core/src/errors.rs:176` (cosmetic diagnostic string)
 - Modify: `app/src-tauri/src/{scripting.rs, cli/lua.rs, gui/command/script.rs, repl/run_script.rs}`
 
-**These four files are contested — re-read them before editing.** The concurrent web-server effort is moving `run_script_file` out of `app/src-tauri/src/scripting.rs` into `crates/scripting_lua`, giving it a `scripts_root` argument, and every one of these call sites changes signature as a result. That work is expected to land BEFORE this task. Do not work from the signatures quoted anywhere in this plan; open each file and read what is actually there. If `run_script_file` still lives in `app/src-tauri`, coordinate before touching it rather than racing.
+**The contested files have landed. Signatures below are current as of `7583d09` — but still open each file and read it; do not code from this block alone.**
+
+`run_script` and `language_by_filename` NO LONGER EXIST in `app/src-tauri/src/scripting.rs`; they moved to `crates/scripting_lua/src/run_script.rs`, re-exported as `factorio_bot_scripting_lua::{language_by_filename, run_script, run_script_file}`.
+
+```rust
+// app/src-tauri/src/scripting.rs — all that remains
+pub async fn run_script_file(planner: &mut Planner, path: &str, bot_count: u8,
+                             sink: Option<Arc<dyn OutputSink>>) -> miette::Result<(String, String)>
+
+// crates/scripting_lua/src/run_script.rs — new home
+pub fn language_by_filename(filename: &str) -> Option<&'static str>
+pub async fn run_script_file(planner: &mut Planner, scripts_root: &Path, requested: &str,
+                             bot_count: u8, sink: Option<Arc<dyn OutputSink>>) -> Result<(String, String)>
+pub async fn run_script(planner: &mut Planner, language: &str, code: &str, scripts_root: &Path,
+                        bot_count: u8, sink: Option<Arc<dyn OutputSink>>) -> Result<(String, String)>
+```
+
+`gui/command/script.rs`: every signature UNCHANGED (bodies changed). `repl/run_script.rs`: unchanged. `cli/lua.rs`: not modified at all.
+
+**Three rules that come with this, all load-bearing:**
+
+1. **`scripts_dir` now has ZERO callers workspace-wide. Use `ensure_scripts_dir`.** Adding a `scripts_dir` call back is a regression, not a convenience: it prefers `./scripts` relative to the process CWD, so the editor would list and save to one directory while execution ran from another. That split is exactly what the concurrent effort's task existed to eliminate.
+2. **Never hardcode `sink: None` when forwarding.** The app-side wrapper is the only script-execution entry point; passing `None` severs the output-streaming path. If a call site looks like it is discarding a capability rather than forwarding it, that is a bug.
+3. **A CLI behaviour change landed:** the old path stripped a leading `"scripts/"`, the new one does not. `factorio-bot lua scripts/example.lua` now fails where `example.lua` works. If this task touches CLI docs or example invocations, use the working form.
+
+**Original guidance retained:** The concurrent web-server effort is moving `run_script_file` out of `app/src-tauri/src/scripting.rs` into `crates/scripting_lua`, giving it a `scripts_root` argument, and every one of these call sites changes signature as a result. That work is expected to land BEFORE this task. Do not work from the signatures quoted anywhere in this plan; open each file and read what is actually there. If `run_script_file` still lives in `app/src-tauri`, coordinate before touching it rather than racing.
 - Delete: `crates/scripting_lua/src/globals/plan.rs`; modify `lua_runner.rs`, `roll_best_seed.rs`, `lua_docs.rs`
 - Migrate: `scripts/{test_phase_2_1,test_phase_2_2,api_test,example,multi_client_test,lib}.lua`, `crates/scripting_lua/tests/script.lua`
 

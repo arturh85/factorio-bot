@@ -8,6 +8,11 @@ pub mod render;
 pub mod schedule;
 pub mod state;
 
+/// Test-only worlds. Not part of the crate's API: research needs a world with
+/// a force, and the shared `fixture_world` has none.
+#[cfg(test)]
+mod test_world;
+
 pub use action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot};
 pub use error::PlannerError;
 pub use goal::{Goal, Holder};

@@ -73,6 +73,19 @@ pub enum PlannerError {
         condition: String,
     },
 
+    /// Deliberately not a `NoApplicableMethod`. That variant means "this world
+    /// offers no route to the thing you asked for", which sends a caller
+    /// looking at prerequisites and resources. A technology no force in this
+    /// world defines is not a routing problem at all — the name itself is
+    /// wrong, or the world was never told about the technology — and no amount
+    /// of mining will fix it.
+    #[error("no technology named {technology} is known to any force in this world")]
+    #[diagnostic(
+        code(planner::unknown_technology),
+        help("check the spelling, or whether the world's forces have been loaded yet")
+    )]
+    UnknownTechnology { technology: String },
+
     #[error("no method can satisfy goal: {goal}")]
     #[diagnostic(code(planner::no_applicable_method))]
     NoApplicableMethod { goal: String },

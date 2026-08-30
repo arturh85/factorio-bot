@@ -4,7 +4,7 @@ use crate::ids::Ticks;
 use crate::state::PlanState;
 use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::num_traits::ToPrimitive;
-use factorio_bot_core::types::{FactorioRecipe, Position};
+use factorio_bot_core::types::{FactorioRecipe, FactorioTechnology, Position};
 
 const TICKS_PER_SECOND: f64 = 60.0;
 
@@ -202,6 +202,74 @@ pub fn output_per_craft(recipe: &FactorioRecipe, item: &str) -> u32 {
 /// A recipe's energy in ticks.
 pub fn recipe_ticks(recipe: &FactorioRecipe) -> Ticks {
     seconds_to_ticks(recipe.energy.to_f64().unwrap_or(0.5))
+}
+
+/// The definition of technology `name`, taken from the alphabetically first
+/// force that carries it.
+///
+/// `FactorioWorld::forces` is a `DashMap`, so "the first force that has it" is
+/// not a deterministic answer — iteration order moves with the hash seed, and
+/// planning is required to give the same plan for the same world every time.
+/// Ordering by force name makes it one. In practice every world here has a
+/// single force, so the tie-break never fires; it exists so that a world with
+/// two could not make planning irreproducible.
+pub fn technology_for(state: &PlanState, name: &str) -> Option<FactorioTechnology> {
+    state
+        .base()
+        .forces
+        .iter()
+        .filter_map(|force| {
+            force
+                .technologies
+                .get(name)
+                .map(|tech| (force.value().name.clone(), tech.clone()))
+        })
+        .min_by(|(a, _), (b, _)| a.cmp(b))
+        .map(|(_, tech)| tech)
+}
+
+/// What a whole research costs, as (item, total count) pairs in the order the
+/// technology lists them.
+///
+/// `research_unit_ingredients` is the cost of **one** unit and
+/// `research_unit_count` is how many units the technology takes, so the bill is
+/// the product. The multiply is done in `u64` and clamped, because `amount` is
+/// a `u32` and a modded technology with a large unit count could otherwise wrap
+/// a plan's cost down to something cheap.
+pub fn research_ingredients(tech: &FactorioTechnology) -> Vec<(String, u32)> {
+    tech.research_unit_ingredients
+        .iter()
+        .map(|ingredient| {
+            let total = u64::from(ingredient.amount).saturating_mul(tech.research_unit_count);
+            (
+                ingredient.name.clone(),
+                u32::try_from(total).unwrap_or(u32::MAX),
+            )
+        })
+        .collect()
+}
+
+/// How long a whole research takes, in ticks.
+///
+/// **`research_unit_energy` is in ticks, not seconds** — unlike
+/// `FactorioRecipe::energy`, which `recipe_ticks` above converts from seconds.
+/// The asymmetry is Factorio's, not ours: the runtime API multiplies a
+/// technology prototype's `unit.time` by 60 before handing it out, so
+/// automation's `time = 10` arrives here as `600`. `mods/BotBridge/types.lua`
+/// copies the field through untouched, so what lands in `FactorioTechnology` is
+/// whatever the runtime API said. If a future Factorio changes that, this is
+/// the one line to change, and the error is a factor of sixty in a *time
+/// estimate* — it moves makespans, it does not make a plan wrong.
+pub fn research_ticks(tech: &FactorioTechnology) -> Ticks {
+    let ticks = tech.research_unit_energy.to_f64().unwrap_or(0.0)
+        * tech.research_unit_count.to_f64().unwrap_or(0.0);
+    if ticks <= 0.0 {
+        return 0;
+    }
+    if ticks >= f64::from(Ticks::MAX) {
+        return Ticks::MAX;
+    }
+    ticks.ceil() as Ticks
 }
 
 #[cfg(test)]

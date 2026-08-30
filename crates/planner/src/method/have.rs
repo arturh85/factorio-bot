@@ -23,11 +23,32 @@ use crate::goal::{Goal, Holder};
 use crate::ids::{BotId, Ticks};
 use crate::method::util::{
     free_area_near, ingredients_of, mining_ticks, nearest_resource_tile, output_per_craft,
-    recipe_for, recipe_ticks, resource_supply_at_least, resource_tiles_for,
+    recipe_for, recipe_ticks, research_ingredients, research_ticks, resource_supply_at_least,
+    resource_tiles_for, technology_for,
 };
 use crate::method::{ExpansionCtx, GoalSite, Method, MethodRegistry, Step};
 use crate::state::PlanState;
 use factorio_bot_core::types::FactorioEntity;
+use std::collections::BTreeSet;
+
+/// Does `item` still have to be *produced*, in the sense that no single bot
+/// already holds the whole `count`?
+///
+/// Deliberately not `shortfall(.., Holder::Anyone) > 0`, which asks whether the
+/// roster holds `count` *between them*. That is the right question for a goal
+/// the roster can split; it is the wrong question for an action that reads one
+/// bot's inventory, and answering it there is a bug with a shape worth
+/// recording: four bots each starting with one stone furnace satisfy
+/// `Have { stone-furnace, 1, Anyone }` four times over, so nothing is crafted,
+/// and the second `Place` a plan needs then fails on the one bot actually
+/// holding it. Used by `converges`, which has no chain actor to size a
+/// `Holder::Share` against and must answer the same question without one.
+fn needs_producing(state: &PlanState, item: &str, count: u32) -> bool {
+    !state
+        .bot_ids()
+        .iter()
+        .any(|bot| state.inventory_count(*bot, item) >= count)
+}
 
 /// How much of `item` still needs producing, given what is already held.
 fn shortfall(state: &PlanState, item: &str, count: u32, whose: &Holder) -> u32 {
@@ -39,6 +60,10 @@ fn shortfall(state: &PlanState, item: &str, count: u32, whose: &Holder) -> u32 {
 }
 
 /// The goal is already met. Emits nothing.
+///
+/// Registered first everywhere, so "we already have this" is decided in exactly
+/// one place rather than re-tested inside every method that could otherwise
+/// have satisfied the goal.
 pub struct AlreadySatisfied;
 
 impl Method for AlreadySatisfied {
@@ -49,6 +74,22 @@ impl Method for AlreadySatisfied {
     fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
         match goal {
             Goal::Have { item, count, whose } => shortfall(state, item, *count, whose) == 0,
+            // `PlanState::is_researched` answers over two sources: the
+            // technologies this plan has already scheduled research for (its
+            // own overlay) and the ones the world reports as researched
+            // (reality). Either alone is a wrong answer here — skipping the
+            // overlay would plan the same research twice for two goals that
+            // share a prerequisite, and skipping the world would re-research
+            // what the force already has.
+            //
+            // They cannot contradict each other, which is why "which wins" has
+            // no bite: research is monotone. Nothing in the game or in this
+            // planner ever un-researches a technology, so the overlay can only
+            // ever add to what the world reports, and the union is the whole
+            // truth. If a future Factorio grew a way to lose a technology, the
+            // overlay would have to learn to subtract and this comment would be
+            // wrong — that is the assumption to check first.
+            Goal::Researched(tech) => state.is_researched(tech),
             _ => false,
         }
     }
@@ -514,12 +555,169 @@ impl Method for HandCraft {
 }
 
 /// The methods this crate ships, in preference order.
+/// Research a technology: get its prerequisites researched, gather its science
+/// packs, then run the research itself.
+///
+/// **Prerequisites recurse.** `Researched(t)` emits a `Researched(p)` subgoal
+/// for each of `t`'s prerequisites rather than refusing when one is missing,
+/// because refusing would make the goal useless: a caller asking for `military`
+/// wants the technology, and telling them to go ask for `logistics` first —
+/// and then for `automation` first — is asking them to walk the tech tree by
+/// hand, which is exactly the decomposition this method exists to do. It also
+/// makes the goal composable, since the prerequisite subgoals are ordinary
+/// goals and pick up `AlreadySatisfied` for free.
+///
+/// Recursion terminates because the technology graph is a DAG in every world
+/// the game produces, and because each research that *is* emitted applies
+/// `Effect::Researched` immediately, so a technology reached twice through two
+/// different prerequisites is expanded once and then satisfied. Neither of
+/// those is a guarantee about arbitrary data, so the backstop is the driver's:
+/// a cycle in a hand-written or modded technology table runs the expansion into
+/// `MAX_EXPANSION_DEPTH` and comes back as `ExpansionTooDeep`, naming the goal.
+/// It cannot hang.
+///
+/// **On consumption.** The research action carries `LoseItem` for every pack it
+/// needs, so a second research cannot be planned out of the same packs. That is
+/// right about the packs and approximate about who spends them: in the game a
+/// lab consumes them, not the bot, and nothing here yet moves packs from a bot
+/// into a lab. Until a `Supply the labs` method exists, the plan debits the
+/// bot, which is the conservative direction — it over-counts what has to be
+/// produced rather than under-counting it.
+pub struct Researched;
+
+impl Method for Researched {
+    fn name(&self) -> &'static str {
+        "research"
+    }
+
+    fn converges(&self, goal: &Goal, state: &PlanState) -> bool {
+        let Goal::Researched(name) = goal else {
+            return false;
+        };
+        let Some(tech) = technology_for(state, name) else {
+            return false;
+        };
+        // One research action carries a `HasItem` for every pack, exactly like
+        // one craft action carries one for every ingredient, so the same
+        // reasoning applies: each pack that still has to be produced is a
+        // separate sub-chain, and two or more of them have to land in one
+        // inventory. Prerequisites are not counted — a `Researched` effect is
+        // world-scoped and satisfied by whoever ran it, so it pulls nothing
+        // into anyone's inventory.
+        research_ingredients(&tech)
+            .iter()
+            .filter(|(item, count)| needs_producing(state, item, *count))
+            .count()
+            >= 2
+    }
+
+    fn applicable(&self, goal: &Goal, _state: &PlanState) -> bool {
+        // Deliberately not conditioned on the technology existing. A goal
+        // naming a technology no force has heard of has to *reach* `expand`, so
+        // that it can be refused by name; declining it here would leave the
+        // registry with no method for it and the caller would get
+        // `NoApplicableMethod` — "no method can satisfy goal: research foo",
+        // which reads as "that technology is out of reach in this world"
+        // rather than "there is no such technology".
+        //
+        // Nor is it conditioned on the technology being unresearched:
+        // `AlreadySatisfied` is registered ahead of this and owns that
+        // question for every goal kind.
+        matches!(goal, Goal::Researched(_))
+    }
+
+    fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+        let Goal::Researched(name) = goal else {
+            return Err(PlannerError::NoApplicableMethod {
+                goal: goal.to_string(),
+            });
+        };
+        let tech =
+            technology_for(&ctx.state, name).ok_or_else(|| PlannerError::UnknownTechnology {
+                technology: name.clone(),
+            })?;
+
+        // A `BTreeSet` rather than the listed order: it dedupes a table that
+        // names a prerequisite twice, and it fixes an order for the emitted
+        // conditions that does not depend on how the force's data happened to
+        // be written down.
+        let prerequisites: BTreeSet<String> = tech
+            .prerequisites
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let ingredients = research_ingredients(&tech);
+
+        let mut steps: Vec<Step> = Vec::new();
+        for prerequisite in &prerequisites {
+            steps.push(Step::Subgoal(Goal::Researched(prerequisite.clone())));
+        }
+        for (item, count) in &ingredients {
+            // `Holder::Share`, not `Holder::Anyone`. The research is one action
+            // reading one bot's inventory, so the packs have to end up in one
+            // inventory, and `Holder::Anyone` sizes its shortfall against the
+            // sum across the roster instead. The difference is not academic:
+            // every bot the Lua runner starts carries one stone furnace, so a
+            // roster of four satisfies `Have { stone-furnace, 1, Anyone }`
+            // without crafting anything, and the second furnace a science pack
+            // chain needs is then placed by a bot that has already spent its
+            // own. `Share` sizes against the chain actor — the same bot the
+            // driver simulates every effect in this subtree against — and
+            // commits nobody to running the work, which stays the scheduler's
+            // decision.
+            steps.push(Step::Subgoal(Goal::Have {
+                item: item.clone(),
+                count: *count,
+                whose: Holder::Share(ctx.chain_actor),
+            }));
+        }
+
+        let mut pre: Vec<Condition> = prerequisites
+            .iter()
+            .map(|prerequisite| Condition::Researched(prerequisite.clone()))
+            .collect();
+        let mut eff: Vec<Effect> = Vec::new();
+        for (item, count) in &ingredients {
+            pre.push(Condition::HasItem {
+                who: Actor::Role,
+                item: item.clone(),
+                count: *count,
+            });
+            eff.push(Effect::LoseItem {
+                who: Actor::Role,
+                item: item.clone(),
+                count: *count,
+            });
+        }
+        eff.push(Effect::Researched(name.clone()));
+
+        // No explicit `Link` steps: every edge this action needs is stated as a
+        // precondition, and `ActionNetwork::infer_edges` turns
+        // `Effect::GainItem`/`HasItem` and `Effect::Researched`/
+        // `Condition::Researched` into ordering edges. A method cannot link to
+        // its subgoals' actions in any case — it never sees their ids.
+        steps.push(Step::Act(Box::new(Action {
+            id: ctx.ids.next(),
+            kind: ActionKind::Research { tech: name.clone() },
+            pre,
+            eff,
+            duration: research_ticks(&tech),
+            pinned: None,
+            label: format!("research {}", name),
+        })));
+
+        Ok(steps)
+    }
+}
+
 pub fn default_registry() -> MethodRegistry {
     MethodRegistry::new()
         .with(Box::new(AlreadySatisfied))
         .with(Box::new(Smelt))
         .with(Box::new(HandCraft))
         .with(Box::new(Mine))
+        .with(Box::new(Researched))
 }
 
 /// Split a shared goal into one independent chain per bot.
@@ -612,6 +810,7 @@ pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
         .with(Box::new(Smelt))
         .with(Box::new(HandCraft))
         .with(Box::new(Mine))
+        .with(Box::new(Researched))
 }
 
 #[cfg(test)]
@@ -619,7 +818,8 @@ mod tests {
     use super::*;
     use crate::ids::BotId;
     use crate::method::expand;
-    use crate::schedule::schedule;
+    use crate::network::ActionNetwork;
+    use crate::schedule::{schedule, StepKind};
     use crate::state::PlanState;
     use factorio_bot_core::factorio::util::calculate_distance;
     use factorio_bot_core::test_utils::fixture_world;
@@ -628,6 +828,436 @@ mod tests {
 
     fn state(bots: &[BotId]) -> PlanState {
         PlanState::from_world(Arc::new(fixture_world()), bots)
+    }
+
+    /// The same world, plus the one force `crate::test_world` bolts on. Every
+    /// research test uses this; nothing else does, so the fixtures the
+    /// makespan figures are pinned to stay exactly as they were.
+    fn tech_state(bots: &[BotId]) -> PlanState {
+        PlanState::from_world(Arc::new(crate::test_world::world_with_technologies()), bots)
+    }
+
+    /// The steps `Researched` emits for `tech`, without running the driver
+    /// over them. Asserting a bill of materials against the network the
+    /// subgoals eventually expand into would be asserting it against the
+    /// *shortfall* — which the bot's starting inventory moves — rather than
+    /// against the technology's stated cost.
+    fn research_steps(state: &PlanState, tech: &str) -> Vec<Step> {
+        let mut ctx = ExpansionCtx::new(state.fork(), BotId(1));
+        Researched
+            .expand(&Goal::Researched(tech.into()), &mut ctx)
+            .expect("the fixture technologies all expand")
+    }
+
+    fn subgoals(steps: &[Step]) -> Vec<Goal> {
+        steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Subgoal(goal) => Some(goal.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn research_actions(net: &ActionNetwork) -> Vec<&Action> {
+        net.actions()
+            .filter(|a| matches!(a.kind, ActionKind::Research { .. }))
+            .collect()
+    }
+
+    fn researched_techs(net: &ActionNetwork) -> Vec<String> {
+        let mut names: Vec<String> = research_actions(net)
+            .iter()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Research { tech } => Some(tech.clone()),
+                _ => None,
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// `automation` is the one fixture technology carrying the real game's
+    /// numbers: 10 units of one automation science pack each, 600 ticks per
+    /// unit. Both the pack bill and the duration are the product, and both are
+    /// written out rather than recomputed from the fixture — a test that says
+    /// `count == tech.research_unit_count * amount` passes just as happily
+    /// against a method that forgot to multiply at all, because it would be
+    /// making the same mistake twice.
+    #[test]
+    fn a_research_asks_for_one_unit_bill_times_the_unit_count() {
+        let s = tech_state(&[BotId(1)]);
+        let steps = research_steps(&s, "automation");
+        assert_eq!(
+            subgoals(&steps),
+            vec![Goal::Have {
+                item: "automation-science-pack".into(),
+                count: 10,
+                whose: Holder::Share(BotId(1)),
+            }]
+        );
+
+        let Some(Step::Act(action)) = steps.last() else {
+            panic!("the last step must be the research action, got {steps:?}");
+        };
+        assert_eq!(
+            action.kind,
+            ActionKind::Research {
+                tech: "automation".into()
+            }
+        );
+        assert!(
+            action.pre.contains(&Condition::HasItem {
+                who: Actor::Role,
+                item: "automation-science-pack".into(),
+                count: 10,
+            }),
+            "the action must require the whole bill, got {:?}",
+            action.pre
+        );
+        assert!(
+            action.eff.contains(&Effect::LoseItem {
+                who: Actor::Role,
+                item: "automation-science-pack".into(),
+                count: 10,
+            }),
+            "the packs are spent, got {:?}",
+            action.eff
+        );
+        assert!(action
+            .eff
+            .contains(&Effect::Researched("automation".into())));
+        assert_eq!(action.duration, 6000, "10 units at 600 ticks each");
+    }
+
+    /// The multiply, on a technology whose ingredient `amount` is not 1 and
+    /// whose unit count is not `automation`'s. `military` costs 5 units of two
+    /// packs each. A method that dropped the `amount` would ask for 5; one
+    /// that dropped `research_unit_count` would ask for 2; one that read the
+    /// wrong technology would ask for 10 of `automation`'s or 20 of
+    /// `logistics`'.
+    #[test]
+    fn an_ingredient_amount_is_multiplied_by_the_unit_count() {
+        let s = tech_state(&[BotId(1)]);
+        let steps = research_steps(&s, "military");
+        assert_eq!(
+            subgoals(&steps),
+            vec![
+                Goal::Researched("logistics".into()),
+                Goal::Have {
+                    item: "automation-science-pack".into(),
+                    count: 10,
+                    whose: Holder::Share(BotId(1)),
+                },
+            ]
+        );
+
+        // ... and a different technology gets a different bill, so the 10
+        // above cannot be a constant the method returns for everything.
+        let logistics = research_steps(&s, "logistics");
+        assert!(
+            subgoals(&logistics).contains(&Goal::Have {
+                item: "automation-science-pack".into(),
+                count: 20,
+                whose: Holder::Share(BotId(1)),
+            }),
+            "logistics costs 20 units of one pack, got {:?}",
+            subgoals(&logistics)
+        );
+    }
+
+    /// Two ingredient types, one of which is spelled out with `amount` 3 and
+    /// `research_unit_count` 2. Both bills, in the technology's own order.
+    #[test]
+    fn a_multi_ingredient_research_bills_every_ingredient() {
+        let s = tech_state(&[BotId(1)]);
+        assert_eq!(
+            subgoals(&research_steps(&s, "mixed-research")),
+            vec![
+                Goal::Have {
+                    item: "automation-science-pack".into(),
+                    count: 2,
+                    whose: Holder::Share(BotId(1)),
+                },
+                Goal::Have {
+                    item: "iron-plate".into(),
+                    count: 6,
+                    whose: Holder::Share(BotId(1)),
+                },
+            ]
+        );
+    }
+
+    /// Prerequisites recurse rather than being refused, and they recurse all
+    /// the way: `military` needs `logistics`, which needs `automation`.
+    #[test]
+    fn prerequisites_expand_into_their_own_research() {
+        let bots = [BotId(1)];
+        let s = tech_state(&bots);
+        let net = expand(
+            &[Goal::Researched("military".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("military must be reachable");
+        assert_eq!(
+            researched_techs(&net),
+            vec!["automation", "logistics", "military"]
+        );
+    }
+
+    /// The order between them is stated, not left to chance: each research
+    /// carries `Condition::Researched` for its prerequisites, and inference
+    /// turns that into an edge from the action that provides it.
+    #[test]
+    fn a_research_is_ordered_after_its_prerequisite() {
+        let bots = [BotId(1)];
+        let s = tech_state(&bots);
+        let net = expand(
+            &[Goal::Researched("logistics".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("logistics must be reachable");
+
+        let find = |name: &str| {
+            research_actions(&net)
+                .into_iter()
+                .find(|a| a.kind == ActionKind::Research { tech: name.into() })
+                .unwrap_or_else(|| panic!("no research action for {name}"))
+                .id
+        };
+        let automation = find("automation");
+        let logistics = find("logistics");
+        assert!(
+            net.action(logistics)
+                .expect("logistics action")
+                .pre
+                .contains(&Condition::Researched("automation".into())),
+            "the prerequisite must be stated as a precondition"
+        );
+        assert!(
+            net.preds(logistics).iter().any(|(id, _)| *id == automation),
+            "logistics must be ordered after automation, preds were {:?}",
+            net.preds(logistics)
+        );
+    }
+
+    /// The world says `steel-processing` is done. Nothing is planned — not a
+    /// research action, and not the 50 science packs it would otherwise cost.
+    #[test]
+    fn a_technology_the_world_already_has_expands_to_nothing() {
+        let bots = [BotId(1)];
+        let s = tech_state(&bots);
+        assert!(s.is_researched("steel-processing"));
+        let net = expand(
+            &[Goal::Researched("steel-processing".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("an already-researched technology is satisfiable");
+        assert_eq!(net.len(), 0, "nothing to do");
+    }
+
+    /// The plan's own overlay counts too: `logistics` researches `automation`
+    /// on the way, so a second goal naming `automation` adds nothing. Without
+    /// the overlay this would plan `automation` twice and buy 20 packs for it.
+    #[test]
+    fn a_technology_this_plan_already_researched_is_not_researched_again() {
+        let bots = [BotId(1)];
+        let s = tech_state(&bots);
+        let net = expand(
+            &[Goal::All(vec![
+                Goal::Researched("logistics".into()),
+                Goal::Researched("automation".into()),
+            ])],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("both goals must be reachable");
+        assert_eq!(researched_techs(&net), vec!["automation", "logistics"]);
+    }
+
+    /// A technology no force defines is refused by name, not as "no method can
+    /// satisfy goal: research …", which would read as "unreachable in this
+    /// world" and send the caller hunting prerequisites.
+    #[test]
+    fn an_unknown_technology_is_refused_by_name() {
+        let bots = [BotId(1)];
+        let s = tech_state(&bots);
+        let err = expand(
+            &[Goal::Researched("nuclear-alchemy".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect_err("an unknown technology cannot be planned");
+        assert!(
+            matches!(&err, PlannerError::UnknownTechnology { technology } if technology == "nuclear-alchemy"),
+            "expected UnknownTechnology, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("nuclear-alchemy"),
+            "the message must name the technology, got: {err}"
+        );
+    }
+
+    /// A world with no forces at all — the shared `fixture_world` — is the
+    /// same story: every technology is unknown, and says so.
+    #[test]
+    fn a_world_without_forces_knows_no_technologies() {
+        let bots = [BotId(1)];
+        let s = state(&bots);
+        let err = expand(
+            &[Goal::Researched("automation".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect_err("a world with no forces has no technologies");
+        assert!(
+            matches!(&err, PlannerError::UnknownTechnology { technology } if technology == "automation"),
+            "expected UnknownTechnology, got {err:?}"
+        );
+    }
+
+    /// Real technology data is a DAG, so this cannot happen in a live world —
+    /// but a hand-written or modded table can say anything, and the recursion
+    /// must come back rather than run forever. `loop-a` requires `loop-b`
+    /// requires `loop-a`.
+    #[test]
+    fn a_cycle_in_the_prerequisites_terminates_as_an_error() {
+        let bots = [BotId(1)];
+        let s = tech_state(&bots);
+        let err = expand(
+            &[Goal::Researched("loop-a".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect_err("a prerequisite cycle cannot be planned");
+        assert!(
+            matches!(
+                &err,
+                PlannerError::ExpansionTooDeep { depth, .. } if *depth == crate::method::MAX_EXPANSION_DEPTH
+            ),
+            "expected ExpansionTooDeep, got {err:?}"
+        );
+    }
+
+    /// Convergence, for the same reason hand-crafting converges: one research
+    /// action carries a `HasItem` for every pack, so two packs that both have
+    /// to be produced must meet in one inventory. One that does not — because
+    /// the bot already holds it — is not a convergence.
+    #[test]
+    fn research_converges_only_when_two_ingredients_need_producing() {
+        let s = tech_state(&[BotId(1)]);
+        let mixed = Goal::Researched("mixed-research".into());
+        assert!(
+            Researched.converges(&mixed, &s),
+            "a science pack and an iron plate both have to be made"
+        );
+
+        let mut stocked = s.fork();
+        stocked.gain(BotId(1), "iron-plate", 6);
+        assert!(
+            !Researched.converges(&mixed, &stocked),
+            "with the plates in hand only one thing is still produced"
+        );
+
+        assert!(
+            !Researched.converges(&Goal::Researched("automation".into()), &s),
+            "one ingredient type is never a convergence"
+        );
+    }
+
+    /// The roster the Lua runner actually starts: four bots, each carrying the
+    /// default inventory `Planner::initiate_missing_players_with_default_
+    /// inventory` hands out — one stone furnace apiece, among other things.
+    ///
+    /// This is the case that caught the ingredient subgoals asking for
+    /// `Holder::Anyone`. Four furnaces spread over four bots satisfy
+    /// `Have { stone-furnace, 1, Anyone }` without crafting one, so the science
+    /// pack chain's second smelt places a furnace the acting bot has already
+    /// spent, and expansion dies with `bot 1 has 0 stone-furnace, needs 1`. A
+    /// single-bot roster cannot show it — with one bot the roster total *is*
+    /// that bot's inventory — which is exactly the fixture-too-small trap.
+    #[test]
+    fn a_research_plans_against_a_roster_whose_bots_each_hold_one_furnace() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let mut s = tech_state(&bots);
+        for bot in bots {
+            s.gain(bot, "stone-furnace", 1);
+        }
+        let net = expand(
+            &[Goal::Researched("automation".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a stocked roster must not make the research unplannable");
+        assert_eq!(research_actions(&net).len(), 1);
+        schedule(&net, &s, &bots).expect("and it must still schedule");
+    }
+
+    /// End to end: a research goal reaches a schedule, with the whole science
+    /// pack chain under it, and every precondition holds when its action runs.
+    #[test]
+    fn a_research_goal_expands_and_schedules() {
+        let bots = [BotId(1), BotId(2)];
+        let mut s = tech_state(&bots);
+        s.gain(BotId(1), "stone-furnace", 2);
+        s.gain(BotId(2), "stone-furnace", 2);
+        let net = expand(
+            &[Goal::Researched("automation".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("automation must be reachable in the fixture world");
+
+        assert_eq!(research_actions(&net).len(), 1);
+        let kinds: Vec<&str> = net
+            .actions()
+            .map(|a| match &a.kind {
+                ActionKind::Mine { .. } => "mine",
+                ActionKind::Craft { .. } => "craft",
+                ActionKind::Place { .. } => "place",
+                ActionKind::Insert { .. } => "insert",
+                ActionKind::Remove { .. } => "remove",
+                ActionKind::Research { .. } => "research",
+            })
+            .collect();
+        assert!(
+            kinds.contains(&"mine") && kinds.contains(&"craft") && kinds.contains(&"research"),
+            "the packs must actually be produced, got {kinds:?}"
+        );
+
+        // The research reaches the schedule as a step of its own, occupying the
+        // 6000 ticks the technology costs. Asserted as the step's own span
+        // rather than as a lower bound on the makespan: the science pack chain
+        // under it is long enough that `makespan >= 6000` passes even when the
+        // research is given no duration at all, which makes it a bound that
+        // guards nothing.
+        let plan = schedule(&net, &s, &bots).expect("a research plan must schedule");
+        let research_id = research_actions(&net)[0].id;
+        let steps: Vec<&crate::schedule::ScheduledStep> = plan
+            .steps
+            .iter()
+            .filter(
+                |step| matches!(&step.what, StepKind::Act { action, .. } if *action == research_id),
+            )
+            .collect();
+        assert_eq!(steps.len(), 1, "the research runs once");
+        assert_eq!(
+            steps[0].end - steps[0].start,
+            6000,
+            "10 units at 600 ticks each must reach the schedule"
+        );
     }
 
     /// The scenario the stack exists for, checked for the thing the game

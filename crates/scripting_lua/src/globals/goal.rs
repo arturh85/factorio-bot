@@ -16,7 +16,7 @@ use factorio_bot_core::tokio::task::JoinHandle;
 use factorio_bot_executor::{run_into, Actuator, ExecutionLog, RconActuator, Status};
 use factorio_bot_planner::{
     expand, graphviz, mermaid_gantt, registry_for, schedule, ActionNetwork, BotId, Goal, Holder,
-    PlanState, PlannerError, Schedule, Ticks,
+    PlanState, Schedule, Ticks,
 };
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -384,13 +384,20 @@ end
             r#"
 --- plans for a technology to be researched
 --
--- **Not implemented yet.** The planner has no method that decomposes a research
--- goal, so this always raises. It is bound because the executor and the goal
--- type already carry research through end to end; only the decomposition is
--- missing. Nothing you pass will make it succeed.
+-- Decomposes into the technology's prerequisites, researched first and
+-- recursively, then the science packs it costs -- its per-unit ingredients
+-- times its unit count, produced by the same methods `goal.have` uses -- then
+-- the research itself. A technology the force has already researched, or that
+-- an earlier goal in the same plan already researched, costs nothing and adds
+-- no actions.
+--
+-- The handle it returns is an ordinary plan handle: pass it to
+-- `goal.schedule`, `goal.graphviz`, `goal.gantt` and `goal.execute` like any
+-- other.
 -- @string technology_name name of the technology, e.g. "automation"
 -- @treturn number a plan handle
--- @raise always, until the planner grows a research method
+-- @raise if no force in this world defines `technology_name`, if the packs it
+--   costs cannot be produced in this world, or if its prerequisites cycle
 function goal.researched(technology_name)
 end
 "#,
@@ -623,30 +630,21 @@ fn expand_goal(goal: Goal, world: &Arc<FactorioWorld>, bots: &[BotId]) -> LuaRes
         .first()
         .ok_or_else(|| goal_error("no bots in this run; goals need at least one"))?;
     let state = PlanState::from_world(world.clone(), bots);
+    // No rewriting of the planner's own errors. There used to be one here,
+    // because `registry_for` held no method for `Goal::Researched` and every
+    // research goal came back as `NoApplicableMethod` — "no method can satisfy
+    // goal: research automation" — which reads as "that technology is
+    // unreachable in this world" for what was really an unbuilt feature. The
+    // feature is built (`method::have::Researched`), and the planner now
+    // distinguishes the cases itself: a technology no force defines comes back
+    // as `UnknownTechnology`, naming it.
     expand(
         std::slice::from_ref(&goal),
         &state,
         &registry_for(bots),
         chain_actor,
     )
-    .map_err(|err| {
-        match (&err, &goal) {
-            // `registry_for` holds no method for `Goal::Researched`, so every
-            // research goal fails here. The planner's own wording — "no method
-            // can satisfy goal: research automation" — reads as "that
-            // technology is unreachable in this world", and sends the caller
-            // looking at prerequisites for a feature that was never built. Say
-            // which of the two it is.
-            (PlannerError::NoApplicableMethod { .. }, Goal::Researched(tech)) => {
-                goal_error(format!(
-                    "research is not implemented yet: the planner has no method that decomposes a \
-                     research goal, so goal.researched cannot be satisfied for {tech} or for any \
-                     other technology"
-                ))
-            }
-            _ => goal_error(err),
-        }
-    })
+    .map_err(goal_error)
 }
 
 /// Awaits a run's task, then reports on it.
@@ -1384,6 +1382,41 @@ mod tests {
         }
     }
 
+    /// One force with one technology, added on top of the shared fixture
+    /// world.
+    ///
+    /// `fixture_world` carries no forces, and technologies live on forces, so
+    /// `goal.researched` has nothing to plan against it. The fixture is shared
+    /// with the planner's own pinned makespan tests and must not grow a force
+    /// of its own, so this adds one here, for this test only. The numbers are
+    /// the game's own for `automation`: 10 units of one automation science
+    /// pack each, 600 ticks per unit.
+    const RESEARCH_FORCE_JSON: &str = r#"
+    {
+      "name": "player",
+      "force_id": 1,
+      "current_research": null,
+      "research_progress": null,
+      "technologies": {
+        "automation": {
+          "name": "automation",
+          "enabled": true,
+          "upgrade": false,
+          "researched": false,
+          "prerequisites": [],
+          "research_unit_ingredients": [
+            { "name": "automation-science-pack", "ingredient_type": "item", "amount": 1 }
+          ],
+          "research_unit_count": 10,
+          "research_unit_energy": 600.0,
+          "order": "a-a",
+          "level": 1,
+          "valid": true
+        }
+      }
+    }
+    "#;
+
     /// Runs `tests/goal_script.lua` through the real interpreter and the real
     /// `run_lua` harness, which is the only thing that proves the table is
     /// installed as a global under a live sandbox.
@@ -1394,10 +1427,15 @@ mod tests {
     #[tokio::test]
     async fn the_goal_script_fixture_runs() {
         use factorio_bot_core::plan::planner::Planner;
+        use factorio_bot_core::types::FactorioForce;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
-        let mut planner = Planner::new(Arc::new(fixture_world()), None);
+        let world = fixture_world();
+        let force: FactorioForce = factorio_bot_core::serde_json::from_str(RESEARCH_FORCE_JSON)
+            .expect("the research force fixture must parse");
+        world.update_force(force).expect("update_force");
+        let mut planner = Planner::new(Arc::new(world), None);
         crate::lua_runner::run_lua(
             &mut planner,
             include_str!("../../tests/goal_script.lua"),

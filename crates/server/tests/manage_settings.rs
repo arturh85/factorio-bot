@@ -21,6 +21,8 @@ fn test_state() -> (tempfile::TempDir, AppState) {
         instance: FactorioInstance::new_shared(),
         settings: AppSettings::default().into_shared(),
         settings_path: dir.path().join("AppSettings.toml"),
+        starting: Default::default(),
+        last_start_error: Default::default(),
         jobs: factorio_bot_server::jobs::JobRegistry::new(8),
     };
     (dir, state)
@@ -59,6 +61,8 @@ async fn put_settings_updates_the_shared_state() {
         instance: FactorioInstance::new_shared(),
         settings: AppSettings::default().into_shared(),
         settings_path: settings_path.clone(),
+        starting: Default::default(),
+        last_start_error: Default::default(),
         jobs: factorio_bot_server::jobs::JobRegistry::new(8),
     };
     let mut updated = AppSettings::default();

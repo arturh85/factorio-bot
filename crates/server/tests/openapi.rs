@@ -152,6 +152,7 @@ async fn openapi_json_lists_every_route() {
         // Management
         "/api/v1/settings",
         "/api/v1/instance",
+        "/api/v1/instance/start",
         "/api/v1/instance/stop",
         "/api/v1/rcon",
         "/api/v1/scripts",
@@ -168,6 +169,7 @@ async fn openapi_json_lists_every_route() {
         ("/api/v1/settings", "get"),
         ("/api/v1/settings", "put"),
         ("/api/v1/instance", "get"),
+        ("/api/v1/instance/start", "post"),
         ("/api/v1/instance/stop", "post"),
         ("/api/v1/rcon", "post"),
         ("/api/v1/scripts", "get"),

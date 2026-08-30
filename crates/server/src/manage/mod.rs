@@ -15,6 +15,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(settings::get_settings))
         .routes(routes!(settings::put_settings))
         .routes(routes!(instance::get_instance))
+        .routes(routes!(instance::start_instance))
         .routes(routes!(instance::stop_instance))
         .routes(routes!(rcon::send_rcon))
         .routes(routes!(scripts::list_scripts))

@@ -172,7 +172,25 @@ pub async fn setup_factorio_instance(
     }
     let readdir = instance_path.read_dir().into_diagnostic()?;
     if readdir.count() == 0 {
-        extract_archive(factorio_archive_path, instance_path, workspace_path)?;
+        // `extract_archive` is a plain synchronous `fn`: on a first run it
+        // decompresses and writes out the entire Factorio archive, which
+        // takes 8-10 minutes and never yields. Awaiting it directly parks
+        // whatever thread runs it -- on the server that is one of a small
+        // number of async workers, and a start plus a couple of long scripts
+        // is enough to stop `/api/v1/health` answering. `spawn_blocking` puts
+        // it on the blocking pool, which exists for exactly this. Fixed here
+        // rather than at the caller so the CLI, the REPL and `roll_best_seed`
+        // -- which all reach the extraction through this function -- get it
+        // too.
+        let archive = factorio_archive_path.to_owned();
+        let target = instance_path.to_path_buf();
+        let workspace = workspace_path.to_path_buf();
+        tokio::task::spawn_blocking(move || extract_archive(&archive, &target, &workspace))
+            .await
+            // A `JoinError` means the extraction panicked or was cancelled.
+            // Turn it into an ordinary error: resuming the panic on this
+            // thread would abort the whole process under `panic = "abort"`.
+            .map_err(|err| miette!("archive extraction task failed: {err}"))??;
     }
     #[allow(unused_mut)]
     let mut workspace_mods_path = workspace_path.join(PathBuf::from(MODS_FOLDERNAME));
@@ -699,5 +717,146 @@ mod tests {
             Some(r#"{"version":"2.1.17"}"#),
         ))
         .expect("unparseable version string must not fail the run");
+    }
+}
+
+/// Runtime behaviour of [`setup_factorio_instance`], as opposed to the
+/// manifest checks above. A separate module because the file already has a
+/// `tests` module (a second one with the same name would not compile) and
+/// because this one needs a tokio runtime with a very specific shape.
+#[cfg(test)]
+mod extraction_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    /// When the sampler below reads the tick counter: far enough into the
+    /// extraction that a working runtime has ticked many times, early enough
+    /// that the extraction is certainly still running.
+    const SAMPLE_AT: Duration = Duration::from_millis(300);
+
+    /// Builds a `.tar.xz` in the shape `extract_archive` expects on unix: a
+    /// single top-level `factorio/` directory containing `data/`.
+    ///
+    /// Slow-by-file-count rather than slow-by-size: 100 000 tiny files make
+    /// `Archive::unpack` do 100 000 file creations, which is syscall-bound and
+    /// takes a couple of seconds, while compressing to almost nothing and
+    /// costing the test no meaningful disk. 20 000 was measured at ~400ms on
+    /// this machine, too close to `SAMPLE_AT` for the guard below to accept.
+    fn build_slow_archive(path: &Path) {
+        let file = File::create(path).expect("create archive");
+        let encoder = xz2::write::XzEncoder::new(file, 1);
+        let mut builder = tar::Builder::new(encoder);
+        let payload = [b'x'; 32];
+        for index in 0..100_000 {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(
+                    &mut header,
+                    format!("factorio/data/file-{index}.bin"),
+                    &payload[..],
+                )
+                .expect("append file");
+        }
+        builder
+            .into_inner()
+            .expect("finish tar")
+            .finish()
+            .expect("finish xz");
+    }
+
+    /// The defect this guards against: `extract_archive` is a synchronous
+    /// `fn` doing minutes of file IO on a first run. Awaited directly it parks
+    /// whatever thread runs it -- on the server that is one of a small number
+    /// of async workers, so a single first-run start takes a worker out of
+    /// service for the whole extraction and `/api/v1/health` stops answering.
+    ///
+    /// Three details are what make this decisive rather than lucky:
+    ///
+    ///   * `worker_threads = 1`. `spawn_blocking` uses the blocking pool,
+    ///     which exists independently of the worker count, so the ticker keeps
+    ///     running; a direct call occupies the one and only worker and the
+    ///     ticker cannot tick at all.
+    ///   * The call under test is `tokio::spawn`ed rather than awaited in the
+    ///     test body. On the multi-threaded runtime the body runs on the
+    ///     `block_on` thread, which is *not* a worker: blocking it leaves the
+    ///     worker free and the ticker ticks merrily with the defect fully
+    ///     present. Verified -- the body-local version of this test passes
+    ///     against the unfixed code.
+    ///   * The tick count is snapshotted by a plain OS thread *during* the
+    ///     extraction, not read after the call returns. `setup_factorio_instance`
+    ///     has further `await` points after the extraction, so a reading taken
+    ///     afterwards picks up a tick or two even when the extraction blocked
+    ///     the whole way through.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn extracting_an_archive_does_not_park_the_async_worker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        let archive = dir.path().join("factorio.tar.xz");
+        build_slow_archive(&archive);
+
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let ticker = {
+            let ticks = ticks.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    ticks.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+        };
+        let sampled = Arc::new(AtomicUsize::new(usize::MAX));
+        let sampler = {
+            let ticks = ticks.clone();
+            let sampled = sampled.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(SAMPLE_AT);
+                sampled.store(ticks.load(Ordering::SeqCst), Ordering::SeqCst);
+            })
+        };
+
+        let workspace_arg = workspace.to_str().expect("utf-8 workspace path").to_owned();
+        let archive_arg = archive.to_str().expect("utf-8 archive path").to_owned();
+        let rcon_settings = RconSettings::new(4321, "foobar", None);
+        let started = Instant::now();
+        // The call fails partway through -- there is no Factorio binary in
+        // this synthetic archive -- and that is fine: extraction happens
+        // early, and the assertion is about the runtime, not the result.
+        let _ = tokio::spawn(async move {
+            setup_factorio_instance(
+                &workspace_arg,
+                &archive_arg,
+                &rcon_settings,
+                None,
+                "server",
+                true,
+                false,
+                None,
+                None,
+                true,
+            )
+            .await
+        })
+        .await;
+        let elapsed = started.elapsed();
+        ticker.abort();
+        sampler.join().expect("sampler thread");
+        let observed = sampled.load(Ordering::SeqCst);
+
+        assert!(
+            elapsed > SAMPLE_AT * 2,
+            "the whole call took {elapsed:?}, so the tick count sampled at {SAMPLE_AT:?} says \
+             nothing about what happened during the extraction; raise the file count in \
+             build_slow_archive"
+        );
+        assert!(
+            observed >= 3,
+            "the runtime made no progress while the archive extracted ({observed} ticks in the \
+             first {SAMPLE_AT:?}); the extraction is blocking an async worker"
+        );
     }
 }

@@ -91,3 +91,125 @@ async fn stopping_takes_the_instance_out_of_shared_state() {
     assert!(response.status().is_success(), "got {}", response.status());
     assert!(instance.read().await.is_none(), "instance was not taken");
 }
+
+#[tokio::test]
+async fn starting_when_an_instance_already_runs_is_a_conflict() {
+    let instance: SharedFactorioInstance = Arc::new(RwLock::new(Some(empty_factorio_instance())));
+    let response = build_router(state_with(instance), None)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/instance/start")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn a_second_start_while_one_is_in_flight_is_a_conflict() {
+    // Occupy the starting slot directly rather than racing two real starts:
+    // the contract under test is the refusal, not the scheduler's timing.
+    // What makes the refusal safe under real concurrency is the
+    // `compare_exchange` in `start_instance`, which this test cannot observe;
+    // see the comment there.
+    let state = state_with(FactorioInstance::new_shared());
+    state
+        .starting
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let response = build_router(state, None)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/instance/start")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn instance_status_reports_the_in_flight_start() {
+    // The UI polls this flag instead of holding a request open for the 8-10
+    // minutes a first-run archive extraction takes.
+    let state = state_with(FactorioInstance::new_shared());
+    state
+        .starting
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    *state.last_start_error.write().await = Some("previous attempt exploded".into());
+
+    let response = build_router(state, None)
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/instance")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let status: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(status["started"], false);
+    assert_eq!(status["starting"], true);
+    assert_eq!(status["last_error"], "previous attempt exploded");
+}
+
+/// A start that fails must leave the slot free *and* a readable reason. The
+/// handler writes `last_error` before clearing `starting`, so a poller that
+/// sees `starting == false` always sees the error too, rather than concluding
+/// from an empty `last_error` that the start succeeded.
+///
+/// Driven through the real handler with a settings object that cannot
+/// possibly start Factorio (no workspace configured), so the failure comes
+/// from `FactorioInstance::start` itself rather than from a stubbed error.
+#[tokio::test]
+async fn a_failed_start_releases_the_slot_and_records_why() {
+    let state = state_with(FactorioInstance::new_shared());
+    // `workspace_path` is empty in the defaults, which `setup_factorio_instance`
+    // rejects immediately -- no archive is touched and no process is spawned.
+    let response = build_router(state.clone(), None)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/instance/start")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    // The spawned task is the thing under test, so wait for it rather than
+    // asserting on a slot it has not reached yet.
+    for _ in 0..200 {
+        if !state.starting.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        !state.starting.load(std::sync::atomic::Ordering::SeqCst),
+        "the starting slot was never released, so every later start would 409"
+    );
+    let last_error = state.last_start_error.read().await.clone();
+    assert!(
+        last_error.is_some(),
+        "the failure left no last_error behind, so a poller seeing starting == false \
+         would conclude the start succeeded"
+    );
+    assert!(
+        state.instance.read().await.is_none(),
+        "a failed start must not publish an instance"
+    );
+}

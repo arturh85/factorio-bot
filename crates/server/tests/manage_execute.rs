@@ -79,6 +79,8 @@ fn state_for(dir: &tempfile::TempDir, instance: Option<FactorioInstance>) -> App
         instance: Arc::new(RwLock::new(instance)),
         settings: settings.into_shared(),
         settings_path: dir.path().join("AppSettings.toml"),
+        starting: Default::default(),
+        last_start_error: Default::default(),
         jobs: factorio_bot_server::jobs::JobRegistry::new(8),
     }
 }

@@ -1958,6 +1958,8 @@ version = "0.2.4-dev"
 dependencies = [
  "axum",
  "factorio-bot-core",
+ "factorio-bot-scripting",
+ "factorio-bot-scripting-lua",
  "miette",
  "num-traits",
  "serde",

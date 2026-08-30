@@ -377,11 +377,88 @@ impl Method for Mine {
     }
 }
 
+/// Craft the shortfall by hand, expanding each ingredient as a subgoal.
+pub struct HandCraft;
+
+impl Method for HandCraft {
+    fn name(&self) -> &'static str {
+        "hand-craft"
+    }
+
+    fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
+        let Goal::Have { item, count, whose } = goal else {
+            return false;
+        };
+        if shortfall(state, item, *count, whose) == 0 {
+            return false;
+        }
+        matches!(recipe_for(state, item), Some(r) if r.category == "crafting")
+    }
+
+    fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+        let Goal::Have { item, count, whose } = goal else {
+            return Err(PlannerError::NoApplicableMethod {
+                goal: goal.to_string(),
+            });
+        };
+        let need = shortfall(&ctx.state, item, *count, whose);
+        let recipe =
+            recipe_for(&ctx.state, item).ok_or_else(|| PlannerError::NoApplicableMethod {
+                goal: goal.to_string(),
+            })?;
+        let runs = need.div_ceil(output_per_craft(&recipe, item));
+
+        let mut steps: Vec<Step> = Vec::new();
+        let mut pre = Vec::new();
+        let mut eff = Vec::new();
+
+        for (ingredient, amount) in ingredients_of(&recipe) {
+            let total = amount.saturating_mul(runs);
+            steps.push(Step::Subgoal(Goal::Have {
+                item: ingredient.clone(),
+                count: total,
+                whose: whose.clone(),
+            }));
+            pre.push(Condition::HasItem {
+                who: Actor::Role,
+                item: ingredient.clone(),
+                count: total,
+            });
+            eff.push(Effect::LoseItem {
+                who: Actor::Role,
+                item: ingredient,
+                count: total,
+            });
+        }
+        eff.push(Effect::GainItem {
+            who: Actor::Role,
+            item: item.clone(),
+            count: runs.saturating_mul(output_per_craft(&recipe, item)),
+        });
+
+        steps.push(Step::Act(Box::new(Action {
+            id: ctx.ids.next(),
+            kind: ActionKind::Craft {
+                item: item.clone(),
+                count: runs,
+            },
+            pre,
+            eff,
+            duration: recipe_ticks(&recipe).saturating_mul(runs),
+            pinned: None,
+            label: format!("craft {} {}", runs, item),
+        })));
+
+        Ok(steps)
+    }
+}
+
 /// The methods this crate ships, in preference order.
 pub fn default_registry() -> MethodRegistry {
     MethodRegistry::new()
         .with(Box::new(AlreadySatisfied))
         .with(Box::new(Smelt))
+        .with(Box::new(HandCraft))
         .with(Box::new(Mine))
 }
 
@@ -696,5 +773,131 @@ mod tests {
         .unwrap();
         let plan = schedule(&net, &s, &bots).expect("schedulable");
         assert!(plan.makespan > 384, "at least the smelting time");
+    }
+
+    #[test]
+    fn hand_crafting_expands_its_ingredients() {
+        let mut s = state(&[BotId(1)]);
+        s.gain(BotId(1), "iron-plate", 4);
+        let net = expand(
+            &[Goal::Have {
+                item: "iron-gear-wheel".into(),
+                count: 2,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &default_registry(),
+            BotId(1),
+        )
+        .unwrap();
+        assert_eq!(
+            net.len(),
+            1,
+            "the plates are already held, so just the craft"
+        );
+        let action = net.actions().next().unwrap();
+        match &action.kind {
+            ActionKind::Craft { item, count } => {
+                assert_eq!(item, "iron-gear-wheel");
+                assert_eq!(*count, 2);
+            }
+            other => panic!("expected a craft, got {:?}", other),
+        }
+        // 0.5 s per gear, two gears.
+        assert_eq!(action.duration, 60);
+    }
+
+    #[test]
+    fn hand_crafting_consumes_its_ingredients() {
+        let mut s = state(&[BotId(1)]);
+        s.gain(BotId(1), "iron-plate", 4);
+        let net = expand(
+            &[Goal::Have {
+                item: "iron-gear-wheel".into(),
+                count: 2,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &default_registry(),
+            BotId(1),
+        )
+        .unwrap();
+        let action = net.actions().next().unwrap();
+        assert!(action.pre.iter().any(
+            |c| matches!(c, Condition::HasItem { item, count, .. } if item == "iron-plate" && *count == 4)
+        ));
+        assert!(action.eff.iter().any(
+            |e| matches!(e, Effect::LoseItem { item, count, .. } if item == "iron-plate" && *count == 4)
+        ));
+    }
+
+    #[test]
+    fn the_whole_science_chain_expands() {
+        let mut s = state(&[BotId(1)]);
+        s.gain(BotId(1), "stone-furnace", 1);
+        let net = expand(
+            &[Goal::Have {
+                item: "automation-science-pack".into(),
+                count: 1,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &default_registry(),
+            BotId(1),
+        )
+        .unwrap();
+        let labels: Vec<String> = net.actions().map(|a| a.label.clone()).collect();
+        assert!(
+            labels
+                .iter()
+                .any(|l| l.contains("mine") && l.contains("iron-ore")),
+            "{:?}",
+            labels
+        );
+        assert!(
+            labels
+                .iter()
+                .any(|l| l.contains("mine") && l.contains("copper-ore")),
+            "{:?}",
+            labels
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("iron-gear-wheel")),
+            "{:?}",
+            labels
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("automation-science-pack")),
+            "{:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn the_science_chain_schedules_without_a_precondition_failure() {
+        let bots = [BotId(1), BotId(2)];
+        let mut s = state(&bots);
+        s.gain(BotId(1), "stone-furnace", 2);
+        s.gain(BotId(2), "stone-furnace", 2);
+        let net = expand(
+            &[Goal::Have {
+                item: "automation-science-pack".into(),
+                count: 1,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &default_registry(),
+            BotId(1),
+        )
+        .unwrap();
+        let plan = schedule(&net, &s, &bots).expect("the chain must be schedulable");
+        assert_eq!(
+            plan.steps
+                .iter()
+                .filter(|s| matches!(s.what, crate::schedule::StepKind::Act { .. }))
+                .count(),
+            net.len(),
+            "every action is scheduled"
+        );
     }
 }

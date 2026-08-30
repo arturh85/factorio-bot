@@ -16,7 +16,6 @@ pub struct FactorioSettings {
     pub rcon_pass: Cow<'static, str>,
     pub rcon_port: u16,
     pub recreate: bool,
-    pub restapi_port: u16,
     pub seed: Cow<'static, str>,
     pub workspace_path: Cow<'static, str>,
 }
@@ -30,7 +29,6 @@ impl Default for FactorioSettings {
             rcon_pass: Cow::Borrowed("foobar"),
             rcon_port: 4321,
             recreate: false,
-            restapi_port: 1234,
             seed: Cow::Borrowed(""),
             workspace_path: Cow::Borrowed(""),
         }

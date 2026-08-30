@@ -1327,7 +1327,9 @@ git commit -m "feat(lua): add the goal api backed by the new planner and executo
 
 **Do not delete** `crates/core/src/graph/entity_graph.rs`, `crates/core/src/graph/flow_graph.rs`, or `crates/core/src/factorio/factorio_planner.rs` — despite the names, the first two are live and the third only decodes blueprint zlib.
 
-**Use core's script path resolution, do not reinvent it.** A concurrent migration added `factorio_bot_core::scripts` (commit `12e8451`) with `scripts_dir` and `resolve_script_path`. Anywhere this task needs to locate a script on disk, call those rather than rebuilding path logic in the binary. Related additive modules that landed in core during this work and may save you effort: `factorio_bot_core::paths`, `factorio_bot_core::app_settings` (`AppSettings`, `GuiSettings`, `SharedAppSettings`, `load_app_settings`), and `factorio_bot_core::settings::RestApiSettings`.
+**Use core's script path resolution, do not reinvent it.** A concurrent migration added `factorio_bot_core::scripts` (commit `12e8451`) with `scripts_dir(workspace_path)` and `resolve_script_path(root, requested)`, both returning a miette `Result`. Anywhere this task needs to locate a script on disk, call those rather than rebuilding path logic in the binary.
+
+**One trap in `resolve_script_path`:** it deliberately resolves `"/"` and `""` to the root directory itself, because a directory-listing endpoint needs that. It does not distinguish a file from a directory — that check belongs to the caller. So a migration step that resolves a script path and then reads it must verify it got a file, or it will try to read the scripts directory and fail with a confusing error. Related additive modules that landed in core during this work and may save you effort: `factorio_bot_core::paths`, `factorio_bot_core::app_settings` (`AppSettings`, `GuiSettings`, `SharedAppSettings`, `load_app_settings`), and `factorio_bot_core::settings::RestApiSettings`.
 
 - [ ] **Step 1: Migrate the Lua scripts first**
 

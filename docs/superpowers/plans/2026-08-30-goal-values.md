@@ -823,6 +823,44 @@ Remove `Plans`, `Runs`, `PlanEntry`, `RunEntry`, `Progress`, the old `wait_for_r
 
 `expand_goal`, `refuse_unknown_bots`, `goal_error` and `lock` stay if still used; delete any that are not.
 
+- [ ] **Step 3b: Close two findings carried forward from Task 4**
+
+**(a) `lua_docs.rs`'s `EXPECTED` check is half a guard.** It asserts every listed entry
+is *present* in the generated file, and never the converse. So it catches a function you
+**remove** and stays silent on one you **add** — and this task both removes six and adds
+four, so it will force you to update the removals and let the additions slide.
+
+Make the `goal.lua` check bidirectional: collect the `function goal.<name>(` lines the
+generator actually emitted and assert that set **equals** the expected set. A missing
+entry and an unlisted one must both fail.
+
+```rust
+// Both directions. A list that only checks "these are present" is a mirror of
+// the code: it stays green when a seventh function appears, which is the drift
+// it exists to catch.
+let emitted: BTreeSet<&str> = /* parse `function goal.X(` out of the generated goal.lua */;
+let expected: BTreeSet<&str> = ["all","have","plan","researched","run","start"].into();
+assert_eq!(emitted, expected, "goal.lua doc entries drifted from the goal table");
+```
+
+Do not widen this to the other four generated files — they are out of scope and their
+lists are longer. `goal.lua` is the one this plan churns.
+
+**(b) `ExecutionError::CircularWait` is swallowed by `RunValue`.** A run that failed to
+start reports `done` with every action `pending`. Whatever its reachability, that shape is
+wrong for the reason this plan has now corrected three times: **an absent fact must not be
+rendered as a present one.** A run that never started is not a finished run.
+
+Give the run value somewhere to carry a start failure and surface it. The minimum: the
+error reaches the script rather than being discarded, and an observation for a run that
+never started does **not** report `done == true`. Add a test driving a schedule that
+`run_into` refuses, asserting the script sees the error.
+
+If you find `CircularWait` is genuinely unreachable through `goal.plan`, say so in your
+report **and still make the shape correct** — unreachable-today is a fact about the
+current caller, not a property of the code, and this plan has been bitten by that exact
+reasoning twice tonight.
+
 - [ ] **Step 4: Run the whole crate**
 
 Run: `cargo test -p factorio-bot-scripting-lua`

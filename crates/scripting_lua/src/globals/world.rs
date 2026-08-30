@@ -1,3 +1,10 @@
+// Reachable from one line of user Lua, and this crate builds with
+// `panic = "abort"`, so every panic here is a remote kill of the whole server
+// process rather than a failed script. The lint is scoped to this file: the
+// sibling `rcon` and `plan` modules carry the same defect and are handled
+// under their own tasks.
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+
 use factorio_bot_core::draw::draw_world;
 use factorio_bot_core::factorio::util::blueprint_build_area;
 use factorio_bot_core::factorio::world::FactorioWorld;
@@ -9,7 +16,16 @@ use factorio_bot_core::types::{FactorioBlueprintInfo, PlayerId, Position, Rect};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::relative_to;
+use super::{path_error, relative_to};
+
+/// Reads a `{x=..., y=...}` table a script passed in.
+///
+/// A missing key arrives as `Nil`, whose conversion to `f64` fails, so a bare
+/// `world.find_free_resource_rect("iron-ore", 2, 2, {})` reports an error
+/// instead of unwrapping `None` and aborting the process.
+fn position_from(table: &LuaTable) -> LuaResult<Position> {
+    Ok(Position::new(table.get("x")?, table.get("y")?))
+}
 
 /// See [`crate::globals::create_lua_globals`] for why the sandbox needs both a
 /// `scripts_root` (the boundary) and a `script_dir` (what relative paths are
@@ -104,7 +120,7 @@ end
         lua.create_function(
             move |_lua, (ore_name, width, height, near): (String, u32, u32, LuaTable)| {
                 let patches = world.entity_graph.resource_patches(ore_name.as_str());
-                let near = Position::new(near.get("x").unwrap(), near.get("y").unwrap());
+                let near = position_from(&near)?;
                 for patch in patches {
                     let rect = patch.find_free_rect(width, height, &near);
                     if let Some(rect) = rect {
@@ -132,8 +148,9 @@ end
     map_table.set(
         "parse_blueprint",
         lua.create_function(move |lua, (blueprint, label): (String, String)| {
-            let decoded =
-                BlueprintCodec::decode_string(&blueprint).expect("failed to parse blueprint");
+            let decoded = BlueprintCodec::decode_string(&blueprint).map_err(|err| {
+                LuaError::RuntimeError(format!("failed to parse blueprint: {err}"))
+            })?;
             let rect = blueprint_build_area(world.entity_prototypes.clone(), &blueprint);
             let response = FactorioBlueprintInfo {
                 rect: rect.clone(),
@@ -141,7 +158,9 @@ end
                 blueprint,
                 width: rect.width() as u16,
                 height: rect.height() as u16,
-                data: serde_json::to_value(decoded).unwrap(),
+                data: serde_json::to_value(decoded).map_err(|err| {
+                    LuaError::RuntimeError(format!("failed to serialise blueprint: {err}"))
+                })?,
             };
             lua.to_value(&response)
         })?,
@@ -174,10 +193,7 @@ end
                 Option<String>,
                 Option<String>,
             )| {
-                let search_center = Position::new(
-                    search_center.get("x").unwrap(),
-                    search_center.get("y").unwrap(),
-                );
+                let search_center = position_from(&search_center)?;
                 let entities = world.entity_graph.find_entities_in_radius(
                     search_center,
                     radius,
@@ -206,8 +222,11 @@ end
     map_table.set(
         "draw",
         lua.create_function(move |_lua, save_path: String| {
-            let resolved = resolve_write_path(&root, &relative_to(&root, &dir, &save_path))
-                .map_err(|err| LuaError::RuntimeError(err.to_string()))?;
+            let resolved = resolve_write_path(
+                &root,
+                &relative_to(&root, &dir, &save_path).map_err(path_error)?,
+            )
+            .map_err(path_error)?;
             draw_world(world.clone(), &resolved)
                 .map_err(|err| LuaError::RuntimeError(format!("{err}")))
         })?,

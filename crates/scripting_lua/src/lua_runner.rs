@@ -61,7 +61,8 @@ pub async fn run_lua(
     // built with `panic = "abort"`, so a panic anywhere in here is a remote
     // kill of the whole server process, not a failed script.
     let result = thread::spawn(move || -> Result<Option<serde_json::Value>> {
-        let lua = Lua::new();
+        let lua = crate::sandbox::new_sandboxed_lua()
+            .map_err(|err| miette!("failed to create the lua sandbox: {err}"))?;
         let _code_by_path = code_by_path.clone();
         let setup = (|| -> LuaResult<()> {
             let world = create_lua_world(
@@ -146,6 +147,190 @@ mod tests {
             .await
             .map(|_| ());
         (dir, outcome)
+    }
+
+    /// Like [`sandboxed`], but seeds the root first so a test can exercise the
+    /// bindings against files that actually exist.
+    async fn sandboxed_with(
+        seed: impl FnOnce(&Path),
+        code: &str,
+    ) -> (tempfile::TempDir, Result<()>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        seed(&root);
+        let world = Arc::new(fixture_world());
+        let mut planner = Planner::new(world, None);
+        let outcome = run_lua(&mut planner, code, None, &root, 1, false)
+            .await
+            .map(|_| ());
+        (dir, outcome)
+    }
+
+    #[tokio::test]
+    async fn a_script_cannot_reach_the_filesystem_standard_library() {
+        // `Lua::new()` loaded `StdLib::ALL_SAFE`, which is memory-safe and not
+        // remotely sandboxed: `io.open` wrote anywhere the process could and
+        // `os.execute` ran arbitrary commands, right beside the four bindings
+        // this task bounded.
+        let (_dir, result) = sandboxed(
+            r#"
+            assert(io == nil, "io is reachable")
+            assert(os == nil, "os is reachable")
+            assert(package == nil, "package is reachable")
+            assert(require == nil, "require is reachable")
+            assert(dofile == nil, "dofile is reachable")
+            assert(loadfile == nil, "loadfile is reachable")
+            "#,
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn a_script_can_still_use_the_computation_standard_library() {
+        // The lockdown is an allow-list, and an allow-list that removes what
+        // scripts actually compute with is a broken product, not a sandbox.
+        let (_dir, result) = sandboxed(
+            r#"
+            local t = {}
+            table.insert(t, "b")
+            table.insert(t, 1, "a")
+            assert(table.concat(t) == "ab")
+            assert(string.upper("ab") == "AB")
+            assert(math.max(1, 2) == 2)
+            assert(type(coroutine.create(function() end)) == "thread")
+            assert(tostring(1) == "1" and tonumber("1") == 1)
+            "#,
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn every_host_binding_still_works_after_the_standard_library_lockdown() {
+        // The positive counterpart to the escape tests: a sandbox that breaks
+        // the product is not a fix. Exercises all four bounded bindings plus
+        // `include` in one run.
+        let (dir, result) = sandboxed_with(
+            |root| {
+                std::fs::write(root.join("lib.lua"), "included_value = 7").expect("write");
+                std::fs::write(root.join("in.txt"), "contents").expect("write");
+            },
+            r#"
+            include("lib.lua")
+            assert(included_value == 7, "include did not run")
+            assert(file_read("in.txt") == "contents", "file_read")
+            file_write("out.txt", "written")
+            world.draw("world.png")
+            "#,
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("out.txt")).expect("file_write"),
+            "written"
+        );
+        assert!(dir.path().join("world.png").is_file(), "world.draw");
+    }
+
+    /// The parent chain is canonicalized but the destination name is not, so a
+    /// symlink planted at the name itself passed every bounds check and the
+    /// write went through to whatever it pointed at.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_script_cannot_write_through_a_symlinked_destination() {
+        let outside = tempfile::tempdir().expect("tempdir");
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, "original").expect("write");
+
+        let victim_for_seed = victim.clone();
+        let (_dir, result) = sandboxed_with(
+            move |root| {
+                std::os::unix::fs::symlink(&victim_for_seed, root.join("evil.txt"))
+                    .expect("symlink");
+            },
+            r#"file_write("evil.txt", "PWNED")"#,
+        )
+        .await;
+
+        assert!(result.is_err(), "the write should have been refused");
+        // Asserting on the *contents*, not merely that the call errored: the
+        // question is whether the outside file survived.
+        assert_eq!(
+            std::fs::read_to_string(&victim).expect("victim still readable"),
+            "original",
+            "the outside file was overwritten through the symlink"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_script_cannot_draw_the_world_through_a_symlinked_destination() {
+        let outside = tempfile::tempdir().expect("tempdir");
+        let victim = outside.path().join("victim.png");
+        std::fs::write(&victim, "original").expect("write");
+
+        let victim_for_seed = victim.clone();
+        let (_dir, result) = sandboxed_with(
+            move |root| {
+                std::os::unix::fs::symlink(&victim_for_seed, root.join("evil.png"))
+                    .expect("symlink");
+            },
+            r#"world.draw("evil.png")"#,
+        )
+        .await;
+
+        assert!(result.is_err(), "the draw should have been refused");
+        assert_eq!(
+            std::fs::read_to_string(&victim).expect("victim still readable"),
+            "original",
+            "the outside file was overwritten through the symlink"
+        );
+    }
+
+    /// `relative_to` used to hand an absolute in-root path to the resolver
+    /// already relativised, so `resolve_write_path` never saw it as absolute
+    /// and accepted it -- the system allowed what the unit test on
+    /// `resolve_write_path` says it refuses. Rejecting in the binding is what
+    /// makes those two agree.
+    #[tokio::test]
+    async fn a_script_cannot_name_a_path_absolutely_even_inside_the_scripts_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let inside = root.join("absolute.txt");
+        let code = format!(
+            "file_write({:?}, \"owned\")",
+            inside.to_str().expect("utf8")
+        );
+
+        let world = Arc::new(fixture_world());
+        let mut planner = Planner::new(world, None);
+        let result = run_lua(&mut planner, &code, None, &root, 1, false)
+            .await
+            .map(|_| ());
+
+        assert!(result.is_err(), "the write should have been refused");
+        assert!(
+            !inside.exists(),
+            "the file was created: {}",
+            inside.display()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_out_of_range_direction_is_reported_not_panicked() {
+        // `Direction::from_u8(9)` is `None`, and unwrapping it aborted.
+        let (_dir, result) = sandboxed("direction_clockwise(9)").await;
+        assert_reported_not_panicked(&result);
+    }
+
+    #[tokio::test]
+    async fn a_position_table_without_coordinates_is_reported_not_panicked() {
+        // `near.get("x")` on `{}` is `Nil`, and unwrapping the conversion
+        // aborted.
+        let (_dir, result) =
+            sandboxed(r#"world.find_free_resource_rect("iron-ore", 2, 2, {})"#).await;
+        assert_reported_not_panicked(&result);
     }
 
     #[tokio::test]

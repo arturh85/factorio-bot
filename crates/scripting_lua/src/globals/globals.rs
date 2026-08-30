@@ -1,3 +1,10 @@
+// Reachable from one line of user Lua, and this crate builds with
+// `panic = "abort"`, so every panic here is a remote kill of the whole server
+// process rather than a failed script. The lint is scoped to this file: the
+// sibling `rcon` and `plan` modules carry the same defect and are handled
+// under their own tasks.
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::mlua::Variadic as LuaVariadic;
 use factorio_bot_core::num_traits::{FromPrimitive, ToPrimitive};
@@ -11,7 +18,22 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::relative_to;
+use super::{path_error, relative_to};
+
+/// `Direction` is `#[repr(u8)]` over 0..=7, so a script passing 9 must get an
+/// error rather than take the process down with it.
+fn direction_from_u8(direction: u8) -> LuaResult<Direction> {
+    Direction::from_u8(direction)
+        .ok_or_else(|| LuaError::RuntimeError(format!("no such direction: {direction}")))
+}
+
+/// Infallible in practice — every `Direction` fits in a `u8` — but writing it
+/// as a conversion that can fail is what keeps the file free of `unwrap`.
+fn direction_to_u8(direction: Direction) -> LuaResult<u8> {
+    direction
+        .to_u8()
+        .ok_or_else(|| LuaError::RuntimeError(format!("direction out of range: {direction:?}")))
+}
 
 /// `scripts_root` is the sandbox boundary: no binding installed here can reach
 /// a path outside it. `script_dir` is only what *relative* paths resolve
@@ -59,8 +81,11 @@ end
     map_table.set(
         "include",
         lua.create_function(move |lua, source_path: String| {
-            let resolved = resolve_script_path(&root, &relative_to(&root, &dir, &source_path))
-                .map_err(|err| LuaError::RuntimeError(err.to_string()))?;
+            let resolved = resolve_script_path(
+                &root,
+                &relative_to(&root, &dir, &source_path).map_err(path_error)?,
+            )
+            .map_err(path_error)?;
             let content = fs::read_to_string(&resolved)
                 .map_err(|err| LuaError::RuntimeError(format!("{source_path}: {err}")))?;
             let mut code_by_path_lock = code_by_path.lock();
@@ -86,8 +111,11 @@ end
     map_table.set(
         "file_read",
         lua.create_function(move |_lua, source_path: String| {
-            let resolved = resolve_script_path(&root, &relative_to(&root, &dir, &source_path))
-                .map_err(|err| LuaError::RuntimeError(err.to_string()))?;
+            let resolved = resolve_script_path(
+                &root,
+                &relative_to(&root, &dir, &source_path).map_err(path_error)?,
+            )
+            .map_err(path_error)?;
             fs::read_to_string(&resolved)
                 .map_err(|err| LuaError::RuntimeError(format!("{source_path}: {err}")))
         })?,
@@ -109,8 +137,11 @@ end
     map_table.set(
         "file_write",
         lua.create_function(move |_lua, (target_path, contents): (String, String)| {
-            let resolved = resolve_write_path(&root, &relative_to(&root, &dir, &target_path))
-                .map_err(|err| LuaError::RuntimeError(err.to_string()))?;
+            let resolved = resolve_write_path(
+                &root,
+                &relative_to(&root, &dir, &target_path).map_err(path_error)?,
+            )
+            .map_err(path_error)?;
             fs::write(&resolved, contents)
                 .map_err(|err| LuaError::RuntimeError(format!("{target_path}: {err}")))
         })?,
@@ -239,10 +270,10 @@ end
     map_table.set(
         "directions_all",
         lua.create_function(move |_, ()| {
-            Ok(Direction::all()
+            Direction::all()
                 .iter()
-                .map(|d| d.to_u8().unwrap())
-                .collect::<Vec<u8>>())
+                .map(|d| direction_to_u8(*d))
+                .collect::<LuaResult<Vec<u8>>>()
         })?,
     )?;
 
@@ -260,10 +291,10 @@ end
     map_table.set(
         "directions_orthogonal",
         lua.create_function(move |_, ()| {
-            Ok(Direction::orthogonal()
+            Direction::orthogonal()
                 .iter()
-                .map(|d| d.to_u8().unwrap())
-                .collect::<Vec<u8>>())
+                .map(|d| direction_to_u8(*d))
+                .collect::<LuaResult<Vec<u8>>>()
         })?,
     )?;
 
@@ -282,8 +313,7 @@ end
     map_table.set(
         "direction_clockwise",
         lua.create_function(move |_, direction: u8| {
-            let direction = Direction::from_u8(direction).unwrap();
-            Ok(direction.clockwise().to_u8().unwrap())
+            direction_to_u8(direction_from_u8(direction)?.clockwise())
         })?,
     )?;
 
@@ -302,8 +332,7 @@ end
     map_table.set(
         "direction_opposite",
         lua.create_function(move |_, direction: u8| {
-            let direction = Direction::from_u8(direction).unwrap();
-            Ok(direction.opposite().to_u8().unwrap())
+            direction_to_u8(direction_from_u8(direction)?.opposite())
         })?,
     )?;
 

@@ -103,7 +103,14 @@ pub fn ensure_scripts_dir(workspace_path: &Path) -> Result<PathBuf> {
 ///
 /// The path may or may not carry a leading `/`. The result is canonicalised and
 /// verified to live under `root`, so `..` segments (and symlinks) cannot escape
-/// it — this is a network-reachable boundary, not a local convenience.
+/// it — this is a network-reachable boundary, not a local convenience. Unlike
+/// [`resolve_write_path`] this canonicalizes the whole target, so a symlink at
+/// the final component is resolved and bounds-checked like any other.
+///
+/// `root` must already be canonical — every caller obtains it from
+/// [`scripts_dir`] or [`ensure_scripts_dir`], both of which canonicalize. A
+/// non-canonical `root` fails closed: the canonical result will not
+/// `starts_with` it, so everything is denied rather than let through.
 ///
 /// This function only answers "is this path inside the scripts root, and
 /// where does it land" — it does not decide whether the result must be a file
@@ -138,9 +145,20 @@ pub fn resolve_script_path(
 /// [`resolve_script_path`] canonicalizes the *target*, so it can only resolve
 /// paths that already exist — right for reads, useless for `file_write` or
 /// `world.draw`, whose whole point is creating something new. This resolves
-/// the deepest existing ancestor instead and re-attaches the remainder, which
-/// gives the same guarantee (`..` and symlinks are resolved by the OS, not by
-/// us) for a destination that is not there yet.
+/// the deepest existing ancestor instead and re-attaches the remainder.
+///
+/// That gets the parent chain checked the way `canonicalize` would — `..` and
+/// symlinks above the destination are resolved by the OS, not by us — but it
+/// deliberately does *not* resolve the final component, because the whole
+/// point is that it may not exist. A name that does exist and is a symlink is
+/// therefore rejected outright: following it would write through to wherever
+/// it points, which is how a script planted `evil.txt -> /outside/file` and
+/// then overwrote the target through a path that passed every bounds check.
+///
+/// `root` must already be canonical — every caller obtains it from
+/// [`scripts_dir`] or [`ensure_scripts_dir`], both of which canonicalize. A
+/// non-canonical `root` fails closed: no canonicalized parent will
+/// `starts_with` it, so everything is denied rather than let through.
 ///
 /// The parent directory must already exist: creating intermediate directories
 /// on a script's behalf would let a script build a tree of its own choosing,
@@ -182,12 +200,26 @@ pub fn resolve_write_path(
     }
 
     let target = parent.join(file_name);
-    // Belt and braces: `file_name` is a single component by construction, so
-    // this cannot fail today. It is here because `resolve_new_script_path` in
-    // the server learned the hard way (plan 3, finding I4) that a component
-    // can replace a path on Windows, and a bounds check that is cheap and
-    // unconditional outlives the reasoning that made it redundant.
+    // Belt and braces: shadowed by the `parent` check above, which rejects
+    // every input that could reach here with `target` outside the root. It is
+    // kept because `resolve_new_script_path` in the server learned the hard
+    // way (plan 3, finding I4) that a component can replace a path on Windows,
+    // and a bounds check that is cheap and unconditional outlives the
+    // reasoning that made it redundant. Being shadowed is why no test can kill
+    // it on its own — that is a property of the code, not a gap in the tests.
     if !target.starts_with(root) {
+        return Err(ScriptPathError::EscapesRoot {
+            requested: requested.to_owned(),
+        });
+    }
+
+    // The parent chain was canonicalized; the leaf was not, because it is
+    // allowed not to exist. If it does exist and is a symlink, writing to it
+    // writes through to wherever it points — which needs no `..` and no
+    // symlinked directory, so nothing above catches it. `symlink_metadata`
+    // does not follow the link; an absent target simply has no metadata and
+    // is fine.
+    if std::fs::symlink_metadata(&target).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return Err(ScriptPathError::EscapesRoot {
             requested: requested.to_owned(),
         });
@@ -392,8 +424,10 @@ mod tests {
         );
     }
 
+    /// Renamed from `a_write_path_may_not_climb_out_and_back_in`, which said
+    /// "may not" about a path the body asserts is *accepted*.
     #[test]
-    fn a_write_path_may_not_climb_out_and_back_in() {
+    fn a_write_path_that_climbs_out_and_back_in_resolves_to_where_it_lands() {
         // The interesting case: this one *does* land inside the root, but only
         // after leaving it. `canonicalize` on the parent chain is what makes the
         // difference between checking the string and checking the destination.
@@ -410,6 +444,36 @@ mod tests {
             matches!(err, ScriptPathError::NotFound { .. }),
             "got {err:?}"
         );
+    }
+
+    /// The parent chain is canonicalized but the destination name is not, so
+    /// a symlink planted at the name itself needs no `..` and no symlinked
+    /// directory: every bounds check passes and the write goes through to
+    /// wherever the link points.
+    #[cfg(unix)]
+    #[test]
+    fn a_write_path_may_not_write_through_a_symlinked_destination() {
+        use std::os::unix::fs::symlink;
+
+        let (dir, root) = root();
+        let outside = dir.path().join("outside.lua");
+        symlink(&outside, root.join("evil.txt")).expect("symlink");
+
+        let err = resolve_write_path(&root, "evil.txt").expect_err("refused");
+        assert!(
+            matches!(err, ScriptPathError::EscapesRoot { .. }),
+            "got {err:?}"
+        );
+    }
+
+    /// The counterpart that stops the symlink check from degenerating into
+    /// "refuse anything that already exists": overwriting a real file in the
+    /// root is what `file_write` is for.
+    #[test]
+    fn a_write_path_may_overwrite_an_existing_regular_file() {
+        let (_dir, root) = root();
+        let resolved = resolve_write_path(&root, "a.lua").expect("accepted");
+        assert_eq!(resolved, root.join("a.lua"));
     }
 
     /// Pins the `parent` bounds check specifically.

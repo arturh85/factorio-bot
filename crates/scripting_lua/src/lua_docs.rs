@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub fn write_lua_docs(target_path: PathBuf) -> LuaResult<()> {
-    let lua = Lua::new();
+    let lua = crate::sandbox::new_sandboxed_lua()?;
     let world = Arc::new(FactorioWorld::new());
     let rcon = Arc::new(FactorioRcon::new_empty());
     let stdout = Arc::new(Mutex::new(String::new()));

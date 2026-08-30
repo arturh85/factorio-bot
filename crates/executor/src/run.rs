@@ -69,14 +69,41 @@ pub async fn run_into(
     }
 
     // An action the network knows about but the schedule never assigns to any
-    // bot will never be dispatched by anyone. Publishing `Failed` for it up
-    // front is the same argument as `abandon_rest` below: a dependent waiting
-    // for a signal nobody will ever send waits forever. Nothing is written to
-    // the log — we did not attempt it, so it stays `Pending` there.
+    // bot will never be dispatched by anyone, so its signal has to be published
+    // here or a dependent waits for it forever — the same argument as
+    // `abandon_rest` below.
+    //
+    // *Which* signal comes from the log, not from the omission. An unassigned
+    // action the log already records as `Success` is not a gap in the plan: it
+    // is work that finished on an earlier run, and recovery deliberately leaves
+    // it out of the new schedule while keeping it in the network so its lag
+    // edges survive (see `Recovery::Rescheduled`). Publishing `Failed` for it
+    // would abandon the very retry that was waiting behind it, and the run
+    // would return `Ok(())` having dispatched nothing. Anything else unassigned
+    // — never attempted, or attempted and failed — is a genuine gap and still
+    // releases waiters as `Failed`.
+    //
+    // Nothing is written to the log here either way: we attempted nothing in
+    // this run, so a never-attempted action stays `Pending`.
+    //
+    // This is why a recovery proposal must be run through `run_into` with the
+    // log recovery was given, not through `run`, which starts an empty one.
     let scheduled: BTreeSet<ActionId> = steps.iter().filter_map(|s| act_id(s)).collect();
+    let already_done: BTreeSet<ActionId> = {
+        let log = lock(progress);
+        senders
+            .keys()
+            .copied()
+            .filter(|id| log.status(*id) == Status::Success)
+            .collect()
+    };
     for (id, tx) in &senders {
         if !scheduled.contains(id) {
-            let _ = tx.send(Status::Failed);
+            let _ = tx.send(if already_done.contains(id) {
+                Status::Success
+            } else {
+                Status::Failed
+            });
         }
     }
 
@@ -134,9 +161,10 @@ fn planned_steps(sched: &Schedule) -> Vec<&ScheduledStep> {
 /// remains is worse than no check, because it reads as protection.
 ///
 /// Only *scheduled* actions are nodes. An action the network holds but nobody
-/// is scheduled to run is published as `Failed` before the run starts, so a
-/// wait on it resolves at once and it can never be part of a circular wait —
-/// including it would reject schedules that in fact terminate.
+/// is scheduled to run has its signal published before the run starts —
+/// `Success` if the log already records it, `Failed` otherwise — so a wait on
+/// it resolves at once either way and it can never be part of a circular wait.
+/// Including it would reject schedules that in fact terminate.
 fn check_wait_graph(net: &ActionNetwork, steps: &[&ScheduledStep]) -> Result<(), ExecutionError> {
     let mut graph: DiGraph<ActionId, ()> = DiGraph::new();
     let mut node: BTreeMap<ActionId, NodeIndex> = BTreeMap::new();
@@ -170,6 +198,14 @@ fn check_wait_graph(net: &ActionNetwork, steps: &[&ScheduledStep]) -> Result<(),
 }
 
 /// Convenience wrapper for callers that only want the final state.
+///
+/// **Not for recovery proposals.** This starts an empty `ExecutionLog`, and
+/// `run_into` reads the log to decide what to publish for the actions its
+/// schedule does not assign. A `Recovery::Rescheduled` network deliberately
+/// keeps already-succeeded actions as nodes so their lag edges survive; against
+/// an empty log they read as never-attempted, get published `Failed`, and
+/// abandon the retries waiting behind them. Run a recovery proposal with
+/// `run_into` and the log recovery was given.
 pub async fn run(
     act: &dyn Actuator,
     sched: &Schedule,

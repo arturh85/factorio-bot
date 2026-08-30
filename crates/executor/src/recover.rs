@@ -76,21 +76,40 @@ pub enum Recovery {
     /// run, recover — cannot see a terminating condition without inspecting
     /// the schedule's insides. It would just keep dispatching nothing.
     Complete,
-    /// The plan still fits the world. `sched` runs the actions of the original
-    /// network that have not yet succeeded, and `net` is that network with the
-    /// succeeded ones removed. The existing `ExecutionLog` carries forward
-    /// unchanged — unlike `Reexpanded`, the ids still mean what they meant.
+    /// The plan still fits the world. `sched` dispatches the actions of the
+    /// original network that have not yet succeeded. The existing
+    /// `ExecutionLog` carries forward unchanged — unlike `Reexpanded`, the ids
+    /// still mean what they meant.
     ///
-    /// **Run `sched` against this `net`, never against the network you passed
-    /// to `recover`.** `run_into` publishes `Failed` for every action of the
-    /// network its schedule does not assign, so handing it the original network
-    /// releases each already-succeeded action *as a failure*; `await_preds`
-    /// then abandons the retry that was waiting on it and the run returns
-    /// `Ok(())` having dispatched nothing at all. Carrying the retained network
-    /// here rather than leaving the caller to rebuild it is what makes that
-    /// mispairing unrepresentable — which is also why this variant is a struct
-    /// shaped exactly like `Reexpanded`: both are "here is a plan: a network
-    /// and a schedule over it", and nothing about handling one should differ.
+    /// **`net` deliberately holds more actions than `sched` assigns.** Besides
+    /// the unfinished work it keeps every succeeded action that an unfinished
+    /// one depends on. Those carry no work and are never dispatched; they are
+    /// there to carry their **edges**, because an edge carries a lag and a lag
+    /// is machine time. `link(smelt, collect, 6000)` says the plate is not in
+    /// the furnace for another hundred seconds no matter who is standing there,
+    /// and `await_preds` reads that lag off this network at run time. Drop the
+    /// succeeded `smelt` node and the lag vanishes with it: the retry of
+    /// `collect` waits zero and reaches into a furnace that is still smelting.
+    ///
+    /// **Run `sched` against this `net`, with the log you gave `recover` —
+    /// `run_into`, not `run`.** Two things depend on it. Handing `run_into` the
+    /// *original* network puts already-succeeded actions back in the dispatch
+    /// set. Handing it an *empty* log — which is exactly what `run` builds —
+    /// makes the succeeded nodes above read as never-attempted, so they are
+    /// published `Failed` and abandon the retries waiting behind them, and the
+    /// run returns `Ok(())` having dispatched nothing at all.
+    ///
+    /// Carrying the network here rather than leaving the caller to rebuild it
+    /// is what makes the first mispairing unrepresentable, and is why this
+    /// variant is shaped exactly like `Reexpanded`: both are "here is a plan: a
+    /// network and a schedule over it", and nothing about handling one should
+    /// differ.
+    ///
+    /// The **whole** lag is preserved, not the part still outstanding. Plan time
+    /// restarts at zero and there is no game clock here to say how much of the
+    /// furnace's 6000 ticks already burned (see `Attempt`), so the retry waits
+    /// it out again. That over-waits. Forgetting it acts too early, and only one
+    /// of those two is safe.
     ///
     /// May contain interrupted (`Running`) actions — see the type-level note on
     /// double execution.
@@ -146,6 +165,69 @@ fn unfinished(net: &ActionNetwork, log: &ExecutionLog) -> BTreeSet<ActionId> {
         .collect()
 }
 
+/// How many times one action may be dispatched before tier 1 stops proposing
+/// it and the decision escalates.
+///
+/// Three, counting the original run. One retry covers a transient — an RCON
+/// timeout, a bot that was mid-walk, a chest that was briefly full. A second
+/// covers the coincidence of two of those. An action that has failed three
+/// times against a plan the scheduler still calls feasible is not being
+/// unlucky: the plan is wrong in a way `schedule` cannot see, and re-proposing
+/// it just issues the same command to a live server again.
+///
+/// The exact number is a judgement, not a derivation. What matters is that it
+/// is finite and small — the cost of escalating early is one wasted
+/// re-expansion, and the cost of never escalating is the unbounded loop this
+/// constant exists to break.
+pub const MAX_TIER_ONE_ATTEMPTS: u32 = 3;
+
+/// Whether tier 1 has run out of road: some action is currently `Failed` and
+/// has already been dispatched `MAX_TIER_ONE_ATTEMPTS` times.
+///
+/// This is the only place `recover` reads *history* rather than the present
+/// state of the world. Without it the tier choice is a function of
+/// schedulability alone, and a schedulable plan whose action fails every time
+/// is proposed forever — the caller cannot break that from outside, because
+/// every proposal it gets back is the same valid plan.
+///
+/// Only `Failed` actions count. An interrupted (`Running`) action has no
+/// verdict yet, and a `Pending` one has not been tried.
+fn exhausted_tier_one(net: &ActionNetwork, log: &ExecutionLog) -> bool {
+    net.actions()
+        .map(|a| a.id)
+        .any(|id| log.status(id) == Status::Failed && log.attempts(id) >= MAX_TIER_ONE_ATTEMPTS)
+}
+
+/// `keep`, plus every succeeded action that a kept action depends on.
+///
+/// Those extra nodes are not work — the schedule never assigns them — they are
+/// there so `ActionNetwork::retaining` keeps the *edges* into the kept actions,
+/// and with them the lags. A lag is machine time: `link(smelt, collect, 6000)`
+/// says the plate is not in the furnace's output for another hundred seconds,
+/// whether or not a bot is standing there.
+///
+/// Direct predecessors only. A succeeded action's own predecessors constrain
+/// nothing further — it has already finished, so whatever had to elapse before
+/// it did elapse.
+///
+/// **The full lag is preserved, not the part of it still outstanding.** Time in
+/// a plan restarts at zero, and knowing how much of the furnace's 6000 ticks
+/// already burned needs a game clock, which this crate does not have (see
+/// `Attempt`). Waiting the whole lag again over-waits; forgetting it acts too
+/// early. Only one of those two is safe.
+fn keep_with_lag_bearing_preds(
+    net: &ActionNetwork,
+    keep: &BTreeSet<ActionId>,
+) -> BTreeSet<ActionId> {
+    let mut wider = keep.clone();
+    for id in keep {
+        for (pred, _lag) in net.preds(*id) {
+            wider.insert(pred);
+        }
+    }
+    wider
+}
+
 /// Decide what to do about a partially failed execution.
 ///
 /// Tier 1 is cheap: keep the network, drop what succeeded, and re-run
@@ -184,17 +266,30 @@ pub fn recover(
         return Recovery::Complete;
     }
 
-    // Tier 1 — the same plan, minus what is already done.
-    let remaining = net.retaining(&keep);
-    if let Ok(sched) = schedule(&remaining, state, bots) {
-        // The retained network travels with its schedule. `run_into` fails
-        // every network action its schedule does not assign, so a schedule
-        // paired with the *original* network abandons the retry behind each
-        // succeeded predecessor and dispatches nothing.
-        return Recovery::Rescheduled {
-            net: remaining,
-            sched,
-        };
+    // Tier 1 — the same plan, minus what is already done. Skipped once an
+    // action has burned through its attempts: proposing the same plan again is
+    // the loop `MAX_TIER_ONE_ATTEMPTS` exists to break.
+    if !exhausted_tier_one(net, log) {
+        // Two different networks, on purpose.
+        //
+        // `schedule` runs over the strictly unfinished actions, so nothing that
+        // already succeeded is dispatched a second time.
+        //
+        // The network that ships with the schedule is wider: it also keeps every
+        // succeeded action that some unfinished action depends on. Those nodes
+        // carry no work — nothing schedules them — but they carry their
+        // **edges**, and an edge carries a lag. Drop the node and the lag goes
+        // with it, and `await_preds` stops waiting for a furnace that is still
+        // smelting. `run_into` publishes `Success` for them straight from the
+        // log, so they release their dependents at once and cost nothing but
+        // the wait they are there to preserve.
+        let to_run = net.retaining(&keep);
+        if let Ok(sched) = schedule(&to_run, state, bots) {
+            return Recovery::Rescheduled {
+                net: net.retaining(&keep_with_lag_bearing_preds(net, &keep)),
+                sched,
+            };
+        }
     }
 
     // Tier 2 — the same goal, planned again from the method layer.
@@ -234,7 +329,7 @@ mod tests {
     use factorio_bot_planner::action::{Action, ActionKind, Actor, Condition, Effect};
     use factorio_bot_planner::goal::Holder;
     use factorio_bot_planner::ids::ActionIdGen;
-    use factorio_bot_planner::InventorySlot;
+    use factorio_bot_planner::{InventorySlot, Ticks};
     use std::sync::Arc;
 
     const BOTS: [BotId; 2] = [BotId(1), BotId(2)];
@@ -539,6 +634,143 @@ mod tests {
             after.status(done),
             Status::Success,
             "the action that already succeeded is untouched"
+        );
+    }
+
+    /// D4: a lag edge from a *succeeded* predecessor must survive into the
+    /// retry, or the executor reaches into a furnace that is still smelting.
+    ///
+    /// `link(a, b, 6000)` is a hundred seconds of machine time. `a` succeeded,
+    /// so tier 1 leaves it out of the schedule — but dropping its node dropped
+    /// the edge, `await_preds` found no predecessor, and the retry of `b` slept
+    /// zero. The clock is paused, so the assertion is on virtual time and the
+    /// test still runs instantly.
+    #[tokio::test(start_paused = true)]
+    async fn a_retry_still_waits_out_a_succeeded_predecessors_lag() {
+        const LAG: Ticks = 6_000;
+
+        let s = state();
+        let tile = ore_tile(&s);
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let smelt = net.add(mine_at(&mut gen, &tile, 2));
+        let collect = net.add(mine_at(&mut gen, &tile, 2));
+        net.link(smelt, collect, LAG);
+
+        let mut log = ExecutionLog::default();
+        log.start(smelt, 0);
+        log.succeed(smelt, 60);
+        log.start(collect, 60);
+        log.fail(collect, 90, "furnace was empty".to_string());
+
+        let Recovery::Rescheduled {
+            net: retained,
+            sched,
+        } = recover(&ore_goal(4), &net, &s, &BOTS, &log)
+        else {
+            panic!("expected a reschedule");
+        };
+
+        // The succeeded action is in the network but not in the schedule: it
+        // carries the lag, it does not carry work.
+        assert_eq!(
+            retained.preds(collect),
+            vec![(smelt, LAG)],
+            "the lag edge must survive the predecessor's success"
+        );
+        assert!(
+            sched.assignment(smelt).is_none(),
+            "succeeded work must not be dispatched again"
+        );
+        assert!(sched.assignment(collect).is_some());
+
+        let act = CountingAct::default();
+        let progress = std::sync::Mutex::new(log.clone());
+        let began = tokio::time::Instant::now();
+        crate::run::run_into(&act, &sched, &retained, &progress)
+            .await
+            .expect("the run should start");
+        let waited = began.elapsed();
+
+        assert_eq!(act.mined.lock().unwrap().len(), 1, "the retry did dispatch");
+        assert!(
+            waited >= std::time::Duration::from_secs(100),
+            "the retry must wait out the full {LAG}-tick lag; it waited {waited:?}"
+        );
+        assert_eq!(
+            progress.into_inner().unwrap().status(collect),
+            Status::Success
+        );
+    }
+
+    /// D3: tier 1 must stop proposing a plan whose action keeps failing.
+    ///
+    /// The tier choice used to be a function of schedulability alone, so a
+    /// perfectly schedulable plan whose action fails every single time was
+    /// re-proposed forever, each round issuing the command to a live server
+    /// again. The caller could not break it from outside: every proposal it got
+    /// back was a valid plan.
+    ///
+    /// Asserted at the boundary in both directions, so this pins the threshold
+    /// and not merely "escalation happens eventually".
+    #[test]
+    fn tier_one_escalates_once_an_action_has_burned_its_attempts() {
+        // The rule below is written in terms of the constant, so it holds for
+        // any value and says nothing about which one we picked. Pin the value
+        // separately: it is a judgement about how much bad luck to absorb
+        // before spending a re-expansion, and moving it changes how many real
+        // commands a doomed action fires at a live server. That should be a
+        // deliberate edit, not a drift.
+        assert_eq!(MAX_TIER_ONE_ATTEMPTS, 3);
+
+        let fixture = |attempts: u32| {
+            let s = state();
+            let tile = ore_tile(&s);
+            let mut gen = ActionIdGen::new();
+            let mut net = ActionNetwork::new();
+            let done = net.add(mine_at(&mut gen, &tile, 2));
+            let doomed = net.add(mine_at(&mut gen, &tile, 2));
+            net.link(done, doomed, 0);
+
+            let mut log = ExecutionLog::default();
+            log.start(done, 0);
+            log.succeed(done, 60);
+            for round in 0..attempts {
+                log.start(doomed, 60 + round);
+                log.fail(doomed, 90 + round, "player is stuck".to_string());
+            }
+            assert_eq!(log.attempts(doomed), attempts);
+            (net, s, log)
+        };
+
+        // One short of the limit: the world still affords the plan, so tier 1
+        // is still the right, cheap answer.
+        let (net, s, log) = fixture(MAX_TIER_ONE_ATTEMPTS - 1);
+        assert!(
+            matches!(
+                recover(&ore_goal(4), &net, &s, &BOTS, &log),
+                Recovery::Rescheduled { .. }
+            ),
+            "below the limit tier 1 must still fire, or the constant is dead weight"
+        );
+
+        // At the limit: the same plan is still schedulable, so nothing about
+        // the *world* has escalated — only the history has. That is the point.
+        let (net, s, log) = fixture(MAX_TIER_ONE_ATTEMPTS);
+        let still_schedulable = {
+            let keep = unfinished(&net, &log);
+            schedule(&net.retaining(&keep), &s, &BOTS).is_ok()
+        };
+        assert!(
+            still_schedulable,
+            "tier 1 is being skipped on history alone, not because scheduling broke"
+        );
+        assert!(
+            matches!(
+                recover(&ore_goal(4), &net, &s, &BOTS, &log),
+                Recovery::Reexpanded { .. }
+            ),
+            "at the limit the decision must escalate instead of looping"
         );
     }
 

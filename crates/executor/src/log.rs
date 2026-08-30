@@ -33,8 +33,12 @@ pub enum Status {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attempt {
     pub status: Status,
-    /// Which attempt this is, counting from 1. Greater than 1 means recovery
-    /// retried the action — see `ExecutionLog::start`.
+    /// Which attempt this is, counting from 1. Greater than 1 means the action
+    /// was dispatched again after a failure or an interruption — see
+    /// `ExecutionLog::start`. Saturates rather than wrapping: at `u32::MAX` the
+    /// count stops being exact, which is harmless, whereas wrapping to 0 would
+    /// make `attempts()` report an action that has run four billion times as
+    /// never started, and every retry budget reading it would reset.
     pub number: u32,
     /// The tick the *schedule* placed this attempt's start at. Not observed.
     pub planned_start_tick: Ticks,
@@ -121,9 +125,21 @@ impl ExecutionLog {
             // A duplicate dispatch of work that already succeeded.
             Some(a) if a.status == Status::Success => return,
             // A retry of a failure: supersede it, and remember it happened.
-            Some(a) if a.status == Status::Failed => a.number + 1,
-            // Pending or already Running: the ordinary first start.
-            Some(a) => a.number,
+            Some(a) if a.status == Status::Failed => a.number.saturating_add(1),
+            // A retry of an *interrupted* attempt. `Running` means the last run
+            // died between dispatch and reply, so starting it again is a retry
+            // exactly like the `Failed` case — and the case a retry budget is
+            // most needed for, since an interrupted action produces no verdict
+            // to escalate on. Counting it flat was a hole: three interrupted
+            // runs left `attempts() == 1`, so no budget built on this counter
+            // could ever trip.
+            //
+            // Nothing double-starts a `Running` attempt inside one run:
+            // `planned_steps` drops duplicate ids before dispatch and each
+            // surviving step calls `start` once. So a second `start` on a
+            // `Running` attempt is always a later run picking the action up
+            // again.
+            Some(a) => a.number.saturating_add(1),
             None => 1,
         };
         self.attempts.insert(
@@ -360,6 +376,39 @@ mod tests {
             None,
             "the superseded failure's message does not linger on a success"
         );
+    }
+
+    #[test]
+    fn an_interrupted_attempt_is_counted_when_it_is_picked_up_again() {
+        // D5. `Running` means the previous run died between dispatch and reply.
+        // Starting the action again is a retry exactly like the `Failed` case,
+        // and it is the case a retry budget is *most* for, because an
+        // interrupted action never produces a verdict to escalate on. While
+        // this counted flat, three interrupted runs left `attempts() == 1` and
+        // no budget reading the counter could ever trip.
+        let mut log = ExecutionLog::default();
+        for round in 0..3 {
+            log.start(id(1), 100 * round);
+            assert_eq!(log.status(id(1)), Status::Running, "never finished");
+        }
+        assert_eq!(log.attempts(id(1)), 3);
+    }
+
+    #[test]
+    fn the_attempt_counter_saturates_rather_than_wrapping_to_never_started() {
+        // D6. `number + 1` panicked in debug and wrapped in release, and a
+        // wrapped counter reports an action that has run four billion times as
+        // never started — resetting every retry budget reading it.
+        let mut log = ExecutionLog::default();
+        log.start(id(1), 0);
+        log.fail(id(1), 1, "x".to_string());
+        // Reach the ceiling without four billion round trips.
+        if let Some(a) = log.attempts.get_mut(&id(1)) {
+            a.number = u32::MAX;
+        }
+        log.start(id(1), 2);
+        assert_eq!(log.attempts(id(1)), u32::MAX, "saturated, not wrapped");
+        assert_ne!(log.attempts(id(1)), 0, "a wrap would read as never started");
     }
 
     #[test]

@@ -744,6 +744,37 @@ git commit -m "feat(lua): runs and observations as values"
 
 **Background.** `Plans`, `Runs`, `PlanEntry`, `RunEntry`, `Progress`, `wait_for_run(runs, handle)` and the eight old binding closures exist only to make integer handles work. Userdata replaced all of it. Anything still referenced by the new modules moves rather than dies — check each before deleting.
 
+**A plan defect this task must close.** Tasks 3 and 4 could not install the new
+constructors on the *production* `goal` table, because the old handle-based `have` and
+`researched` were still there and ~20 existing tests depend on them. Both tasks therefore
+tested against a **table instance of their own**. That was the right call for them, but it
+means the composed surface — the one a real script actually gets from
+`create_lua_goal_with` — has **never been exercised end to end**. Every new test so far
+proves a part against a parallel wiring, not the whole against the real one.
+
+This task is where that wiring becomes real, so this task owes the integration proof.
+Add a test that goes through the production table only, in one unbroken chain:
+
+```rust
+#[test]
+fn the_production_goal_table_composes_end_to_end() {
+    // The real table from create_lua_goal_with -- NOT a hand-assembled one.
+    let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never)));
+    lua.load(r#"
+        local g    = goal.all { goal.have("iron-ore", 2), goal.have("coal", 1) }
+        local p    = goal.plan(g, { bots = { 1 } })
+        local obs  = goal.run(p)
+        assert(#p.steps > 0, "the composed surface produced a plan")
+        assert(p:count { kind = "mine" } > 0, "and it contains real work")
+        assert(obs.done and obs.failed == 0, "and the run completed cleanly")
+        assert(select(2, pcall(goal.run, p)):find("already"), "and the plan is spent")
+    "#).exec().expect("script");
+}
+```
+
+If that test cannot be written against the production table, the surface is not actually
+composed and the task is not done — say so rather than adapting the test to fit.
+
 - [ ] **Step 1: Write the failing test**
 
 ```rust

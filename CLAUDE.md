@@ -172,12 +172,17 @@ The system supports running multiple graphical Factorio clients controlled by Lu
 cargo build --release --no-default-features --features cli,lua
 
 # Run multi-client test with adequate timeout (180s recommended)
-# Use absolute paths when running from different directories
-timeout 180 target/release/factorio-bot lua /absolute/path/to/script.lua -c <num_clients>
+#
+# The script name is resolved against the workspace scripts directory
+# (`<workspace_path>/scripts`), NOT against the current working directory, so
+# pass a bare name and run from anywhere. An absolute path does NOT work: the
+# leading `/` is stripped and the rest is joined onto the scripts root, so
+# `/home/me/scripts/foo.lua` is looked up as `<scripts_root>/home/me/scripts/foo.lua`
+# and reported as not found.
+timeout 180 target/release/factorio-bot lua <script_name>.lua -c <num_clients>
 
 # Example: Test with 2 clients
-timeout 180 target/release/factorio-bot lua \
-  /Volumes/2TB/projects/private/factorio-bot/scripts/multi_client_test.lua -c 2
+timeout 180 target/release/factorio-bot lua multi_client_test.lua -c 2
 ```
 
 ### Expected Behavior

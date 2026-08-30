@@ -80,12 +80,21 @@ pub fn scripts_dir(workspace_path: &Path) -> Result<PathBuf> {
 pub fn ensure_scripts_dir(workspace_path: &Path) -> Result<PathBuf> {
     let workspace_scripts = workspace_path.join("scripts");
     if !workspace_scripts.is_dir() {
-        std::fs::create_dir_all(&workspace_scripts).into_diagnostic()?;
-
         #[cfg(not(debug_assertions))]
-        crate::process::instance_setup::PLANS_CONTENT
-            .extract(workspace_scripts.clone())
-            .map_err(|err| miette!("failed to extract bundled scripts: {err:?}"))?;
+        {
+            // Build under a sibling name and rename in one step: a crash or a
+            // full disk mid-extraction leaves no half-populated `scripts/`
+            // that the next start would mistake for a finished one.
+            let staging = workspace_path.join(".scripts-partial");
+            let _ = std::fs::remove_dir_all(&staging);
+            std::fs::create_dir_all(&staging).into_diagnostic()?;
+            crate::process::instance_setup::PLANS_CONTENT
+                .extract(staging.clone())
+                .map_err(|err| miette!("failed to extract bundled scripts: {err:?}"))?;
+            std::fs::rename(&staging, &workspace_scripts).into_diagnostic()?;
+        }
+        #[cfg(debug_assertions)]
+        std::fs::create_dir_all(&workspace_scripts).into_diagnostic()?;
     }
     std::fs::canonicalize(&workspace_scripts).into_diagnostic()
 }
@@ -122,6 +131,68 @@ pub fn resolve_script_path(
         });
     }
     Ok(canonical)
+}
+
+/// Resolves a path that is allowed not to exist yet, bounding it to `root`.
+///
+/// [`resolve_script_path`] canonicalizes the *target*, so it can only resolve
+/// paths that already exist — right for reads, useless for `file_write` or
+/// `world.draw`, whose whole point is creating something new. This resolves
+/// the deepest existing ancestor instead and re-attaches the remainder, which
+/// gives the same guarantee (`..` and symlinks are resolved by the OS, not by
+/// us) for a destination that is not there yet.
+///
+/// The parent directory must already exist: creating intermediate directories
+/// on a script's behalf would let a script build a tree of its own choosing,
+/// and no caller needs it.
+pub fn resolve_write_path(
+    root: &Path,
+    requested: &str,
+) -> std::result::Result<PathBuf, ScriptPathError> {
+    let requested_path = Path::new(requested);
+    // An absolute argument makes `Path::join` discard `root` entirely, so it
+    // must be refused before any joining happens.
+    if requested_path.is_absolute() {
+        return Err(ScriptPathError::EscapesRoot {
+            requested: requested.to_owned(),
+        });
+    }
+
+    let joined = root.join(requested_path);
+    let parent = joined
+        .parent()
+        .ok_or_else(|| ScriptPathError::EscapesRoot {
+            requested: requested.to_owned(),
+        })?;
+    let file_name = joined
+        .file_name()
+        .ok_or_else(|| ScriptPathError::EscapesRoot {
+            requested: requested.to_owned(),
+        })?;
+
+    // The parent must exist; canonicalizing it is what resolves `..` segments
+    // and symlinks before the bounds check sees the path.
+    let parent = std::fs::canonicalize(parent).map_err(|_| ScriptPathError::NotFound {
+        requested: requested.to_owned(),
+    })?;
+    if !parent.starts_with(root) {
+        return Err(ScriptPathError::EscapesRoot {
+            requested: requested.to_owned(),
+        });
+    }
+
+    let target = parent.join(file_name);
+    // Belt and braces: `file_name` is a single component by construction, so
+    // this cannot fail today. It is here because `resolve_new_script_path` in
+    // the server learned the hard way (plan 3, finding I4) that a component
+    // can replace a path on Windows, and a bounds check that is cheap and
+    // unconditional outlives the reasoning that made it redundant.
+    if !target.starts_with(root) {
+        return Err(ScriptPathError::EscapesRoot {
+            requested: requested.to_owned(),
+        });
+    }
+    Ok(target)
 }
 
 #[cfg(test)]
@@ -285,6 +356,77 @@ mod tests {
             resolve_script_path(&root, "/escape.lua").is_err(),
             "a symlink escaping the root should not resolve"
         );
+    }
+
+    #[test]
+    fn a_write_path_may_name_a_file_that_does_not_exist_yet() {
+        let (_dir, root) = root();
+        let resolved = resolve_write_path(&root, "new.png").expect("accepted");
+        assert_eq!(resolved, root.join("new.png"));
+    }
+
+    #[test]
+    fn a_write_path_may_name_a_file_in_an_existing_subdirectory() {
+        let (_dir, root) = root();
+        let resolved = resolve_write_path(&root, "sub/new.png").expect("accepted");
+        assert_eq!(resolved, root.join("sub").join("new.png"));
+    }
+
+    #[test]
+    fn a_write_path_may_not_be_absolute() {
+        let (_dir, root) = root();
+        let err = resolve_write_path(&root, "/tmp/pwned.png").expect_err("refused");
+        assert!(
+            matches!(err, ScriptPathError::EscapesRoot { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_write_path_may_not_climb_out_with_dotdot() {
+        let (_dir, root) = root();
+        let err = resolve_write_path(&root, "../outside.txt").expect_err("refused");
+        assert!(
+            matches!(err, ScriptPathError::EscapesRoot { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_write_path_may_not_climb_out_and_back_in() {
+        // The interesting case: this one *does* land inside the root, but only
+        // after leaving it. `canonicalize` on the parent chain is what makes the
+        // difference between checking the string and checking the destination.
+        let (_dir, root) = root();
+        let resolved = resolve_write_path(&root, "sub/../new.png").expect("accepted");
+        assert_eq!(resolved, root.join("new.png"));
+    }
+
+    #[test]
+    fn a_write_path_may_not_target_a_directory_that_does_not_exist() {
+        let (_dir, root) = root();
+        let err = resolve_write_path(&root, "nope/new.png").expect_err("refused");
+        assert!(
+            matches!(err, ScriptPathError::NotFound { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_write_path_may_not_escape_through_a_symlinked_parent() {
+        let (dir, root) = root();
+        let outside_dir = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&outside_dir).expect("mkdir");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside_dir, root.join("link")).expect("symlink");
+        #[cfg(unix)]
+        {
+            let err = resolve_write_path(&root, "link/new.png").expect_err("refused");
+            assert!(
+                matches!(err, ScriptPathError::EscapesRoot { .. }),
+                "got {err:?}"
+            );
+        }
     }
 
     /// A substring check on ".." rejects this legitimate name; a canonicalising

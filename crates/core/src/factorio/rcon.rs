@@ -31,6 +31,28 @@ use unicode_segmentation::UnicodeSegmentation;
 
 const RCON_INTERFACE: &str = "botbridge";
 
+/// The `/silent-command remote.call(...)` text for a BotBridge function.
+fn remote_call_command(function_name: &str, args: &[String]) -> String {
+    let mut arg_string: String = args.join(", ");
+    if !arg_string.is_empty() {
+        arg_string = String::from(", ") + &arg_string;
+    }
+    format!("/silent-command remote.call('{RCON_INTERFACE}', '{function_name}'{arg_string})")
+}
+
+/// Splits an RCON reply body into lines, dropping the trailing newline the
+/// server always appends. `None` for an empty reply.
+fn split_reply(result: &str, silent: bool) -> Option<Vec<String>> {
+    if result.is_empty() {
+        return None;
+    }
+    let body = &result[0..result.len() - 1];
+    if !silent {
+        info!("<cyan>rcon</>  ⮞ <green>{}</>", body);
+    }
+    Some(body.split('\n').map(|str| str.to_owned()).collect())
+}
+
 pub struct FactorioRcon {
     pool: Option<bb8::Pool<ConnectionManager>>,
     silent: Arc<RwLock<bool>>,
@@ -102,22 +124,7 @@ impl FactorioRcon {
             .into_diagnostic()?;
         drop(conn);
         // info!("send took {} ms", started.elapsed().as_millis());
-        if !result.is_empty() {
-            if !silent {
-                info!(
-                    "<cyan>rcon</>  ⮞ <green>{}</>",
-                    &result[0..result.len() - 1]
-                );
-            }
-            Ok(Some(
-                result[0..result.len() - 1]
-                    .split('\n')
-                    .map(|str| str.to_owned())
-                    .collect(),
-            ))
-        } else {
-            Ok(None)
-        }
+        Ok(split_reply(&result, silent))
     }
 
     /// Calls a lua function exported by BotBridge
@@ -126,15 +133,80 @@ impl FactorioRcon {
         function_name: &str,
         args: Vec<String>,
     ) -> Result<Option<Vec<String>>> {
-        let mut arg_string: String = args.join(", ");
-        if !arg_string.is_empty() {
-            arg_string = String::from(", ") + &arg_string;
+        self.send(&remote_call_command(function_name, &args)).await
+    }
+
+    /// Calls a BotBridge function whose reply must be one *complete* JSON
+    /// document, and returns that document's text.
+    ///
+    /// Why this is not [`FactorioRcon::remote_call`] followed by
+    /// `serde_json::from_str`: the pooled connection has to still be in hand
+    /// when the reply is judged.
+    ///
+    /// This client builds its connections with `enable_factorio_quirks(true)`,
+    /// which makes the `rcon` crate use `receive_single_packet_response` — it
+    /// reads exactly *one* packet per command. A reply the server split across
+    /// packets therefore leaves its remainder sitting unread in the socket, and
+    /// nothing in the `rcon` crate reports that: `cmd` returns the first
+    /// packet's body as a plain `Ok`. Left alone, the connection goes back into
+    /// the `bb8` pool still holding that tail, and the *next* command on it
+    /// reads someone else's reply — permanent cross-talk from one oversized
+    /// read.
+    ///
+    /// The only in-band evidence of a short read is that the JSON does not
+    /// parse, so the completeness check happens here, while
+    /// [`RconConnection::mark_desynced`] can still reach the connection and
+    /// keep [`ConnectionManager::has_broken`] from handing it out again. The
+    /// error carries the byte count, because "expected `,` at line 1 column
+    /// 393025" names the parser and a size names the cause.
+    async fn remote_call_json(&self, function_name: &str, args: Vec<String>) -> Result<String> {
+        let silent = *self.silent.read();
+        let command = remote_call_command(function_name, &args);
+        if !silent {
+            info!("<cyan>rcon</>  ⮜ <green>{}</>", command);
         }
-        self.send(&format!(
-            "/silent-command remote.call('{}', '{}'{})",
-            RCON_INTERFACE, function_name, arg_string
-        ))
-        .await
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| miette!("rcon is not connected"))?;
+        let mut conn = pool.get().await.into_diagnostic()?;
+        let result = match conn.cmd(&command.clone().add("\n")).await {
+            Ok(result) => result,
+            Err(err) => {
+                // The read failed part-way through a reply that was already
+                // being written, so the socket's position is unknown.
+                conn.mark_desynced();
+                return Err(err).into_diagnostic();
+            }
+        };
+        let Some(mut lines) = split_reply(&result, silent) else {
+            return Err(RconUnexpectedEmptyResponse {}.into());
+        };
+        let json = lines.pop().ok_or(RconUnexpectedEmptyResponse {})?;
+        // A server whose BotBridge predates this call answers with the game's
+        // own "Cannot execute command. Error: No such function: ..." rather
+        // than with JSON. That is a complete reply, just not the one asked
+        // for, so the connection stays usable; reporting the text is the
+        // difference between "expected value at line 1 column 1" and a message
+        // naming the cause.
+        if !json.starts_with('{') && !json.starts_with('[') {
+            return Err(RconUnexpectedOutput { output: json }.into());
+        }
+        // `IgnoredAny` walks the document without building it: this asks only
+        // "did the JSON end", which is precisely the truncation question, and
+        // leaves the typed parse to the caller.
+        if let Err(err) = serde_json::from_str::<serde::de::IgnoredAny>(&json) {
+            conn.mark_desynced();
+            return Err(err).into_diagnostic().wrap_err(format!(
+                "the {} reply is not a complete JSON document: {} bytes arrived and the document \
+                 does not end. This client reads one RCON packet per command, so a reply larger \
+                 than the server puts in a single packet is truncated here. The connection has \
+                 been dropped from the pool rather than returned to it holding the remainder.",
+                function_name,
+                json.len()
+            ));
+        }
+        Ok(json)
     }
 
     /// Take a screenshot -> but where?
@@ -603,23 +675,19 @@ impl FactorioRcon {
     /// magnitude of headroom. Note that this crate configures the `rcon`
     /// connection with `enable_factorio_quirks(true)`, which reads exactly one
     /// packet per command — a chunked reply would need multi-packet reads that
-    /// this client does not do.
+    /// this client does not do. [`FactorioRcon::remote_call_json`] is what
+    /// makes that limit *loud* instead of silent if a bigger base, a wider
+    /// radius or more mods ever push a reply past it.
     pub async fn world_snapshot(&self) -> Result<WorldSnapshot> {
-        let lines = self.remote_call("world_snapshot", vec![]).await?;
-        let Some(mut lines) = lines else {
-            return Err(RconUnexpectedEmptyResponse {}.into());
-        };
-        let json = lines.pop().ok_or(RconUnexpectedEmptyResponse {})?;
-        // A server whose BotBridge predates this call answers with the game's
-        // own "Cannot execute command. Error: No such function: ..." rather
-        // than with JSON. Reporting that text is the difference between
-        // "expected value at line 1 column 1" and a message naming the cause.
-        if !json.starts_with('{') {
-            return Err(RconUnexpectedOutput { output: json }.into());
-        }
+        let json = self.remote_call_json("world_snapshot", vec![]).await?;
         serde_json::from_str(json.as_str())
             .into_diagnostic()
-            .wrap_err("failed to parse the world_snapshot reply")
+            .wrap_err_with(|| {
+                format!(
+                    "failed to parse the world_snapshot reply ({} bytes)",
+                    json.len()
+                )
+            })
     }
 
     pub async fn player_force(&self) -> Result<FactorioForce> {
@@ -1303,8 +1371,46 @@ impl ConnectionManager {
     }
 }
 
+/// A pooled RCON connection, plus whether it is still known to be in sync with
+/// the server.
+///
+/// `bb8` decides whether to keep a connection by asking
+/// [`ConnectionManager::has_broken`], and that answer has to be *stored*
+/// somewhere per connection. `rcon::Connection` has no room for it and is not
+/// ours to change, so the pool holds this wrapper instead of the bare
+/// connection.
+pub struct RconConnection {
+    conn: Connection<TcpStream>,
+    /// Set once this connection may be holding an unread remainder of a reply.
+    ///
+    /// Never cleared: there is no way to resynchronise a stream whose position
+    /// is unknown, because the client cannot tell a leftover tail from the next
+    /// legitimate reply. Once set, the connection is dropped rather than
+    /// reused.
+    desynced: bool,
+}
+
+impl RconConnection {
+    /// Runs one command, marking the connection desynced if the read fails
+    /// part-way.
+    pub async fn cmd(&mut self, command: &str) -> rcon::Result<String> {
+        let result = self.conn.cmd(command).await;
+        if result.is_err() {
+            self.desynced = true;
+        }
+        result
+    }
+
+    /// Declares this connection no longer trustworthy — see
+    /// [`FactorioRcon::remote_call_json`], the one caller that can detect a
+    /// short read.
+    pub fn mark_desynced(&mut self) {
+        self.desynced = true;
+    }
+}
+
 impl bb8::ManageConnection for ConnectionManager {
-    type Connection = rcon::Connection<TcpStream>;
+    type Connection = RconConnection;
     type Error = rcon::Error;
 
     fn connect(
@@ -1313,19 +1419,38 @@ impl bb8::ManageConnection for ConnectionManager {
         let address = self.address.clone();
         let pass = self.pass.clone();
         async move {
-            Connection::builder()
-                .enable_factorio_quirks(true)
-                .connect(&address, &pass)
-                .await
+            Ok(RconConnection {
+                conn: Connection::builder()
+                    .enable_factorio_quirks(true)
+                    .connect(&address, &pass)
+                    .await?,
+                desynced: false,
+            })
         }
     }
 
-    async fn is_valid(&self, _conn: &mut Self::Connection) -> Result<(), Self::Error> {
+    /// Checked when the pool hands a connection out. It stays a local test:
+    /// the honest liveness check is a round trip to the server, and paying one
+    /// per checkout would double the cost of every RCON call to catch a case
+    /// `cmd` already surfaces as an error. What it does catch is a desynced
+    /// connection that somehow survived [`Self::has_broken`] — belt as well as
+    /// braces, since the cost of reusing one is silent cross-talk rather than a
+    /// failure.
+    async fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
+        if conn.desynced {
+            return Err(rcon::Error::Io(std::io::Error::other(
+                "rcon connection desynced by a truncated reply",
+            )));
+        }
         Ok(())
     }
 
-    fn has_broken(&self, _conn: &mut Self::Connection) -> bool {
-        false
+    /// Asked when a connection is returned to the pool. This used to be a flat
+    /// `false`, which meant a connection that had failed mid-reply went back
+    /// into rotation still holding the remainder in its socket, and every later
+    /// command on it read someone else's tail.
+    fn has_broken(&self, conn: &mut Self::Connection) -> bool {
+        conn.desynced
     }
 }
 

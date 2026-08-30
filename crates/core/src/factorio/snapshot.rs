@@ -173,6 +173,192 @@ pub async fn attach_world(rcon: &FactorioRcon, area: Option<Rect>) -> Result<Arc
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::entity_graph::QuadTreeRect;
+    use crate::types::{FactorioEntity, FactorioPlayer};
+    use parking_lot::Mutex;
+
+    fn stone_furnace_prototype() -> FactorioEntityPrototype {
+        FactorioEntityPrototype {
+            name: "stone-furnace".into(),
+            entity_type: "furnace".into(),
+            collision_mask: None,
+            collision_box: Rect::from_wh(1., 1.),
+            mine_result: None,
+            mining_time: None,
+            mining_speed: None,
+            crafting_speed: None,
+            max_underground_distance: None,
+            fluidbox_prototypes: None,
+        }
+    }
+
+    fn iron_plate_recipe() -> FactorioRecipe {
+        FactorioRecipe {
+            name: "iron-plate".into(),
+            valid: true,
+            enabled: true,
+            category: "smelting".into(),
+            ingredients: None,
+            products: vec![],
+            hidden: false,
+            energy: Box::new(noisy_float::types::r64(3.2)),
+            order: "a".into(),
+            group: "g".into(),
+            subgroup: "s".into(),
+        }
+    }
+
+    /// The smallest snapshot [`WorldSnapshot::is_plannable`] accepts, so the
+    /// tests below exercise what comes *after* that guard.
+    fn plannable_snapshot() -> WorldSnapshot {
+        WorldSnapshot {
+            entity_prototypes: vec![stone_furnace_prototype()],
+            item_prototypes: vec![],
+            recipes: vec![iron_plate_recipe()],
+            forces: vec![FactorioForce {
+                name: "player".into(),
+                force_id: 1,
+                current_research: None,
+                research_progress: None,
+                technologies: Box::default(),
+            }],
+        }
+    }
+
+    /// A 1x1 entity whose bounding box actually surrounds its position — the
+    /// entity graph inserts the box it is given, so a default (zero-width) one
+    /// would be skipped and prove nothing.
+    fn entity_at(name: &str, entity_type: &str, position: Position) -> FactorioEntity {
+        FactorioEntity {
+            name: name.into(),
+            entity_type: entity_type.into(),
+            bounding_box: Rect::new(
+                &Position::new(position.x() - 0.5, position.y() - 0.5),
+                &Position::new(position.x() + 0.5, position.y() + 0.5),
+            ),
+            position,
+            ..FactorioEntity::default()
+        }
+    }
+
+    fn probe(position: &Position) -> QuadTreeRect {
+        Rect::new(
+            &Position::new(position.x() - 0.1, position.y() - 0.1),
+            &Position::new(position.x() + 0.1, position.y() + 0.1),
+        )
+        .into()
+    }
+
+    /// A server whose BotBridge predates `world_snapshot` answers with data
+    /// that carries nothing to plan against. The failure has to name the mod;
+    /// left to itself it surfaces much later as "cannot craft iron-plate",
+    /// which sends the reader after the goal instead of after the server.
+    #[tokio::test]
+    async fn attach_world_blames_the_mod_when_the_snapshot_is_empty() {
+        let mut rcon = FactorioRcon::default();
+        rcon.expect_world_snapshot()
+            .times(1)
+            .returning(|| Ok(WorldSnapshot::default()));
+
+        let Err(error) = attach_world(&rcon, None).await else {
+            panic!("an unusable snapshot must not produce a world");
+        };
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("too old"),
+            "the error must point at the server's mod, got: {message}"
+        );
+    }
+
+    /// `writeout_entities` skips characters, so the stdout path never puts a
+    /// player's body into the graph. If the RCON path did, the tile the bot is
+    /// standing on would read as blocked and placements would be refused at the
+    /// one spot the bot can certainly reach.
+    #[tokio::test]
+    async fn a_players_own_body_never_blocks_the_tile_it_stands_on() {
+        let mut rcon = FactorioRcon::default();
+        rcon.expect_world_snapshot()
+            .returning(|| Ok(plannable_snapshot()));
+        rcon.expect_connected_players().returning(|| Ok(vec![]));
+        rcon.expect_find_entities_filtered().returning(|_, _, _| {
+            Ok(vec![
+                entity_at("character", "character", Position::new(0., 0.)),
+                entity_at("stone-furnace", "furnace", Position::new(10., 10.)),
+            ])
+        });
+
+        let world = attach_world(&rcon, None).await.expect("attach_world");
+        let blocked = world.entity_graph.blocked_tree();
+        assert!(
+            !blocked.query(probe(&Position::new(10., 10.))).is_empty(),
+            "a real building must block its tile, or this test proves nothing"
+        );
+        assert!(
+            blocked.query(probe(&Position::new(0., 0.))).is_empty(),
+            "the character was allowed to block the tile it stands on"
+        );
+    }
+
+    /// Runs `attach_world` against a roster and reports the rect it asked the
+    /// server for.
+    async fn read_area_for(players: Vec<FactorioPlayer>) -> Rect {
+        let captured: Arc<Mutex<Option<Rect>>> = Arc::new(Mutex::new(None));
+        let sink = captured.clone();
+        let mut rcon = FactorioRcon::default();
+        rcon.expect_world_snapshot()
+            .returning(|| Ok(plannable_snapshot()));
+        rcon.expect_connected_players()
+            .returning(move || Ok(players.clone()));
+        rcon.expect_find_entities_filtered()
+            .times(1)
+            .returning(move |filter, _, _| {
+                let AreaFilter::Rect(rect) = filter else {
+                    panic!("attach_world must bound its entity read by a rect");
+                };
+                *sink.lock() = Some(rect.clone());
+                Ok(vec![])
+            });
+
+        attach_world(&rcon, None).await.expect("attach_world");
+        let area = captured.lock().take();
+        area.expect("find_entities_filtered was never called")
+    }
+
+    /// Nobody connected means there is no player to centre on, and the origin
+    /// is where a fresh map puts its starting resources — centring on nothing
+    /// would read an arbitrary corner of the map instead.
+    #[tokio::test]
+    async fn the_read_area_falls_back_to_the_origin_when_nobody_is_connected() {
+        let area = read_area_for(vec![]).await;
+        let expected = area_around(&Position::new(0., 0.), DEFAULT_ATTACH_RADIUS);
+        assert_eq!(area.left_top, expected.left_top);
+        assert_eq!(area.right_bottom, expected.right_bottom);
+    }
+
+    /// One square around the *first* connected player, not one per player —
+    /// which is what `--connect`'s help now says.
+    #[tokio::test]
+    async fn the_read_area_is_centred_on_the_first_connected_player() {
+        let players = vec![
+            FactorioPlayer {
+                player_id: 1,
+                position: Position::new(100., -60.),
+                ..FactorioPlayer::default()
+            },
+            FactorioPlayer {
+                player_id: 2,
+                position: Position::new(-900., 900.),
+                ..FactorioPlayer::default()
+            },
+        ];
+        let area = read_area_for(players).await;
+        let expected = area_around(&Position::new(100., -60.), DEFAULT_ATTACH_RADIUS);
+        assert_eq!(area.left_top, expected.left_top);
+        assert_eq!(
+            area.right_bottom, expected.right_bottom,
+            "the second player must not widen the square"
+        );
+    }
 
     #[test]
     fn area_around_is_centred_and_square() {

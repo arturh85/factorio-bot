@@ -39,12 +39,28 @@ are already playing on -- over RCON alone:
 
   factorio-bot lua myscript.lua --connect
 
-The world is read with a single `world_snapshot` RCON call plus the connected
-players and the entities within 200 tiles of them, so world.* and goal.* work.
-What it cannot give you is the live event stream an owned server prints on its
-stdout: the world is a point-in-time read, so research finished, entities built
-and players moved after the snapshot are invisible until the script is run
-again. The server must have the BotBridge mod loaded and RCON enabled.";
+The world is read with a single `world_snapshot` RCON call, plus the connected
+players, plus the entities in ONE 400x400 square -- centred on the first
+connected player, or on the origin when nobody is connected. One square, not
+one per player: 200 tiles either side was chosen by measuring the payload
+(~1.9 MB), and a square per player multiplies that.
+
+goal.* plans against that snapshot and world.* answers from it, but five
+things an owned server gives you are absent, and none of them announce
+themselves:
+
+  * No event stream. The world is a point-in-time read: research finished,
+    entities built or mined, and players moved after the snapshot stay
+    invisible until the script is run again.
+  * Recipes are only those enabled at snapshot time; a technology that
+    finishes afterwards does not appear.
+  * Entities outside that one square do not exist as far as the plan is
+    concerned.
+  * No tiles, which means no water. world.draw still renders, and renders a
+    map with no lakes in it -- a wrong picture rather than an error.
+  * No graphics. The map renderer's sprite atlas is not read.
+
+The server must have the BotBridge mod loaded and RCON enabled.";
 
 impl Subcommand for ThisCommand {
   fn name(&self) -> &'static str {
@@ -368,12 +384,55 @@ mod tests {
       "the old --connect limitation is still advertised:\n{help}"
     );
     assert!(
-      help.contains("world.* and goal.* work"),
+      help.contains("goal.* plans against that snapshot"),
       "missing what --connect now permits:\n{help}"
     );
     assert!(
       help.contains("point-in-time"),
       "missing the snapshot caveat that replaces the old limitation:\n{help}"
+    );
+  }
+
+  /// `attach_world` centres its one entity read on `players.first()`. The help
+  /// used to say "within 200 tiles of them", which reads as a square per
+  /// player, and a reader who believed it would expect every bot's
+  /// surroundings to be loaded.
+  #[test]
+  fn help_says_the_read_area_is_one_square_around_one_player() {
+    let mut lua = build_app()
+      .find_subcommand("lua")
+      .expect("lua subcommand exists")
+      .clone();
+    let help = lua.render_long_help().to_string();
+    assert!(
+      help.contains("first\nconnected player") || help.contains("first connected player"),
+      "the help does not say which player the square is centred on:\n{help}"
+    );
+    assert!(
+      help.contains("not\none per player") || help.contains("not one per player"),
+      "the help still leaves a square per player as a plausible reading:\n{help}"
+    );
+  }
+
+  /// The five things an attached session gives up are all stated in
+  /// `attach_world`'s doc; the help used to state two. The tile one is the
+  /// dangerous omission, because `world.draw` reads the blocked-tile tree and
+  /// an attached world has no tiles -- so it draws a map with no water and
+  /// says nothing. A user must not have to discover that from the picture.
+  #[test]
+  fn help_admits_that_an_attached_world_has_no_water() {
+    let mut lua = build_app()
+      .find_subcommand("lua")
+      .expect("lua subcommand exists")
+      .clone();
+    let help = lua.render_long_help().to_string();
+    assert!(
+      help.contains("no water"),
+      "the help does not warn that an attached world has no tiles:\n{help}"
+    );
+    assert!(
+      help.contains("world.draw"),
+      "the help does not name the command that silently draws the wrong map:\n{help}"
     );
   }
 

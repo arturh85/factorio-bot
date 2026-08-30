@@ -19,9 +19,12 @@ async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String
   .into_diagnostic()?;
   match action {
     Action::Start => {
-      let app_settings = context.app_settings.read().await;
       let instance_state = context.instance_state.clone();
-      let webserver = webserver::start(app_settings.restapi.clone(), instance_state);
+      let bind = std::net::SocketAddr::from((
+        [127, 0, 0, 1],
+        u16::try_from(context.app_settings.read().await.restapi.port).unwrap_or(7492),
+      ));
+      let webserver = webserver::start(context.app_settings.clone(), instance_state, bind);
       let handle = tokio::task::spawn(webserver);
       let mut restapi_handle = context.restapi_handle.write().await;
       *restapi_handle = Some(handle);

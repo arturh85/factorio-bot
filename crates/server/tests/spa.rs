@@ -1,6 +1,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use factorio_bot_server::settings::RestApiSettings;
+use factorio_bot_core::app_settings::AppSettings;
+use factorio_bot_core::settings::RestApiSettings;
 use factorio_bot_server::state::AppState;
 use factorio_bot_server::webserver::build_router;
 use std::sync::Arc;
@@ -10,10 +11,14 @@ use tower::ServiceExt;
 fn state_with_web_root(dir: &std::path::Path) -> AppState {
     AppState {
         instance: Arc::new(RwLock::new(None)),
-        settings: Arc::new(RwLock::new(RestApiSettings {
-            port: 7492,
-            web_root: Some(dir.to_string_lossy().into_owned()),
-        })),
+        settings: AppSettings {
+            restapi: RestApiSettings {
+                port: 7492,
+                web_root: Some(dir.to_string_lossy().into_owned()),
+            },
+            ..Default::default()
+        }
+        .into_shared(),
     }
 }
 
@@ -83,7 +88,7 @@ async fn api_404_is_not_swallowed_by_the_spa_fallback() {
 fn state_without_web_root() -> AppState {
     AppState {
         instance: Arc::new(RwLock::new(None)),
-        settings: Arc::new(RwLock::new(RestApiSettings::default())),
+        settings: AppSettings::default().into_shared(),
     }
 }
 

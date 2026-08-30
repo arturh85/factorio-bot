@@ -1,12 +1,11 @@
-use crate::settings::RestApiSettings;
 use crate::state::AppState;
 use axum::response::Redirect;
 use axum::routing::get;
 use axum::Router;
+use factorio_bot_core::app_settings::SharedAppSettings;
 use factorio_bot_core::process::process_control::SharedFactorioInstance;
 use miette::{IntoDiagnostic, Result};
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::net::SocketAddr;
 use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_swagger_ui::SwaggerUi;
@@ -20,7 +19,7 @@ pub fn build_router(state: AppState) -> Router {
         .settings
         .try_read()
         .ok()
-        .and_then(|settings| settings.web_root.clone());
+        .and_then(|settings| settings.restapi.web_root.clone());
 
     let (router, api) = OpenApiRouter::with_openapi(crate::openapi::ApiDoc::openapi())
         .route("/api/v1/health", get(health))
@@ -48,24 +47,19 @@ async fn api_not_found() -> axum::response::Response {
 }
 
 pub async fn start(
-    settings: RestApiSettings,
+    settings: SharedAppSettings,
     instance_state: SharedFactorioInstance,
+    bind: SocketAddr,
 ) -> Result<()> {
-    let port = u16::try_from(settings.port).map_err(|_| {
-        miette::miette!(
-            "invalid restapi port {}: must be between 0 and 65535",
-            settings.port
-        )
-    })?;
     let state = AppState {
         instance: instance_state,
-        settings: Arc::new(RwLock::new(settings)),
+        settings,
     };
     let app = build_router(state);
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+    let listener = tokio::net::TcpListener::bind(bind)
         .await
         .into_diagnostic()?;
-    tracing::info!("restapi listening on http://127.0.0.1:{port}");
+    tracing::info!("listening on http://{bind}");
     axum::serve(listener, app).await.into_diagnostic()?;
     Ok(())
 }

@@ -26,8 +26,11 @@ pub async fn start_restapi(
     }
     let app_settings = app_settings.inner().clone();
     let instance_state = instance_state.inner().clone();
-    let app_settings = app_settings.read().await;
-    let webserver = webserver::start(app_settings.restapi.clone(), instance_state);
+    let bind = std::net::SocketAddr::from((
+      [127, 0, 0, 1],
+      u16::try_from(app_settings.read().await.restapi.port).unwrap_or(7492),
+    ));
+    let webserver = webserver::start(app_settings.clone(), instance_state, bind);
     let handle = tokio::task::spawn(webserver);
     let mut restapi_handle = restapi_handle.write().await;
     *restapi_handle = Some(handle);

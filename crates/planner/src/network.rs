@@ -6,7 +6,7 @@ use crate::ids::{ActionId, BotId, ChainId, Ticks};
 use factorio_bot_core::petgraph::algo::toposort;
 use factorio_bot_core::petgraph::graph::{DiGraph, NodeIndex};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Edge {
@@ -246,6 +246,67 @@ impl ActionNetwork {
         match toposort(&graph, None) {
             Ok(_) => Ok(()),
             Err(cycle) => Err(PlannerError::CyclicNetwork(graph[cycle.node_id()])),
+        }
+    }
+
+    /// A copy of this network holding only the actions named in `keep`.
+    ///
+    /// Everything that identifies a kept action travels with it, not just the
+    /// node: an edge survives when **both** its endpoints do, an action keeps
+    /// the `ChainId` it belonged to, and a chain keeps its owner as long as at
+    /// least one of its actions is still here. Dropping any of those would
+    /// silently relax the plan — a chain whose owner was lost is one a caller
+    /// pinned to a bot and the scheduler is now free to give away, and a chain
+    /// stamp lost from an action is an item handed to a bot that does not hold
+    /// it.
+    ///
+    /// A chain with no surviving action loses its owner too, since keeping the
+    /// entry would constrain nothing and only litter the map.
+    ///
+    /// Ids in `keep` that this network never had are ignored: the caller is
+    /// typically an executor computing "what did not finish" from a log, and a
+    /// log may legitimately name actions from a different network.
+    ///
+    /// Edges are *not* re-inferred. The retained slice is a sub-plan of a plan
+    /// that already validated, so its ordering is a restriction of one that was
+    /// acyclic and stays acyclic. Re-running `infer_edges` could add edges the
+    /// original plan deliberately never had.
+    ///
+    /// This takes a plain `BTreeSet` rather than anything execution-shaped on
+    /// purpose: the planner does not depend on the executor, and deciding
+    /// *which* actions are finished is the executor's judgement, not this
+    /// crate's.
+    pub fn retaining(&self, keep: &BTreeSet<ActionId>) -> ActionNetwork {
+        let actions: BTreeMap<ActionId, Action> = self
+            .actions
+            .iter()
+            .filter(|(id, _)| keep.contains(id))
+            .map(|(id, action)| (*id, action.clone()))
+            .collect();
+        let edges: Vec<Edge> = self
+            .edges
+            .iter()
+            .filter(|e| actions.contains_key(&e.from) && actions.contains_key(&e.to))
+            .copied()
+            .collect();
+        let chains: BTreeMap<ActionId, ChainId> = self
+            .chains
+            .iter()
+            .filter(|(id, _)| actions.contains_key(id))
+            .map(|(id, chain)| (*id, *chain))
+            .collect();
+        let surviving: BTreeSet<ChainId> = chains.values().copied().collect();
+        let chain_owner: BTreeMap<ChainId, BotId> = self
+            .chain_owner
+            .iter()
+            .filter(|(chain, _)| surviving.contains(chain))
+            .map(|(chain, bot)| (*chain, *bot))
+            .collect();
+        ActionNetwork {
+            actions,
+            edges,
+            chains,
+            chain_owner,
         }
     }
 
@@ -785,5 +846,84 @@ mod tests {
         net.set_chain(consumer, ChainId(1));
         net.infer_edges();
         assert!(net.preds(consumer).is_empty());
+    }
+
+    #[test]
+    fn retaining_keeps_only_the_named_actions_and_the_edges_between_them() {
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let a = net.add(mine(&mut gen, "iron-plate", 2));
+        let b = net.add(craft(&mut gen, "iron-plate", 2, "iron-gear-wheel"));
+        let c = net.add(craft(&mut gen, "iron-gear-wheel", 1, "iron-plate"));
+        net.link(a, b, 7);
+        net.link(b, c, 0);
+
+        let kept = net.retaining(&BTreeSet::from([b, c]));
+        assert_eq!(
+            kept.actions().map(|x| x.id).collect::<Vec<_>>(),
+            vec![b, c],
+            "only the named actions survive"
+        );
+        assert!(
+            kept.action(a).is_none(),
+            "an action left out must not come back"
+        );
+        assert_eq!(
+            kept.preds(c),
+            vec![(b, 0)],
+            "an edge with both endpoints kept survives"
+        );
+        assert!(
+            kept.preds(b).is_empty(),
+            "an edge whose source was dropped must not dangle"
+        );
+        // The original is untouched: `retaining` is a copy, not a drain.
+        assert_eq!(net.len(), 3);
+    }
+
+    #[test]
+    fn retaining_carries_chain_identity_and_chain_owners_for_what_it_keeps() {
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let kept_action = net.add(mine(&mut gen, "coal", 5));
+        let dropped_action = net.add(mine(&mut gen, "stone", 5));
+        net.set_chain(kept_action, ChainId(0));
+        net.set_chain(dropped_action, ChainId(1));
+        net.set_chain_owner(ChainId(0), BotId(3));
+        net.set_chain_owner(ChainId(1), BotId(4));
+
+        let kept = net.retaining(&BTreeSet::from([kept_action]));
+        assert_eq!(
+            kept.chain_of(kept_action),
+            Some(ChainId(0)),
+            "a kept action keeps the chain it belonged to"
+        );
+        assert_eq!(
+            kept.owner_of(ChainId(0)),
+            Some(BotId(3)),
+            "a surviving chain keeps the bot a caller pinned it to"
+        );
+        assert_eq!(
+            kept.chain_of(dropped_action),
+            None,
+            "a dropped action's chain stamp goes with it"
+        );
+        assert_eq!(
+            kept.owner_of(ChainId(1)),
+            None,
+            "a chain with no surviving action keeps no owner"
+        );
+    }
+
+    #[test]
+    fn retaining_ignores_ids_this_network_never_had() {
+        // The caller is an executor computing "what did not finish" from a
+        // log, and a log may name actions from another network entirely.
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let a = net.add(mine(&mut gen, "coal", 1));
+        let kept = net.retaining(&BTreeSet::from([a, ActionId(9_999)]));
+        assert_eq!(kept.len(), 1);
+        assert!(kept.action(ActionId(9_999)).is_none());
     }
 }

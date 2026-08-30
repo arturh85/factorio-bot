@@ -528,6 +528,94 @@ panic=abort, was killing the process."
 
 ---
 
+## Task 1b: Harden the `rcon.*` Lua bindings (GATE for Task 6)
+
+Task 1's review scope stopped at `globals.rs` and `world.rs`. `crates/scripting_lua/src/globals/rcon.rs` carries **26** `unwrap`/`expect` calls of the same class, and `create_lua_rcon` is registered into the interpreter at `lua_runner.rs:89` whenever an RCON handle exists — which is exactly the configuration the HTTP execute endpoint runs in.
+
+**Files:**
+- Modify: `crates/scripting_lua/src/globals/rcon.rs`
+- Test: `crates/scripting_lua/src/lua_runner.rs`
+
+### Two distinct classes, both real, verified by counting
+
+**10 are attacker input.** `position.get("x").unwrap()` at `:239`, `:291`, `:327` and the `search_center` pair at `:57-58` read fields off a Lua table the script supplies. `rcon.player_mine({}, ...)` — an empty table — panics. Under `panic = "abort"` that is one line of Lua killing the server.
+
+**16 are availability.** `_rcon.as_ref().print(..).await.unwrap()` at `:90`, `:166`, and thirteen more, panic when the *RCON call itself* fails. No attacker needed: if the Factorio server drops its connection mid-script, or the game is stopped while a script runs, the bot server dies with it. This class is not a security bug and would not have been found by looking for one — it is a crash on the ordinary unhappy path.
+
+- [ ] **Step 1: Write the failing tests**
+
+In `lua_runner.rs`'s `mod tests`, reusing the `sandboxed` helper. These run with no RCON handle, so they exercise the argument parsing that happens *before* any call:
+
+```rust
+#[tokio::test]
+async fn an_rcon_binding_given_a_table_without_coordinates_reports_an_error() {
+    // rcon.* is only registered when a handle exists, so build the planner
+    // with one; the call must fail on the missing field, not on the socket.
+    let (_dir, result) = sandboxed_with_rcon("rcon.player_mine(1, {}, \"iron-ore\", 1)").await;
+    assert!(result.is_err(), "a table with no x/y must be refused");
+    assert_reported_not_panicked(&result);
+}
+
+#[tokio::test]
+async fn an_rcon_binding_given_a_non_numeric_coordinate_reports_an_error() {
+    let (_dir, result) =
+        sandboxed_with_rcon("rcon.player_mine(1, {x=\"north\", y=0}, \"iron-ore\", 1)").await;
+    assert!(result.is_err(), "a non-numeric coordinate must be refused");
+    assert_reported_not_panicked(&result);
+}
+```
+
+`assert_reported_not_panicked` already exists from commit `05775a5` — it checks the error is not the `"lua thread panicked"` message produced by the join handler, which is the distinction that matters. A plain `is_err()` passes against the vulnerable code.
+
+- [ ] **Step 2: Run them and watch them fail with a panic, not an error**
+
+`nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo test -p factorio-bot-scripting-lua'`
+Expected: the interpreter thread panics at `rcon.rs:291` and the assertion reports it.
+
+- [ ] **Step 3: Replace both classes**
+
+Field reads become a helper, since the same pair appears five times:
+
+```rust
+/// Reads an `{x=, y=}` table from Lua, refusing anything else.
+///
+/// The previous `table.get("x").unwrap()` panicked on a missing or
+/// non-numeric field, and under `panic = "abort"` that ends the process
+/// rather than the script.
+fn position_from_lua(table: &LuaTable, argument: &str) -> LuaResult<Position> {
+    let x: f64 = table
+        .get("x")
+        .map_err(|_| LuaError::RuntimeError(format!("{argument}: expected a number at `x`")))?;
+    let y: f64 = table
+        .get("y")
+        .map_err(|_| LuaError::RuntimeError(format!("{argument}: expected a number at `y`")))?;
+    Ok(Position::new(x, y))
+}
+```
+
+RCON results become `.map_err(|err| LuaError::RuntimeError(format!("rcon: {err}")))?`.
+
+- [ ] **Step 4: Run and watch them pass**
+
+- [ ] **Step 5: Lock the class out**
+
+Add `#![deny(clippy::unwrap_used, clippy::expect_used)]` at the top of `rcon.rs`, matching what Task 1's fix round put on `globals.rs` and `world.rs`. Do **not** put it on `globals/mod.rs` — that propagates into `plan.rs`, which another session is deleting.
+
+- [ ] **Step 6: Mutation**
+
+Restore one `position.get("x").unwrap()`. `an_rcon_binding_given_a_table_without_coordinates_reports_an_error` must fail *and* report a thread panic. Assert the edit landed before trusting the result. Then re-introduce one `unwrap` anywhere in the file and confirm the `deny` lint fails the build. Restore both.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add crates/scripting_lua/src/globals/rcon.rs crates/scripting_lua/src/lua_runner.rs
+git commit -m "fix(lua): stop rcon bindings panicking on bad input and rcon failure"
+```
+
+**Do not touch `plan.rs`.** Its 10 panics go with the file when the other session deletes it.
+
+---
+
 ## Task 2: Replace the process-global stdout redirect with an output sink
 
 **Files:**
@@ -1102,6 +1190,8 @@ git commit -m "feat(server): add a single-slot job registry with broadcast outpu
 ---
 
 ## Task 6: Execute and job-inspection endpoints
+
+> **GATE:** do not start this task until Task 1b has landed. This is the task that makes the Lua interpreter reachable over an unauthenticated network API; shipping it while `rcon.*` still panics on a malformed table means one line of Lua kills the server for everyone.
 
 **Files:**
 - Create: `crates/server/src/manage/execute.rs`

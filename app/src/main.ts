@@ -7,6 +7,7 @@ import ToastService from 'primevue/toastservice';
 import Tooltip from 'primevue/tooltip';
 import Ripple from 'primevue/ripple';
 
+import './assets/tailwind.css';
 import 'primeicons/primeicons.css';
 import './assets/layout/layout.scss';
 

@@ -1,0 +1,13 @@
+/* Tailwind v4, deliberately without Preflight.
+ *
+ * Preflight is Tailwind's global reset. The layout shell in assets/layout/ is a
+ * self-contained SASS design that predates it and styles bare elements
+ * (headings, buttons, lists) directly, so enabling the reset now would restyle
+ * every page before there is anything Tailwind-native to replace it with.
+ *
+ * Add `@import "tailwindcss/preflight.css" layer(base);` once the shell has
+ * been migrated and the reset is wanted. */
+@layer theme, base, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);

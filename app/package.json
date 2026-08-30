@@ -46,6 +46,7 @@
     "ynetwork": "3.0.6"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4",
     "@tauri-apps/cli": "2.11.4",
     "@types/node": "^26",
     "@typescript-eslint/eslint-plugin": "8.68.0",
@@ -62,6 +63,7 @@
     "prettier": "3.9.6",
     "rollup-plugin-visualizer": "^7",
     "sass": "1.103.1",
+    "tailwindcss": "^4",
     "typescript": "5.9.3",
     "typescript-eslint": "8.68.0",
     "vite": "^6",

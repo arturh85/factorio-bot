@@ -8,6 +8,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
 mod plan;
+mod run;
 mod value;
 
 use crate::lua_runner::PendingWork;
@@ -483,6 +484,42 @@ end
         ),
     )?;
     plan::install_goal_plan(lua, &map_table, plan_world.clone(), roster.clone())?;
+
+    // `goal.start` / `goal.run`
+    map_table.set(
+        "__doc_entry_start",
+        String::from(
+            r#"
+--- starts executing a plan value and returns immediately
+-- Consumes the plan: a `PlanValue` may only be taken for a run once, and a
+-- second `goal.start`/`goal.run` on the same plan raises rather than
+-- dispatching its actions again. The bots keep working while the script does
+-- something else; poll with `run:progress()` or block with `run:wait()`.
+-- @tparam PlanValue plan a plan returned by `goal.plan`
+-- @treturn RunValue the run, immediately -- before it has finished
+-- @raise if the plan was already taken for a run, or no game is connected
+function goal.start(plan)
+end
+"#,
+        ),
+    )?;
+    map_table.set(
+        "__doc_entry_run",
+        String::from(
+            r#"
+--- starts executing a plan value and blocks until it finishes
+-- Exactly `goal.start(plan):wait()`.
+-- @tparam PlanValue plan a plan returned by `goal.plan`
+-- @treturn table an observation: `{ done, pending, running, success, failed,
+--   first_error, actions, failures }` -- see `RunValue`'s own `:wait()` for
+--   the shape
+-- @raise on the same conditions as `goal.start`
+function goal.run(plan)
+end
+"#,
+        ),
+    )?;
+    run::install_goal_run(lua, &map_table, actuator.clone())?;
 
     // `goal.schedule`
     let _plans = plans.clone();
@@ -1291,7 +1328,7 @@ mod tests {
     /// tests are about run/progress/execute mechanics, not about the unknown-
     /// bot refusal, so bots 1 and 2 need to be real players or `goal.have`
     /// refuses before any of that mechanics is ever reached.
-    fn lua_with_goal(stub: Arc<dyn Actuator>) -> Lua {
+    pub(crate) fn lua_with_goal(stub: Arc<dyn Actuator>) -> Lua {
         let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
         lua.set_app_data(crate::lua_runner::PendingWork::default());
         let table =
@@ -1307,7 +1344,7 @@ mod tests {
     /// block here forever behind the shut gate, and a test that hangs on
     /// regression is not a guard — it reads as a slow suite. This turns it into
     /// a named assertion failure.
-    async fn exec_bounded(lua: &Lua, code: &str) {
+    pub(crate) async fn exec_bounded(lua: &Lua, code: &str) {
         let outcome = factorio_bot_core::tokio::time::timeout(
             Duration::from_secs(10),
             lua.load(code).exec_async(),

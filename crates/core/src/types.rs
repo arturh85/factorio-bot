@@ -72,6 +72,77 @@ mod deserialize_helpers {
         deserializer.deserialize_any(VecOrEmptyMap(PhantomData))
     }
 
+    // A custom `deserialize_with` opts a field out of serde's built-in
+    // "missing key means None" handling for `Option<T>` fields, so every
+    // caller of these two helpers must pair them with `#[serde(default)]` to
+    // keep that behaviour for fields Lua omits entirely (e.g. a container
+    // with no fuel inventory sends no `fuel_inventory` key at all).
+
+    /// Deserializes an `Option<Vec<T>>` that may be represented as `[]`, `{}`
+    /// (Lua's empty table, same as `vec_or_empty_map`), or `null`.
+    pub fn option_vec_or_empty_map<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: serde::Deserialize<'de>,
+    {
+        struct OptionVecOrEmptyMap<T>(PhantomData<T>);
+
+        impl<'de, T> Visitor<'de> for OptionVecOrEmptyMap<T>
+        where
+            T: serde::Deserialize<'de>,
+        {
+            type Value = Option<Vec<T>>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a sequence, an empty map, or null")
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(None)
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut vec = Vec::new();
+                while let Some(elem) = seq.next_element()? {
+                    vec.push(elem);
+                }
+                Ok(Some(vec))
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                // Drain the map (should be empty for this to make sense)
+                while map
+                    .next_entry::<de::IgnoredAny, de::IgnoredAny>()?
+                    .is_some()
+                {}
+                Ok(Some(Vec::new()))
+            }
+        }
+
+        deserializer.deserialize_any(OptionVecOrEmptyMap(PhantomData))
+    }
+
+    /// The `Box<Option<Vec<T>>>`-shaped companion to `option_vec_or_empty_map`,
+    /// for fields boxed to keep the enclosing struct small.
+    pub fn boxed_option_vec_or_empty_map<'de, D, T>(
+        deserializer: D,
+    ) -> Result<Box<Option<Vec<T>>>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: serde::Deserialize<'de>,
+    {
+        option_vec_or_empty_map(deserializer).map(Box::new)
+    }
+
     /// Deserializes an inventory into a name -> count map, accepting both shapes
     /// the game reports it in.
     ///
@@ -353,7 +424,15 @@ pub struct RequestEntity {
 pub struct InventoryResponse {
     pub name: String,
     pub position: Position,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_helpers::boxed_option_vec_or_empty_map"
+    )]
     pub output_inventory: Box<Option<Vec<InventoryItemWithQuality>>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_helpers::boxed_option_vec_or_empty_map"
+    )]
     pub fuel_inventory: Box<Option<Vec<InventoryItemWithQuality>>>,
 }
 
@@ -636,7 +715,15 @@ pub struct ChunkObject {
     pub position: Position,
     pub direction: String,
     pub bounding_box: Rect,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_helpers::boxed_option_vec_or_empty_map"
+    )]
     pub output_inventory: Box<Option<Vec<InventoryItemWithQuality>>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_helpers::boxed_option_vec_or_empty_map"
+    )]
     pub fuel_inventory: Box<Option<Vec<InventoryItemWithQuality>>>,
 }
 
@@ -783,8 +870,18 @@ pub struct FactorioEntity {
     pub direction: u8,
     pub drop_position: Option<Position>,
     pub pickup_position: Option<Position>, // only type = inserter
-    pub output_inventory: Option<Vec<InventoryItemWithQuality>>, // Factorio 2.0 format
-    pub fuel_inventory: Option<Vec<InventoryItemWithQuality>>, // Factorio 2.0 format
+    // Factorio 2.0 format; empty arrives as `{}` (Lua's empty table), so this
+    // needs the map-or-sequence tolerant deserializer, not a plain `Option<Vec<_>>`.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_helpers::option_vec_or_empty_map"
+    )]
+    pub output_inventory: Option<Vec<InventoryItemWithQuality>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_helpers::option_vec_or_empty_map"
+    )]
+    pub fuel_inventory: Option<Vec<InventoryItemWithQuality>>,
     pub amount: Option<u32>,               // only type = resource
     pub recipe: Option<String>,            // only CraftingMachines
     pub ghost_name: Option<String>,        // only type = entity-ghost

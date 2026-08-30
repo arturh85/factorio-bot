@@ -185,30 +185,51 @@ impl OutputParser {
                 //     websocket_server.send(ResearchCompletedMessage {}).await?;
                 // }
             }
-            "force" => {
-                let force: FactorioForce = serde_json::from_str(rest).unwrap_or_else(|err| {
-                    panic!("failed to deserialize force: {:?} '{}'", err, rest)
-                });
-                self.world.update_force(force)?;
-            }
-            "on_some_entity_created" => {
-                let entity: FactorioEntity = serde_json::from_str(rest).unwrap_or_else(|err| {
-                    panic!("failed to deserialize entity: {:?} '{}'", err, rest)
-                });
-                self.world.on_some_entity_created(entity)?;
-            }
-            "on_some_entity_updated" => {
-                let entity: FactorioEntity = serde_json::from_str(rest).unwrap_or_else(|err| {
-                    panic!("failed to deserialize entity: {:?} '{}'", err, rest)
-                });
-                self.world.on_some_entity_updated(entity)?;
-            }
-            "on_some_entity_deleted" => {
-                let entity: FactorioEntity = serde_json::from_str(rest).unwrap_or_else(|err| {
-                    panic!("failed to deserialize entity: {:?} '{}'", err, rest)
-                });
-                self.world.on_some_entity_deleted(entity)?;
-            }
+            // This parser reads a stream produced by a game whose schema
+            // drifts between versions (see crates/core/tests/live_2_1_payloads.rs),
+            // and this crate builds with `panic = "abort"` in release. A
+            // `panic!` here used to turn one unparseable line -- one future
+            // schema change -- into the death of the whole bot process. Log
+            // loudly and skip just this event instead: missing one world
+            // update is recoverable, aborting a running multi-bot session is
+            // not. Do not silently swallow the error either -- an ignored
+            // failure with no log would be worse than the panic it replaces.
+            "force" => match serde_json::from_str::<FactorioForce>(rest) {
+                Ok(force) => self.world.update_force(force)?,
+                Err(err) => {
+                    error!(
+                        "<red>failed to deserialize force</>: {:?} '{}'",
+                        err, rest
+                    );
+                }
+            },
+            "on_some_entity_created" => match serde_json::from_str::<FactorioEntity>(rest) {
+                Ok(entity) => self.world.on_some_entity_created(entity)?,
+                Err(err) => {
+                    error!(
+                        "<red>failed to deserialize entity</>: {:?} '{}'",
+                        err, rest
+                    );
+                }
+            },
+            "on_some_entity_updated" => match serde_json::from_str::<FactorioEntity>(rest) {
+                Ok(entity) => self.world.on_some_entity_updated(entity)?,
+                Err(err) => {
+                    error!(
+                        "<red>failed to deserialize entity</>: {:?} '{}'",
+                        err, rest
+                    );
+                }
+            },
+            "on_some_entity_deleted" => match serde_json::from_str::<FactorioEntity>(rest) {
+                Ok(entity) => self.world.on_some_entity_deleted(entity)?,
+                Err(err) => {
+                    error!(
+                        "<red>failed to deserialize entity</>: {:?} '{}'",
+                        err, rest
+                    );
+                }
+            },
             "on_player_main_inventory_changed" => {
                 let event: PlayerChangedMainInventoryEvent =
                     serde_json::from_str(rest).into_diagnostic()?;

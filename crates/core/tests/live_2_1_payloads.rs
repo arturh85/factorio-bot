@@ -368,26 +368,21 @@ fn the_live_spawn_entities_reply_carries_array_shaped_container_inventories() {
     assert_eq!(inventory[0]["quality"], "normal");
 }
 
-/// **Known defect, and the reason this fixture exists.**
+/// **Formerly a known defect; this is the fixture that caught it.**
 ///
 /// Lua cannot hold a `nil` in a table, so an *empty* inventory reaches Rust as
-/// `{}` — a map — while a non-empty one is an array. `FactorioEntity` declares
-/// both inventories as plain `Option<Vec<..>>` with no tolerance for the empty
-/// map, so the first entity anyone places crashes the run: `OutputParser`
-/// unwraps this parse and panics the whole process, which is what a live
-/// `place_entity` of a stone furnace did during this capture.
+/// `{}` — a map — while a non-empty one is an array. `FactorioEntity` used to
+/// declare both inventories as plain `Option<Vec<..>>` with no tolerance for
+/// the empty map, so the first entity anyone places crashed the run:
+/// `OutputParser` unwrapped this parse and panicked the whole process, which
+/// is what a live `place_entity` of a stone furnace did during this capture.
 ///
-/// `crates/core/src/types.rs` already has the fix in it —
-/// `deserialize_helpers::vec_or_empty_map`, used by
-/// `FactorioTechnology::research_unit_ingredients` and
-/// `PlayerChangedMainInventoryEvent::main_inventory` — it is simply not applied
-/// to `FactorioEntity`'s two inventory fields or to `InventoryResponse`'s.
-/// That file was being edited concurrently and is deliberately untouched here.
-///
-/// When it is applied, this test will fail. That is the intent: replace it with
-/// the positive assertion that the furnace parses with two empty inventories.
+/// Fixed by `deserialize_helpers::option_vec_or_empty_map` in
+/// `crates/core/src/types.rs`, applied to `FactorioEntity::{output_inventory,
+/// fuel_inventory}` (and to the same two fields on `InventoryResponse` and
+/// `ChunkObject`).
 #[test]
-fn an_empty_entity_inventory_from_the_live_game_does_not_yet_deserialise() {
+fn an_empty_entity_inventory_from_the_live_game_deserialises() {
     let raw: serde_json::Value = serde_json::from_str(ENTITIES_SPAWN).expect("parses as json");
     let furnace = raw
         .as_array()
@@ -402,12 +397,18 @@ fn an_empty_entity_inventory_from_the_live_game_does_not_yet_deserialise() {
     );
     assert_eq!(furnace["fuel_inventory"], serde_json::json!({}));
 
-    let err = serde_json::from_str::<Vec<FactorioEntity>>(ENTITIES_SPAWN)
-        .expect_err("see this test's doc comment: vec_or_empty_map is not applied yet");
-    assert!(
-        err.to_string().contains("invalid type: map"),
-        "the failure must still be the empty-map inventory, got: {err}"
+    let entities: Vec<FactorioEntity> = serde_json::from_str(ENTITIES_SPAWN)
+        .unwrap_or_else(|err| panic!("{err} in {ENTITIES_SPAWN}"));
+    let furnace = entities
+        .iter()
+        .find(|entity| entity.name == "stone-furnace")
+        .expect("a stone furnace was placed before this capture");
+    assert_eq!(
+        furnace.output_inventory,
+        Some(Vec::new()),
+        "an empty map must deserialise to an empty (not absent) inventory"
     );
+    assert_eq!(furnace.fuel_inventory, Some(Vec::new()));
 }
 
 // ---------------------------------------------------------------------------

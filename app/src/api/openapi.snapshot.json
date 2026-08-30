@@ -689,9 +689,7 @@
         },
         "required": [
           "name",
-          "position",
-          "output_inventory",
-          "fuel_inventory"
+          "position"
         ],
         "type": "object"
       },

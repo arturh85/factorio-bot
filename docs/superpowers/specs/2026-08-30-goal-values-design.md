@@ -194,7 +194,9 @@ Deliberately **not** added: a Lua assertion library, custom matchers, or a test 
 ## Migration
 
 This replaces the current surface rather than sitting beside it; two surfaces would defeat
-the purpose. The six scripts under `scripts/` are migrated with it, and the commit carries a
+the purpose. The eight scripts under `scripts/` that call `goal.*` — `lib.lua`,
+`example.lua`, `api_test.lua`, `goal_smoke.lua`, `exec_smoke.lua`, `attach_smoke.lua`,
+`test_phase_2_1.lua`, `test_phase_2_2.lua` — are migrated with it, and the commit carries a
 `BREAKING CHANGE:` footer with this table — the changelog is generated from commit messages,
 and a script calling the old API fails at runtime, not at build time.
 

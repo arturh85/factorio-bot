@@ -1,8 +1,8 @@
-use crate::cli::{Subcommand, SubcommandCallback};
+use crate::cli::{settings_overrides, Subcommand, SubcommandCallback, SETTINGS_PRECEDENCE_HELP};
 use crate::context::Context;
-use crate::settings::load_app_settings;
+use crate::settings::load_app_settings_with;
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command};
-use factorio_bot_core::miette::Result;
+use factorio_bot_core::miette::{Context as _, Result};
 use factorio_bot_core::paris::info;
 use factorio_bot_core::process::process_control::{
   FactorioInstance, FactorioParams, FactorioStartCondition,
@@ -70,6 +70,10 @@ impl Subcommand for ThisCommand {
           .help("Log server output to console"),
       )
       .about("start given number of clients after server start")
+      .after_help(format!(
+        "`start` only launches processes; it never plans, so it has no bot count \
+         to conflate with --clients. Use `lua --clients N --bots M` for that.\n\n{SETTINGS_PRECEDENCE_HELP}"
+      ))
   }
 
   fn build_callback(&self) -> SubcommandCallback {
@@ -78,7 +82,9 @@ impl Subcommand for ThisCommand {
 }
 
 async fn run(matches: &ArgMatches, context: &mut Context) -> Result<()> {
-  let app_settings = load_app_settings()?;
+  let app_settings = load_app_settings_with(&settings_overrides(matches))?;
+  // Unlike `lua`, this count feeds exactly one thing: how many client processes
+  // to launch. Nothing here plans, so there is no bot count to conflate it with.
   let clients = *matches.get_one::<u8>("clients").expect("defaulted by clap");
   let write_logs = matches.get_flag("logs");
   let verbose = matches.get_flag("verbose");
@@ -99,9 +105,11 @@ async fn run(matches: &ArgMatches, context: &mut Context) -> Result<()> {
     silent: !verbose,
     ..FactorioParams::default()
   };
+  // Was `.expect("failed to start factorio")`: a missing archive, a mod that
+  // fails to load or an occupied port are expected conditions, not panics.
   let instance_state = FactorioInstance::start(&app_settings.factorio, params)
     .await
-    .expect("failed to start factorio");
+    .wrap_err("failed to start Factorio")?;
 
   #[cfg(feature = "repl")]
   {

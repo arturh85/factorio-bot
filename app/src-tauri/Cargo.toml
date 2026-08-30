@@ -47,6 +47,7 @@ serde = { version = "1.0", features = [ "derive" ] }
 # `serde_json::` paths, so the gui feature needs it in scope
 serde_json = "1.0.145"
 strum = { version = "0.27", features = ["derive"] }
+toml = "0.9" # `config show` / `config init` render AppSettings back to TOML
 
 # cli
 clap = {version = "4.5.53", optional = true }
@@ -62,6 +63,9 @@ tauri-plugin-http = "2.5.3"
 tauri-plugin-dialog = "2"
 tauri-plugin-log = "2"
 log = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
 
 [build-dependencies]
 typescript-definitions = { version = "0.1", package = "typescript-definitions-ufo-patch", features = ["export-typescript"] }

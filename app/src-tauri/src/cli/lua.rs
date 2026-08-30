@@ -1,18 +1,38 @@
-use crate::cli::{Subcommand, SubcommandCallback};
+use crate::cli::{settings_overrides, Subcommand, SubcommandCallback, SETTINGS_PRECEDENCE_HELP};
 use crate::context::Context;
 use crate::scripting::run_script_file;
-use crate::settings::load_app_settings;
+use crate::settings::load_app_settings_with;
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command};
 use factorio_bot_core::factorio::rcon::{FactorioRcon, RconSettings};
 use factorio_bot_core::factorio::world::FactorioWorld;
-use factorio_bot_core::miette::Result;
-use factorio_bot_core::paris::info;
+use factorio_bot_core::miette::{Context as _, Result};
+use factorio_bot_core::paris::{info, warn};
 use factorio_bot_core::parking_lot::RwLock;
 use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_core::process::process_control::{
   FactorioInstance, FactorioParams, FactorioStartCondition,
 };
 use std::sync::Arc;
+
+const LUA_AFTER_HELP: &str = "\
+--clients and --bots are different numbers:
+
+  --clients  how many *graphical Factorio client processes* to launch.
+             Each one needs a display and ~26s to load sprites, and the
+             server then waits up to 90s for them to connect.
+  --bots     how many *bots the script plans for*. Bots the clients did not
+             bring are synthesised by the planner with a default inventory,
+             so goals can be planned without any client running.
+
+--bots defaults to --clients, so existing invocations are unchanged.
+
+Fast planning loop (no graphical client, no 90s connect wait):
+
+  factorio-bot lua myscript.lua --clients 0 --bots 4
+
+Note that --clients 0 plans and simulates only: nothing moves in the game
+world, because there are no real players to move. Use it to iterate on goal
+decomposition and task graphs, then re-run with --clients N to execute.";
 
 impl Subcommand for ThisCommand {
   fn name(&self) -> &'static str {
@@ -21,6 +41,7 @@ impl Subcommand for ThisCommand {
   fn build_command(&self) -> Command {
     Command::new("lua")
             .about("Start Factorio and run a Lua script")
+            .after_help(format!("{LUA_AFTER_HELP}\n\n{SETTINGS_PRECEDENCE_HELP}"))
             .arg(
                 Arg::new("script")
                     .help("Path to the Lua script to run (relative to scripts/ folder)")
@@ -33,7 +54,16 @@ impl Subcommand for ThisCommand {
                     .long("clients")
                     .default_value("1")
                     .value_parser(value_parser!(u8))
-                    .help("number of clients to start"),
+                    .help("number of graphical Factorio clients to start (0 = server only)"),
+            )
+            .arg(
+                Arg::new("bots")
+                    .short('b')
+                    .long("bots")
+                    .value_name("bots")
+                    .required(false)
+                    .value_parser(value_parser!(u8))
+                    .help("number of bots the script plans for [default: same as --clients]"),
             )
             .arg(
                 Arg::new("server")
@@ -94,12 +124,27 @@ impl Subcommand for ThisCommand {
   }
 }
 
+/// How many client processes to launch, and how many bots to plan for.
+///
+/// These used to be one number, which meant `-c 0` planned for zero bots (every
+/// goal failed with "no bots in this run") and `-c 1` on a headless machine
+/// insisted on launching a graphical client. They are independent: planning
+/// needs a bot count, execution needs client processes.
+///
+/// `--bots` defaults to `--clients` so every invocation written before the split
+/// keeps its old meaning.
+pub fn resolve_counts(matches: &ArgMatches) -> (u8, u8) {
+  let clients = *matches.get_one::<u8>("clients").expect("defaulted by clap");
+  let bots = matches.get_one::<u8>("bots").copied().unwrap_or(clients);
+  (clients, bots)
+}
+
 async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
-  let app_settings = load_app_settings()?;
+  let app_settings = load_app_settings_with(&settings_overrides(matches))?;
   let script_path = matches
     .get_one::<String>("script")
     .expect("required by clap");
-  let clients = *matches.get_one::<u8>("clients").expect("defaulted by clap");
+  let (clients, bots) = resolve_counts(matches);
   let connect_mode = matches.get_flag("connect");
   let server_host = matches.get_one::<String>("server").cloned();
 
@@ -115,22 +160,24 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
       &app_settings.factorio.rcon_pass,
       server_host,
     );
+    // Was `.expect(..)`: a refused connection is an ordinary operational
+    // failure, not a broken invariant, and printing it as a panic buried the
+    // cause under a backtrace hint.
     let rcon = FactorioRcon::new(&rcon_settings, Arc::new(RwLock::new(false)))
       .await
-      .expect("failed to connect to RCON - is Factorio running?");
+      .wrap_err_with(|| {
+        format!(
+          "failed to connect to RCON on port {} - is Factorio running?",
+          app_settings.factorio.rcon_port
+        )
+      })?;
 
     // Create empty world for connect mode
     let world = Arc::new(FactorioWorld::new());
     let mut planner = Planner::new(world, Some(Arc::new(rcon)));
 
-    let (stdout, stderr) = run_script_file(&mut planner, script_path, clients, None).await?;
-
-    if !stdout.is_empty() {
-      print!("{stdout}");
-    }
-    if !stderr.is_empty() {
-      eprint!("{stderr}");
-    }
+    let (stdout, stderr) = run_script_file(&mut planner, script_path, bots, None).await?;
+    print_script_output(&stdout, &stderr);
 
     info!("Script completed");
   } else {
@@ -141,6 +188,9 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
     let map_exchange_string = matches.get_one::<String>("map").cloned();
     let recreate = matches.get_flag("new");
 
+    if clients == 0 {
+      info!("Planning-only run: no graphical clients, {} bot(s)", bots);
+    }
     info!("Starting Factorio to run script: {}", script_path);
 
     let params = FactorioParams {
@@ -155,38 +205,143 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
       ..FactorioParams::default()
     };
 
+    // Was `.expect("failed to start factorio")`. A missing archive, a mod that
+    // fails to load or an occupied port are all expected conditions and are
+    // reported as errors, not as "The application panicked (crashed)".
     let instance_state = FactorioInstance::start(&app_settings.factorio, params)
       .await
-      .expect("failed to start factorio");
+      .wrap_err("failed to start Factorio")?;
 
-    if let Some(world) = instance_state.world.as_ref() {
-      let rcon = &instance_state.rcon;
-      info!("Factorio started, running script...");
-
-      let mut planner = Planner::new(world.clone(), Some(rcon.clone()));
-
-      let (stdout, stderr) = run_script_file(&mut planner, script_path, clients, None).await?;
-
-      if !stdout.is_empty() {
-        print!("{stdout}");
+    // The script result is captured rather than `?`-propagated: returning early
+    // here would drop `instance_state` without stopping it, and
+    // `FactorioInstance` has no `Drop`, so a failing script leaked a Factorio
+    // server holding the factorio and rcon ports. The next run then failed with
+    // "Host address is already in use" instead of the real error.
+    let script_result = match instance_state.world.as_ref() {
+      Some(world) => {
+        info!("Factorio started, running script...");
+        let mut planner = Planner::new(world.clone(), Some(instance_state.rcon.clone()));
+        run_script_file(&mut planner, script_path, bots, None).await
       }
-      if !stderr.is_empty() {
-        eprint!("{stderr}");
-      }
+      None => Err(factorio_bot_core::miette::miette!(
+        "Failed to start Factorio (no world available)"
+      )),
+    };
 
-      info!("Script completed");
-
-      // Clean up Factorio processes (clients first, then server)
-      instance_state.stop().expect("failed to stop factorio");
-    } else {
-      factorio_bot_core::paris::error!("Failed to start Factorio (no world/rcon available)");
+    // Clean up Factorio processes (clients first, then server) on every path.
+    if let Err(err) = instance_state.stop() {
+      warn!("failed to stop Factorio cleanly: {:?}", err);
     }
+
+    let (stdout, stderr) = script_result?;
+    print_script_output(&stdout, &stderr);
+    info!("Script completed");
   }
 
   Ok(())
 }
 
+fn print_script_output(stdout: &str, stderr: &str) {
+  if !stdout.is_empty() {
+    print!("{stdout}");
+  }
+  if !stderr.is_empty() {
+    eprint!("{stderr}");
+  }
+}
+
 struct ThisCommand {}
 pub fn build() -> Box<dyn Subcommand> {
   Box::new(ThisCommand {})
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::cli::build_app;
+
+  fn counts_for(argv: &[&str]) -> (u8, u8) {
+    let matches = build_app()
+      .try_get_matches_from(argv)
+      .unwrap_or_else(|e| panic!("parses {argv:?}: {e}"));
+    let sub = matches.subcommand_matches("lua").expect("lua matched");
+    resolve_counts(sub)
+  }
+
+  /// Backwards compatibility: with no `--bots`, the two numbers stay equal, so
+  /// every invocation written before the split means what it always meant.
+  #[test]
+  fn bots_defaults_to_clients() {
+    assert_eq!(counts_for(&["factorio-bot", "lua", "s.lua"]), (1, 1));
+    assert_eq!(
+      counts_for(&["factorio-bot", "lua", "s.lua", "-c", "3"]),
+      (3, 3)
+    );
+    assert_eq!(
+      counts_for(&["factorio-bot", "lua", "s.lua", "-c", "0"]),
+      (0, 0)
+    );
+  }
+
+  /// The half that proves the split actually happened: a defaulting test alone
+  /// passes just as well against the old code, where one value fed both uses.
+  /// Here the two numbers must come out *different*.
+  #[test]
+  fn bots_and_clients_can_differ() {
+    assert_eq!(
+      counts_for(&["factorio-bot", "lua", "s.lua", "-c", "2", "-b", "5"]),
+      (2, 5)
+    );
+    assert_eq!(
+      counts_for(&[
+        "factorio-bot",
+        "lua",
+        "s.lua",
+        "--clients",
+        "4",
+        "--bots",
+        "1"
+      ]),
+      (4, 1)
+    );
+  }
+
+  /// The planning-only invocation from `--help`: a server, no graphical client
+  /// to launch and wait for, and a non-zero bot count so goals can be planned.
+  /// Under the old conflation this combination was unreachable -- `-c 0` gave
+  /// zero bots and every goal failed with "no bots in this run".
+  #[test]
+  fn planning_only_mode_has_no_clients_but_does_have_bots() {
+    let (clients, bots) = counts_for(&[
+      "factorio-bot",
+      "lua",
+      "s.lua",
+      "--clients",
+      "0",
+      "--bots",
+      "4",
+    ]);
+    assert_eq!(clients, 0, "no graphical client process may be launched");
+    assert_eq!(bots, 4, "the planner must still get bots to plan for");
+  }
+
+  /// `--bots` is documented, and so is the planning-only loop it enables. The
+  /// flag is useless to anyone who cannot find out that it exists.
+  #[test]
+  fn help_documents_the_split_and_the_planning_only_loop() {
+    let mut lua = build_app()
+      .find_subcommand("lua")
+      .expect("lua subcommand exists")
+      .clone();
+    let help = lua.render_long_help().to_string();
+    assert!(help.contains("--bots"), "missing --bots:\n{help}");
+    assert!(
+      help.contains("--clients 0 --bots 4"),
+      "missing the planning-only example:\n{help}"
+    );
+    assert!(
+      help.contains("Settings precedence"),
+      "missing the precedence note:\n{help}"
+    );
+  }
 }

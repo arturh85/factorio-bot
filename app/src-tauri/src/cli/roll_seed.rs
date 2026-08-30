@@ -1,5 +1,5 @@
-use crate::cli::{Subcommand, SubcommandCallback};
-use crate::settings::load_app_settings;
+use crate::cli::{settings_overrides, Subcommand, SubcommandCallback, SETTINGS_PRECEDENCE_HELP};
+use crate::settings::load_app_settings_with;
 use clap::{value_parser, Arg, ArgMatches, Command};
 
 use crate::context::Context;
@@ -61,9 +61,10 @@ impl Subcommand for ThisCommand {
           .long("clients")
           .default_value("1")
           .value_parser(value_parser!(u8))
-          .help("number of clients to plan for"),
+          .help("number of bots to plan for (no client process is started)"),
       )
       .about("roll good seed for given map-exchange-string based on heuristics")
+      .after_help(SETTINGS_PRECEDENCE_HELP)
   }
 
   fn build_callback(&self) -> SubcommandCallback {
@@ -72,7 +73,7 @@ impl Subcommand for ThisCommand {
 }
 
 async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
-  let app_settings = load_app_settings()?;
+  let app_settings = load_app_settings_with(&settings_overrides(matches))?;
   if let Some((seed, score)) = roll_seed(
     app_settings.factorio.clone(),
     matches

@@ -30,9 +30,19 @@ pub fn run() {
   #[cfg(feature = "cli")]
   {
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-    let app = rt
-      .block_on(async { cli::start(context.clone()).await })
-      .expect("failed to start cli");
+    // Was `.expect("failed to start cli")`, which turned every operational
+    // failure a subcommand can hit -- a missing factorio archive, a mod that
+    // fails to load, a port already in use -- into "The application panicked
+    // (crashed)" with a backtrace hint. Those are expected conditions with
+    // one-line, user-fixable causes; only genuine invariant violations should
+    // still panic. `{:?}` on a miette `Report` is its rendered diagnostic.
+    let app = match rt.block_on(async { cli::start(context.clone()).await }) {
+      Ok(app) => app,
+      Err(report) => {
+        eprintln!("Error: {report:?}");
+        std::process::exit(1);
+      }
+    };
 
     // If no subcommand was run, app is Some and we should show help (unless GUI/REPL will start)
     #[cfg(all(not(feature = "gui"), not(feature = "repl")))]

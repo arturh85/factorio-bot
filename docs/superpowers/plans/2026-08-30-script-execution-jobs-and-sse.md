@@ -774,8 +774,8 @@ line-at-a-time output, which is what the SSE endpoint needs."
 - Create: `crates/scripting_lua/src/run_script.rs`
 - Modify: `crates/scripting_lua/src/lib.rs` (export it)
 - Modify: `app/src-tauri/src/scripting.rs` (becomes a wrapper)
-- Modify: `app/src-tauri/src/gui/command/script.rs:32,69`
-- Modify: `app/src-tauri/src/repl/run_script.rs:29,50`
+- Modify: `app/src-tauri/src/gui/command/script.rs:32,74`
+- Modify: `app/src-tauri/src/repl/run_script.rs:29,50` (`:29` calls `run_script_file`; `:50` is a *separate* `scripts_dir` call inside a directory listing — different fix, same root cause)
 - Modify: `app/src-tauri/src/cli/lua.rs:126,168`
 - Test: `crates/scripting_lua/src/run_script.rs`
 
@@ -945,8 +945,11 @@ Note `load_app_settings().unwrap()` becomes `?` — that `unwrap` is reachable f
 
 Then update the call sites for the dropped `redirect` argument:
 - `gui/command/script.rs:32` — `run_script_file(&mut planner, &path[1..], bot_count)`; also drop the `&path[1..]` slicing, which panics on an empty `path` — `resolve_script_path` strips the leading `/` itself.
-- `gui/command/script.rs:69` — `run_script(&mut planner, &language, &code, &scripts_root, bot_count, None)`.
-- `repl/run_script.rs:29` and `cli/lua.rs:126,168` — drop the trailing `false`.
+- `gui/command/script.rs:74` — `run_script(&mut planner, &language, &code, &scripts_root, bot_count, None)`. (Was `:69`; Task 1's fix round shifted it. Re-read before editing — this file has moved twice.)
+- `repl/run_script.rs:29` and `cli/lua.rs:126,168` — drop the trailing `redirect` argument.
+- `repl/run_script.rs:50` — a `scripts_dir(..)` call feeding a `read_dir` for the REPL's script listing. Not a `run_script_file` call site; it needs the same `ensure_scripts_dir` swap for the same reason, or the REPL lists one directory while it executes from another.
+
+**Three more sites in `gui/command/script.rs` are deliberately left alone**: `:112`/`:116`, `:167`/`:171` and `:202`/`:206` each pair a `path.contains("..")` substring check with a `&path[1..]` slice that panics on an empty path. Same defect class as everything Task 1 fixed. They are Tauri command handlers, reachable only over local IPC, and plan 5's Task 14 deletes the file. Fixing them here is work thrown away; record them in your report so the deletion is a decision rather than an accident.
 
 - [ ] **Step 6: Full build**
 

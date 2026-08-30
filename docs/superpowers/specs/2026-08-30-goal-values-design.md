@@ -98,15 +98,38 @@ A step is one table shape, with `kind` discriminating:
 { kind="mine",   bot=2, start=0,  finish=94, id=7, item="iron-ore", count=5, pos={...} }
 ```
 
-`kind` is one of `walk`, `mine`, `craft`, `place`, `insert`, `remove`, `research`. Only
-`walk` lacks an `id`, because only `walk` is not an action.
+Every step carries `kind`, `bot`, `start`, `finish`. Action steps also carry `id`
+and `label`; `walk` carries neither, because a walk is not an action. The rest is
+per kind, transcribed from `ActionKind`:
 
-**One collection, not two.** A `Schedule` has steps — including walks, which have no action
-id — while an `ActionNetwork` has actions. Exposing both would make every query ask which
-one it meant. Steps are the executable thing, so steps are what a script sees.
+| `kind` | extra fields |
+| --- | --- |
+| `walk` | `to` |
+| `mine` | `pos`, `item`, `count` |
+| `craft` | `item`, `count` |
+| `place` | `entity` (the prototype name), `pos` |
+| `insert` | `pos`, `entity`, `slot`, `item`, `count` |
+| `remove` | `pos`, `entity`, `slot`, `item`, `count` |
+| `research` | `tech` |
 
-**One predicate shape.** `pred` is a table; a step matches when every key in `pred` equals
-the step's value, comparing scalars only:
+**`finish`, not `end`.** `end` is a Lua keyword: `step.end` does not parse, and a
+field only reachable as `step["end"]` is a trap. The Rust field stays
+`ScheduledStep::end`; the Lua name diverges deliberately.
+
+**Building a step is a join.** `ScheduledStep` holds only `action: ActionId` and a
+`label` — `entity`, `item`, `count`, `pos` live on the `Action` in the
+`ActionNetwork`. So a plan value retains *both* the network and the schedule and
+joins them once, at construction. `place` flattens `ActionKind::Place`'s
+`FactorioEntity` to its `name` and `position`, because a script asserting on a
+plan wants those two and not a whole entity record.
+
+**One collection, not two.** A `Schedule` has steps — including walks, which have no
+action id — while an `ActionNetwork` has actions. Exposing both would make every
+query ask which one it meant. Steps are the executable thing, so steps are what a
+script sees.
+
+**One predicate shape.** `pred` is a table; a step matches when every key in `pred`
+equals the step's value, comparing scalars only:
 
 ```lua
 assert(plan:count { kind = "place", entity = "stone-furnace" } <= 4)
@@ -114,7 +137,8 @@ for _, s in ipairs(plan:find { kind = "place" }) do assert(in_bounds(s.pos)) end
 ```
 
 This replaces a family of specific accessors (`plan.furnaces_placed()` and its future
-siblings) with one idea.
+siblings) with one idea. A predicate key that no step of any kind defines is a
+script bug rather than a query that matches nothing, so it raises.
 
 ### Running is the only effect
 
@@ -197,9 +221,14 @@ Blast radius is those scripts. The HTTP effort calls `run_lua`, not `goal.*`.
   it misbehaves; built after, it is easy.
 - **`Goal::Producing { item, rate }`** — declared in the planner, claimed by no method.
   Exposing it would add a constructor whose plan always errors.
-- **Observed ticks.** Making `planned_*` into genuine measurements needs a game-clock source
-  the executor does not have — an RCON round trip per action, or mod-stamped events. Named
-  here because a UI scrubber aligning frames to plan ticks will drift without it.
+- **Observed ticks.** `Attempt` already documents why `planned_*` cannot become a
+  measurement here: `Actuator` returns `Result<(), ActuatorError>` with no tick in it,
+  and nothing in the executor reads `game.tick`. The fix is to widen `Actuator` so a
+  dispatch returns the game tick — cheapest as a `tick` field on every BotBridge RPC
+  response, since the executor already pays that round trip. This has a **named
+  consumer**: the peer session's screenshot scrubber aligns captured frames to plan
+  ticks and will show drift as what looks like a rendering bug. It is the increment
+  after this one, not part of it.
 - **Planning against a snapshot file.** The RCON `world_snapshot` path could be persisted and
   replayed, giving script tests that run in milliseconds with no Factorio at all. The natural
   next increment; not this one.

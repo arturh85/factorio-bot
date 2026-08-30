@@ -11,17 +11,22 @@
 //! the single place the per-kind field shapes in the module doc table are
 //! decided.
 //!
-//! Not yet reachable from Lua: nothing constructs a [`PlanValue`] outside this
-//! module's own tests. A later task adds `goal.plan`, which builds one from an
-//! expanded, scheduled goal.
+//! `install_goal_plan` is `goal.plan`: it expands and schedules a goal value
+//! in one call, against one roster, and hands back a [`PlanValue`]. See
+//! `expand_goal`'s doc comment in `goal/mod.rs` for the defect that removes --
+//! a network expanded for one roster only ever makes sense scheduled on that
+//! same roster, and sharing one `roster` binding between the two calls here
+//! is what makes the old mismatch unrepresentable.
 
-use super::goal_error;
+use super::value::goal_from_lua;
+use super::{expand_goal, goal_error, refuse_unknown_bots};
+use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::types::Position;
 use factorio_bot_planner::ids::{ActionId, BotId};
 use factorio_bot_planner::{
-    graphviz, mermaid_gantt, ActionKind, ActionNetwork, InventorySlot, Schedule, ScheduledStep,
-    StepKind, Ticks,
+    graphviz, mermaid_gantt, schedule, ActionKind, ActionNetwork, InventorySlot, PlanState,
+    Schedule, ScheduledStep, StepKind, Ticks,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -30,7 +35,6 @@ use std::sync::Arc;
 /// deliberately absent -- they are tables, not comparable values, and are
 /// rejected with a dedicated message rather than falling through to "unknown
 /// field".
-#[allow(dead_code)]
 const KNOWN_PREDICATE_KEYS: &[&str] = &[
     "kind", "bot", "start", "finish", "id", "label", "entity", "item", "count", "tech", "slot",
 ];
@@ -43,7 +47,6 @@ const KNOWN_PREDICATE_KEYS: &[&str] = &[
 /// `goal.execute` (a later task, mirroring today's `Plans::scheduled` in
 /// `mod.rs`) needs exactly these two handed to the executor without cloning
 /// the graph or the schedule.
-#[allow(dead_code)]
 pub(crate) struct PlanValue {
     net: Arc<ActionNetwork>,
     schedule: Arc<Schedule>,
@@ -59,7 +62,6 @@ pub(crate) struct PlanValue {
 }
 
 impl PlanValue {
-    #[allow(dead_code)]
     pub(crate) fn new(
         net: Arc<ActionNetwork>,
         schedule: Arc<Schedule>,
@@ -82,6 +84,92 @@ impl PlanValue {
         }
         Ok((self.net.clone(), self.schedule.clone()))
     }
+}
+
+/// The roster `goal.plan` expands and schedules against: `opts.bots` if given,
+/// otherwise `default_roster` (the run's whole roster).
+///
+/// Deliberately a list of bot ids, never a count: a count could only mean
+/// "some N of them", which is exactly the ambiguity `goal.plan` exists to
+/// remove by fixing expansion and scheduling to the same, explicit roster.
+///
+/// An empty roster raises here, before either the planner or the scheduler
+/// ever sees it -- `schedule` itself also refuses an empty slice
+/// (`PlannerError::NoBots`), but that error does not mention "bot" at all, and
+/// this call's own empty-roster test asserts on that word.
+fn resolve_roster(opts: Option<&LuaTable>, default_roster: &[BotId]) -> LuaResult<Vec<BotId>> {
+    let bots_value: LuaValue = match opts {
+        Some(opts) => opts.get("bots")?,
+        None => LuaValue::Nil,
+    };
+    let roster = match bots_value {
+        LuaValue::Nil => default_roster.to_vec(),
+        LuaValue::Table(bots) => {
+            let len = bots.raw_len();
+            let mut roster = Vec::with_capacity(len);
+            for i in 1..=len {
+                let value: LuaValue = bots.get(i)?;
+                let n: i64 = match value {
+                    LuaValue::Integer(n) if n >= 1 => n,
+                    LuaValue::Number(n) if n >= 1.0 && n.fract() == 0.0 => n as i64,
+                    other => {
+                        return Err(goal_error(format!(
+                            "opts.bots must be a list of positive integers; \
+                             index {i} is a {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+                let bot = u8::try_from(n)
+                    .map_err(|_| goal_error(format!("bot {n} does not fit a player id (0-255)")))?;
+                roster.push(BotId(bot));
+            }
+            roster
+        }
+        other => {
+            return Err(goal_error(format!(
+                "opts.bots must be a table of bot ids, got a {}",
+                other.type_name()
+            )))
+        }
+    };
+    if roster.is_empty() {
+        return Err(goal_error(
+            "opts.bots is empty; a plan needs at least one bot",
+        ));
+    }
+    Ok(roster)
+}
+
+/// Installs `goal.plan` on `table`.
+///
+/// Expands and schedules in a single call, against one shared roster --
+/// `expand_goal`'s own doc comment explains why the two cannot safely use
+/// different ones. `world` and `default_roster` are captured by the closure,
+/// exactly as every other `goal.*` binding in `mod.rs` captures them.
+pub(crate) fn install_goal_plan(
+    lua: &Lua,
+    table: &LuaTable,
+    world: Arc<FactorioWorld>,
+    default_roster: Vec<BotId>,
+) -> LuaResult<()> {
+    table.set(
+        "plan",
+        lua.create_function(move |_lua, (g, opts): (LuaTable, Option<LuaTable>)| {
+            let goal = goal_from_lua(&g)?;
+            let roster = resolve_roster(opts.as_ref(), &default_roster)?;
+            // Built once and reused for the scheduler below; `expand_goal`
+            // builds its own copy internally to run the same refusal, which
+            // is redundant but harmless -- see `goal.schedule` in `mod.rs`
+            // for the existing precedent of doing both.
+            let state = PlanState::from_world(world.clone(), &roster);
+            refuse_unknown_bots(&state)?;
+            let net = expand_goal(goal, &world, &roster)?;
+            let scheduled = schedule(&net, &state, &roster).map_err(goal_error)?;
+            Ok(PlanValue::new(Arc::new(net), Arc::new(scheduled), roster))
+        })?,
+    )?;
+    Ok(())
 }
 
 /// A `Position` as a Lua table `{ x = ..., y = ... }`.
@@ -329,6 +417,8 @@ impl LuaUserData for PlanValue {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::globals::goal::tests::{factory, seeded_world_for, Failure, StubActuator};
+    use crate::globals::goal::{create_lua_goal_with, value::install_goal_constructors};
 
     /// A hand-built network and schedule covering every step kind, so the
     /// step-shape test does not depend on what the planner happens to emit.
@@ -560,6 +650,159 @@ mod tests {
             assert(type(p.graphviz) == "function", "graphviz is a method, not a string")
             assert(p:graphviz():find("digraph"))
             assert(p:gantt("t"):find("gantt"))
+        "#,
+        )
+        .exec()
+        .expect("script");
+    }
+
+    /// `slot_name`'s seven strings are a public API contract: a script writes
+    /// `plan:count{ slot = "furnace_source" }` against them, and nothing but
+    /// this test pins the exact spelling. The match itself is exhaustive, so
+    /// the compiler already refuses a build that adds an `InventorySlot`
+    /// variant without a `slot_name` arm -- that direction needs no test.
+    /// Only the string *values* are unguarded, and a later refactor could
+    /// rename one silently with the rest of the suite green.
+    ///
+    /// These are the Rust enum's own names, deliberately not the game's
+    /// `defines.inventory` names: Factorio 2.1 maps both `FurnaceSource` and
+    /// `AssemblerInput` to the single define `crafter_input`, so using the
+    /// game's names here would collide two distinct slots into one string and
+    /// lose exactly the information a script asks `slot` for.
+    #[test]
+    fn slot_names_are_pinned_to_their_exact_strings() {
+        assert_eq!(slot_name(InventorySlot::Chest), "chest");
+        assert_eq!(slot_name(InventorySlot::FurnaceSource), "furnace_source");
+        assert_eq!(slot_name(InventorySlot::FurnaceResult), "furnace_result");
+        assert_eq!(slot_name(InventorySlot::Fuel), "fuel");
+        assert_eq!(slot_name(InventorySlot::AssemblerInput), "assembler_input");
+        assert_eq!(
+            slot_name(InventorySlot::AssemblerOutput),
+            "assembler_output"
+        );
+        assert_eq!(slot_name(InventorySlot::LabInput), "lab_input");
+    }
+
+    // ---------------------------------------------------------------- goal.plan
+
+    /// The real `goal` table over a world seeded with `roster`, in a sandbox.
+    ///
+    /// Reuses `seeded_world_for`, `factory` and `StubActuator` from
+    /// `goal::tests` (bumped to `pub(crate)` for this). Also installs the
+    /// value-based goal constructors from `goal::value` on top of the table
+    /// `create_lua_goal_with` returns: production does not wire those onto
+    /// `have`/`researched` until the old handle surface is deleted, but
+    /// `goal.plan` consumes a goal *value*, and every other test in this
+    /// crate gets its own fresh table from `create_lua_goal_with` too, so
+    /// installing the constructors here changes nothing they see.
+    fn lua_with_world(roster: &[u8]) -> Lua {
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        lua.set_app_data(crate::lua_runner::PendingWork::default());
+        let table = create_lua_goal_with(
+            &lua,
+            seeded_world_for(roster),
+            factory(Arc::new(StubActuator::new(Failure::Never))),
+            roster.to_vec(),
+        )
+        .expect("goal table");
+        install_goal_constructors(&lua, &table).expect("goal values");
+        lua.globals().set("goal", table).expect("install");
+        lua
+    }
+
+    #[test]
+    fn plan_defaults_to_the_whole_roster() {
+        let lua = lua_with_world(&[1, 2, 3, 4]);
+        lua.load(
+            r#"
+            local p = goal.plan(goal.have("iron-plate", 8))
+            assert(#p.bots == 4, "defaults to every bot, got " .. #p.bots)
+            for i = 1, 4 do assert(p.bots[i] == i, "roster is 1..4 in order") end
+        "#,
+        )
+        .exec()
+        .expect("script");
+    }
+
+    #[test]
+    fn plan_honours_a_bot_subset() {
+        let lua = lua_with_world(&[1, 2, 3, 4]);
+        lua.load(
+            r#"
+            local p = goal.plan(goal.have("iron-plate", 8), { bots = { 1, 2 } })
+            assert(#p.bots == 2, "two bots asked for, got " .. #p.bots)
+            for _, s in ipairs(p.steps) do
+                assert(s.bot == 1 or s.bot == 2, "no step may land on bot " .. s.bot)
+            end
+        "#,
+        )
+        .exec()
+        .expect("script");
+    }
+
+    #[test]
+    fn expansion_and_scheduling_always_share_one_roster() {
+        // The regression this design exists for. A four-bot world, planned
+        // for one bot, must schedule every action of its own network onto
+        // that bot and satisfy every precondition -- not fail on a
+        // precondition about an item three other bots were carrying.
+        let lua = lua_with_world(&[1, 2, 3, 4]);
+        lua.load(
+            r#"
+            local p = goal.plan(goal.have("iron-plate", 8), { bots = { 1 } })
+            assert(#p.bots == 1 and p.bots[1] == 1)
+            for _, s in ipairs(p.steps) do assert(s.bot == 1, "every step on bot 1") end
+            assert(#p.steps > 0, "a one-bot plan is still a plan")
+        "#,
+        )
+        .exec()
+        .expect("script");
+    }
+
+    #[test]
+    fn semantic_errors_raise_at_plan_time_not_construction() {
+        let lua = lua_with_world(&[1, 2]);
+        lua.load(
+            r#"
+            -- Constructing is pure: an unknown item is not a shape error.
+            local g = goal.have("not-a-real-item", 1)
+            assert(g.item == "not-a-real-item", "construction succeeds")
+            local ok, err = pcall(goal.plan, g)
+            assert(not ok, "planning an unknown item must raise")
+            assert(tostring(err):find("not%-a%-real%-item"), "the error names it: " .. tostring(err))
+
+            local t = goal.researched("no-such-technology")
+            local ok2, err2 = pcall(goal.plan, t)
+            assert(not ok2, "planning an unknown technology must raise")
+            assert(tostring(err2):find("no%-such%-technology"), "names it: " .. tostring(err2))
+        "#,
+        )
+        .exec()
+        .expect("script");
+    }
+
+    #[test]
+    fn an_unknown_bot_raises_and_names_it() {
+        let lua = lua_with_world(&[1, 2]);
+        lua.load(
+            r#"
+            local ok, err = pcall(goal.plan, goal.have("iron-plate", 1), { bots = { 99 } })
+            assert(not ok, "bot 99 is not a connected player")
+            assert(tostring(err):find("99"), "the error names the bot: " .. tostring(err))
+        "#,
+        )
+        .exec()
+        .expect("script");
+    }
+
+    #[test]
+    fn an_empty_bot_list_raises() {
+        let lua = lua_with_world(&[1, 2]);
+        lua.load(
+            r#"
+            local ok, err = pcall(goal.plan, goal.have("iron-plate", 1), { bots = {} })
+            assert(not ok, "an empty roster cannot plan anything")
+            assert(tostring(err):find("bot"), "the error is about bots: " .. tostring(err))
         "#,
         )
         .exec()

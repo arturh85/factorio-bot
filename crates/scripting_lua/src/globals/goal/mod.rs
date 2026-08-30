@@ -451,6 +451,39 @@ end
         })?,
     )?;
 
+    // `goal.plan`
+    //
+    // Deliberately independent of `have`/`researched` above: those two still
+    // return handles (deleted only once the old handle surface goes), while
+    // `goal.plan` is built against the goal *value* shape `goal_from_lua`
+    // understands -- a table with a `kind` field, either hand-built
+    // (`{ kind = "have", item = "iron-plate", count = 8 }`) or produced by the
+    // value constructors in `goal/value.rs` once a later change wires them
+    // onto this same table in place of the handle-returning `have`.
+    map_table.set(
+        "__doc_entry_plan",
+        String::from(
+            r#"
+--- expands a goal value and schedules it against one roster, in one call
+-- Consumes a goal value: a table with a `kind` field, such as
+-- `{ kind = "have", item = "iron-plate", count = 8 }`. Expansion and
+-- scheduling always share the same roster -- `SplitAcrossBots` sizes each
+-- bot's share against that bot's own holdings, so a network expanded for four
+-- bots only ever makes sense scheduled on those same four; this call is what
+-- makes the mismatch unrepresentable.
+-- @tparam table goal a goal value
+-- @tparam[opt] table opts `{ bots = { ... } }` -- bot ids, not a count;
+--   defaults to every bot in this run
+-- @treturn PlanValue the expanded, scheduled plan
+-- @raise if the goal names an unknown item or technology, if any bot in
+--   `opts.bots` is not a connected player, or if `opts.bots` is empty
+function goal.plan(goal, opts)
+end
+"#,
+        ),
+    )?;
+    plan::install_goal_plan(lua, &map_table, plan_world.clone(), roster.clone())?;
+
     // `goal.schedule`
     let _plans = plans.clone();
     let world = plan_world.clone();
@@ -840,7 +873,10 @@ mod tests {
     use std::time::Duration;
 
     /// When the stub refuses an action.
-    enum Failure {
+    ///
+    /// `pub(crate)`: `goal::plan`'s own tests reuse this and `StubActuator`
+    /// rather than duplicating a second stub actuator.
+    pub(crate) enum Failure {
         Never,
         Always,
         /// Only the first action dispatched anywhere. That is what produces an
@@ -856,7 +892,7 @@ mod tests {
     /// the rest of its slice abandoned before a single action is dispatched, so
     /// everything would stay `Pending` and the counting these tests exist to
     /// exercise would never run.
-    struct StubActuator {
+    pub(crate) struct StubActuator {
         delay: Duration,
         fails: Failure,
         /// Signalled as each action is dispatched, so a test can observe a run
@@ -869,7 +905,7 @@ mod tests {
     }
 
     impl StubActuator {
-        fn new(fails: Failure) -> Self {
+        pub(crate) fn new(fails: Failure) -> Self {
             StubActuator {
                 delay: Duration::ZERO,
                 fails,
@@ -964,7 +1000,7 @@ mod tests {
     }
 
     /// Wraps a stub as the factory `create_lua_goal_with` takes.
-    fn factory(stub: Arc<dyn Actuator>) -> ActuatorFactory {
+    pub(crate) fn factory(stub: Arc<dyn Actuator>) -> ActuatorFactory {
         Arc::new(move || {
             let stub = stub.clone();
             Box::pin(async move { Ok(stub) })
@@ -1211,7 +1247,7 @@ mod tests {
     /// any player at all, so every bot named against it is "unknown" by that
     /// same definition; tests that exercise the bindings above the refusal
     /// need this instead.
-    fn seeded_world_for(roster: &[u8]) -> Arc<FactorioWorld> {
+    pub(crate) fn seeded_world_for(roster: &[u8]) -> Arc<FactorioWorld> {
         let world = fixture_world();
         seed_players(&world, roster);
         Arc::new(world)

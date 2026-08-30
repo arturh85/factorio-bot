@@ -76,21 +76,14 @@ impl Method for Mine {
             });
         };
         let need = shortfall(&ctx.state, item, *count, whose);
-        let from = ctx
-            .state
-            .bot(ctx.chain_actor)
-            .map(|b| b.position.clone())
-            .unwrap_or_default();
+        let bot = ctx.state.bot(ctx.chain_actor);
+        let from = bot.map(|b| b.position.clone()).unwrap_or_default();
+        let reach = bot.map(|b| b.resource_reach_distance).unwrap_or(3.0);
         let pos = nearest_resource_tile(&ctx.state, item, &from, need).ok_or_else(|| {
             PlannerError::NoApplicableMethod {
                 goal: goal.to_string(),
             }
         })?;
-        let reach = ctx
-            .state
-            .bot(ctx.chain_actor)
-            .map(|b| b.resource_reach_distance)
-            .unwrap_or(3.0);
 
         let action = Action {
             id: ctx.ids.next(),
@@ -123,7 +116,7 @@ impl Method for Mine {
                     count: need,
                 },
             ],
-            duration: mining_ticks(&ctx.state, item) * need,
+            duration: mining_ticks(&ctx.state, item).saturating_mul(need),
             pinned: None,
             label: format!("mine {} {}", need, item),
         };

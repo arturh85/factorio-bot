@@ -2,12 +2,21 @@
 
 ## Project Status Summary
 
-**Current State (Jan 2026):**
-- Factorio 2.0 compatibility recently added (inventory quality system)
-- Server + client launch works on macOS via `just factorio`
-- RCON communication functional
-- rlua → mlua migration complete, but Lua scripts **untested** (expect issues)
-- 22 tests passing, 1 clippy warning
+**Current State:**
+- Factorio **2.1** (2.1.17 verified). The bundled BotBridge mod declares its
+  `factorio_version` in `mods/BotBridge/info.json`; a mismatch means Factorio
+  refuses to load it and there is no RCON bridge at all, so a preflight check
+  reports it at startup.
+- Server + client launch works; `--clients 0 --bots N` plans without spawning a
+  graphical client.
+- RCON functional, and `lua --connect` can now attach to a server factorio-bot
+  did **not** start, via a `world_snapshot` remote call.
+- Lua scripts exercised against a live server, not only fixtures — see
+  `scripts/goal_smoke.lua`.
+- For the test count and lint state, run them; a number written here is stale the
+  next time anyone commits:
+  `cargo test --workspace` and
+  `cargo clippy --workspace --all-features --all-targets -- --deny warnings`
 
 **Comparison with Other Projects:**
 
@@ -83,7 +92,7 @@
 - Added path normalization to fix doubled path bug (scripting.rs:51-60)
 - All three path formats now work: `api_test.lua`, `scripts/api_test.lua`, `/scripts/api_test.lua`
 - ✅ All clippy warnings resolved
-- ✅ All 22 tests pass
+- ✅ Workspace tests pass (run `cargo test --workspace` for the current count)
 
 ---
 

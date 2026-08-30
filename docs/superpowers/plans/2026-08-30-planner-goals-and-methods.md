@@ -1413,14 +1413,25 @@ Append to `mod tests` in `crates/planner/src/method/have.rs`:
             .actions()
             .find(|a| matches!(a.kind, ActionKind::Remove { .. }))
             .expect("a removal");
-        // iron-plate is 3.2s each, so two plates lag 2 * 192 = 384 ticks.
-        let lag = net
-            .preds(remove.id)
-            .into_iter()
-            .map(|(_, lag)| lag)
-            .max()
-            .expect("the removal has predecessors");
-        assert_eq!(lag, 384);
+        // Identify each insert by what it inserts, then check its own edge to
+        // the removal — a blind max() over all predecessors would pass even if
+        // the ore and fuel lags were swapped, which is the whole invariant.
+        let lag_from = |item: &str| -> Ticks {
+            let insert = net
+                .actions()
+                .find(|a| matches!(&a.kind, ActionKind::Insert { item: i, .. } if i == item))
+                .unwrap_or_else(|| panic!("expected an insert of {}", item));
+            net.preds(remove.id)
+                .into_iter()
+                .find(|(from, _)| *from == insert.id)
+                .unwrap_or_else(|| panic!("expected an edge from the {} insert to the removal", item))
+                .1
+        };
+
+        // iron-plate is 3.2 s each, so two plates lag 2 * 192 = 384 ticks.
+        assert_eq!(lag_from("iron-ore"), 384, "the ore insert carries the smelting time");
+        // Fuel must be in before the removal, but does not itself take smelting time.
+        assert_eq!(lag_from("coal"), 0, "the fuel insert carries no lag");
     }
 
     #[test]

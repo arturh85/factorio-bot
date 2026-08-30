@@ -1127,6 +1127,18 @@ git commit -m "feat(app): add the fetch transport that replaces tauri invoke"
 
 ---
 
+## Task 3b: Add the Vite dev proxy the plan assumed existed
+
+**Files:** `app/vite.config.mts`
+
+Task 3's brief asserted "the dev proxy in `vite.config.mts` is the normal path". That was invented — `grep` for `server.proxy` and `VITE_API_BASE` across the repo returns nothing outside the files Task 3 itself wrote. Without it, `pnpm run serve` gives a dev server that cannot reach the backend at all, and **the first store task is where that bites**.
+
+- [ ] **Step 1:** Add a `server.proxy` entry forwarding `/api` and `/openapi.json` to the configured backend, defaulting to `http://127.0.0.1:7492`. Both paths matter: the contract test in Task 5 fetches the spec.
+- [ ] **Step 2:** Verify by running the dev server against a live `factorio-bot serve` and fetching `/api/v1/health` **through the dev server's origin**, not the backend's. Curling the backend directly proves nothing about the proxy.
+- [ ] **Step 3:** Leave `VITE_API_BASE` working. Task 3 kept it deliberately for a dev session that is not proxying; the two are alternatives, not duplicates, and `apiBase()` already prefers the env var.
+
+---
+
 ## Task 4: Typed DTOs and the route client
 
 **Files:**
@@ -1576,6 +1588,12 @@ git commit -m "test(app): pin the http client to a committed openapi snapshot"
 ```
 
 ---
+
+> **Match on `code`, not on HTTP status — the same condition ships under two statuses.**
+>
+> `crates/server/src/error.rs` has two "not started" constructors that both carry **`code: 2`**: one answers **400** (`:69`, used by `/api/v1/rcon` and `/api/v1/instance/stop`) and one answers **503** (`:84`, used by `/api/v1/scripts/execute`). The split is deliberate and pinned by server tests — "start a script" is not something the caller can fix, whereas an RCON call against a stopped game is a request problem.
+>
+> A store branching on `response.status === 503` will therefore handle "no game running" on one route and miss it on two others. Branch on `code === 2`. Found by Task 3's implementer while checking a fixture against the real handlers.
 
 ## Task 6: `appStore` over HTTP
 

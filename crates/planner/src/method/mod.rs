@@ -7,7 +7,7 @@ pub mod util;
 use crate::action::Action;
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
-use crate::ids::{ActionId, ActionIdGen, BotId, Ticks};
+use crate::ids::{ActionId, ActionIdGen, BotId, ChainId, ChainIdGen, Ticks};
 use crate::state::PlanState;
 
 /// One element of a method's expansion.
@@ -39,10 +39,19 @@ pub enum Step {
 /// experience the same thing. That holds while `PlanState::from_world` gives
 /// unknown bots identical defaults. **If bots ever start with materially
 /// different inventories, this driver must be revisited.**
+///
+/// `chain` is the other half of the same story, and the half that outlives
+/// expansion: every action emitted inside a per-bot subtree is stamped with it
+/// in the network, so the scheduler can bind the whole chain to one bot instead
+/// of choosing per action. It is `None` outside such a subtree, which leaves an
+/// action freely assignable.
 pub struct ExpansionCtx {
     pub state: PlanState,
     pub ids: ActionIdGen,
+    pub chains: ChainIdGen,
     pub chain_actor: BotId,
+    /// The chain actions emitted right now belong to, if any.
+    pub chain: Option<ChainId>,
     pub depth: u32,
 }
 
@@ -51,7 +60,9 @@ impl ExpansionCtx {
         ExpansionCtx {
             state,
             ids: ActionIdGen::new(),
+            chains: ChainIdGen::new(),
             chain_actor,
+            chain: None,
             depth: 0,
         }
     }
@@ -140,16 +151,26 @@ fn expand_goal(
     }
 
     // Save, run, restore — on every exit path, errors included. A completed
-    // call must leave `depth` and `chain_actor` exactly as it found them even
-    // when it fails, or a caller that continues past an error inherits a
-    // corrupted context and a comment claiming that cannot happen.
+    // call must leave `depth`, `chain_actor` and `chain` exactly as it found
+    // them even when it fails, or a caller that continues past an error
+    // inherits a corrupted context and a comment claiming that cannot happen.
     let previous_actor = ctx.chain_actor;
+    let previous_chain = ctx.chain;
     if let Goal::Have {
         whose: Holder::Bot(bot),
         ..
     } = goal
     {
         ctx.chain_actor = *bot;
+        // The *outermost* per-bot goal opens the chain; everything below it
+        // belongs to that same chain. `whose` is propagated verbatim into
+        // subgoals — a per-bot science pack asks for per-bot plates — so
+        // allocating on every match instead would give each ingredient its own
+        // chain and scatter a branching recipe across bots again, which is the
+        // failure this exists to prevent.
+        if ctx.chain.is_none() {
+            ctx.chain = Some(ctx.chains.next());
+        }
     }
     ctx.depth += 1;
 
@@ -157,6 +178,7 @@ fn expand_goal(
 
     ctx.depth -= 1;
     ctx.chain_actor = previous_actor;
+    ctx.chain = previous_chain;
     result
 }
 
@@ -196,7 +218,13 @@ fn expand_goal_body(
                 for effect in &action.eff {
                     effect.apply(&mut ctx.state, binding)?;
                 }
-                net.add(*action);
+                let id = net.add(*action);
+                // Stamp it with the chain it was expanded under, so the
+                // scheduler keeps the chain together. Outside a per-bot
+                // subtree there is no chain and the action stays free.
+                if let Some(chain) = ctx.chain {
+                    net.set_chain(id, chain);
+                }
             }
             Step::Link { from, to, lag } => net.link(from, to, lag),
         }
@@ -552,6 +580,176 @@ mod tests {
             vec![BotId(2), BotId(1)],
             "a Bot-addressed goal rebinds, and the binding is restored afterwards"
         );
+    }
+
+    /// Expands a `Have` into one action per unit, so a subtree has more than
+    /// one action to compare chains across.
+    struct ProduceEach;
+    impl Method for ProduceEach {
+        fn name(&self) -> &'static str {
+            "produce-each"
+        }
+        fn applicable(&self, goal: &Goal, _s: &PlanState) -> bool {
+            matches!(goal, Goal::Have { .. })
+        }
+        fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+            let Goal::Have { item, count, .. } = goal else {
+                unreachable!()
+            };
+            Ok((0..*count)
+                .map(|_| Step::Act(Box::new(gain_action(ctx, item, 1))))
+                .collect())
+        }
+    }
+
+    #[test]
+    fn a_bot_addressed_goals_actions_all_share_one_chain() {
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1), BotId(2)]);
+        let reg = MethodRegistry::new().with(Box::new(ProduceEach));
+        let goal = Goal::Have {
+            item: "coal".into(),
+            count: 3,
+            whose: Holder::Bot(BotId(2)),
+        };
+        let net = expand(&[goal], &state, &reg, BotId(1)).unwrap();
+        assert_eq!(net.len(), 3);
+        let chains: Vec<Option<_>> = net.actions().map(|a| net.chain_of(a.id)).collect();
+        assert!(chains[0].is_some(), "a per-bot subtree opens a chain");
+        assert!(
+            chains.iter().all(|c| *c == chains[0]),
+            "one chain for the whole subtree, got {:?}",
+            chains
+        );
+    }
+
+    #[test]
+    fn two_bot_addressed_goals_get_different_chains() {
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1), BotId(2)]);
+        let reg = MethodRegistry::new().with(Box::new(ProduceEach));
+        let goals = vec![
+            Goal::Have {
+                item: "coal".into(),
+                count: 1,
+                whose: Holder::Bot(BotId(1)),
+            },
+            Goal::Have {
+                item: "stone".into(),
+                count: 1,
+                whose: Holder::Bot(BotId(2)),
+            },
+        ];
+        let net = expand(&goals, &state, &reg, BotId(1)).unwrap();
+        let chains: Vec<Option<_>> = net.actions().map(|a| net.chain_of(a.id)).collect();
+        assert_eq!(chains.len(), 2);
+        assert!(chains.iter().all(|c| c.is_some()));
+        assert_ne!(
+            chains[0], chains[1],
+            "independent per-bot goals must not share a chain"
+        );
+    }
+
+    #[test]
+    fn a_nested_bot_addressed_subgoal_stays_in_its_parents_chain() {
+        // `whose` is propagated into subgoals, so the ingredient goal is
+        // `Holder::Bot` too. It must extend the chain, not start a new one:
+        // splitting here is exactly how a branching recipe ends up scattered.
+        struct ViaSubgoal;
+        impl Method for ViaSubgoal {
+            fn name(&self) -> &'static str {
+                "via-subgoal"
+            }
+            fn applicable(&self, goal: &Goal, _s: &PlanState) -> bool {
+                matches!(goal, Goal::Have { item, .. } if item == "iron-gear-wheel")
+            }
+            fn expand(&self, g: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+                let Goal::Have { whose, .. } = g else {
+                    unreachable!()
+                };
+                let a = gain_action(ctx, "iron-gear-wheel", 1);
+                Ok(vec![
+                    Step::Subgoal(Goal::Have {
+                        item: "iron-plate".into(),
+                        count: 2,
+                        whose: whose.clone(),
+                    }),
+                    Step::Act(Box::new(a)),
+                ])
+            }
+        }
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1), BotId(2)]);
+        let reg = MethodRegistry::new()
+            .with(Box::new(ViaSubgoal))
+            .with(Box::new(ProduceEach));
+        let goal = Goal::Have {
+            item: "iron-gear-wheel".into(),
+            count: 1,
+            whose: Holder::Bot(BotId(2)),
+        };
+        let net = expand(&[goal], &state, &reg, BotId(1)).unwrap();
+        let chains: Vec<Option<_>> = net.actions().map(|a| net.chain_of(a.id)).collect();
+        assert!(chains[0].is_some());
+        assert!(
+            chains.iter().all(|c| *c == chains[0]),
+            "the ingredient and its consumer share a chain, got {:?}",
+            chains
+        );
+    }
+
+    #[test]
+    fn the_chain_is_restored_after_a_bot_addressed_subtree() {
+        // The mirror of `a_bot_addressed_goal_rebinds_the_chain_actor`: the
+        // second goal is not addressed to anyone, so it must come back out of
+        // the chain the first one opened.
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1), BotId(2)]);
+        let reg = MethodRegistry::new().with(Box::new(ProduceEach));
+        let goals = vec![
+            Goal::Have {
+                item: "coal".into(),
+                count: 1,
+                whose: Holder::Bot(BotId(2)),
+            },
+            Goal::Have {
+                item: "stone".into(),
+                count: 1,
+                whose: Holder::Anyone,
+            },
+        ];
+        let net = expand(&goals, &state, &reg, BotId(1)).unwrap();
+        let chains: Vec<Option<_>> = net.actions().map(|a| net.chain_of(a.id)).collect();
+        assert!(chains[0].is_some(), "the per-bot goal is in a chain");
+        assert_eq!(
+            chains[1], None,
+            "and the goal after it is freely assignable again"
+        );
+    }
+
+    #[test]
+    fn a_failed_expansion_restores_the_chain() {
+        struct Fails;
+        impl Method for Fails {
+            fn name(&self) -> &'static str {
+                "fails"
+            }
+            fn applicable(&self, goal: &Goal, _s: &PlanState) -> bool {
+                matches!(goal, Goal::Have { .. })
+            }
+            fn expand(&self, g: &Goal, _c: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+                Err(PlannerError::NoApplicableMethod {
+                    goal: g.to_string(),
+                })
+            }
+        }
+        let reg = MethodRegistry::new().with(Box::new(Fails));
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1), BotId(2)]);
+        let mut ctx = ExpansionCtx::new(state, BotId(1));
+        let mut net = ActionNetwork::new();
+        let goal = Goal::Have {
+            item: "coal".into(),
+            count: 1,
+            whose: Holder::Bot(BotId(2)),
+        };
+        assert!(expand_goal(&goal, &mut ctx, &mut net, &reg).is_err());
+        assert_eq!(ctx.chain, None, "the chain must survive an error");
     }
 
     #[test]

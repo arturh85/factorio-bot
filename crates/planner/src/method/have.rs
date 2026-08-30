@@ -1,9 +1,16 @@
 //! Methods that satisfy `Goal::Have`.
 //!
 //! Every method here emits actions with `Actor::Role` and `pinned: None`. The
-//! scheduler decides who runs each one, and a chain stays with one bot because
-//! its `HasItem` preconditions are only satisfiable by the bot holding the
-//! items — see the plan's note on why nothing is pinned.
+//! scheduler decides who runs each one — see the plan's note on why nothing is
+//! pinned.
+//!
+//! A chain stays with one bot because the driver stamps everything it expands
+//! under a `Holder::Bot` goal with one `ChainId`, and the scheduler assigns
+//! chains rather than actions. `HasItem` preconditions alone are not enough:
+//! they keep a *linear* chain together, since only the bot holding the items
+//! can run the next step, but a recipe with two ingredients that each need
+//! producing is a chain with two roots, and neither root has a `HasItem`
+//! precondition to hold it near the other. Red science is exactly that shape.
 
 use crate::action::{Action, ActionKind, Actor, Condition, Effect};
 use crate::error::PlannerError;

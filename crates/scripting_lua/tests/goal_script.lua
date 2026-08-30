@@ -29,13 +29,18 @@ assert(string.find(gantt, "red science", 1, true), "the title must reach the cha
 assert(string.find(gantt, "section bot 1", 1, true), "expected bot 1 to have a section")
 assert(string.find(gantt, "section bot 2", 1, true), "expected the work to be spread over bots")
 
--- Research has no method in the planner yet. This asserts the *reporting*: a
--- planner failure must arrive as a catchable Lua error naming the goal, not as
--- a panic, which under `panic = "abort"` would take the whole server down.
+-- Research has no method in the planner yet. Two things are asserted here. That
+-- the failure arrives as a catchable Lua error rather than a panic, which under
+-- `panic = "abort"` would take the whole server down. And that it says research
+-- is *unimplemented*: the planner's own "no method can satisfy goal" reads as
+-- "that technology is unreachable", which sends a user hunting prerequisites
+-- for a feature that was never built.
 local ok, err = pcall(goal.researched, "automation")
 assert(not ok, "goal.researched cannot succeed until a research method exists")
-assert(string.find(tostring(err), "research automation", 1, true),
-       "the planner error must name the goal, got: " .. tostring(err))
+assert(string.find(tostring(err), "not implemented yet", 1, true),
+       "the error must say research is unimplemented, got: " .. tostring(err))
+assert(string.find(tostring(err), "automation", 1, true),
+       "the error must still name the technology asked for, got: " .. tostring(err))
 
 -- An unknown handle is likewise an error, not a crash.
 local ok = pcall(goal.graphviz, 987)

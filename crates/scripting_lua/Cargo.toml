@@ -24,4 +24,4 @@ thiserror = "2.0"
 # `#[async_trait]`, so implementing it needs the same macro.
 async-trait = "0.1"
 tempfile = "3"
-tokio = { version = "1", features = ["full", "tracing"] }
+tokio = { version = "1", features = ["full", "tracing", "test-util"] }

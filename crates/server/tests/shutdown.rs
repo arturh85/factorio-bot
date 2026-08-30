@@ -19,9 +19,15 @@ async fn server_returns_when_the_shutdown_future_resolves() {
     let (tx, rx) = oneshot::channel::<()>();
 
     let server = tokio::spawn(async move {
-        start_with_shutdown(settings, instance, bind, async {
-            let _ = rx.await;
-        })
+        start_with_shutdown(
+            settings,
+            instance,
+            bind,
+            async {
+                let _ = rx.await;
+            },
+            Duration::from_millis(200),
+        )
         .await
     });
 
@@ -71,9 +77,15 @@ async fn shutdown_takes_and_stops_the_factorio_instance() {
     let (tx, rx) = oneshot::channel::<()>();
 
     let server = tokio::spawn(async move {
-        start_with_shutdown(settings, instance_state, bind, async {
-            let _ = rx.await;
-        })
+        start_with_shutdown(
+            settings,
+            instance_state,
+            bind,
+            async {
+                let _ = rx.await;
+            },
+            Duration::from_millis(200),
+        )
         .await
     });
 
@@ -131,6 +143,13 @@ async fn free_addr() -> SocketAddr {
 /// long as the socket stays open. `with_graceful_shutdown` is documented to
 /// wait for exactly this kind of in-flight work to finish, which it never
 /// will here, so this is the real shape the plan-4 SSE streams will take.
+/// Grace period injected into these tests. `start_with_shutdown` no longer
+/// hardcodes ten seconds — the caller passes it in, production via
+/// `webserver::SHUTDOWN_GRACE_PERIOD` and tests via a value small enough
+/// that a test which needs to wait the grace period out (or well past it)
+/// does not have to sleep for ten real seconds to do so.
+const TEST_GRACE_PERIOD: Duration = Duration::from_millis(300);
+
 #[tokio::test]
 async fn shutdown_does_not_wait_forever_for_an_in_flight_request() {
     let settings = AppSettings::default().into_shared();
@@ -139,9 +158,15 @@ async fn shutdown_does_not_wait_forever_for_an_in_flight_request() {
     let (tx, rx) = oneshot::channel::<()>();
 
     let server = tokio::spawn(async move {
-        start_with_shutdown(settings, instance, bind, async {
-            let _ = rx.await;
-        })
+        start_with_shutdown(
+            settings,
+            instance,
+            bind,
+            async {
+                let _ = rx.await;
+            },
+            TEST_GRACE_PERIOD,
+        )
         .await
     });
 
@@ -181,9 +206,11 @@ async fn shutdown_does_not_wait_forever_for_an_in_flight_request() {
     tx.send(()).expect("receiver alive");
     let shutdown_started = Instant::now();
 
-    // Grace period (10s) plus a margin. If the shutdown wait is unbounded,
-    // this join times out and the test fails — that is the guard.
-    let result = tokio::time::timeout(Duration::from_secs(15), server)
+    // Grace period plus a generous margin. If the shutdown wait is
+    // unbounded, this join times out and the test fails — that is the
+    // guard.
+    let test_timeout = TEST_GRACE_PERIOD + Duration::from_secs(5);
+    let result = tokio::time::timeout(test_timeout, server)
         .await
         .expect("start_with_shutdown did not return within the grace period plus a margin")
         .expect("task did not panic");
@@ -194,11 +221,53 @@ async fn shutdown_does_not_wait_forever_for_an_in_flight_request() {
         "shutdown should be a clean exit: {result:?}"
     );
     assert!(
-        elapsed < Duration::from_secs(13),
-        "shutdown took {elapsed:?}, expected it bounded well within the 10s grace period plus a margin"
+        elapsed < TEST_GRACE_PERIOD + Duration::from_secs(2),
+        "shutdown took {elapsed:?}, expected it bounded well within the {TEST_GRACE_PERIOD:?} grace period plus a margin"
     );
 
     // Keep the connection (and its stuck request) alive across the whole
     // shutdown wait; only drop it now that the assertions above are done.
     drop(stream);
+}
+
+/// Guards against the exact bug caught during this task's end-to-end check
+/// and reported as a coverage gap: an earlier draft wrapped the *entire*
+/// `serve().with_graceful_shutdown()` future in a fixed timeout, so the
+/// server silently exited once the grace period elapsed *from process
+/// start* — even though `shutdown` never resolved and nothing ever asked it
+/// to stop. No other test in this file would have caught that: the other
+/// three all send a shutdown signal quickly and only check what happens
+/// after that.
+///
+/// This starts the server with a `shutdown` future that never resolves,
+/// waits five times the (injected, short) grace period, and asserts the
+/// server task is still running. Under the correct implementation — the
+/// grace-period timer only starts once `shutdown` actually fires — this
+/// passes easily. Under the naive whole-future-timeout shape, the server
+/// would already have exited well before this assertion runs.
+#[tokio::test]
+async fn server_survives_past_the_grace_period_with_no_shutdown_signal() {
+    let settings = AppSettings::default().into_shared();
+    let instance = FactorioInstance::new_shared();
+    let bind = free_addr().await;
+
+    let server = tokio::spawn(async move {
+        start_with_shutdown(
+            settings,
+            instance,
+            bind,
+            std::future::pending(),
+            TEST_GRACE_PERIOD,
+        )
+        .await
+    });
+
+    tokio::time::sleep(TEST_GRACE_PERIOD * 5).await;
+
+    assert!(
+        !server.is_finished(),
+        "server exited on its own after the grace period elapsed, even though shutdown was never signalled — the grace period must only start counting once a shutdown signal actually fires"
+    );
+
+    server.abort();
 }

@@ -47,11 +47,21 @@ async fn api_not_found() -> axum::response::Response {
     (axum::http::StatusCode::NOT_FOUND, axum::Json(body)).into_response()
 }
 
+/// Production value of the graceful-shutdown grace period: how long
+/// [`start_with_shutdown`] waits, once a shutdown signal actually fires, for
+/// in-flight requests to finish on their own before abandoning them.
+/// `start()` (the CLI's entry point) always uses this. Exposed so callers
+/// like `serve.rs` pass the same value explicitly rather than a magic
+/// number, and so tests can inject a much smaller value instead of sleeping
+/// past a real 10 seconds.
+pub const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(10);
+
 pub async fn start_with_shutdown(
     settings: SharedAppSettings,
     instance_state: SharedFactorioInstance,
     bind: SocketAddr,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    shutdown_grace_period: Duration,
 ) -> Result<()> {
     let web_root = settings.read().await.restapi.web_root.clone();
     let state = AppState::new(instance_state.clone(), settings);
@@ -74,14 +84,20 @@ pub async fn start_with_shutdown(
     // silently kill the server after the grace period elapses even when
     // nothing ever asked it to shut down (this was caught by manually
     // running `serve` and watching it exit on its own after 10s with no
-    // signal sent). So `shutdown` is fanned out through a `watch` channel to
-    // two consumers: the signal axum's graceful drain waits on, and a
-    // second branch whose grace-period sleep only starts once that same
-    // signal has actually fired.
-    const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(10);
+    // signal sent — and is now also guarded by
+    // `server_survives_past_the_grace_period_with_no_shutdown_signal` in
+    // `tests/shutdown.rs`). So `shutdown` is fanned out through a `watch`
+    // channel to two consumers: the signal axum's graceful drain waits on,
+    // and a second branch whose grace-period sleep only starts once that
+    // same signal has actually fired.
     let (fired_tx, fired_rx) = tokio::sync::watch::channel(false);
     let mut fired_rx_for_grace = fired_rx.clone();
     let mut fired_rx_for_axum = fired_rx;
+    // No `JoinHandle` is kept: if `shutdown` never resolves (e.g. `start()`'s
+    // `std::future::pending()`), this task simply lives for the remainder of
+    // the process — harmless, since it holds nothing but the `shutdown`
+    // future and a `watch::Sender`, both dropped together with the runtime
+    // on exit.
     tokio::spawn(async move {
         shutdown.await;
         // The receivers are always alive for the lifetime of this function,
@@ -99,10 +115,10 @@ pub async fn start_with_shutdown(
         result = serve_future => result.into_diagnostic(),
         () = async {
             let _ = fired_rx_for_grace.changed().await;
-            tokio::time::sleep(SHUTDOWN_GRACE_PERIOD).await;
+            tokio::time::sleep(shutdown_grace_period).await;
         } => {
             tracing::warn!(
-                "graceful shutdown grace period ({SHUTDOWN_GRACE_PERIOD:?}) elapsed; abandoning in-flight requests"
+                "graceful shutdown grace period ({shutdown_grace_period:?}) elapsed; abandoning in-flight requests"
             );
             Ok(())
         }
@@ -129,5 +145,12 @@ pub async fn start(
     instance_state: SharedFactorioInstance,
     bind: SocketAddr,
 ) -> Result<()> {
-    start_with_shutdown(settings, instance_state, bind, std::future::pending()).await
+    start_with_shutdown(
+        settings,
+        instance_state,
+        bind,
+        std::future::pending(),
+        SHUTDOWN_GRACE_PERIOD,
+    )
+    .await
 }

@@ -87,6 +87,7 @@ async fn run(matches: &ArgMatches, context: &mut Context) -> Result<()> {
     context.instance_state.clone(),
     bind,
     shutdown,
+    factorio_bot_server::webserver::SHUTDOWN_GRACE_PERIOD,
   )
   .await?;
 

@@ -1597,7 +1597,30 @@ git commit -m "feat(server): stream job output over SSE, bounded by shutdown"
 
 The `__doc_entry_*` strings in `globals.rs` and `world.rs` are the source of the published Lua API docs. Update the four bounded bindings to say that paths are relative to the scripts directory and that leaving it is refused, and say that `io`, `os`, `package`, `require`, `dofile` and `loadfile` are not available.
 
-**Verified rather than assumed** (this claim is why the task exists, so it was checked before an implementer acted on it): `write_lua_docs` at `crates/scripting_lua/src/lua_docs.rs:16` walks each table for keys prefixed `__doc_entry_` and writes `globals.lua`, `world.lua`, `plan.lua`, `goal.lua` and `rcon.lua`; `app/src-tauri/build.rs:39` invokes it into `docs/lua/src/`; and `docs/lua/src/.gitignore` ignores `*.lua`, so those five files are untracked build artifacts. Editing the strings really is the only place to change them.
+**This task must FIX the generator before editing any string — the published Lua docs are currently near-empty.**
+
+I previously "verified" that editing the `__doc_entry_*` strings was the only place to change the published docs, by reading `write_lua_docs` and confirming it walks each table for `__doc_entry_`-prefixed keys. That verified the *mechanism* and never looked at the *output*. The output is:
+
+| file | size | contents |
+|---|---|---|
+| `docs/lua/src/globals.lua` | 79 B | header + footer only — **all 12 entries missing** |
+| `docs/lua/src/world.lua` | 119 B | header + footer only |
+| `docs/lua/src/rcon.lua` | 134 B | header + footer only |
+| `docs/lua/src/goal.lua` | 1.4 kB | full, every entry present |
+
+Editing the strings for `globals`, `world` and `rcon` would therefore change nothing a reader ever sees. One table works and three do not, which points at the iteration rather than the data.
+
+The suspect is `crates/scripting_lua/src/lua_docs.rs:62`:
+
+```rust
+for (key, value) in doc_table.clone().pairs::<String, String>().flatten() {
+```
+
+Every one of these tables holds both documentation strings *and* the bound functions. `pairs::<String, String>` demands a `String` value, so each function entry yields an `Err`. If mlua's `TablePairs` terminates on the first error rather than yielding it and continuing, then whether any entries survive depends on where the first function lands in Lua's hash order — exactly the pattern observed. `.flatten()` makes the truncation silent, because a stopped iterator and an empty one are indistinguishable.
+
+**Diagnose before fixing** — do not assume the above is correct. Then fix so a non-string value is skipped rather than ending iteration, and **add a test asserting a known entry appears in the generated output** for each of the four tables. Without that test this regresses invisibly: nothing reads these files, so nothing has ever contradicted them.
+
+Worth its own commit, before the string edits, so the fix and the content change stay separable.
 
 **One exception, and it is a hand-maintained copy of a derived thing.** `docs/lua/src/types.lua` *is* tracked, is not generated from any `__doc_entry_*`, and documents `crates/core/src/types.rs`'s structs (`FactorioTile`, `Position`, …) by hand. It carries the same drift risk as any hand-written mirror: nothing regenerates it and nothing checks it. Do not try to fix that here — it is documentation-only and out of this plan's scope — but note it in the report so it does not stay invisible.
 

@@ -1530,7 +1530,11 @@ git commit -m "feat(server): stream job output over SSE, bounded by shutdown"
 
 - [ ] **Step 1: Document the sandbox in the Lua API docs**
 
-The `__doc_entry_*` strings in `globals.rs` and `world.rs` are the source of the published Lua API docs. Update the four bounded bindings to say that paths are relative to the scripts directory and that leaving it is refused. The docs are generated from these strings, so this is the only place to change.
+The `__doc_entry_*` strings in `globals.rs` and `world.rs` are the source of the published Lua API docs. Update the four bounded bindings to say that paths are relative to the scripts directory and that leaving it is refused, and say that `io`, `os`, `package`, `require`, `dofile` and `loadfile` are not available.
+
+**Verified rather than assumed** (this claim is why the task exists, so it was checked before an implementer acted on it): `write_lua_docs` at `crates/scripting_lua/src/lua_docs.rs:16` walks each table for keys prefixed `__doc_entry_` and writes `globals.lua`, `world.lua`, `plan.lua`, `goal.lua` and `rcon.lua`; `app/src-tauri/build.rs:39` invokes it into `docs/lua/src/`; and `docs/lua/src/.gitignore` ignores `*.lua`, so those five files are untracked build artifacts. Editing the strings really is the only place to change them.
+
+**One exception, and it is a hand-maintained copy of a derived thing.** `docs/lua/src/types.lua` *is* tracked, is not generated from any `__doc_entry_*`, and documents `crates/core/src/types.rs`'s structs (`FactorioTile`, `Position`, …) by hand. It carries the same drift risk as any hand-written mirror: nothing regenerates it and nothing checks it. Do not try to fix that here — it is documentation-only and out of this plan's scope — but note it in the report so it does not stay invisible.
 
 - [ ] **Step 2: Note the execution model in `CLAUDE.md`**
 

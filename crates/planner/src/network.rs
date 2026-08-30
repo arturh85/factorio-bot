@@ -1,6 +1,6 @@
 //! A partially ordered set of actions. No bot appears here; ordering only.
 
-use crate::action::{Action, Condition};
+use crate::action::{Action, Actor, Condition};
 use crate::error::PlannerError;
 use crate::ids::{ActionId, BotId, ChainId, Ticks};
 use factorio_bot_core::petgraph::algo::toposort;
@@ -120,19 +120,39 @@ impl ActionNetwork {
     /// one.
     ///
     /// A pair is skipped when both actions carry a `ChainId`, the chains
-    /// differ, and the pairing is inventory-scoped (`Condition::HasItem`):
-    /// the scheduler re-derives that order on its own, since its per-bot
-    /// feasibility check only offers a consumer to a bot that actually holds
-    /// the items — which is the producer's bot — so an inferred item edge
-    /// across chains is redundant, not load-bearing. World-state conditions
-    /// (`EntityAt`, `Researched`, `PositionFree`, ...) are satisfied by *any*
-    /// bot, so nothing re-derives them; those edges must stand regardless of
-    /// chain, and two sibling chains can genuinely depend on each other's
-    /// output even by item (`shortfall` can credit one chain's simulated
-    /// production to another sharing a `chain_actor`), so the exclusion is
-    /// deliberately narrower than "different chain, drop it." When either
-    /// side carries no chain, nothing says they are separate work, so the
-    /// edge stands.
+    /// differ, and the pairing is inventory-scoped *and role-scoped*
+    /// (`Condition::HasItem { who: Actor::Role, .. }`). Dropping such an edge
+    /// is safe only because of **two** hypotheses, and both must hold:
+    ///
+    /// 1. **`HasItem { who: Role }` forces the consumer onto the producer's
+    ///    bot.** The scheduler's per-bot feasibility check only offers a
+    ///    consumer to a bot that actually holds the items, and the only bot
+    ///    holding them is the one that ran the producer. A
+    ///    `HasItem { who: Actor::Bound(b) }` does *not* — it is satisfied by
+    ///    `b`'s inventory whoever runs the consumer — so it is treated as
+    ///    world-scoped here and keeps its edge.
+    /// 2. **Two actions on one bot cannot overlap in time.** `schedule` gives
+    ///    each bot a single `free_at` cursor, so its actions are totally
+    ///    ordered, and hypothesis 1's forced co-location then re-derives the
+    ///    producer-before-consumer order that the dropped edge would have
+    ///    stated.
+    ///
+    /// Hypothesis 2 is a property of `schedule`, not of this network, so it is
+    /// **an obligation the executor inherits**: whatever runs a `Schedule` must
+    /// keep one bot's actions serialised in their scheduled order. The spec's
+    /// Layer 5 — one task per bot, walking its own assignment list — satisfies
+    /// it. An executor that ran a bot's assignments concurrently would break
+    /// plans that are valid here, because the edge that stated the order was
+    /// dropped on the strength of this paragraph.
+    ///
+    /// World-state conditions (`EntityAt`, `Researched`, `PositionFree`, ...)
+    /// are satisfied by *any* bot, so nothing re-derives them; those edges must
+    /// stand regardless of chain, and two sibling chains can genuinely depend
+    /// on each other's output even by item (`shortfall` can credit one chain's
+    /// simulated production to another sharing a `chain_actor`), so the
+    /// exclusion is deliberately narrower than "different chain, drop it."
+    /// When either side carries no chain, nothing says they are separate work,
+    /// so the edge stands.
     ///
     /// **Inferred edges enforce order, never location.** Ordering a consumer
     /// after ten producers spread across four bots does not put the items in
@@ -166,12 +186,21 @@ impl ActionNetwork {
                 if !produces {
                     continue;
                 }
-                // Only inventory-scoped pairings may be dropped across chains: a
-                // HasItem is re-derived by the scheduler's per-bot feasibility
-                // check, a world-state condition is not.
+                // Only inventory-scoped, role-scoped pairings may be dropped
+                // across chains: a `HasItem { who: Role }` is re-derived by the
+                // scheduler's per-bot feasibility check, a world-state
+                // condition is not — and neither is a
+                // `HasItem { who: Bound(b) }`, which any bot can satisfy out of
+                // `b`'s inventory and so does not pull the consumer onto the
+                // producer's runner.
                 let world_scoped = self.actions[consumer].pre.iter().any(|cond| {
-                    !matches!(cond, Condition::HasItem { .. })
-                        && self.actions[producer].eff.iter().any(|e| e.satisfies(cond))
+                    !matches!(
+                        cond,
+                        Condition::HasItem {
+                            who: Actor::Role,
+                            ..
+                        }
+                    ) && self.actions[producer].eff.iter().any(|e| e.satisfies(cond))
                 });
                 if !world_scoped {
                     if let (Some(p), Some(c)) = (self.chain_of(*producer), self.chain_of(*consumer))
@@ -674,5 +703,84 @@ mod tests {
         net.set_chain(i, ChainId(1));
         net.infer_edges();
         assert_eq!(net.preds(i), vec![(p, 0)]);
+    }
+
+    /// Produce `count` of `item` into a *named* bot's inventory.
+    fn produce_into(gen: &mut ActionIdGen, bot: BotId, item: &str, count: u32) -> Action {
+        Action {
+            id: gen.next(),
+            kind: ActionKind::Mine {
+                pos: Position::new(1., 1.),
+                item: item.into(),
+                count,
+            },
+            pre: vec![],
+            eff: vec![Effect::GainItem {
+                who: Actor::Bound(bot),
+                item: item.into(),
+                count,
+            }],
+            duration: 500,
+            pinned: None,
+            label: format!("produce {} {} into {}", count, item, bot),
+        }
+    }
+
+    /// Consume out of a *named* bot's inventory, whoever runs it.
+    fn consume_from(gen: &mut ActionIdGen, bot: BotId, item: &str, count: u32) -> Action {
+        Action {
+            id: gen.next(),
+            kind: ActionKind::Craft {
+                item: "iron-gear-wheel".into(),
+                count: 1,
+            },
+            pre: vec![Condition::HasItem {
+                who: Actor::Bound(bot),
+                item: item.into(),
+                count,
+            }],
+            eff: vec![],
+            duration: 10,
+            pinned: None,
+            label: format!("consume {}'s {}", bot, item),
+        }
+    }
+
+    #[test]
+    fn inference_still_links_a_bot_bound_item_condition_across_chains() {
+        // The cross-chain skip rests on `HasItem { who: Role }` pulling the
+        // consumer onto the producer's bot, where `free_at` then serialises
+        // the two. `HasItem { who: Bound(b) }` does not: any bot can satisfy
+        // it out of bot 1's inventory, so nothing re-derives the order and
+        // dropping the edge left the consumer free to run 490 ticks before
+        // its producer. Classifying by condition *kind* alone was the bug;
+        // `who` is half the hypothesis.
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let producer = net.add(produce_into(&mut gen, BotId(1), "coal", 5));
+        let consumer = net.add(consume_from(&mut gen, BotId(1), "coal", 5));
+        net.set_chain(producer, ChainId(0));
+        net.set_chain(consumer, ChainId(1));
+        net.infer_edges();
+        assert_eq!(
+            net.preds(consumer),
+            vec![(producer, 0)],
+            "a bot-bound item condition is not re-derived by the scheduler, \
+             so its edge must stand across chains"
+        );
+    }
+
+    #[test]
+    fn inference_still_drops_a_role_scoped_item_condition_across_chains() {
+        // The companion to the test above: with `who: Role` on both sides the
+        // skip is still correct, so the narrowing did not simply disable it.
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let producer = net.add(mine(&mut gen, "coal", 5));
+        let consumer = net.add(craft(&mut gen, "coal", 5, "iron-gear-wheel"));
+        net.set_chain(producer, ChainId(0));
+        net.set_chain(consumer, ChainId(1));
+        net.infer_edges();
+        assert!(net.preds(consumer).is_empty());
     }
 }

@@ -53,14 +53,20 @@ impl Method for AlreadySatisfied {
     }
 }
 
-/// How many plates one coal will smelt in a stone furnace.
+/// How long one coal keeps a stone furnace running.
 ///
 /// A coal carries 4 MJ and a stone furnace draws 90 kW, so one coal sustains
-/// about 44 seconds of smelting — roughly 13 plates at 3.2 s each. This is an
+/// 4 MJ / 90 kW = 44.4 s of smelting, which is 2666 ticks at 60 ticks per
+/// second. Rounding down over-fuels very slightly, which is the safe
+/// direction: a furnace that runs out mid-batch strands the plan.
+///
+/// Fuel is worked out from the recipe's own smelting time — a *plates* per
+/// coal figure would be recipe-blind, and applying iron plate's 3.2 s to
+/// steel's 16 s under-fuels by a factor of five. This is still an
 /// approximation: it ignores partial burns carried between smelts, and it
 /// assumes stone-furnace speed. Calibrating it against observed burn rates is
 /// follow-up work for the execution increment.
-pub const PLATES_PER_COAL: u32 = 13;
+pub const COAL_BURN_TICKS: Ticks = 2666;
 
 /// Time to put items into or take them out of a machine.
 const TRANSFER_TICKS: Ticks = 10;
@@ -99,7 +105,10 @@ impl Method for Smelt {
             })?;
         let per_craft = output_per_craft(&recipe, item);
         let runs = need.div_ceil(per_craft);
-        let coal = runs.div_ceil(PLATES_PER_COAL).max(1);
+        let coal = recipe_ticks(&recipe)
+            .saturating_mul(runs)
+            .div_ceil(COAL_BURN_TICKS)
+            .max(1);
         let ingredients = ingredients_of(&recipe);
 
         let from = ctx
@@ -1068,6 +1077,81 @@ mod tests {
         )
         .unwrap();
         assert_eq!(net.len(), 2, "two chains for two units");
+    }
+
+    /// A smelting recipe the fixture does not ship: steel plate, 16 s a run
+    /// against iron plate's 3.2 s. Deserialised rather than built, because
+    /// `FactorioRecipe::energy` is a `noisy_float` this crate does not depend
+    /// on directly.
+    fn state_knowing_steel() -> PlanState {
+        use factorio_bot_core::serde_json;
+        use factorio_bot_core::types::FactorioRecipe;
+        let steel: FactorioRecipe = serde_json::from_str(
+            r#"{
+                "name": "steel-plate",
+                "valid": true,
+                "enabled": true,
+                "category": "smelting",
+                "ingredients": [
+                    { "name": "iron-plate", "ingredient_type": "item", "amount": 5 }
+                ],
+                "products": [
+                    { "name": "steel-plate", "product_type": "item",
+                      "amount": 1, "probability": 1.0 }
+                ],
+                "hidden": false,
+                "energy": 16.0,
+                "order": "c[steel-plate]",
+                "group": "intermediate-products",
+                "subgroup": "raw-material"
+            }"#,
+        )
+        .expect("the steel recipe parses");
+        let world = fixture_world();
+        world.update_recipes(vec![steel]).expect("recipes update");
+        PlanState::from_world(Arc::new(world), &[BotId(1)])
+    }
+
+    /// The coal a `Smelt` asks for, given a goal.
+    fn fuel_for(state: &PlanState, item: &str, count: u32) -> u32 {
+        let mut ctx = ExpansionCtx::new(state.fork(), BotId(1));
+        let steps = Smelt
+            .expand(
+                &Goal::Have {
+                    item: item.into(),
+                    count,
+                    whose: Holder::Anyone,
+                },
+                &mut ctx,
+            )
+            .expect("smelting expands");
+        steps
+            .iter()
+            .find_map(|step| match step {
+                Step::Subgoal(Goal::Have { item, count, .. }) if item == "coal" => Some(*count),
+                _ => None,
+            })
+            .expect("a fuel subgoal")
+    }
+
+    #[test]
+    fn fuel_scales_with_the_recipes_smelting_time() {
+        let state = state_knowing_steel();
+        // Ten runs either way. Iron plate burns 10 x 192 = 1920 ticks, inside
+        // one coal's 2666; steel burns 10 x 960 = 9600, which is four.
+        assert_eq!(fuel_for(&state, "iron-plate", 10), 1);
+        assert_eq!(
+            fuel_for(&state, "steel-plate", 10),
+            4,
+            "a flat plates-per-coal figure would say one, and the furnace \
+             would go out a quarter of the way through"
+        );
+    }
+
+    #[test]
+    fn one_coal_is_the_floor_however_little_is_smelted() {
+        let state = state(&[BotId(1)]);
+        assert_eq!(fuel_for(&state, "iron-plate", 1), 1);
     }
 
     #[test]

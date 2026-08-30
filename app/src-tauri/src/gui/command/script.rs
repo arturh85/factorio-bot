@@ -65,10 +65,23 @@ pub async fn execute_code(
         let world = world.clone();
         let rcon = instance_state.rcon.clone();
         let mut planner = Planner::new(world, Some(rcon));
-        let bot_count = app_settings.read().await.factorio.client_count;
-        let (stdout, stderr) = run_script(&mut planner, &language, &code, None, bot_count, true)
-          .await
-          .map_err(|e| format!("error: {e:?}"))?;
+        let app_settings = &app_settings.read().await;
+        let bot_count = app_settings.factorio.client_count;
+        let workspace_path = app_settings.factorio.workspace_path.to_string();
+        let scripts_root =
+          factorio_bot_core::scripts::ensure_scripts_dir(std::path::Path::new(&workspace_path))
+            .map_err(|e| format!("error: {e:?}"))?;
+        let (stdout, stderr) = run_script(
+          &mut planner,
+          &language,
+          &code,
+          None,
+          &scripts_root,
+          bot_count,
+          true,
+        )
+        .await
+        .map_err(|e| format!("error: {e:?}"))?;
         return Ok((stdout, stderr));
       }
       #[cfg(not(feature = "lua"))]

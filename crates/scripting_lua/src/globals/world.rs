@@ -1,17 +1,24 @@
+use factorio_bot_core::draw::draw_world;
 use factorio_bot_core::factorio::util::blueprint_build_area;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::factorio_blueprint::BlueprintCodec;
 use factorio_bot_core::mlua::prelude::*;
+use factorio_bot_core::scripts::resolve_write_path;
 use factorio_bot_core::serde_json;
-use factorio_bot_core::test_utils::draw_world;
 use factorio_bot_core::types::{FactorioBlueprintInfo, PlayerId, Position, Rect};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use super::relative_to;
+
+/// See [`crate::globals::create_lua_globals`] for why the sandbox needs both a
+/// `scripts_root` (the boundary) and a `script_dir` (what relative paths are
+/// resolved against).
 pub fn create_lua_world(
     lua: &Lua,
     _world: Arc<FactorioWorld>,
-    cwd: PathBuf,
+    scripts_root: PathBuf,
+    script_dir: PathBuf,
 ) -> LuaResult<LuaTable> {
     let map_table = lua.create_table()?;
     map_table.set(
@@ -194,11 +201,15 @@ end
 "#,
         ),
     )?;
+    let root = scripts_root;
+    let dir = script_dir;
     map_table.set(
         "draw",
         lua.create_function(move |_lua, save_path: String| {
-            draw_world(world.clone(), cwd.clone(), &save_path);
-            Ok(())
+            let resolved = resolve_write_path(&root, &relative_to(&root, &dir, &save_path))
+                .map_err(|err| LuaError::RuntimeError(err.to_string()))?;
+            draw_world(world.clone(), &resolved)
+                .map_err(|err| LuaError::RuntimeError(format!("{err}")))
         })?,
     )?;
 

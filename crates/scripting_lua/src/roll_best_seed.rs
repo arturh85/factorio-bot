@@ -175,11 +175,20 @@ pub async fn score_seed(
     world: Arc<FactorioWorld>,
     _seed: u32,
     lua_code: String,
+    scripts_root: &Path,
     bot_count: PlayerId,
 ) -> Result<f64> {
     let _rcon = rcon.clone();
     let mut planner = Planner::new(world, Some(_rcon.clone()));
-    run_lua(&mut planner, &lua_code, None, bot_count, false).await?;
+    run_lua(
+        &mut planner,
+        &lua_code,
+        None,
+        scripts_root,
+        bot_count,
+        false,
+    )
+    .await?;
     let mut score = 0.0;
 
     let weight = planner.graph().shortest_path().expect("no path found");

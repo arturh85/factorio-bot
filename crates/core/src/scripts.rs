@@ -412,6 +412,44 @@ mod tests {
         );
     }
 
+    /// Pins the `parent` bounds check specifically.
+    ///
+    /// This is the one input where the two `starts_with` guards disagree:
+    /// `target` is `parent.join(file_name)` with a single-component
+    /// `file_name`, so `target` can only be inside the root while `parent` is
+    /// outside it when the two are the *same* path -- climbing out of the root
+    /// and naming the root back. Without the `parent` check this resolves to
+    /// the scripts root itself, which is a directory a script has no business
+    /// being handed as a write destination.
+    #[test]
+    fn a_write_path_may_not_name_the_scripts_root_by_climbing_out_and_back() {
+        let (_dir, root) = root();
+        let name = root.file_name().expect("root has a name").to_string_lossy();
+        let err = resolve_write_path(&root, &format!("../{name}")).expect_err("refused");
+        assert!(
+            matches!(err, ScriptPathError::EscapesRoot { .. }),
+            "got {err:?}"
+        );
+    }
+
+    /// Pins the `is_absolute` check specifically.
+    ///
+    /// `a_write_path_may_not_be_absolute` uses a path outside the root, so the
+    /// bounds check refuses it even with the absolute check gone. An absolute
+    /// path that happens to land *inside* the root is what isolates the rule
+    /// "the argument is always root-relative" from the rule "the destination
+    /// is inside the root".
+    #[test]
+    fn a_write_path_may_not_be_absolute_even_when_it_points_inside_the_root() {
+        let (_dir, root) = root();
+        let inside = root.join("new.png");
+        let err = resolve_write_path(&root, &inside.to_string_lossy()).expect_err("refused");
+        assert!(
+            matches!(err, ScriptPathError::EscapesRoot { .. }),
+            "got {err:?}"
+        );
+    }
+
     #[test]
     fn a_write_path_may_not_escape_through_a_symlinked_parent() {
         let (dir, root) = root();

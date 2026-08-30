@@ -3,6 +3,7 @@ use factorio_bot_core::mlua::Variadic as LuaVariadic;
 use factorio_bot_core::num_traits::{FromPrimitive, ToPrimitive};
 use factorio_bot_core::paris::{error, info, warn};
 use factorio_bot_core::parking_lot::Mutex;
+use factorio_bot_core::scripts::{resolve_script_path, resolve_write_path};
 use factorio_bot_core::types::{Direction, PlayerId};
 use itertools::Itertools;
 use std::collections::HashMap;
@@ -10,10 +11,18 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use super::relative_to;
+
+/// `scripts_root` is the sandbox boundary: no binding installed here can reach
+/// a path outside it. `script_dir` is only what *relative* paths resolve
+/// against, so `include("lib.lua")` from `scripts/sub/foo.lua` still finds
+/// `scripts/sub/lib.lua`. Collapsing the two would break either nested scripts
+/// or the boundary.
 pub fn create_lua_globals(
     lua: &Lua,
     all_bots: Vec<PlayerId>,
-    cwd: PathBuf,
+    scripts_root: PathBuf,
+    script_dir: PathBuf,
     stdout: Arc<Mutex<String>>,
     stderr: Arc<Mutex<String>>,
     code_by_path: Arc<Mutex<HashMap<String, String>>>,
@@ -45,18 +54,19 @@ end
 "#,
         ),
     )?;
-    let _cwd = cwd.clone();
+    let root = scripts_root.clone();
+    let dir = script_dir.clone();
     map_table.set(
         "include",
         lua.create_function(move |lua, source_path: String| {
-            let content = fs::read_to_string(_cwd.join(&source_path).to_str().unwrap())
-                .expect("file not found");
+            let resolved = resolve_script_path(&root, &relative_to(&root, &dir, &source_path))
+                .map_err(|err| LuaError::RuntimeError(err.to_string()))?;
+            let content = fs::read_to_string(&resolved)
+                .map_err(|err| LuaError::RuntimeError(format!("{source_path}: {err}")))?;
             let mut code_by_path_lock = code_by_path.lock();
-            code_by_path_lock.insert(source_path.to_owned(), content.clone());
+            code_by_path_lock.insert(source_path.clone(), content.clone());
             drop(code_by_path_lock);
-            let chunk = lua.load(&content).set_name(&source_path);
-            chunk.exec().expect("failed to execute");
-            Ok(())
+            lua.load(&content).set_name(&source_path).exec()
         })?,
     )?;
     map_table.set(
@@ -71,13 +81,15 @@ end
 "#,
         ),
     )?;
-    let _cwd = cwd.clone();
+    let root = scripts_root.clone();
+    let dir = script_dir.clone();
     map_table.set(
         "file_read",
         lua.create_function(move |_lua, source_path: String| {
-            let content = fs::read_to_string(_cwd.join(source_path).to_str().unwrap())
-                .expect("file not found");
-            Ok(content)
+            let resolved = resolve_script_path(&root, &relative_to(&root, &dir, &source_path))
+                .map_err(|err| LuaError::RuntimeError(err.to_string()))?;
+            fs::read_to_string(&resolved)
+                .map_err(|err| LuaError::RuntimeError(format!("{source_path}: {err}")))
         })?,
     )?;
     map_table.set(
@@ -92,12 +104,15 @@ end
 "#,
         ),
     )?;
-    let _cwd = cwd;
+    let root = scripts_root;
+    let dir = script_dir;
     map_table.set(
         "file_write",
         lua.create_function(move |_lua, (target_path, contents): (String, String)| {
-            fs::write(_cwd.join(target_path).to_str().unwrap(), contents).expect("failed to write");
-            Ok(())
+            let resolved = resolve_write_path(&root, &relative_to(&root, &dir, &target_path))
+                .map_err(|err| LuaError::RuntimeError(err.to_string()))?;
+            fs::write(&resolved, contents)
+                .map_err(|err| LuaError::RuntimeError(format!("{target_path}: {err}")))
         })?,
     )?;
 

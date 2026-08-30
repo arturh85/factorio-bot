@@ -9,85 +9,108 @@ use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_core::serde_json;
 use factorio_bot_core::tokio::runtime::Runtime;
 use factorio_bot_scripting::{buffers_to_string, redirect_buffers};
-use miette::Result;
+use miette::{miette, IntoDiagnostic, Result};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 
+/// `scripts_root` bounds every filesystem operation the script can reach.
+/// `filename` is only used for error messages and for resolving `include`
+/// relative to the script's own directory; a `None` filename (inline code
+/// from the editor) simply resolves relative to the root.
 pub async fn run_lua(
     planner: &mut Planner,
     lua_code: &str,
     filename: Option<&str>,
+    scripts_root: &Path,
     bot_count: u8,
+    // Task 2 replaces this with an OutputSink
     redirect: bool,
 ) -> Result<(Option<serde_json::Value>, (String, String))> {
+    let scripts_root = scripts_root.to_path_buf();
     let buffers = redirect_buffers(redirect);
     let stdout: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     let stderr: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
-    let filename = filename.unwrap_or("unknown.lua").to_owned();
-    let cwd = Path::new(&filename)
+    let filename = filename.unwrap_or("<inline>").to_owned();
+    // Never derive this by canonicalizing `filename`'s parent: for a bare
+    // name that parent is `""`, which does not canonicalize, and the old
+    // `.expect()` there aborted the process on every inline run.
+    let script_dir = Path::new(&filename)
         .parent()
-        .expect("failed to find cwd")
-        .canonicalize()
-        .expect("failed to canonicalize");
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .and_then(|parent| std::fs::canonicalize(parent).ok())
+        .filter(|parent| parent.starts_with(&scripts_root))
+        .unwrap_or_else(|| scripts_root.clone());
     let mut code_by_path: HashMap<String, String> = HashMap::new();
     code_by_path.insert(filename.clone(), lua_code.to_owned());
     let code_by_path: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(code_by_path));
     let all_bots = planner.initiate_missing_players_with_default_inventory(bot_count);
     planner.update_plan_world();
     let lua_code = lua_code.to_owned();
-    let filename = filename.to_owned();
 
     let plan_world = planner.plan_world.clone();
     let graph = planner.graph.clone();
     let real_world = planner.real_world.clone();
     let rcon = planner.rcon.clone();
-    let cwd_buf = cwd.to_path_buf();
 
     let thread_stdout = stdout.clone();
     let thread_stderr = stderr.clone();
 
-    let result = thread::spawn(move || {
+    // Every fallible step below returns instead of unwrapping: this crate is
+    // built with `panic = "abort"`, so a panic anywhere in here is a remote
+    // kill of the whole server process, not a failed script.
+    let result = thread::spawn(move || -> Result<Option<serde_json::Value>> {
         let lua = Lua::new();
         let _code_by_path = code_by_path.clone();
-        let world = create_lua_world(&lua, plan_world.clone(), cwd_buf).unwrap();
-        let plan = create_lua_plan_builder(&lua, graph, plan_world).unwrap();
-        create_lua_globals(
-            &lua,
-            all_bots,
-            cwd.clone(),
-            thread_stdout,
-            thread_stderr,
-            _code_by_path,
-        )
-        .unwrap();
+        let setup = (|| -> LuaResult<()> {
+            let world = create_lua_world(
+                &lua,
+                plan_world.clone(),
+                scripts_root.clone(),
+                script_dir.clone(),
+            )?;
+            let plan = create_lua_plan_builder(&lua, graph, plan_world)?;
+            create_lua_globals(
+                &lua,
+                all_bots,
+                scripts_root,
+                script_dir,
+                thread_stdout,
+                thread_stderr,
+                _code_by_path,
+            )?;
 
-        let globals = lua.globals();
-        globals.set("world", world).unwrap();
-        globals.set("plan", plan).unwrap();
-        if let Some(rcon) = rcon.as_ref() {
-            let rcon = create_lua_rcon(&lua, rcon.clone(), real_world.clone()).unwrap();
-            globals.set("rcon", rcon).unwrap();
-        }
+            let globals = lua.globals();
+            globals.set("world", world)?;
+            globals.set("plan", plan)?;
+            if let Some(rcon) = rcon.as_ref() {
+                let rcon = create_lua_rcon(&lua, rcon.clone(), real_world.clone())?;
+                globals.set("rcon", rcon)?;
+            }
+            Ok(())
+        })();
+        let to_report = |err: LuaError| {
+            let code_by_path = code_by_path.lock().clone();
+            crate::error::to_lua_error(err, &code_by_path)
+        };
+        setup.map_err(to_report)?;
 
-        let rt: Runtime = Runtime::new().unwrap();
+        let rt: Runtime = Runtime::new().into_diagnostic()?;
         rt.block_on(async {
             let chunk = lua.load(&lua_code).set_name(&filename);
-            match chunk.exec_async().await {
-                Ok(_) => {
-                    let result: Option<LuaValue> = lua.globals().get("result").ok();
-                    Ok(result.map(|r| lua.from_value(r).unwrap()))
-                }
-                Err(err) => {
-                    let code_by_path = code_by_path.lock().clone();
-                    Err(crate::error::to_lua_error(err, &code_by_path))
-                }
+            chunk.exec_async().await.map_err(to_report)?;
+            // `result` is whatever the script assigned, so it can be a value
+            // serde cannot represent (a function, a table with a cycle).
+            // Unwrapping here would let a script abort the process.
+            match lua.globals().get::<LuaValue>("result") {
+                Ok(LuaValue::Nil) | Err(_) => Ok(None),
+                Ok(value) => Ok(Some(lua.from_value(value).map_err(to_report)?)),
             }
         })
     })
     .join()
-    .unwrap()?;
+    .map_err(|_| miette!("lua thread panicked"))??;
     let stdout: String = stdout.lock().to_owned();
     let stderr: String = stderr.lock().to_owned();
     let buffers = buffers_to_string(&stdout, &stderr, buffers)?;
@@ -102,6 +125,107 @@ mod tests {
     use tokio::fs;
 
     use super::*;
+
+    /// The repository checkout is the sandbox root for `test_script`: its
+    /// fixture script includes `scripts/lib.lua` from the repository root and
+    /// writes its output next to itself under `crates/scripting_lua/tests`.
+    fn repo_root() -> std::path::PathBuf {
+        std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(".."))
+            .expect("canonicalize repo root")
+    }
+
+    /// Runs `code` with the sandbox rooted at a fresh temp directory and returns
+    /// the run's error, if any. The temp dir is returned so the caller can assert
+    /// on what did and did not appear on disk.
+    async fn sandboxed(code: &str) -> (tempfile::TempDir, Result<()>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let world = Arc::new(fixture_world());
+        let mut planner = Planner::new(world, None);
+        let outcome = run_lua(&mut planner, code, None, &root, 1, false)
+            .await
+            .map(|_| ());
+        (dir, outcome)
+    }
+
+    #[tokio::test]
+    async fn a_script_cannot_write_outside_the_scripts_root() {
+        let victim = std::env::temp_dir().join(format!("pwned-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&victim);
+        let code = format!(
+            "file_write({:?}, \"owned\")",
+            victim.to_str().expect("utf8")
+        );
+        let (_dir, result) = sandboxed(&code).await;
+        assert!(result.is_err(), "the write should have been refused");
+        assert!(
+            !victim.exists(),
+            "the file was created outside the root: {}",
+            victim.display()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_script_cannot_climb_out_of_the_scripts_root() {
+        let (dir, result) = sandboxed("file_write(\"../pwned.txt\", \"owned\")").await;
+        assert!(result.is_err(), "the write should have been refused");
+        assert!(!dir
+            .path()
+            .parent()
+            .expect("parent")
+            .join("pwned.txt")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn a_script_cannot_read_outside_the_scripts_root() {
+        let (_dir, result) = sandboxed("file_read(\"/etc/hostname\")").await;
+        assert!(result.is_err(), "the read should have been refused");
+    }
+
+    #[tokio::test]
+    async fn a_script_cannot_include_code_from_outside_the_scripts_root() {
+        let (_dir, result) = sandboxed("include(\"../../../etc/hostname\")").await;
+        assert!(result.is_err(), "the include should have been refused");
+    }
+
+    #[tokio::test]
+    async fn a_script_cannot_draw_the_world_outside_the_scripts_root() {
+        let victim = std::env::temp_dir().join(format!("pwned-{}.png", std::process::id()));
+        let _ = std::fs::remove_file(&victim);
+        let code = format!("world.draw({:?})", victim.to_str().expect("utf8"));
+        let (_dir, result) = sandboxed(&code).await;
+        assert!(result.is_err(), "the draw should have been refused");
+        assert!(
+            !victim.exists(),
+            "the image was written outside the root: {}",
+            victim.display()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_script_may_write_inside_the_scripts_root() {
+        // The counterpart that keeps the five tests above honest: if the bindings
+        // were simply broken rather than bounded, they would all still pass.
+        let (dir, result) = sandboxed("file_write(\"ok.txt\", \"fine\")").await;
+        assert!(
+            result.is_ok(),
+            "an in-root write must still work: {result:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("ok.txt")).expect("written"),
+            "fine"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_without_a_filename_does_not_panic() {
+        // Guards the `Path::new("unknown.lua").parent() == Some("")` crash: `""`
+        // does not canonicalize, so the old code aborted the process before
+        // executing a line. `None` for the filename is what inline code passes.
+        let (_dir, result) = sandboxed("result = 1 + 1").await;
+        assert!(result.is_ok(), "{result:?}");
+    }
 
     #[tokio::test]
     async fn test_script() {
@@ -124,6 +248,7 @@ mod tests {
                 &mut planner,
                 include_str!("../tests/script.lua"),
                 Some(relative_path),
+                &repo_root(),
                 bot_count,
                 false,
             )
@@ -220,9 +345,11 @@ result = world.find_free_resource_rect("iron-ore", 2, 2, {x=0,y=200})
     }
 
     async fn result_test(bot_count: u8, code: &str, expected: serde_json::Value) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
         let world = Arc::new(fixture_world());
         let mut planner = Planner::new(world, None);
-        let (result, _) = run_lua(&mut planner, code, Some("./test.lua"), bot_count, false)
+        let (result, _) = run_lua(&mut planner, code, None, &root, bot_count, false)
             .await
             .expect("run_lua failed");
 

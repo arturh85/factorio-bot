@@ -11,17 +11,21 @@ use factorio_bot_scripting_lua::run_lua;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// `scripts_root` is the sandbox boundary handed to the interpreter: every
+/// filesystem operation the script can reach is bounded by it.
+#[allow(unused_variables)]
 pub async fn run_script(
   planner: &mut Planner,
   language: &str,
   code: &str,
   filename: Option<&str>,
+  scripts_root: &Path,
   bot_count: u8,
   redirect: bool,
 ) -> miette::Result<(String, String)> {
   match language {
     #[cfg(feature = "lua")]
-    "lua" => run_lua(planner, code, filename, bot_count, redirect)
+    "lua" => run_lua(planner, code, filename, scripts_root, bot_count, redirect)
       .await
       .map(|n| n.1),
     // #[cfg(feature = "rune")]
@@ -73,6 +77,7 @@ pub async fn run_script_file(
     language.unwrap(),
     &code,
     Some(full_path),
+    &workspace_plans_path,
     bot_count,
     redirect,
   )

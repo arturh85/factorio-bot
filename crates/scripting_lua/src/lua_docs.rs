@@ -19,21 +19,16 @@ pub fn write_lua_docs(target_path: PathBuf) -> LuaResult<()> {
     let stdout = Arc::new(Mutex::new(String::new()));
     let stderr = Arc::new(Mutex::new(String::new()));
     let planner = Planner::new(world, None);
-    let cwd = target_path.parent().expect("failed to find parent");
-    let world_table = create_lua_world(&lua, planner.plan_world.clone(), cwd.to_path_buf())?;
+    // Doc generation never executes a script, so the sandbox root only has to
+    // be a real directory; the bindings are introspected, not called.
+    let cwd = target_path.parent().unwrap_or(&target_path).to_path_buf();
+    let world_table = create_lua_world(&lua, planner.plan_world.clone(), cwd.clone(), cwd.clone())?;
     let plan_table =
         create_lua_plan_builder(&lua, planner.graph.clone(), planner.plan_world.clone())?;
     let rcon_table = create_lua_rcon(&lua, rcon, planner.real_world)?;
     let code_by_path: HashMap<String, String> = HashMap::new();
     let code_by_path: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(code_by_path));
-    create_lua_globals(
-        &lua,
-        vec![],
-        cwd.to_path_buf(),
-        stdout,
-        stderr,
-        code_by_path,
-    )?;
+    create_lua_globals(&lua, vec![], cwd.clone(), cwd, stdout, stderr, code_by_path)?;
 
     write_lua_doc(target_path.join("globals.lua"), &lua.globals());
     write_lua_doc(target_path.join("world.lua"), &world_table);

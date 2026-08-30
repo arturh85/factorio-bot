@@ -1949,6 +1949,7 @@ dependencies = [
  "itertools 0.14.0",
  "miette",
  "mlua",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
 ]

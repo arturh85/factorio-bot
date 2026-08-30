@@ -26,5 +26,12 @@ pub async fn run_script_file(
   let app_settings = load_app_settings()?;
   let workspace_path = PathBuf::from(app_settings.factorio.workspace_path.to_string());
   let scripts_root = factorio_bot_core::scripts::ensure_scripts_dir(&workspace_path)?;
-  factorio_bot_scripting_lua::run_script_file(planner, &scripts_root, path, bot_count, sink).await
+  // `run_script_file` reports a typed `RunScriptError` so the HTTP server can
+  // tell a missing script (404) from a refused traversal (400). Nothing behind
+  // this wrapper -- the GUI command, the CLI, the REPL -- does anything with
+  // the error but print it, so it is collapsed back to a `Report` here rather
+  // than propagated through three call sites that would only re-format it.
+  factorio_bot_scripting_lua::run_script_file(planner, &scripts_root, path, bot_count, sink)
+    .await
+    .map_err(factorio_bot_scripting_lua::RunScriptError::into_report)
 }

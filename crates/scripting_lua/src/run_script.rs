@@ -1,10 +1,88 @@
 use crate::run_lua;
 use factorio_bot_core::plan::planner::Planner;
-use factorio_bot_core::scripts::resolve_script_path;
+use factorio_bot_core::scripts::{resolve_script_path, ScriptPathError};
 use factorio_bot_scripting::OutputSink;
 use miette::{miette, IntoDiagnostic, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// Why a script could not be run.
+///
+/// The path cases are kept distinct from everything else because the HTTP
+/// layer answers them differently -- a missing script is the caller's typo
+/// (404), a script outside the root is a refused traversal (400), and a Lua
+/// failure is neither. Flattening these into a string forced the server to
+/// re-derive them by matching on message text, which breaks silently the
+/// first time someone rewords an error.
+#[derive(Debug, thiserror::Error)]
+pub enum RunScriptError {
+    #[error(transparent)]
+    Path(#[from] ScriptPathError),
+    #[error("unknown scripting file extension: {0}")]
+    UnknownExtension(String),
+    #[error("path is not a file: {0}")]
+    NotAFile(String),
+    /// Deliberately not `#[error(transparent)] Run(#[from] miette::Report)` as
+    /// first sketched: `miette::Report` (like `anyhow::Error`) does not
+    /// implement `std::error::Error`, so thiserror cannot make it a `source`
+    /// and that form does not compile. `Display` is forwarded by hand and the
+    /// `From` conversion is written out below instead.
+    #[error("{0}")]
+    Run(miette::Report),
+}
+
+impl From<miette::Report> for RunScriptError {
+    fn from(report: miette::Report) -> Self {
+        RunScriptError::Run(report)
+    }
+}
+
+impl RunScriptError {
+    /// Collapses back into a `miette::Report` for the callers that only
+    /// display the error -- the GUI command, the CLI and the REPL. The `Run`
+    /// arm is unwrapped rather than re-wrapped so a Lua failure keeps its
+    /// source snippet and diagnostic code; only the path/extension arms, which
+    /// carry no diagnostic of their own, become plain messages.
+    pub fn into_report(self) -> miette::Report {
+        match self {
+            RunScriptError::Run(report) => report,
+            other => miette!("{other}"),
+        }
+    }
+}
+
+/// A script name resolved to a file this crate knows how to run.
+#[derive(Debug, Clone)]
+pub struct ResolvedScript {
+    /// Canonical path, guaranteed to be inside the scripts root.
+    pub path: PathBuf,
+    /// The scripting language chosen by the file's extension.
+    pub language: &'static str,
+}
+
+/// Turns a client-supplied script name into a runnable file, or says exactly
+/// why it is not one.
+///
+/// Split out of [`run_script_file`] because the HTTP server has to answer the
+/// "is this a script I can run" question *before* it accepts the request: it
+/// returns `202` and runs the script on a detached task, so by the time
+/// `run_script_file` fails there is no status code left to put the failure in.
+/// Sharing this function is what keeps the pre-flight check and the run from
+/// drifting apart -- the alternative, re-implementing the checks in the
+/// handler, is how the two would come to disagree about which names are
+/// runnable.
+pub fn resolve_script(
+    scripts_root: &Path,
+    requested: &str,
+) -> std::result::Result<ResolvedScript, RunScriptError> {
+    let path = resolve_script_path(scripts_root, requested)?;
+    if !path.is_file() {
+        return Err(RunScriptError::NotAFile(requested.to_owned()));
+    }
+    let language = language_by_filename(requested)
+        .ok_or_else(|| RunScriptError::UnknownExtension(requested.to_owned()))?;
+    Ok(ResolvedScript { path, language })
+}
 
 /// Maps a filename to the scripting language that runs it.
 pub fn language_by_filename(filename: &str) -> Option<&'static str> {
@@ -38,19 +116,14 @@ pub async fn run_script_file(
     requested: &str,
     bot_count: u8,
     sink: Option<Arc<dyn OutputSink>>,
-) -> Result<(String, String)> {
-    let resolved = resolve_script_path(scripts_root, requested).map_err(|err| miette!("{err}"))?;
-    if !resolved.is_file() {
-        return Err(miette!("path is not a file: {requested}"));
-    }
-    let language = language_by_filename(requested)
-        .ok_or_else(|| miette!("unknown scripting file extension: {requested}"))?;
-    let code = std::fs::read_to_string(&resolved).into_diagnostic()?;
+) -> std::result::Result<(String, String), RunScriptError> {
+    let ResolvedScript { path, language } = resolve_script(scripts_root, requested)?;
+    let code = std::fs::read_to_string(&path).into_diagnostic()?;
     // The resolved absolute path, not the request: `include` resolves relative
     // to the script's own directory, and errors should name the real file.
-    let filename = resolved.to_string_lossy().into_owned();
+    let filename = path.to_string_lossy().into_owned();
     match language {
-        "lua" => run_lua(
+        "lua" => Ok(run_lua(
             planner,
             &code,
             Some(&filename),
@@ -59,8 +132,10 @@ pub async fn run_script_file(
             sink,
         )
         .await
-        .map(|outcome| outcome.1),
-        other => Err(miette!("unknown language: \"{other}\"")),
+        .map(|outcome| outcome.1)?),
+        other => Err(RunScriptError::Run(miette!(
+            "unknown language: \"{other}\""
+        ))),
     }
 }
 
@@ -192,6 +267,68 @@ mod tests {
             .await
             .expect_err("should be refused");
         assert!(format!("{err}").contains("not a file"), "error was {err}");
+    }
+
+    /// The distinction the HTTP layer turns into 404 (a typo) versus 400 (a
+    /// refused traversal).
+    ///
+    /// Asserted on the *variant*, never on the message. Before this type
+    /// existed `run_script_file` flattened both into a string with
+    /// `miette!("{err}")`, and the only way for a caller to recover the split
+    /// was to match on message text -- which turns rewording an error into a
+    /// silent status-code regression that nothing fails on. A test that
+    /// asserted the text would pass just as happily against the flattened
+    /// version, which is exactly why this one does not.
+    #[test]
+    fn a_missing_script_and_an_escaping_script_are_distinguishable_arms() {
+        let (dir, root) = fixture();
+        // Same fixture requirement as `a_script_outside_the_root_is_refused`:
+        // the escape attempt must land on a file that really exists outside
+        // the root, or `NotFound` answers it and the split is never exercised.
+        let outside = std::fs::canonicalize(dir.path().join("outside.lua")).expect("canonicalize");
+        assert!(
+            !outside.starts_with(&root),
+            "fixture bug: outside.lua ended up under root"
+        );
+
+        assert!(
+            matches!(
+                resolve_script(&root, "/nope.lua"),
+                Err(RunScriptError::Path(ScriptPathError::NotFound { .. }))
+            ),
+            "a missing script must stay distinguishable as NotFound"
+        );
+        assert!(
+            matches!(
+                resolve_script(&root, "../outside.lua"),
+                Err(RunScriptError::Path(ScriptPathError::EscapesRoot { .. }))
+            ),
+            "a traversal must stay distinguishable as EscapesRoot"
+        );
+    }
+
+    /// The non-path arms, so a caller matching on `Path` cannot accidentally
+    /// be handed one of these instead.
+    #[test]
+    fn a_directory_and_an_unknown_extension_are_their_own_arms() {
+        let (_dir, root) = fixture();
+        std::fs::create_dir_all(root.join("sub.lua")).expect("mkdir");
+        std::fs::write(root.join("notes.txt"), "hello").expect("write");
+
+        assert!(
+            matches!(
+                resolve_script(&root, "/sub.lua"),
+                Err(RunScriptError::NotAFile(_))
+            ),
+            "a directory is not a missing file"
+        );
+        assert!(
+            matches!(
+                resolve_script(&root, "/notes.txt"),
+                Err(RunScriptError::UnknownExtension(_))
+            ),
+            "a file with no interpreter is not a missing file"
+        );
     }
 
     #[test]

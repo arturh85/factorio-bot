@@ -4,7 +4,6 @@ use crate::state::AppState;
 use axum::extract::State;
 use axum::Json;
 use factorio_bot_core::app_settings::AppSettings;
-use factorio_bot_core::paths::settings_file;
 
 /// Returns the current application settings
 #[utoipa::path(
@@ -37,6 +36,6 @@ pub async fn put_settings(
 ) -> ApiResult<AppSettings> {
     let mut settings = state.settings.write().await;
     *settings = body;
-    AppSettings::save(settings_file(), &settings).map_err(ErrorResponse::from)?;
+    AppSettings::save(state.settings_path.clone(), &settings).map_err(ErrorResponse::from)?;
     Ok(Json(settings.clone()))
 }

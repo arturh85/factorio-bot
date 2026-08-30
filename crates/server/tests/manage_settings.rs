@@ -6,10 +6,18 @@ use factorio_bot_server::state::AppState;
 use factorio_bot_server::webserver::build_router;
 use tower::ServiceExt;
 
+/// `settings_path` points inside a fresh, per-call temp directory rather than
+/// `AppState::new`'s real `paths::settings_file()`: a `PUT` that reaches
+/// `AppSettings::save` must never write to a developer's actual settings
+/// file just because the test suite ran.
 fn test_state() -> AppState {
     AppState {
         instance: FactorioInstance::new_shared(),
         settings: AppSettings::default().into_shared(),
+        settings_path: tempfile::tempdir()
+            .expect("tempdir")
+            .keep()
+            .join("AppSettings.toml"),
     }
 }
 
@@ -34,9 +42,18 @@ async fn get_settings_returns_the_current_settings() {
     assert!(settings.get("factorio").is_some());
 }
 
+/// This is also the test that proves persistence, not just the in-memory
+/// mutation: `settings_path` points inside a `tempfile::TempDir` that this
+/// test owns, and it reads that exact file back off disk afterwards.
 #[tokio::test]
 async fn put_settings_updates_the_shared_state() {
-    let state = test_state();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let settings_path = dir.path().join("AppSettings.toml");
+    let state = AppState {
+        instance: FactorioInstance::new_shared(),
+        settings: AppSettings::default().into_shared(),
+        settings_path: settings_path.clone(),
+    };
     let mut updated = AppSettings::default();
     updated.factorio.client_count = 4;
     let body = serde_json::to_string(&updated).unwrap();
@@ -55,6 +72,12 @@ async fn put_settings_updates_the_shared_state() {
 
     assert!(response.status().is_success(), "got {}", response.status());
     assert_eq!(state.settings.read().await.factorio.client_count, 4);
+
+    let persisted = AppSettings::load(settings_path).expect("settings file was written");
+    assert_eq!(
+        persisted.factorio.client_count, 4,
+        "PUT must persist to settings_path, not just mutate memory"
+    );
 }
 
 #[tokio::test]

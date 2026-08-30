@@ -9,9 +9,9 @@ use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 fn state_with_web_root(dir: &std::path::Path) -> AppState {
-    AppState {
-        instance: Arc::new(RwLock::new(None)),
-        settings: AppSettings {
+    AppState::new(
+        Arc::new(RwLock::new(None)),
+        AppSettings {
             restapi: RestApiSettings {
                 port: 7492,
                 web_root: Some(dir.to_string_lossy().into_owned()),
@@ -19,7 +19,7 @@ fn state_with_web_root(dir: &std::path::Path) -> AppState {
             ..Default::default()
         }
         .into_shared(),
-    }
+    )
 }
 
 #[tokio::test]
@@ -89,10 +89,10 @@ async fn api_404_is_not_swallowed_by_the_spa_fallback() {
 }
 
 fn state_without_web_root() -> AppState {
-    AppState {
-        instance: Arc::new(RwLock::new(None)),
-        settings: AppSettings::default().into_shared(),
-    }
+    AppState::new(
+        Arc::new(RwLock::new(None)),
+        AppSettings::default().into_shared(),
+    )
 }
 
 /// The JSON error contract must not depend on whether a frontend is deployed.

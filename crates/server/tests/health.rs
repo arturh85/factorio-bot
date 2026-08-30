@@ -8,10 +8,10 @@ use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 fn test_state() -> AppState {
-    AppState {
-        instance: Arc::new(RwLock::new(None)),
-        settings: AppSettings::default().into_shared(),
-    }
+    AppState::new(
+        Arc::new(RwLock::new(None)),
+        AppSettings::default().into_shared(),
+    )
 }
 
 #[tokio::test]

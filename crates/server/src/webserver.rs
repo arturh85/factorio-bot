@@ -53,10 +53,7 @@ pub async fn start_with_shutdown(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     let web_root = settings.read().await.restapi.web_root.clone();
-    let state = AppState {
-        instance: instance_state.clone(),
-        settings,
-    };
+    let state = AppState::new(instance_state.clone(), settings);
     let app = build_router(state, web_root.as_deref());
     let listener = tokio::net::TcpListener::bind(bind)
         .await

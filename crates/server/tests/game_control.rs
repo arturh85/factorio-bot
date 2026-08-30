@@ -11,10 +11,10 @@ use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 fn test_state() -> AppState {
-    AppState {
-        instance: Arc::new(RwLock::new(None)),
-        settings: AppSettings::default().into_shared(),
-    }
+    AppState::new(
+        Arc::new(RwLock::new(None)),
+        AppSettings::default().into_shared(),
+    )
 }
 
 async fn post(uri: &str, body: &str) -> (StatusCode, String) {
@@ -101,8 +101,8 @@ async fn get_is_not_allowed_on_mutating_routes() {
 /// any real rcon round-trip panics inside `FactorioRcon::send` on
 /// `self.pool.as_ref().unwrap()` (`crates/core/src/factorio/rcon.rs:85`).
 fn unknown_player_state() -> AppState {
-    AppState {
-        instance: Arc::new(RwLock::new(Some(FactorioInstance {
+    AppState::new(
+        Arc::new(RwLock::new(Some(FactorioInstance {
             world: Some(Arc::new(FactorioWorld::new())),
             rcon: Arc::new(FactorioRcon::new_empty()),
             server_process: None,
@@ -115,8 +115,8 @@ fn unknown_player_state() -> AppState {
             map_exchange_string: None,
             seed: None,
         }))),
-        settings: AppSettings::default().into_shared(),
-    }
+        AppSettings::default().into_shared(),
+    )
 }
 
 /// `move_player`'s only source of a "player not found" error is the

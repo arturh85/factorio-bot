@@ -1,4 +1,4 @@
-use crate::ids::{ActionId, BotId, ItemId};
+use crate::ids::{ActionId, BotId, ChainId, ItemId};
 use miette::Diagnostic;
 use thiserror::Error;
 
@@ -31,6 +31,21 @@ pub enum PlannerError {
         action: ActionId,
         bot: BotId,
         condition: String,
+    },
+
+    /// Deliberately not a `PreconditionUnsatisfied`: that variant means "the
+    /// world was not as planned", which the spec answers by re-planning from
+    /// observed state. A pin that contradicts a chain binding is not about the
+    /// world at all — re-planning would produce the same contradiction forever.
+    #[error(
+        "action {action:?} is pinned to {pinned_to}, but its chain {chain:?} is already bound to {bound_to}"
+    )]
+    #[diagnostic(code(planner::chain_conflict))]
+    ChainConflict {
+        chain: ChainId,
+        action: ActionId,
+        bound_to: BotId,
+        pinned_to: BotId,
     },
 
     #[error("no bots supplied to the scheduler")]

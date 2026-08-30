@@ -173,6 +173,42 @@ impl Effect {
     }
 }
 
+/// Which inventory of a target entity an insert or remove addresses.
+///
+/// Deliberately semantic rather than numeric. Factorio's `defines.inventory`
+/// integers are entity-type dependent — the same number means different things
+/// for a chest and a furnace (see `mods/BotBridge/control.lua`
+/// `inventory_type_name(invtype, enttype)`) — and they move between game
+/// versions. The executor resolves these to numbers against the running game.
+///
+/// Ordering is derived and load-bearing: the planner is deterministic, so every
+/// type reachable from an `ActionNetwork` must order totally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum InventorySlot {
+    Chest,
+    FurnaceSource,
+    FurnaceResult,
+    Fuel,
+    AssemblerInput,
+    AssemblerOutput,
+    LabInput,
+}
+
+impl InventorySlot {
+    /// The name used to look this slot up in the game's `defines.inventory`.
+    pub fn defines_key(self) -> &'static str {
+        match self {
+            InventorySlot::Chest => "chest",
+            InventorySlot::FurnaceSource => "furnace_source",
+            InventorySlot::FurnaceResult => "furnace_result",
+            InventorySlot::Fuel => "fuel",
+            InventorySlot::AssemblerInput => "assembling_machine_input",
+            InventorySlot::AssemblerOutput => "assembling_machine_output",
+            InventorySlot::LabInput => "lab_input",
+        }
+    }
+}
+
 /// What a bot physically does. Carries the payload the executor needs;
 /// the planner reasons from `pre` and `eff`, never from this.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -191,11 +227,15 @@ pub enum ActionKind {
     },
     Insert {
         pos: Position,
+        entity: String,
+        slot: InventorySlot,
         item: ItemId,
         count: u32,
     },
     Remove {
         pos: Position,
+        entity: String,
+        slot: InventorySlot,
         item: ItemId,
         count: u32,
     },
@@ -465,5 +505,41 @@ mod tests {
             count: 2,
         };
         assert_eq!(cond.to_string(), "has 2 coal");
+    }
+
+    #[test]
+    fn an_insert_names_the_entity_and_slot_it_targets() {
+        let a = ActionKind::Insert {
+            pos: Position::new(3.0, 4.0),
+            entity: "stone-furnace".to_string(),
+            slot: InventorySlot::FurnaceSource,
+            item: "iron-ore".into(),
+            count: 8,
+        };
+        match a {
+            ActionKind::Insert { entity, slot, .. } => {
+                assert_eq!(entity, "stone-furnace");
+                assert_eq!(slot, InventorySlot::FurnaceSource);
+            }
+            _ => panic!("expected Insert"),
+        }
+    }
+
+    #[test]
+    fn inventory_slots_order_deterministically() {
+        let mut v = vec![
+            InventorySlot::FurnaceResult,
+            InventorySlot::Chest,
+            InventorySlot::FurnaceSource,
+        ];
+        v.sort();
+        assert_eq!(
+            v,
+            vec![
+                InventorySlot::Chest,
+                InventorySlot::FurnaceSource,
+                InventorySlot::FurnaceResult
+            ]
+        );
     }
 }

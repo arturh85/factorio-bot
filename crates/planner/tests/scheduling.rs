@@ -1,6 +1,6 @@
 use factorio_bot_core::test_utils::fixture_world;
 use factorio_bot_core::types::{FactorioEntity, Position};
-use factorio_bot_planner::action::{Action, ActionKind, Actor, Condition, Effect};
+use factorio_bot_planner::action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot};
 use factorio_bot_planner::ids::ActionIdGen;
 use factorio_bot_planner::{
     schedule, ActionId, ActionNetwork, BotId, PlanState, PlannerError, Schedule, ScheduledStep,
@@ -99,6 +99,8 @@ fn insert_at(gen: &mut ActionIdGen, pos: &Position) -> Action {
         id: gen.next(),
         kind: ActionKind::Insert {
             pos: pos.clone(),
+            entity: "stone-furnace".into(),
+            slot: InventorySlot::FurnaceSource,
             item: "iron-ore".into(),
             count: 1,
         },

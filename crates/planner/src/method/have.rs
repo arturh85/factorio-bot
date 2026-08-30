@@ -17,7 +17,7 @@
 //! producing is a chain with two roots, and neither root has a `HasItem`
 //! precondition to hold it near the other. Red science is exactly that shape.
 
-use crate::action::{Action, ActionKind, Actor, Condition, Effect};
+use crate::action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot};
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::ids::{BotId, Ticks};
@@ -144,8 +144,9 @@ impl Method for Smelt {
             .map(|b| b.reach_distance)
             .unwrap_or(10.0);
 
+        let furnace_entity: String = "stone-furnace".into();
         let furnace = FactorioEntity {
-            name: "stone-furnace".into(),
+            name: furnace_entity.clone(),
             entity_type: "furnace".into(),
             position: pos.clone(),
             ..Default::default()
@@ -213,6 +214,8 @@ impl Method for Smelt {
                 id,
                 kind: ActionKind::Insert {
                     pos: pos.clone(),
+                    entity: furnace_entity.clone(),
+                    slot: InventorySlot::FurnaceSource,
                     item: ingredient.clone(),
                     count: total,
                 },
@@ -249,6 +252,8 @@ impl Method for Smelt {
             id: fuel_id,
             kind: ActionKind::Insert {
                 pos: pos.clone(),
+                entity: furnace_entity.clone(),
+                slot: InventorySlot::Fuel,
                 item: "coal".into(),
                 count: coal,
             },
@@ -283,6 +288,8 @@ impl Method for Smelt {
             id: remove_id,
             kind: ActionKind::Remove {
                 pos: pos.clone(),
+                entity: furnace_entity.clone(),
+                slot: InventorySlot::FurnaceResult,
                 item: item.clone(),
                 count: need,
             },

@@ -8,7 +8,7 @@ pub mod render;
 pub mod schedule;
 pub mod state;
 
-pub use action::{Action, ActionKind, Actor, Condition, Effect};
+pub use action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot};
 pub use error::PlannerError;
 pub use goal::{Goal, Holder};
 pub use ids::{ActionId, ActionIdGen, BotId, ChainId, ChainIdGen, ItemId, Ticks};

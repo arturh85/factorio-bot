@@ -504,6 +504,8 @@ mod tests {
             id: gen.next(),
             kind: ActionKind::Insert {
                 pos: pos.clone(),
+                entity: "stone-furnace".into(),
+                slot: crate::action::InventorySlot::FurnaceSource,
                 item: "iron-ore".into(),
                 count: 1,
             },

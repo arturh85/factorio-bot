@@ -104,16 +104,19 @@ fn more_bots_finish_sooner() {
     let net_four = expand(&[goal(4)], &state_four, &registry_for(&four), BotId(1)).unwrap();
     let many = schedule(&net_four, &state_four, &four).unwrap().makespan;
 
-    // The four-vs-one speedup on this scenario is 2.27x (one = 6173, many =
-    // 2717). That speedup is itself down from 2.45x (many was 2523) before
-    // task 2 of the planner-hardening pass narrowed `infer_edges` to drop
-    // only inventory-scoped pairings across chains — restricting inference
-    // regressed this particular scenario's makespan by 194 ticks (7.7%),
-    // a known greedy-list-scheduling anomaly (see task-2-report.md), not a
-    // correctness defect. `many * 2 < one` still passes with 369 ticks of
-    // headroom (13.6%): the floor is 2x, not the measured 2.27x, so this
-    // guard survives ordinary makespan movement in later tasks without being
-    // so loose that a repeat of this task's 194-tick regression is invisible.
+    // Measured on this scenario: one = 4749, many = 1843, a 2.577x speedup.
+    //
+    // Both figures moved twice during the planner-hardening pass and this
+    // comment is the crate's only record of them, so it states what was
+    // actually measured rather than what an earlier task predicted. Task 2
+    // narrowed `infer_edges` to drop only inventory-scoped pairings across
+    // chains and cost 194 ticks here (2523 -> 2717), a greedy-list-scheduling
+    // anomaly rather than a correctness defect; task 4 then sited furnaces at
+    // the ore instead of the origin and took one from 6173 to 4749 and many
+    // from 2717 to 1843, lifting the ratio from 2.27x to 2.577x.
+    //
+    // The floor stays 2x rather than the measured 2.577x, so ordinary
+    // makespan movement does not trip it.
     assert!(
         many.saturating_mul(2) < one,
         "four bots ({} ticks) must beat one ({} ticks) by more than 2x",
@@ -121,10 +124,12 @@ fn more_bots_finish_sooner() {
         one
     );
     // Absolute ceiling: catches a regression even if `one` also moves in a
-    // way that keeps the 2x ratio satisfied. 3200 gives headroom above the
-    // measured 2717 without being so loose that this task's own 194-tick
-    // regression (2523 -> 2717) would have passed silently.
-    assert!(many < 3200, "four bots regressed past 3200 ticks: {}", many);
+    // way that keeps the 2x ratio satisfied. 2100 sits 257 ticks (14%) above
+    // the measured 1843 — room for ordinary movement, but tight enough that a
+    // repeat of task 2's 194-tick regression fails here instead of passing
+    // silently. Retighten it whenever the measured figure drops again: a
+    // ceiling with 74% headroom, which 3200 became, guards nothing.
+    assert!(many < 2100, "four bots regressed past 2100 ticks: {}", many);
 }
 
 #[test]

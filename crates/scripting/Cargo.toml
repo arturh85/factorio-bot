@@ -9,5 +9,8 @@ tag = false
 push = false
 publish = false
 
+# No dependencies. This crate is deliberately a leaf: it holds `line_offset`
+# and the `OutputSink` trait, both of which `crates/scripting_lua` consumes.
+# It depended on factorio-bot-core only for the miette types used by
+# `buffers_to_string`, which went with the gag redirect.
 [dependencies]
-factorio-bot-core = { path = "../core" }

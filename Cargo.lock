@@ -1934,9 +1934,6 @@ dependencies = [
 [[package]]
 name = "factorio-bot-scripting"
 version = "0.2.4-dev"
-dependencies = [
- "factorio-bot-core",
-]
 
 [[package]]
 name = "factorio-bot-scripting-lua"

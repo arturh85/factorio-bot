@@ -106,11 +106,19 @@ mod tests {
         ActionId(0)
     }
 
-    /// A one-action network (a `Mine`) preceded by a `Walk` step, both for
-    /// `BotId(0)`.
+    /// The action scheduled right after the mine in `walk_then_mine_fixture`.
+    /// Exists so `a_failed_step_is_logged_and_stops_that_bot` has something
+    /// to prove was *never attempted* — a fixture whose failing step is last
+    /// cannot distinguish "stops" from "there was nothing left to do".
+    fn craft_action_id() -> ActionId {
+        ActionId(1)
+    }
+
+    /// A two-action network (`Mine` then `Craft`) preceded by a `Walk` step,
+    /// all for `BotId(0)`.
     fn walk_then_mine_fixture() -> (ActionNetwork, Schedule) {
         let mut net = ActionNetwork::new();
-        let action = Action {
+        let mine = Action {
             id: mine_action_id(),
             kind: ActionKind::Mine {
                 pos: Position::new(10., 10.),
@@ -131,7 +139,21 @@ mod tests {
             pinned: None,
             label: "mine 1 iron-ore".into(),
         };
-        net.add(action);
+        net.add(mine);
+
+        let craft = Action {
+            id: craft_action_id(),
+            kind: ActionKind::Craft {
+                item: "iron-gear-wheel".into(),
+                count: 1,
+            },
+            pre: vec![],
+            eff: vec![],
+            duration: 30,
+            pinned: None,
+            label: "craft 1 iron-gear-wheel".into(),
+        };
+        net.add(craft);
 
         let sched = Schedule {
             steps: vec![
@@ -152,8 +174,17 @@ mod tests {
                     start: 60,
                     end: 120,
                 },
+                ScheduledStep {
+                    what: StepKind::Act {
+                        action: craft_action_id(),
+                        label: "craft 1 iron-gear-wheel".into(),
+                    },
+                    bot: BotId(0),
+                    start: 120,
+                    end: 150,
+                },
             ],
-            makespan: 120,
+            makespan: 150,
         };
         (net, sched)
     }
@@ -170,12 +201,17 @@ mod tests {
             .times(1)
             .in_sequence(&mut seq)
             .returning(|_, _, _, _| Ok(()));
+        act.expect_craft()
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _, _| Ok(()));
 
         let (net, sched) = walk_then_mine_fixture();
         let log = run_bot(&act, BotId(0), &sched, &net).await;
 
         assert_eq!(log.failed(), vec![]);
         assert_eq!(log.status(mine_action_id()), Status::Success);
+        assert_eq!(log.status(craft_action_id()), Status::Success);
     }
 
     #[tokio::test]
@@ -184,11 +220,21 @@ mod tests {
         act.expect_walk().returning(|_, _| Ok(()));
         act.expect_mine()
             .returning(|_, _, _, _| Err(ActuatorError::Rejected("out of reach".into())));
+        // The craft step follows the failing mine in the schedule. If
+        // `run_bot` pressed on after the failure instead of stopping, this
+        // is what it would dispatch next.
+        act.expect_craft().times(0);
 
         let (net, sched) = walk_then_mine_fixture();
         let log = run_bot(&act, BotId(0), &sched, &net).await;
 
         assert_eq!(log.failed(), vec![mine_action_id()]);
+        assert_eq!(
+            log.status(craft_action_id()),
+            Status::Pending,
+            "run_bot must stop at the first failure, not merely record it \
+             and press on"
+        );
     }
 
     #[tokio::test]
@@ -198,6 +244,7 @@ mod tests {
         let mut act = MockAct::new();
         act.expect_walk().times(1).returning(|_, _| Ok(()));
         act.expect_mine().times(1).returning(|_, _, _, _| Ok(()));
+        act.expect_craft().times(1).returning(|_, _, _| Ok(()));
 
         let (net, mut sched) = walk_then_mine_fixture();
         sched.steps.push(ScheduledStep {
@@ -212,6 +259,7 @@ mod tests {
         let log = run_bot(&act, BotId(0), &sched, &net).await;
         assert_eq!(log.failed(), vec![]);
         assert_eq!(log.status(mine_action_id()), Status::Success);
+        assert_eq!(log.status(craft_action_id()), Status::Success);
     }
 
     #[tokio::test]

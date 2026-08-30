@@ -1571,6 +1571,28 @@ Write that test's body in full using the existing `SHORT_GRACE_PERIOD` constant:
 
 - [ ] **Step 2: Run and watch them fail**
 
+### Two facts from Task 5 you must design around
+
+**1. `subscribe` returns `None` for *two different reasons*.** The broadcast channel is pruned when a job completes, so `None` means either "no such job" **or** "the job finished". The handler must call `get` to tell them apart: unknown → **404**; finished → replay the buffered output, emit `finished`, close. Treating `None` as 404 uniformly would make `GET /jobs/{id}/events` fail for every job that completed before the client attached — which is most of them, since a fast script finishes before a browser opens the stream. `the_event_stream_replays_a_finished_job_and_ends` is exactly this case.
+
+**2. `JobEvent` is not `Serialize`.** `Stream` comes from `crates/scripting`, which is deliberately dependency-free (no serde), so `JobEvent` cannot derive it. Map to a wire shape owned by this module rather than reaching for a serde derive on someone else's type:
+
+```rust
+/// The wire form of a job event.
+///
+/// `JobEvent` itself cannot derive `Serialize`: its `Stream` comes from
+/// `crates/scripting`, which has no dependencies at all -- that crate is a leaf
+/// on purpose, and adding serde to it to satisfy a transport concern would put
+/// the wire format's tail in the wrong crate.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WireEvent<'a> {
+    Output { stream: &'a str, text: &'a str },
+    Finished { status: JobStatus },
+    Lagged { skipped: u64 },
+}
+```
+
 - [ ] **Step 3: Implement the SSE handler**
 
 Use `axum::response::sse::{Event, KeepAlive, Sse}` over a `tokio_stream::wrappers::BroadcastStream`, prefixed with the job's buffered output so a late subscriber sees the whole run. Terminate the stream on `JobEvent::Finished`. Add `KeepAlive::default()` so proxies do not drop an idle connection.

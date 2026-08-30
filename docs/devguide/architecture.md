@@ -13,6 +13,9 @@ graph LR
         B --> C[crates/core]
         B --> D[crates/scripting + scripting_lua]
         B --> E[crates/server]
+        D --> P[crates/planner]
+        D --> X[crates/executor]
+        P -->|Schedule| X
     end
     subgraph Factorio Runtime
         F[Server Instance]
@@ -42,45 +45,120 @@ sequenceDiagram
 
     User->>UI: Select script + start
     UI->>Core: IPC start request
-    Core->>Core: Spin up server + clients, inject mods
+    Core->>Core: Preflight mod version, extract archive per instance
+    Core->>Core: Spin up server + N clients
     Core->>RCON: Issue bootstrap commands
     RCON->>Mod: deliver commands/state
-    Mod-->>Core: Stream recipes, entities, events
-    Core-->>UI: Push graphs + progress
+    Mod-->>Core: Recipes, prototypes, entities, player inventories
+    Core-->>UI: Script output & progress
     Core-->>User: Log & telemetry
 ```
 
+The desktop app is not the only entry point: the same `Context` is driven from
+the CLI (`factorio-bot lua`, `start`, `serve`, `rcon`, `repl`, `roll-seed`,
+`config`) and, for `serve`, from the HTTP API. `app/src-tauri/src/cli/`
+assembles the clap command; each subcommand is a `Subcommand` impl.
+
 ### Subsystems (Rust workspace)
-- **`crates/core`**: Owns launching Factorio binaries, configuring saves/mod sets, scheduling tasks, and building domain graphs (entity/flow/task). Provides graph traversal utilities (`graph/`, `plan/`, `process/`) and shared data models in `types.rs`.
-- **`crates/scripting` + `crates/scripting_lua`**: Wrap Lua (via `mlua`) and expose typed host functions so scripts can queue tasks, query graphs, or issue direct commands. Also contains the REPL/minimal runtime used for smoke tests.
+- **`crates/core`**: Owns launching Factorio binaries, configuring saves/mod sets, RCON, and the world model. `graph/` holds the entity and flow graphs, `process/` the instance setup and process control, `types.rs` the shared data models. `plan/planner.rs` survives only as a context holder (`real_world`, `plan_world`, `initiate_missing_players_with_default_inventory`); the search that used to live next to it is gone.
+- **`crates/planner`**: Pure, deterministic goal decomposition. No I/O — no tokio, no RCON, no filesystem — and `BTreeMap`/`BTreeSet` throughout, so the same inputs always produce the same plan. See below.
+- **`crates/executor`**: Runs a `Schedule` across bots over RCON. Depends on `planner` for the plan types and on `core` for RCON. See below.
+- **`crates/scripting` + `crates/scripting_lua`**: Wrap Lua (via `mlua`) and expose typed host functions so scripts can declare goals, query the world, or issue direct RCON commands. `scripting_lua` is the only crate that depends on both `planner` and `executor`. Also contains the REPL/minimal runtime used for smoke tests.
 - **`crates/server`**: axum HTTP server that mirrors the Lua controls for remote automation and monitoring. Routes and the OpenAPI spec are generated together with `utoipa`/`utoipa-axum` (Swagger UI at `/swagger-ui`, spec at `/openapi.json`), and the same server also serves the built Vue SPA from the configured web root.
-- **`src-tauri`**: IPC boundary for the desktop app. Commands forward to the Rust workspace, debounce UI requests, and proxy file-system interactions (config, scripts, mod archives).
+- **`app/src-tauri`**: the shipped binary. It is both the Tauri IPC boundary for the desktop app and the host of the CLI (`src/cli/`) and the shared `Context`. Cargo features split the two: `default = ["gui", "restapi", "repl", "cli", "lua"]`, only `gui` pulls Tauri in, so `--no-default-features --features cli,lua` builds a binary with no Tauri and no GUI toolkit dependency. That is the shape `just factorio` (`cli,repl`), `just lua` (`cli,lua`) and `cargo repl` (`repl,lua,tokio-console`) all build.
 
 ### Factorio orchestration
-- **Bootstrap**: The user selects a Factorio ZIP/tar and mods; `core` unpacks/links assets per instance, applies settings, and spawns one headless server plus `N` graphical clients. Windows are laid out so multiple bots stay visible.
-- **BotBridge mod**: Runs in every instance, exposes RPC-like APIs over RCON to read prototypes (recipes, items, entities), world snapshots, and to enqueue “tasks” (build, craft, move, research). It also emits events consumed by the graph builders.
-- **Command surface**: RCON is the single control channel. The core crate batches script intentions into idempotent commands so that repeated calls remain safe.
+- **Bootstrap**: The user configures a Factorio ZIP/tar (`factorio.factorio_archive_path`); the mods are not chosen, they ship with the project. `core` unpacks/links assets per instance, applies settings, runs `preflight_mod_factorio_version`, and spawns one server plus `N` graphical clients. `arrange_windows` lays the client windows out — but its body is `#[cfg(windows)]`, so on Linux and macOS it is a no-op.
+- **BotBridge mod**: Runs in every instance and exposes RPC-like APIs over RCON to read prototypes (recipes, items, entities), world snapshots and player inventories, and to act (walk, mine, craft, place, insert, remove, research).
+- **Command surface**: RCON is the single control channel, and commands are **not** uniformly idempotent — `insert`, `remove` and `place` visibly double if repeated. Retry policy is the executor's `recover` tiers, not a property of the commands.
 
 ### Graph views
 | Graph | Purpose | Source data | Example uses |
 | --- | --- | --- | --- |
 | Entity graph | Spatial relationship of entities with distance weights | BotBridge entity snapshots | Find nearest resource patch, detect chokepoints |
 | Flow graph | Throughput along belts/inserters per side/resource | Recipe + machine stats + entity graph | Balance material flows, detect bottlenecks |
-| Task graph | Bot task DAG with time estimates | Script planner + execution telemetry | Parallelize crafting/research, surface critical path |
 
-Graph updates are incremental: RCON deltas update local caches, then the affected subgraphs are recomputed and sent to the UI (Mermaid, canvas overlays) and scripting layer.
+Both live on `FactorioWorld` (`crates/core/src/factorio/world.rs`), which is what
+`crates/core/src/graph/{entity_graph,flow_graph}.rs` build. The planner reads
+them through `PlanState` (`crates/planner/src/state.rs`) rather than touching
+them directly.
+
+There is **no task graph**. `crates/core/src/graph/task_graph.rs`,
+`plan/plan_builder.rs` and `plan/execute.rs` were deleted together with the Lua
+`plan.*` global; `goal.*` and the planner/executor pair below replace them.
+The plan's own DAG is now `ActionNetwork`, which lives only in memory for the
+duration of a run.
 
 ### Lua automation path
 1. User writes `<workspace>/scripts/*.lua` using the Monaco editor embedded in the app.
 2. `scripting_lua` loads the script, injects helper libs from `scripts/lib.lua`, and validates against the exposed API (see docs/lua).
-3. The script schedules goals ("mine plates", "research automation") which map to predefined or user-defined planners.
-4. Planners expand goals into task graph nodes; executor assigns nodes to clients based on availability, predicted travel time, and current inventory.
-5. Execution feedback (success, failure, ETA) flows back to Lua so scripts can adapt.
+3. The script declares a goal — `goal.have("iron-plate", 5)`, `goal.researched("automation")` — which the planner expands into an `ActionNetwork`.
+4. `goal.schedule(handle, bot_count)` assigns the network's actions to bots over time and returns the makespan in ticks.
+5. `goal.execute(handle)` hands the schedule to the executor and returns a run handle immediately; `goal.progress` polls it and `goal.wait` blocks on it.
+
+### Planning: `crates/planner`
+
+`Goal` → `expand()` → `ActionNetwork` → `schedule()` → `Schedule`.
+
+- **`Goal`** has four variants: `Have { item, count, whose }`, `Researched(String)`, `Producing { item, rate }` and `All(Vec<Goal>)`. `Producing` has no method yet — blueprint generation is a later increment, and a test pins that it is unsatisfiable today.
+- **`expand(goals, state, registry, chain_actor) -> Result<ActionNetwork, PlannerError>`** drives HTN-style decomposition. Methods live in `crates/planner/src/method/`: `mod.rs` holds the vocabulary (`trait Method`, `Step`, `MethodRegistry`, `MAX_EXPANSION_DEPTH`), `util.rs` holds pure lookups over `PlanState`, and `have.rs` holds every concrete method — `AlreadySatisfied`, `SplitAcrossBots`, `Smelt`, `HandCraft`, `Mine`, `Researched`. First applicable method in registration order wins; `registry_for(bots)` is the multi-bot registry, `default_registry()` the single-bot one.
+- **`ActionNetwork`** is a partially ordered set of actions plus `Edge { from, to, lag }`. No bot appears in it: a `ChainId` says which actions must share a runner, never which bot that is. `lag` is machine time — a furnace's smelting time — expressed as the minimum ticks after `from` finishes before `to` may start. `validate()` rejects a cyclic network.
+- **`schedule(net, state, bots) -> Result<Schedule, PlannerError>`** is a greedy, travel-aware list scheduler and a pure function of its three arguments; ties break on `(end, action, bot)` ascending, so output is stable across runs. A `Schedule` is `Vec<ScheduledStep>` plus a `makespan`, where each step is a `Walk` or an `Act` with a bot and a tick range.
+
+A network is only schedulable on the roster it was expanded for, because
+`SplitAcrossBots` sizes each share against the holdings of the bot it names.
+`goal.schedule` re-expands the goal when it is asked for a different roster.
+
+### Execution: `crates/executor`
+
+`run_into(actuator, schedule, network, log)` runs the schedule. One future per
+bot (`futures::future::join_all` over a `BTreeSet<BotId>`, so future order is a
+function of the schedule alone), each walking its own steps in schedule order.
+
+- **Completion signals.** One `tokio::sync::watch` channel per action, carrying `Status` (`Pending | Running | Success | Failed`). A bot waits on its predecessors' channels instead of polling; this replaced a 100 ms poll loop.
+- **Lag edges.** After every predecessor reports `Success`, the waiter sleeps the *maximum* lag across those edges — once, not a sum — converted at 60 ticks per second. The bot has walked away but the furnace has not finished. Known limitation: a server at non-default `game.speed` makes that conversion wrong.
+- **Wait-graph cycle rejection.** `check_wait_graph` topologically sorts the union of the network's edges *and* the schedule's per-bot successor edges, over scheduled actions only, and fails with `ExecutionError::CircularWait` before a single command reaches the game. The planner's own `validate()` cannot catch this: a network holding `1 -> 0` is acyclic, yet a bot scheduled to run `0` then `1` waits on itself forever.
+- **Actuator seam.** `trait Actuator` (`walk`, `mine`, `craft`, `place`, `insert`, `remove`, `research`) is what the tests mock; `RconActuator` is the wire implementation. `research` takes no `BotId` because research is server-wide. Bot ids are Factorio player ids and are never renumbered.
+- **Recovery** (`recover.rs`) returns a decision as a value; nothing in it talks to the game. Tier 0 `Complete` when no action is unfinished; **tier 1 `Rescheduled`** re-schedules the same plan minus what is already done, keeping action ids so the existing log carries forward, and escalates after `MAX_TIER_ONE_ATTEMPTS` (3) failures of any one action; **tier 2 `Reexpanded`** plans the same goal again from the method layer, producing fresh action ids that require a fresh log and carrying no loop breaker of its own; **tier 3 `Surfaced(Vec<ActionId>)`** hands the failed action ids to a human when nothing mechanical is left.
+
+Retrying is a default, not a guarantee: `Insert`, `Remove` and `Place` are not
+idempotent and will visibly double if re-run.
+
+### Debug and release diverge on `mods/` and `scripts/`
+
+A release binary has to be self-contained, so `mods/` and `scripts/` are baked
+in with `include_dir!` at compile time
+(`crates/core/src/process/instance_setup.rs`) and extracted into the workspace
+on first setup. Debug builds instead point `workspace_mods_path` at
+`../../mods` — the repository checkout, resolved relative to the current
+working directory — which is live.
+
+Setup logs which one it picked — `Using mods directory <path> (<source>)` —
+where the source is one of:
+
+| build | condition | reported source |
+| --- | --- | --- |
+| any | `workspace/mods` already exists | `pre-existing workspace copy; editing mods/ does NOT update it, delete it to re-extract` |
+| debug | it does not | `repo checkout (debug build); edits apply on the next run` |
+| release | it does not | `compile-time snapshot embedded in this release binary; edits to mods/ need a rebuild` |
+| any | neither of the above resolved | `mods/ relative to the current working directory` |
+
+Two consequences, both of which have already cost debugging sessions:
+
+- editing `mods/` or `scripts/` has **no effect on a release binary** until it is rebuilt — the embedded copy is a snapshot;
+- it has **no effect on an existing workspace at all, in any build**, because extraction is skipped once the target directory exists. Delete `workspace/mods` (or edit the copy in place) to pick up mod changes.
+
+Scripts follow the same rule in two places: `scripts::ensure_scripts_dir` seeds
+`workspace/scripts` from `PLANS_CONTENT` when that directory does not yet
+exist, and instance setup separately extracts the same content into
+`workspace/plans`. Both are release-only and both skip an existing directory.
+
+The divergence is deliberate. Do not "fix" it by dropping the embedding.
 
 ### Current limitations
-- Task planners still rely on hand-written heuristics; only basic tasks (move, craft, research first technologies) are reliable.
+- `Goal::Producing` is declared but unsatisfiable: no method expands it yet.
 - No persistent knowledge graph yet—world state must be recomputed per session.
-- Goals are imperative; scripts express every action instead of declaring desired end states.
+- The executor has no game-clock source, so an `ExecutionLog`'s tick fields are the *scheduled* times, not observed ones, and a lag is re-waited in full rather than for its outstanding remainder.
 
 ### Roadmap
 
@@ -88,27 +166,28 @@ Graph updates are incremental: RCON deltas update local caches, then the affecte
 - Deliverables: deterministic bootstrap, repeatable set of starter scripts, baseline graphs surfaced in UI.
 - Dependencies: stable BotBridge schema, Factorio binary management, task executor telemetry.
 - Suggested prompts:
-  - `Document BotBridge data flow and entity/flow/task graphs` (for dev guide completeness).
-  - `Add smoke test that runs "research automation" script headlessly`.
-  - `Wire task graph events into Vue gantt view`.
+  - `Document BotBridge data flow and the entity/flow graphs` (for dev guide completeness).
+  - `Add smoke test that runs "research automation" script headlessly`. `lua --clients 0 --bots N` makes this cheap: it starts the server, plans, and never waits for a graphical client.
+  - **Superseded**: "wire task graph events into Vue gantt view". There is no task graph to emit events from. `goal.gantt` renders a scheduled plan as mermaid gantt source; `app/src/components/GanttChart.vue` and `app/src/pages/TasksPage.vue` predate the change and have not been re-pointed at it.
 
 #### Mid-term automation (goal-aware planning)
 - Deliverables: recipe knowledge graph, supply/demand planner, dynamic task queue rebalancing, REST hooks for external planners.
 - Dependencies: MVP telemetry, serialized world snapshots, Lua API coverage.
 - Suggested prompts:
   1. `Implement recipe knowledge graph service in crates/core`.
-  2. `Add planner heuristic to decompose "research automation" into craft/build tasks`.
-  3. `Expose executor queue over REST with pagination`.
+  2. **Done**: decomposing `research automation` into craft/build actions. `method::have::Researched` expands a technology into its prerequisites, then the science packs it costs, then the research itself, and `goal.researched` exposes it to Lua.
+  3. `Expose executor queue over REST with pagination` — still open. The server has a jobs API (`/api/v1/jobs`, with SSE at `/api/v1/jobs/{id}/events`) for script execution, but nothing exposes an executor run's per-action progress.
 
 #### Long-term autonomy (user-defined high-level goals)
-- Deliverables: declarative goal DSL ("research automation tech"), goal decomposition pipeline, feedback control loop, learning hooks (ML agents or heuristics), multi-bot coordination strategies.
+- Deliverables: feedback control loop, learning hooks (ML agents or heuristics), richer multi-bot coordination strategies.
 - Dependencies: mid-term planners, robust persistence, telemetry aggregation.
-- Suggested prompts:
-  1. `Design goal decomposition pipeline that maps research goals to recipe/task graphs`.
-  2. `Integrate feedback loop so bots adjust when tasks stall`.
-  3. `Prototype multi-bot assignment strategy using Hungarian algorithm on task graph weights`.
+- Status and next steps:
+  1. **Done**: the declarative goal surface and the decomposition pipeline. `goal.have` / `goal.researched` are the DSL; `crates/planner` is the pipeline.
+  2. **Partly done**: "integrate feedback loop so bots adjust when tasks stall". `crates/executor/src/recover.rs` computes the decision (reschedule, re-expand, surface) but nothing calls it on a live run yet — `goal.execute` runs a schedule and reports the outcome.
+  3. **Superseded**: "Hungarian algorithm on task graph weights". Assignment is greedy and travel-aware at chain granularity in `crates/planner/src/schedule.rs`; a better assignment strategy would replace that loop, not a task graph.
 
 ### Where to go next
-- Validate BotBridge APIs against the current Factorio release and document any mod-specific quirks in `docs/devguide/src/useful_links.md`.
+- Validate BotBridge APIs against the current Factorio release and document any mod-specific quirks in `docs/devguide/useful_links.md`. The mod declares `"factorio_version": "2.1"` in `mods/BotBridge/info.json`; `preflight_mod_factorio_version` fails the run early when the installed game's major.minor does not match.
+- Call `executor::recover` from a live run. It is fully implemented and tested but has no call site outside its own module.
+- Give the executor a game-clock source so `ExecutionLog` records observed ticks rather than scheduled ones, and so a lag can be waited for its remainder instead of in full.
 - Flesh out the Lua API reference with real-world examples so contributors can script richer goals sooner.
-- Instrument execution paths (`crates/core/process`) to capture metrics the planner will need (travel time distributions, craft success rates).

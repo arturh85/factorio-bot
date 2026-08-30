@@ -16,3 +16,13 @@ Goals / Use Cases:
 - Learning Environment to train Machine Learning algorithms within Factorio
 - Playground for Factorio Experiments
 
+It needs **Factorio 2.1**: the bundled BotBridge mod declares
+`"factorio_version": "2.1"`, and Factorio refuses a mod whose major.minor does
+not match the installed game. Without that mod there is no RCON bridge and
+nothing else works. See [Howto: Setup Factorio Bot](./howto_setup.md).
+
+Scripts declare goals rather than spelling out every action —
+`goal.have("iron-plate", 5)`, `goal.researched("automation")` — and a planner
+decomposes them into actions that an executor runs across the bots. See
+[Howto: Lua Scripting](./howto_lua_scripting.md).
+

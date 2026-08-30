@@ -1174,13 +1174,40 @@ mod tests {
         result.expect("world.draw failed");
 
         let drawn = std::fs::read(dir.path().join("drawn.png")).expect("world.draw wrote no file");
-        assert_eq!(
-            &drawn[..8],
-            b"\x89PNG\r\n\x1a\n",
+        // Checked before slicing to `[..8]`: a `drawn` shorter than 8 bytes
+        // would otherwise panic on the index itself, before the assertion
+        // message below -- the one meant for a failing developer -- ever
+        // gets to print.
+        assert!(
+            drawn.len() >= 8 && &drawn[..8] == b"\x89PNG\r\n\x1a\n",
             "world.draw must write a PNG; got {} bytes starting {:?}",
             drawn.len(),
             &drawn[..8.min(drawn.len())]
         );
+    }
+
+    /// The only place `world.find_entities_in_radius` was exercised was
+    /// `mine_rocks` in `scripts/lib.lua`, called from `test_script`'s
+    /// `build_starter_mining` -- but `mine_rocks` early-returns whenever
+    /// `rcon` is `nil` (see its `SKIP` guard), and every `test_script`
+    /// planner is built with `Planner::new(world, None)`, so that call is a
+    /// guarded no-op under CI: the test still passes having exercised
+    /// nothing. This calls the binding directly against the fixture's
+    /// `rock-huge` cluster -- `spawn_rocks` seeds 3 of them around (20, 20)
+    /// in a tight spiral, see `test_utils.rs` -- and asserts on how many
+    /// come back, so a binding that stops filtering by name or radius fails
+    /// here instead of silently losing its only coverage.
+    #[tokio::test]
+    async fn test_find_entities_in_radius() {
+        result_test(
+            1,
+            r#"
+local entities = world.find_entities_in_radius({x=20,y=20}, 10, "rock-huge", nil)
+result = #entities
+"#,
+            json!(3),
+        )
+        .await
     }
 
     // The fixture's iron-ore field (see `add_to_rect` in `test_utils.rs`) spans

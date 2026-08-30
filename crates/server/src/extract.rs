@@ -8,6 +8,14 @@
 //! did not seem worth it, so `ApiQuery`/`ApiJson` delegate to
 //! `axum::extract::{Query, Json}` and map the rejection via `ErrorResponse`'s
 //! existing `From` impls.
+//!
+//! Note this collapses status codes: `ErrorResponse::into_response` always
+//! answers 400, so a rejection that axum would otherwise have answered
+//! differently (an oversized body would be 413, a missing/wrong
+//! content-type would be 415) now answers 400 too. That is a real behavior
+//! change from axum's defaults. It is accepted here because every other
+//! error in this crate already collapses to 400 via `ErrorResponse`, and
+//! this keeps extractor rejections consistent with that.
 
 use crate::error::ErrorResponse;
 use axum::extract::{FromRequest, FromRequestParts, Json, Query, Request};

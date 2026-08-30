@@ -957,8 +957,43 @@ MSG
 
 - [ ] **Step 1: Find every doc reference**
 
-Run: `grep -rn "goal\.\(schedule\|graphviz\|gantt\|execute\|progress\|wait\)" docs/ CLAUDE.md README.md`
+Run: `grep -rn "goal\.\(schedule\|graphviz\|gantt\|execute\|progress\|wait\)" docs/ CLAUDE.md README.md crates/`
+
+Known stale already: `crates/scripting_lua/src/lua_runner.rs` lines 23, 248 and 1115 name
+`goal.execute` / `goal.schedule` / `goal.gantt` in comments, and `docs/userguide/*` plus
+`README.md` still document the handle API. A comment describing a deleted API is worse
+than no comment. Do not edit `run_script.rs` — a peer session owns it; report it instead
+if it needs a change.
 Update each. The generated Lua API docs come from the `__doc__` entries rewritten in Task 5 — regenerate rather than hand-editing if a generator exists.
+
+- [ ] **Step 1b: Restore two anti-vacuity guards weakened in earlier tasks**
+
+Both are tests that currently pass whether or not the thing they name is true. Neither is
+a new defect; both are guards that thinned while code moved.
+
+**(a) `wait_is_idempotent`** lost the deleted test's explicit anti-vacuity guard when it
+was ported. Restore it: assert `success > 0` so the test cannot pass on a run that did
+nothing, and compare the whole observation between the two waits rather than one field —
+"both calls returned" is much weaker than "both calls returned the same run".
+
+**(b) `tick_fields_are_named_planned_not_observed`** loops over `obs.actions` asserting
+field names, with **no guard that the loop ran**. An empty `obs.actions` passes it. Add a
+counter and assert it is non-zero, the same shape used in
+`every_field_a_step_actually_has_is_accepted_as_a_predicate_key`:
+
+```lua
+local checked = 0
+for id, a in pairs(obs.actions) do
+    assert(a.planned_start ~= nil, "planned_start")
+    assert(a.observed_start == nil, "these are estimates, not measurements")
+    assert(a.observed_end == nil, "these are estimates, not measurements")
+    checked = checked + 1
+end
+assert(checked > 0, "the run had actions to check, got " .. checked)
+```
+
+Prove both: make the run produce zero actions and confirm (b) fails; make the second wait
+return a different observation and confirm (a) fails. Revert.
 
 - [ ] **Step 2: Full workspace check**
 

@@ -1088,12 +1088,19 @@ pub struct PlayerLeftEvent {
     pub player_id: PlayerId,
 }
 
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
+#[derive(
+    Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq, utoipa::ToSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub struct PrimeVueTreeNode {
     pub key: String,
     pub label: String,
     pub leaf: bool,
+    // Self-referential (`PrimeVueTreeNode` -> `PrimeVueTreeNode`): without
+    // `no_recursion`, utoipa's OpenAPI schema generation recurses into this
+    // field forever and aborts the process with a stack overflow the first
+    // time any route referencing this type builds its schema.
+    #[schema(no_recursion)]
     pub children: Vec<PrimeVueTreeNode>,
 }
 

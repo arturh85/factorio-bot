@@ -724,12 +724,17 @@ This is the same defect class as plan 4's finding I3 — two code paths resolvin
 Only the schema name moves. The four fields keep their names, so the wire format is byte-identical and no client has to change behaviour — just the identifier it imports.
 
 **Files:**
-- Modify: `crates/core/src/types.rs:1149-1165`
-- Modify: `crates/server/src/manage/scripts.rs:8,165,174,213`
-- Modify: `app/src/components/ScriptTree.vue:5,7,18,20,35,39`
-- Modify: `app/src/store/scriptStore.ts:3,43`
-- Modify: `app/src-tauri/src/gui/command/script.rs:7,102,132`
-- Modify: `app/src-tauri/build.rs:93` — **another agent holds uncommitted changes in this file**
+**Every line number below is advisory — re-read before editing.** Re-measured just before dispatch; the plan's original numbers had all drifted:
+
+- Modify: `crates/core/src/types.rs` (~`:1270-1279`, was `:1149-1165`)
+- Modify: `crates/server/src/manage/scripts.rs` (~`:8,160,169,208`, was `:165,174,213`)
+- Modify: `app/src/components/ScriptTree.vue` (~`:5,7,18,20,35,37,39` — `:37` was missing from the original list)
+- Modify: `app/src/store/scriptStore.ts` (~`:3,43,46` — `:46` was missing)
+- Modify: `app/src-tauri/src/gui/command/script.rs` (~`:7,106,140`, was `:102,132`)
+- Modify: `app/src-tauri/build.rs:93` — the collision note here is **stale**: the other agent committed and the file is free. Re-check anyway.
+- Modify: `app/src/models/types.ts:148` — the *generated* file, which is committed. Regenerate it via a build rather than hand-editing, or the next build reverts you.
+
+**Do not over-invest in the last two.** `app/src-tauri/build.rs` and `app/src/models/types.ts` are both deleted by Task 13, which removes the TypeScript generator entirely rather than moving it. They are edited here only so the tree compiles in between. A one-line rename in each is the whole job; if either fights you, say so rather than working around it.
 - Modify: `crates/server/tests/manage_scripts.rs` (only if it names the type)
 
 **Interfaces:**

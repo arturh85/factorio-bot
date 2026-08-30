@@ -1327,6 +1327,8 @@ git commit -m "feat(lua): add the goal api backed by the new planner and executo
 
 **Do not delete** `crates/core/src/graph/entity_graph.rs`, `crates/core/src/graph/flow_graph.rs`, or `crates/core/src/factorio/factorio_planner.rs` — despite the names, the first two are live and the third only decodes blueprint zlib.
 
+**Use core's script path resolution, do not reinvent it.** A concurrent migration added `factorio_bot_core::scripts` (commit `12e8451`) with `scripts_dir` and `resolve_script_path`. Anywhere this task needs to locate a script on disk, call those rather than rebuilding path logic in the binary. Related additive modules that landed in core during this work and may save you effort: `factorio_bot_core::paths`, `factorio_bot_core::app_settings` (`AppSettings`, `GuiSettings`, `SharedAppSettings`, `load_app_settings`), and `factorio_bot_core::settings::RestApiSettings`.
+
 - [ ] **Step 1: Migrate the Lua scripts first**
 
 Rewrite each script's `plan.*` calls onto `goal.*`. Run each one that has a test harness. A script whose behaviour cannot be preserved gets a comment at the top naming what changed and why — do not silently drop functionality.

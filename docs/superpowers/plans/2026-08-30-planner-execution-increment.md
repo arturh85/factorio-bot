@@ -1354,6 +1354,8 @@ function goal.researched(technology_name)
 function goal.schedule(plan_handle, bot_count)
 -- @treturn string graphviz source
 function goal.graphviz(plan_handle)
+-- @treturn string mermaid gantt source for the scheduled plan
+function goal.gantt(plan_handle, title)
 -- starts execution and returns immediately
 -- @treturn number a run handle
 function goal.execute(plan_handle)
@@ -1365,6 +1367,8 @@ function goal.wait(run_handle)
 ```
 
 `goal.have` and `goal.researched` build a `Goal`, run `expand`, and return a handle holding the `ActionNetwork`. `goal.schedule` runs `schedule` and stores the result on the handle.
+
+`goal.gantt` is a three-line binding: `factorio_bot_planner::render::mermaid_gantt(schedule, title)` already exists (`crates/planner/src/render.rs:33`). It replaces the old `plan.task_graph_mermaid_gantt`, so bind it here rather than leaving the migration without a Gantt renderer. It requires the handle to have been scheduled; error clearly if it has not.
 
 **Execution is handle-based, not blocking** — this was an explicit decision, so do not "simplify" it back to a blocking call. `goal.execute` builds an `RconActuator` from the live `FactorioInstance` (which discovers its own bots — it takes no mapping), spawns a tokio task running `executor::run_into`, and returns a run handle immediately. `goal.progress` reads a snapshot of that run's shared `ExecutionLog`; `goal.wait` blocks on the join handle and then returns the final snapshot.
 
@@ -1939,7 +1943,7 @@ git commit -m "feat(lua): add the goal api backed by the new planner and executo
 **Files:**
 - Delete: `crates/core/src/plan/{plan_builder.rs, execute.rs}` (489 lines), `crates/core/src/graph/task_graph.rs` (655 lines)
 - **KEEP `crates/core/src/plan/planner.rs`.** See the scope correction below — an earlier draft deleted it and that was wrong.
-- Modify: `crates/core/src/lib.rs:41` (drop `pub mod plan;`), `crates/core/src/graph/mod.rs`, `crates/core/src/gantt_mermaid.rs` (test-only use), `crates/core/src/errors.rs:176` (cosmetic diagnostic string)
+- Modify: `crates/core/src/plan/mod.rs` (drop the `plan_builder` and `execute` lines; **KEEP `pub mod planner;`**), `crates/core/src/graph/mod.rs` (drop `task_graph`), `crates/core/src/gantt_mermaid.rs` (test-only use), `crates/core/src/errors.rs:176` (cosmetic diagnostic string)
 - Modify: `app/src-tauri/src/{scripting.rs, cli/lua.rs, gui/command/script.rs, repl/run_script.rs}`
 
 **These four files are contested — re-read them before editing.** The concurrent web-server effort is moving `run_script_file` out of `app/src-tauri/src/scripting.rs` into `crates/scripting_lua`, giving it a `scripts_root` argument, and every one of these call sites changes signature as a result. That work is expected to land BEFORE this task. Do not work from the signatures quoted anywhere in this plan; open each file and read what is actually there. If `run_script_file` still lives in `app/src-tauri`, coordinate before touching it rather than racing.
@@ -1995,7 +1999,7 @@ Run: `cargo test -p factorio-bot-scripting-lua`
 
 - [ ] **Step 3: Remove the Rust callers**
 
-Update the four `app/src-tauri` sites to construct the new planner path instead of `Planner`. Update `gantt_mermaid.rs`'s test-only use to build a `Schedule` instead of a `TaskGraph`. Change the `errors.rs:176` diagnostic string.
+The four `app/src-tauri` sites keep constructing `Planner` — it survives. They change only where they referenced the old task graph, and where the concurrent effort's `run_script_file` move altered their signatures. Update `gantt_mermaid.rs`'s test-only use to build a `Schedule` instead of a `TaskGraph`. Change the `errors.rs:176` diagnostic string.
 
 Run: `cargo check --workspace --all-features`
 
@@ -2005,7 +2009,7 @@ Run: `cargo check --workspace --all-features`
 git rm -r crates/core/src/plan crates/core/src/graph/task_graph.rs
 ```
 
-Drop `pub mod plan;` from `crates/core/src/lib.rs` and the `task_graph` line from `crates/core/src/graph/mod.rs`.
+**Do NOT drop `pub mod plan;` from `crates/core/src/lib.rs`** — an earlier draft said to, and that contradicts the scope correction above. `Planner` lives at `crates/core/src/plan/planner.rs` and survives. Drop only the `plan_builder` and `execute` lines from `crates/core/src/plan/mod.rs`, and the `task_graph` line from `crates/core/src/graph/mod.rs`.
 
 - [ ] **Step 5: Verify and commit**
 

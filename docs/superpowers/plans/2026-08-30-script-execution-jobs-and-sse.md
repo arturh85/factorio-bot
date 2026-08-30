@@ -712,7 +712,21 @@ Then remove `gag = "^1.0"` from `crates/scripting/Cargo.toml`.
 
 - [ ] **Step 4: Feed the sink from the `print` bindings**
 
-`globals.rs` already accumulates into `Arc<Mutex<String>>` for `print` / `warn` / `error`. Keep that (the full transcript is still returned at the end) and add the sink call beside it. `create_lua_globals` takes `sink: Option<Arc<dyn OutputSink>>`; each of the three bindings does:
+`globals.rs` already accumulates into `Arc<Mutex<String>>`. Keep that (the full transcript is still returned at the end) and add the sink call beside it. `create_lua_globals` takes `sink: Option<Arc<dyn OutputSink>>`.
+
+The three bindings are **`print` (`:163`), `print_err` (`:185`) and `print_warn` (`:208`)** — not `print`/`warn`/`error`, which is what an earlier draft of this task claimed and which do not exist. Verified against the registered names.
+
+**Their current stream assignment is not what you would guess, and you must preserve it:**
+
+| binding | accumulates into | prefix |
+|---|---|---|
+| `print` | `stdout` | none |
+| `print_err` | `stderr` | `"ERROR: "` |
+| `print_warn` | **`stdout`** | `"WARN: "` |
+
+`print_warn` writes to **stdout**, not stderr (`:211` takes `stdout_lock`). Map it to `Stream::Stdout`. Moving it to stderr would be a silent behaviour change smuggled inside a refactor — the SSE consumer in plan 5 splits on stream, so a script's warnings would move panes. If that assignment is wrong it is wrong today and should be changed deliberately, in its own commit, not here.
+
+Each binding does:
 
 ```rust
 let text = strings.iter().join(" ");
@@ -723,7 +737,7 @@ if let Some(sink) = sink.as_ref() {
 let mut stdout_lock = _stdout.lock();
 ```
 
-`warn` and `error` use `Stream::Stderr`.
+`print_err` uses `Stream::Stderr`; `print` and `print_warn` use `Stream::Stdout`, matching the table above. The sink call goes *beside* the existing accumulation, reading from the same values — do not refactor the accumulation into the sink, because the returned transcript and the streamed lines must stay identical.
 
 - [ ] **Step 5: Drop `redirect` from `run_lua`**
 

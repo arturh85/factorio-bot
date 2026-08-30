@@ -93,8 +93,8 @@ pub async fn load_scripts_in_directory(
     let app_settings = &app_settings.read().await;
     let workspace_path = app_settings.factorio.workspace_path.to_string();
     let workspace_path = Path::new(&workspace_path);
-    let workspace_plans_path = factorio_bot_core::scripts::scripts_dir(workspace_path)
-      .map_err(|e| format!("{e}"))?;
+    let workspace_plans_path =
+      factorio_bot_core::scripts::scripts_dir(workspace_path).map_err(|e| format!("{e}"))?;
 
     if path.contains("..") {
       return Err("invalid path".into());
@@ -149,8 +149,8 @@ pub async fn load_script(
     let app_settings = &app_settings.read().await;
     let workspace_path = app_settings.factorio.workspace_path.to_string();
     let workspace_path = Path::new(&workspace_path);
-    let workspace_plans_path = factorio_bot_core::scripts::scripts_dir(workspace_path)
-      .map_err(|e| format!("{e}"))?;
+    let workspace_plans_path =
+      factorio_bot_core::scripts::scripts_dir(workspace_path).map_err(|e| format!("{e}"))?;
     if path.contains("..") {
       return Err("invalid path".into());
     }
@@ -184,8 +184,8 @@ pub async fn save_script(
     let app_settings = &app_settings.read().await;
     let workspace_path = app_settings.factorio.workspace_path.to_string();
     let workspace_path = Path::new(&workspace_path);
-    let workspace_plans_path = factorio_bot_core::scripts::scripts_dir(workspace_path)
-      .map_err(|e| format!("{e}"))?;
+    let workspace_plans_path =
+      factorio_bot_core::scripts::scripts_dir(workspace_path).map_err(|e| format!("{e}"))?;
     if path.contains("..") {
       return Err("invalid path".into());
     }

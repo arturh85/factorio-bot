@@ -135,8 +135,21 @@ Implemented:
 - `crates/core/src/errors.rs`
 - `crates/scripting_lua/src/globals/plan.rs`
 
-### 2.2 Multi-Bot Executor ✅ COMPLETE
-Current state: All task types execute with proper status transitions and dependency checking.
+### 2.2 Multi-Bot Executor ✅ COMPLETE — *superseded and removed*
+
+This section described the old `crates/core/src/plan/execute.rs` (100ms
+dependency polling, `TaskGraph`-based status transitions). That file is
+deleted along with the rest of the old planner. The real executor now is
+`crates/executor`: one `tokio::sync::watch` channel per action for completion
+signals (no polling), lag edges modelling machine time between a predecessor's
+success and a dependent's start, a pre-flight wait-graph cycle check
+(`ExecutionError::CircularWait`) before any command reaches the game, and
+tiered recovery in `recover.rs` (reschedule → re-expand → surface to a human).
+It issues only legitimate player actions — there is no `cheat_*` call anywhere
+in `crates/executor`. See `docs/devguide/architecture.md` for the full
+description.
+
+Current state (as it was, for the record): All task types execute with proper status transitions and dependency checking.
 
 Implemented:
 - [x] All 6 task types execute via RCON (Mine, Walk, Craft, Place, InsertToInventory, RemoveFromInventory)
@@ -181,14 +194,26 @@ Implemented:
 - Group synchronization (explicit wait at group_end)
 
 ### 2.3 Bot Coordination (8-16 bots)
-- [ ] Efficient task distribution
+- [ ] Efficient task distribution — `crates/planner/src/schedule.rs` is a greedy,
+      travel-aware list scheduler today; a better assignment strategy (e.g.
+      Hungarian algorithm) is still open, per `docs/devguide/architecture.md`
 - [ ] Avoid collisions (two bots mining same tile)
 - [ ] Load balancing (idle bots pick up slack)
-- [ ] Visualization of bot assignments (Gantt chart via Mermaid)
+- [x] Visualization of bot assignments (Gantt chart via Mermaid) — `goal.gantt`
+      renders a scheduled plan as mermaid gantt source
+      (`crates/scripting_lua/src/globals/goal.rs`)
 
 ---
 
 ## Phase 3: Goal Decomposition System
+
+*(Partly done, by a different design than sketched below: `crates/planner`'s
+HTN-style methods in `crates/planner/src/method/have.rs` — `Researched`,
+`Smelt`, `HandCraft`, `Mine`, `SplitAcrossBots` — do prerequisite/recipe
+traversal and recursive decomposition to primitive actions for `Goal::Have`
+and `Goal::Researched`. There is no literal "milestone graph" data structure
+and no `launch_rocket` goal — `Goal::Producing` exists but no method expands
+it yet, per `docs/devguide/architecture.md`.)*
 
 ### 3.1 Milestone-Based Planning
 Define high-level milestones:
@@ -296,10 +321,17 @@ cargo test          # Tests only
 
 ## Immediate Next Steps
 
-1. **Figure out how to test basic Lua** - identify mlua issues
-2. **Fix any blocking issues** found in step 1
-3. **Write simple 2-bot coordination test** - bot1 mines, bot2 crafts
-4. **Get task graph execution working** - the core differentiator
+*(This list predates Phase 1/2 above; items 1-3 are covered by those
+completions and item 4's target no longer exists — see "Phase 2: Core Engine"
+for why. Left here as a historical record rather than deleted.)*
+
+1. ~~Figure out how to test basic Lua - identify mlua issues~~ — done, Phase 1.1
+2. ~~Fix any blocking issues found in step 1~~ — done, Phase 1
+3. ~~Write simple 2-bot coordination test - bot1 mines, bot2 crafts~~ — done, Phase 1.2
+4. ~~Get task graph execution working - the core differentiator~~ — obsolete: there
+   is no task graph. The current differentiator is the `crates/planner` +
+   `crates/executor` pair reached via Lua `goal.*` (see Phase 2 above and
+   `docs/devguide/architecture.md`).
 
 ---
 

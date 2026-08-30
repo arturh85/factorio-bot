@@ -32,6 +32,7 @@ Expansion still needs *some* binding to simulate against, so `ExpansionCtx` carr
 - **New files are the one exception.** A pathspec commit cannot see an untracked file, so a task that creates one must first run `git add <that exact path>` — naming the file, never a directory — and then commit with the pathspec as usual. Staging one named new file cannot capture anyone else's work. **Never `git add -A`, never `git add .`, never `git commit -a`.**
 - Never `git checkout`/`stash`/`reset`/`clean` outside `crates/planner/`, with the single exception of discarding `crates/scripting_lua/tests/` snapshot churn after a workspace-wide test run.
 - `Ticks` is `u32`; 60 ticks = 1 second. No `f64` durations — `f64` is for distances and radii only.
+- **Multiply durations and item counts with `saturating_mul`, never `*`.** `Goal::Have`'s `count` is an unbounded `u32`, so a plain multiply panics in debug and *silently wraps* in release — turning an absurd request into a plausible-looking but wrong plan. Saturating turns the same request into an obviously broken one (a duration of `u32::MAX` ticks) instead of a subtly wrong one.
 - Build structs with functional-update syntax (`Foo { a, ..Default::default() }`), never `let mut x = Foo::default();` plus field assignments. An `#[allow(clippy::field_reassign_with_default)]` is the wrong fix.
 - Large enum variants get `Box`ed — clippy denies `large_enum_variant`.
 - Determinism is required end to end. Iterate `BTreeMap`/`BTreeSet`/`Vec`, never `HashMap`/`HashSet`, anywhere a result can influence output.
@@ -1314,7 +1315,7 @@ impl Method for Mine {
                     count: need,
                 },
             ],
-            duration: mining_ticks(&ctx.state, item) * need,
+            duration: mining_ticks(&ctx.state, item).saturating_mul(need),
             pinned: None,
             label: format!("mine {} {}", need, item),
         };
@@ -1539,7 +1540,7 @@ impl Method for Smelt {
         for (ingredient, amount) in ingredients_of(&recipe) {
             steps.push(Step::Subgoal(Goal::Have {
                 item: ingredient,
-                count: amount * runs,
+                count: amount.saturating_mul(runs),
                 whose: whose.clone(),
             }));
         }
@@ -1574,7 +1575,7 @@ impl Method for Smelt {
 
         let mut insert_ids = Vec::new();
         for (ingredient, amount) in ingredients_of(&recipe) {
-            let total = amount * runs;
+            let total = amount.saturating_mul(runs);
             let id = ctx.ids.next();
             insert_ids.push(id);
             steps.push(Step::Act(Box::new(Action {
@@ -1624,7 +1625,7 @@ impl Method for Smelt {
 
         // The furnace runs between the last insert and the removal. The bot is
         // free to do other work across this lag — that is what it is for.
-        let smelt_lag = recipe_ticks(&recipe) * runs;
+        let smelt_lag = recipe_ticks(&recipe).saturating_mul(runs);
         for id in insert_ids {
             let lag = if id == fuel_id { 0 } else { smelt_lag };
             steps.push(Step::Link { from: id, to: remove_id, lag });
@@ -1812,7 +1813,7 @@ impl Method for HandCraft {
         let mut eff = Vec::new();
 
         for (ingredient, amount) in ingredients_of(&recipe) {
-            let total = amount * runs;
+            let total = amount.saturating_mul(runs);
             steps.push(Step::Subgoal(Goal::Have {
                 item: ingredient.clone(),
                 count: total,
@@ -1832,7 +1833,7 @@ impl Method for HandCraft {
         eff.push(Effect::GainItem {
             who: Actor::Role,
             item: item.clone(),
-            count: runs * output_per_craft(&recipe, item),
+            count: runs.saturating_mul(output_per_craft(&recipe, item)),
         });
 
         steps.push(Step::Act(Box::new(Action {
@@ -1843,7 +1844,7 @@ impl Method for HandCraft {
             },
             pre,
             eff,
-            duration: recipe_ticks(&recipe) * runs,
+            duration: recipe_ticks(&recipe).saturating_mul(runs),
             pinned: None,
             label: format!("craft {} {}", runs, item),
         })));

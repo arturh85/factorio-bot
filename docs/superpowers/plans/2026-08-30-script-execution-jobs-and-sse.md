@@ -1230,9 +1230,19 @@ factorio-bot-scripting = { path = "../scripting" }
 factorio-bot-scripting-lua = { path = "../scripting_lua", optional = true }
 
 [features]
-default = ["lua"]
+# Deliberately NOT in a `default` set -- see below.
 lua = ["dep:factorio-bot-scripting-lua"]
 ```
+
+and, in `app/src-tauri/Cargo.toml`, the app's existing `lua` feature gains the server's:
+
+```toml
+lua = ["dep:factorio-bot-scripting-lua", "factorio-bot-server?/lua"]
+```
+
+**Why `lua` is not a default feature of `crates/server`.** `app/src-tauri` already has a `lua` feature and a separate `restapi` feature (`restapi = ["dep:factorio-bot-server"]`), both in its default set. If the server defaulted `lua` on, then building the app as `--no-default-features --features restapi` — server but no scripting — would still pull `factorio-bot-scripting-lua` in through the server's defaults, silently contradicting the feature the operator turned off. `cargo build --no-default-features` is a documented precommit gate (`app/package.json`'s `precommit:check`), so feature combinations here are load-bearing rather than theoretical.
+
+The `?` in `factorio-bot-server?/lua` matters: it means "if `factorio-bot-server` is enabled, also enable its `lua` feature", without forcing the optional dependency on. Without the `?`, enabling the app's `lua` would drag the whole server in even for a CLI-only build — which is exactly the coupling this avoids. `crates/server/src/jobs.rs` itself needs only `factorio-bot-scripting` for `OutputSink`/`Stream`, so it is **not** feature-gated; only the execute handler in Task 6 is.
 
 `jobs.rs` itself needs only `factorio-bot-scripting` (for `OutputSink`/`Stream`), so it is not feature-gated; only the execute *handler* in Task 6 is.
 

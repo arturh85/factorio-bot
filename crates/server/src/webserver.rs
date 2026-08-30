@@ -46,13 +46,14 @@ async fn api_not_found() -> axum::response::Response {
     (axum::http::StatusCode::NOT_FOUND, axum::Json(body)).into_response()
 }
 
-pub async fn start(
+pub async fn start_with_shutdown(
     settings: SharedAppSettings,
     instance_state: SharedFactorioInstance,
     bind: SocketAddr,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     let state = AppState {
-        instance: instance_state,
+        instance: instance_state.clone(),
         settings,
     };
     let app = build_router(state);
@@ -60,6 +61,24 @@ pub async fn start(
         .await
         .into_diagnostic()?;
     tracing::info!("listening on http://{bind}");
-    axum::serve(listener, app).await.into_diagnostic()?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
+        .into_diagnostic()?;
+
+    // FactorioInstance has no Drop impl, so a server that is signalled would
+    // otherwise leave the Factorio server and every client process orphaned.
+    if let Some(instance) = instance_state.write().await.take() {
+        tracing::info!("stopping factorio instance");
+        instance.stop()?;
+    }
     Ok(())
+}
+
+pub async fn start(
+    settings: SharedAppSettings,
+    instance_state: SharedFactorioInstance,
+    bind: SocketAddr,
+) -> Result<()> {
+    start_with_shutdown(settings, instance_state, bind, std::future::pending()).await
 }

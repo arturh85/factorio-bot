@@ -7,6 +7,8 @@ mod rcon;
 mod repl;
 #[cfg(feature = "lua")]
 mod roll_seed;
+#[cfg(feature = "restapi")]
+mod serve;
 mod start;
 
 use crate::context::Context;
@@ -29,6 +31,8 @@ pub fn subcommands() -> Vec<Box<dyn Subcommand>> {
     playground::build(),
     #[cfg(feature = "repl")]
     repl::build(),
+    #[cfg(feature = "restapi")]
+    serve::build(),
     start::build(),
   ]
 }

@@ -182,14 +182,33 @@ pub fn schedule(
                 Some(pinned) if !bots.contains(&pinned) => {
                     return Err(PlannerError::UnknownBot(pinned))
                 }
-                // Pinning takes precedence over everything: it is an explicit
-                // instruction, chain binding is an inference. But rather than
-                // silently overriding the binding — which would hand a chain's
+                // Pinning takes precedence over a chain *binding*: the pin is an
+                // explicit instruction, the binding an inference. But rather
+                // than silently overriding it — which would hand a chain's
                 // items to a bot that does not hold them, and fail later with a
                 // confusing precondition error somewhere else — a contradiction
                 // is reported here, where its cause is still visible. Nothing
                 // sets `pinned` today, so this is defensive.
+                //
+                // A chain *owner* is checked first and on the same footing. An
+                // owner is the same class of thing as a pin — a caller's
+                // instruction — and the harder of the two: it is stated before
+                // scheduling begins and gets no fallback tier. Letting a pin
+                // quietly win over it would run the action on a bot the caller
+                // did not name while the rest of the chain went where the
+                // caller asked, which is precisely the silent override this
+                // arm exists to prevent.
                 Some(pinned) => {
+                    if let (Some(chain), Some(owner)) = (chain, owner) {
+                        if owner != pinned {
+                            return Err(PlannerError::ChainConflict {
+                                chain,
+                                action: action.id,
+                                bound_to: owner,
+                                pinned_to: pinned,
+                            });
+                        }
+                    }
                     if let (Some(chain), Some(bound)) = (chain, bound) {
                         if bound != pinned {
                             return Err(PlannerError::ChainConflict {
@@ -332,6 +351,7 @@ pub fn schedule(
                     // the caller's own instruction that cannot be met.
                     Some(chain) => PlannerError::ChainOwnerInfeasible {
                         chain,
+                        action: rejected.candidate.action,
                         bot: rejected.candidate.bot,
                         condition: rejected.condition,
                     },
@@ -888,6 +908,111 @@ mod tests {
                 "expected a ChainConflict, got {:?}",
                 other.map(|s| s.makespan)
             ),
+        }
+    }
+
+    #[test]
+    fn a_pin_that_contradicts_a_chain_owner_is_a_conflict() {
+        // An owner is the same class of thing as a pin — a caller's
+        // instruction — and the harder one, since it admits no fallback tier.
+        // Before the owner was compared here the pin simply won: the action
+        // ran on bot 1 while its chain belonged to bot 2, silently, with no
+        // error anywhere.
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let mut pinned = free(&mut gen, "pinned away from its owner", 10);
+        pinned.pinned = Some(BotId(1));
+        let action = net.add(pinned);
+        let chain = ChainId(0);
+        net.set_chain(action, chain);
+        net.set_chain_owner(chain, BotId(2));
+
+        let bots = [BotId(1), BotId(2)];
+        match schedule(&net, &state(&bots), &bots) {
+            Err(PlannerError::ChainConflict {
+                chain: c,
+                action: a,
+                bound_to,
+                pinned_to,
+            }) => {
+                assert_eq!(c, chain);
+                assert_eq!(a, action);
+                assert_eq!(
+                    bound_to,
+                    BotId(2),
+                    "the owner is what the pin contradicts, not a binding"
+                );
+                assert_eq!(pinned_to, BotId(1));
+            }
+            other => panic!(
+                "expected a ChainConflict, got {:?}",
+                other.map(|s| s.makespan)
+            ),
+        }
+    }
+
+    #[test]
+    fn a_pin_that_agrees_with_the_chain_owner_is_allowed() {
+        // The companion to the test above: the check rejects contradiction,
+        // not the presence of a pin on an owned chain.
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let mut pinned = free(&mut gen, "pinned to its own owner", 10);
+        pinned.pinned = Some(BotId(2));
+        let action = net.add(pinned);
+        let chain = ChainId(0);
+        net.set_chain(action, chain);
+        net.set_chain_owner(chain, BotId(2));
+
+        let bots = [BotId(1), BotId(2)];
+        let result = schedule(&net, &state(&bots), &bots).expect("pin and owner agree");
+        assert_eq!(result.assignment(action), Some(BotId(2)));
+    }
+
+    #[test]
+    fn an_owner_that_cannot_run_its_chain_blames_the_caller_not_the_world() {
+        // `PreconditionUnsatisfied` means "the world was not as planned", which
+        // the spec answers by re-planning from observed state. A caller naming
+        // a bot that cannot meet the chain's own precondition is not that: the
+        // instruction itself is unsatisfiable, and re-planning meets it again.
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let mut needs_ore = free(&mut gen, "the chain the caller asked for", 10);
+        needs_ore.pre = vec![Condition::HasItem {
+            who: Actor::Role,
+            item: "uranium-ore".into(),
+            count: 1,
+        }];
+        let action = net.add(needs_ore);
+        let chain = ChainId(0);
+        net.set_chain(action, chain);
+        net.set_chain_owner(chain, BotId(2));
+
+        // Neither bot holds any, so this is not about bot 2 being unlucky —
+        // but the owner tier means bot 2 is the only bot ever offered it.
+        let bots = [BotId(1), BotId(2)];
+        let err = schedule(&net, &state(&bots), &bots).expect_err("nobody holds uranium ore");
+        assert_eq!(
+            err.to_string(),
+            "bot 2 owns chain ChainId(0) because a caller named it, \
+             but has 1 uranium-ore does not hold there"
+        );
+        match err {
+            PlannerError::ChainOwnerInfeasible {
+                chain: c,
+                action: a,
+                bot,
+                condition,
+            } => {
+                assert_eq!(c, chain);
+                assert_eq!(
+                    a, action,
+                    "tier-1 recovery needs the action to re-plan around"
+                );
+                assert_eq!(bot, BotId(2));
+                assert_eq!(condition, "has 1 uranium-ore");
+            }
+            other => panic!("expected a ChainOwnerInfeasible, got {:?}", other),
         }
     }
 

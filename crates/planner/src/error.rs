@@ -37,8 +37,15 @@ pub enum PlannerError {
     /// world was not as planned", which the spec answers by re-planning from
     /// observed state. A pin that contradicts a chain binding is not about the
     /// world at all — re-planning would produce the same contradiction forever.
+    ///
+    /// `bound_to` is whichever committed the chain to a bot: its **owner**, if
+    /// a caller named one, and otherwise the bot the scheduler bound it to when
+    /// the chain opened. Ownership is checked first because it is the harder
+    /// constraint — a caller's instruction, stated before scheduling begins,
+    /// with no fallback tier — and because a chain with an owner is only ever
+    /// bound to that owner, so the owner is the original cause.
     #[error(
-        "action {action:?} is pinned to {pinned_to}, but its chain {chain:?} is already bound to {bound_to}"
+        "action {action:?} is pinned to {pinned_to}, but its chain {chain:?} already belongs to {bound_to}"
     )]
     #[diagnostic(code(planner::chain_conflict))]
     ChainConflict {
@@ -58,6 +65,10 @@ pub enum PlannerError {
     #[diagnostic(code(planner::chain_owner_infeasible))]
     ChainOwnerInfeasible {
         chain: ChainId,
+        /// The action that could not be run, carried like every sibling
+        /// variant carries one: tier-1 recovery has to know which action to
+        /// re-plan around, and the chain alone does not say.
+        action: ActionId,
         bot: BotId,
         condition: String,
     },

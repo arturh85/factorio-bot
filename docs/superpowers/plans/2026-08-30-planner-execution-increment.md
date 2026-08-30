@@ -1426,7 +1426,15 @@ Fix: resolve the path against the intended root and reject anything that escapes
 
 Add tests for: an absolute path is refused, a `..` escape is refused, a path through a symlink pointing outside the root is refused, and an ordinary relative name still works.
 
-This is being fixed here rather than filed because a concurrent effort is about to expose script execution over HTTP, which turns a local sandbox escape into a remote arbitrary file write.
+**Move `draw_world` out of `test_utils` as part of this fix.** It currently lives in `crates/core/src/test_utils.rs`, which `crates/core/src/lib.rs:47` deliberately does NOT gate behind `#[cfg(test)]` ("not possible because lua crate needs this"). That naming is the root cause: an `.unwrap()` and an unvalidated `join` are unremarkable in a test helper and indefensible in a live API path, so nobody looked twice. Fixing only the validation leaves the trap set for the next function added there.
+
+`crates/core/src/draw.rs` already exists and holds the drawing primitives (`arrow_mut` and friends) — that is where it belongs. Move it there and update the two references: the import in `crates/scripting_lua/src/globals/world.rs` and the commented-out call at `crates/scripting_lua/src/lua_runner.rs:109`.
+
+Verify first that `draw_world` is the only non-fixture consumer of `test_utils`: at time of writing, every other cross-crate use is `fixture_world`, which is a genuine test fixture that must stay public (a dependency's `#[cfg(test)]` items are invisible downstream, and the planner's unit tests need it). After the move, `test_utils` contains only fixtures and no longer exposes a filesystem write to the live API.
+
+**Say this in the commit message.** The next person to read `test_utils.rs` will assume it is test-only, exactly as two agents did before checking the module declaration.
+
+This is being fixed here rather than filed because a concurrent effort is about to expose script execution over HTTP, which turns a local sandbox escape into a remote arbitrary file write. That effort has agreed to gate on this fix and to verify it independently from its side rather than trusting that it landed.
 
 - [ ] **Step 5: Commit**
 

@@ -7,6 +7,8 @@
 //! and planner/executor failures on the `LuaError` path.
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
+mod value;
+
 use crate::lua_runner::PendingWork;
 use factorio_bot_core::factorio::rcon::FactorioRcon;
 use factorio_bot_core::factorio::world::FactorioWorld;
@@ -1785,7 +1787,7 @@ mod tests {
         let mut planner = Planner::new(Arc::new(world), None);
         crate::lua_runner::run_lua(
             &mut planner,
-            include_str!("../../tests/goal_script.lua"),
+            include_str!("../../../tests/goal_script.lua"),
             None,
             &root,
             4,

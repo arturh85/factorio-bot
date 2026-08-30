@@ -65,10 +65,17 @@ impl AppSettings {
 #[allow(clippy::module_name_repetitions)]
 pub fn load_app_settings() -> Result<AppSettings> {
     let mut app_settings = AppSettings::load(paths::settings_file())?;
-    if app_settings.factorio.workspace_path.is_empty() {
-        let s: String = paths::workspace_dir().to_str().unwrap().into();
-        app_settings.factorio.workspace_path = Cow::from(s);
-    }
+    // One resolution rule, in `paths::resolve_workspace`. This used to inline
+    // it -- empty means the data-local workspace -- and four copies of that
+    // inline had drifted apart, which is how a start could resolve a workspace
+    // differently from the route that lists its scripts.
+    //
+    // `to_str().unwrap()` also went with it: a non-UTF-8 data-local directory
+    // panicked here, and with `panic = "abort"` in release that is a crash at
+    // load rather than an error.
+    let resolved = paths::resolve_workspace(&app_settings.factorio.workspace_path)
+        .into_diagnostic()?;
+    app_settings.factorio.workspace_path = Cow::from(resolved.to_string_lossy().into_owned());
     Ok(app_settings)
 }
 

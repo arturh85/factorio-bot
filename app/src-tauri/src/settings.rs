@@ -62,12 +62,14 @@ pub fn load_app_settings_with(overrides: &SettingsOverrides) -> Result<CoreAppSe
     None => CoreAppSettings::load(paths::settings_file())?,
   };
   overrides.apply(&mut settings);
-  // Same fallback `load_app_settings` applies, but after the override so an
-  // explicit `--workspace-path` is never second-guessed.
-  if settings.factorio.workspace_path.is_empty() {
-    let workspace_dir = paths::workspace_dir().to_string_lossy().into_owned();
-    settings.factorio.workspace_path = Cow::Owned(workspace_dir);
-  }
+  // The same resolution every other caller uses, applied after the override so
+  // an explicit `--workspace-path` is never second-guessed. Shared rather than
+  // inlined: four copies of this rule had drifted apart, and the start route
+  // ended up resolving a workspace differently from the route listing its
+  // scripts.
+  let resolved = paths::resolve_workspace(&settings.factorio.workspace_path)
+    .map_err(|err| miette!("{err}"))?;
+  settings.factorio.workspace_path = Cow::Owned(resolved.to_string_lossy().into_owned());
   Ok(settings)
 }
 

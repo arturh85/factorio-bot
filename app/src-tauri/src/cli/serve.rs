@@ -60,21 +60,12 @@ async fn run(matches: &ArgMatches, context: &mut Context) -> Result<()> {
       .factorio
       .workspace_path
       .to_string();
-    // Same resolution the handlers use: an empty `workspace_path` means the
-    // data-local workspace, and a relative one is never joined against the
-    // CWD. `load_app_settings` already fills the empty case in, so this only
-    // matters for settings built by other means.
-    let workspace_path = if configured.is_empty() {
-      factorio_bot_core::paths::workspace_dir()
-    } else {
-      std::path::PathBuf::from(configured)
-    };
-    if workspace_path.is_relative() {
-      return Err(miette!(
-        "settings.factorio.workspace_path must be absolute, got: {}",
-        workspace_path.display()
-      ));
-    }
+    // The shared rule, not a fourth copy of it. `resolve_workspace` already
+    // rejects a relative path -- the local `is_relative` check that used to
+    // follow this could no longer fire, and a guard that cannot fail is worse
+    // than none, because the next reader trusts it.
+    let workspace_path = factorio_bot_core::paths::resolve_workspace(&configured)
+      .map_err(|err| miette!("{err}"))?;
     let scripts_dir = factorio_bot_core::scripts::ensure_scripts_dir(&workspace_path)?;
     info!("scripts directory: {}", scripts_dir.display());
   }

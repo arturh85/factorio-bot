@@ -173,4 +173,61 @@ recreate = true
         assert_eq!(restored.restapi.web_root, Some("/srv/www".to_owned()));
         assert!(restored.gui.enable_autostart);
     }
+
+    /// The template shipped in `src/data/AppSettings.toml` is what a user copies
+    /// into the data directory. It used to be flat while `AppSettings` is
+    /// nested, so every key in it merged into nothing: a `factorio_archive_path`
+    /// set there stayed empty and the run failed with "no factorio archive
+    /// configured".
+    const SHIPPED_TEMPLATE: &str = include_str!("data/AppSettings.toml");
+
+    #[test]
+    fn the_shipped_template_is_sectioned_like_the_struct() {
+        let parsed: toml::Value = toml::from_str(SHIPPED_TEMPLATE).expect("template is valid toml");
+        let table = parsed.as_table().expect("template is a table");
+        let sections: Vec<&str> = table.keys().map(String::as_str).collect();
+        assert_eq!(
+            sections,
+            vec!["factorio", "gui", "restapi"],
+            "the template must only contain the struct's sections"
+        );
+        for section in sections {
+            assert!(
+                table[section].is_table(),
+                "[{section}] must be a table of settings"
+            );
+        }
+    }
+
+    /// Structure alone is not enough: the values have to arrive in the struct.
+    /// Every key here is edited away from its default first, because a template
+    /// whose values happen to equal the defaults cannot tell a working merge
+    /// from a broken one.
+    #[test]
+    fn values_edited_in_the_shipped_template_reach_the_struct() {
+        let edited = SHIPPED_TEMPLATE
+            .replace(
+                r#"factorio_archive_path = """#,
+                r#"factorio_archive_path = "/opt/factorio.tar.xz""#,
+            )
+            .replace("client_count = 2", "client_count = 5")
+            .replace("port = 7492", "port = 9001")
+            .replace("enable_autostart = false", "enable_autostart = true");
+        assert_ne!(edited, SHIPPED_TEMPLATE, "the edits must apply");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file_path = dir.path().join("AppSettings.toml");
+        std::fs::write(&file_path, edited).expect("writes the settings file");
+        let settings = AppSettings::load(file_path).expect("loads the template");
+
+        assert_eq!(
+            settings.factorio.factorio_archive_path,
+            "/opt/factorio.tar.xz"
+        );
+        assert_eq!(settings.factorio.client_count, 5);
+        assert_eq!(settings.restapi.port, 9001);
+        assert!(settings.gui.enable_autostart);
+        // and an untouched key still carries the template's own value
+        assert_eq!(settings.factorio.rcon_pass, "foobar");
+    }
 }

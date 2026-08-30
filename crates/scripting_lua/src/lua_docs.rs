@@ -1,4 +1,5 @@
 use crate::globals::create_lua_globals;
+use crate::globals::goal::create_lua_goal;
 use crate::globals::plan::create_lua_plan_builder;
 use crate::globals::rcon::create_lua_rcon;
 use crate::globals::world::create_lua_world;
@@ -25,6 +26,13 @@ pub fn write_lua_docs(target_path: PathBuf) -> LuaResult<()> {
     let world_table = create_lua_world(&lua, planner.plan_world.clone(), cwd.clone(), cwd.clone())?;
     let plan_table =
         create_lua_plan_builder(&lua, planner.graph.clone(), planner.plan_world.clone())?;
+    let goal_table = create_lua_goal(
+        &lua,
+        planner.plan_world.clone(),
+        planner.real_world.clone(),
+        None,
+        vec![],
+    )?;
     let rcon_table = create_lua_rcon(&lua, rcon, planner.real_world)?;
     let code_by_path: HashMap<String, String> = HashMap::new();
     let code_by_path: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(code_by_path));
@@ -33,6 +41,7 @@ pub fn write_lua_docs(target_path: PathBuf) -> LuaResult<()> {
     write_lua_doc(target_path.join("globals.lua"), &lua.globals());
     write_lua_doc(target_path.join("world.lua"), &world_table);
     write_lua_doc(target_path.join("plan.lua"), &plan_table);
+    write_lua_doc(target_path.join("goal.lua"), &goal_table);
     write_lua_doc(target_path.join("rcon.lua"), &rcon_table);
     Ok(())
 }

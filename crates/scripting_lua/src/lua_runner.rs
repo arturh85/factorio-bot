@@ -1,4 +1,5 @@
 use crate::globals::create_lua_globals;
+use crate::globals::goal::create_lua_goal;
 use crate::globals::plan::create_lua_plan_builder;
 use crate::globals::rcon::create_lua_rcon;
 use crate::globals::world::create_lua_world;
@@ -71,6 +72,13 @@ pub async fn run_lua(
                 scripts_root.clone(),
                 script_dir.clone(),
             )?;
+            let goal = create_lua_goal(
+                &lua,
+                plan_world.clone(),
+                real_world.clone(),
+                rcon.clone(),
+                all_bots.clone(),
+            )?;
             let plan = create_lua_plan_builder(&lua, graph, plan_world)?;
             create_lua_globals(
                 &lua,
@@ -85,6 +93,7 @@ pub async fn run_lua(
             let globals = lua.globals();
             globals.set("world", world)?;
             globals.set("plan", plan)?;
+            globals.set("goal", goal)?;
             if let Some(rcon) = rcon.as_ref() {
                 let rcon = create_lua_rcon(&lua, rcon.clone(), real_world.clone())?;
                 globals.set("rcon", rcon)?;

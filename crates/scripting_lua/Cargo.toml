@@ -11,6 +11,8 @@ publish = false
 
 [dependencies]
 factorio-bot-core = { path = "../core" }
+factorio-bot-executor = { path = "../executor", version = "0.2.4-dev" }
+factorio-bot-planner = { path = "../planner", version = "0.2.4-dev" }
 factorio-bot-scripting = { path = "../scripting" }
 itertools = "0.14"
 mlua = { version = "0.12", features = ["lua54", "serialize", "macros", "async"] }
@@ -18,5 +20,8 @@ mlua = { version = "0.12", features = ["lua54", "serialize", "macros", "async"] 
 miette = {version = "7.4", features = ["fancy"] }
 thiserror = "2.0"
 [dev-dependencies]
+# `goal.execute` is tested against a stub `Actuator`, and the trait is
+# `#[async_trait]`, so implementing it needs the same macro.
+async-trait = "0.1"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "tracing"] }

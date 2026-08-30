@@ -227,6 +227,50 @@ mod tests {
         assert!(result.is_ok(), "{result:?}");
     }
 
+    /// A panic inside the interpreter thread surfaces as this exact message,
+    /// so asserting on it is what separates "the script failed" (wanted) from
+    /// "the process would have died" (a remote kill under `panic = "abort"`).
+    fn assert_reported_not_panicked(result: &Result<()>) {
+        let err = result.as_ref().expect_err("expected an error");
+        assert!(
+            !format!("{err}").contains("lua thread panicked"),
+            "the interpreter thread panicked instead of reporting: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_error_from_a_chunk_the_script_named_itself_is_reported_not_panicked() {
+        // `code_by_path` has no entry for "evil", and the old error formatter
+        // unwrapped that lookup -- one line of Lua killed the whole process.
+        let (_dir, result) = sandboxed(r#"load("error('boom')", "evil")()"#).await;
+        assert_reported_not_panicked(&result);
+    }
+
+    #[tokio::test]
+    async fn a_crafted_error_message_with_an_unparsable_line_number_is_reported_not_panicked() {
+        // `error(msg, 0)` suppresses Lua's own position prefix, so the whole
+        // message -- including the `[string "x"]:N:` the formatter parses -- is
+        // exactly what the script chose. A line number this size overflows the
+        // `usize` the formatter parsed it into.
+        let (_dir, result) =
+            sandboxed("error('[string \"<inline>\"]:99999999999999999999999999: boom', 0)").await;
+        assert_reported_not_panicked(&result);
+    }
+
+    #[tokio::test]
+    async fn a_crafted_error_message_naming_a_line_past_the_end_is_reported_not_panicked() {
+        let (_dir, result) = sandboxed("error('[string \"<inline>\"]:9999: boom', 0)").await;
+        assert_reported_not_panicked(&result);
+    }
+
+    #[tokio::test]
+    async fn a_result_that_cannot_be_serialised_is_reported_not_panicked() {
+        // `result` is whatever the script assigned; a function has no serde
+        // representation, and `lua.from_value(..).unwrap()` was reachable.
+        let (_dir, result) = sandboxed("result = function() end").await;
+        assert_reported_not_panicked(&result);
+    }
+
     #[tokio::test]
     async fn test_script() {
         let world = Arc::new(fixture_world());

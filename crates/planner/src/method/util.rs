@@ -8,7 +8,7 @@ use factorio_bot_core::types::{FactorioRecipe, Position};
 
 const TICKS_PER_SECOND: f64 = 60.0;
 
-/// How far out `free_tile_near` will search before giving up, in tiles.
+/// How far out `free_area_near` will search before giving up, in tiles.
 const FREE_TILE_SEARCH_RADIUS: i32 = 12;
 
 /// Convert a recipe's or prototype's seconds into ticks, rounding up so that a
@@ -144,9 +144,19 @@ pub fn resource_supply_at_least(state: &PlanState, item: &str, need: u32) -> boo
     false
 }
 
-/// The nearest unoccupied tile to `from`, searched in rings so the result is
-/// close and reproducible.
-pub fn free_tile_near(state: &PlanState, from: &Position) -> Option<Position> {
+/// The nearest spot to `from` where an `entity` actually fits, searched in
+/// rings so the result is close and reproducible.
+///
+/// Takes the entity because "free" is not a property of a tile: a stone
+/// furnace is 1.398 tiles across, so a tile with nothing on it is still no
+/// place for one if the neighbouring tile carries a furnace whose box reaches
+/// over. Searching by tile and testing by tile is what sited two furnaces one
+/// tile apart and had the game refuse the second.
+///
+/// Candidates stay on the integer grid the tile search has always used, which
+/// is where Factorio wants an even-sized entity like a furnace; the *test* is
+/// `is_area_free`, which is exact.
+pub fn free_area_near(state: &PlanState, from: &Position, entity: &str) -> Option<Position> {
     let base_x = from.x.floor() as i32;
     let base_y = from.y.floor() as i32;
     for radius in 0..=FREE_TILE_SEARCH_RADIUS {
@@ -157,7 +167,7 @@ pub fn free_tile_near(state: &PlanState, from: &Position) -> Option<Position> {
                     continue;
                 }
                 let candidate = Position::new((base_x + dx) as f64, (base_y + dy) as f64);
-                if state.is_position_free(&candidate) {
+                if state.is_area_free(entity, &candidate) {
                     return Some(candidate);
                 }
             }
@@ -315,15 +325,16 @@ mod tests {
     #[test]
     fn a_free_tile_is_found_and_is_actually_free() {
         let s = state();
-        let pos = free_tile_near(&s, &Position::new(0., 0.)).expect("origin area is open");
-        assert!(s.is_position_free(&pos));
+        let pos = free_area_near(&s, &Position::new(0., 0.), "stone-furnace")
+            .expect("origin area is open");
+        assert!(s.is_area_free("stone-furnace", &pos));
     }
 
     #[test]
     fn a_free_tile_avoids_an_occupied_one() {
         let mut s = state();
         let origin = Position::new(0., 0.);
-        let first = free_tile_near(&s, &origin).unwrap();
+        let first = free_area_near(&s, &origin, "stone-furnace").unwrap();
         let furnace = factorio_bot_core::types::FactorioEntity {
             name: "stone-furnace".into(),
             entity_type: "furnace".into(),
@@ -331,9 +342,9 @@ mod tests {
             ..Default::default()
         };
         s.create_entity(furnace);
-        let second = free_tile_near(&s, &origin).unwrap();
+        let second = free_area_near(&s, &origin, "stone-furnace").unwrap();
         assert_ne!(first, second);
-        assert!(s.is_position_free(&second));
+        assert!(s.is_area_free("stone-furnace", &second));
     }
 
     #[test]
@@ -344,7 +355,8 @@ mod tests {
         let s = state();
         let ore = nearest_resource_tile(&s, "iron-ore", &Position::new(0., 0.), 1)
             .expect("fixture has iron ore");
-        let tile = free_tile_near(&s, &ore).expect("open ground next to the patch");
+        let tile =
+            free_area_near(&s, &ore, "stone-furnace").expect("open ground next to the patch");
         assert_ne!(tile, ore, "the furnace was sited on the ore tile itself");
         assert_eq!(
             s.resource_available(&tile, "iron-ore"),
@@ -396,8 +408,8 @@ mod tests {
                 });
             }
         }
-        let found = free_tile_near(&s, &origin).expect("ring 2 is open");
-        assert!(s.is_position_free(&found));
+        let found = free_area_near(&s, &origin, "stone-furnace").expect("ring 2 is open");
+        assert!(s.is_area_free("stone-furnace", &found));
         assert!(
             found.x.abs() >= 2.0 || found.y.abs() >= 2.0,
             "must have moved past the blocked 3x3, got {}",

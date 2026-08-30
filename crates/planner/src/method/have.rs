@@ -22,7 +22,7 @@ use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::ids::{BotId, Ticks};
 use crate::method::util::{
-    free_tile_near, ingredients_of, mining_ticks, nearest_resource_tile, output_per_craft,
+    free_area_near, ingredients_of, mining_ticks, nearest_resource_tile, output_per_craft,
     recipe_for, recipe_ticks, resource_supply_at_least, resource_tiles_for,
 };
 use crate::method::{ExpansionCtx, GoalSite, Method, MethodRegistry, Step};
@@ -128,7 +128,8 @@ impl Method for Smelt {
             .first()
             .and_then(|(ingredient, _)| nearest_resource_tile(&ctx.state, ingredient, &from, 1))
             .unwrap_or(from.clone());
-        let pos = free_tile_near(&ctx.state, &anchor).ok_or_else(|| {
+        let furnace_entity: String = "stone-furnace".into();
+        let pos = free_area_near(&ctx.state, &anchor, &furnace_entity).ok_or_else(|| {
             PlannerError::NoApplicableMethod {
                 goal: goal.to_string(),
             }
@@ -144,7 +145,6 @@ impl Method for Smelt {
             .map(|b| b.reach_distance)
             .unwrap_or(10.0);
 
-        let furnace_entity: String = "stone-furnace".into();
         let furnace = FactorioEntity {
             name: furnace_entity.clone(),
             entity_type: "furnace".into(),
@@ -185,7 +185,10 @@ impl Method for Smelt {
                     pos: pos.clone(),
                     radius: build,
                 },
-                Condition::PositionFree { pos: pos.clone() },
+                Condition::AreaFree {
+                    pos: pos.clone(),
+                    entity: furnace_entity.clone(),
+                },
                 Condition::HasItem {
                     who: Actor::Role,
                     item: "stone-furnace".into(),
@@ -625,6 +628,88 @@ mod tests {
 
     fn state(bots: &[BotId]) -> PlanState {
         PlanState::from_world(Arc::new(fixture_world()), bots)
+    }
+
+    /// The scenario the stack exists for, checked for the thing the game
+    /// checks: no two entities the plan places may share ground.
+    ///
+    /// Before footprints, this plan sited stone furnaces at `[-34, -1]` and
+    /// `[-34, 0]` — one tile apart, where a stone furnace is 1.398 tiles
+    /// across. `mods/BotBridge/control.lua`'s `can_place_entity` refuses the
+    /// second, and the executor's `abandon_rest` then drops that bot's whole
+    /// remaining slice, so a single overlap costs a quarter of the run.
+    ///
+    /// Stated over collision boxes read from the prototypes, never over a
+    /// clearance constant: `dx > 1.398` would pin the very number the fix must
+    /// not hardcode, and would quietly stop meaning anything for any other
+    /// entity. The overlap test below is written out rather than borrowed from
+    /// `state.rs` so it is not the production predicate checking itself; it is
+    /// deliberately stricter (no touch slack), which is safe here because
+    /// placements sit on integer tiles and 1.398 is not an integer, so two
+    /// furnaces can never come to rest exactly touching.
+    #[test]
+    fn nothing_the_red_science_plan_places_overlaps_anything_else_it_places() {
+        use factorio_bot_core::types::Rect;
+
+        fn intersect(a: &Rect, b: &Rect) -> bool {
+            a.left_top.x() < b.right_bottom.x()
+                && b.left_top.x() < a.right_bottom.x()
+                && a.left_top.y() < b.right_bottom.y()
+                && b.left_top.y() < a.right_bottom.y()
+        }
+
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        // `tests/red_science.rs`'s world, so this is the real headline plan and
+        // not a scenario invented to be easy.
+        let mut s = state(&bots);
+        for bot in bots {
+            s.gain(bot, "stone-furnace", 2);
+        }
+        s.set_position(BotId(2), Position::new(30., 0.));
+
+        let net = expand(
+            &[Goal::Have {
+                item: "automation-science-pack".into(),
+                count: 10,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("ten red science expands");
+
+        let placed: Vec<(String, Position)> = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Place { entity } => {
+                    Some((entity.name.clone(), entity.position.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            placed.len() > 1,
+            "this plan must place at least two entities or the pairwise check \
+             below is vacuous; it placed {}",
+            placed.len()
+        );
+
+        for (i, (name_a, pos_a)) in placed.iter().enumerate() {
+            let box_a = s
+                .collision_area(name_a, pos_a)
+                .unwrap_or_else(|| panic!("no prototype for {name_a}, which was placed anyway"));
+            for (name_b, pos_b) in placed.iter().skip(i + 1) {
+                let box_b = s
+                    .collision_area(name_b, pos_b)
+                    .unwrap_or_else(|| panic!("no prototype for {name_b}"));
+                assert!(
+                    !intersect(&box_a, &box_b),
+                    "{name_a} at {pos_a} and {name_b} at {pos_b} overlap: \
+                     {box_a:?} against {box_b:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1583,7 +1668,7 @@ mod tests {
         );
         // `to_ore < to_origin` alone passes for an anchor anywhere in the half
         // of the map nearer the ore than the origin, which is most of it. The
-        // siting is `free_tile_near` from the ore tile itself, and that
+        // siting is `free_area_near` from the ore tile itself, and that
         // searches at most 12 tiles out, so 20 catches the regression this
         // guards: the anchor slipping back towards the bot's start, 49.5 away.
         //

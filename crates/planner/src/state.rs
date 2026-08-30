@@ -1,9 +1,53 @@
 use crate::error::PlannerError;
 use crate::ids::{BotId, ItemId};
+use factorio_bot_core::factorio::util::add_to_rect;
 use factorio_bot_core::factorio::world::FactorioWorld;
-use factorio_bot_core::types::{FactorioEntity, Pos, Position, ResourcePatch};
+use factorio_bot_core::types::{FactorioEntity, Pos, Position, Rect, ResourcePatch};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+
+/// How far two collision boxes may reach into each other before it counts.
+///
+/// Factorio lets boxes that merely touch along an edge coexist, and the
+/// prototype numbers are binary fractions (a stone furnace is ±0.69921875),
+/// so exact touching really happens. A 1/512 tile is finer than the 1/256 the
+/// game stores positions at, so nothing this admits is a collision the game
+/// would see; it only keeps float noise from reading as one.
+const TOUCH_SLACK: f64 = 1. / 512.;
+
+/// Do two collision boxes share ground? Touching along an edge does not count.
+fn boxes_overlap(a: &Rect, b: &Rect) -> bool {
+    a.left_top.x() < b.right_bottom.x() - TOUCH_SLACK
+        && b.left_top.x() < a.right_bottom.x() - TOUCH_SLACK
+        && a.left_top.y() < b.right_bottom.y() - TOUCH_SLACK
+        && b.left_top.y() < a.right_bottom.y() - TOUCH_SLACK
+}
+
+/// The one-tile box covering `tile`. Tile `(x, y)` spans `[x, x+1)`.
+fn tile_area(tile: &Pos) -> Rect {
+    Rect::new(
+        &Position::new(tile.0 as f64, tile.1 as f64),
+        &Position::new(tile.0 as f64 + 1., tile.1 as f64 + 1.),
+    )
+}
+
+/// Every tile `area` reaches into, in a fixed order.
+///
+/// The slack keeps a box that stops exactly on a tile boundary from claiming
+/// the tile beyond it, which is the same edge case `boxes_overlap` handles.
+fn tiles_under(area: &Rect) -> Vec<Pos> {
+    let x0 = (area.left_top.x() + TOUCH_SLACK).floor() as i32;
+    let x1 = (area.right_bottom.x() - TOUCH_SLACK).floor() as i32;
+    let y0 = (area.left_top.y() + TOUCH_SLACK).floor() as i32;
+    let y1 = (area.right_bottom.y() - TOUCH_SLACK).floor() as i32;
+    let mut out = Vec::new();
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            out.push(Pos(x, y));
+        }
+    }
+    out
+}
 
 /// How much ore one tile yields before this plan exhausts it.
 ///
@@ -155,27 +199,122 @@ impl PlanState {
             .and_then(|id| self.base.entity_graph.entity_by_id(id))
     }
 
-    /// Whether an entity could be placed on this tile.
+    /// The ground an entity of `name` would cover with its centre at `position`,
+    /// in world coordinates.
     ///
-    /// Ore counts as occupying its tile, and `entity_at` cannot report it:
-    /// `EntityGraph::add` routes resource entities into `resources`/`resource_tree`
-    /// only, so the entity tree `entity_at` queries never sees them. Asking
-    /// `entity_at` alone therefore calls an ore tile free, and `free_tile_near`
-    /// would site a furnace on top of the patch — arithmetic the planner is happy
-    /// with and the game rejects. `any_resource_at` closes that asymmetry.
+    /// Read from the game's own `collision_box` prototype — never assumed and
+    /// never per-entity constants. A stone furnace is ±0.69921875 and an
+    /// assembling machine ±1.19921875; the planner has no business knowing
+    /// either number.
+    ///
+    /// `None` when the world has no prototype under that name. Callers treat
+    /// that as *not placeable* rather than guessing a size: a guess that is too
+    /// small is exactly the defect this function exists to remove, and the only
+    /// names the planner ever places come from the world's own prototypes and
+    /// recipes, so a miss means the world carries no prototype data at all.
+    /// Failing to plan is recoverable; planning a placement the game refuses,
+    /// which costs the bot its whole remaining slice, is not.
+    pub fn collision_area(&self, name: &str, position: &Position) -> Option<Rect> {
+        self.base
+            .entity_prototypes
+            .get(name)
+            .map(|proto| add_to_rect(&proto.collision_box, position))
+    }
+
+    /// The ground an entity already in the plan covers.
+    ///
+    /// `create_entity` fills the entity's `bounding_box` from its prototype, so
+    /// this is normally that box. The fallback — the single tile the entity
+    /// stands on — is for entities put into the state directly with neither a
+    /// bounding box nor a known prototype, and it under-reserves; it is the
+    /// least this can claim without inventing a size.
+    fn footprint_of(&self, entity: &FactorioEntity) -> Rect {
+        if entity.bounding_box.width() > 0. && entity.bounding_box.height() > 0. {
+            return entity.bounding_box.clone();
+        }
+        self.collision_area(&entity.name, &entity.position)
+            .unwrap_or_else(|| tile_area(&Pos::from(&entity.position)))
+    }
+
+    /// Whether an entity of `name` could be built with its centre at `position`.
+    ///
+    /// The question `is_position_free` could not ask. A stone furnace is 1.398
+    /// tiles across, so two of them one tile apart overlap while each one's
+    /// *tile* is free — which is how the red-science plan came to site furnaces
+    /// at `[-34, -1]` and `[-34, 0]` and have the game refuse the second.
+    ///
+    /// Entities are compared box against box rather than tile against tile, so
+    /// a placement is refused when it would actually collide and not merely
+    /// when it shares a tile.
+    pub fn is_area_free(&self, name: &str, position: &Position) -> bool {
+        match self.collision_area(name, position) {
+            Some(area) => self.is_area_clear(&area),
+            None => false,
+        }
+    }
+
+    /// Whether anything the plan can see occupies `area`.
+    ///
+    /// Three sources, because no single one of them sees everything:
+    /// entities this plan has placed, entities the base world already had, and
+    /// ore. Ore is the odd one — `EntityGraph::add` routes resource entities
+    /// into `resources`/`resource_tree` only, so the entity tree never sees
+    /// them and they have to be asked for by tile.
+    fn is_area_clear(&self, area: &Rect) -> bool {
+        for entity in self.added.values() {
+            if boxes_overlap(&self.footprint_of(entity), area) {
+                return false;
+            }
+        }
+        // The query box is the smallest square covering `area`, so nothing
+        // overlapping `area` can be outside it; the exact test is the
+        // `boxes_overlap` below, this only narrows the search.
+        let radius = area.width().max(area.height()) / 2. + 1.;
+        for entity in
+            self.base
+                .entity_graph
+                .find_entities_in_radius(area.center(), radius, None, None)
+        {
+            if self.removed.contains(&Pos::from(&entity.position)) {
+                continue;
+            }
+            if boxes_overlap(&entity.bounding_box, area) {
+                return false;
+            }
+        }
+        !tiles_under(area)
+            .iter()
+            .any(|tile| self.base.entity_graph.any_resource_at(tile))
+    }
+
+    /// Whether this tile is clear.
+    ///
+    /// A tile-granularity question, kept because that is what
+    /// `Condition::PositionFree` asks. It says nothing about whether a
+    /// *particular* entity fits — a placement wants [`is_area_free`], which
+    /// knows how big the thing being placed is.
     ///
     /// Presence, not quantity: a tile whose ore this plan has drained to zero is
     /// still an ore tile in the ground, so it stays occupied. `remove_entity`
     /// frees a placed entity's tile, but it does not clear ore.
     pub fn is_position_free(&self, position: &Position) -> bool {
-        if self.entity_at(position).is_some() {
-            return false;
-        }
-        !self.base.entity_graph.any_resource_at(&Pos::from(position))
+        self.is_area_clear(&tile_area(&Pos::from(position)))
     }
 
-    pub fn create_entity(&mut self, entity: FactorioEntity) {
+    /// Records a placed entity, giving it the footprint its prototype says it
+    /// has if it arrived without one.
+    ///
+    /// The fill-in happens here, once, rather than at each of the places that
+    /// ask about occupancy: methods build a `FactorioEntity` from a name and a
+    /// position and leave `bounding_box` at its zero default, and a zero box
+    /// collides with nothing.
+    pub fn create_entity(&mut self, mut entity: FactorioEntity) {
         let key = Pos::from(&entity.position);
+        if entity.bounding_box.width() == 0. || entity.bounding_box.height() == 0. {
+            if let Some(area) = self.collision_area(&entity.name, &entity.position) {
+                entity.bounding_box = area;
+            }
+        }
         self.removed.remove(&key);
         self.added.insert(key, entity);
     }
@@ -271,6 +410,91 @@ mod tests {
 
     fn state() -> PlanState {
         PlanState::from_world(Arc::new(fixture_world()), &[BotId(1), BotId(2)])
+    }
+
+    fn entity_at_pos(name: &str, x: f64, y: f64) -> FactorioEntity {
+        FactorioEntity {
+            name: name.into(),
+            entity_type: "furnace".into(),
+            position: Position::new(x, y),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_second_furnace_one_tile_from_the_first_does_not_fit() {
+        // The defect, in miniature. The neighbouring tile is empty by the tile
+        // test -- the first furnace's *centre* is not on it -- but a stone
+        // furnace is 1.398 tiles across, so the boxes overlap and the game
+        // refuses the second placement. This is what sited the red-science
+        // furnaces at [-34, -1] and [-34, 0].
+        let mut s = state();
+        let first = Position::new(0., -1.);
+        assert!(s.is_area_free("stone-furnace", &first), "open ground");
+        s.create_entity(entity_at_pos("stone-furnace", first.x, first.y));
+
+        assert!(
+            !s.is_area_free("stone-furnace", &Position::new(0., 0.)),
+            "a furnace one tile from another overlaps it"
+        );
+        // Two tiles apart it does fit -- otherwise this test would also pass on
+        // an `is_area_free` that simply always says no.
+        assert!(
+            s.is_area_free("stone-furnace", &Position::new(0., 1.)),
+            "two tiles of clearance is enough for a 1.398-wide entity"
+        );
+    }
+
+    #[test]
+    fn how_much_room_is_needed_comes_from_the_prototype() {
+        // Identical geometry, two tiles apart, and the answer differs by
+        // prototype: 1.398 across fits, 2.398 across does not. Neither number
+        // appears here, and a fixed size -- whatever it was -- would have to
+        // give these two the same answer.
+        let mut small = state();
+        small.create_entity(entity_at_pos("stone-furnace", 0., -1.));
+        assert!(
+            small.is_area_free("stone-furnace", &Position::new(0., 1.)),
+            "a stone furnace fits two tiles from another"
+        );
+
+        let mut large = state();
+        large.create_entity(entity_at_pos("assembling-machine-1", 0., -1.));
+        assert!(
+            !large.is_area_free("assembling-machine-1", &Position::new(0., 1.)),
+            "an assembling machine does not fit in the same gap"
+        );
+    }
+
+    #[test]
+    fn an_entity_with_no_prototype_is_refused_rather_than_guessed_at() {
+        let s = state();
+        assert!(s
+            .collision_area("not-a-real-entity", &Position::new(0., 0.))
+            .is_none());
+        assert!(
+            !s.is_area_free("not-a-real-entity", &Position::new(0., 0.)),
+            "an unknown size must fail to plan, not be assumed small"
+        );
+    }
+
+    #[test]
+    fn a_placed_entity_carries_the_footprint_its_prototype_gives_it() {
+        // Methods build a `FactorioEntity` from a name and a position and leave
+        // `bounding_box` at zero; a zero box collides with nothing, so the fill
+        // in `create_entity` is what makes the overlap test above possible.
+        let mut s = state();
+        assert_eq!(
+            entity_at_pos("stone-furnace", 0., -1.).bounding_box.width(),
+            0.
+        );
+        s.create_entity(entity_at_pos("stone-furnace", 0., -1.));
+        let stored = s.entity_at(&Position::new(0., -1.)).expect("placed");
+        assert!(
+            stored.bounding_box.width() > 1.,
+            "expected the prototype's 1.398, got {}",
+            stored.bounding_box.width()
+        );
     }
 
     #[test]

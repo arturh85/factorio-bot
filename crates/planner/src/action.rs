@@ -43,8 +43,26 @@ pub enum Condition {
         pos: Position,
         name: ItemId,
     },
+    /// One tile is clear.
+    ///
+    /// **No method emits this**, and none should: a placement wants
+    /// [`Condition::AreaFree`], which knows how big the thing being placed is.
+    /// It stays because "is this tile clear" is still a meaningful question of
+    /// a `PlanState`, and `tests/scheduling.rs` asks it of hand-built networks.
     PositionFree {
         pos: Position,
+    },
+    /// Room for an entity of `entity` centred on `pos` — its whole collision
+    /// box, not just the tile under its centre.
+    ///
+    /// The condition every `Place` wants. `PositionFree` asks about one tile,
+    /// which is true of both tiles of a pair of stone furnaces sited one tile
+    /// apart even though the game refuses the second: the furnace is 1.398
+    /// tiles across. The size is looked up from the prototype at check time
+    /// (`PlanState::is_area_free`), so nothing here has to know it.
+    AreaFree {
+        pos: Position,
+        entity: ItemId,
     },
     Researched(String),
     ResourceAvailable {
@@ -68,6 +86,7 @@ impl Condition {
                 matches!(state.entity_at(pos), Some(e) if &e.name == name)
             }
             Condition::PositionFree { pos } => state.is_position_free(pos),
+            Condition::AreaFree { pos, entity } => state.is_area_free(entity, pos),
             Condition::Researched(tech) => state.is_researched(tech),
             Condition::ResourceAvailable { pos, item, count } => {
                 state.resource_available(pos, item) >= *count
@@ -98,6 +117,7 @@ impl std::fmt::Display for Condition {
             }
             Condition::EntityAt { pos, name } => write!(f, "{} at {}", name, pos),
             Condition::PositionFree { pos } => write!(f, "{} is free", pos),
+            Condition::AreaFree { pos, entity } => write!(f, "{} fits at {}", entity, pos),
             Condition::Researched(tech) => write!(f, "{} researched", tech),
             Condition::ResourceAvailable { pos, item, count } => {
                 write!(f, "{} {} available at {}", count, item, pos)
@@ -164,7 +184,8 @@ impl Effect {
             (Effect::CreateEntity(e), Condition::EntityAt { pos, name }) => {
                 &e.name == name && Pos::from(&e.position) == Pos::from(pos)
             }
-            (Effect::RemoveEntity { pos }, Condition::PositionFree { pos: want }) => {
+            (Effect::RemoveEntity { pos }, Condition::PositionFree { pos: want })
+            | (Effect::RemoveEntity { pos }, Condition::AreaFree { pos: want, .. }) => {
                 Pos::from(pos) == Pos::from(want)
             }
             (Effect::Researched(t), Condition::Researched(want)) => t == want,

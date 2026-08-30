@@ -8,12 +8,18 @@ import {useResizeObserver} from '@vueuse/core'
 
 // Import monaco
 // https://github.com/vitejs/vite/discussions/1791
+//
+// The worker specifiers drop the `esm/vs/` prefix they carried before monaco
+// 0.56. That release added an `exports` map to monaco's package.json
+// ("./*" -> "./esm/vs/*.js"), which stops deep paths resolving by filesystem
+// walk: `monaco-editor/esm/vs/editor/editor.worker` now maps to
+// `esm/vs/esm/vs/editor/editor.worker.js` and fails to resolve.
 import * as monaco from 'monaco-editor'
-import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker'
-import jsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker'
-import cssWorker from 'monaco-editor/esm/vs/language/css/css.worker?worker'
-import htmlWorker from 'monaco-editor/esm/vs/language/html/html.worker?worker'
-import tsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker'
+import editorWorker from 'monaco-editor/editor/editor.worker?worker'
+import jsonWorker from 'monaco-editor/language/json/json.worker?worker'
+import cssWorker from 'monaco-editor/language/css/css.worker?worker'
+import htmlWorker from 'monaco-editor/language/html/html.worker?worker'
+import tsWorker from 'monaco-editor/language/typescript/ts.worker?worker'
 
 console.log('load monaco');
 (window as any)['MonacoEnvironment'] = {

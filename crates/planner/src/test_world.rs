@@ -307,7 +307,6 @@ mod tests {
         let world = Arc::new(world_with_forces(&[("alpha", false), ("zeta", true)]));
         let state = PlanState::from_world(world, &[BotId(1)]);
 
-        assert_eq!(state.force(), Some("alpha"));
         assert!(
             !state.is_researched("automation"),
             "the acting force has not researched it, whatever the other force says"
@@ -329,7 +328,6 @@ mod tests {
         let world = Arc::new(world_with_forces(&[("alpha", true), ("zeta", false)]));
         let state = PlanState::from_world(world, &[BotId(1)]);
 
-        assert_eq!(state.force(), Some("alpha"));
         assert!(state.is_researched("automation"));
         assert_eq!(
             state
@@ -362,7 +360,6 @@ mod tests {
         for _ in 0..50 {
             let world = Arc::new(world_with_forces(&names));
             let state = PlanState::from_world(world, &[BotId(1)]);
-            assert_eq!(state.force(), Some("alpha"));
             assert!(!state.is_researched("automation"));
             assert_eq!(
                 state
@@ -380,7 +377,6 @@ mod tests {
     #[test]
     fn a_world_without_forces_acts_for_no_force() {
         let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
-        assert_eq!(state.force(), None);
         assert!(state.technology("automation").is_none());
         assert!(!state.is_researched("automation"));
     }

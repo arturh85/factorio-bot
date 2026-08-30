@@ -190,11 +190,6 @@ impl PlanState {
         &self.base
     }
 
-    /// The force this plan acts for. See the field.
-    pub fn force(&self) -> Option<&str> {
-        self.force.as_deref()
-    }
-
     /// Technology `name` as the acting force defines it.
     ///
     /// The only way to reach a `FactorioTechnology` from a `PlanState`, so

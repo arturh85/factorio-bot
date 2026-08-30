@@ -540,6 +540,28 @@ end
             let actuator = actuator.clone();
             async move {
                 let (net, scheduled) = lock(&plans).scheduled(plan_handle)?;
+                // Checked before anything is spawned, not after: registration
+                // is what stops a fire-and-forget `goal.execute` from being
+                // killed mid-plan when `run_lua` drops its tokio runtime (see
+                // `PendingWork` in `lua_runner.rs`). A caller that omits
+                // `set_app_data` — today, only a binding built outside
+                // `run_lua`, e.g. a future doc-generation or REPL path that
+                // forgets it — must not be able to lose a run silently; the
+                // loud failure has to come before the run exists, or an
+                // unregistered run is started and orphaned regardless of what
+                // this returns. This module's own tests build the table this
+                // way on purpose (to test the bindings below the game seam)
+                // and install `PendingWork` themselves when they mean to
+                // exercise `goal.execute`.
+                let pending = lua.app_data_ref::<PendingWork>().ok_or_else(|| {
+                    goal_error(
+                        "goal.execute: no PendingWork registered for this Lua state; \
+                         refusing to start a run that could be silently killed when \
+                         the interpreter's runtime is dropped (internal error, not a \
+                         script bug)",
+                    )
+                })?;
+                let pending = pending.clone();
                 // Building the actuator is awaited; running the schedule is not.
                 // An actuator that cannot be built at all — no connected
                 // players, no reply to the defines query — is a setup error the
@@ -547,18 +569,7 @@ end
                 // never happened.
                 let actuator = actuator().await.map_err(goal_error)?;
                 let (handle, join) = lock(&runs).spawn(actuator, scheduled, net);
-                // Registers the run's task into the seam `run_lua` drains
-                // before its runtime is dropped (see `PendingWork` in
-                // `lua_runner.rs`). Without this, a script that returns
-                // without a matching `goal.wait` would have this run aborted
-                // mid-plan the moment the interpreter's runtime goes away —
-                // silently, with no error. `app_data_ref` is `None` only for
-                // callers that build this table without going through
-                // `run_lua` (this module's own tests), and there is nothing
-                // to register into in that case.
-                if let Some(pending) = lua.app_data_ref::<PendingWork>() {
-                    pending.register(join);
-                }
+                pending.register(join);
                 Ok(handle)
             }
         })?,
@@ -1049,8 +1060,17 @@ mod tests {
 
     /// Installs the real `goal` table, backed by `stub`, into a sandboxed
     /// interpreter — the same one user scripts get.
+    ///
+    /// Installs a `PendingWork`, as `run_lua` always does in production,
+    /// so that `goal.execute` is free to run: most of the tests below are
+    /// about what happens *after* a run starts, not about the app-data
+    /// check itself. The one test for that check
+    /// (`execute_without_pending_work_installed_fails_loudly_instead_of_silently_losing_the_run`)
+    /// builds its own `Lua` without this helper so it can leave `PendingWork`
+    /// out on purpose.
     fn lua_with_goal(stub: Arc<dyn Actuator>) -> Lua {
         let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        lua.set_app_data(crate::lua_runner::PendingWork::default());
         let table =
             create_lua_goal_with(&lua, Arc::new(fixture_world()), factory(stub), vec![1, 2])
                 .expect("goal table");
@@ -1125,6 +1145,64 @@ mod tests {
         assert!(
             pending + running > 0,
             "the plan's actions must all still be outstanding"
+        );
+    }
+
+    /// `lua_with_goal` builds the table exactly as this module's own tests
+    /// want it -- without installing `PendingWork` -- to drive the bindings
+    /// below the game seam. `goal.execute` must not read that as "nothing to
+    /// register into, carry on anyway": in production only `run_lua` installs
+    /// `PendingWork`, and a future caller that forgets to must not be able to
+    /// start a run nothing will keep alive when its runtime is dropped.
+    ///
+    /// Proven to discriminate by the assertion at the end: not just that the
+    /// call errors, but that nothing was ever dispatched -- i.e. no run was
+    /// started at all, not merely a run whose handle came back unusable.
+    #[tokio::test]
+    async fn execute_without_pending_work_installed_fails_loudly_instead_of_silently_losing_the_run(
+    ) {
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+        let stub = StubActuator {
+            entered: Some(entered_tx),
+            ..StubActuator::new(Failure::Never)
+        };
+        // Built directly rather than through `lua_with_goal`: that helper
+        // installs `PendingWork` the way `run_lua` does, and this test is
+        // specifically about the caller that forgets to.
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        let table = create_lua_goal_with(
+            &lua,
+            Arc::new(fixture_world()),
+            factory(Arc::new(stub)),
+            vec![1, 2],
+        )
+        .expect("goal table");
+        lua.globals().set("goal", table).expect("install");
+
+        let err = lua
+            .load(
+                r#"
+                local p = goal.have("iron-ore", 20)
+                goal.schedule(p, 2)
+                goal.execute(p)
+                "#,
+            )
+            .exec_async()
+            .await
+            .expect_err("goal.execute must refuse to run without PendingWork installed");
+        let message = err.to_string();
+        assert!(
+            message.contains("PendingWork"),
+            "the error should name what is missing: {message}"
+        );
+
+        let dispatched =
+            factorio_bot_core::tokio::time::timeout(Duration::from_millis(200), entered_rx.recv())
+                .await;
+        assert!(
+            dispatched.is_err(),
+            "no action should ever have been dispatched: goal.execute must refuse \
+             before a run is spawned, not spawn one it then fails to register"
         );
     }
 
@@ -1339,6 +1417,7 @@ mod tests {
         for roster in [vec![1u8], vec![1, 2], vec![3, 4], vec![1, 2, 3, 4]] {
             let rec = Arc::new(RecordingActuator::default());
             let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+            lua.set_app_data(crate::lua_runner::PendingWork::default());
             let table = create_lua_goal_with(
                 &lua,
                 Arc::new(fixture_world()),

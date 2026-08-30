@@ -1,0 +1,17 @@
+[package]
+name = "factorio-bot-executor"
+version = "0.2.4-dev"
+edition = "2021"
+
+[dependencies]
+factorio-bot-core = { path = "../core", version = "0.2.4-dev" }
+factorio-bot-planner = { path = "../planner", version = "0.2.4-dev" }
+async-trait = "0.1"
+miette = { version = "7.4", features = ["fancy"] }
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+
+[dev-dependencies]
+mockall = "0.13"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }

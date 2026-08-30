@@ -176,10 +176,15 @@ impl Effect {
 /// Which inventory of a target entity an insert or remove addresses.
 ///
 /// Deliberately semantic rather than numeric. Factorio's `defines.inventory`
-/// integers are entity-type dependent — the same number means different things
-/// for a chest and a furnace (see `mods/BotBridge/control.lua`
-/// `inventory_type_name(invtype, enttype)`) — and they move between game
-/// versions. The executor resolves these to numbers against the running game.
+/// numbers move between game versions, so the executor resolves these names
+/// against the running game and never hardcodes an integer.
+///
+/// The authority for the names is the game's own `defines.inventory`, as
+/// published in `runtime-api.json` (`workspace/factorio-api-docs/`). It is not
+/// `mods/BotBridge/control.lua`'s `inventory_type_name`: that function is dead
+/// 1.1-era code with no callers, it names slots that 2.1 no longer has, and it
+/// would raise "table index is nil" if it were ever called. Do not use it as a
+/// reference.
 ///
 /// Ordering is derived and load-bearing: the planner is deterministic, so every
 /// type reachable from an `ActionNetwork` must order totally.
@@ -196,17 +201,39 @@ pub enum InventorySlot {
 
 impl InventorySlot {
     /// The name used to look this slot up in the game's `defines.inventory`.
+    ///
+    /// Factorio 2.0 unified furnaces and assemblers into one "crafter" family,
+    /// so `FurnaceSource` and `AssemblerInput` both resolve to `crafter_input`,
+    /// and both outputs to `crafter_output`. The variants stay distinct because
+    /// this enum is the planner's vocabulary, not the game's: a method that
+    /// loads a furnace and one that loads an assembler are different methods
+    /// even where the game now agrees about the slot.
+    ///
+    /// The pre-2.0 names `furnace_source`, `furnace_result`,
+    /// `assembling_machine_input` and `assembling_machine_output` no longer
+    /// exist; asking for them yields no inventory at all.
     pub fn defines_key(self) -> &'static str {
         match self {
             InventorySlot::Chest => "chest",
-            InventorySlot::FurnaceSource => "furnace_source",
-            InventorySlot::FurnaceResult => "furnace_result",
+            InventorySlot::FurnaceSource => "crafter_input",
+            InventorySlot::FurnaceResult => "crafter_output",
             InventorySlot::Fuel => "fuel",
-            InventorySlot::AssemblerInput => "assembling_machine_input",
-            InventorySlot::AssemblerOutput => "assembling_machine_output",
+            InventorySlot::AssemblerInput => "crafter_input",
+            InventorySlot::AssemblerOutput => "crafter_output",
             InventorySlot::LabInput => "lab_input",
         }
     }
+
+    /// Every variant, for exhaustive checks against the game's defines table.
+    pub const ALL: [InventorySlot; 7] = [
+        InventorySlot::Chest,
+        InventorySlot::FurnaceSource,
+        InventorySlot::FurnaceResult,
+        InventorySlot::Fuel,
+        InventorySlot::AssemblerInput,
+        InventorySlot::AssemblerOutput,
+        InventorySlot::LabInput,
+    ];
 }
 
 /// What a bot physically does. Carries the payload the executor needs;
@@ -523,6 +550,59 @@ mod tests {
             }
             _ => panic!("expected Insert"),
         }
+    }
+
+    /// Pins the exact strings sent to the game. These are Factorio 2.1 names,
+    /// read from `defines.inventory` in `runtime-api.json`; the executor has
+    /// the test that checks them against the game's own table.
+    #[test]
+    fn every_slot_maps_to_its_2_1_defines_name() {
+        assert_eq!(InventorySlot::Chest.defines_key(), "chest");
+        assert_eq!(InventorySlot::Fuel.defines_key(), "fuel");
+        assert_eq!(InventorySlot::LabInput.defines_key(), "lab_input");
+        // 2.0 unified furnaces and assemblers under `crafter_*`.
+        assert_eq!(InventorySlot::FurnaceSource.defines_key(), "crafter_input");
+        assert_eq!(InventorySlot::AssemblerInput.defines_key(), "crafter_input");
+        assert_eq!(InventorySlot::FurnaceResult.defines_key(), "crafter_output");
+        assert_eq!(
+            InventorySlot::AssemblerOutput.defines_key(),
+            "crafter_output"
+        );
+    }
+
+    #[test]
+    fn no_slot_still_uses_a_removed_pre_2_0_name() {
+        // These four exist in `mods/BotBridge/control.lua`'s dead
+        // `inventory_type_name` and nowhere in the 2.1 game.
+        let gone = [
+            "furnace_source",
+            "furnace_result",
+            "assembling_machine_input",
+            "assembling_machine_output",
+        ];
+        for slot in InventorySlot::ALL {
+            let key = slot.defines_key();
+            assert!(!gone.contains(&key), "{slot:?} uses removed name {key}");
+        }
+    }
+
+    #[test]
+    fn all_lists_every_variant() {
+        // Guards the exhaustiveness the executor's defines check relies on.
+        let mut keys: Vec<&str> = InventorySlot::ALL.iter().map(|s| s.defines_key()).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(InventorySlot::ALL.len(), 7);
+        assert_eq!(
+            keys,
+            vec![
+                "chest",
+                "crafter_input",
+                "crafter_output",
+                "fuel",
+                "lab_input"
+            ]
+        );
     }
 
     #[test]

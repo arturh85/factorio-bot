@@ -1460,6 +1460,19 @@ const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[
 ];
 ```
 
+**You will hit a deliberate tripwire first, and it is the test doing its job.** `no_operation_publishes_a_path_parameter` opens each path with:
+
+```rust
+assert!(
+    !path.contains('{'),
+    "{path} is templated; this test's premise no longer holds"
+);
+```
+
+That fires the moment `/api/v1/jobs/{id}` is registered. It is not an obstacle — it is the previous author telling you, by name, that the test's premise has changed and needs a decision rather than a patch. **Do not delete it.** Keep a guard that fails on any templated path *not* in the allow-list, so the test still means "no operation publishes an unexpected path parameter" rather than degrading to "path parameters are fine now". A test that stops asserting anything the moment it becomes inconvenient is the failure mode this plan has hit five times.
+
+Worth copying that pattern in your own tests where a premise could silently stop holding: an assertion whose message says *why the test exists* survives a rewrite that an assertion of bare fact does not.
+
 - [ ] **Step 5: Run the tests and watch them pass**
 
 - [ ] **Step 6: Commit**

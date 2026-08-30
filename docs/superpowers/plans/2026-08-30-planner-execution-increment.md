@@ -1416,6 +1416,18 @@ An earlier draft fixed this by binding it into `globals/plan.rs`. Do **not** do 
 
 What matters instead is the consequence for Task 8, so write it into your report: **those two scripts have never successfully run.** Their `plan.*` calls were never all valid, so there is no observed behaviour to preserve when migrating them. Task 8 must port them from their evident intent and say so, rather than claiming behaviour preservation it cannot verify.
 
+- [ ] **Step 4b: Constrain `world.draw`'s save path**
+
+While you are in `crates/scripting_lua/src/globals/`, fix a sandbox escape in the neighbouring `world.draw` binding. It takes a path string straight from the Lua script and `crates/core/src/test_utils.rs:232` does `buffer.save(cwd.join(save_path)).unwrap()`.
+
+`Path::join` **replaces the base entirely** when the argument is absolute, so `world.draw("/etc/x.png")` writes to `/etc/x.png`. A relative `"../../x.png"` escapes upward, and a symlink planted at the target is followed. Lua scripts here are otherwise sandboxed to the exposed API and have no file-write capability, so this is the one primitive that breaks out. The `.unwrap()` also turns any write failure into a panic that takes down the caller.
+
+Fix: resolve the path against the intended root and reject anything that escapes it — reject absolute paths outright, reject `..` components, and canonicalise the parent to confirm it stays under the root. Prefer `OpenOptions::create_new` semantics over check-then-write: `exists()` followed by `write()` follows a dangling symlink and writes through it, which is the same defect one directory over. Return a Lua error instead of panicking.
+
+Add tests for: an absolute path is refused, a `..` escape is refused, a path through a symlink pointing outside the root is refused, and an ordinary relative name still works.
+
+This is being fixed here rather than filed because a concurrent effort is about to expose script execution over HTTP, which turns a local sandbox escape into a remote arbitrary file write.
+
 - [ ] **Step 5: Commit**
 
 ```bash

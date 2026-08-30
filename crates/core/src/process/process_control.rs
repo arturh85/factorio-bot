@@ -8,6 +8,7 @@ use crate::process::output_reader::read_output;
 use crate::process::{io_utils, InteractiveProcess};
 use crate::settings::FactorioSettings;
 use miette::{IntoDiagnostic, Result};
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
@@ -408,7 +409,7 @@ impl FactorioInstance {
         settings: &FactorioSettings,
         instance_name: String,
         server_host: Option<String>,
-        _write_logs: bool,
+        write_logs: bool,
         silent: bool,
     ) -> Result<InteractiveProcess> {
         let workspace_path = settings.workspace_path.to_string();
@@ -474,10 +475,43 @@ impl FactorioInstance {
         // For macOS graphical clients, we need to use null stdio to avoid
         // interfering with GUI rendering. InteractiveProcess with piped stdio
         // causes GUI apps to fail silently on macOS.
+        //
+        // Nulling *stderr* as well is what made a client that dies during
+        // startup -- the whole symptom of the broken `config.ini` this sits
+        // next to -- indistinguishable from one that is merely slow to
+        // connect. `--logs` promised a client log and never delivered one
+        // (`write_logs` was accepted and dropped here), so under `-l` the two
+        // output streams go to a file instead. A file is not a pipe, so the
+        // macOS GUI workaround still holds.
         use std::process::Stdio;
         command.stdin(Stdio::null());
-        command.stdout(Stdio::null());
-        command.stderr(Stdio::null());
+        let log_path = workspace_path.join(format!("{instance_name}-log.txt"));
+        let log_file = if write_logs {
+            match File::create(&log_path) {
+                Ok(file) => Some(file),
+                Err(err) => {
+                    // Losing the log must not lose the client.
+                    error!("failed to open <bright-blue>{log_path:?}</>: {err}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        match log_file {
+            Some(file) => {
+                let stderr = file.try_clone().into_diagnostic()?;
+                command.stdout(Stdio::from(file));
+                command.stderr(Stdio::from(stderr));
+                if !silent {
+                    info!("Writing <bright-blue>{:?}</>", &log_path);
+                }
+            }
+            None => {
+                command.stdout(Stdio::null());
+                command.stderr(Stdio::null());
+            }
+        }
 
         // Spawn the child process directly
         let child = command.spawn().into_diagnostic()?;

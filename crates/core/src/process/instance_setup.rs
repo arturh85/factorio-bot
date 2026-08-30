@@ -15,7 +15,9 @@ use crate::factorio::rcon::RconSettings;
 use crate::factorio::util::{read_to_value, write_value_to};
 #[cfg(not(debug_assertions))]
 use crate::process::asset_sync;
-use crate::process::io_utils::{await_lock, extract_archive, get_factorio_binary_path, symlink};
+use crate::process::io_utils::{
+    await_lock, extract_archive, get_factorio_binary_path, get_factorio_data_path, symlink,
+};
 use crate::process::output_reader::read_output;
 use crate::process::process_control::FactorioStartCondition;
 use crate::process::spinner::Spinner;
@@ -342,6 +344,7 @@ pub async fn setup_factorio_instance(
         }
     };
     preflight_mod_factorio_version(&workspace_mods_path, &base_data_path, silent)?;
+    ensure_instance_config_ini(workspace_path, instance_path, silent)?;
     // delete server/script-output/*
     // let script_output_put = instance_path.join(PathBuf::from("script-output"));
     // if script_output_put.exists() {
@@ -522,24 +525,6 @@ pub async fn setup_factorio_instance(
         value["service-username"] = Value::from(instance_name);
         let player_data_file = File::create(&player_data_path).into_diagnostic()?;
         serde_json::to_writer_pretty(player_data_file, &value).into_diagnostic()?;
-
-        // CRITICAL: Check if config.ini FILE exists, not just the config/ directory
-        // Bug fix (Jan 2026): Archive extraction creates an empty config/ directory,
-        // so checking `!config_path.exists()` would skip config.ini creation, causing
-        // clients to crash with "Error: Specified config file doesn't exist"
-        let config_path = instance_path.join(PathBuf::from("config"));
-        let config_ini_path = config_path.join(PathBuf::from("config.ini"));
-        if !config_ini_path.exists() {
-            if !config_path.exists() {
-                create_dir(&config_path).await.into_diagnostic()?;
-            }
-            let config_ini_data = include_bytes!("../data/config.ini");
-            let mut outfile = File::create(&config_ini_path).into_diagnostic()?;
-            outfile.write_all(config_ini_data).into_diagnostic()?;
-            if !silent {
-                info!("Created <bright-blue>{:?}</>", &config_ini_path);
-            }
-        }
     }
     Ok(())
 }
@@ -663,6 +648,101 @@ pub async fn update_map_gen_settings(
     Ok(())
 }
 
+/// The `config.ini` shipped with this crate, placeholders and all. Never write
+/// it to disk verbatim -- see [`render_config_ini`].
+const CONFIG_INI_TEMPLATE: &str = include_str!("../data/config.ini");
+/// Stands in for `path.read-data` in [`CONFIG_INI_TEMPLATE`].
+const READ_DATA_PLACEHOLDER: &str = "__FACTORIO_BOT_READ_DATA__";
+/// Stands in for `path.write-data` in [`CONFIG_INI_TEMPLATE`].
+const WRITE_DATA_PLACEHOLDER: &str = "__FACTORIO_BOT_WRITE_DATA__";
+
+/// Renders the config template for one instance by substituting absolute
+/// `read-data` / `write-data` paths.
+///
+/// Absolute, rather than the `__PATH__executable__/../..` form Factorio writes
+/// for itself, because that form is unshareable. Factorio resolves it against
+/// the *binary's* directory, and this project supports three layouts where the
+/// binary sits at different depths: `MacOS/factorio` on macOS,
+/// `bin/x64/factorio` on Linux and `bin/x64/factorio.exe` on Windows. The
+/// template used to carry the macOS shape, so every generated instance on
+/// Linux resolved `read-data` to `<instance>/bin/data` and died at startup
+/// with `Error configuring paths: There is no package core in ...` -- before
+/// writing a log, and with its stdio nulled, so entirely silently. Counting
+/// `../` per platform would work, but absolute paths remove the whole class of
+/// bug and were verified against a real Factorio 2.1.17 run, which reports
+/// them back as `Read data path:` / `Write data path:`.
+///
+/// Fails rather than emitting a half-substituted config: a leftover
+/// placeholder would reach Factorio as a literal directory name.
+fn render_config_ini(read_data: &Path, write_data: &Path) -> Result<String> {
+    fn as_value<'a>(path: &'a Path, what: &str) -> Result<&'a str> {
+        if !path.is_absolute() {
+            return Err(miette!(
+                "refusing to write a relative {what} path into config.ini: {path:?}"
+            ));
+        }
+        path.to_str()
+            .ok_or_else(|| miette!("{what} path is not valid UTF-8: {path:?}"))
+    }
+    let rendered = CONFIG_INI_TEMPLATE
+        .replace(READ_DATA_PLACEHOLDER, as_value(read_data, "read-data")?)
+        .replace(WRITE_DATA_PLACEHOLDER, as_value(write_data, "write-data")?);
+    if rendered.contains(READ_DATA_PLACEHOLDER) || rendered.contains(WRITE_DATA_PLACEHOLDER) {
+        return Err(miette!(
+            "config.ini template still contains a path placeholder after substitution"
+        ));
+    }
+    Ok(rendered)
+}
+
+/// Writes `<instance>/config/config.ini` unless it is already there.
+///
+/// Applies to server and client instances alike: both are launched with an
+/// explicit `--config` pointing here, and Factorio refuses to start when that
+/// file is missing.
+///
+/// The "unless it is already there" is deliberate. An instance that was
+/// extracted from a real Factorio archive carries the game's own config, which
+/// already works; rewriting it would discard whatever the user or the game put
+/// in it. The check is on the *file*, not the `config/` directory, because
+/// archive extraction leaves that directory behind empty.
+fn ensure_instance_config_ini(
+    workspace_path: &Path,
+    instance_path: &Path,
+    silent: bool,
+) -> Result<()> {
+    let config_path = instance_path.join("config");
+    let config_ini_path = config_path.join("config.ini");
+    if config_ini_path.exists() {
+        return Ok(());
+    }
+    // `<instance>/data` is a symlink to the shared `<workspace>/data` whenever
+    // the latter exists; fall back to the workspace copy for the layouts where
+    // the symlink was never made, and to the instance path when neither is
+    // present so Factorio reports the missing directory itself.
+    let instance_data_path = get_factorio_data_path(instance_path);
+    let read_data = if instance_data_path.exists() {
+        instance_data_path
+    } else {
+        let workspace_data_path = workspace_path.join("data");
+        if workspace_data_path.exists() {
+            workspace_data_path
+        } else {
+            instance_data_path
+        }
+    };
+    let rendered = render_config_ini(&read_data, instance_path)?;
+    std::fs::create_dir_all(&config_path).into_diagnostic()?;
+    File::create(&config_ini_path)
+        .into_diagnostic()?
+        .write_all(rendered.as_bytes())
+        .into_diagnostic()?;
+    if !silent {
+        info!("Created <bright-blue>{:?}</>", &config_ini_path);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -698,6 +778,137 @@ mod tests {
 
     fn run(dir: &tempfile::TempDir) -> Result<()> {
         preflight_mod_factorio_version(&dir.path().join("mods"), &dir.path().join("data"), true)
+    }
+
+    /// Reads back the `[path]` values of a rendered config.
+    fn path_values(rendered: &str) -> Vec<(String, String)> {
+        rendered
+            .lines()
+            .filter(|line| line.starts_with("read-data=") || line.starts_with("write-data="))
+            .map(|line| {
+                let (key, value) = line.split_once('=').unwrap();
+                (key.to_string(), value.to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_shipped_template_still_carries_both_placeholders() {
+        // If someone pastes a Factorio-generated config over the template,
+        // every generated instance silently inherits that machine's layout.
+        assert!(CONFIG_INI_TEMPLATE.contains(READ_DATA_PLACEHOLDER));
+        assert!(CONFIG_INI_TEMPLATE.contains(WRITE_DATA_PLACEHOLDER));
+        // Comments may name the old form; no *setting* may use it -- resolving
+        // it against the binary's directory is what broke every Linux client.
+        let settings = CONFIG_INI_TEMPLATE
+            .lines()
+            .filter(|line| !line.trim_start().starts_with(';'));
+        for line in settings {
+            assert!(
+                !line.contains("__PATH__executable__"),
+                "platform-relative path setting in the template: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_substitutes_absolute_paths() {
+        let rendered =
+            render_config_ini(Path::new("/ws/client1/data"), Path::new("/ws/client1")).unwrap();
+        assert_eq!(
+            path_values(&rendered),
+            vec![
+                ("read-data".to_string(), "/ws/client1/data".to_string()),
+                ("write-data".to_string(), "/ws/client1".to_string()),
+            ]
+        );
+        assert!(!rendered.contains(READ_DATA_PLACEHOLDER));
+        assert!(!rendered.contains(WRITE_DATA_PLACEHOLDER));
+        // The rest of the template has to survive intact.
+        assert!(rendered.contains("show-tips-and-tricks=false"));
+        assert!(rendered.starts_with("; version=9"));
+    }
+
+    #[test]
+    fn render_rejects_relative_paths() {
+        let err = render_config_ini(Path::new("data"), Path::new("/ws/client1")).unwrap_err();
+        assert!(
+            err.to_string().contains("read-data"),
+            "unexpected error: {err}"
+        );
+        let err = render_config_ini(Path::new("/ws/client1/data"), Path::new("..")).unwrap_err();
+        assert!(
+            err.to_string().contains("write-data"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn ensure_writes_a_config_pointing_at_the_instance() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let instance = workspace.join("client1");
+        std::fs::create_dir_all(instance.join("data")).unwrap();
+        ensure_instance_config_ini(workspace, &instance, true).unwrap();
+        let written = std::fs::read_to_string(instance.join("config").join("config.ini")).unwrap();
+        assert_eq!(
+            path_values(&written),
+            vec![
+                (
+                    "read-data".to_string(),
+                    instance.join("data").to_str().unwrap().to_string()
+                ),
+                (
+                    "write-data".to_string(),
+                    instance.to_str().unwrap().to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn ensure_falls_back_to_the_workspace_data_directory() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let instance = workspace.join("client1");
+        std::fs::create_dir_all(&instance).unwrap();
+        std::fs::create_dir_all(workspace.join("data")).unwrap();
+        ensure_instance_config_ini(workspace, &instance, true).unwrap();
+        let written = std::fs::read_to_string(instance.join("config").join("config.ini")).unwrap();
+        assert_eq!(
+            path_values(&written)[0].1,
+            workspace.join("data").to_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn ensure_fills_an_empty_config_directory_left_by_extraction() {
+        // Archive extraction creates `config/` but no `config.ini`; a check on
+        // the directory rather than the file used to skip the write here and
+        // leave the instance unable to start.
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let instance = workspace.join("client1");
+        std::fs::create_dir_all(instance.join("config")).unwrap();
+        ensure_instance_config_ini(workspace, &instance, true).unwrap();
+        assert!(instance.join("config").join("config.ini").exists());
+    }
+
+    #[test]
+    fn ensure_leaves_an_existing_config_untouched() {
+        // `workspace/server` is a real extracted install carrying Factorio's
+        // own config. Overwriting it would be a regression, not a fix.
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let instance = workspace.join("server");
+        std::fs::create_dir_all(instance.join("config")).unwrap();
+        let existing = "; version=13\n[path]\nread-data=__PATH__executable__/../../data\n";
+        std::fs::write(instance.join("config").join("config.ini"), existing).unwrap();
+        ensure_instance_config_ini(workspace, &instance, true).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(instance.join("config").join("config.ini")).unwrap(),
+            existing
+        );
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use crate::error::{ApiResult, ErrorResponse};
+use crate::extract::ApiJson;
 use crate::game::{require_player, require_world};
 use crate::state::AppState;
 use axum::extract::State;
@@ -36,7 +37,7 @@ pub struct MovePlayerBody {
 )]
 pub async fn move_player(
     State(state): State<AppState>,
-    Json(body): Json<MovePlayerBody>,
+    ApiJson(body): ApiJson<MovePlayerBody>,
 ) -> ApiResult<FactorioPlayer> {
     let goal: Position = body
         .goal
@@ -79,7 +80,7 @@ pub struct PlaceEntityBody {
 )]
 pub async fn place_entity(
     State(state): State<AppState>,
-    Json(body): Json<PlaceEntityBody>,
+    ApiJson(body): ApiJson<PlaceEntityBody>,
 ) -> ApiResult<PlaceEntityResult> {
     let position: Position = body
         .position
@@ -130,7 +131,7 @@ pub struct CheatItemBody {
 )]
 pub async fn cheat_item(
     State(state): State<AppState>,
-    Json(body): Json<CheatItemBody>,
+    ApiJson(body): ApiJson<CheatItemBody>,
 ) -> ApiResult<FactorioPlayer> {
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
@@ -165,7 +166,7 @@ pub struct CheatTechnologyBody {
 )]
 pub async fn cheat_technology(
     State(state): State<AppState>,
-    Json(body): Json<CheatTechnologyBody>,
+    ApiJson(body): ApiJson<CheatTechnologyBody>,
 ) -> ApiResult<OperationResult> {
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
@@ -221,7 +222,7 @@ pub struct InsertToInventoryBody {
 )]
 pub async fn insert_to_inventory(
     State(state): State<AppState>,
-    Json(body): Json<InsertToInventoryBody>,
+    ApiJson(body): ApiJson<InsertToInventoryBody>,
 ) -> ApiResult<FactorioPlayer> {
     let entity_position: Position = body.entity_position.parse().map_err(|_| {
         ErrorResponse::bad_request(format!("invalid entity_position: {}", body.entity_position))
@@ -273,7 +274,7 @@ pub struct RemoveFromInventoryBody {
 )]
 pub async fn remove_from_inventory(
     State(state): State<AppState>,
-    Json(body): Json<RemoveFromInventoryBody>,
+    ApiJson(body): ApiJson<RemoveFromInventoryBody>,
 ) -> ApiResult<FactorioPlayer> {
     let entity_position: Position = body.entity_position.parse().map_err(|_| {
         ErrorResponse::bad_request(format!("invalid entity_position: {}", body.entity_position))
@@ -341,7 +342,7 @@ pub struct AddResearchBody {
 )]
 pub async fn add_research(
     State(state): State<AppState>,
-    Json(body): Json<AddResearchBody>,
+    ApiJson(body): ApiJson<AddResearchBody>,
 ) -> ApiResult<OperationResult> {
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;

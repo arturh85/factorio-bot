@@ -138,3 +138,28 @@ async fn plan_path_without_running_instance_reports_not_started() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body.contains("not started"), "got: {body}");
 }
+
+#[tokio::test]
+async fn malformed_query_parameters_return_json() {
+    let response = build_router(test_state())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/game/find-entities?position=0,0&radius=notanumber")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let content_type = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .expect("has a content type")
+        .to_str()
+        .expect("utf-8");
+    assert!(
+        content_type.starts_with("application/json"),
+        "expected JSON, got {content_type}"
+    );
+}

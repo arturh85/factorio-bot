@@ -1,4 +1,5 @@
 pub mod error;
+mod extract;
 pub mod game;
 pub mod openapi;
 pub mod settings;

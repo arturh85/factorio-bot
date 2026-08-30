@@ -1,7 +1,8 @@
 use crate::error::{ApiResult, ErrorResponse};
+use crate::extract::ApiQuery;
 use crate::game::{require_player, require_world};
 use crate::state::AppState;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::Json;
 use factorio_bot_core::num_traits::FromPrimitive;
 use factorio_bot_core::types::{
@@ -60,7 +61,7 @@ pub struct FindEntitiesParams {
 )]
 pub async fn find_entities(
     State(state): State<AppState>,
-    Query(params): Query<FindEntitiesParams>,
+    ApiQuery(params): ApiQuery<FindEntitiesParams>,
 ) -> ApiResult<Vec<FactorioEntity>> {
     let area_filter = area_filter_from(
         params.area.as_deref(),
@@ -107,7 +108,7 @@ pub struct PlanPathParams {
 )]
 pub async fn plan_path(
     State(state): State<AppState>,
-    Query(params): Query<PlanPathParams>,
+    ApiQuery(params): ApiQuery<PlanPathParams>,
 ) -> ApiResult<Vec<FactorioEntity>> {
     let from_position: Position = params.from_position.parse().map_err(|_| {
         ErrorResponse::bad_request(format!("invalid from_position: {}", params.from_position))
@@ -162,7 +163,7 @@ pub struct FindTilesParams {
 )]
 pub async fn find_tiles(
     State(state): State<AppState>,
-    Query(params): Query<FindTilesParams>,
+    ApiQuery(params): ApiQuery<FindTilesParams>,
 ) -> ApiResult<Vec<FactorioTile>> {
     let area_filter = area_filter_from(
         params.area.as_deref(),
@@ -198,7 +199,7 @@ pub struct InventoryContentsAtParams {
 )]
 pub async fn inventory_contents_at(
     State(state): State<AppState>,
-    Query(params): Query<InventoryContentsAtParams>,
+    ApiQuery(params): ApiQuery<InventoryContentsAtParams>,
 ) -> ApiResult<Vec<Option<InventoryResponse>>> {
     let entities: Vec<RequestEntity> = params
         .query
@@ -244,7 +245,7 @@ pub struct PlayerInfoParams {
 )]
 pub async fn player_info(
     State(state): State<AppState>,
-    Query(params): Query<PlayerInfoParams>,
+    ApiQuery(params): ApiQuery<PlayerInfoParams>,
 ) -> ApiResult<FactorioPlayer> {
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;

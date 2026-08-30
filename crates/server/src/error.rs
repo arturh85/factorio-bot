@@ -39,4 +39,20 @@ impl From<miette::Report> for ErrorResponse {
     }
 }
 
+/// axum's own `Query` rejection answers in `text/plain`; convert it so a
+/// malformed query string still gets the same JSON shape as every other
+/// handler error.
+impl From<axum::extract::rejection::QueryRejection> for ErrorResponse {
+    fn from(rejection: axum::extract::rejection::QueryRejection) -> Self {
+        ErrorResponse::bad_request(rejection.body_text())
+    }
+}
+
+/// Same as above, but for the `Json` body extractor.
+impl From<axum::extract::rejection::JsonRejection> for ErrorResponse {
+    fn from(rejection: axum::extract::rejection::JsonRejection) -> Self {
+        ErrorResponse::bad_request(rejection.body_text())
+    }
+}
+
 pub type ApiResult<T> = Result<Json<T>, ErrorResponse>;

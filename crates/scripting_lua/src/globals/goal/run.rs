@@ -12,7 +12,7 @@
 //! [`RunSlot::take`] -- which is also what makes "a plan may be run once"
 //! true without a registry of its own to police it.
 
-use super::plan::{position_to_lua, PlanValue, RunSlot};
+use super::plan::{position_to_lua, Dispatch, PlanOrigin, PlanValue, RunSlot};
 use super::{goal_error, lock, ActuatorFactory};
 use crate::lua_runner::{PendingWork, ReplaySink};
 use factorio_bot_core::mlua::prelude::*;
@@ -99,11 +99,21 @@ fn status_name(status: Status) -> &'static str {
 /// wall-clock in these plans, so a consumer rendering a timeline without this
 /// can only draw one undifferentiated "walk + wait" span; the split is
 /// observable, and this is where it surfaces.
+///
+/// # `obs:recover()` is installed here, on the snapshot
+///
+/// The recovery it proposes is a function of the same `net` and the same `log`
+/// the counts above were read from, taken at the same instant, so a script that
+/// looked at `obs.failed` and then asked for a proposal gets one about the run
+/// it just looked at. The closure owns its own clone of the log for the reason
+/// `failures` does: it may be called any number of times, long after the run's
+/// own log has moved on.
 fn build_observation(
     lua: &Lua,
-    net: &ActionNetwork,
+    net: &Arc<ActionNetwork>,
     log: &ExecutionLog,
     done: bool,
+    origin: Option<Arc<PlanOrigin>>,
 ) -> LuaResult<LuaTable> {
     let actions = lua.create_table()?;
     let mut pending = 0u32;
@@ -227,6 +237,7 @@ fn build_observation(
             Ok(out)
         })?,
     )?;
+    super::recovery::install_recover(lua, &obs, net.clone(), log.clone(), done, origin)?;
     Ok(obs)
 }
 
@@ -244,6 +255,14 @@ fn build_observation(
 pub(crate) struct RunValue {
     net: Arc<ActionNetwork>,
     log: Arc<Mutex<ExecutionLog>>,
+    /// Where the plan this run is executing came from, so its observations can
+    /// answer `obs:recover()`. See [`PlanOrigin`].
+    ///
+    /// `None` only below the Lua seam: [`spawn_bare`] drives a hand-built
+    /// network and schedule that no goal produced, and a run with no goal has
+    /// nothing to re-expand. Every run a script can reach comes from
+    /// `goal.plan` and carries one.
+    origin: Option<Arc<PlanOrigin>>,
     finished_rx: watch::Receiver<bool>,
     /// Set if `run_into` refused the run outright rather than executing it.
     ///
@@ -273,7 +292,7 @@ impl RunValue {
         refuse_a_run_that_never_started(&self.start_error)?;
         let done = *self.finished_rx.borrow();
         let log = lock(&self.log);
-        build_observation(lua, &self.net, &log, done)
+        build_observation(lua, &self.net, &log, done, self.origin.clone())
     }
 }
 
@@ -302,9 +321,10 @@ impl LuaUserData for RunValue {
         methods.add_async_method("wait", |lua, this, ()| {
             let net = this.net.clone();
             let log = this.log.clone();
+            let origin = this.origin.clone();
             let finished_rx = this.finished_rx.clone();
             let start_error = this.start_error.clone();
-            async move { await_completion(&lua, net, log, finished_rx, start_error).await }
+            async move { await_completion(&lua, net, log, origin, finished_rx, start_error).await }
         });
     }
 }
@@ -387,13 +407,22 @@ fn emit_replay(
 /// [`PendingWork`] -- the same split `Runs::spawn` used to make in `mod.rs`,
 /// and for the same reason: a stub `Actuator` can drive this directly in
 /// tests, with no live game and no Lua involved at all.
+///
+/// `seed` is the log the run starts from and `origin` is where its plan came
+/// from; both arrive from [`RunSlot::take`] and neither is a choice made here.
+/// A run of an ordinary plan is seeded with an empty log, exactly as before; a
+/// run of a tier-1 recovery is seeded with the log of the run it recovers, and
+/// [`PlanValue::from_recovery`] is what decides which -- see [`spawn_bare`]
+/// for the shape the tests below use.
 fn spawn(
     act: Arc<dyn Actuator>,
     sched: Arc<Schedule>,
     net: Arc<ActionNetwork>,
+    seed: ExecutionLog,
+    origin: Option<Arc<PlanOrigin>>,
     sink: Option<Arc<dyn OutputSink>>,
 ) -> (RunValue, factorio_bot_core::tokio::task::JoinHandle<()>) {
-    let log = Arc::new(Mutex::new(ExecutionLog::default()));
+    let log = Arc::new(Mutex::new(seed));
     let start_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let (finished_tx, finished_rx) = watch::channel(false);
     let task_log = log.clone();
@@ -423,6 +452,7 @@ fn spawn(
         RunValue {
             net,
             log,
+            origin,
             finished_rx,
             start_error,
         },
@@ -441,6 +471,7 @@ async fn await_completion(
     lua: &Lua,
     net: Arc<ActionNetwork>,
     log: Arc<Mutex<ExecutionLog>>,
+    origin: Option<Arc<PlanOrigin>>,
     mut finished_rx: watch::Receiver<bool>,
     start_error: Arc<Mutex<Option<String>>>,
 ) -> LuaResult<LuaTable> {
@@ -453,7 +484,7 @@ async fn await_completion(
     // report a refusal.
     refuse_a_run_that_never_started(&start_error)?;
     let log = lock(&log);
-    build_observation(lua, &net, &log, true)
+    build_observation(lua, &net, &log, true, origin)
 }
 
 /// `goal.start`'s body, shared with `goal.run` so the two can never disagree
@@ -506,8 +537,13 @@ async fn start_impl(
     let sink = lua.app_data_ref::<ReplaySink>().map(|sink| sink.0.clone());
     // Last: nothing below this line can fail, so the plan is spent only by a
     // start that really does dispatch.
-    let (net, sched) = reserved.take()?;
-    let (run, join) = spawn(act, sched, net, sink);
+    let Dispatch {
+        net,
+        schedule,
+        seed,
+        origin,
+    } = reserved.take()?;
+    let (run, join) = spawn(act, schedule, net, seed, Some(origin), sink);
     pending.register(join);
     Ok(run)
 }
@@ -541,7 +577,15 @@ pub(crate) fn install_goal_run(
             let actuator = actuator.clone();
             async move {
                 let run = start_impl(&lua, reserved, &actuator).await?;
-                await_completion(&lua, run.net, run.log, run.finished_rx, run.start_error).await
+                await_completion(
+                    &lua,
+                    run.net,
+                    run.log,
+                    run.origin,
+                    run.finished_rx,
+                    run.start_error,
+                )
+                .await
             }
         })?,
     )?;
@@ -555,8 +599,8 @@ mod tests {
     use super::*;
     use crate::globals::goal::create_lua_goal_with;
     use crate::globals::goal::tests::{
-        bounded, exec_bounded, factory, lua_with_goal, mining_plan, science_plan, seeded_world_for,
-        Failure, StubActuator, EXEC_BOUND, STUB_CLOCK_BASE,
+        exec_bounded, exec_bounded_err, factory, lua_with_goal, mining_plan, science_plan,
+        seeded_world_for, test_origin, Failure, StubActuator, STUB_CLOCK_BASE,
     };
     use crate::lua_runner::tests::RecordingSink;
     use factorio_bot_core::serde_json::{self, json, Value};
@@ -567,6 +611,24 @@ mod tests {
     };
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
+
+    /// [`spawn`] for a run that came from no plan: a fresh log, and no origin
+    /// to recover from.
+    ///
+    /// Every test below builds its network and schedule by hand, or takes one
+    /// from a fixture, precisely so the counting they assert on is not the
+    /// planner's choices. Such a run has no goal to re-expand and nothing that
+    /// already happened to carry forward, and saying so with `None` and an
+    /// empty log is what keeps those two facts out of the production
+    /// signature, where both really are decided by the plan.
+    fn spawn_bare(
+        act: Arc<dyn Actuator>,
+        sched: Arc<Schedule>,
+        net: Arc<ActionNetwork>,
+        sink: Option<Arc<dyn OutputSink>>,
+    ) -> (RunValue, factorio_bot_core::tokio::task::JoinHandle<()>) {
+        spawn(act, sched, net, ExecutionLog::default(), None, sink)
+    }
 
     // Every test here drives the table `create_lua_goal_with` really
     // returns. Until the handle surface was deleted this module had to
@@ -591,22 +653,6 @@ mod tests {
     /// hold the table [`build_observation`] writes into.
     fn observing_lua() -> Lua {
         crate::sandbox::new_sandboxed_lua().expect("sandbox")
-    }
-
-    /// Runs `code`, failing rather than hanging if it does not finish, and
-    /// returning the error `code` raised.
-    ///
-    /// `exec_bounded` (reused from `mod.rs`) is the success-path counterpart;
-    /// this is its mirror for the tests here that assert a script must
-    /// fail -- `exec_bounded` itself `.expect`s success, so it cannot be used
-    /// for them. It shares `bounded`, so it shares the watchdog: the bound
-    /// here also covers a hang that never yields. See `goal::tests::Watchdog`.
-    async fn exec_bounded_err(lua: &Lua, code: &str) -> String {
-        match bounded(EXEC_BOUND, code, lua.load(code).exec_async()).await {
-            None => panic!("the script did not finish within {EXEC_BOUND:?}"),
-            Some(Ok(())) => panic!("the script was expected to fail but succeeded"),
-            Some(Err(err)) => err.to_string(),
-        }
     }
 
     #[tokio::test]
@@ -1117,16 +1163,23 @@ mod tests {
         // unfinished for good.
         let (net, sched) = science_plan();
         let total = net.len() as u32;
-        let (run, _join) = spawn(
+        let (run, _join) = spawn_bare(
             Arc::new(StubActuator::new(Failure::First(AtomicBool::new(false)))),
             sched,
             net,
             None,
         );
         let lua = observing_lua();
-        let obs = await_completion(&lua, run.net, run.log, run.finished_rx, run.start_error)
-            .await
-            .expect("the run finished");
+        let obs = await_completion(
+            &lua,
+            run.net,
+            run.log,
+            run.origin,
+            run.finished_rx,
+            run.start_error,
+        )
+        .await
+        .expect("the run finished");
         let (pending, running, success, failed, done) = counts(&obs);
         assert!(done, "the run's task has returned, so it is done");
         assert_eq!(failed, 1, "one action was refused");
@@ -1161,7 +1214,7 @@ mod tests {
             ..StubActuator::new(Failure::Never)
         };
 
-        let (run, _join) = spawn(Arc::new(stub), sched, net, None);
+        let (run, _join) = spawn_bare(Arc::new(stub), sched, net, None);
         entered_rx.recv().await.expect("an action was dispatched");
 
         let lua = observing_lua();
@@ -1183,16 +1236,23 @@ mod tests {
         let total = net.len() as u32;
         assert!(total > 0, "the fixture plan must contain actions");
 
-        let (run, _join) = spawn(
+        let (run, _join) = spawn_bare(
             Arc::new(StubActuator::new(Failure::Never)),
             sched,
             net,
             None,
         );
         let lua = observing_lua();
-        let obs = await_completion(&lua, run.net, run.log, run.finished_rx, run.start_error)
-            .await
-            .expect("the run finished");
+        let obs = await_completion(
+            &lua,
+            run.net,
+            run.log,
+            run.origin,
+            run.finished_rx,
+            run.start_error,
+        )
+        .await
+        .expect("the run finished");
         let (pending, running, success, failed, done) = counts(&obs);
         assert!(done, "wait must return a finished run");
         assert_eq!(success, total, "every action of the plan succeeded");
@@ -1212,16 +1272,23 @@ mod tests {
         let total = net.len() as u32;
         assert!(total > 0, "the fixture plan must contain actions");
 
-        let (run, _join) = spawn(
+        let (run, _join) = spawn_bare(
             Arc::new(StubActuator::new(Failure::Always)),
             sched,
             net,
             None,
         );
         let lua = observing_lua();
-        let obs = await_completion(&lua, run.net, run.log, run.finished_rx, run.start_error)
-            .await
-            .expect("the run finished");
+        let obs = await_completion(
+            &lua,
+            run.net,
+            run.log,
+            run.origin,
+            run.finished_rx,
+            run.start_error,
+        )
+        .await
+        .expect("the run finished");
         let (pending, running, success, failed, done) = counts(&obs);
         assert!(done, "a failed run is still a finished run");
         assert_eq!(success, 0, "nothing succeeded");
@@ -1284,7 +1351,7 @@ mod tests {
     #[tokio::test]
     async fn a_run_refused_before_it_started_raises_instead_of_reporting_done() {
         let (net, sched) = circular_wait_plan();
-        let (run, _join) = spawn(
+        let (run, _join) = spawn_bare(
             Arc::new(StubActuator::new(Failure::Never)),
             sched,
             net,
@@ -1300,6 +1367,7 @@ mod tests {
             &lua,
             run.net.clone(),
             run.log.clone(),
+            run.origin.clone(),
             run.finished_rx.clone(),
             run.start_error.clone(),
         )
@@ -1324,7 +1392,7 @@ mod tests {
         // must re-raise rather than swallow.
         let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never)));
         let (net, sched) = circular_wait_plan();
-        let plan = PlanValue::new(net, sched, vec![BotId(1)]);
+        let plan = PlanValue::new(net, sched, test_origin(&[BotId(1)]));
         lua.globals()
             .set("p", lua.create_userdata(plan).expect("userdata"))
             .expect("set p");
@@ -1370,16 +1438,23 @@ mod tests {
         let (net, sched) = mining_plan();
         let expected = sched.clone();
         let sink = Arc::new(RecordingSink::default());
-        let (run, _join) = spawn(
+        let (run, _join) = spawn_bare(
             Arc::new(StubActuator::new(Failure::Never).with_clock()),
             sched,
             net,
             Some(sink.clone()),
         );
         let lua = observing_lua();
-        await_completion(&lua, run.net, run.log, run.finished_rx, run.start_error)
-            .await
-            .expect("the run finished");
+        await_completion(
+            &lua,
+            run.net,
+            run.log,
+            run.origin,
+            run.finished_rx,
+            run.start_error,
+        )
+        .await
+        .expect("the run finished");
 
         let doc = only_replay(&sink);
         assert_eq!(
@@ -1469,7 +1544,7 @@ mod tests {
         // count.
         let (net, sched) = mining_plan();
         let sink = Arc::new(RecordingSink::default());
-        let (run, _join) = spawn(
+        let (run, _join) = spawn_bare(
             Arc::new(StubActuator::new(Failure::Never)),
             sched,
             net,
@@ -1481,6 +1556,7 @@ mod tests {
                 &lua,
                 run.net.clone(),
                 run.log.clone(),
+                run.origin.clone(),
                 run.finished_rx.clone(),
                 run.start_error.clone(),
             )
@@ -1499,7 +1575,7 @@ mod tests {
         // from `await_completion` instead would silently lose this case.
         let (net, sched) = mining_plan();
         let sink = Arc::new(RecordingSink::default());
-        let (_run, join) = spawn(
+        let (_run, join) = spawn_bare(
             Arc::new(StubActuator::new(Failure::Never)),
             sched,
             net,
@@ -1521,16 +1597,23 @@ mod tests {
         // failed, pending and succeeded rows at once.
         let (net, sched) = science_plan();
         let sink = Arc::new(RecordingSink::default());
-        let (run, _join) = spawn(
+        let (run, _join) = spawn_bare(
             Arc::new(StubActuator::new(Failure::First(AtomicBool::new(false)))),
             sched,
             net,
             Some(sink.clone()),
         );
         let lua = observing_lua();
-        await_completion(&lua, run.net, run.log, run.finished_rx, run.start_error)
-            .await
-            .expect("the run finished");
+        await_completion(
+            &lua,
+            run.net,
+            run.log,
+            run.origin,
+            run.finished_rx,
+            run.start_error,
+        )
+        .await
+        .expect("the run finished");
 
         let doc = only_replay(&sink);
         let statuses = statuses(&doc);
@@ -1589,16 +1672,23 @@ mod tests {
         // the step went wrong.
         let (net, sched) = mining_plan();
         let sink = Arc::new(RecordingSink::default());
-        let (run, _join) = spawn(
+        let (run, _join) = spawn_bare(
             Arc::new(StubActuator::new(Failure::WithoutVerdict)),
             sched,
             net,
             Some(sink.clone()),
         );
         let lua = observing_lua();
-        await_completion(&lua, run.net, run.log, run.finished_rx, run.start_error)
-            .await
-            .expect("the run finished");
+        await_completion(
+            &lua,
+            run.net,
+            run.log,
+            run.origin,
+            run.finished_rx,
+            run.start_error,
+        )
+        .await
+        .expect("the run finished");
 
         let statuses = statuses(&only_replay(&sink));
         assert!(
@@ -1622,7 +1712,7 @@ mod tests {
         // produced by a version that never had the field.
         let (net, sched) = mining_plan();
         let sink = Arc::new(RecordingSink::default());
-        let (_run, join) = spawn(
+        let (_run, join) = spawn_bare(
             Arc::new(StubActuator::new(Failure::Never)),
             sched,
             net,
@@ -1658,7 +1748,7 @@ mod tests {
         let (net, sched) = circular_wait_plan();
         let expected = sched.clone();
         let sink = Arc::new(RecordingSink::default());
-        let (run, join) = spawn(
+        let (run, join) = spawn_bare(
             Arc::new(StubActuator::new(Failure::Never)),
             sched,
             net,
@@ -1666,9 +1756,16 @@ mod tests {
         );
         join.await.expect("the run's task finished");
         let lua = observing_lua();
-        let raised = await_completion(&lua, run.net, run.log, run.finished_rx, run.start_error)
-            .await
-            .expect_err("a refused run raises rather than reporting done");
+        let raised = await_completion(
+            &lua,
+            run.net,
+            run.log,
+            run.origin,
+            run.finished_rx,
+            run.start_error,
+        )
+        .await
+        .expect_err("a refused run raises rather than reporting done");
 
         let doc = only_replay(&sink);
         let refused = doc

@@ -23,9 +23,10 @@ use super::{expand_goal, goal_error, refuse_unknown_bots};
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::types::Position;
+use factorio_bot_executor::{ExecutionLog, Recovery};
 use factorio_bot_planner::ids::{ActionId, BotId};
 use factorio_bot_planner::{
-    graphviz, mermaid_gantt, schedule, ActionKind, ActionNetwork, InventorySlot, PlanState,
+    graphviz, mermaid_gantt, schedule, ActionKind, ActionNetwork, Goal, InventorySlot, PlanState,
     Schedule, ScheduledStep, StepKind, Ticks,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,6 +44,25 @@ const KNOWN_PREDICATE_KEYS: &[&str] = &[
     "radius",
 ];
 
+/// What a plan was planned *from*: everything a later recovery needs to
+/// propose the next plan, and nothing a run needs to dispatch this one.
+///
+/// It travels plan -> run -> observation because that is the path the question
+/// takes: `obs:recover()` is asked of a finished run, and answering it needs
+/// the goal the plan came from (tier 2 re-expands it), the world to read
+/// observed state off, and the roster to schedule against -- none of which the
+/// executor keeps, since none of them is needed to dispatch a schedule.
+///
+/// The roster lives here rather than beside it on [`PlanValue`] so that the
+/// three are never separated: expanding for one roster and scheduling for
+/// another is the mismatch `goal.plan` exists to make unrepresentable, and a
+/// recovery re-plans for exactly the roster the plan it recovers was made for.
+pub(crate) struct PlanOrigin {
+    pub(crate) goal: Goal,
+    pub(crate) world: Arc<FactorioWorld>,
+    pub(crate) roster: Vec<BotId>,
+}
+
 /// An expanded, scheduled plan: an [`ActionNetwork`] plus the [`Schedule`]
 /// that assigned its actions to bots, held together so Lua can inspect either
 /// side of the join `step_to_lua` performs.
@@ -53,9 +73,26 @@ const KNOWN_PREDICATE_KEYS: &[&str] = &[
 pub(crate) struct PlanValue {
     net: Arc<ActionNetwork>,
     schedule: Arc<Schedule>,
-    /// The bots the plan was scheduled for, in roster order. Exposed as
-    /// `plan.bots` and walked by `for_bot`.
-    roster: Vec<BotId>,
+    /// Where this plan came from; also the roster it was scheduled for, in
+    /// roster order, which is what `plan.bots` reports.
+    origin: Arc<PlanOrigin>,
+    /// The [`ExecutionLog`] a run of this plan must start from.
+    ///
+    /// Empty for every plan a script builds with `goal.plan`, and empty for a
+    /// re-expanded recovery. Non-empty for exactly one thing: a tier-1
+    /// recovery, whose network is a *subset of the one that just ran* and
+    /// whose ids therefore still mean what the previous run's log says they
+    /// mean (see [`Recovery::Rescheduled`]).
+    ///
+    /// It is a field rather than an argument to `goal.run` on purpose. The
+    /// pairing of a proposal with the log it must run against is the one
+    /// mistake this surface cannot let a script make -- carrying the old log
+    /// into a re-expanded plan joins unrelated work, and starting a fresh one
+    /// for a rescheduled plan abandons the retries waiting behind actions that
+    /// already succeeded -- so the pairing is decided once, inside
+    /// [`PlanValue::from_recovery`], by a `match` on the variant. No caller,
+    /// Lua or Rust, is ever handed both halves to put together.
+    seed: ExecutionLog,
     /// Set the first time a [`RunSlot`] is actually taken. A plan may only be
     /// run once -- running it twice would dispatch every action against the
     /// game a second time -- and this flag is where that rule lives, which is
@@ -86,21 +123,41 @@ pub(crate) struct PlanValue {
 pub(crate) struct RunSlot {
     net: Arc<ActionNetwork>,
     schedule: Arc<Schedule>,
+    seed: ExecutionLog,
+    origin: Arc<PlanOrigin>,
     consumed: Arc<AtomicBool>,
 }
 
+/// Everything a run needs, handed over by the plan that is spent to start it.
+///
+/// A struct rather than a tuple because [`seed`](Dispatch::seed) is the field
+/// nobody may choose: it arrives already paired with the network it belongs to
+/// (see [`PlanValue::seed`]), and a tuple invites a caller to build one from
+/// parts.
+pub(crate) struct Dispatch {
+    pub(crate) net: Arc<ActionNetwork>,
+    pub(crate) schedule: Arc<Schedule>,
+    pub(crate) seed: ExecutionLog,
+    pub(crate) origin: Arc<PlanOrigin>,
+}
+
 impl RunSlot {
-    /// Consumes the plan and hands over its network and schedule.
+    /// Consumes the plan and hands over what the run needs.
     ///
     /// The check is repeated here, not merely made at reservation time: two
     /// reservations can be outstanding at once (each `goal.start` awaits its
     /// actuator, and a script may have several coroutines in flight), and the
     /// `swap` is what makes exactly one of them win.
-    pub(crate) fn take(self) -> LuaResult<(Arc<ActionNetwork>, Arc<Schedule>)> {
+    pub(crate) fn take(self) -> LuaResult<Dispatch> {
         if self.consumed.swap(true, Ordering::SeqCst) {
             return Err(already_taken());
         }
-        Ok((self.net, self.schedule))
+        Ok(Dispatch {
+            net: self.net,
+            schedule: self.schedule,
+            seed: self.seed,
+            origin: self.origin,
+        })
     }
 }
 
@@ -114,18 +171,123 @@ fn already_taken() -> LuaError {
     goal_error("plan has already been taken for a run; a plan may be executed at most once, so re-plan to retry")
 }
 
+/// The word `obs:recover()` answers with, one per [`Recovery`] variant.
+///
+/// A `&'static str` and not a number or a boolean, because the four outcomes
+/// are not ordered and not two: "the work is done" and "nothing mechanical is
+/// left to try" both end a loop, and a script that stops on either still wants
+/// to say which happened.
+pub(crate) const RESCHEDULED: &str = "rescheduled";
+pub(crate) const REEXPANDED: &str = "reexpanded";
+pub(crate) const COMPLETE: &str = "complete";
+pub(crate) const SURFACED: &str = "surfaced";
+
 impl PlanValue {
+    /// A plan as `goal.plan` builds it: nothing has run, so the log a run of
+    /// it starts from is empty.
     pub(crate) fn new(
         net: Arc<ActionNetwork>,
         schedule: Arc<Schedule>,
-        roster: Vec<BotId>,
+        origin: Arc<PlanOrigin>,
     ) -> Self {
         Self {
             net,
             schedule,
-            roster,
+            origin,
+            seed: ExecutionLog::default(),
             consumed: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// A [`Recovery`] as the next plan to run -- **including which log that
+    /// run must start from**.
+    ///
+    /// This is the only place in the crate where a network and a non-empty
+    /// [`ExecutionLog`] are put together, and the pairing is not a parameter:
+    /// `previous` is the log the run being recovered from produced, and which
+    /// of the two arms below uses it is decided by the variant, here, by a
+    /// `match` that a new variant breaks the build over.
+    ///
+    /// Both directions of the pairing are a defect, and only one of them is
+    /// loud:
+    ///
+    /// - **`Reexpanded` with `previous` would join unrelated work.** `expand`
+    ///   numbers a fresh network from zero, so `ActionId(0)` of the new plan
+    ///   is an unrelated action that merely shares a number with `ActionId(0)`
+    ///   of the old one. Every colliding id would inherit the old plan's
+    ///   attempt count -- burning the tier-1 budget of a plan that has never
+    ///   run -- and any of them the new schedule left unassigned would be
+    ///   published `Success` straight from a log describing a plan that no
+    ///   longer exists.
+    /// - **`Rescheduled` with a fresh log is the silent one.** Tier 1 keeps
+    ///   already-succeeded actions in its network for their lag edges and
+    ///   leaves them out of its schedule; `run_into` reads their `Success` off
+    ///   the log it is given. From an empty log they read as never-attempted,
+    ///   so they are published `Failed`, the retries waiting behind them are
+    ///   abandoned, and the run returns having dispatched nothing at all.
+    ///
+    /// `previous` is taken **by value** for that reason: at the one call site
+    /// there is a single log, it is moved in, and there is no second use of it
+    /// to get wrong.
+    ///
+    /// `Complete` and `Surfaced` produce no plan. The word is returned
+    /// alongside either way, so the caller always learns which tier answered
+    /// without inspecting a schedule's insides.
+    pub(crate) fn from_recovery(
+        recovery: Recovery,
+        origin: Arc<PlanOrigin>,
+        previous: ExecutionLog,
+    ) -> (Option<Self>, &'static str) {
+        match recovery {
+            // The work is done. Deliberately not a `Rescheduled` with an empty
+            // schedule -- see `Recovery::Complete` -- so a script looping on
+            // `recover` has something to stop on.
+            Recovery::Complete => (None, COMPLETE),
+            // Nothing mechanical is left to try. Also no plan, and for the
+            // same reason: proposing one here would loop forever.
+            Recovery::Surfaced(_) => (None, SURFACED),
+            Recovery::Rescheduled { net, sched } => (
+                Some(Self::recovered(net, sched, origin, previous)),
+                RESCHEDULED,
+            ),
+            Recovery::Reexpanded { net, sched } => (
+                Some(Self::recovered(
+                    net,
+                    sched,
+                    origin,
+                    // Not `previous`, and not a filtered `previous`: a plan
+                    // built from scratch is a different plan, so its progress
+                    // is recorded from scratch too.
+                    ExecutionLog::default(),
+                )),
+                REEXPANDED,
+            ),
+        }
+    }
+
+    /// The plan half of [`from_recovery`](PlanValue::from_recovery), shared by
+    /// its two proposing arms so that they can differ in exactly one thing --
+    /// the log -- and nothing else.
+    fn recovered(
+        net: ActionNetwork,
+        schedule: Schedule,
+        origin: Arc<PlanOrigin>,
+        seed: ExecutionLog,
+    ) -> Self {
+        Self {
+            net: Arc::new(net),
+            schedule: Arc::new(schedule),
+            origin,
+            seed,
+            consumed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// The log a run of this plan would start from. Test-only: production
+    /// never reads it, it only hands it to the run.
+    #[cfg(test)]
+    pub(crate) fn seed(&self) -> &ExecutionLog {
+        &self.seed
     }
 
     /// Reserves the plan for a run that is about to be attempted, cloning out
@@ -143,6 +305,8 @@ impl PlanValue {
         Ok(RunSlot {
             net: self.net.clone(),
             schedule: self.schedule.clone(),
+            seed: self.seed.clone(),
+            origin: self.origin.clone(),
             consumed: self.consumed.clone(),
         })
     }
@@ -226,9 +390,22 @@ pub(crate) fn install_goal_plan(
             // read of the world snapshot.
             let state = PlanState::from_world(world.clone(), &roster);
             refuse_unknown_bots(&state)?;
-            let net = expand_goal(goal, &world, &roster)?;
+            let net = expand_goal(goal.clone(), &world, &roster)?;
             let scheduled = schedule(&net, &state, &roster).map_err(goal_error)?;
-            Ok(PlanValue::new(Arc::new(net), Arc::new(scheduled), roster))
+            // The goal, the world and the roster are kept together on the
+            // plan, not because dispatching needs them -- it does not -- but
+            // because `obs:recover()` will, one run later, and a recovery must
+            // re-plan the same goal for the same roster or it is answering a
+            // different question.
+            Ok(PlanValue::new(
+                Arc::new(net),
+                Arc::new(scheduled),
+                Arc::new(PlanOrigin {
+                    goal,
+                    world: world.clone(),
+                    roster,
+                }),
+            ))
         })?,
     )?;
     Ok(())
@@ -409,7 +586,7 @@ impl LuaUserData for PlanValue {
         });
         fields.add_field_method_get("bots", |lua, this| {
             let t = lua.create_table()?;
-            for (i, bot) in this.roster.iter().enumerate() {
+            for (i, bot) in this.origin.roster.iter().enumerate() {
                 t.set(i + 1, bot.0)?;
             }
             Ok(t)
@@ -481,7 +658,9 @@ impl LuaUserData for PlanValue {
 mod tests {
     use super::*;
     use crate::globals::goal::create_lua_goal_with;
-    use crate::globals::goal::tests::{factory, seeded_world_for, Failure, StubActuator};
+    use crate::globals::goal::tests::{
+        factory, seeded_world_for, test_origin, Failure, StubActuator,
+    };
 
     /// A hand-built network and schedule covering every step kind, so the
     /// step-shape test does not depend on what the planner happens to emit.
@@ -562,7 +741,11 @@ mod tests {
             makespan: 60,
             steps,
         };
-        PlanValue::new(Arc::new(net), Arc::new(schedule), vec![BotId(1), BotId(2)])
+        PlanValue::new(
+            Arc::new(net),
+            Arc::new(schedule),
+            test_origin(&[BotId(1), BotId(2)]),
+        )
     }
 
     /// Installs one plan as the global `p` in a sandboxed interpreter.

@@ -16,6 +16,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
 mod plan;
+mod recovery;
 mod run;
 mod value;
 
@@ -119,6 +120,11 @@ pub(crate) fn create_lua_goal_with(
 -- `plan:gantt(title)`). `goal.start` and `goal.run` execute a plan and hand
 -- back a **RunValue** / an observation table rather than a number to look up
 -- later. A plan may be executed at most once.
+--
+-- A run that did not finish its plan is not the end of it: `obs:recover()`
+-- proposes the next plan to run -- or `nil`, when the work is done or nothing
+-- mechanical is left -- so a script can write its own retry loop, with its own
+-- budget, out of the same `goal.run` it already uses. See `goal.run`.
 --
 -- @module goal
 
@@ -250,6 +256,10 @@ end
 -- script's *own* end blocks until every run it started has finished, so a
 -- script that never waits still has its bots run to completion -- it just
 -- finds out how they went one call later than a script that waited would.
+--
+-- Either observation a `RunValue` gives back -- `run:progress()` mid-run,
+-- `run:wait()` at the end -- carries `:recover()`, but only a finished one
+-- will answer it; see `goal.run` for what it proposes.
 -- @tparam PlanValue plan a plan returned by `goal.plan`
 -- @treturn RunValue the run, immediately -- before it has finished
 -- @raise if the plan was already taken for a run, or no game is connected
@@ -266,8 +276,8 @@ end
 -- Exactly `goal.start(plan):wait()`.
 -- @tparam PlanValue plan a plan returned by `goal.plan`
 -- @treturn table an observation: `{ done, pending, running, success, failed,
---   lost, first_error, actions, walks, failures }` -- see `RunValue`'s own
---   `:wait()` for the shape.
+--   lost, first_error, actions, walks, failures, recover }` -- see
+--   `RunValue`'s own `:wait()` for the shape.
 --
 --   `lost` counts what was dispatched and never accounted for: the game
 --   answered with no readable outcome, or the run ended still waiting. Those
@@ -275,6 +285,38 @@ end
 --   `running` (nothing is in flight) nor `failed` (no verdict was ever
 --   given), so a display that draws `running` as a busy bot does not draw one
 --   for work nobody is watching. `obs:failures()` does not list them.
+--
+--   `obs:recover()` answers what to do about a run that did not finish its
+--   plan, as `next_plan, why`. `why` is one of `"rescheduled"` (the plan
+--   still fits the world, so here it is again minus what already succeeded),
+--   `"reexpanded"` (the world no longer affords that approach, so the same
+--   goal was planned afresh), `"complete"` (every action succeeded; there is
+--   nothing to run) or `"surfaced"` (nothing mechanical is left to try). The
+--   first two come with a plan to hand straight back to `goal.run`; the last
+--   two come with `nil`, which is what a retry loop stops on:
+--
+--       local obs, tries = goal.run(plan), 0
+--       while obs.failed > 0 and tries < 3 do
+--         local next_plan = obs:recover()
+--         if next_plan == nil then break end
+--         obs = goal.run(next_plan)
+--         tries = tries + 1
+--       end
+--
+--   Nothing is retried unless a script asks, and the budget above is the
+--   script's on purpose: a re-expansion is proposed from the world alone, so
+--   a world that has not moved gets the same proposal again, and a loop with
+--   no bound of its own can spend a very long time on a goal that cannot be
+--   reached. The proposal is a plan like any other -- inspect it
+--   (`plan.steps`, `plan:count{...}`) or drop it.
+--
+--   A recovered plan already carries the history it must be run against, so
+--   there is no log to pass and none to get wrong: `obs.actions[id].attempts`
+--   keeps counting across a `"rescheduled"` retry, and starts again at 1
+--   after a `"reexpanded"` one, whose ids number a different plan from zero.
+--   Recovering a run that has not finished raises instead of answering: a
+--   proposal made mid-flight would re-dispatch whatever the bots are doing
+--   right now, so wait (`run:wait()`, or `goal.run`, which waits) first.
 --
 --   `walks` is an array of `{ bot, step_index, to, status,
 --   planned_start, planned_end, dispatched_tick, replied_tick }`, one per walk
@@ -673,6 +715,26 @@ mod tests {
         }
     }
 
+    /// A [`PlanOrigin`] for a plan that no goal produced.
+    ///
+    /// The tests that need one build their network and schedule by hand, so
+    /// there is no goal they came from and no recovery they could ask for: an
+    /// origin is on a `PlanValue` for the benefit of `obs:recover()`, which
+    /// none of them reach. The goal below is a stand-in and says so; the
+    /// roster is the part that has to be right, since `plan.bots` reports it.
+    pub(crate) fn test_origin(roster: &[BotId]) -> Arc<plan::PlanOrigin> {
+        let ids: Vec<u8> = roster.iter().map(|bot| bot.0).collect();
+        Arc::new(plan::PlanOrigin {
+            goal: Goal::Have {
+                item: "iron-ore".into(),
+                count: 1,
+                whose: Holder::Anyone,
+            },
+            world: seeded_world_for(&ids),
+            roster: roster.to_vec(),
+        })
+    }
+
     /// Installs the real `goal` table, backed by `stub`, into a sandboxed
     /// interpreter — the same one user scripts get.
     ///
@@ -822,6 +884,22 @@ mod tests {
     /// a timeout alone cannot do.
     pub(crate) async fn exec_bounded(lua: &Lua, code: &str) {
         exec_bounded_within(EXEC_BOUND, lua, code).await;
+    }
+
+    /// Runs `code`, failing rather than hanging if it does not finish, and
+    /// returning the error `code` raised.
+    ///
+    /// [`exec_bounded`] is the success-path counterpart; this is its mirror for
+    /// the tests that assert a script must fail -- `exec_bounded` itself
+    /// `.expect`s success, so it cannot be used for them. It shares
+    /// [`bounded`], so it shares the watchdog: the bound here also covers a
+    /// hang that never yields. See [`Watchdog`].
+    pub(crate) async fn exec_bounded_err(lua: &Lua, code: &str) -> String {
+        match bounded(EXEC_BOUND, code, lua.load(code).exec_async()).await {
+            None => panic!("the script did not finish within {EXEC_BOUND:?}"),
+            Some(Ok(())) => panic!("the script was expected to fail but succeeded"),
+            Some(Err(err)) => err.to_string(),
+        }
     }
 
     /// [`exec_bounded`] with the deadline named, for the tests *about* the

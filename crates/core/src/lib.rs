@@ -40,6 +40,7 @@ pub mod graph;
 pub mod paths;
 pub mod plan;
 pub mod process;
+pub mod record;
 pub mod scripts;
 pub mod settings;
 

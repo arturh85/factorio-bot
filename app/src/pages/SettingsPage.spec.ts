@@ -9,14 +9,7 @@ import SettingsPage from './SettingsPage.vue';
 
 vi.mock('@/api/client');
 
-// jsdom does not implement ResizeObserver, which reka-ui's SliderRoot (behind
-// the client-count Slider on this page) needs on mount to measure the track.
-class ResizeObserverStub {
-    observe(): void {}
-    unobserve(): void {}
-    disconnect(): void {}
-}
-globalThis.ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver;
+import '@/test/resizeObserverStub';
 
 const settingsFixture = (): AppSettings => ({
     gui: {enable_autostart: false, enable_restapi: true},

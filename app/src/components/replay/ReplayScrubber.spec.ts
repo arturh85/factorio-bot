@@ -10,14 +10,7 @@ import {
     UNRELATED_RUN_MANIFEST
 } from '@/api/frames.fixtures';
 
-// jsdom does not implement ResizeObserver, which reka-ui's SliderRoot (used
-// for the scrubber) needs on mount to measure the track.
-class ResizeObserverStub {
-    observe(): void {}
-    unobserve(): void {}
-    disconnect(): void {}
-}
-globalThis.ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver;
+import '@/test/resizeObserverStub';
 
 describe('ReplayScrubber -- honesty requirement 1: refuse the join when ranges do not overlap', () => {
     it('shows no frames at all when the replay and manifest tick ranges never overlap, and says why', () => {

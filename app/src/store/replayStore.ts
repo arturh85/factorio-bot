@@ -1,8 +1,9 @@
 import {defineStore} from 'pinia'
-import {listJobs} from '@/api/client';
+import {frames as fetchFrames, listJobs} from '@/api/client';
 import {subscribeJobEvents} from '@/api/jobEvents';
 import {Job} from '@/api/types';
 import {parseReplayJson, Replay} from '@/api/replay';
+import {FramesManifest} from '@/api/types';
 
 /**
  * The live stream's unsubscribe callback, and the job id it watches.
@@ -48,6 +49,14 @@ export const useReplayStore = defineStore('replay', {
         jobId: null as string | null,
         replay: null as Replay | null,
         /**
+         * The frame manifest, or `null` when it has not been fetched or the
+         * request failed. `null` is not "no frames": an empty manifest is a
+         * fact (capture has not run) and a failed fetch is not, so the two
+         * must not collapse. `ReplayScrubber` treats both as nothing to
+         * judge, but only because it is told them separately.
+         */
+        manifest: null as FramesManifest | null,
+        /**
          * Set when the most recently *received* replay text failed to parse.
          * The previous good `replay`, if any, is left on screen rather than
          * being wiped by a bad update -- a malformed document is a reason to
@@ -66,6 +75,9 @@ export const useReplayStore = defineStore('replay', {
         getParseError(): string | null {
             return this.parseError
         },
+        getManifest(): FramesManifest | null {
+            return this.manifest
+        },
         isLoading(): boolean {
             return this.loading
         }
@@ -79,6 +91,20 @@ export const useReplayStore = defineStore('replay', {
         async refresh(): Promise<void> {
             this.loading = true
             try {
+                // Fetched alongside the replay rather than on its own timer:
+                // the two are joined by tick, so a manifest from a later
+                // moment than the replay it is judged against is exactly the
+                // mismatch the join check exists to catch.
+                //
+                // A failed frames fetch must not lose the replay -- the
+                // timeline is useful without pictures, and the reverse is not
+                // true. So this is caught and left `null` rather than allowed
+                // to abort the refresh.
+                try {
+                    this.manifest = await fetchFrames()
+                } catch {
+                    this.manifest = null
+                }
                 const jobs = await listJobs()
                 const latest = mostRecent(jobs)
                 if (latest !== null && latest.id !== watchedJobId) {

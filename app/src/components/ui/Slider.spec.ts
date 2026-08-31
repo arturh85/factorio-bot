@@ -4,15 +4,7 @@ import {mount} from '@vue/test-utils';
 import {SliderRoot} from 'reka-ui';
 import Slider from './Slider.vue';
 
-// jsdom does not implement ResizeObserver, which reka-ui's SliderRoot needs
-// on mount to measure the track. Without this stub every test below fails
-// with "ResizeObserver is not defined" before a single assertion runs.
-class ResizeObserverStub {
-    observe(): void {}
-    unobserve(): void {}
-    disconnect(): void {}
-}
-globalThis.ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver;
+import '@/test/resizeObserverStub';
 
 describe('Slider', () => {
     it('hands reka-ui the single-element array it expects', () => {

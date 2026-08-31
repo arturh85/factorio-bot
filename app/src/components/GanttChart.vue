@@ -38,11 +38,12 @@ let diagram = ref('gantt\n' +
 // `ReplayView.vue`.
 import {computed, onMounted, onUnmounted} from 'vue';
 import {useReplayStore} from '@/store/replayStore';
-import ReplayView from '@/components/replay/ReplayView.vue';
+import ReplayScrubber from '@/components/replay/ReplayScrubber.vue';
 
 const replayStore = useReplayStore();
 const replay = computed(() => replayStore.getReplay);
 const parseError = computed(() => replayStore.getParseError);
+const manifest = computed(() => replayStore.getManifest);
 
 onMounted(() => {
   void replayStore.refresh();
@@ -58,5 +59,5 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <ReplayView :replay="replay" :parse-error="parseError"/>
+  <ReplayScrubber :replay="replay" :manifest="manifest" :parse-error="parseError"/>
 </template>

@@ -45,7 +45,7 @@ Every task's requirements implicitly include this section.
 - **Never a bare `git commit`.** Always `git commit --only <explicit paths>`. Another session works in this checkout and a bare commit would sweep up its files.
 - **Do not run `just fix`** — it rewrites files workspace-wide.
 - Commits go to `master`; no feature branches. Conventional-commit subjects.
-- **Do not touch `crates/`** in any task of this plan. This is a frontend-only plan; the one Rust-adjacent file it reads (`app/src/models/types.ts`) is generated and must never be hand-edited.
+- **Do not touch `crates/`** in any task of this plan. This is a frontend-only plan. The DTOs it reads live in `app/src/api/types.ts`, which is hand-written and pinned to the server's published OpenAPI spec by `app/src/api/openapi.contract.spec.ts` — changing a declaration there without the server changing fails `tsc`.
 
 ---
 
@@ -73,7 +73,7 @@ Concretely, for the tasks below:
 
 Every task below states the expected failure text for its red step. If the red step passes, stop: the test is wrong, not the code.
 
-The frontend has almost no tests today (one placeholder plus plan 5's `src/api/` and `src/store/` specs). **This plan does not start a general testing initiative** — it does not add tests for `Editor.vue`, `GanttChart.vue`, the router beyond route existence, or plan 5's transport code. It requires only that every component *this plan creates* is genuinely covered, enforced by extending plan 5's coverage gate to `src/components/ui/**`, `src/composables/**` and `src/lib/**`.
+The frontend's tests today are plan 5's `src/api/` and `src/store/` specs (251 of them; the placeholder `dummy.spec.ts` was deleted by plan 5's Task 16). **This plan does not start a general testing initiative** — it does not add tests for `Editor.vue`, `GanttChart.vue`, the router beyond route existence, or plan 5's transport code. It requires only that every component *this plan creates* is genuinely covered, enforced by extending plan 5's coverage gate to `src/components/ui/**`, `src/composables/**` and `src/lib/**`.
 
 ---
 
@@ -2312,7 +2312,7 @@ PrimeVue's `Tree` is the only component with no equivalent worth adopting (see "
 - Create: `app/src/components/ScriptTree.spec.ts`
 
 **Interfaces:**
-- Consumes: `ScriptTreeNode` from `@/models/types` — `{key: string; label: string; leaf: boolean; children: ScriptTreeNode[]}` (generated; renamed from `PrimeVueTreeNode` by plan 5's Task 2, do not hand-edit). `useScriptStore` from `@/store/scriptStore` with `loadScriptsInDirectory(path: string): Promise<ScriptTreeNode[]>` and getter `getLoadingScriptsInDirectory: boolean`.
+- Consumes: `ScriptTreeNode` from `@/api/types` — `{key: string; label: string; leaf: boolean; children: ScriptTreeNode[]}` (renamed from `PrimeVueTreeNode` by plan 5's Task 2; plan 5's Task 13 then deleted the TypeScript generator and `app/src/models/types.ts` with it, so this type is now hand-written in `app/src/api/types.ts` and checked against the OpenAPI spec by the contract test). `useScriptStore` from `@/store/scriptStore` with `loadScriptsInDirectory(path: string): Promise<ScriptTreeNode[]>` and getter `getLoadingScriptsInDirectory: boolean`.
 - Produces:
   - `mergeNodes(nodes: ScriptTreeNode[], key: string, children: ScriptTreeNode[]): ScriptTreeNode[]` from `@/components/ui/tree/mergeNodes` — pure, returns a new array, replaces the children of the node whose `key` matches at any depth.
   - `@/components/ui/tree/TreeView.vue` — props `{nodes: ScriptTreeNode[]; expandedKeys: string[]; selectedKey: string | null; level?: number}`, emits `toggle(node: ScriptTreeNode)` and `select(node: ScriptTreeNode)`. Renders `<ul role="tree">` at level 0 and `<ul role="group">` below, one `<li role="treeitem">` per node.
@@ -2324,7 +2324,7 @@ Create `app/src/components/ui/tree/mergeNodes.spec.ts`:
 
 ```ts
 import {describe, expect, it} from 'vitest';
-import type {ScriptTreeNode} from '@/models/types';
+import type {ScriptTreeNode} from '@/api/types';
 import {mergeNodes} from './mergeNodes';
 
 const leaf = (key: string, label: string): ScriptTreeNode => ({key, label, leaf: true, children: []});
@@ -2378,7 +2378,7 @@ Expected: FAIL — `Failed to resolve import "./mergeNodes"`.
 Create `app/src/components/ui/tree/mergeNodes.ts`:
 
 ```ts
-import type {ScriptTreeNode} from '@/models/types';
+import type {ScriptTreeNode} from '@/api/types';
 
 /**
  * Return a copy of `nodes` in which the node identified by `key` has `children`.
@@ -2425,7 +2425,7 @@ Create `app/src/components/ui/tree/TreeView.spec.ts`:
 // @vitest-environment jsdom
 import {describe, expect, it} from 'vitest';
 import {mount} from '@vue/test-utils';
-import type {ScriptTreeNode} from '@/models/types';
+import type {ScriptTreeNode} from '@/api/types';
 import TreeView from './TreeView.vue';
 
 const leaf = (key: string, label: string): ScriptTreeNode => ({key, label, leaf: true, children: []});
@@ -2508,7 +2508,7 @@ Create `app/src/components/ui/tree/TreeView.vue`:
 ```vue
 <script setup lang="ts">
 import {ChevronDown, ChevronRight, FileCode} from 'lucide-vue-next';
-import type {ScriptTreeNode} from '@/models/types';
+import type {ScriptTreeNode} from '@/api/types';
 
 // Self-referencing by filename: Vue resolves <TreeView> inside this template
 // to this component, which is how the recursion works without a named export.
@@ -2590,7 +2590,7 @@ import {beforeEach, describe, expect, it, vi} from 'vitest';
 import {flushPromises, mount} from '@vue/test-utils';
 import {createPinia, setActivePinia} from 'pinia';
 import * as client from '@/api/client';
-import type {ScriptTreeNode} from '@/models/types';
+import type {ScriptTreeNode} from '@/api/types';
 import ScriptTree from './ScriptTree.vue';
 
 vi.mock('@/api/client');
@@ -2694,7 +2694,7 @@ Replace the whole of `app/src/components/ScriptTree.vue` with:
 <script setup lang="ts">
 import {computed, onMounted, ref} from 'vue';
 import {Loader2} from 'lucide-vue-next';
-import type {ScriptTreeNode} from '@/models/types';
+import type {ScriptTreeNode} from '@/api/types';
 import {useScriptStore} from '@/store/scriptStore';
 import TreeView from '@/components/ui/tree/TreeView.vue';
 import {mergeNodes} from '@/components/ui/tree/mergeNodes';

@@ -78,10 +78,27 @@ The workspace copy is transient by design and is wiped by the next run. The
 archive is written at run end (and incrementally for `events.jsonl`, so a
 crashed run still leaves a readable partial record).
 
-`<run-id>` is the id already minted into `frames/run.json`, so frames captured
-by the mod and events recorded by the executor agree on identity without a
-second scheme. **Frames are matched to a run by that id, never by tick range**
-— tick ranges of two runs overlap trivially, since every run starts near tick 0.
+`<run-id>` is minted by the recorder. Today nothing mints it: the mod echoes
+whatever string `rcon.frame_capture_start(run_id)` is handed, so identity is
+currently "whoever remembers to pass the same string twice".
+
+**Starting the recorder also starts frame capture, with the id it just
+minted.** One call, one id, no way for the log and the frames to disagree
+about which run they belong to. Two call sites that must agree on a string is
+precisely the kind of arrangement that works until the day it doesn't.
+
+**Frames are matched to a run by that id, never by tick range** — tick ranges
+of two runs overlap trivially, since every run starts near tick 0. A stale
+frame left in the workspace by an earlier run is excluded by id, which is the
+bug that bit us on 2026-08-30.
+
+`runs/` lives at `<workspace>/runs/`, beside the `client<N>` directories the
+frames are copied from.
+
+**Bots and clients are 1:1**: frames are captured into `client<N>/` and
+archived under the bot id `N`. The archive uses bot ids throughout because
+that is what every event already refers to; `client<N>` is a detail of where
+the file happened to land.
 
 ### D4 — Splits are derived from the log, then materialised
 
@@ -111,7 +128,7 @@ means one control.
 {"tick":120,   "wall_ms":2011,  "kind":"milestone_started",   "index":0,
  "goal":"researched(automation)"}
 {"tick":24707, "wall_ms":41022, "kind":"milestone_satisfied", "index":0,
- "iterations":3, "ticks":24587}
+ "iterations":3, "elapsed_ticks":24587}
 {"tick":30000, "wall_ms":50100, "kind":"milestone_stuck",     "index":1,
  "outcome":"stuck_silent", "best_steps":42, "last_error":null}
 
@@ -121,14 +138,18 @@ means one control.
 {"tick":140,   "wall_ms":2300,  "kind":"action_dispatched", "id":17, "bot":2,
  "action":"mine", "target":{"x":-40.5,"y":-48.5}}
 {"tick":260,   "wall_ms":4180,  "kind":"action_settled",    "id":17, "bot":2,
- "status":"success", "ticks":120, "error":null}
+ "status":"success", "elapsed_ticks":120, "error":null}
 
 {"tick":300,   "wall_ms":5000,  "kind":"frame", "bot":1, "camera":"overview",
  "file":"frames/1/overview/300.jpg"}
 
 {"tick":41000, "wall_ms":68000, "kind":"run_finished", "outcome":"done",
- "ticks":41000}
+ "elapsed_ticks":41000}
 ```
+
+Every event's own `tick` is *when it happened*; a duration is always
+`elapsed_ticks`. The two were both called `ticks` in the first draft of this
+schema, which is the sort of thing that reads fine until someone plots it.
 
 `action_dispatched` / `action_settled` pair on `id`. The pair is what produces
 a per-bot span, and therefore the task lanes. A dispatched action with no
@@ -161,6 +182,13 @@ record and the existing `Replay` cannot diverge.
 Milestone events come from the supervisor loop
 (`docs/superpowers/specs/2026-08-31-supervisor-loop-design.md`), which is the
 thing that knows what a phase is.
+
+**That supervisor is specified and not yet implemented, and this is a hard
+dependency for one goal and not the other.** Without it a run is a single plan:
+`events.jsonl`, frames, task lanes and the viewer all work, and `splits.json`
+holds exactly one entry. Multi-phase runs — and therefore meaningful splits and
+run comparison — arrive only when the supervisor does. Implementing the
+supervisor is a prerequisite of goal 1, not of goals 2-5.
 
 ### 3. Archive step
 
@@ -197,6 +225,22 @@ One route, `/runs/:id`, with four panels over a shared tick cursor:
 
 Run comparison is selecting a second run in the splits panel; it loads only
 that run's `splits.json`, not its whole log.
+
+## Disk
+
+Frames dominate. The mod captures at 300-tick intervals — 12 frames per minute
+per camera — with three cameras configured, at 1920x1080. A 20-minute run is
+therefore of the order of 700 frames and a few hundred megabytes. Fifty
+archived runs is several gigabytes.
+
+So the archive needs a retention policy from day one rather than as a later
+fix: keep the N most recent runs (default 20, configurable), and never
+auto-delete a run the user has marked kept. Deleting a run deletes its whole
+directory; a run is the unit of retention, because an event log whose frames
+have been reaped is a viewer full of gaps that look like dropped frames.
+
+Retention runs at archive time, not on a timer: a background reaper deleting
+directories a viewer is reading is a race nobody needs.
 
 ## Error handling
 

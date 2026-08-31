@@ -41,20 +41,25 @@
           #
           # With all three: "Initialised OpenGL: AMD Radeon 880M (radeonsi)"
           # and "Factorio initialised".
+          # Lower-case names, not the `xorg.*` set: nixpkgs deprecated that
+          # alias and every entry printed a rename warning on every `nix`
+          # invocation -- eleven lines in front of each command, which is the
+          # kind of noise that trains a reader to skim past output that
+          # sometimes matters.
           guiLibs = with pkgs; [
             libglvnd # libGL.so.1 -- the dispatch library, not the driver
             alsa-lib # else SDL logs an audio failure every frame
-            xorg.libX11
-            xorg.libXrandr
-            xorg.libXinerama
-            xorg.libXcursor
-            xorg.libXi
-            xorg.libXext
-            xorg.libXfixes
-            xorg.libXrender
-            xorg.libxcb
-            xorg.libXau
-            xorg.libXdmcp
+            libx11
+            libxrandr
+            libxinerama
+            libxcursor
+            libxi
+            libxext
+            libxfixes
+            libxrender
+            libxcb
+            libxau
+            libxdmcp
           ];
         in {
           # Only native/system libraries live here; the language toolchains are

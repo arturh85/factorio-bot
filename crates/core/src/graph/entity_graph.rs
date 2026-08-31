@@ -19,7 +19,7 @@ use petgraph::stable_graph::StableGraph;
 use petgraph::visit::{Bfs, EdgeRef};
 use serde::de::{MapAccess, Visitor};
 use serde::ser::SerializeStruct;
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::collections::HashMap;
 use std::fmt;
 use std::ops::Deref;
@@ -119,15 +119,15 @@ impl EntityGraph {
         );
         let mut entities = vec![];
         for (entity, _rect, _item_id) in tree.query(rect) {
-            if let Some(search_name) = search_name.as_ref() {
-                if entity.name != *search_name {
-                    continue;
-                }
+            if let Some(search_name) = search_name.as_ref()
+                && entity.name != *search_name
+            {
+                continue;
             }
-            if let Some(search_type) = search_type.as_ref() {
-                if entity.entity_type != *search_type {
-                    continue;
-                }
+            if let Some(search_type) = search_type.as_ref()
+                && entity.entity_type != *search_type
+            {
+                continue;
             }
             if entity.position.distance(&search_center) > radius {
                 continue;
@@ -171,11 +171,11 @@ impl EntityGraph {
                         continue;
                     };
                     let other: Pos = (&other).into();
-                    if let Some(p) = positions_by_id.get(&other) {
-                        if p.is_none() {
-                            positions_by_id.insert(other.clone(), Some(next_id));
-                            stack.push(other);
-                        }
+                    if let Some(p) = positions_by_id.get(&other)
+                        && p.is_none()
+                    {
+                        positions_by_id.insert(other.clone(), Some(next_id));
+                        stack.push(other);
                     }
                 }
             }
@@ -811,16 +811,15 @@ impl EntityGraph {
                         } else {
                             warn!("underground belt prototype not found");
                         }
-                        if found {
-                            if let Some(next_index) =
+                        if found
+                            && let Some(next_index) =
                                 self.node_at_moved(&node.position, node.direction, 1.)
+                        {
+                            let next = inner.node_weight(next_index).unwrap();
+                            if !inner.contains_edge(node_index, next_index)
+                                && self.is_entity_belt_connectable(node, next)
                             {
-                                let next = inner.node_weight(next_index).unwrap();
-                                if !inner.contains_edge(node_index, next_index)
-                                    && self.is_entity_belt_connectable(node, next)
-                                {
-                                    edges_to_add.push((node_index, next_index, 1.));
-                                }
+                                edges_to_add.push((node_index, next_index, 1.));
                             }
                         }
                     }
@@ -864,16 +863,15 @@ impl EntityGraph {
                         } else {
                             warn!("underground pipe prototype not found");
                         }
-                        if found {
-                            if let Some(next_index) =
+                        if found
+                            && let Some(next_index) =
                                 self.node_at_moved(&node.position, node.direction, 1.)
+                        {
+                            let next = inner.node_weight(next_index).unwrap();
+                            if next.entity_type.is_fluid_input()
+                                && !inner.contains_edge(node_index, next_index)
                             {
-                                let next = inner.node_weight(next_index).unwrap();
-                                if next.entity_type.is_fluid_input()
-                                    && !inner.contains_edge(node_index, next_index)
-                                {
-                                    edges_to_add.push((node_index, next_index, 1.));
-                                }
+                                edges_to_add.push((node_index, next_index, 1.));
                             }
                         }
                     }

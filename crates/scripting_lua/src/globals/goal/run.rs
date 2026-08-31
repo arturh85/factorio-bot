@@ -12,12 +12,12 @@
 //! [`RunSlot::take`] -- which is also what makes "a plan may be run once"
 //! true without a registry of its own to police it.
 
-use super::plan::{position_to_lua, Dispatch, PlanOrigin, PlanValue, RunSlot};
-use super::{goal_error, lock, ActuatorFactory};
+use super::plan::{Dispatch, PlanOrigin, PlanValue, RunSlot, position_to_lua};
+use super::{ActuatorFactory, goal_error, lock};
 use crate::lua_runner::{PendingWork, ReplaySink};
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::tokio::sync::watch;
-use factorio_bot_executor::{run_into, Actuator, ExecutionLog, Replay, Status};
+use factorio_bot_executor::{Actuator, ExecutionLog, Replay, Status, run_into};
 use factorio_bot_planner::{ActionNetwork, Schedule};
 use factorio_bot_scripting::OutputSink;
 use std::sync::{Arc, Mutex};
@@ -599,11 +599,11 @@ mod tests {
     use super::*;
     use crate::globals::goal::create_lua_goal_with;
     use crate::globals::goal::tests::{
-        exec_bounded, exec_bounded_err, factory, lua_with_goal, mining_plan, science_plan,
-        seeded_world_for, test_origin, Failure, StubActuator, STUB_CLOCK_BASE,
+        Failure, STUB_CLOCK_BASE, StubActuator, exec_bounded, exec_bounded_err, factory,
+        lua_with_goal, mining_plan, science_plan, seeded_world_for, test_origin,
     };
     use crate::lua_runner::tests::RecordingSink;
-    use factorio_bot_core::serde_json::{self, json, Value};
+    use factorio_bot_core::serde_json::{self, Value, json};
     use factorio_bot_core::tokio::sync::mpsc;
     use factorio_bot_core::types::Position;
     use factorio_bot_planner::{

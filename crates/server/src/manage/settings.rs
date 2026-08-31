@@ -1,8 +1,8 @@
 use crate::error::{ApiResult, ErrorResponse};
 use crate::extract::ApiJson;
 use crate::state::AppState;
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 use factorio_bot_core::app_settings::AppSettings;
 
 /// Returns the current application settings

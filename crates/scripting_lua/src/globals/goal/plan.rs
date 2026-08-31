@@ -26,11 +26,11 @@ use factorio_bot_core::types::Position;
 use factorio_bot_executor::{ExecutionLog, Recovery};
 use factorio_bot_planner::ids::{ActionId, BotId};
 use factorio_bot_planner::{
-    graphviz, mermaid_gantt, schedule, ActionKind, ActionNetwork, Goal, InventorySlot, PlanState,
-    Schedule, ScheduledStep, StepKind, Ticks,
+    ActionKind, ActionNetwork, Goal, InventorySlot, PlanState, Schedule, ScheduledStep, StepKind,
+    Ticks, graphviz, mermaid_gantt, schedule,
 };
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The predicate keys `count`/`find` understand. `pos` and `to` are
 /// deliberately absent -- they are tables, not comparable values, and are
@@ -168,7 +168,9 @@ impl RunSlot {
 /// caller could be pointed at. Saying "the run started at line 12" would be
 /// inventing one.
 fn already_taken() -> LuaError {
-    goal_error("plan has already been taken for a run; a plan may be executed at most once, so re-plan to retry")
+    goal_error(
+        "plan has already been taken for a run; a plan may be executed at most once, so re-plan to retry",
+    )
 }
 
 /// The word `obs:recover()` answers with, one per [`Recovery`] variant.
@@ -343,7 +345,7 @@ fn resolve_roster(opts: Option<&LuaTable>, default_roster: &[BotId]) -> LuaResul
                             "opts.bots must be a list of positive integers; \
                              index {i} is a {}",
                             other.type_name()
-                        )))
+                        )));
                     }
                 };
                 let bot = u8::try_from(n)
@@ -356,7 +358,7 @@ fn resolve_roster(opts: Option<&LuaTable>, default_roster: &[BotId]) -> LuaResul
             return Err(goal_error(format!(
                 "opts.bots must be a table of bot ids, got a {}",
                 other.type_name()
-            )))
+            )));
         }
     };
     if roster.is_empty() {
@@ -659,7 +661,7 @@ mod tests {
     use super::*;
     use crate::globals::goal::create_lua_goal_with;
     use crate::globals::goal::tests::{
-        factory, seeded_world_for, test_origin, Failure, StubActuator,
+        Failure, StubActuator, factory, seeded_world_for, test_origin,
     };
 
     /// A hand-built network and schedule covering every step kind, so the

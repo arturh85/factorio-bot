@@ -30,10 +30,10 @@ use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::ids::{BotId, Ticks};
 use crate::method::util::{
-    free_area_near, ingredients_of, mining_ticks, nearest_resource_tile, output_per_craft,
-    recipe_for, recipe_gate, recipe_ticks, research_ingredients, research_ticks,
-    resource_supply_at_least, resource_tiles_for, smelting_ticks, trigger_requirement, RecipeGate,
-    CRAFTING_CATEGORY, SMELTING_CATEGORY,
+    CRAFTING_CATEGORY, RecipeGate, SMELTING_CATEGORY, free_area_near, ingredients_of, mining_ticks,
+    nearest_resource_tile, output_per_craft, recipe_for, recipe_gate, recipe_ticks,
+    research_ingredients, research_ticks, resource_supply_at_least, resource_tiles_for,
+    smelting_ticks, trigger_requirement,
 };
 use crate::method::{ExpansionCtx, GoalSite, Method, MethodRegistry, Step};
 use crate::state::PlanState;
@@ -946,7 +946,7 @@ mod tests {
     use crate::method::expand;
     use crate::method::util::unlocking_technology;
     use crate::network::ActionNetwork;
-    use crate::schedule::{schedule, StepKind};
+    use crate::schedule::{StepKind, schedule};
     use crate::state::PlanState;
     use factorio_bot_core::factorio::util::calculate_distance;
     use factorio_bot_core::test_utils::fixture_world;
@@ -1051,9 +1051,11 @@ mod tests {
             "the packs are spent, got {:?}",
             action.eff
         );
-        assert!(action
-            .eff
-            .contains(&Effect::Researched("automation".into())));
+        assert!(
+            action
+                .eff
+                .contains(&Effect::Researched("automation".into()))
+        );
         assert_eq!(action.duration, 6000, "10 units at 600 ticks each");
     }
 
@@ -1706,10 +1708,12 @@ mod tests {
         )
         .unwrap();
         let action = net.actions().next().unwrap();
-        assert!(action
-            .pre
-            .iter()
-            .any(|c| matches!(c, Condition::AtPosition { .. })));
+        assert!(
+            action
+                .pre
+                .iter()
+                .any(|c| matches!(c, Condition::AtPosition { .. }))
+        );
         assert!(action
             .pre
             .iter()
@@ -1717,10 +1721,12 @@ mod tests {
         assert!(action.eff.iter().any(
             |e| matches!(e, Effect::GainItem { item, count, .. } if item == "coal" && *count == 2)
         ));
-        assert!(action
-            .eff
-            .iter()
-            .any(|e| matches!(e, Effect::ConsumeResource { .. })));
+        assert!(
+            action
+                .eff
+                .iter()
+                .any(|e| matches!(e, Effect::ConsumeResource { .. }))
+        );
     }
 
     #[test]
@@ -3206,9 +3212,11 @@ mod tests {
             "a trigger consumes nothing, got {:?}",
             action.eff
         );
-        assert!(action
-            .eff
-            .contains(&Effect::Researched("steam-power".into())));
+        assert!(
+            action
+                .eff
+                .contains(&Effect::Researched("steam-power".into()))
+        );
     }
 
     /// `count` is absent in the shipped prototype for a single-item trigger

@@ -1,6 +1,6 @@
 use std::io::Read;
 
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use flate2::read::ZlibDecoder;
 use miette::{IntoDiagnostic, Result};
 use serde_json::Value;

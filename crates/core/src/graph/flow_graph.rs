@@ -15,7 +15,7 @@ use parking_lot::{RwLock, RwLockReadGuard};
 use petgraph::dot::{Config, Dot};
 use petgraph::graph::NodeIndex;
 use petgraph::stable_graph::StableGraph;
-use petgraph::visit::{depth_first_search, Bfs, Control, DfsEvent, EdgeRef};
+use petgraph::visit::{Bfs, Control, DfsEvent, EdgeRef, depth_first_search};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;

@@ -100,7 +100,9 @@ pub enum PlannerError {
     /// makespan that is quietly missing several steps is worse than a refusal,
     /// because a caller cannot tell it happened. Refusing names the technology
     /// and the trigger kind, so a caller can see exactly what is not modelled.
-    #[error("{technology} is unlocked by a {trigger} trigger, which this planner cannot express as a goal")]
+    #[error(
+        "{technology} is unlocked by a {trigger} trigger, which this planner cannot express as a goal"
+    )]
     #[diagnostic(
         code(planner::unsupported_research_trigger),
         help(
@@ -144,10 +146,14 @@ pub enum PlannerError {
     #[diagnostic(code(planner::expansion_too_deep))]
     ExpansionTooDeep { goal: String, depth: u32 },
 
-    #[error("{a} and {b} hold different amounts of {item}; expansion sizes each share against one bot's inventory and assumes any bot would do")]
+    #[error(
+        "{a} and {b} hold different amounts of {item}; expansion sizes each share against one bot's inventory and assumes any bot would do"
+    )]
     #[diagnostic(
         code(planner::bots_not_interchangeable),
-        help("re-plan per bot, or extend the driver to size shares against the bot that will run them")
+        help(
+            "re-plan per bot, or extend the driver to size shares against the bot that will run them"
+        )
     )]
     BotsNotInterchangeable { a: BotId, b: BotId, item: ItemId },
 }

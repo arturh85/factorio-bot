@@ -8,7 +8,7 @@
 
 use crate::log::{ExecutionLog, Status};
 use factorio_bot_planner::{
-    expand, registry_for, schedule, ActionId, ActionNetwork, BotId, Goal, PlanState, Schedule,
+    ActionId, ActionNetwork, BotId, Goal, PlanState, Schedule, expand, registry_for, schedule,
 };
 use std::collections::BTreeSet;
 
@@ -308,17 +308,16 @@ pub fn recover(
     // `UnknownBot` rather than planned for), and stable no matter what order
     // the caller listed its bots in. An empty roster has no such bot, and
     // `schedule` would refuse it anyway, so tier 2 is skipped entirely.
-    if let Some(chain_actor) = bots.iter().copied().min() {
-        if let Ok(fresh) = expand(
+    if let Some(chain_actor) = bots.iter().copied().min()
+        && let Ok(fresh) = expand(
             std::slice::from_ref(goal),
             state,
             &registry_for(bots),
             chain_actor,
-        ) {
-            if let Ok(sched) = schedule(&fresh, state, bots) {
-                return Recovery::Reexpanded { net: fresh, sched };
-            }
-        }
+        )
+        && let Ok(sched) = schedule(&fresh, state, bots)
+    {
+        return Recovery::Reexpanded { net: fresh, sched };
     }
 
     // Tier 3 — nothing mechanical is left.
@@ -413,8 +412,8 @@ mod tests {
     /// Two mines on a live patch; the first succeeded, the second failed.
     /// Nothing about the world has changed, so the remaining half still
     /// schedules.
-    fn one_failed_mine_but_ore_still_reachable(
-    ) -> (Goal, ActionNetwork, PlanState, Vec<BotId>, ExecutionLog) {
+    fn one_failed_mine_but_ore_still_reachable()
+    -> (Goal, ActionNetwork, PlanState, Vec<BotId>, ExecutionLog) {
         let s = state();
         let tile = ore_tile(&s);
         let mut id_gen = ActionIdGen::new();

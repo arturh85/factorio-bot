@@ -562,11 +562,12 @@ mod tests {
         handle.finish(Err(miette!("script exploded")));
         let job = registry.get(id).expect("job is retained");
         assert_eq!(job.status, JobStatus::Failed);
-        assert!(job
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("script exploded"));
+        assert!(
+            job.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("script exploded")
+        );
     }
 
     /// Test 1 of the replay-wiring brief: a sink receiving a replay stores it

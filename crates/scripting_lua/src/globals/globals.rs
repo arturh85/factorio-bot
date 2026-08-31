@@ -5,8 +5,8 @@
 // under their own tasks.
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
-use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::mlua::Variadic as LuaVariadic;
+use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::num_traits::{FromPrimitive, ToPrimitive};
 use factorio_bot_core::paris::{error, info, warn};
 use factorio_bot_core::parking_lot::Mutex;

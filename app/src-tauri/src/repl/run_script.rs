@@ -7,8 +7,8 @@ use factorio_bot_core::miette::IntoDiagnostic;
 use factorio_bot_core::paris::error;
 use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_core::types::PlayerId;
-use reedline_repl_rs::clap::{Arg, ArgMatches, Command};
 use reedline_repl_rs::Repl;
+use reedline_repl_rs::clap::{Arg, ArgMatches, Command};
 
 async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String>, Error> {
   let filename = matches.get_one::<String>("filename").unwrap().to_owned();

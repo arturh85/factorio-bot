@@ -1,9 +1,9 @@
 //! Re-exported from `factorio_bot_core::app_settings` so the existing
 //! `crate::settings::` call sites keep compiling.
-pub use factorio_bot_core::app_settings::{load_app_settings, SharedAppSettings};
+pub use factorio_bot_core::app_settings::{SharedAppSettings, load_app_settings};
 
-use factorio_bot_core::app_settings::{fill_workspace_default, AppSettings as CoreAppSettings};
-use factorio_bot_core::miette::{miette, Result};
+use factorio_bot_core::app_settings::{AppSettings as CoreAppSettings, fill_workspace_default};
+use factorio_bot_core::miette::{Result, miette};
 use factorio_bot_core::paths;
 use std::borrow::Cow;
 use std::path::PathBuf;

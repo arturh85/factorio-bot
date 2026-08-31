@@ -1,6 +1,6 @@
 use crate::cli::{Subcommand, SubcommandCallback};
 use crate::context::Context;
-use clap::{value_parser, Arg, ArgMatches, Command};
+use clap::{Arg, ArgMatches, Command, value_parser};
 use factorio_bot_core::miette::{IntoDiagnostic, Result};
 use factorio_bot_core::paris::info;
 use std::net::SocketAddr;

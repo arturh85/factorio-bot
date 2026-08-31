@@ -15,7 +15,7 @@
 #![cfg(feature = "lua")]
 
 use axum::body::Body;
-use axum::http::{header, Request, Response, StatusCode};
+use axum::http::{Request, Response, StatusCode, header};
 use factorio_bot_core::app_settings::AppSettings;
 use factorio_bot_core::factorio::rcon::FactorioRcon;
 use factorio_bot_core::factorio::world::FactorioWorld;

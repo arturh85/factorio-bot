@@ -301,14 +301,18 @@ fn the_live_world_snapshot_carries_the_player_force_and_its_technologies() {
         .technologies
         .get("automation-science-pack")
         .expect("the technology that unlocks the pack recipe");
-    assert!(pack_tech
-        .unlocked_recipes
-        .contains(&"automation-science-pack".to_string()));
-    assert!(automation
-        .prerequisites
-        .as_ref()
-        .expect("automation lists prerequisites")
-        .contains(&"automation-science-pack".to_string()));
+    assert!(
+        pack_tech
+            .unlocked_recipes
+            .contains(&"automation-science-pack".to_string())
+    );
+    assert!(
+        automation
+            .prerequisites
+            .as_ref()
+            .expect("automation lists prerequisites")
+            .contains(&"automation-science-pack".to_string())
+    );
 }
 
 /// Every disabled recipe should name a technology that unlocks it — with eight

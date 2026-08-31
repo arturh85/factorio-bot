@@ -299,7 +299,14 @@ mod tests {
         // for env vars shared across tests. This name is unique to this test
         // so no other test can race it.
         let var = "FACTORIO_BOT_ASSET_SYNC_TEST_REFRESH_VAR";
-        std::env::set_var(var, "1");
+        // SAFETY: edition 2024 made these unsafe because `std::env` is
+        // process-global and another thread reading it concurrently is UB.
+        // The unique var name above stops another *test* from racing this
+        // one for this key, which is the hazard we can actually rule out; it
+        // does not rule out a concurrent read of some other var elsewhere in
+        // the process. Confined to a test binary, and the alternative is a
+        // process-wide env lock these two tests do not earn.
+        unsafe { std::env::set_var(var, "1") };
 
         let dir = tempfile::tempdir().expect("tempdir");
         embed().extract(dir.path()).expect("extract");
@@ -308,7 +315,8 @@ mod tests {
 
         let refreshed =
             refresh_if_requested(&embed(), dir.path(), var).expect("refresh_if_requested");
-        std::env::remove_var(var);
+        // SAFETY: as above -- same key, same test, same reasoning.
+        unsafe { std::env::remove_var(var) };
 
         assert!(refreshed);
         assert!(stale_paths(&embed(), dir.path()).is_empty());
@@ -328,9 +336,17 @@ mod tests {
         std::fs::write(dir.path().join("users_own_script.lua"), b"-- mine").expect("write");
 
         let var = "FACTORIO_BOT_ASSET_SYNC_TEST_REFRESH_KEEPS_EXTRAS";
-        std::env::set_var(var, "1");
+        // SAFETY: edition 2024 made these unsafe because `std::env` is
+        // process-global and another thread reading it concurrently is UB.
+        // The unique var name above stops another *test* from racing this
+        // one for this key, which is the hazard we can actually rule out; it
+        // does not rule out a concurrent read of some other var elsewhere in
+        // the process. Confined to a test binary, and the alternative is a
+        // process-wide env lock these two tests do not earn.
+        unsafe { std::env::set_var(var, "1") };
         refresh_if_requested(&embed(), dir.path(), var).expect("refresh_if_requested");
-        std::env::remove_var(var);
+        // SAFETY: as above -- same key, same test, same reasoning.
+        unsafe { std::env::remove_var(var) };
 
         assert_eq!(
             std::fs::read(dir.path().join("users_own_script.lua")).expect("read"),

@@ -327,14 +327,13 @@ fn render_types_doc(documented: &BTreeMap<String, SchemaObject>) -> String {
         };
         body += &format!("{name} = {{\n");
         for (field, field_schema) in &object.properties {
-            if let Schema::Object(field_object) = field_schema {
-                if let Some(description) = field_object
+            if let Schema::Object(field_object) = field_schema
+                && let Some(description) = field_object
                     .metadata
                     .as_ref()
                     .and_then(|metadata| metadata.description.as_ref())
-                {
-                    body += &comment_lines(description, "    -- ");
-                }
+            {
+                body += &comment_lines(description, "    -- ");
             }
             let (placeholder, note) = lua_field(field_schema);
             body += &format!("    {field} = {placeholder}, -- {note}\n");

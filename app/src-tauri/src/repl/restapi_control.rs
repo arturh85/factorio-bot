@@ -3,9 +3,9 @@ use crate::repl::{Error, Subcommand};
 use factorio_bot_core::miette::{IntoDiagnostic, Result};
 use factorio_bot_core::paris::{error, info};
 use factorio_bot_server::webserver;
-use reedline_repl_rs::clap::builder::PossibleValue;
-use reedline_repl_rs::clap::{builder::PossibleValuesParser, Arg, ArgMatches, Command};
 use reedline_repl_rs::Repl;
+use reedline_repl_rs::clap::builder::PossibleValue;
+use reedline_repl_rs::clap::{Arg, ArgMatches, Command, builder::PossibleValuesParser};
 use std::str::FromStr;
 use strum::{EnumIter, EnumMessage, EnumString, IntoEnumIterator, IntoStaticStr};
 

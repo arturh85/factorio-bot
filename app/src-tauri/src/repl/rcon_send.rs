@@ -1,8 +1,8 @@
 use crate::context::Context;
 use crate::repl::{Error, Subcommand};
 use factorio_bot_core::paris::error;
-use reedline_repl_rs::clap::{Arg, ArgMatches, Command};
 use reedline_repl_rs::Repl;
+use reedline_repl_rs::clap::{Arg, ArgMatches, Command};
 
 async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String>, Error> {
   let command = matches

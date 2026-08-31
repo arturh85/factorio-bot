@@ -568,10 +568,10 @@ impl PlanState {
     /// collides with nothing.
     pub fn create_entity(&mut self, mut entity: FactorioEntity) {
         let key = Pos::from(&entity.position);
-        if entity.bounding_box.width() == 0. || entity.bounding_box.height() == 0. {
-            if let Some(area) = self.collision_area(&entity.name, &entity.position) {
-                entity.bounding_box = area;
-            }
+        if (entity.bounding_box.width() == 0. || entity.bounding_box.height() == 0.)
+            && let Some(area) = self.collision_area(&entity.name, &entity.position)
+        {
+            entity.bounding_box = area;
         }
         self.removed.remove(&key);
         self.added.insert(key, entity);
@@ -771,9 +771,10 @@ mod tests {
     #[test]
     fn an_entity_with_no_prototype_is_refused_rather_than_guessed_at() {
         let s = state();
-        assert!(s
-            .collision_area("not-a-real-entity", &Position::new(0., 0.))
-            .is_none());
+        assert!(
+            s.collision_area("not-a-real-entity", &Position::new(0., 0.))
+                .is_none()
+        );
         assert!(
             !s.is_area_free("not-a-real-entity", &Position::new(0., 0.)),
             "an unknown size must fail to plan, not be assumed small"

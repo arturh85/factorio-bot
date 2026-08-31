@@ -29,7 +29,7 @@
 use super::plan::{PlanOrigin, PlanValue};
 use super::{goal_error, refuse_unknown_bots};
 use factorio_bot_core::mlua::prelude::*;
-use factorio_bot_executor::{recover, ExecutionLog};
+use factorio_bot_executor::{ExecutionLog, recover};
 use factorio_bot_planner::{ActionNetwork, PlanState};
 use std::sync::Arc;
 
@@ -113,12 +113,12 @@ fn propose(
 mod tests {
     use super::super::plan::{COMPLETE, REEXPANDED, RESCHEDULED, SURFACED};
     use super::super::tests::{
-        exec_bounded, exec_bounded_err, lua_with_goal, seeded_world_for, Failure, StubActuator,
+        Failure, StubActuator, exec_bounded, exec_bounded_err, lua_with_goal, seeded_world_for,
     };
     use super::*;
     use factorio_bot_core::tokio::sync::watch;
     use factorio_bot_executor::{Actuator, Recovery, Status};
-    use factorio_bot_planner::{schedule, ActionId, BotId, Goal, Holder, Schedule};
+    use factorio_bot_planner::{ActionId, BotId, Goal, Holder, Schedule, schedule};
     use std::sync::atomic::AtomicBool;
 
     const BOTS: [BotId; 2] = [BotId(1), BotId(2)];

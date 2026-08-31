@@ -19,11 +19,11 @@ pub use goal::{Goal, Holder};
 pub use ids::{ActionId, ActionIdGen, BotId, ChainId, ChainIdGen, ItemId, Ticks};
 pub use method::have::default_registry;
 pub use method::have::registry_for;
-pub use method::{expand, MAX_EXPANSION_DEPTH};
 pub use method::{ExpansionCtx, GoalSite, Method, MethodRegistry, Step};
+pub use method::{MAX_EXPANSION_DEPTH, expand};
 pub use network::{ActionNetwork, Edge};
 pub use render::{graphviz, mermaid_gantt, ticks_to_timestamp};
 pub use schedule::{
-    schedule, travel_ticks, Schedule, ScheduledStep, StepKind, WALK_TILES_PER_TICK,
+    Schedule, ScheduledStep, StepKind, WALK_TILES_PER_TICK, schedule, travel_ticks,
 };
 pub use state::{BotState, PlanState};

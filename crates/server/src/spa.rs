@@ -1,4 +1,4 @@
-use axum::routing::{get_service, MethodRouter};
+use axum::routing::{MethodRouter, get_service};
 use std::path::Path;
 use tower_http::services::{ServeDir, ServeFile};
 

@@ -12,7 +12,7 @@ use image::RgbaImage;
 use miette::{IntoDiagnostic, Result};
 use serde::de::{MapAccess, Visitor};
 use serde::ser::SerializeStruct;
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::{fmt, fs};

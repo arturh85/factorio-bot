@@ -15,8 +15,8 @@ mod start;
 use crate::context::Context;
 use crate::settings::SettingsOverrides;
 use crate::{APP_ABOUT, APP_AUTHOR, APP_NAME};
-use clap::{value_parser, Arg, ArgMatches, Command};
-use clap_complete::{generate, Generator, Shell};
+use clap::{Arg, ArgMatches, Command, value_parser};
+use clap_complete::{Generator, Shell, generate};
 use factorio_bot_core::miette::Result;
 use std::future::Future;
 use std::io;
@@ -156,8 +156,8 @@ pub async fn start(mut context: Context) -> Result<Option<Command>> {
   Ok(Some(app))
 }
 
-fn print_completions<G: Generator>(gen: G, cmd: &mut Command) {
-  generate(gen, cmd, cmd.get_name().to_owned(), &mut io::stdout());
+fn print_completions<G: Generator>(r#gen: G, cmd: &mut Command) {
+  generate(r#gen, cmd, cmd.get_name().to_owned(), &mut io::stdout());
 }
 
 pub trait Subcommand {

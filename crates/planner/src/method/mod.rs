@@ -601,13 +601,14 @@ mod tests {
     fn the_registry_returns_none_when_nothing_applies() {
         let reg = MethodRegistry::new().with(Box::new(Nothing));
         let c = ctx();
-        assert!(reg
-            .find(
+        assert!(
+            reg.find(
                 &Goal::Researched("automation".into()),
                 &c.state,
                 GoalSite::root()
             )
-            .is_none());
+            .is_none()
+        );
     }
 
     #[test]
@@ -1037,7 +1038,8 @@ mod tests {
             })
             .sum();
         assert_eq!(
-            cogs, 6,
+            cogs,
+            6,
             "the widget's six cogs, with the two it did not spend left free              for the second goal rather than promised forever: {:?}",
             net.actions().map(|a| &a.label).collect::<Vec<_>>()
         );

@@ -630,7 +630,9 @@ fn describe_differences(snapshot: &Value, published: &Value) -> String {
         // `tags`, a security scheme. Rare enough not to itemise, and a bare
         // "they differ" with no detail would be useless, so fall back to both
         // documents.
-        return format!("  the documents differ outside paths and component schemas\n    snapshot:  {snapshot}\n    published: {published}");
+        return format!(
+            "  the documents differ outside paths and component schemas\n    snapshot:  {snapshot}\n    published: {published}"
+        );
     }
     lines.join("\n")
 }

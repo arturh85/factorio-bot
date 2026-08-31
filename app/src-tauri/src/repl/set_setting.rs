@@ -1,7 +1,7 @@
 use crate::context::Context;
 use crate::repl::{Error, Subcommand};
-use reedline_repl_rs::clap::{Arg, ArgMatches, Command};
 use reedline_repl_rs::Repl;
+use reedline_repl_rs::clap::{Arg, ArgMatches, Command};
 
 #[allow(clippy::unused_async)]
 async fn run(matches: ArgMatches, _context: &mut Context) -> Result<Option<String>, Error> {

@@ -46,10 +46,14 @@ pub struct ModExtractFailed {}
 pub struct PlansExtractFailed {}
 
 #[derive(Error, Debug, Diagnostic)]
-#[error("mod {mod_name} targets Factorio {mod_factorio_version} but the installed game is {game_version}")]
+#[error(
+    "mod {mod_name} targets Factorio {mod_factorio_version} but the installed game is {game_version}"
+)]
 #[diagnostic(
     code(factorio::mods::incompatible_version),
-    help("Factorio compares only major.minor, so it will refuse the mod with `Incompatible Factorio version (current: {game_major_minor}, required: {mod_major_minor})` and the level creation that follows fails with a misleading `failed to create factorio level`. Without {mod_name} there is no RCON bridge and nothing in this project works.\nFix: set \"factorio_version\": \"{game_major_minor}\" in {mod_info_path} (then delete the copy under the workspace mods directory so it is re-extracted), or install a Factorio {mod_major_minor}.x archive.\nThe installed version was read from {base_info_path}.")
+    help(
+        "Factorio compares only major.minor, so it will refuse the mod with `Incompatible Factorio version (current: {game_major_minor}, required: {mod_major_minor})` and the level creation that follows fails with a misleading `failed to create factorio level`. Without {mod_name} there is no RCON bridge and nothing in this project works.\nFix: set \"factorio_version\": \"{game_major_minor}\" in {mod_info_path} (then delete the copy under the workspace mods directory so it is re-extracted), or install a Factorio {mod_major_minor}.x archive.\nThe installed version was read from {base_info_path}."
+    )
 )]
 pub struct ModFactorioVersionMismatch {
     pub mod_name: String,
@@ -188,10 +192,14 @@ pub struct RectInvalid {
 /// real one, and the caller must not read the resulting path as evidence that
 /// the bot will end up where it asked to be.
 #[derive(Error, Debug, Diagnostic)]
-#[error("no path to [{goal_x}, {goal_y}] — the best one found ends [{shortfall:.3}] tiles away at [{end_x}, {end_y}], outside the [{tolerance:.3}] tile arrival tolerance")]
+#[error(
+    "no path to [{goal_x}, {goal_y}] — the best one found ends [{shortfall:.3}] tiles away at [{end_x}, {end_y}], outside the [{tolerance:.3}] tile arrival tolerance"
+)]
 #[diagnostic(
     code(factorio::rcon::walk_falls_short),
-    help("the goal is very likely blocked — a tile the bot itself built on is the usual cause; pick a standing position beside the target instead of on it")
+    help(
+        "the goal is very likely blocked — a tile the bot itself built on is the usual cause; pick a standing position beside the target instead of on it"
+    )
 )]
 pub struct RconWalkFallsShort {
     pub goal_x: f64,
@@ -210,10 +218,14 @@ pub struct RconWalkFallsShort {
 /// mine a resource outside `resource_reach_distance` — no event, no error — so
 /// dispatching anyway costs the whole action deadline in silence.
 #[derive(Error, Debug, Diagnostic)]
-#[error("still [{distance:.3}] tiles from [{target_x}, {target_y}] after walking, outside the [{reach:.3}] tile resource reach")]
+#[error(
+    "still [{distance:.3}] tiles from [{target_x}, {target_y}] after walking, outside the [{reach:.3}] tile resource reach"
+)]
 #[diagnostic(
     code(factorio::rcon::out_of_resource_reach),
-    help("the game refuses such a mine silently, so it is rejected here instead; retry, or plan a standing position closer to the resource")
+    help(
+        "the game refuses such a mine silently, so it is rejected here instead; retry, or plan a standing position closer to the resource"
+    )
 )]
 pub struct RconOutOfResourceReach {
     pub target_x: f64,

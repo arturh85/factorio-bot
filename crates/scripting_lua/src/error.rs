@@ -5,7 +5,7 @@ use factorio_bot_core::mlua;
 use factorio_bot_core::regex::Regex;
 use factorio_bot_core::thiserror::Error;
 use factorio_bot_scripting::line_offset;
-use miette::{miette, Diagnostic, NamedSource, SourceSpan};
+use miette::{Diagnostic, NamedSource, SourceSpan, miette};
 use std::collections::HashMap;
 
 /// Turns an mlua error into a report, attaching the offending source line when

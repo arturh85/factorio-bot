@@ -1,6 +1,6 @@
 use crate::actuator::{ActionTicks, Actuator, ActuatorError, ActuatorFailure};
 use async_trait::async_trait;
-use factorio_bot_core::factorio::rcon::{approach_radius, ActionFailure, Dispatch, FactorioRcon};
+use factorio_bot_core::factorio::rcon::{ActionFailure, Dispatch, FactorioRcon, approach_radius};
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::types::{PlayerId, Position};
 use factorio_bot_planner::{BotId, InventorySlot};

@@ -20,8 +20,8 @@ use factorio_bot_core::factorio::rcon::{FactorioRcon, RconSettings};
 use parking_lot::RwLock;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 

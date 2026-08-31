@@ -2,15 +2,15 @@ use crate::globals::create_lua_globals;
 use crate::globals::goal::create_lua_goal;
 use crate::globals::rcon::create_lua_rcon;
 use crate::globals::world::create_lua_world;
-use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::mlua::LuaSerdeExt;
+use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::parking_lot::Mutex;
 use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_core::serde_json;
 use factorio_bot_core::tokio::runtime::Runtime;
 use factorio_bot_core::tokio::task::JoinHandle;
 use factorio_bot_scripting::{OutputSink, Stream};
-use miette::{miette, IntoDiagnostic, Result};
+use miette::{IntoDiagnostic, Result, miette};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -830,12 +830,13 @@ pub(crate) mod tests {
     async fn a_script_cannot_climb_out_of_the_scripts_root() {
         let (dir, result) = sandboxed("file_write(\"../pwned.txt\", \"owned\")").await;
         assert!(result.is_err(), "the write should have been refused");
-        assert!(!dir
-            .path()
-            .parent()
-            .expect("parent")
-            .join("pwned.txt")
-            .exists());
+        assert!(
+            !dir.path()
+                .parent()
+                .expect("parent")
+                .join("pwned.txt")
+                .exists()
+        );
     }
 
     #[tokio::test]

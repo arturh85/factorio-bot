@@ -399,10 +399,10 @@ fn lock(log: &Mutex<ExecutionLog>) -> std::sync::MutexGuard<'_, ExecutionLog> {
 /// waits forever too. Abandonment has to propagate for the run to terminate.
 fn abandon_rest(rest: &[&ScheduledStep], senders: &BTreeMap<ActionId, watch::Sender<Status>>) {
     for step in rest {
-        if let StepKind::Act { action, .. } = &step.what {
-            if let Some(tx) = senders.get(action) {
-                let _ = tx.send(Status::Failed);
-            }
+        if let StepKind::Act { action, .. } = &step.what
+            && let Some(tx) = senders.get(action)
+        {
+            let _ = tx.send(Status::Failed);
         }
     }
 }

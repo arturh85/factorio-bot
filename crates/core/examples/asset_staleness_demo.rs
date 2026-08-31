@@ -59,10 +59,14 @@ fn main() {
        simulating a workspace populated by a prior run.",
             workspace
         );
-        println!("[step 1] checking immediately -- must be silent (nothing extracted, nothing edited yet):");
+        println!(
+            "[step 1] checking immediately -- must be silent (nothing extracted, nothing edited yet):"
+        );
         warn_if_stale(&MODS_CONTENT, &mods_path, "mods", REFRESH_MODS_ENV);
         warn_if_stale(&PLANS_CONTENT, &plans_path, "plans", REFRESH_PLANS_ENV);
-        println!("[step 1] done. Now edit a tracked file under mods/ or scripts/, rebuild this example, and run with --step=2.");
+        println!(
+            "[step 1] done. Now edit a tracked file under mods/ or scripts/, rebuild this example, and run with --step=2."
+        );
         return;
     }
 
@@ -90,9 +94,13 @@ fn main() {
     }
     warn_if_stale(&PLANS_CONTENT, &plans_path, "plans", REFRESH_PLANS_ENV);
 
-    println!("[step 2] now the same check through the real ensure_scripts_dir() entry point, called twice:");
+    println!(
+        "[step 2] now the same check through the real ensure_scripts_dir() entry point, called twice:"
+    );
     ensure_scripts_dir(&scripts_workspace).expect("ensure_scripts_dir first call");
-    println!("[step 2] second call in the same process -- must be silent even if still stale (once-per-process guard):");
+    println!(
+        "[step 2] second call in the same process -- must be silent even if still stale (once-per-process guard):"
+    );
     ensure_scripts_dir(&scripts_workspace).expect("ensure_scripts_dir second call");
 
     println!("[step 2] done. No warning above a cache's line means it is up to date.");
@@ -101,7 +109,7 @@ fn main() {
 #[cfg(debug_assertions)]
 fn main() {
     eprintln!(
-    "this demo only makes sense against MODS_CONTENT/PLANS_CONTENT, which only exist in a release build; run with --release"
-  );
+        "this demo only makes sense against MODS_CONTENT/PLANS_CONTENT, which only exist in a release build; run with --release"
+    );
     std::process::exit(1);
 }

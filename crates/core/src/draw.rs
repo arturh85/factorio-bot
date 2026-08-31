@@ -1,4 +1,4 @@
-use imageproc::drawing::{draw_hollow_rect_mut, draw_line_segment_mut, Canvas};
+use imageproc::drawing::{Canvas, draw_hollow_rect_mut, draw_line_segment_mut};
 
 use crate::factorio::util::{
     scaled_draw_rect, vector_add, vector_multiply, vector_normalize, vector_substract,

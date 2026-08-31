@@ -1,8 +1,8 @@
 use crate::run_lua;
 use factorio_bot_core::plan::planner::Planner;
-use factorio_bot_core::scripts::{resolve_script_path, ScriptPathError};
+use factorio_bot_core::scripts::{ScriptPathError, resolve_script_path};
 use factorio_bot_scripting::OutputSink;
-use miette::{miette, IntoDiagnostic, Result};
+use miette::{IntoDiagnostic, Result, miette};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 

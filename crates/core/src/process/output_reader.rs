@@ -8,10 +8,10 @@ use std::{fs::File, sync::Arc};
 
 use crate::factorio::rcon::{FactorioRcon, RconSettings};
 use crate::factorio::world::FactorioWorld;
+use crate::process::InteractiveProcess;
 use crate::process::output_parser::OutputParser;
 use crate::process::process_control::FactorioStartCondition;
-use crate::process::InteractiveProcess;
-use miette::{miette, IntoDiagnostic, Result};
+use miette::{IntoDiagnostic, Result, miette};
 use parking_lot::{Mutex, RwLock};
 use std::sync::mpsc;
 

@@ -24,7 +24,7 @@ use factorio_bot_core::factorio::rcon::FactorioRcon;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_executor::{Actuator, RconActuator};
-use factorio_bot_planner::{expand, registry_for, ActionNetwork, BotId, Goal, PlanState};
+use factorio_bot_planner::{ActionNetwork, BotId, Goal, PlanState, expand, registry_for};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -411,7 +411,7 @@ mod tests {
     use factorio_bot_core::tokio::sync::{mpsc, watch};
     use factorio_bot_core::types::Position;
     use factorio_bot_executor::{ActionTicks, ActuatorError, ActuatorFailure};
-    use factorio_bot_planner::{schedule, Holder, InventorySlot, Schedule};
+    use factorio_bot_planner::{Holder, InventorySlot, Schedule, schedule};
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::Duration;

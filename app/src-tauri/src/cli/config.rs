@@ -1,9 +1,9 @@
-use crate::cli::{settings_overrides, Subcommand, SubcommandCallback, SETTINGS_PRECEDENCE_HELP};
+use crate::cli::{SETTINGS_PRECEDENCE_HELP, Subcommand, SubcommandCallback, settings_overrides};
 use crate::context::Context;
-use crate::settings::{load_app_settings_with, resolved_settings_path, SettingsOverrides};
+use crate::settings::{SettingsOverrides, load_app_settings_with, resolved_settings_path};
 use clap::{ArgAction, ArgMatches, Command};
 use factorio_bot_core::app_settings::AppSettings;
-use factorio_bot_core::miette::{miette, IntoDiagnostic, Result};
+use factorio_bot_core::miette::{IntoDiagnostic, Result, miette};
 use std::path::PathBuf;
 
 impl Subcommand for ThisCommand {

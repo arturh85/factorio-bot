@@ -2,8 +2,8 @@ use crate::jobs::JobRegistry;
 use factorio_bot_core::app_settings::SharedAppSettings;
 use factorio_bot_core::process::process_control::{FactorioInstance, SharedFactorioInstance};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use tokio::sync::RwLock;
 
 /// How many finished script runs the server remembers. Past this, the oldest
@@ -189,8 +189,8 @@ impl AppState {
 mod tests {
     use super::*;
     use factorio_bot_core::app_settings::AppSettings;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Pins the atomicity of the start claim, which the route tests cannot see:
     /// `a_second_start_while_one_is_in_flight_is_a_conflict` occupies the slot

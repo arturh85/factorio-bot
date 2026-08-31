@@ -5,11 +5,11 @@ use factorio_bot_core::paris::{error, info};
 use factorio_bot_core::process::process_control::{
   FactorioInstance, FactorioParams, FactorioStartCondition,
 };
+use reedline_repl_rs::Repl;
 use reedline_repl_rs::clap::builder::PossibleValue;
-use reedline_repl_rs::clap::{builder::PossibleValuesParser, Arg, ArgAction, ArgMatches, Command};
+use reedline_repl_rs::clap::{Arg, ArgAction, ArgMatches, Command, builder::PossibleValuesParser};
 use reedline_repl_rs::crossterm::event::{KeyCode, KeyModifiers};
 use reedline_repl_rs::reedline::ReedlineEvent;
-use reedline_repl_rs::Repl;
 use std::str::FromStr;
 use strum::{EnumIter, EnumMessage, EnumString, IntoEnumIterator, IntoStaticStr};
 

@@ -17,7 +17,7 @@ use factorio_bot_core::test_utils::fixture_world;
 use factorio_bot_planner::goal::{Goal, Holder};
 use factorio_bot_planner::method::expand;
 use factorio_bot_planner::method::have::registry_for;
-use factorio_bot_planner::{schedule, ActionNetwork, BotId, PlanState, PlannerError};
+use factorio_bot_planner::{ActionNetwork, BotId, PlanState, PlannerError, schedule};
 use std::sync::Arc;
 
 /// Bots seeded the way `initiate_missing_players_with_default_inventory` seeds

@@ -1,6 +1,6 @@
 use serde_json::Value;
 use std::fs;
-use std::fs::{read_to_string, File};
+use std::fs::{File, read_to_string};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -20,7 +20,7 @@ use crate::process::io_utils::{
 use crate::process::output_reader::read_output;
 use crate::process::process_control::FactorioStartCondition;
 use crate::process::spinner::Spinner;
-use miette::{miette, IntoDiagnostic, Result};
+use miette::{IntoDiagnostic, Result, miette};
 use parking_lot::RwLock;
 use tokio::fs::create_dir;
 
@@ -263,7 +263,9 @@ pub async fn setup_factorio_instance(
     // already cost a live debugging session.
     #[allow(unused_mut, unused_assignments)]
     #[cfg(not(debug_assertions))]
-    let mut mods_source = String::from("pre-existing workspace copy; editing mods/ does NOT update it -- see the staleness warning below, or set FACTORIO_BOT_REFRESH_MODS=1 to refresh it");
+    let mut mods_source = String::from(
+        "pre-existing workspace copy; editing mods/ does NOT update it -- see the staleness warning below, or set FACTORIO_BOT_REFRESH_MODS=1 to refresh it",
+    );
     #[allow(unused_mut, unused_assignments)]
     #[cfg(debug_assertions)]
     let mut mods_source =
@@ -453,64 +455,63 @@ pub async fn setup_factorio_instance(
 
         let saves_level_path = saves_path.join(PathBuf::from("level.zip"));
         let map_exchange_string_path = instance_path.join(PathBuf::from("map-exchange-string.txt"));
-        if let Some(map_exchange_string) = &map_exchange_string {
-            if !map_exchange_string_path.exists()
+        if let Some(map_exchange_string) = &map_exchange_string
+            && (!map_exchange_string_path.exists()
                 || read_to_string(&map_exchange_string_path)
                     .into_diagnostic()?
-                    .ne(map_exchange_string)
-            {
-                if !saves_level_path.exists() {
-                    let factorio_binary_path = get_factorio_binary_path(instance_path);
-                    if !factorio_binary_path.exists() {
-                        error!(
-                            "factorio binary missing at <bright-blue>{:?}</>",
-                            factorio_binary_path
-                        );
-                        return Err(FactorioBinaryNotFound {}.into());
-                    }
-                    // only used to point macOS Factorio at the instance mods directory
-                    #[cfg(target_os = "macos")]
-                    let mods_path = instance_path.join("mods");
-                    #[cfg(target_os = "macos")]
-                    let mods_path_str = mods_path.to_str().unwrap().to_string();
-                    let mut args = vec!["--create", saves_level_path.to_str().unwrap()];
-                    if let Some(seed) = seed.as_ref() {
-                        args.push("--map-gen-seed");
-                        args.push(seed);
-                    }
-                    // macOS Factorio uses ~/Library/Application Support/factorio/mods by default
-                    #[cfg(target_os = "macos")]
-                    {
-                        args.push("--mod-directory");
-                        args.push(&mods_path_str);
-                    }
-                    let output = Command::new(&factorio_binary_path)
-                        .args(&args)
-                        .output()
-                        .expect("failed to run factorio --create");
-                    if !saves_level_path.exists() {
-                        error!(
-                            "failed to create factorio level. Output: \n\n{}\n\n{}",
-                            std::str::from_utf8(&output.stdout).unwrap(),
-                            std::str::from_utf8(&output.stderr).unwrap()
-                        );
-                        return Err(FactorioLevelFailed {}.into());
-                    }
+                    .ne(map_exchange_string))
+        {
+            if !saves_level_path.exists() {
+                let factorio_binary_path = get_factorio_binary_path(instance_path);
+                if !factorio_binary_path.exists() {
+                    error!(
+                        "factorio binary missing at <bright-blue>{:?}</>",
+                        factorio_binary_path
+                    );
+                    return Err(FactorioBinaryNotFound {}.into());
                 }
-                update_map_gen_settings(
-                    &resolved_workspace,
-                    instance_name,
-                    factorio_port,
-                    rcon_settings,
-                    map_exchange_string,
-                    silent,
-                )
-                .await?;
-                File::create(&map_exchange_string_path)
-                    .into_diagnostic()?
-                    .write_all(map_exchange_string.as_ref())
-                    .into_diagnostic()?;
+                // only used to point macOS Factorio at the instance mods directory
+                #[cfg(target_os = "macos")]
+                let mods_path = instance_path.join("mods");
+                #[cfg(target_os = "macos")]
+                let mods_path_str = mods_path.to_str().unwrap().to_string();
+                let mut args = vec!["--create", saves_level_path.to_str().unwrap()];
+                if let Some(seed) = seed.as_ref() {
+                    args.push("--map-gen-seed");
+                    args.push(seed);
+                }
+                // macOS Factorio uses ~/Library/Application Support/factorio/mods by default
+                #[cfg(target_os = "macos")]
+                {
+                    args.push("--mod-directory");
+                    args.push(&mods_path_str);
+                }
+                let output = Command::new(&factorio_binary_path)
+                    .args(&args)
+                    .output()
+                    .expect("failed to run factorio --create");
+                if !saves_level_path.exists() {
+                    error!(
+                        "failed to create factorio level. Output: \n\n{}\n\n{}",
+                        std::str::from_utf8(&output.stdout).unwrap(),
+                        std::str::from_utf8(&output.stderr).unwrap()
+                    );
+                    return Err(FactorioLevelFailed {}.into());
+                }
             }
+            update_map_gen_settings(
+                &resolved_workspace,
+                instance_name,
+                factorio_port,
+                rcon_settings,
+                map_exchange_string,
+                silent,
+            )
+            .await?;
+            File::create(&map_exchange_string_path)
+                .into_diagnostic()?
+                .write_all(map_exchange_string.as_ref())
+                .into_diagnostic()?;
         }
 
         if saves_level_path.exists() && recreate_save {

@@ -3,8 +3,8 @@ use factorio_bot_core::types::{FactorioEntity, Position};
 use factorio_bot_planner::action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot};
 use factorio_bot_planner::ids::ActionIdGen;
 use factorio_bot_planner::{
-    schedule, ActionId, ActionNetwork, BotId, PlanState, PlannerError, Schedule, ScheduledStep,
-    StepKind, Ticks,
+    ActionId, ActionNetwork, BotId, PlanState, PlannerError, Schedule, ScheduledStep, StepKind,
+    Ticks, schedule,
 };
 use std::sync::Arc;
 

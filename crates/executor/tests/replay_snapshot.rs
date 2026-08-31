@@ -50,9 +50,9 @@
 //! the consumer's styling.
 
 use factorio_bot_core::types::Position;
+use factorio_bot_executor::ActionTicks;
 use factorio_bot_executor::log::{ExecutionLog, Status};
 use factorio_bot_executor::replay::Replay;
-use factorio_bot_executor::ActionTicks;
 use factorio_bot_planner::schedule::{Schedule, ScheduledStep, StepKind};
 use factorio_bot_planner::{ActionId, BotId, Ticks};
 use serde_json::Value;

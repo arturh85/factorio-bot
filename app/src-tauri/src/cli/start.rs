@@ -1,7 +1,7 @@
-use crate::cli::{settings_overrides, Subcommand, SubcommandCallback, SETTINGS_PRECEDENCE_HELP};
+use crate::cli::{SETTINGS_PRECEDENCE_HELP, Subcommand, SubcommandCallback, settings_overrides};
 use crate::context::Context;
 use crate::settings::load_app_settings_with;
-use clap::{value_parser, Arg, ArgAction, ArgMatches, Command};
+use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 use factorio_bot_core::miette::{Context as _, Result};
 use factorio_bot_core::paris::{info, warn};
 use factorio_bot_core::process::process_control::{
@@ -131,7 +131,9 @@ async fn run(matches: &ArgMatches, context: &mut Context) -> Result<()> {
     StartOutcome::ClientsMissing {
       expected,
       connected,
-    } => warn!("started the server, but only <yellow>{connected}</>/<yellow>{expected}</> client(s) connected"),
+    } => warn!(
+      "started the server, but only <yellow>{connected}</>/<yellow>{expected}</> client(s) connected"
+    ),
   }
 
   // Hold the instance in the shared slot and block until the user asks us to
@@ -200,7 +202,7 @@ pub fn build() -> Box<dyn Subcommand> {
 
 #[cfg(test)]
 mod tests {
-  use super::{start_outcome, StartOutcome};
+  use super::{StartOutcome, start_outcome};
 
   /// Every requested client joined, so the run is what the user asked for.
   #[test]

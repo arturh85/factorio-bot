@@ -36,7 +36,9 @@ pub fn workspace_dir() -> PathBuf {
 #[error("workspace_path must be absolute, got: {path}")]
 #[diagnostic(
     code(factorio::workspace::relative),
-    help("set settings.factorio.workspace_path to an absolute path, or leave it empty to use the data-local workspace")
+    help(
+        "set settings.factorio.workspace_path to an absolute path, or leave it empty to use the data-local workspace"
+    )
 )]
 pub struct RelativeWorkspacePath {
     pub path: String,

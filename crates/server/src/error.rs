@@ -1,6 +1,6 @@
+use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use factorio_bot_core::scripts::ScriptPathError;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;

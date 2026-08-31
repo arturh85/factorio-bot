@@ -6,7 +6,7 @@ authors = [ "Artur Hallmann <arturh@arturh.de>" ]
 license = "MIT"
 repository = "https://github.com/arturh85/factorio-bot/"
 default-run = "factorio-bot"
-edition = "2021"
+edition = "2024"
 
 [lib]
 name = "app_lib"

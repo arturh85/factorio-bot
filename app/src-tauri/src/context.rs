@@ -1,6 +1,6 @@
 use crate::paths;
 use crate::settings::{
-  load_app_settings_with, resolved_settings_path, SettingsOverrides, SharedAppSettings,
+  SettingsOverrides, SharedAppSettings, load_app_settings_with, resolved_settings_path,
 };
 use factorio_bot_core::miette::{IntoDiagnostic, Result};
 use factorio_bot_core::process::process_control::{FactorioInstance, SharedFactorioInstance};
@@ -65,7 +65,7 @@ impl Context {
 mod tests {
   use super::*;
   use axum::body::Body;
-  use axum::http::{header, Request, StatusCode};
+  use axum::http::{Request, StatusCode, header};
   use factorio_bot_core::app_settings::AppSettings;
   use factorio_bot_server::state::AppState;
   use factorio_bot_server::webserver::build_router;

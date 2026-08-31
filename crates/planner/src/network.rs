@@ -203,13 +203,11 @@ impl ActionNetwork {
                         }
                     ) && self.actions[producer].eff.iter().any(|e| e.satisfies(cond))
                 });
-                if !world_scoped {
-                    if let (Some(p), Some(c)) = (self.chain_of(*producer), self.chain_of(*consumer))
-                    {
-                        if p != c {
-                            continue;
-                        }
-                    }
+                if !world_scoped
+                    && let (Some(p), Some(c)) = (self.chain_of(*producer), self.chain_of(*consumer))
+                    && p != c
+                {
+                    continue;
                 }
                 if self
                     .edges

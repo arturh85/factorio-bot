@@ -1161,8 +1161,8 @@ impl FactorioEntity {
         prototypes: Arc<DashMap<String, FactorioEntityPrototype>>,
     ) -> Result<Self> {
         let direction = direction.unwrap_or(Direction::North);
-        if let Some(prototype) = prototypes.get(name) {
-            Ok(FactorioEntity {
+        match prototypes.get(name) {
+            Some(prototype) => Ok(FactorioEntity {
                 bounding_box: add_to_rect_turned(&prototype.collision_box, &position, direction),
                 position,
                 direction: direction.to_u8().unwrap(),
@@ -1171,16 +1171,15 @@ impl FactorioEntity {
                 pickup_position,
                 drop_position,
                 ..Default::default()
-            })
-        } else {
-            Ok(FactorioEntity {
+            }),
+            _ => Ok(FactorioEntity {
                 position,
                 direction: direction.to_u8().unwrap(),
                 name: name.to_owned(),
                 pickup_position,
                 drop_position,
                 ..Default::default()
-            })
+            }),
         }
     }
     pub fn new_transport_belt(position: &Position, direction: Direction) -> FactorioEntity {

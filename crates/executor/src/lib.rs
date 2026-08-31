@@ -7,7 +7,7 @@ pub mod run;
 
 pub use actuator::{ActionTicks, Actuator, ActuatorError, ActuatorFailure};
 pub use log::{Attempt, ExecutionLog, Status, WalkObservation};
-pub use rcon_actuator::{InventoryDefines, RconActuator, DEFINES_QUERY};
-pub use recover::{recover, Recovery};
+pub use rcon_actuator::{DEFINES_QUERY, InventoryDefines, RconActuator};
+pub use recover::{Recovery, recover};
 pub use replay::{Evidence, Replay, ReplayStep, ReplayStepKind, UnmatchedWalk, WALK_BELIEF};
-pub use run::{run, run_into, ExecutionError};
+pub use run::{ExecutionError, run, run_into};

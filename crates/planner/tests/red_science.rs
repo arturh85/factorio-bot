@@ -6,7 +6,7 @@ use factorio_bot_planner::goal::{Goal, Holder};
 use factorio_bot_planner::method::expand;
 use factorio_bot_planner::method::have::registry_for;
 use factorio_bot_planner::schedule::StepKind;
-use factorio_bot_planner::{mermaid_gantt, schedule, BotId, PlanState};
+use factorio_bot_planner::{BotId, PlanState, mermaid_gantt, schedule};
 use std::sync::Arc;
 
 mod common;

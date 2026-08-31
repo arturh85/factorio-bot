@@ -1,9 +1,9 @@
 use crate::process::spinner::Spinner;
 use indicatif::HumanDuration;
-use miette::{miette, IntoDiagnostic, Result};
+use miette::{IntoDiagnostic, Result, miette};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus};
-use std::thread::{sleep, JoinHandle};
+use std::thread::{JoinHandle, sleep};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 
@@ -14,8 +14,8 @@ pub async fn kill_process(process_name: &str) -> Result<()> {
         K32EnumProcessModules, K32EnumProcesses, K32GetModuleBaseNameW,
     };
     use windows_sys::Win32::System::Threading::{
-        OpenProcess, TerminateProcess, PROCESS_QUERY_INFORMATION, PROCESS_TERMINATE,
-        PROCESS_VM_READ,
+        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_TERMINATE, PROCESS_VM_READ,
+        TerminateProcess,
     };
 
     let mut kill_list: Vec<u32> = vec![];

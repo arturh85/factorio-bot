@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{RwLock, oneshot};
 
 /// Grace period injected into these tests. `start_with_shutdown` no longer
 /// hardcodes ten seconds — the caller passes it in, production via

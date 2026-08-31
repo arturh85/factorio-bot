@@ -10,10 +10,10 @@ mod run_script;
 mod set_setting;
 
 use crate::context::Context;
-use crate::{paths, APP_ABOUT, APP_NAME};
+use crate::{APP_ABOUT, APP_NAME, paths};
 use factorio_bot_core::miette;
-use factorio_bot_core::miette::{miette, IntoDiagnostic};
-use reedline_repl_rs::{yansi::Paint, Repl};
+use factorio_bot_core::miette::{IntoDiagnostic, miette};
+use reedline_repl_rs::{Repl, yansi::Paint};
 use std::fmt;
 
 fn subcommands() -> Vec<Box<dyn Subcommand>> {

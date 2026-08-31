@@ -2,7 +2,7 @@
 name = "factorio-bot-planner"
 version = "0.2.4-dev"
 authors = ["Artur Hallmann <arturh@arturh.de>"]
-edition = "2021"
+edition = "2024"
 
 [package.metadata.release]
 tag = false

@@ -1,9 +1,9 @@
 use crate::error::{ApiResult, ErrorResponse};
 use crate::extract::{ApiJson, ApiQuery};
 use crate::state::AppState;
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use factorio_bot_core::scripts::resolve_script_path;
 use factorio_bot_core::types::ScriptTreeNode;
 use serde::{Deserialize, Serialize};

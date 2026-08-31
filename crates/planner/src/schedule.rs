@@ -201,7 +201,7 @@ pub fn schedule(
             // narrower candidate set.
             let candidate_tiers: Vec<Vec<BotId>> = match action.pinned {
                 Some(pinned) if !bots.contains(&pinned) => {
-                    return Err(PlannerError::UnknownBot(pinned))
+                    return Err(PlannerError::UnknownBot(pinned));
                 }
                 // Pinning takes precedence over a chain *binding*: the pin is an
                 // explicit instruction, the binding an inference. But rather
@@ -220,25 +220,25 @@ pub fn schedule(
                 // caller asked, which is precisely the silent override this
                 // arm exists to prevent.
                 Some(pinned) => {
-                    if let (Some(chain), Some(owner)) = (chain, owner) {
-                        if owner != pinned {
-                            return Err(PlannerError::ChainConflict {
-                                chain,
-                                action: action.id,
-                                bound_to: owner,
-                                pinned_to: pinned,
-                            });
-                        }
+                    if let (Some(chain), Some(owner)) = (chain, owner)
+                        && owner != pinned
+                    {
+                        return Err(PlannerError::ChainConflict {
+                            chain,
+                            action: action.id,
+                            bound_to: owner,
+                            pinned_to: pinned,
+                        });
                     }
-                    if let (Some(chain), Some(bound)) = (chain, bound) {
-                        if bound != pinned {
-                            return Err(PlannerError::ChainConflict {
-                                chain,
-                                action: action.id,
-                                bound_to: bound,
-                                pinned_to: pinned,
-                            });
-                        }
+                    if let (Some(chain), Some(bound)) = (chain, bound)
+                        && bound != pinned
+                    {
+                        return Err(PlannerError::ChainConflict {
+                            chain,
+                            action: action.id,
+                            bound_to: bound,
+                            pinned_to: pinned,
+                        });
                     }
                     // A pin is an instruction, not a preference: there is no
                     // second tier to fall back to.
@@ -735,7 +735,13 @@ mod tests {
         let mut net = ActionNetwork::new();
         // Insert the ore, then remove the plate 200 ticks later, 30 tiles away.
         let insert = net.add(free(&mut id_gen, "insert", 10));
-        let remove = net.add(at_for(&mut id_gen, "remove", Position::new(30., 0.), 3.0, 60));
+        let remove = net.add(at_for(
+            &mut id_gen,
+            "remove",
+            Position::new(30., 0.),
+            3.0,
+            60,
+        ));
         net.link(insert, remove, 200);
 
         let bots = [BotId(1)];
@@ -880,8 +886,20 @@ mod tests {
 
         let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let first = net.add(at_for(&mut id_gen, "first", Position::new(0., 0.), 3.0, 600));
-        let second = net.add(at_for(&mut id_gen, "second", Position::new(0., 0.), 3.0, 600));
+        let first = net.add(at_for(
+            &mut id_gen,
+            "first",
+            Position::new(0., 0.),
+            3.0,
+            600,
+        ));
+        let second = net.add(at_for(
+            &mut id_gen,
+            "second",
+            Position::new(0., 0.),
+            3.0,
+            600,
+        ));
 
         let mut chains = ChainIdGen::new();
         net.set_chain(first, chains.next());
@@ -1113,8 +1131,20 @@ mod tests {
 
         let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let first = net.add(at_for(&mut id_gen, "first", Position::new(0., 0.), 3.0, 600));
-        let second = net.add(at_for(&mut id_gen, "second", Position::new(0., 0.), 3.0, 600));
+        let first = net.add(at_for(
+            &mut id_gen,
+            "first",
+            Position::new(0., 0.),
+            3.0,
+            600,
+        ));
+        let second = net.add(at_for(
+            &mut id_gen,
+            "second",
+            Position::new(0., 0.),
+            3.0,
+            600,
+        ));
 
         let result = schedule(&net, &s, &bots).unwrap();
 
@@ -1136,8 +1166,20 @@ mod tests {
 
         let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let first = net.add(at_for(&mut id_gen, "first", Position::new(0., 0.), 3.0, 600));
-        let second = net.add(at_for(&mut id_gen, "second", Position::new(0., 0.), 3.0, 600));
+        let first = net.add(at_for(
+            &mut id_gen,
+            "first",
+            Position::new(0., 0.),
+            3.0,
+            600,
+        ));
+        let second = net.add(at_for(
+            &mut id_gen,
+            "second",
+            Position::new(0., 0.),
+            3.0,
+            600,
+        ));
 
         let result = schedule(&net, &s, &bots).unwrap();
 

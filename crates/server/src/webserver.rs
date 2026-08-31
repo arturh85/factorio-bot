@@ -1,7 +1,7 @@
 use crate::state::AppState;
+use axum::Router;
 use axum::response::Redirect;
 use axum::routing::get;
-use axum::Router;
 use factorio_bot_core::app_settings::SharedAppSettings;
 use factorio_bot_core::process::process_control::SharedFactorioInstance;
 use miette::{IntoDiagnostic, Result};
@@ -167,6 +167,12 @@ pub async fn start_with_state(
     // Factorio server and every client process orphaned. Stop it whether
     // `serve_result` is Ok, Err, or timed out (never skip this block — that
     // exact bug was already fixed once on the error path).
+    // `cargo fix --edition` rewrote this as a `match` to preserve 2021 drop
+    // order. Restored, because edition 2024 only drops the scrutinee's
+    // temporaries early on the *else* path: the write guard is still held
+    // across `instance.stop()`, which is what stops a concurrent `start` from
+    // racing a shutdown. On the `None` path the guard now drops a few
+    // instructions sooner, and nothing there uses it.
     let stop_result = if let Some(instance) = instance_state.write().await.take() {
         tracing::info!("stopping factorio instance");
         instance.stop()

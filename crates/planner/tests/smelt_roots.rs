@@ -16,7 +16,7 @@ use factorio_bot_planner::goal::{Goal, Holder};
 use factorio_bot_planner::method::expand;
 use factorio_bot_planner::method::have::registry_for;
 use factorio_bot_planner::schedule::StepKind;
-use factorio_bot_planner::{schedule, ActionNetwork, BotId, PlanState, Schedule};
+use factorio_bot_planner::{ActionNetwork, BotId, PlanState, Schedule, schedule};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 

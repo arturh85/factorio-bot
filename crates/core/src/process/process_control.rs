@@ -5,7 +5,7 @@ use crate::factorio::world::FactorioWorld;
 use crate::process::arrange_windows::arrange_windows;
 use crate::process::instance_setup::setup_factorio_instance;
 use crate::process::output_reader::read_output;
-use crate::process::{io_utils, InteractiveProcess};
+use crate::process::{InteractiveProcess, io_utils};
 use crate::settings::FactorioSettings;
 use miette::{IntoDiagnostic, Result};
 use std::fs::File;
@@ -533,10 +533,10 @@ impl FactorioInstance {
                 error!("failed to kill client");
             }
         }
-        if let Some(server) = server {
-            if server.close().kill().is_err() {
-                error!("failed to kill server");
-            }
+        if let Some(server) = server
+            && server.close().kill().is_err()
+        {
+            error!("failed to kill server");
         }
     }
 

@@ -4,7 +4,7 @@ use crate::errors::{
     RconUnexpectedEmptyResponse, RconUnexpectedOutput, RconWalkFallsShort,
 };
 use crate::factorio::snapshot::WorldSnapshot;
-use crate::factorio::ticks::{take_tick_stamp, ActionTicks};
+use crate::factorio::ticks::{ActionTicks, take_tick_stamp};
 use crate::factorio::util::{
     blueprint_build_area, build_entity_path, calculate_distance, hashmap_to_lua, map_blocked_tiles,
     move_pos, move_position, position_to_lua, rect_to_lua, span_rect, str_to_lua, value_to_lua,
@@ -16,7 +16,7 @@ use crate::types::{
     ActionId, AreaFilter, Direction, FactorioEntity, FactorioForce, FactorioPlayer, FactorioTile,
     InventoryResponse, PlayerId, Pos, Position, Rect, RequestEntity,
 };
-use miette::{miette, Context, IntoDiagnostic, Report, Result};
+use miette::{Context, IntoDiagnostic, Report, Result, miette};
 use paris::info;
 use parking_lot::RwLock;
 use rcon::Connection;
@@ -1086,20 +1086,20 @@ impl FactorioRcon {
         // player position with an empty path leaves nothing to judge, and an
         // unjudgeable walk is dispatched rather than refused on a guess.
         let here = world.players.get(&player_id).map(|p| p.position.clone());
-        if let Some(end) = walk_end_position(&waypoints, here.as_ref()) {
-            if !walk_arrives(goal, radius, end) {
-                return Err(ActionFailure::not_dispatched(
-                    RconWalkFallsShort {
-                        goal_x: goal.x(),
-                        goal_y: goal.y(),
-                        end_x: end.x(),
-                        end_y: end.y(),
-                        shortfall: calculate_distance(end, goal),
-                        tolerance: arrival_tolerance(radius),
-                    }
-                    .into(),
-                ));
-            }
+        if let Some(end) = walk_end_position(&waypoints, here.as_ref())
+            && !walk_arrives(goal, radius, end)
+        {
+            return Err(ActionFailure::not_dispatched(
+                RconWalkFallsShort {
+                    goal_x: goal.x(),
+                    goal_y: goal.y(),
+                    end_x: end.x(),
+                    end_y: end.y(),
+                    shortfall: calculate_distance(end, goal),
+                    tolerance: arrival_tolerance(radius),
+                }
+                .into(),
+            ));
         }
 
         let dispatched = self

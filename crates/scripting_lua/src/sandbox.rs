@@ -85,20 +85,20 @@ fn install_text_only_load(lua: &Lua) -> LuaResult<()> {
                     return Err(LuaError::RuntimeError(format!(
                         "bad argument #1 to 'load' (string expected, got {})",
                         other.type_name()
-                    )))
+                    )));
                 }
             };
 
             // An explicit mode that excludes text is a request for exactly the
             // thing this function exists to refuse. Say so, rather than
             // quietly compiling it as text and confusing the caller.
-            if let Some(mode) = &mode {
-                if !mode.as_bytes().contains(&b't') {
-                    return Ok((
-                        None,
-                        Some("attempt to load a binary chunk (binary chunks are disabled)".into()),
-                    ));
-                }
+            if let Some(mode) = &mode
+                && !mode.as_bytes().contains(&b't')
+            {
+                return Ok((
+                    None,
+                    Some("attempt to load a binary chunk (binary chunks are disabled)".into()),
+                ));
             }
 
             let name = chunkname

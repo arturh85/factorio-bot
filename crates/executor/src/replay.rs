@@ -350,7 +350,7 @@ mod tests {
     use super::*;
     use crate::ActionTicks;
     use factorio_bot_planner::schedule::ScheduledStep;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     fn act(bot: u8, id: u32, label: &str, start: Ticks, end: Ticks) -> ScheduledStep {
         ScheduledStep {

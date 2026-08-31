@@ -1,4 +1,4 @@
-use miette::{miette, Diagnostic, IntoDiagnostic, Result};
+use miette::{Diagnostic, IntoDiagnostic, Result, miette};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 

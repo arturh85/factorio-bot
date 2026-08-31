@@ -9,24 +9,24 @@ use crate::extract::ApiJson;
 use crate::jobs::{Job, JobEvent, JobHandle, JobId, JobStatus};
 use crate::manage::scripts::scripts_root;
 use crate::state::AppState;
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::Json;
 use factorio_bot_core::factorio::rcon::FactorioRcon;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_scripting::{OutputSink, Stream};
 // `Stream` above is the script's stdout/stderr discriminant, so the async
 // trait of the same name is aliased rather than shadowing it.
-use futures_util::stream::Stream as EventStream;
 use futures_util::StreamExt;
+use futures_util::stream::Stream as EventStream;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::{broadcast, watch};
-use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
+use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 use utoipa::ToSchema;
 
 /// The language assumed for inline `code` when the caller does not say.
@@ -154,12 +154,12 @@ pub async fn post_execute(
         (Some(_), Some(_)) => {
             return Err(ErrorResponse::bad_request(
                 "exactly one of `path` or `code` may be given, not both",
-            ))
+            ));
         }
         (None, None) => {
             return Err(ErrorResponse::bad_request(
                 "one of `path` or `code` is required",
-            ))
+            ));
         }
     };
 
@@ -467,7 +467,7 @@ fn job_event_stream(
     job: &Job,
     receiver: Option<broadcast::Receiver<JobEvent>>,
     mut shutdown: watch::Receiver<bool>,
-) -> impl EventStream<Item = Result<Event, Infallible>> + Send + 'static {
+) -> impl EventStream<Item = Result<Event, Infallible>> + Send + 'static + use<> {
     // `iter` over an `Option` is 0 or 1 receivers, which is how the
     // finished-job case (no live channel left) and the running case share one
     // stream type without boxing a branch.

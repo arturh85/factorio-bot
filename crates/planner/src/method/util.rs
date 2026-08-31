@@ -484,15 +484,14 @@ pub fn trigger_requirement(
     };
     match trigger {
         ResearchTrigger::CraftItem { item, count } => {
-            if let Some(recipe) = recipe_for(state, item) {
-                if let RecipeGate::NeedsResearch(unlocker) = recipe_gate(state, &recipe) {
-                    if unlocker == tech.name {
-                        return Err(PlannerError::SelfUnlockingResearchTrigger {
-                            technology: tech.name.clone(),
-                            item: item.clone(),
-                        });
-                    }
-                }
+            if let Some(recipe) = recipe_for(state, item)
+                && let RecipeGate::NeedsResearch(unlocker) = recipe_gate(state, &recipe)
+                && unlocker == tech.name
+            {
+                return Err(PlannerError::SelfUnlockingResearchTrigger {
+                    technology: tech.name.clone(),
+                    item: item.clone(),
+                });
             }
             Ok(Some((item.clone(), *count)))
         }

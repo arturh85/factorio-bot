@@ -1105,11 +1105,22 @@
         ]
       }
     },
-    "/api/v1/frames/{name}": {
+    "/api/v1/frames/{client}/{name}": {
       "get": {
-        "description": "The route carries no client segment, so `name` is tried against each\ndiscovered `client<N>` directory in turn (lowest client number first),\nanswering the first match. Each directory is bounds-checked with\n[`resolve_script_path`] -- the same traversal guard\n`manage::scripts` uses -- rather than a second, independent\nimplementation of it: this endpoint is unauthenticated, so that guard is\nwhat stands between an HTTP caller and the filesystem.\n\nDoes not invent a way to disambiguate two clients that happen to have\nproduced a same-named file: the first match wins, silently. Nothing in\nthis feature deduplicates or renames a colliding name -- a `-1`-style\nsuffix would let a genuine double-write live on disk indistinguishably\nfrom two legitimate frames, which is worse than the ambiguity it would\npaper over.",
+        "description": "The route carries no client segment, so `name` is tried against each\ndiscovered `client<N>` directory in turn (lowest client number first),\nanswering the first match. Each directory is bounds-checked with\n[`resolve_script_path`] -- the same traversal guard\n`manage::scripts` uses -- rather than a second, independent\nimplementation of it: this endpoint is unauthenticated, so that guard is\nwhat stands between an HTTP caller and the filesystem.\n\n**Addressed by `(client, name)`, not by `name` alone.** Per-bot cameras mean\n`client1` and `client2` both capture at tick 300 and both files are correct\nand different; they are distinguished by the directory they are in, which\nis exactly what [`FrameEntry::client`] reports. An earlier version of this\nroute searched the client directories in order and returned the first\nmatch, which made the manifest honest and the bytes not: two entries with\nthe same `name` resolved to one image, and the higher-numbered client's\nframe was unreachable. A scrubber showing two bots would have shown the\nsame picture twice and nothing would have said so.\n\nStill no uniquifier: nothing here renames a colliding file so both survive.\nThat would let a genuine same-client double-write live on disk\nindistinguishably from two legitimate frames. The two cases are different —\ntwo clients at one tick is expected and addressable; one client twice at\none tick is a defect and must not be given a home.",
         "operationId": "get_frame",
         "parameters": [
+          {
+            "description": "the client number, as reported by FrameEntry.client",
+            "in": "path",
+            "name": "client",
+            "required": true,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
           {
             "description": "a frame's filename, as reported by GET /api/v1/frames",
             "in": "path",

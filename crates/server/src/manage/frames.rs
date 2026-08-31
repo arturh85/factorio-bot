@@ -276,17 +276,29 @@ pub async fn list_frames(
 /// implementation of it: this endpoint is unauthenticated, so that guard is
 /// what stands between an HTTP caller and the filesystem.
 ///
-/// Does not invent a way to disambiguate two clients that happen to have
-/// produced a same-named file: the first match wins, silently. Nothing in
-/// this feature deduplicates or renames a colliding name -- a `-1`-style
-/// suffix would let a genuine double-write live on disk indistinguishably
-/// from two legitimate frames, which is worse than the ambiguity it would
-/// paper over.
+/// **Addressed by `(client, name)`, not by `name` alone.** Per-bot cameras mean
+/// `client1` and `client2` both capture at tick 300 and both files are correct
+/// and different; they are distinguished by the directory they are in, which
+/// is exactly what [`FrameEntry::client`] reports. An earlier version of this
+/// route searched the client directories in order and returned the first
+/// match, which made the manifest honest and the bytes not: two entries with
+/// the same `name` resolved to one image, and the higher-numbered client's
+/// frame was unreachable. A scrubber showing two bots would have shown the
+/// same picture twice and nothing would have said so.
+///
+/// Still no uniquifier: nothing here renames a colliding file so both survive.
+/// That would let a genuine same-client double-write live on disk
+/// indistinguishably from two legitimate frames. The two cases are different —
+/// two clients at one tick is expected and addressable; one client twice at
+/// one tick is a defect and must not be given a home.
 #[utoipa::path(
     get,
-    path = "/api/v1/frames/{name}",
+    path = "/api/v1/frames/{client}/{name}",
     tag = "Admin",
-    params(("name" = String, Path, description = "a frame's filename, as reported by GET /api/v1/frames")),
+    params(
+        ("client" = u8, Path, description = "the client number, as reported by FrameEntry.client"),
+        ("name" = String, Path, description = "a frame's filename, as reported by GET /api/v1/frames"),
+    ),
     responses(
         (status = 200, content_type = "image/jpeg", description = "the frame's JPEG bytes"),
         (status = 400, body = crate::error::ErrorResponse),
@@ -295,46 +307,44 @@ pub async fn list_frames(
 )]
 pub async fn get_frame(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    Path((client, name)): Path<(u8, String)>,
 ) -> Result<Response, ErrorResponse> {
     let workspace = workspace_root(&state).await?;
     let client_dirs = discover_client_dirs(&workspace);
 
-    for dir in &client_dirs {
-        // A frames directory that does not exist yet cannot canonicalize;
-        // that is not this request's problem to report, it just means this
-        // client has nothing to offer, so move on to the next one instead of
-        // failing the whole lookup.
-        let Ok(frames_root) = std::fs::canonicalize(&dir.frames_dir) else {
-            continue;
-        };
-        let Ok(resolved) = resolve_script_path(&frames_root, &name) else {
-            continue;
-        };
-        if !resolved.is_file() {
-            continue;
-        }
-        let bytes = std::fs::read(&resolved)
-            .map_err(|err| ErrorResponse::internal(format!("failed to read frame: {err}")))?;
-        return Ok((
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg")),
-                (
-                    header::CACHE_CONTROL,
-                    // A tick never recurs, so a frame is immutable once
-                    // written -- a scrubber re-requests the same frames
-                    // constantly, and this header is the difference between a
-                    // usable one and a slow one.
-                    HeaderValue::from_static("public, max-age=31536000, immutable"),
-                ),
-            ],
-            bytes,
-        )
-            .into_response());
-    }
+    // Exactly the one the caller named. No fallback to another client: a
+    // fallback is how the previous version returned a different client's
+    // frame under the requested name, which is worse than a 404 because the
+    // caller cannot tell it happened.
+    let dir = client_dirs
+        .iter()
+        .find(|dir| dir.client == client)
+        .ok_or_else(|| ErrorResponse::not_found(format!("no such client: {client}")))?;
 
-    Err(ErrorResponse::not_found(format!("frame not found: {name}")))
+    let frames_root = std::fs::canonicalize(&dir.frames_dir)
+        .map_err(|_| ErrorResponse::not_found(format!("no frames for client {client}")))?;
+    let resolved = resolve_script_path(&frames_root, &name).map_err(ErrorResponse::from)?;
+    if !resolved.is_file() {
+        return Err(ErrorResponse::not_found(format!("no such frame: {name}")));
+    }
+    let bytes = std::fs::read(&resolved)
+        .map_err(|err| ErrorResponse::internal(format!("failed to read frame: {err}")))?;
+
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg")),
+            (
+                header::CACHE_CONTROL,
+                // A tick never recurs, so a frame is immutable once written --
+                // a scrubber re-requests the same frames constantly, and this
+                // header is the difference between a usable one and a slow one.
+                HeaderValue::from_static("public, max-age=31536000, immutable"),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 #[cfg(test)]

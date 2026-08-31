@@ -142,8 +142,8 @@ async fn traversal_outside_the_frames_directory_is_refused() {
     std::fs::write(dir.path().join("secret.txt"), "top secret").unwrap();
 
     for uri in [
-        "/api/v1/frames/../../secret.txt",
-        "/api/v1/frames/..%2F..%2Fsecret.txt",
+        "/api/v1/frames/1/../../secret.txt",
+        "/api/v1/frames/1/..%2F..%2Fsecret.txt",
     ] {
         let (status, _headers, body) = get(state_with_workspace(dir.path()), uri).await;
         assert!(
@@ -170,7 +170,7 @@ async fn frame_bytes_are_served_as_immutable_jpeg() {
 
     let (status, headers, body) = get(
         state_with_workspace(dir.path()),
-        "/api/v1/frames/tick-0000000300-front.jpg",
+        "/api/v1/frames/1/tick-0000000300-front.jpg",
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -263,4 +263,77 @@ async fn multiple_clients_are_all_represented() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["clients"].as_array().unwrap().len(), 2, "{body}");
     assert_eq!(body["frames"].as_array().unwrap().len(), 2, "{body}");
+}
+
+/// Two clients capturing the same tick is the ONE legitimate duplicate: per-bot
+/// cameras mean `client1` and `client2` both fire at tick 300, and both files
+/// are correct and different. They are distinguished by their directory, which
+/// is what `FrameEntry.client` reports.
+///
+/// This is a regression test for a real defect. The first version of
+/// `get_frame` took only a name and searched the client directories in order,
+/// returning the first match — so the manifest listed two entries and the byte
+/// route could serve only one of them, and the higher-numbered client's frame
+/// was unreachable. A scrubber showing two bots would have shown the same
+/// picture twice with nothing saying so.
+#[tokio::test]
+async fn two_clients_at_the_same_tick_are_both_reachable() {
+    let dir = tempfile::tempdir().unwrap();
+    for (client, body) in [(1u8, b"client-one-pixels"), (2u8, b"client-two-pixels")] {
+        let frames = frames_dir(dir.path(), client);
+        std::fs::create_dir_all(&frames).unwrap();
+        std::fs::write(frames.join("tick-0000300-follow.jpg"), body).unwrap();
+    }
+
+    let (status, body) = get_json(state_with_workspace(dir.path()), "/api/v1/frames").await;
+    assert_eq!(status, StatusCode::OK);
+    let frames = body["frames"].as_array().unwrap();
+    assert_eq!(frames.len(), 2, "the manifest must report both: {body}");
+    assert_eq!(frames[0]["name"], frames[1]["name"], "same name, by design");
+
+    // The bytes must differ, which is only possible if the client addresses it.
+    let (s1, _, b1) = get(
+        state_with_workspace(dir.path()),
+        "/api/v1/frames/1/tick-0000300-follow.jpg",
+    )
+    .await;
+    let (s2, _, b2) = get(
+        state_with_workspace(dir.path()),
+        "/api/v1/frames/2/tick-0000300-follow.jpg",
+    )
+    .await;
+    assert_eq!(s1, StatusCode::OK);
+    assert_eq!(s2, StatusCode::OK);
+    assert_eq!(b1, b"client-one-pixels".as_slice());
+    assert_eq!(
+        b2,
+        b"client-two-pixels".as_slice(),
+        "client 2 got client 1's frame — the route is ignoring the client"
+    );
+}
+
+/// A client that exists in the manifest but is not the one asked for must not
+/// be substituted. A fallback is how the previous version returned the wrong
+/// image under the right name, which is worse than a 404 because the caller
+/// cannot tell it happened.
+#[tokio::test]
+async fn a_frame_is_not_served_from_a_different_client() {
+    let dir = tempfile::tempdir().unwrap();
+    let frames = frames_dir(dir.path(), 1);
+    std::fs::create_dir_all(&frames).unwrap();
+    std::fs::write(frames.join("tick-0000300-follow.jpg"), b"only-client-one").unwrap();
+    std::fs::create_dir_all(frames_dir(dir.path(), 2)).unwrap();
+
+    let (status, _, body) = get(
+        state_with_workspace(dir.path()),
+        "/api/v1/frames/2/tick-0000300-follow.jpg",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "got: {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert!(!body.starts_with(b"only-client-one"));
 }

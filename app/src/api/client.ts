@@ -132,8 +132,10 @@ export function frames(): Promise<FramesManifest> {
 /**
  * The URL for one frame's JPEG bytes, for an `<img>` tag rather than a
  * `request()` call -- the response is immutable image bytes, not JSON.
- * `name` is a `FrameEntry.name` as reported by `frames()`.
+ * Addressed by `(client, name)` together, both from one `FrameEntry`. The name
+ * alone is not an address: per-bot cameras mean two clients capture the same
+ * tick under the same filename, and both frames are correct and different.
  */
-export function frameUrl(name: string): string {
-    return buildUrl('/api/v1/frames/' + encodeURIComponent(name));
+export function frameUrl(client: number, name: string): string {
+    return buildUrl(`/api/v1/frames/${client}/` + encodeURIComponent(name));
 }

@@ -123,13 +123,14 @@ const SCRIPTING_OPERATIONS: &[(&str, &str)] = &[];
 const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[
     ("get", "/api/v1/jobs/{id}"),
     ("get", "/api/v1/jobs/{id}/events"),
-    ("get", "/api/v1/frames/{name}"),
+    ("get", "/api/v1/frames/{client}/{name}"),
 ];
-// `/api/v1/frames/{name}` is registered unconditionally by `manage::router`
+// `/api/v1/frames/{client}/{name}` is registered unconditionally by `manage::router`
 // (it does not need an interpreter), so it is templated in both builds --
 // unlike the jobs routes above, which exist only behind `lua`.
 #[cfg(not(feature = "lua"))]
-const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[("get", "/api/v1/frames/{name}")];
+const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] =
+    &[("get", "/api/v1/frames/{client}/{name}")];
 
 /// The published response set for `POST /api/v1/instance/start` has to match
 /// what the handler actually answers.
@@ -190,7 +191,7 @@ async fn openapi_json_lists_every_route() {
         "/api/v1/scripts/file",
         "/api/v1/fs/exists",
         "/api/v1/frames",
-        "/api/v1/frames/{name}",
+        "/api/v1/frames/{client}/{name}",
     ] {
         assert!(paths.contains_key(path), "spec is missing {path}");
     }
@@ -212,7 +213,7 @@ async fn openapi_json_lists_every_route() {
         ("/api/v1/scripts/file", "delete"),
         ("/api/v1/fs/exists", "get"),
         ("/api/v1/frames", "get"),
-        ("/api/v1/frames/{name}", "get"),
+        ("/api/v1/frames/{client}/{name}", "get"),
     ] {
         assert!(
             paths[path].get(method).is_some(),
@@ -325,16 +326,24 @@ async fn no_operation_publishes_an_unexpected_path_parameter() {
             let Some(parameters) = operation.get("parameters").and_then(|p| p.as_array()) else {
                 continue;
             };
-            // The one segment name the path itself templates, e.g. `id` for
-            // `/api/v1/jobs/{id}` or `name` for `/api/v1/frames/{name}` --
-            // derived from the path rather than hardcoded, so a second
-            // templated route with a differently named segment does not need
-            // this test rewritten to know about it.
-            let expected_name = path
+            // EVERY segment name the path templates, e.g. `id` for
+            // `/api/v1/jobs/{id}`, or `client` and `name` for
+            // `/api/v1/frames/{client}/{name}` -- derived from the path rather
+            // than hardcoded, so a route with differently named segments does
+            // not need this test rewritten to know about it.
+            //
+            // This read only the FIRST `{...}` until `/api/v1/frames` grew a
+            // second segment. A path parameter that the path really does
+            // template is not a finding, and rejecting it would have pushed
+            // the fix towards exempting the operation -- which is exactly what
+            // the comment below explains must never happen.
+            let expected_names: Vec<&str> = path
                 .split('{')
-                .nth(1)
-                .and_then(|rest| rest.split('}').next());
-            let mut allowed_so_far = 0;
+                .skip(1)
+                .filter_map(|rest| rest.split('}').next())
+                .collect();
+            let mut allowed: std::collections::BTreeMap<&str, u32> =
+                std::collections::BTreeMap::new();
             for parameter in parameters {
                 // An allow-listed operation is exempted for exactly the one
                 // path parameter it is listed for, and for nothing else.
@@ -344,15 +353,14 @@ async fn no_operation_publishes_an_unexpected_path_parameter() {
                 // `ApiQuery<T>` and plan 3's finding I1 resurfaces there,
                 // republishing `since` as a path parameter, with this file
                 // silently agreeing.
-                if expected
-                    && parameter["in"] == "path"
-                    && Some(parameter["name"].as_str().unwrap_or_default()) == expected_name
-                {
-                    allowed_so_far += 1;
+                let published = parameter["name"].as_str().unwrap_or_default();
+                if expected && parameter["in"] == "path" && expected_names.contains(&published) {
+                    let seen = allowed.entry(published).or_insert(0);
+                    *seen += 1;
                     assert_eq!(
-                        allowed_so_far,
+                        *seen,
                         1,
-                        "{} {path} publishes more than one {expected_name:?} path parameter",
+                        "{} {path} publishes more than one {published:?} path parameter",
                         method.to_uppercase()
                     );
                     continue;

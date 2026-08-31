@@ -247,10 +247,13 @@ const OPERATIONS: readonly OperationContract[] = [
         response: {status: '200', schema: 'FramesManifest'}
     },
     {
-        path: '/api/v1/frames/{name}',
+        path: '/api/v1/frames/{client}/{name}',
         method: 'get',
         caller: 'frameUrl',
-        pathParams: ['name'],
+        // Both segments. A frame is addressed by `(client, name)` together:
+        // per-bot cameras mean two clients capture the same tick under the
+        // same filename, and both frames are correct and different.
+        pathParams: ['client', 'name'],
         // `frameUrl` builds a URL for an `<img>` tag, not a `request()` call --
         // the response is immutable JPEG bytes, never parsed as JSON.
         response: {status: '200', mediaType: 'image/jpeg'}

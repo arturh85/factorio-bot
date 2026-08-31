@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import Textarea from 'primevue/textarea';
-import Button from 'primevue/button';
+import Button from '@/components/ui/Button.vue';
 import {computed, ref} from 'vue';
 import {useRconStore} from '../store/rconStore';
 import {useToast} from '@/composables/useToast';
@@ -39,18 +39,15 @@ const isExecuting = computed(() => rconStore.isExecuting)
       <div class="card">
         <h5>
           RCON
-          <Button @click="execute(command)"
-                  :label="isExecuting ? 'Running ...' : 'Run'"
-                  :disabled="isExecuting">
-          </Button>
+          <Button :disabled="isExecuting" @click="execute(command)">{{ isExecuting ? 'Running ...' : 'Run' }}</Button>
         </h5>
 
         <Textarea class="input" :autoResize="true"  v-model="command"></Textarea>
 
-        <Button @click="execute('/silent-command remote.call(\'botbridge\', \'cheat_item\', 1, \'stone-furnace\', 20)')" label="Cheat Furnaces" />
-        <Button @click="execute('/silent-command remote.call(\'botbridge\', \'cheat_item\', 1, \'transport-belt\', 100)')" label="Cheat belts" />
-        <Button @click="execute('/silent-command remote.call(\'botbridge\', \'cheat_item\', 1, \'burner-mining-drill\', 20)')" label="Cheat Drills" />
-        <Button @click="execute('/server-save')" label="Save" />
+        <Button variant="ghost" @click="execute('/silent-command remote.call(\'botbridge\', \'cheat_item\', 1, \'stone-furnace\', 20)')">Cheat Furnaces</Button>
+        <Button variant="ghost" @click="execute('/silent-command remote.call(\'botbridge\', \'cheat_item\', 1, \'transport-belt\', 100)')">Cheat belts</Button>
+        <Button variant="ghost" @click="execute('/silent-command remote.call(\'botbridge\', \'cheat_item\', 1, \'burner-mining-drill\', 20)')">Cheat Drills</Button>
+        <Button variant="ghost" @click="execute('/server-save')">Save</Button>
       </div>
     </div>
   </div>

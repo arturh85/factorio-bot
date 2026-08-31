@@ -7,7 +7,7 @@ import ScriptTree from '@/components/ScriptTree.vue'
 import Editor from '@/components/Editor.vue'
 import Splitter, {SplitterResizeEndEvent} from 'primevue/splitter';
 import SplitterPanel from 'primevue/splitterpanel';
-import Button from 'primevue/button';
+import Button from '@/components/ui/Button.vue';
 import {useDebounceFn} from '@vueuse/core';
 
 const scriptStore = useScriptStore()
@@ -55,10 +55,7 @@ onUnmounted(() => {
       <div class="card" style="height: 100%">
         <h5>
           Lua Script <strong>{{ activeScriptPath }}</strong>
-          <Button @click="execute()"
-                  :label="isExecuting ? 'Running ...' : 'Run'"
-                  :disabled="isExecuting">
-          </Button>
+          <Button :disabled="isExecuting" @click="execute()">{{ isExecuting ? 'Running ...' : 'Run' }}</Button>
         </h5>
 
         <Splitter style="min-height: 800px; width: 800px" stateKey="luaScriptSplitter" stateStorage="local">

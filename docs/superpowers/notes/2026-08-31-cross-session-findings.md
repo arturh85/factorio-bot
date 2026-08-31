@@ -201,3 +201,43 @@ detect that source becoming less demanding.* Something outside the derivation
 has to assert what the check is supposed to be exercising. This is the same
 shape as the coverage floor — a threshold is what stops "regenerate until
 green" from being a valid move.
+
+## A sixth shape: the quorum of one
+
+The five shapes above are all about a thing that exists but is not wired to
+anything. This one is different, and worth naming separately: **code that
+answers a question by asking one member of a group and reporting the answer as
+the group's.**
+
+`GET /api/v1/frames` read `run.json` from the lowest-numbered client and
+published it as the manifest's run id. The comment defended the choice:
+
+> reading them all to compare would be checking that the mod is consistent
+> with itself, which is not this route's job
+
+The reasoning is locally valid and the conclusion is wrong, which is what makes
+it worth keeping. Every client *that takes part in a capture* does write an
+identical sidecar — so among participants, asking one really is asking all. The
+defect is that the set being sampled was never the set of participants. It was
+the set of `client<N>` directories on disk, and a client that sat out this run
+is in the second set but not the first, still holding the previous run's frames
+and sidecar.
+
+**The tell is the word "any".** "Any one of them answers the question" is a
+claim about a group's uniformity, and a comment is where such a claim goes to
+avoid being checked. When the group is defined by something the code can
+observe (directories on disk) but the uniformity comes from something it
+cannot (participation in this run), the two sets drift apart silently and the
+sample keeps returning a confident answer.
+
+Found by running a one-client capture over a workspace a two-client run had
+left behind — the manifest reported client 2's older frames under the current
+run's id. No test caught it: every fixture had all its clients participating,
+because that is the natural way to write a fixture. Fixed in `c28029b7` by
+asking every client and reporting an id only on unanimity, with each client's
+own id carried alongside so the odd one out can be named rather than outvoted.
+
+**Two-element groups cannot distinguish rules.** With one client on each side,
+"they disagree", "the minority loses" and "the first one wins" all produce the
+same answer. The test that pins the actual rule needs three: two agreeing and
+one stale, where a majority rule would confidently return the wrong id.

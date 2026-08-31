@@ -24,9 +24,10 @@
  *   eye the way `Failed`/`Lost` are meant to.
  */
 import {computed} from 'vue';
-import {CheckCircle2, CircleHelp, Loader2, RotateCcw, XCircle} from '@lucide/vue';
-import {ReplayStatus, ReplayStep} from '@/api/replay';
+import {RotateCcw} from '@lucide/vue';
+import {ReplayStep} from '@/api/replay';
 import EvidenceMark from './EvidenceMark.vue';
+import {STATUS_VISUAL} from './statusVisual';
 
 const props = defineProps<{step: ReplayStep; axisCeiling: number}>();
 
@@ -44,46 +45,6 @@ const plannedStyle = computed(() => ({
     width: pct(props.step.planned_end_tick - props.step.planned_start_tick) + '%'
 }));
 
-/**
- * `Failed` and `Lost` must never share a look: one is a verdict, the other is
- * the absence of one. Icon, colour classes and accessible label all differ,
- * on purpose, for every status -- this table is the single place that
- * decides how a status reads, so nothing downstream can accidentally align
- * two statuses that must stay visually apart.
- */
-const STATUS_VISUAL: Record<ReplayStatus, {icon: typeof CheckCircle2 | null; classes: string; label: string}> = {
-    Pending: {icon: null, classes: '', label: 'pending'},
-    Running: {
-        icon: Loader2,
-        classes: 'border border-brand bg-brand/20 text-brand-dark',
-        label: 'running -- outcome not yet known'
-    },
-    Success: {
-        icon: CheckCircle2,
-        classes: 'bg-success text-white',
-        label: 'success -- the ticks were measured'
-    },
-    Failed: {
-        icon: XCircle,
-        classes: 'bg-danger text-white',
-        label: 'failed -- a verdict arrived and it was bad'
-    },
-    Lost: {
-        icon: CircleHelp,
-        // Amber, hatched, question-marked: an outcome that DID happen (this
-        // run stopped watching) and is meant to draw the eye like `Failed`
-        // does -- but never the danger-red that would say a bad verdict
-        // arrived, because none did. Deliberately shares no colour token
-        // with `EvidenceMark`'s quiet ink-muted styling: `Lost` is an
-        // outcome and must not read as the same kind of thing as a caveat
-        // on a routine row.
-        classes:
-            'border-2 border-dashed border-warn text-ink ' +
-            'bg-[repeating-linear-gradient(45deg,color-mix(in_srgb,var(--color-warn)_40%,transparent)_0px,' +
-            'color-mix(in_srgb,var(--color-warn)_40%,transparent)_3px,transparent_3px,transparent_7px)]',
-        label: 'lost -- this run will never learn the outcome'
-    }
-};
 
 const visual = computed(() => STATUS_VISUAL[props.step.status]);
 

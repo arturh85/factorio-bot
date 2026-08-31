@@ -2,6 +2,8 @@
 import {describe, expect, it} from 'vitest';
 import {mount} from '@vue/test-utils';
 import ReplayView from './ReplayView.vue';
+import {STATUS_VISUAL} from './statusVisual';
+import {ReplayStatus} from '@/api/replay';
 import {
     ALL_PENDING_ATTEMPTED_REPLAY,
     CIRCULAR_REFUSAL,
@@ -104,5 +106,37 @@ describe('ReplayView -- no document yet', () => {
     it('surfaces a parse error distinctly, when one is given', () => {
         const wrapper = mount(ReplayView, {props: {replay: null, parseError: 'replay document invalid at $.steps[0].status'}});
         expect(wrapper.text()).toContain('$.steps[0].status');
+    });
+
+    /**
+     * The legend is derived from `STATUS_VISUAL`, and this asserts the
+     * derivation rather than the contents: every status that has a visual
+     * must appear, so adding one to the table and forgetting the key is a
+     * failure here. Written against the table's own keys, not a hand-written
+     * list -- a list would be the mirror the derivation exists to avoid.
+     */
+    it('keys every status that has a visual, without restating them', () => {
+        const wrapper = mount(ReplayView, {props: {replay: REALISTIC_REPLAY}});
+        const legend = wrapper.get('[data-testid="status-legend"]');
+
+        // Iterating STATUS_VISUAL, not LEGEND_ENTRIES. Iterating the latter
+        // would derive both sides of this check from the same source, so
+        // dropping a status from the legend would also drop it from what the
+        // test looks for and the test would still pass. That is the exact
+        // defect this project documented hours before this test was written,
+        // and the first draft of it had the bug.
+        const withVisuals = (Object.entries(STATUS_VISUAL) as [ReplayStatus, {label: string}][])
+            .filter(([status]) => status !== 'Pending');
+
+        for (const [status, entry] of withVisuals) {
+            expect(
+                wrapper.find(`[data-testid="legend-${status}"]`).exists(),
+                `${status} has a visual but no legend entry`
+            ).toBe(true);
+            expect(legend.text()).toContain(entry.label);
+        }
+        // Pending is deliberately absent: it draws no observed bar, so a
+        // swatch for it would be an empty box beside the word "pending".
+        expect(wrapper.find('[data-testid="legend-Pending"]').exists()).toBe(false);
     });
 });

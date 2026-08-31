@@ -27,6 +27,7 @@
 import {computed} from 'vue';
 import {AlertTriangle, Ban} from '@lucide/vue';
 import {Replay, replayAxisCeiling} from '@/api/replay';
+import {LEGEND_ENTRIES} from './statusVisual';
 import ReplayStepRow from './ReplayStepRow.vue';
 
 const props = defineProps<{
@@ -102,6 +103,31 @@ const axisCeiling = computed(() => (props.replay !== null ? replayAxisCeiling(pr
         :key="step.index"
         :step="step"
         :axis-ceiling="axisCeiling"/>
+    </div>
+
+    <!--
+      The key. Derived from `STATUS_VISUAL`, never restated: a hand-written
+      legend is a mirror, and a mirror stops describing the view the moment a
+      status is added or a colour changes, without anything going red.
+
+      It matters more here than in most views because the whole point of this
+      one is a set of distinctions -- measured against believed, a bad verdict
+      against no verdict at all. A distinction the reader cannot decode is not
+      a distinction that has been shown to them.
+    -->
+    <div data-testid="status-legend" class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-muted">
+      <span
+        v-for="[status, entry] in LEGEND_ENTRIES"
+        :key="status"
+        class="flex items-center gap-1.5"
+        :data-testid="`legend-${status}`">
+        <span class="inline-block h-3 w-6 rounded" :class="entry.classes"/>
+        <span>{{ entry.label }}</span>
+      </span>
+      <span class="flex items-center gap-1.5">
+        <span class="inline-block h-3 w-6 rounded border-2 border-ink-muted bg-transparent"/>
+        <span>planned</span>
+      </span>
     </div>
 
     <!--

@@ -9,7 +9,7 @@ pub const APP_SETTINGS_FILENAME: &str = "AppSettings.toml";
 const APP_NAME: &str = "factorio-bot";
 
 pub fn data_local_dir() -> PathBuf {
-    dirs_next::data_local_dir()
+    dirs::data_local_dir()
         .expect("no local data directory available")
         .join(format!(
             "{}{}",

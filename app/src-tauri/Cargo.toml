@@ -68,7 +68,7 @@ serde_json = { version = "1.0", features = ["raw_value"] }
 factorio-bot-scripting-lua = { path = "../../crates/scripting_lua", optional = true }
 
 [target.'cfg(windows)'.build-dependencies]
-winres = "^0.1.12"
+winresource = "0.1.31"
 
 
 [features]

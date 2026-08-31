@@ -6,7 +6,7 @@ use crate::types::{
 use dashmap::DashMap;
 use factorio_blueprint::BlueprintCodec;
 use factorio_blueprint::Container::{Blueprint, BlueprintBook};
-use human_sort::compare;
+use alphanumeric_sort::compare_str;
 use itertools::Itertools;
 use miette::{IntoDiagnostic, Result};
 use num_traits::ToPrimitive;
@@ -539,7 +539,7 @@ pub fn format_dotgraph(str: String) -> String {
                 let b_is_edge = b.contains(" -> ");
                 let ordering = a_is_edge.cmp(&b_is_edge);
                 if ordering == Ordering::Equal {
-                    compare(a, b)
+                    compare_str(a, b)
                 } else {
                     ordering
                 }

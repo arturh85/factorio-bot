@@ -6,7 +6,7 @@
 //! As the name implies, the tree is a mapping from axis-aligned-bounding-box => object.
 
 use euclid::{Point2D, Rect as EuclidRect, Size2D};
-use fnv::FnvHashMap;
+use rustc_hash::FxHashMap;
 use smallvec::{Array, SmallVec};
 use std::cmp::Ord;
 
@@ -52,7 +52,7 @@ pub struct QuadTree<T, S, A: Array<Item = (ItemId, Rect<S>)>> {
     root: QuadNode<S, A>,
     config: QuadTreeConfig,
     id: u32,
-    elements: FnvHashMap<ItemId, (T, Rect<S>)>,
+    elements: FxHashMap<ItemId, (T, Rect<S>)>,
 }
 
 #[derive(Serialize, Deserialize)]

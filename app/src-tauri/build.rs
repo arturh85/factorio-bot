@@ -3,7 +3,7 @@ fn main() {
   #[cfg(windows)]
   {
     // set .exe file properties
-    let mut res = winres::WindowsResource::new();
+    let mut res = winresource::WindowsResource::new();
     res.set("ProductName", "Factorio-Bot");
     res.set("FileDescription", "Factorio-Bot");
     res.set("Version", env!("CARGO_PKG_VERSION"));

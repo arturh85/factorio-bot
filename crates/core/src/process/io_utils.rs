@@ -174,12 +174,12 @@ pub fn extract_archive(
         let extracted_path = workspace_path.join(PathBuf::from("factorio"));
         if !extracted_path.exists() {
             logger.loading(format!(
-                "Uncompressing xz2 <bright-blue>{}</> to <magenta>{}</> ...",
+                "Uncompressing xz <bright-blue>{}</> to <magenta>{}</> ...",
                 archive_path.to_str().unwrap(),
                 workspace_path.to_str().unwrap()
             ));
             let tar_xz = File::open(&archive_path).into_diagnostic()?;
-            let tar = xz2::read::XzDecoder::new(tar_xz);
+            let tar = liblzma::read::XzDecoder::new(tar_xz);
             let mut archive = tar::Archive::new(tar);
             archive
                 .unpack(workspace_path)

@@ -1467,7 +1467,7 @@ mod extraction_tests {
     /// this machine, too close to `SAMPLE_AT` for the guard below to accept.
     fn build_slow_archive(path: &Path) {
         let file = File::create(path).expect("create archive");
-        let encoder = xz2::write::XzEncoder::new(file, 1);
+        let encoder = liblzma::write::XzEncoder::new(file, 1);
         let mut builder = tar::Builder::new(encoder);
         let payload = [b'x'; 32];
         for index in 0..100_000 {

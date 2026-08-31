@@ -44,8 +44,21 @@ export default defineConfig({
         }
     },
     test: {
+        environment: 'node',
         coverage: {
-            reporter: ['html-spa', 'cobertura']
+            reporter: ['html-spa', 'cobertura', 'text'],
+            // The transport swap's blast radius, and nothing else. Views and
+            // routing were untested before this change and are out of scope
+            // here; widening `include` without writing the tests first would
+            // just move the thresholds down to meaninglessness.
+            include: ['src/api/**/*.ts', 'src/store/**/*.ts'],
+            exclude: ['**/*.spec.ts'],
+            thresholds: {
+                lines: 90,
+                functions: 90,
+                statements: 90,
+                branches: 80
+            }
         }
     },
     resolve: {

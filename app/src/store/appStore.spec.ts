@@ -112,6 +112,23 @@ describe('appStore', () => {
         expect(store.getWorkspacePath).toBe('/srv/workspace');
     });
 
+    /**
+     * Reachable precisely because `_updateSettings` is a Pinia action: anything
+     * holding the store can call it, not only the update actions that establish
+     * `settings` first. Without the guard this PUTs `null` as the whole
+     * settings document -- the server's own settings, overwritten with nothing,
+     * from a store that had merely never loaded.
+     */
+    it('does not PUT when no settings have been loaded', async () => {
+        const store = useAppStore();
+        expect(store.settings).toBeNull();
+
+        await store._updateSettings();
+
+        expect(client.putSettings).not.toHaveBeenCalled();
+        expect(store.settings).toBeNull();
+    });
+
     describe('each update action sends its own field and nothing else', () => {
         /**
          * `apply` drives the store; `mutate` states, independently, the one

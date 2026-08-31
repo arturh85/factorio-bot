@@ -181,6 +181,31 @@ describe('instanceStore', () => {
             expect(store.clientCount).toBe(3);
         });
 
+        /**
+         * `App.vue` calls this on every mount, and more than one component can
+         * mount in a tab. The `pollTimer !== null` guard is what stops a second
+         * call opening a second interval -- two intervals would double the poll
+         * rate against the server and leave one running after `stopPolling`
+         * cleared the single handle the store tracks.
+         */
+        it('a second call does not open a second interval', async () => {
+            vi.useFakeTimers();
+            vi.mocked(client.getInstance).mockResolvedValue(status({starting: true}));
+            const store = useInstanceStore();
+            store.$patch({starting: true});
+
+            store.pollWhileStarting();
+            store.pollWhileStarting();
+            await tick(1);
+
+            // Two intervals would have produced two reads per tick.
+            expect(client.getInstance).toHaveBeenCalledTimes(1);
+
+            store.stopPolling();
+            await tick(2);
+            expect(client.getInstance).toHaveBeenCalledTimes(1);
+        });
+
         it('carries an accepted start through to a failure without further user action', async () => {
             vi.useFakeTimers();
             vi.mocked(client.startInstance).mockResolvedValue({accepted: true});

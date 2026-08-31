@@ -83,9 +83,12 @@ export const useAppStore = defineStore('app', {
      * of keeping the local object means any normalisation the server applies
      * is visible immediately, rather than at the next reload.
      *
-     * The null check is what narrows `settings` for the call; every caller
-     * below has already established it, so it is a type guard and not a branch
-     * any test can reach.
+     * The null check narrows `settings` for the call, and every caller below
+     * has already established it. It is NOT unreachable, though: this is a
+     * Pinia action, so anything holding the store can call it directly with
+     * `settings` still null, and `appStore.spec.ts` does exactly that. An
+     * earlier version of this comment said no test could reach it, which is
+     * why it went uncovered.
      */
     async _updateSettings() {
       if (this.settings === null) {

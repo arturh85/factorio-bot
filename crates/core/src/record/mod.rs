@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::types::Position;
 
@@ -100,12 +100,37 @@ pub struct Event {
     pub kind: EventKind,
 }
 
+/// What a run was and how it ended, without reading its whole log.
+///
+/// Everything here except the identity and the wall clock is *derived from the
+/// event log at finish*, not tracked alongside it, so the manifest cannot drift
+/// from the events it summarises. The listing endpoint reads this file; only a
+/// viewer opening one run reads the log itself.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Manifest {
+    pub run_id: String,
+    /// Unix seconds. For "when was this run", never for comparing two runs --
+    /// runs are compared on ticks.
+    pub started_unix: u64,
+    /// `null` while the run is still going or if it crashed before finishing.
+    pub finished_unix: Option<u64>,
+    /// `null` for a run that never reached `finish`. A crashed run keeps its
+    /// events and its frames; what it lacks is a verdict, and inventing one
+    /// would make it look complete.
+    pub outcome: Option<String>,
+    pub elapsed_ticks: Option<u64>,
+    pub events: usize,
+    pub frames: usize,
+    pub splits: usize,
+}
+
 /// Writes a run's event log.
 pub struct RunRecorder {
     dir: PathBuf,
     run_id: String,
     events: File,
     started: Instant,
+    started_unix: u64,
 }
 
 impl RunRecorder {
@@ -124,6 +149,10 @@ impl RunRecorder {
             run_id,
             events,
             started: Instant::now(),
+            started_unix: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or_default(),
         })
     }
 
@@ -150,6 +179,68 @@ impl RunRecorder {
         line.push('\n');
         self.events.write_all(line.as_bytes())?;
         self.events.flush()
+    }
+}
+
+impl RunRecorder {
+    /// Closes the run: records `run_finished`, then derives and materialises
+    /// everything a reader needs.
+    ///
+    /// Order matters. The finishing event is written *first*, so that a crash
+    /// during archiving still leaves a log that says how the run ended. Splits
+    /// and the manifest are then derived from the log on disk rather than from
+    /// state held in memory -- if the two could disagree, the summary would be
+    /// the one that is wrong, and it is the one everybody reads.
+    ///
+    /// `workspace` is where `client<N>` directories live; pass `None` for a
+    /// planning-only run that captured no frames. That is a valid run, not a
+    /// degenerate one.
+    pub fn finish(
+        &mut self,
+        tick: u64,
+        outcome: &str,
+        workspace: Option<&Path>,
+    ) -> io::Result<Manifest> {
+        self.record(
+            tick,
+            EventKind::RunFinished {
+                outcome: outcome.to_string(),
+                elapsed_ticks: tick,
+            },
+        )?;
+
+        let read = read_events(&self.dir.join("events.jsonl"))?;
+        let splits = splits::derive_splits(&read.events);
+        fs::write(
+            self.dir.join("splits.json"),
+            serde_json::to_vec_pretty(&splits).map_err(io::Error::other)?,
+        )?;
+
+        let frames = match workspace {
+            Some(workspace) => frames::archive_frames(workspace, &self.dir, &self.run_id)?.len(),
+            None => 0,
+        };
+
+        let manifest = Manifest {
+            run_id: self.run_id.clone(),
+            started_unix: self.started_unix,
+            finished_unix: Some(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or_default(),
+            ),
+            outcome: Some(outcome.to_string()),
+            elapsed_ticks: Some(tick),
+            events: read.events.len(),
+            frames,
+            splits: splits.len(),
+        };
+        fs::write(
+            self.dir.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).map_err(io::Error::other)?,
+        )?;
+        Ok(manifest)
     }
 }
 
@@ -344,5 +435,95 @@ mod tests {
         let read = read_events(&rec.dir().join("events.jsonl")).unwrap();
         assert_eq!(read.events.len(), 1, "the event must be on disk already");
         let _ = rec.events.stream_position();
+    }
+}
+
+#[cfg(test)]
+mod finish_tests {
+    use super::*;
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("fb-finish-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn finishing_materialises_splits_and_a_manifest() {
+        let root = tmpdir("materialise");
+        let mut rec = RunRecorder::start(&root, "r1").unwrap();
+        rec.record(
+            10,
+            EventKind::MilestoneStarted {
+                index: 0,
+                goal: "researched(automation)".into(),
+            },
+        )
+        .unwrap();
+        rec.record(
+            310,
+            EventKind::MilestoneSatisfied {
+                index: 0,
+                iterations: 2,
+                elapsed_ticks: 300,
+            },
+        )
+        .unwrap();
+
+        let manifest = rec.finish(400, "done", None).unwrap();
+        assert_eq!(manifest.outcome.as_deref(), Some("done"));
+        assert_eq!(manifest.elapsed_ticks, Some(400));
+        assert_eq!(manifest.splits, 1);
+        assert_eq!(manifest.frames, 0, "a planning-only run is a valid run");
+        assert_eq!(manifest.events, 3, "the finishing event counts");
+
+        let splits: Vec<Split> =
+            serde_json::from_slice(&fs::read(rec.dir().join("splits.json")).unwrap()).unwrap();
+        assert_eq!(splits[0].elapsed_ticks, Some(300));
+
+        let on_disk: Manifest =
+            serde_json::from_slice(&fs::read(rec.dir().join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(on_disk, manifest);
+    }
+
+    #[test]
+    fn the_finishing_event_is_written_before_anything_can_fail() {
+        // Archiving from a workspace that does not exist must still leave a log
+        // that says how the run ended.
+        let root = tmpdir("orderfail");
+        let mut rec = RunRecorder::start(&root, "r2").unwrap();
+        let missing = root.join("no-such-workspace");
+        let _ = rec.finish(99, "stuck", Some(&missing));
+
+        let read = read_events(&rec.dir().join("events.jsonl")).unwrap();
+        assert!(
+            matches!(
+                read.events.last().map(|e| &e.kind),
+                Some(EventKind::RunFinished { outcome, .. }) if outcome == "stuck"
+            ),
+            "the verdict must survive a failure in the steps after it"
+        );
+    }
+
+    #[test]
+    fn a_run_that_never_finished_has_no_manifest_and_keeps_its_events() {
+        let root = tmpdir("crashed");
+        let mut rec = RunRecorder::start(&root, "r3").unwrap();
+        rec.record(
+            5,
+            EventKind::MilestoneStarted {
+                index: 0,
+                goal: "g".into(),
+            },
+        )
+        .unwrap();
+        // No finish() -- the process died here.
+        assert!(
+            !rec.dir().join("manifest.json").exists(),
+            "a crashed run must not acquire a verdict it never reached"
+        );
+        let read = read_events(&rec.dir().join("events.jsonl")).unwrap();
+        assert_eq!(read.events.len(), 1, "its events are still readable");
     }
 }

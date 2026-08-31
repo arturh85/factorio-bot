@@ -49,6 +49,31 @@
 //!   **is**. That asymmetry is the point: a schedule always knows where it put a
 //!   step, and a run frequently does not know when the game ran it.
 //!
+//! # A run that never started is not a run that measured nothing
+//!
+//! The rule above says an absent measurement stays absent. It cannot say
+//! anything about a run in which *every* measurement is absent, because at that
+//! point two different runs produce the identical document:
+//!
+//! - one that dispatched every step and learned nothing back — real, and
+//!   alarming;
+//! - one [`run_into`](crate::run_into) refused outright, which dispatched
+//!   nothing at all — real, and completely unremarkable.
+//!
+//! Both are the whole schedule with every row [`Status::Pending`] and no
+//! observation anywhere. A view handed only the rows draws the same picture for
+//! both and captions it wrong half the time. So [`Replay::refused`] carries the
+//! difference, and it carries the refusal's own words rather than a `bool`: the
+//! [`Evidence::Believed`] argument again — a flag whose reason is stored
+//! somewhere else is a pair that can drift, and one whose reason is stored
+//! nowhere leaves the reader told *that* a run was refused with no way to learn
+//! *why*. With the reason present the view greys the plan out and puts the
+//! sentence on top of it.
+//!
+//! The key obeys the same always-present rule as the observed ticks, for the
+//! same reason: `"refused": null` is *this run was attempted*, and an omitted
+//! key would be indistinguishable from a producer too old to know the field.
+//!
 //! # Walk rows are belief, not measurement
 //!
 //! A walk's *ticks* are measured exactly as an action's are. Where the bot
@@ -211,6 +236,18 @@ pub struct Replay {
     /// definition (last reply? last dispatch? last step with any tick at all?)
     /// and that is the consumer's decision, not this document's.
     pub planned_makespan: Ticks,
+    /// Why the run was refused before it started, or `null` when the run was
+    /// attempted.
+    ///
+    /// `Some` means **nothing was dispatched** — every
+    /// [`ExecutionError`](crate::ExecutionError) is raised before a command
+    /// reaches the game — and this is what the refusal said. Without it the two
+    /// unrelated facts *never started* and *started and measured nothing*
+    /// produce the same all-`Pending` document; see the module docs.
+    ///
+    /// The reason and not a flag, for the same argument as
+    /// [`Evidence::Believed::why`].
+    pub refused: Option<String>,
     pub steps: Vec<ReplayStep>,
     /// Walk observations whose `(bot, bot_step_index)` matches no step in the
     /// schedule — normally empty, and non-empty only when a log is paired with a
@@ -226,7 +263,13 @@ pub struct Replay {
 
 impl Replay {
     /// Join a schedule with a log. Pure: reads both, mutates neither.
-    pub fn new(schedule: &Schedule, log: &ExecutionLog) -> Self {
+    ///
+    /// `refused` is [`Replay::refused`]: `None` for a run that was attempted,
+    /// `Some(reason)` for one that never started. It is a required argument and
+    /// not a builder step on purpose — a caller can forget to add something,
+    /// and the fact it would forget is the one that decides whether an
+    /// all-`Pending` document is alarming or expected.
+    pub fn new(schedule: &Schedule, log: &ExecutionLog, refused: Option<String>) -> Self {
         let mut next_index: BTreeMap<BotId, usize> = BTreeMap::new();
         let mut matched: BTreeMap<BotId, Vec<usize>> = BTreeMap::new();
         let mut steps = Vec::with_capacity(schedule.steps.len());
@@ -295,6 +338,7 @@ impl Replay {
 
         Replay {
             planned_makespan: schedule.makespan,
+            refused,
             steps,
             unmatched_walks,
         }
@@ -389,7 +433,8 @@ mod tests {
 
     fn doc() -> Value {
         let (schedule, log) = realistic();
-        serde_json::to_value(Replay::new(&schedule, &log)).expect("the document must serialise")
+        serde_json::to_value(Replay::new(&schedule, &log, None))
+            .expect("the document must serialise")
     }
 
     /// Rows are the schedule's rows, in the schedule's order, one for one.
@@ -512,7 +557,7 @@ mod tests {
         // contract. `0` must appear nowhere as an observed tick.
         let text = serde_json::to_string(&{
             let (s, l) = realistic();
-            Replay::new(&s, &l)
+            Replay::new(&s, &l, None)
         })
         .unwrap();
         assert!(
@@ -539,7 +584,7 @@ mod tests {
     #[test]
     fn a_missing_tick_never_deserialises_into_a_number() {
         let (schedule, log) = realistic();
-        let v = serde_json::to_value(Replay::new(&schedule, &log)).unwrap();
+        let v = serde_json::to_value(Replay::new(&schedule, &log, None)).unwrap();
 
         // Round trip with the nulls intact: still absent, still not zero.
         let back: Replay = serde_json::from_value(v.clone()).expect("null round-trips");
@@ -621,7 +666,7 @@ mod tests {
         assert!(
             serde_json::to_string(&{
                 let (s, l) = realistic();
-                Replay::new(&s, &l)
+                Replay::new(&s, &l, None)
             })
             .unwrap()
             .contains("\"attempt_number\":3"),
@@ -679,13 +724,112 @@ mod tests {
         );
     }
 
+    // --------------------------------------- attempted, or never attempted
+
+    /// The reason a refused run is not simply an unobserved one.
+    const CIRCULAR: &str = "the schedule and the network imply a circular wait \
+                            through action ActionId(2): it could never start, so \
+                            the run would never finish";
+
+    /// An attempted run says so by holding `null` — with the key present.
+    ///
+    /// This is the half that is easy to lose. `refused` is the only field on the
+    /// document whose *absence of a value* is the common case, so it is the one
+    /// a `#[serde(skip_serializing_if = "Option::is_none")]` would silently eat,
+    /// and the consumer would then be unable to tell "this producer did not
+    /// refuse" from "this producer is too old to know about refusals". Both
+    /// reads are checked here, and the second is checked against the raw text
+    /// because the text is what crosses to the consumer.
+    #[test]
+    fn an_attempted_run_serialises_refused_as_an_explicit_null() {
+        let v = doc();
+        let refused = v
+            .as_object()
+            .expect("the document is an object")
+            .get("refused")
+            .expect("refused must be present as a key, not omitted");
+        assert_eq!(
+            refused,
+            &Value::Null,
+            "a run that was attempted refused nothing"
+        );
+
+        let (s, l) = realistic();
+        let text = serde_json::to_string(&Replay::new(&s, &l, None)).unwrap();
+        assert!(
+            text.contains("\"refused\":null"),
+            "the key must survive serialisation holding null: {text}"
+        );
+
+        let back: Replay = serde_json::from_value(v).expect("null round-trips");
+        assert_eq!(back.refused, None);
+    }
+
+    /// A refused run says *why*, and that is the whole point of the field.
+    ///
+    /// Such a run dispatched nothing, so every row it can produce is `Pending`
+    /// — byte-for-byte the document a run that dispatched everything and
+    /// measured none of it would produce. Those are opposite facts: "we never
+    /// started" against "we started and learned nothing", the second of which is
+    /// alarming and the first of which is not. The rows cannot tell them apart
+    /// and this key is the only thing that can, which is why the assertion below
+    /// pairs the reason with the all-`Pending` shape rather than checking either
+    /// alone.
+    ///
+    /// It carries the reason and not a flag for the same argument that made
+    /// [`Evidence::Believed`] carry its `why`: a `refused: true` whose reason
+    /// lives somewhere else lets the two drift, and leaves a view able to say
+    /// only *this run was refused* with nothing to tell the reader why.
+    #[test]
+    fn a_refused_run_carries_the_reason_it_was_refused() {
+        let (schedule, _) = realistic();
+        // A refused run never wrote to its log; `run_into` raises every
+        // `ExecutionError` before a command reaches the game.
+        let log = ExecutionLog::default();
+        let replay = Replay::new(&schedule, &log, Some(CIRCULAR.to_string()));
+        let v = serde_json::to_value(&replay).expect("the document must serialise");
+
+        assert_eq!(
+            v["refused"],
+            json!(CIRCULAR),
+            "the reason travels with the fact, not in a second field beside it"
+        );
+        assert_ne!(
+            v["refused"],
+            Value::Null,
+            "this run was never attempted and the document must not read as \
+             though it was"
+        );
+
+        let steps = v["steps"].as_array().expect("steps");
+        assert_eq!(
+            steps.len(),
+            schedule.steps.len(),
+            "a refused run still knows the plan it did not run"
+        );
+        assert!(
+            steps.iter().all(|s| s["status"] == json!("Pending")),
+            "nothing was dispatched, so the rows alone are indistinguishable \
+             from an unmeasured run -- which is exactly why the key exists: {v}"
+        );
+
+        let text = serde_json::to_string(&replay).unwrap();
+        assert!(
+            text.contains("\"refused\":\"the schedule and the network imply a circular wait"),
+            "the reason must reach the wire as a string, not as true: {text}"
+        );
+
+        let back: Replay = serde_json::from_value(v).expect("the reason round-trips");
+        assert_eq!(back.refused.as_deref(), Some(CIRCULAR));
+    }
+
     /// Pairing a log with a schedule it did not come from must be visible, not
     /// silently lossy: the walk observation that no step claims is reported.
     #[test]
     fn a_walk_that_no_scheduled_step_claims_is_reported_not_dropped() {
         let (schedule, mut log) = realistic();
         log.start_walk(BotId(2), 7, Position::new(99.0, 99.0), 900, 999);
-        let v = serde_json::to_value(Replay::new(&schedule, &log)).unwrap();
+        let v = serde_json::to_value(Replay::new(&schedule, &log, None)).unwrap();
         assert_eq!(
             v["unmatched_walks"],
             json!([{"bot": 2, "bot_step_index": 7}]),

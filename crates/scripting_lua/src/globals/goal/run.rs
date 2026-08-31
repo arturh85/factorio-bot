@@ -330,22 +330,26 @@ impl LuaUserData for RunValue {
 ///   signal is sent after this, so anything the script does once its wait comes
 ///   back is ordered after the replay a consumer already has.
 ///
-/// # A failed run emits; a refused one does not
+/// # A failed run emits, and so does a refused one
 ///
 /// Failure is not a reason to stay quiet — it is the reason the document
 /// exists. A run whose actions were rejected, whose verdicts were unreadable
 /// ([`Status::Lost`]), or which abandoned a bot's whole tail undispatched is
 /// emitted in full, and each of those facts has its own row and its own status.
-/// This function is not given the outcome and does not ask for it.
+/// This function is not given that outcome and does not ask for it: the rows
+/// carry it.
 ///
-/// A run [`run_into`] refused outright is the one case that emits nothing, and
-/// the caller decides that by not calling here. Such a run dispatched nothing,
-/// so the only document available would be the whole schedule with every row
-/// `Pending` and no observation anywhere — indistinguishable from a run that
-/// simply measured nothing, which is a claim about the run that is not true.
-/// The document has no field saying "refused" and must not grow one to carry
-/// what [`RunValue::start_error`] already carries and every observation of that
-/// run already raises.
+/// `refused` is the one outcome the rows *cannot* carry, which is why it is the
+/// one thing passed in. A run [`run_into`] refused dispatched nothing, so its
+/// document is the whole schedule with every row `Pending` and no observation
+/// anywhere — shape-identical to a run that dispatched everything and measured
+/// none of it. Emitting nothing was the earlier answer to that ambiguity and it
+/// resolved it by throwing the document away: a reader saw no plan at all for
+/// the run most worth seeing greyed out, and had to notice an *absence* on the
+/// stream to learn anything. Passing the reason instead keeps the plan and says
+/// why it did not run. It duplicates [`RunValue::start_error`] deliberately —
+/// that is raised at a script, this is written to a document, and only one of
+/// them is still around when the document is read later.
 ///
 /// # Serialisation happens here, not in the sink
 ///
@@ -355,7 +359,12 @@ impl LuaUserData for RunValue {
 /// refuses a non-finite float, so this is reachable rather than theoretical. A
 /// run that reached the end is not failed retroactively over its report, so the
 /// failure goes out on the run's own error stream and the run stands.
-fn emit_replay(sink: Option<&dyn OutputSink>, sched: &Schedule, log: &Mutex<ExecutionLog>) {
+fn emit_replay(
+    sink: Option<&dyn OutputSink>,
+    sched: &Schedule,
+    log: &Mutex<ExecutionLog>,
+    refused: Option<String>,
+) {
     let Some(sink) = sink else {
         return;
     };
@@ -363,7 +372,7 @@ fn emit_replay(sink: Option<&dyn OutputSink>, sched: &Schedule, log: &Mutex<Exec
     // before the sink is called: `replay` is an implementation this crate does
     // not control, and holding the run's log across it would let a slow one
     // block a concurrent `:progress()`.
-    let replay = Replay::new(sched, &lock(log));
+    let replay = Replay::new(sched, &lock(log), refused);
     match factorio_bot_core::serde_json::to_string(&replay) {
         Ok(json) => sink.replay(&json),
         Err(err) => sink.line(
@@ -394,11 +403,18 @@ fn spawn(
         // A run refused outright dispatched nothing, so the log stays exactly
         // as empty as it started. Recording *why* is what keeps the
         // observation from reading as a finished run with everything still
-        // pending -- see [`RunValue::start_error`].
-        match run_into(&*act, &sched, &task_net, &task_log).await {
-            Err(err) => *lock(&task_error) = Some(err.to_string()),
-            Ok(()) => emit_replay(sink.as_deref(), &sched, &task_log),
+        // pending -- see [`RunValue::start_error`] -- and the replay carries
+        // the same words for the same reason: its rows would otherwise be an
+        // all-`Pending` schedule that reads as a run which measured nothing.
+        // One string, two destinations, so the two cannot disagree.
+        let refused = run_into(&*act, &sched, &task_net, &task_log)
+            .await
+            .err()
+            .map(|err| err.to_string());
+        if let Some(err) = &refused {
+            *lock(&task_error) = Some(err.clone());
         }
+        emit_replay(sink.as_deref(), &sched, &task_log, refused);
         // No receiver is an ordinary outcome, not a failure: it just means
         // nothing (`:wait()`, `PendingWork`'s drain) is waiting on this run.
         let _ = finished_tx.send(true);
@@ -1597,15 +1613,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_run_refused_before_it_started_emits_no_replay() {
-        // Nothing was dispatched, so the only document available would be the
-        // whole schedule with every row `Pending` and no observation at all --
-        // shape-identical to a run that simply measured nothing. The document
-        // has no field for "this run was refused" and must not grow one to
-        // carry a fact the run's own error already carries, so the honest
-        // emission is none. `a_run_refused_before_it_started_raises_instead_of_
-        // reporting_done` covers what a script hears instead.
+    async fn an_attempted_run_emits_a_document_whose_refused_key_is_null() {
+        // The other half of the refusal pair. A run that really started must
+        // say so, and it says so by holding `null` under a key that is *there*
+        // -- so this reads the raw string the sink was handed rather than the
+        // parsed document, because a `skip_serializing_if` would drop the key
+        // and leave the parsed form indistinguishable from the same document
+        // produced by a version that never had the field.
+        let (net, sched) = mining_plan();
+        let sink = Arc::new(RecordingSink::default());
+        let (_run, join) = spawn(
+            Arc::new(StubActuator::new(Failure::Never)),
+            sched,
+            net,
+            Some(sink.clone()),
+        );
+        join.await.expect("the run's task finished");
+
+        let text = sink.replays.lock()[0].clone();
+        assert!(
+            text.contains("\"refused\":null"),
+            "an attempted run must carry the key holding null: {text}"
+        );
+        let doc: Value = serde_json::from_str(&text).expect("JSON");
+        assert!(
+            doc.as_object()
+                .expect("the document is an object")
+                .contains_key("refused"),
+            "the key must be present, not omitted: {doc}"
+        );
+        assert_eq!(doc["refused"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn a_run_refused_before_it_started_emits_a_document_that_says_so() {
+        // Nothing was dispatched, so every row of this document is `Pending`
+        // and no observation appears anywhere -- shape-identical to a run that
+        // dispatched everything and measured none of it. Those are opposite
+        // facts and the rows cannot tell them apart, so the document carries
+        // `refused`, holding what `run_into` actually said. Emitting nothing was
+        // the earlier answer and it was the wrong one: it left the consumer with
+        // no document at all for a run whose plan is exactly what a reader wants
+        // to see greyed out.
         let (net, sched) = circular_wait_plan();
+        let expected = sched.clone();
         let sink = Arc::new(RecordingSink::default());
         let (run, join) = spawn(
             Arc::new(StubActuator::new(Failure::Never)),
@@ -1615,12 +1666,39 @@ mod tests {
         );
         join.await.expect("the run's task finished");
         let lua = observing_lua();
-        let _ = await_completion(&lua, run.net, run.log, run.finished_rx, run.start_error).await;
+        let raised = await_completion(&lua, run.net, run.log, run.finished_rx, run.start_error)
+            .await
+            .expect_err("a refused run raises rather than reporting done");
+
+        let doc = only_replay(&sink);
+        let refused = doc
+            .as_object()
+            .expect("the document is an object")
+            .get("refused")
+            .expect("refused must be present as a key");
+        let refused = refused
+            .as_str()
+            .unwrap_or_else(|| panic!("a refused run names its reason, got {refused}"));
         assert!(
-            sink.replays.lock().is_empty(),
-            "a run that dispatched nothing must not emit a document claiming a \
-             schedule ran and measured nothing: {:?}",
-            sink.replays.lock()
+            refused.contains("circular wait"),
+            "the reason must be what `run_into` said, not a stand-in: {refused}"
+        );
+        assert!(
+            raised.to_string().contains(refused),
+            "the document and the error a script hears must be the same words, \
+             or the two can drift: {raised} / {refused}"
+        );
+
+        // The half the field exists for: the rows alone say nothing.
+        assert_eq!(
+            doc["steps"].as_array().expect("steps").len(),
+            expected.steps.len(),
+            "a refused run still reports the plan it did not run"
+        );
+        assert!(
+            statuses(&doc).iter().all(|s| s == "Pending"),
+            "a refused run dispatched nothing: {:?}",
+            statuses(&doc)
         );
     }
 

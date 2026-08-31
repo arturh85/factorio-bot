@@ -70,7 +70,36 @@ pub struct FramesManifest {
     /// camera)` with unparsed entries last, so iteration order is contractual
     /// rather than filesystem order.
     pub frames: Vec<FrameEntry>,
+    /// The opaque run identifier from `frames/run.json`, or `null` when the
+    /// capture was started without one, the file is absent, or it could not be
+    /// read.
+    ///
+    /// **Opaque here too.** The server does not parse, validate or interpret
+    /// it; it reads one string and forwards it, exactly as the mod echoes it
+    /// without examining it. A consumer compares it for equality and nothing
+    /// else.
+    ///
+    /// `null` means *unknown*, never *no match* — a consumer that treats a
+    /// missing id as a mismatch would refuse a perfectly good join, and one
+    /// that treats it as a match would assert something nobody established.
+    ///
+    /// `#[schema(required)]` because the **key is always on the wire**: there
+    /// is no `skip_serializing_if`, so serde emits `"run": null`. Without this
+    /// utoipa would publish it as optional purely because the Rust type is an
+    /// `Option`, and a generated client would then have to distinguish "absent
+    /// from the document" from "absent as a fact" — a distinction this server
+    /// never makes and no consumer should have to.
+    #[schema(required)]
+    pub run: Option<String>,
 }
+
+/// The capture writes this beside the frames it belongs to, holding the opaque
+/// run identifier the caller supplied. It lives *inside* `frames/` so the
+/// per-run wipe clears it together with the frames it describes: a sidecar one
+/// level up would survive a wipe and go on describing frames that no longer
+/// exist, which converts "I cannot tell whether these match" into "I checked,
+/// they match".
+const RUN_SIDECAR: &str = "run.json";
 
 /// Parses `tick-<digits>-<camera>.jpg`, or reports that a name does not fit
 /// the pattern by answering `(None, None)`.
@@ -178,6 +207,15 @@ fn list_frame_entries(dir: &ClientDir) -> Vec<FrameEntry> {
                 return None;
             }
             let name = entry.file_name().to_string_lossy().into_owned();
+            // The one name excluded from "report what you find". That rule
+            // exists so an unexplained file cannot be hidden; this file's
+            // meaning is known and it is surfaced as `FramesManifest::run`,
+            // so excluding it here is not hiding it. Reporting it as a
+            // null-tick frame would put a permanent unparseable row in every
+            // manifest, which is noise the rule was never meant to create.
+            if name == RUN_SIDECAR {
+                return None;
+            }
             let bytes = entry.metadata().ok()?.len();
             let (tick, camera) = parse_frame_name(&name);
             Some(FrameEntry {
@@ -244,7 +282,20 @@ async fn build_manifest(state: &AppState) -> Result<FramesManifest, ErrorRespons
     }
     sort_frame_entries(&mut frames);
 
-    Ok(FramesManifest { clients, frames })
+    // Read from the lowest-numbered client that has one. Every peer writes an
+    // identical sidecar in its own directory (the capture runs on each), so
+    // any one of them answers the question; reading them all to compare would
+    // be checking that the mod is consistent with itself, which is not this
+    // route's job.
+    let run = client_dirs
+        .iter()
+        .find_map(|dir| read_run_id(&dir.frames_dir));
+
+    Ok(FramesManifest {
+        clients,
+        frames,
+        run,
+    })
 }
 
 /// Returns the manifest of frames captured so far.
@@ -345,6 +396,21 @@ pub async fn get_frame(
         bytes,
     )
         .into_response())
+}
+
+/// Reads the opaque run id from `frames/run.json`, or `None` for any reason at
+/// all — absent, unreadable, not JSON, no `run` key, or a `run` that is not a
+/// string.
+///
+/// Every failure collapses to `None` on purpose. The id exists to make a match
+/// *exact*; a malformed sidecar means the match cannot be established, which
+/// is precisely what `None` says. Reporting *why* it could not be read would
+/// invite a consumer to treat some reasons as good enough, and there is no
+/// reason that is.
+fn read_run_id(frames_dir: &std::path::Path) -> Option<String> {
+    let raw = std::fs::read_to_string(frames_dir.join(RUN_SIDECAR)).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    value.get("run")?.as_str().map(str::to_owned)
 }
 
 #[cfg(test)]

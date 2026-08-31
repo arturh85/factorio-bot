@@ -603,11 +603,19 @@
               "$ref": "#/components/schemas/FrameEntry"
             },
             "type": "array"
+          },
+          "run": {
+            "description": "The opaque run identifier from `frames/run.json`, or `null` when the\ncapture was started without one, the file is absent, or it could not be\nread.\n\n**Opaque here too.** The server does not parse, validate or interpret\nit; it reads one string and forwards it, exactly as the mod echoes it\nwithout examining it. A consumer compares it for equality and nothing\nelse.\n\n`null` means *unknown*, never *no match* — a consumer that treats a\nmissing id as a mismatch would refuse a perfectly good join, and one\nthat treats it as a match would assert something nobody established.\n\n`#[schema(required)]` because the **key is always on the wire**: there\nis no `skip_serializing_if`, so serde emits `\"run\": null`. Without this\nutoipa would publish it as optional purely because the Rust type is an\n`Option`, and a generated client would then have to distinguish \"absent\nfrom the document\" from \"absent as a fact\" — a distinction this server\nnever makes and no consumer should have to.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
           "clients",
-          "frames"
+          "frames",
+          "run"
         ],
         "type": "object"
       },

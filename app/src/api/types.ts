@@ -244,4 +244,12 @@ export interface FramesManifest {
     /** `client<N>` directories discovered under the workspace. */
     clients: number[];
     frames: FrameEntry[];
+    /**
+     * The opaque run identifier from `frames/run.json`, or `null` when capture
+     * ran without one, the file is absent, or it could not be read.
+     *
+     * Opaque: compare it for equality and nothing else. `null` means
+     * **unknown**, never *no match* — see `runIdCheck` in `@/api/frameJoin`.
+     */
+    run: string | null;
 }

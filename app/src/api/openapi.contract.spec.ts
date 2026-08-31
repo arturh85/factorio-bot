@@ -432,7 +432,11 @@ const SCHEMAS: Record<string, SchemaContract> = {
     }),
     FramesManifest: objectContract<FramesManifest>({
         clients: {required: true, type: 'array'},
-        frames: {required: true, arrayOf: 'FrameEntry'}
+        frames: {required: true, arrayOf: 'FrameEntry'},
+        // Always present, `null` when unknown -- the same rule the replay
+        // document follows: a consumer must never have to distinguish "absent
+        // from the document" from "absent as a fact".
+        run: {required: true, type: 'string', nullable: true}
     }),
     // Not `objectContract<…>`: `sendRcon(command)` builds this body as an
     // inline literal, so there is no declaration in `types.ts` to bind it to

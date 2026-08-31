@@ -22,6 +22,7 @@ import {FramesManifest} from './types';
 /** Overlaps `REALISTIC_REPLAY`'s observed range (100-400): a plausible match. */
 export const OVERLAPPING_MANIFEST: FramesManifest = {
     clients: [1],
+    run: null,
     frames: [
         {client: 1, tick: 0, camera: 'front', name: 'tick-0000000000-front.jpg', bytes: 111},
         {client: 1, tick: 300, camera: 'front', name: 'tick-0000000300-front.jpg', bytes: 222},
@@ -38,6 +39,7 @@ export const OVERLAPPING_MANIFEST: FramesManifest = {
  */
 export const UNRELATED_RUN_MANIFEST: FramesManifest = {
     clients: [1],
+    run: null,
     frames: [
         {client: 1, tick: 10000, camera: 'front', name: 'tick-0000010000-front.jpg', bytes: 111},
         {client: 1, tick: 10300, camera: 'front', name: 'tick-0000010300-front.jpg', bytes: 222},
@@ -48,6 +50,7 @@ export const UNRELATED_RUN_MANIFEST: FramesManifest = {
 /** One entry whose filename did not parse, alongside two that did. */
 export const MANIFEST_WITH_UNPARSED_ENTRY: FramesManifest = {
     clients: [1],
+    run: null,
     frames: [
         {client: 1, tick: 200, camera: 'front', name: 'tick-0000000200-front.jpg', bytes: 111},
         {client: 1, tick: null, camera: null, name: 'not-a-frame-name.jpg', bytes: 999},
@@ -56,7 +59,8 @@ export const MANIFEST_WITH_UNPARSED_ENTRY: FramesManifest = {
 };
 
 /** No capture has ever run: `clients` itself is empty. */
-export const EMPTY_MANIFEST: FramesManifest = {clients: [], frames: []};
+export const EMPTY_MANIFEST: FramesManifest = {clients: [],
+    run: null, frames: []};
 
 /**
  * Overlaps `REALISTIC_REPLAY`'s observed range (100-400), but its first
@@ -66,6 +70,7 @@ export const EMPTY_MANIFEST: FramesManifest = {clients: [], frames: []};
  */
 export const OVERLAPPING_MANIFEST_LATE_START: FramesManifest = {
     clients: [1],
+    run: null,
     frames: [
         {client: 1, tick: 200, camera: 'front', name: 'tick-0000000200-front.jpg', bytes: 111},
         {client: 1, tick: 350, camera: 'front', name: 'tick-0000000350-front.jpg', bytes: 222}

@@ -337,3 +337,77 @@ async fn a_frame_is_not_served_from_a_different_client() {
     );
     assert!(!body.starts_with(b"only-client-one"));
 }
+
+/// `run.json` is surfaced as the manifest's run id and **not** as a frame row.
+///
+/// It is the one name excluded from "report every file you find". That rule
+/// exists so an unexplained file cannot be hidden, and this file's meaning is
+/// known and reported — excluding it from `frames` is not hiding it. Reporting
+/// it as a null-tick frame instead would put a permanent unparseable row in
+/// every manifest that has ever captured anything.
+#[tokio::test]
+async fn the_run_sidecar_becomes_the_run_id_not_a_frame_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let frames = frames_dir(dir.path(), 1);
+    std::fs::create_dir_all(&frames).unwrap();
+    std::fs::write(frames.join("run.json"), r#"{"run":"job-7"}"#).unwrap();
+    std::fs::write(frames.join("tick-0000300-follow.jpg"), b"pixels").unwrap();
+
+    let (status, body) = get_json(state_with_workspace(dir.path()), "/api/v1/frames").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["run"], "job-7");
+    let names: Vec<&str> = body["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["tick-0000300-follow.jpg"],
+        "run.json must not appear as a frame row"
+    );
+}
+
+/// A malformed or absent sidecar yields `null`, which means **unknown** and
+/// never **no match**.
+///
+/// A consumer that read `null` as a mismatch would refuse a join that is
+/// perfectly good; one that read it as a match would assert something nobody
+/// established. Both are wrong, and the manifest can only avoid causing either
+/// by saying nothing rather than guessing.
+#[tokio::test]
+async fn an_unreadable_run_sidecar_is_null_rather_than_a_guess() {
+    for (label, contents) in [
+        ("not json", "this is not json"),
+        ("no run key", r#"{"other":"x"}"#),
+        ("run is not a string", r#"{"run":42}"#),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let frames = frames_dir(dir.path(), 1);
+        std::fs::create_dir_all(&frames).unwrap();
+        std::fs::write(frames.join("run.json"), contents).unwrap();
+        std::fs::write(frames.join("tick-0000300-follow.jpg"), b"pixels").unwrap();
+
+        let (status, body) = get_json(state_with_workspace(dir.path()), "/api/v1/frames").await;
+        assert_eq!(status, StatusCode::OK, "{label}");
+        assert!(body["run"].is_null(), "{label}: got {}", body["run"]);
+        assert_eq!(
+            body["frames"].as_array().unwrap().len(),
+            1,
+            "{label}: a bad sidecar must not cost us the frames"
+        );
+    }
+}
+
+/// No sidecar at all is also `null` — capture started without an id.
+#[tokio::test]
+async fn no_run_sidecar_is_null() {
+    let dir = tempfile::tempdir().unwrap();
+    let frames = frames_dir(dir.path(), 1);
+    std::fs::create_dir_all(&frames).unwrap();
+    std::fs::write(frames.join("tick-0000300-follow.jpg"), b"pixels").unwrap();
+
+    let (_status, body) = get_json(state_with_workspace(dir.path()), "/api/v1/frames").await;
+    assert!(body["run"].is_null());
+}

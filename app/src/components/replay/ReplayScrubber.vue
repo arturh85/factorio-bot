@@ -40,7 +40,7 @@ import {Ban, Image, ImageOff} from '@lucide/vue';
 import {Replay, replayAxisCeiling} from '@/api/replay';
 import {FramesManifest} from '@/api/types';
 import {frameUrl} from '@/api/client';
-import {combineRunMatchChecks, frameAtTick, framesForClient, tickOverlapCheck} from '@/api/frameJoin';
+import {combineRunMatchChecks, frameAtTick, framesForClient, runIdCheck, tickOverlapCheck} from '@/api/frameJoin';
 import Slider from '@/components/ui/Slider.vue';
 import ReplayView from './ReplayView.vue';
 
@@ -49,6 +49,12 @@ const props = defineProps<{
   /** `null`: not fetched yet, or capture has never run. Distinct from `EMPTY_MANIFEST`-shaped data, which this component treats the same way (nothing to judge). */
   manifest: FramesManifest | null;
   parseError?: string | null;
+  /**
+   * The job this replay came from, compared against the manifest's opaque run
+   * identifier. `null` when unknown, which makes that check inconclusive
+   * rather than a mismatch.
+   */
+  jobId?: string | null;
 }>();
 
 const tick = defineModel<number>('tick', {default: 0});
@@ -69,7 +75,14 @@ const matchVerdict = computed(() => {
     if (props.replay === null || props.manifest === null) {
         return null;
     }
-    return combineRunMatchChecks([tickOverlapCheck(props.replay, props.manifest)]);
+    // Two checks, deliberately ordered cheapest-first and both kept. The
+    // range check stays useful even with an identifier: it is the filter that
+    // needs no cooperation from the capture side, so it still answers when a
+    // run was captured without an id.
+    return combineRunMatchChecks([
+        tickOverlapCheck(props.replay, props.manifest),
+        runIdCheck(props.manifest.run, props.jobId ?? null)
+    ]);
 });
 
 const showFrameSection = computed(() => matchVerdict.value?.show === true);

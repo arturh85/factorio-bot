@@ -50,7 +50,7 @@ beforeEach(() => {
     // Given a default here rather than in each test: a manifest is not what
     // any of these assert, and leaving it unset made the failure look like a
     // defect in the join logic instead of an unset mock.
-    vi.mocked(client.frames).mockResolvedValue({clients: [], frames: []});
+    vi.mocked(client.frames).mockResolvedValue({clients: [], frames: [], run: null});
 });
 
 afterEach(() => {

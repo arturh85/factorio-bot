@@ -95,6 +95,14 @@ function rangesOverlap(a: TickRange, b: TickRange): boolean {
  */
 export type RunMatchResult =
     | {kind: 'contradicted'; reason: string}
+    /**
+     * The run is *established*, not merely un-contradicted. Only an identity
+     * comparison can produce this — a range overlap never can, however wide.
+     * Kept distinct from `consistent` because showing "these might be from a
+     * different run" when the run is known is under-claiming, which is its own
+     * form of saying something untrue.
+     */
+    | {kind: 'confirmed'}
     | {kind: 'consistent'}
     | {kind: 'inconclusive'; reason: string};
 
@@ -163,15 +171,68 @@ export interface RunMatchVerdict {
  * list this function already takes -- this function's shape does not change.
  */
 export function combineRunMatchChecks(checks: RunMatchCheck[]): RunMatchVerdict {
+    // A contradiction wins outright, and is checked first: a confirmation and
+    // a contradiction together mean two checks disagree about reality, and the
+    // safe reading of that is the one that refuses to show anything.
     for (const check of checks) {
         if (check.result.kind === 'contradicted') {
             return {show: false, reason: check.result.reason, partial: false};
+        }
+    }
+    // A confirmation retires the caveat, because the caveat is no longer true.
+    for (const check of checks) {
+        if (check.result.kind === 'confirmed') {
+            return {
+                show: true,
+                reason: 'the frames carry this run\'s identifier',
+                partial: false
+            };
         }
     }
     return {
         show: true,
         reason: 'no check found a mismatch, but tick overlap alone cannot prove these frames belong to this run',
         partial: true
+    };
+}
+
+/**
+ * Compares the manifest's opaque run identifier against the job the replay came
+ * from. The only check here that can *establish* a match rather than fail to
+ * refute one.
+ *
+ * `null` on either side is **inconclusive, never a mismatch**. A capture may
+ * legitimately be started without an id, and a missing sidecar says the
+ * question cannot be answered — treating that as a contradiction would refuse a
+ * perfectly good join, and treating it as a match would assert something nobody
+ * established. Both are wrong; saying nothing is not.
+ *
+ * The comparison is equality on an opaque string and nothing else. Neither the
+ * mod, the server, nor this function parses it.
+ */
+export function runIdCheck(manifestRun: string | null, jobId: string | null): RunMatchCheck {
+    const name = 'run identifier';
+    if (manifestRun === null || jobId === null) {
+        return {
+            name,
+            result: {
+                kind: 'inconclusive',
+                reason:
+                    manifestRun === null
+                        ? 'these frames carry no run identifier'
+                        : 'this replay has no job to compare against'
+            }
+        };
+    }
+    if (manifestRun === jobId) {
+        return {name, result: {kind: 'confirmed'}};
+    }
+    return {
+        name,
+        result: {
+            kind: 'contradicted',
+            reason: `these frames were captured for run ${manifestRun}, not run ${jobId}`
+        }
     };
 }
 

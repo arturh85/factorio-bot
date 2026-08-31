@@ -44,6 +44,7 @@ const replayStore = useReplayStore();
 const replay = computed(() => replayStore.getReplay);
 const parseError = computed(() => replayStore.getParseError);
 const manifest = computed(() => replayStore.getManifest);
+const jobId = computed(() => replayStore.getJobId);
 
 onMounted(() => {
   void replayStore.refresh();
@@ -59,5 +60,5 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <ReplayScrubber :replay="replay" :manifest="manifest" :parse-error="parseError"/>
+  <ReplayScrubber :replay="replay" :manifest="manifest" :parse-error="parseError" :job-id="jobId"/>
 </template>

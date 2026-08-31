@@ -1,8 +1,6 @@
 mod dump;
 mod factorio_control;
 mod get_setting;
-#[cfg(all(debug_assertions, feature = "gui"))]
-mod gui;
 mod quit;
 mod rcon_send;
 #[cfg(feature = "restapi")]
@@ -21,8 +19,6 @@ use std::fmt;
 fn subcommands() -> Vec<Box<dyn Subcommand>> {
   vec![
     factorio_control::build(),
-    #[cfg(all(debug_assertions, feature = "gui"))]
-    gui::build(),
     #[cfg(feature = "lua")]
     run_script::build(),
     rcon_send::build(),

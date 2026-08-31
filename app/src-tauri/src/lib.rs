@@ -8,8 +8,6 @@
 #[cfg(feature = "cli")]
 mod cli;
 mod context;
-#[cfg(feature = "gui")]
-mod gui;
 mod paths;
 #[cfg(feature = "repl")]
 mod repl;
@@ -22,7 +20,6 @@ pub const APP_NAME: &str = env!("CARGO_PKG_NAME");
 pub const APP_AUTHOR: &str = env!("CARGO_PKG_AUTHORS");
 pub const APP_ABOUT: &str = env!("CARGO_PKG_DESCRIPTION");
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 #[allow(clippy::missing_panics_doc)]
 pub fn run() {
   // Same treatment as `cli::start` below, and for the same reason: everything
@@ -63,8 +60,8 @@ pub fn run() {
       }
     };
 
-    // If no subcommand was run, app is Some and we should show help (unless GUI/REPL will start)
-    #[cfg(all(not(feature = "gui"), not(feature = "repl")))]
+    // If no subcommand was run, app is Some and we should show help (unless REPL will start)
+    #[cfg(not(feature = "repl"))]
     {
       if app.is_none() {
         return;
@@ -75,31 +72,23 @@ pub fn run() {
         .expect("failed to print_help");
       return;
     }
-    // With GUI or REPL features, continue even after a subcommand runs
-    #[cfg(any(feature = "gui", feature = "repl"))]
-    {
-      if let Some(mut app) = app {
-        // No subcommand was run, show help and let GUI/REPL take over
-        app.print_help().expect("failed to print_help");
-      }
-      // If app is None, a subcommand ran - continue to GUI/REPL
-    }
-  }
-  #[cfg(feature = "gui")]
-  {
-    gui::start(context.clone()).expect("failed to start gui");
-  }
-  #[cfg(not(feature = "gui"))]
-  {
     #[cfg(feature = "repl")]
     {
-      let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-      rt.block_on(async { repl::start(context.clone()).await })
-        .expect("repl failed");
+      if let Some(mut app) = app {
+        // No subcommand was run, show help and let the REPL take over
+        app.print_help().expect("failed to print_help");
+      }
+      // If app is None, a subcommand ran - continue to the REPL
     }
-    #[cfg(all(not(feature = "cli"), not(feature = "repl")))]
-    {
-      panic!("select at least one feature of cli, repl, gui");
-    }
+  }
+  #[cfg(feature = "repl")]
+  {
+    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+    rt.block_on(async { repl::start(context.clone()).await })
+      .expect("repl failed");
+  }
+  #[cfg(all(not(feature = "cli"), not(feature = "repl")))]
+  {
+    panic!("select at least one feature of cli or repl");
   }
 }

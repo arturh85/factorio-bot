@@ -74,10 +74,22 @@ function serialize_ingredient(ingredient)
     return table_properties(ingredient, {"name", "type", "amount"}, {type = "ingredient_type"})
 end
 
+-- `speed` and `durability` were in this list and are deliberately not any
+-- more. Neither is declared on `FactorioItemPrototype` in
+-- `crates/core/src/types.rs`, so both were serialised and then dropped at
+-- deserialisation -- and `durability` was not even being read: 2.0 moved it to
+-- `LuaItemPrototype::get_durability()`, so the attribute read raised and the
+-- `pcall` in `table_properties` swallowed it. Confirmed against a live 2.1.17
+-- capture: `repair-pack` is the only `repair-tool` in 342 item prototypes,
+-- its `speed` arrived as 2, and its `durability` arrived nil.
+--
+-- Repairing the read would have added a field with no consumer, so the fix is
+-- deletion. If durability is ever wanted, it needs the Rust struct first and
+-- then `item.get_durability()` here, never the attribute.
 function serialize_item_prototype(item)
     local record = table_properties(
         item,
-        {"name", "stack_size", "fuel_value", "type", "speed", "durability"},
+        {"name", "stack_size", "fuel_value", "type"},
         {type = "item_type", stack_size = "stack_size", fuel_value = "fuel_value" }
     )
     record.place_result = item.place_result and item.place_result.name or ""

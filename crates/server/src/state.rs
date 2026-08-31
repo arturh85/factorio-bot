@@ -15,11 +15,15 @@ const JOB_HISTORY_LIMIT: usize = 50;
 pub struct AppState {
     pub instance: SharedFactorioInstance,
     pub settings: SharedAppSettings,
-    /// Where `PUT /api/v1/settings` persists. Production wiring points this
-    /// at `factorio_bot_core::paths::settings_file()` via [`AppState::new`];
-    /// tests that exercise persistence should build `AppState` directly with
-    /// a path inside a `tempfile::TempDir` instead, so the suite never
-    /// overwrites a real developer's settings file.
+    /// Where `PUT /api/v1/settings` persists. Callers pass this to
+    /// [`AppState::new`] rather than it being derived here: production
+    /// wiring (`serve.rs`) hands over whatever path `settings` was actually
+    /// loaded from -- the data-dir default, or an explicit `--settings` file
+    /// -- and the two must always agree, or a server started against a named
+    /// settings file would read it but silently overwrite the default one
+    /// instead. Tests that exercise persistence should pass a path inside a
+    /// `tempfile::TempDir`, so the suite never touches a real developer's
+    /// settings file.
     pub settings_path: PathBuf,
     /// True between `POST /api/v1/instance/start` accepting and the spawned
     /// start finishing, win or lose. Starting Factorio takes 12-17 seconds
@@ -48,16 +52,26 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Builds production state: `settings_path` is the real on-disk settings
-    /// file. Test helpers that only exercise routes unrelated to persistence
-    /// (i.e. everything but `put_settings`) should use this too, rather than
-    /// repeating the struct literal, so a future field addition only touches
-    /// this constructor.
-    pub fn new(instance: SharedFactorioInstance, settings: SharedAppSettings) -> Self {
+    /// Builds state from its three real inputs. `settings_path` is not
+    /// derived here -- the caller must pass the exact path `settings` was
+    /// loaded from (production: `factorio_bot_core::paths::settings_file()`,
+    /// or the resolved `--settings` path when one was given); deriving it
+    /// independently is how a server could once read one file and write
+    /// another. Test helpers that only exercise routes unrelated to
+    /// persistence (i.e. everything but `put_settings`) can pass
+    /// `factorio_bot_core::paths::settings_file()` too -- production's value
+    /// is never written to unless a test's `put_settings` calls actually
+    /// exercise it. Use this rather than repeating the struct literal, so a
+    /// future field addition only touches this constructor.
+    pub fn new(
+        instance: SharedFactorioInstance,
+        settings: SharedAppSettings,
+        settings_path: PathBuf,
+    ) -> Self {
         AppState {
             instance,
             settings,
-            settings_path: factorio_bot_core::paths::settings_file(),
+            settings_path,
             starting: Arc::new(AtomicBool::new(false)),
             last_start_error: Arc::new(RwLock::new(None)),
             stop_generation: Arc::new(AtomicU64::new(0)),
@@ -121,6 +135,7 @@ impl AppState {
     /// let state = AppState::new(
     ///     Arc::new(RwLock::new(None)),
     ///     AppSettings::default().into_shared(),
+    ///     factorio_bot_core::paths::settings_file(),
     /// );
     /// // No lock is held here, and there must be no way to say otherwise.
     /// let mut forged: Option<FactorioInstance> = None;
@@ -196,6 +211,7 @@ mod tests {
         let state = AppState::new(
             Arc::new(RwLock::new(None)),
             AppSettings::default().into_shared(),
+            factorio_bot_core::paths::settings_file(),
         );
         // `THREADS + 1`: the racers plus this thread, which inspects the result
         // of each round and frees the slot for the next one.

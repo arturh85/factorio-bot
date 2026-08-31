@@ -6,10 +6,10 @@ use factorio_bot_server::state::AppState;
 use factorio_bot_server::webserver::build_router;
 use tower::ServiceExt;
 
-/// `settings_path` points inside a fresh, per-call temp directory rather than
-/// `AppState::new`'s real `paths::settings_file()`: a `PUT` that reaches
-/// `AppSettings::save` must never write to a developer's actual settings
-/// file just because the test suite ran.
+/// `settings_path` points inside a fresh, per-call temp directory, passed
+/// explicitly to `AppState::new` rather than the real `paths::settings_file()`:
+/// a `PUT` that reaches `AppSettings::save` must never write to a developer's
+/// actual settings file just because the test suite ran.
 ///
 /// The `TempDir` is returned rather than `keep()`-ed: `keep()` disarms the
 /// deletion guard, so every run of this file left a directory behind in the
@@ -17,15 +17,11 @@ use tower::ServiceExt;
 /// and it is removed on drop.
 fn test_state() -> (tempfile::TempDir, AppState) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let state = AppState {
-        instance: FactorioInstance::new_shared(),
-        settings: AppSettings::default().into_shared(),
-        settings_path: dir.path().join("AppSettings.toml"),
-        starting: Default::default(),
-        last_start_error: Default::default(),
-        stop_generation: Default::default(),
-        jobs: factorio_bot_server::jobs::JobRegistry::new(8),
-    };
+    let state = AppState::new(
+        FactorioInstance::new_shared(),
+        AppSettings::default().into_shared(),
+        dir.path().join("AppSettings.toml"),
+    );
     (dir, state)
 }
 
@@ -58,15 +54,11 @@ async fn get_settings_returns_the_current_settings() {
 async fn put_settings_updates_the_shared_state() {
     let dir = tempfile::tempdir().expect("tempdir");
     let settings_path = dir.path().join("AppSettings.toml");
-    let state = AppState {
-        instance: FactorioInstance::new_shared(),
-        settings: AppSettings::default().into_shared(),
-        settings_path: settings_path.clone(),
-        starting: Default::default(),
-        last_start_error: Default::default(),
-        stop_generation: Default::default(),
-        jobs: factorio_bot_server::jobs::JobRegistry::new(8),
-    };
+    let state = AppState::new(
+        FactorioInstance::new_shared(),
+        AppSettings::default().into_shared(),
+        settings_path.clone(),
+    );
     let mut updated = AppSettings::default();
     updated.factorio.client_count = 4;
     let body = serde_json::to_string(&updated).unwrap();

@@ -19,6 +19,7 @@ fn state_with_web_root(dir: &std::path::Path) -> AppState {
             ..Default::default()
         }
         .into_shared(),
+        factorio_bot_core::paths::settings_file(),
     )
 }
 
@@ -92,6 +93,7 @@ fn state_without_web_root() -> AppState {
     AppState::new(
         Arc::new(RwLock::new(None)),
         AppSettings::default().into_shared(),
+        factorio_bot_core::paths::settings_file(),
     )
 }
 

@@ -45,6 +45,20 @@ impl SettingsOverrides {
   }
 }
 
+/// The settings file a command should use: the explicit `--settings` path if
+/// one was given, otherwise the default location the program reads.
+///
+/// The single copy of this rule -- `Context::new` (read side) and
+/// `cli::config::target_path` (`config init`'s write side) both call this
+/// rather than restating it. Four copies of a settings rule have already
+/// drifted apart in this repo once.
+pub fn resolved_settings_path(overrides: &SettingsOverrides) -> PathBuf {
+  overrides
+    .settings_path
+    .clone()
+    .unwrap_or_else(paths::settings_file)
+}
+
 /// Loads the effective settings: the file (either `--settings` or the default
 /// location) with the CLI overrides applied on top.
 pub fn load_app_settings_with(overrides: &SettingsOverrides) -> Result<CoreAppSettings> {

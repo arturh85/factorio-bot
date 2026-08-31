@@ -1,6 +1,6 @@
 use crate::cli::{settings_overrides, Subcommand, SubcommandCallback, SETTINGS_PRECEDENCE_HELP};
 use crate::context::Context;
-use crate::settings::{load_app_settings_with, SettingsOverrides};
+use crate::settings::{load_app_settings_with, resolved_settings_path, SettingsOverrides};
 use clap::{ArgAction, ArgMatches, Command};
 use factorio_bot_core::app_settings::AppSettings;
 use factorio_bot_core::miette::{miette, IntoDiagnostic, Result};
@@ -54,11 +54,12 @@ fn render(settings: &AppSettings) -> Result<String> {
 
 /// Where `config init` writes to: the explicit `--settings` path if one was
 /// given, otherwise the location the program reads by default.
+///
+/// Thin wrapper over `crate::settings::resolved_settings_path`, kept under
+/// this name because it is what the tests below already call and what the
+/// docstring above still describes; the rule itself lives in one place.
 fn target_path(overrides: &SettingsOverrides) -> PathBuf {
-  overrides
-    .settings_path
-    .clone()
-    .unwrap_or_else(factorio_bot_core::paths::settings_file)
+  resolved_settings_path(overrides)
 }
 
 /// The settings `config init` writes: the struct defaults with any CLI

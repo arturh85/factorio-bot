@@ -10,6 +10,7 @@ fn test_state() -> AppState {
     AppState::new(
         FactorioInstance::new_shared(),
         AppSettings::default().into_shared(),
+        factorio_bot_core::paths::settings_file(),
     )
 }
 

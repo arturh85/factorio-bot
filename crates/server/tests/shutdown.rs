@@ -28,6 +28,7 @@ async fn server_returns_when_the_shutdown_future_resolves() {
     let server = tokio::spawn(async move {
         start_with_shutdown(
             settings,
+            factorio_bot_core::paths::settings_file(),
             instance,
             bind,
             async {
@@ -86,6 +87,7 @@ async fn shutdown_takes_and_stops_the_factorio_instance() {
     let server = tokio::spawn(async move {
         start_with_shutdown(
             settings,
+            factorio_bot_core::paths::settings_file(),
             instance_state,
             bind,
             async {
@@ -160,6 +162,7 @@ async fn shutdown_does_not_wait_forever_for_an_in_flight_request() {
     let server = tokio::spawn(async move {
         start_with_shutdown(
             settings,
+            factorio_bot_core::paths::settings_file(),
             instance,
             bind,
             async {
@@ -254,6 +257,7 @@ async fn server_survives_past_the_grace_period_with_no_shutdown_signal() {
     let server = tokio::spawn(async move {
         start_with_shutdown(
             settings,
+            factorio_bot_core::paths::settings_file(),
             instance,
             bind,
             std::future::pending(),
@@ -305,7 +309,11 @@ async fn an_open_event_stream_does_not_hold_shutdown_past_the_grace_period() {
     let settings = AppSettings::default().into_shared();
     let instance_state: SharedFactorioInstance =
         Arc::new(RwLock::new(Some(empty_factorio_instance())));
-    let state = AppState::new(instance_state, settings);
+    let state = AppState::new(
+        instance_state,
+        settings,
+        factorio_bot_core::paths::settings_file(),
+    );
 
     // A job that never finishes: this handle is held for the whole test, so
     // nothing completes it and its broadcast channel stays open. (Dropping it

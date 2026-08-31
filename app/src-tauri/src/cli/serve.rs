@@ -120,6 +120,7 @@ async fn run(matches: &ArgMatches, context: &mut Context) -> Result<()> {
 
   factorio_bot_server::webserver::start_with_shutdown(
     context.app_settings.clone(),
+    context.settings_path.clone(),
     context.instance_state.clone(),
     bind,
     shutdown,

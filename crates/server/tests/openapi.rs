@@ -12,6 +12,7 @@ fn test_state() -> AppState {
     AppState::new(
         Arc::new(RwLock::new(None)),
         AppSettings::default().into_shared(),
+        factorio_bot_core::paths::settings_file(),
     )
 }
 

@@ -16,12 +16,44 @@ mod scripting;
 mod settings;
 
 use context::Context;
+use settings::SettingsOverrides;
 pub const APP_NAME: &str = env!("CARGO_PKG_NAME");
 pub const APP_AUTHOR: &str = env!("CARGO_PKG_AUTHORS");
 pub const APP_ABOUT: &str = env!("CARGO_PKG_DESCRIPTION");
 
+/// The `--settings` (and its sibling overrides) pulled out of the real
+/// process argv, *before* `cli::start` does its own full parse and dispatch.
+///
+/// This has to happen ahead of `Context::new` below, which is what actually
+/// loads settings, and `Context::new` has to happen ahead of `cli::start`
+/// picking a subcommand -- `config show` and every other subcommand alike
+/// read `context.app_settings`. Parsing here again means `cli::start` parses
+/// the same argv a second time, which is harmless: clap parsing has no side
+/// effects, and a `--settings`/`--help`/malformed-argv error surfaces here
+/// exactly as it would have there, just slightly earlier.
+///
+/// Without the `cli` feature there is no argv to parse -- nothing else in
+/// the binary reads `--settings` -- so this is just the no-override default.
+#[cfg(feature = "cli")]
+fn settings_overrides_from_env() -> SettingsOverrides {
+  match cli::build_app().try_get_matches_from(std::env::args_os()) {
+    Ok(matches) => cli::settings_overrides(&matches),
+    // `.exit()` prints the usage/help/error clap would have shown and ends
+    // the process -- the same outcome `cli::start`'s own `get_matches()`
+    // would have produced, just before `Context::new` rather than after.
+    Err(err) => err.exit(),
+  }
+}
+
+#[cfg(not(feature = "cli"))]
+fn settings_overrides_from_env() -> SettingsOverrides {
+  SettingsOverrides::default()
+}
+
 #[allow(clippy::missing_panics_doc)]
 pub fn run() {
+  let overrides = settings_overrides_from_env();
+
   // Same treatment as `cli::start` below, and for the same reason: everything
   // `Context::new` can fail at is operational -- an unwritable data directory,
   // an `AppSettings.toml` that is not valid TOML. `.expect` turned those into
@@ -35,7 +67,13 @@ pub fn run() {
   // the configuration. That is why the workspace refusal was moved out of
   // settings load and down to the point of use -- see
   // `factorio_bot_core::app_settings::fill_workspace_default`.
-  let context = match Context::new() {
+  //
+  // `overrides` -- pulled out of argv above -- is what makes this honour
+  // `--settings` at all: previously `Context::new()` took nothing and always
+  // loaded the data-dir default, so `--settings x.toml serve` read (and its
+  // `PUT /api/v1/settings` route overwrote) the wrong file while reporting
+  // success.
+  let context = match Context::new(&overrides) {
     Ok(context) => context,
     Err(report) => {
       eprintln!("Error: {report:?}");

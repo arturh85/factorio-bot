@@ -6,6 +6,7 @@ use factorio_bot_core::app_settings::SharedAppSettings;
 use factorio_bot_core::process::process_control::SharedFactorioInstance;
 use miette::{IntoDiagnostic, Result};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
@@ -59,13 +60,14 @@ pub const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(10);
 
 pub async fn start_with_shutdown(
     settings: SharedAppSettings,
+    settings_path: PathBuf,
     instance_state: SharedFactorioInstance,
     bind: SocketAddr,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     shutdown_grace_period: Duration,
 ) -> Result<()> {
     start_with_state(
-        AppState::new(instance_state, settings),
+        AppState::new(instance_state, settings, settings_path),
         bind,
         shutdown,
         shutdown_grace_period,
@@ -178,11 +180,13 @@ pub async fn start_with_state(
 
 pub async fn start(
     settings: SharedAppSettings,
+    settings_path: PathBuf,
     instance_state: SharedFactorioInstance,
     bind: SocketAddr,
 ) -> Result<()> {
     start_with_shutdown(
         settings,
+        settings_path,
         instance_state,
         bind,
         std::future::pending(),

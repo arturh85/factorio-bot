@@ -53,6 +53,13 @@ color-eyre = "0.6" # colorful human oriented error reports via panics
 
 [dev-dependencies]
 tempfile = "3"
+# Only exercised by the `context` tests gated on `feature = "restapi"`, which
+# build the same router `serve.rs` does to prove the `--settings` path
+# reaches it end to end. Versions match `crates/server`'s so the same axum
+# types are used on both sides of `factorio-bot-server`'s public API.
+axum = { version = "0.8.9", features = ["json", "tokio", "http1"] }
+tower = "0.5.3"
+serde_json = { version = "1.0", features = ["raw_value"] }
 
 [build-dependencies]
 # `build.rs` uses exactly one of these: `luaify()` calls

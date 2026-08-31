@@ -12,7 +12,11 @@ use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 fn state_with(instance: SharedFactorioInstance) -> AppState {
-    AppState::new(instance, AppSettings::default().into_shared())
+    AppState::new(
+        instance,
+        AppSettings::default().into_shared(),
+        factorio_bot_core::paths::settings_file(),
+    )
 }
 
 /// A `FactorioInstance` that owns no real child processes: no server or

@@ -7,15 +7,16 @@ use factorio_bot_server::webserver::build_router;
 use tower::ServiceExt;
 
 // `AppState::new(...)` rather than a struct literal: `AppState` also carries
-// `settings_path` (added in an earlier task), which the brief's snippet
-// predates. None of these tests touch persistence, so the production
-// constructor (which points `settings_path` at the real on-disk settings
-// file) is fine here, matching the convention every other read-only
-// `manage_*` test file in this crate already uses.
+// `settings_path`, which every caller must now supply explicitly. None of
+// these tests touch persistence, so passing the production default
+// (`factorio_bot_core::paths::settings_file()`, never written to here) is
+// fine, matching the convention every other read-only `manage_*` test file
+// in this crate already uses.
 fn test_state() -> AppState {
     AppState::new(
         FactorioInstance::new_shared(),
         AppSettings::default().into_shared(),
+        factorio_bot_core::paths::settings_file(),
     )
 }
 

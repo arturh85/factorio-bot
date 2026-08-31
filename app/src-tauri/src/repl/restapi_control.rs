@@ -24,7 +24,12 @@ async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String
         [127, 0, 0, 1],
         u16::try_from(context.app_settings.read().await.restapi.port).unwrap_or(7492),
       ));
-      let webserver = webserver::start(context.app_settings.clone(), instance_state, bind);
+      let webserver = webserver::start(
+        context.app_settings.clone(),
+        context.settings_path.clone(),
+        instance_state,
+        bind,
+      );
       let handle = tokio::task::spawn(webserver);
       let mut restapi_handle = context.restapi_handle.write().await;
       *restapi_handle = Some(handle);

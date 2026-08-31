@@ -1193,6 +1193,7 @@ dependencies = [
 name = "factorio-bot"
 version = "0.2.4-dev"
 dependencies = [
+ "axum",
  "clap",
  "clap_complete",
  "color-eyre",
@@ -1202,10 +1203,12 @@ dependencies = [
  "factorio-bot-server",
  "reedline-repl-rs",
  "serde",
+ "serde_json",
  "strum 0.27.2",
  "tempfile",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
+ "tower",
  "winres",
 ]
 

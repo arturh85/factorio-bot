@@ -58,7 +58,15 @@ async fn start_binds_the_requested_address() {
     let instance = FactorioInstance::new_shared();
     let bind = free_addr().await;
 
-    let server = tokio::spawn(async move { start(settings, instance, bind).await });
+    let server = tokio::spawn(async move {
+        start(
+            settings,
+            factorio_bot_core::paths::settings_file(),
+            instance,
+            bind,
+        )
+        .await
+    });
 
     let response = get(bind, "/api/v1/health").await;
     assert!(
@@ -91,7 +99,15 @@ async fn start_serves_the_web_root_from_the_shared_settings() {
     let instance = FactorioInstance::new_shared();
     let bind = free_addr().await;
 
-    let server = tokio::spawn(async move { start(settings, instance, bind).await });
+    let server = tokio::spawn(async move {
+        start(
+            settings,
+            factorio_bot_core::paths::settings_file(),
+            instance,
+            bind,
+        )
+        .await
+    });
 
     let response = get(bind, "/").await;
     assert!(
@@ -116,9 +132,17 @@ async fn start_reports_an_unbindable_address() {
         .expect("an ephemeral port is available");
     let bind = occupied.local_addr().expect("listener has a local address");
 
-    let result = tokio::time::timeout(Duration::from_secs(5), start(settings, instance, bind))
-        .await
-        .expect("start() returned instead of serving the occupied port");
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        start(
+            settings,
+            factorio_bot_core::paths::settings_file(),
+            instance,
+            bind,
+        ),
+    )
+    .await
+    .expect("start() returned instead of serving the occupied port");
 
     assert!(result.is_err(), "expected a bind error for {bind}");
     drop(occupied);

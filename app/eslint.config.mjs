@@ -79,7 +79,7 @@ export default defineConfig([
             // matching the upstream shadcn/ui naming this redesign follows.
             'vue/multi-word-component-names': [
                 'error',
-                { ignores: ['Editor', 'Dashboard', 'Toaster', 'Button'] }
+                { ignores: ['Editor', 'Dashboard', 'Toaster', 'Button', 'Toggle'] }
             ],
 
             'space-before-function-paren': 'off',

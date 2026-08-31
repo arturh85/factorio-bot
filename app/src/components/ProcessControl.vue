@@ -5,7 +5,7 @@ import Button from '@/components/ui/Button.vue';
 import {Check} from '@lucide/vue';
 import {useToast} from '@/composables/useToast';
 import {useAppStore} from '@/store/appStore';
-import ToggleButton from 'primevue/togglebutton';
+import Toggle from '@/components/ui/Toggle.vue';
 
 
 const instanceStore = useInstanceStore()
@@ -32,10 +32,10 @@ const isStarted = computed(() => instanceStore.isStarted)
 
 const recreateLevel = computed({
   get() {
-    return appStore.getRecreateLevel
+    return appStore.getRecreateLevel === true
   },
-  set(val ) {
-    appStore.updateRecreateLevel(val as boolean)
+  set(val: boolean) {
+    appStore.updateRecreateLevel(val)
   }
 })
 const startInstances = async() => {
@@ -65,7 +65,7 @@ const stopInstances = async() => {
 </script>
 
 <template>
-  <ToggleButton v-model="recreateLevel" onLabel="Recreate Level" offLabel="Use existing Level" onIcon="pi pi-check" offIcon="pi pi-times" />
+  <Toggle v-model="recreateLevel" on-label="Recreate Level" off-label="Use existing Level"/>
   <Button :variant="isStarted ? 'success' : 'danger'"
           :disabled="isStopping || isStarting"
           @click="isStarted ? stopInstances() : startInstances()">

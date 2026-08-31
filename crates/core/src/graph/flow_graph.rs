@@ -10,7 +10,7 @@ use dashmap::DashMap;
 use euclid::{Point2D, Size2D};
 use miette::Result;
 use num_traits::ToPrimitive;
-use paris::warn;
+use paris::{error, warn};
 use parking_lot::{RwLock, RwLockReadGuard};
 use petgraph::dot::{Config, Dot};
 use petgraph::graph::NodeIndex;
@@ -194,27 +194,14 @@ impl FlowGraph {
 
                                 let mut output: FlowRates = vec![];
                                 for (name, _rate) in &incoming {
-                                    if let Ok(name) = EntityName::from_str(name) {
-                                        match name {
-                                            EntityName::IronOre => output.push((
-                                                EntityName::IronPlate.to_string(),
-                                                1. / 3.2,
-                                            )),
-                                            EntityName::CopperOre => output.push((
-                                                EntityName::CopperPlate.to_string(),
-                                                1. / 3.2,
-                                            )),
-                                            EntityName::Stone => output.push((
-                                                EntityName::StoneBrick.to_string(),
-                                                1. / 3.2,
-                                            )),
-                                            EntityName::IronPlate => output
-                                                .push((EntityName::Steel.to_string(), 1. / 3.2)),
-                                            EntityName::Coal => {}
-                                            _ => warn!("invalid furnace input: {}", name),
-                                        }
-                                    } else {
-                                        warn!("invalid furnace input: {}", name);
+                                    match EntityName::from_str(name) {
+                                        // coal is fuel, not an input to smelt
+                                        Ok(EntityName::Coal) => {}
+                                        Ok(name) => match furnace_output(&name) {
+                                            Some(rate) => output.push(rate),
+                                            None => warn!("invalid furnace input: {}", name),
+                                        },
+                                        Err(_) => warn!("invalid furnace input: {}", name),
                                     }
                                 }
                                 self.update_flow_edge(
@@ -290,20 +277,21 @@ impl FlowGraph {
         Ok(())
     }
 
-    pub fn get_or_create_flow_node(&self, entity_node: &EntityNode) -> NodeIndex {
-        self.node_at(&entity_node.position).unwrap_or_else(|| {
-            let entity_id = entity_node.entity_id.unwrap();
-            let entity = self.entity_graph.entity_by_id(entity_id).unwrap();
-            let new_index = self.inner.write().add_node(FlowNode::new(
-                &entity,
-                entity_node.miner_ore.clone(),
-                entity_id,
-            ));
-            self.flow_tree
-                .write()
-                .insert_with_box(new_index, entity_node.bounding_box.clone().into());
-            new_index
-        })
+    /// `None` when the entity cannot be turned into a `FlowNode` -- see
+    /// `FlowNode::new`. The edge that wanted it is then dropped rather than
+    /// drawn against a fabricated node.
+    pub fn get_or_create_flow_node(&self, entity_node: &EntityNode) -> Option<NodeIndex> {
+        if let Some(existing) = self.node_at(&entity_node.position) {
+            return Some(existing);
+        }
+        let entity_id = entity_node.entity_id?;
+        let entity = self.entity_graph.entity_by_id(entity_id)?;
+        let node = FlowNode::new(&entity, entity_node.miner_ore.clone(), entity_id)?;
+        let new_index = self.inner.write().add_node(node);
+        self.flow_tree
+            .write()
+            .insert_with_box(new_index, entity_node.bounding_box.clone().into());
+        Some(new_index)
     }
 
     pub fn update_flow_edge(
@@ -312,8 +300,12 @@ impl FlowGraph {
         source_entity_node: &EntityNode,
         target_entity_node: &EntityNode,
     ) {
-        let source_flow_idx = self.get_or_create_flow_node(source_entity_node);
-        let target_flow_idx = self.get_or_create_flow_node(target_entity_node);
+        let (Some(source_flow_idx), Some(target_flow_idx)) = (
+            self.get_or_create_flow_node(source_entity_node),
+            self.get_or_create_flow_node(target_entity_node),
+        ) else {
+            return;
+        };
         self.inner
             .write()
             .update_edge(source_flow_idx, target_flow_idx, flow);
@@ -582,17 +574,36 @@ pub struct FlowNode {
 }
 
 impl FlowNode {
-    pub fn new(entity: &FactorioEntity, miner_ore: Option<String>, entity_id: ItemId) -> FlowNode {
-        let direction = Direction::from_u8(entity.direction).unwrap();
-        let entity_type = EntityType::from_str(&entity.entity_type).unwrap();
-        FlowNode {
+    /// `None` when the game reports something this build cannot represent --
+    /// see `EntityNode::new` for why that is reported and skipped rather than
+    /// unwrapped (`panic = "abort"`) or defaulted.
+    pub fn new(
+        entity: &FactorioEntity,
+        miner_ore: Option<String>,
+        entity_id: ItemId,
+    ) -> Option<FlowNode> {
+        let Some(direction) = Direction::from_u8(entity.direction) else {
+            error!(
+                "<red>unreadable direction</> <bright-blue>{}</> on <bright-blue>{}</> at <bright-blue>{}</>: this build understands 0..=7, Factorio 2.x sends 0..=15 -- flow node skipped",
+                entity.direction, entity.name, entity.position
+            );
+            return None;
+        };
+        let Ok(entity_type) = EntityType::from_str(&entity.entity_type) else {
+            error!(
+                "<red>unknown entity type</> <bright-blue>{}</> on <bright-blue>{}</> at <bright-blue>{}</> -- flow node skipped",
+                entity.entity_type, entity.name, entity.position
+            );
+            return None;
+        };
+        Some(FlowNode {
             position: entity.position.clone(),
             entity_id: Some(entity_id),
             entity_name: entity.name.clone(),
             direction,
             miner_ore,
             entity_type,
-        }
+        })
     }
 }
 
@@ -667,6 +678,23 @@ impl Default for FlowEdge {
     }
 }
 
+/// What one crafting-speed-1 furnace turns `input` into, and how many per
+/// second. `None` means the item is not something a furnace smelts.
+///
+/// Base smelting times: iron, copper and stone each take 3.2 s, steel takes
+/// 16 s. The steel arm divided by 3.2 like the others, overstating steel
+/// throughput 5x against the comment that sits directly above the call site
+/// and states the 16 s correctly.
+fn furnace_output(input: &EntityName) -> Option<FlowRate> {
+    match input {
+        EntityName::IronOre => Some((EntityName::IronPlate.to_string(), 1. / 3.2)),
+        EntityName::CopperOre => Some((EntityName::CopperPlate.to_string(), 1. / 3.2)),
+        EntityName::Stone => Some((EntityName::StoneBrick.to_string(), 1. / 3.2)),
+        EntityName::IronPlate => Some((EntityName::Steel.to_string(), 1. / 16.)),
+        _ => None,
+    }
+}
+
 pub type FlowGraphInner = StableGraph<FlowNode, FlowEdge>;
 pub type FlowRate = (String, f64);
 pub type FlowRates = Vec<FlowRate>;
@@ -678,6 +706,42 @@ mod tests {
     use crate::test_utils::entity_graph_from;
 
     use super::*;
+
+    /// The comment above the furnace rates has always said steel takes a base
+    /// 16 seconds while every arm, steel included, divided by 3.2 -- steel
+    /// throughput came out 5x too high. Someone hit the trap, wrote the note,
+    /// and did not write the check.
+    #[test]
+    fn steel_smelts_five_times_slower_than_iron() {
+        assert_eq!(
+            furnace_output(&EntityName::IronOre),
+            Some((EntityName::IronPlate.to_string(), 1. / 3.2)),
+            "iron smelts in the base 3.2 s"
+        );
+        assert_eq!(
+            furnace_output(&EntityName::IronPlate),
+            Some((EntityName::Steel.to_string(), 1. / 16.)),
+            "steel smelts in the base 16 s, not 3.2"
+        );
+        assert_eq!(
+            furnace_output(&EntityName::Coal),
+            None,
+            "coal is fuel, not something a furnace smelts"
+        );
+    }
+
+    /// Same 2.x direction scale as `EntityNode::new`: `FlowNode::new` unwrapped
+    /// `Direction::from_u8` and aborted on anything >= 8.
+    #[test]
+    fn a_flow_node_is_not_built_from_a_direction_that_cannot_be_read() {
+        let mut belt =
+            FactorioEntity::new_transport_belt(&Position::new(0.5, 0.5), Direction::North);
+        belt.direction = 12;
+        assert!(
+            FlowNode::new(&belt, None, ItemId::default()).is_none(),
+            "a node we cannot orient must not be built"
+        );
+    }
 
     #[test]
     fn test_splitters() {

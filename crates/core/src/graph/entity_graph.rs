@@ -280,15 +280,27 @@ impl EntityGraph {
             }
             if entity.name == EntityName::Pumpjack.to_string() {
                 // for some reason pumpjacks report their drop position at their position so we fix it
-                entity.drop_position = Some(entity.position.add(
-                    &match Direction::from_u8(entity.direction).unwrap() {
-                        Direction::North => Position::new(1., -2.),
-                        Direction::East => Position::new(2., -1.),
-                        Direction::South => Position::new(-1., 2.),
-                        Direction::West => Position::new(-2., 1.),
-                        _ => panic!("invalid pumpjack position"),
-                    },
-                ));
+                let offset = Direction::from_u8(entity.direction).and_then(|direction| {
+                    match direction {
+                        Direction::North => Some(Position::new(1., -2.)),
+                        Direction::East => Some(Position::new(2., -1.)),
+                        Direction::South => Some(Position::new(-1., 2.)),
+                        Direction::West => Some(Position::new(-2., 1.)),
+                        _ => None,
+                    }
+                });
+                match offset {
+                    Some(offset) => entity.drop_position = Some(entity.position.add(&offset)),
+                    None => {
+                        // Aborting here killed the bot outright; so would leaving
+                        // the uncorrected drop position in place, only quietly.
+                        error!(
+                            "<red>unusable pumpjack direction</> <bright-blue>{}</> at <bright-blue>{}</>: cannot place its drop position -- entity skipped",
+                            entity.direction, entity.position
+                        );
+                        continue;
+                    }
+                }
             }
 
             if let Ok(entity_type) = EntityType::from_str(&entity.entity_type) {
@@ -362,7 +374,11 @@ impl EntityGraph {
                             } else {
                                 None
                             };
-                            let new_node = EntityNode::new(entity.clone(), miner_ore, entity_id);
+                            let Some(new_node) =
+                                EntityNode::new(entity.clone(), miner_ore, entity_id)
+                            else {
+                                continue;
+                            };
                             let mut inner = self.entity_graph.write();
                             let new_node_index = inner.add_node(new_node);
                             self.entity_nodes.insert(entity_id, new_node_index);
@@ -1193,10 +1209,39 @@ impl std::fmt::Debug for EntityNode {
 }
 
 impl EntityNode {
-    pub fn new(entity: FactorioEntity, miner_ore: Option<String>, entity_id: ItemId) -> EntityNode {
-        let direction = Direction::from_u8(entity.direction).unwrap();
-        let entity_type = EntityType::from_str(&entity.entity_type).unwrap();
-        EntityNode {
+    /// `None` when the game reports something this build cannot represent.
+    ///
+    /// `Direction` still models Factorio 1.x's eight-value `defines.direction`,
+    /// but 2.x uses sixteen (0..=15), so `from_u8` returns `None` for any of the
+    /// eight new values. Unwrapping it aborted the process -- this crate builds
+    /// `panic = "abort"` -- which let one belt facing a 2.x-only direction kill
+    /// the bot. The same reasoning as 04f8e76f/0cb7636f applies: a game whose
+    /// schema drifts must not be able to crash us. Report loudly and skip.
+    ///
+    /// Skipping rather than defaulting is deliberate. Defaulting to `North`
+    /// would put a node with a fabricated orientation into the graph, and the
+    /// graph's whole job is to answer "what feeds what" from orientation -- a
+    /// wrong answer nobody can see is worse than a missing one somebody can.
+    pub fn new(
+        entity: FactorioEntity,
+        miner_ore: Option<String>,
+        entity_id: ItemId,
+    ) -> Option<EntityNode> {
+        let Some(direction) = Direction::from_u8(entity.direction) else {
+            error!(
+                "<red>unreadable direction</> <bright-blue>{}</> on <bright-blue>{}</> at <bright-blue>{}</>: this build understands 0..=7, Factorio 2.x sends 0..=15 -- entity skipped",
+                entity.direction, entity.name, entity.position
+            );
+            return None;
+        };
+        let Ok(entity_type) = EntityType::from_str(&entity.entity_type) else {
+            error!(
+                "<red>unknown entity type</> <bright-blue>{}</> on <bright-blue>{}</> at <bright-blue>{}</> -- entity skipped",
+                entity.entity_type, entity.name, entity.position
+            );
+            return None;
+        };
+        Some(EntityNode {
             position: entity.position.clone(),
             bounding_box: entity.bounding_box.clone(),
             direction,
@@ -1204,7 +1249,7 @@ impl EntityNode {
             entity_id: Some(entity_id),
             entity_name: entity.name,
             entity_type,
-        }
+        })
     }
 }
 
@@ -1219,9 +1264,61 @@ pub type ResourceQuadTree = QuadTree<String, Rect, [(ItemId, QuadTreeRect); 4]>;
 #[cfg(test)]
 mod tests {
     use crate::factorio::util::rect_fields;
+    use crate::num_traits::ToPrimitive;
     use crate::test_utils::{entity_graph_from, fixture_world, spawn_ore};
 
     use super::*;
+
+    /// Factorio 2.x's `defines.direction` runs 0..=15 -- `west` is 12 -- while
+    /// `Direction` still only covers 0..=7. `Direction::from_u8(12)` is `None`,
+    /// and unwrapping it aborted the process (`panic = "abort"`), so one belt
+    /// facing a 2.x-only direction killed the bot. Skip the entity loudly.
+    #[test]
+    fn an_entity_whose_direction_cannot_be_read_is_skipped_not_aborted() {
+        let mut belt =
+            FactorioEntity::new_transport_belt(&Position::new(0.5, 0.5), Direction::North);
+        belt.direction = 12;
+        let graph = entity_graph_from(vec![belt]).expect("adding must not fail");
+        assert_eq!(
+            graph.inner_graph().node_count(),
+            0,
+            "an entity we cannot orient must not enter the graph"
+        );
+    }
+
+    /// The other pumpjack abort: a direction this build *can* read but that has
+    /// no drop-position offset (any diagonal) hit `panic!("invalid pumpjack
+    /// position")`. Skipping keeps the uncorrected drop position -- which the
+    /// game reports at the pumpjack's own position -- out of the graph.
+    #[test]
+    fn a_pumpjack_facing_a_diagonal_is_skipped_not_aborted() {
+        let mut pumpjack =
+            FactorioEntity::new_electric_mining_drill(&Position::new(0.5, 0.5), Direction::North);
+        pumpjack.name = EntityName::Pumpjack.to_string();
+        pumpjack.direction = Direction::SouthWest.to_u8().expect("fits in a u8");
+        let graph = entity_graph_from(vec![pumpjack]).expect("adding must not fail");
+        assert_eq!(
+            graph.inner_graph().node_count(),
+            0,
+            "a pumpjack with no usable drop position must not enter the graph"
+        );
+    }
+
+    /// The pumpjack drop-position fixup unwrapped the same `from_u8` and then
+    /// `panic!`ed on anything non-orthogonal. Both arms aborted.
+    #[test]
+    fn a_pumpjack_whose_direction_cannot_be_read_is_skipped_not_aborted() {
+        let mut pumpjack =
+            FactorioEntity::new_electric_mining_drill(&Position::new(0.5, 0.5), Direction::North);
+        pumpjack.name = EntityName::Pumpjack.to_string();
+        pumpjack.direction = 12;
+        let graph = entity_graph_from(vec![pumpjack]).expect("adding must not fail");
+        assert_eq!(
+            graph.inner_graph().node_count(),
+            0,
+            "an entity we cannot orient must not enter the graph"
+        );
+    }
 
     #[test]
     fn test_resource_patches_single_field_is_one_patch() {

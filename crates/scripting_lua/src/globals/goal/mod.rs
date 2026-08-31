@@ -59,8 +59,14 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// Builds the `goal` table.
 ///
-/// `plan_world` is what goals are planned against (the same hypothetical world
-/// `world.*` sees); `real_world` is what the executor drives.
+/// `plan_world` is what goals are planned against; `real_world` is what the
+/// executor drives. They are now the same world -- see [`Planner`]'s docs: the
+/// hypothetical `plan_world` once held was a deep copy that no surviving code
+/// wrote to, and that froze every `world.*` read at the run's start state. The
+/// two parameters remain only so the split can be reintroduced deliberately if
+/// a simulation surface is ever wanted again.
+///
+/// [`Planner`]: factorio_bot_core::plan::planner::Planner
 /// `bots` is the run's roster, as player ids.
 pub fn create_lua_goal(
     lua: &Lua,

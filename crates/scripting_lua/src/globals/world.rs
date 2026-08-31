@@ -256,3 +256,117 @@ end
 
     Ok(map_table)
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use factorio_bot_core::plan::planner::Planner;
+    use factorio_bot_core::types::{
+        PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent, Position,
+    };
+    use std::collections::BTreeMap;
+
+    /// Builds the `world` table exactly the way a run does.
+    ///
+    /// Every binding in this file closes over the one `Arc<FactorioWorld>`
+    /// given to `create_lua_world`, and `lua_runner` hands it that Arc once,
+    /// before the chunk runs -- so taking the handle here through `Planner` in
+    /// the same order is the point, not incidental setup. A test that passed
+    /// the world Arc straight in would not be testing what production does.
+    fn lua_world_for(world: &Arc<FactorioWorld>) -> (Lua, LuaTable) {
+        let mut planner = Planner::new(world.clone(), None);
+        planner.initiate_missing_players_with_default_inventory(1);
+        // `lua_runner` refreshes and then takes exactly this handle.
+        planner.update_plan_world();
+        let bound = planner.plan_world.clone();
+
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        let root = std::env::temp_dir();
+        let table = create_lua_world(&lua, bound, root.clone(), root).expect("world table");
+        (lua, table)
+    }
+
+    /// The `world.*` surface must answer from the running game.
+    ///
+    /// Measured live before the fix: a bot standing at `(-22.29, 35.34)` read
+    /// back as `(0, 0)` -- 41.8 tiles and some 6,200 ticks out -- because the
+    /// bindings held a deep copy of the world taken before the run started.
+    ///
+    /// The pre-mutation read is asserted too. Without it a binding that simply
+    /// always reported the post-mutation value would pass.
+    #[test]
+    fn world_player_reports_the_position_the_game_has_now() {
+        let world = Arc::new(FactorioWorld::new());
+        world
+            .player_changed_position(PlayerChangedPositionEvent {
+                player_id: 1,
+                position: Position::new(0., 0.),
+            })
+            .expect("seed");
+
+        let (lua, table) = lua_world_for(&world);
+        lua.globals().set("world", table).expect("set global");
+
+        let before: f64 = lua
+            .load("return world.player(1).position.x")
+            .eval()
+            .expect("read before");
+        assert_eq!(before, 0., "precondition: the binding starts at the origin");
+
+        world
+            .player_changed_position(PlayerChangedPositionEvent {
+                player_id: 1,
+                position: Position::new(-22.29, 35.34),
+            })
+            .expect("move");
+
+        let after: (f64, f64) = lua
+            .load("local p = world.player(1).position return p.x, p.y")
+            .eval()
+            .expect("read after");
+        assert_eq!(
+            after,
+            (-22.29, 35.34),
+            "world.player is frozen at the pre-run snapshot"
+        );
+    }
+
+    /// The other half of the live symptom: the ten iron plates the run had
+    /// just smelted read as zero, which is what made a goal that had genuinely
+    /// succeeded look like it had produced nothing.
+    ///
+    /// Asserted separately from the position test rather than folded into it:
+    /// `players` is one `DashMap`, so a single read would let either field
+    /// stand in for the other, and `world.inventory` is a different binding
+    /// with its own captured handle.
+    #[test]
+    fn world_inventory_reports_the_items_the_run_produced() {
+        let world = Arc::new(FactorioWorld::new());
+        let (lua, table) = lua_world_for(&world);
+        lua.globals().set("world", table).expect("set global");
+
+        let before: u32 = lua
+            .load("return world.inventory(1, 'iron-plate')")
+            .eval()
+            .expect("read before");
+        assert_eq!(before, 0, "precondition: the run starts with no plates");
+
+        let mut inventory: BTreeMap<String, u32> = BTreeMap::new();
+        inventory.insert("iron-plate".to_owned(), 10);
+        world
+            .player_changed_main_inventory(PlayerChangedMainInventoryEvent::from_btreemap(
+                1, inventory,
+            ))
+            .expect("smelt");
+
+        let after: u32 = lua
+            .load("return world.inventory(1, 'iron-plate')")
+            .eval()
+            .expect("read after");
+        assert_eq!(
+            after, 10,
+            "world.inventory is frozen: the plates the run smelted are invisible"
+        );
+    }
+}

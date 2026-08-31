@@ -1007,6 +1007,202 @@ mod tests {
     }
 }
 
+/// Proves the "Using mods directory ... (...)" line printed around line 314
+/// names the directory `setup_factorio_instance` actually picked, on a debug
+/// build -- the one profile that had no staleness check at all before this
+/// change, and the one `cargo build --no-default-features --features
+/// cli,lua` (CLAUDE.md's own recommended iteration command) produces.
+///
+/// The two `worker_*` functions do the real work and are marked `#[ignore]`
+/// so a normal test run never executes them directly; the `names_the_*`
+/// functions are what actually runs, and each launches its worker as a
+/// *subprocess* (`std::process::Command::new(current_exe())`, filtered to
+/// that one test by name, with `--nocapture`) rather than calling it
+/// in-process.
+///
+/// That indirection is required, not stylistic. `cargo test`'s default
+/// per-test capturing redirects `print!`/`println!` (which is how `paris`'s
+/// `info!` ultimately writes) to an in-memory buffer rather than the real fd,
+/// and confirmed empirically here: `std::thread::spawn`, which was tried
+/// first as a lighter-weight escape hatch, does NOT get you out of it --
+/// `thread::Builder::spawn` explicitly propagates the capture setting to the
+/// new thread precisely so multi-threaded tests are captured too. A `print!`
+/// only reaches the real stdout fd when nothing in the same process asked
+/// libtest to redirect it, which is true of a fresh child process invoked
+/// with `--nocapture` and not of any thread inside this one. Once it's a real
+/// child process, its stdout is captured the ordinary way, via
+/// `Command::output()` -- no fd-swapping crate needed.
+///
+/// A test that only checked "something was printed" would pass against a
+/// hardcoded string and prove nothing about *which* directory was named. The
+/// discrimination proof (done manually, not left as an automated test): with
+/// `mods_source` hardcoded to always report "repo checkout" regardless of
+/// which branch ran, `names_the_workspace_copy_when_it_already_exists` failed
+/// while `names_the_repo_checkout_when_no_workspace_copy_exists` kept
+/// passing -- proving each test actually reads the outcome of its own branch
+/// rather than a shared assumption.
+#[cfg(all(test, debug_assertions))]
+mod mods_source_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    /// Runs `setup_factorio_instance` far enough to log the mods line and no
+    /// further, then prints the resolved workspace path as a plain
+    /// machine-readable marker line so the driver test (running in a
+    /// different process, with its own freshly-generated tempdir name) can
+    /// check the log line against it.
+    ///
+    /// `is_server: false` and a fake, never-opened archive path keep this to
+    /// filesystem bookkeeping: no real Factorio binary or archive is needed as
+    /// long as `instance_path` is pre-populated so the "first run" extraction
+    /// branch is skipped.
+    async fn run_setup_and_report(workspace: &Path) {
+        let instance_path = workspace.join("client1");
+        std::fs::create_dir_all(&instance_path).expect("create instance dir");
+        // Non-empty, so `setup_factorio_instance` skips archive extraction.
+        std::fs::write(instance_path.join(".placeholder"), b"").expect("write placeholder");
+
+        let rcon_settings = RconSettings::new(4321, "foobar", None);
+        setup_factorio_instance(
+            workspace.to_str().expect("utf-8 workspace path"),
+            "/nonexistent/archive.tar.xz",
+            &rcon_settings,
+            None,
+            "client1",
+            false,
+            false,
+            None,
+            None,
+            false,
+        )
+        .await
+        .expect("setup must succeed with a pre-populated instance dir");
+    }
+
+    /// Spawns this same test binary as a child process, running only
+    /// `worker_name` (which must be `#[ignore]`d so the outer, uninstructed
+    /// run never executes it), with `--nocapture` so its real stdout reaches
+    /// the pipe `Command::output()` reads back.
+    fn run_worker_and_capture_stdout(worker_name: &str) -> String {
+        let exe = std::env::current_exe().expect("current test binary path");
+        let output = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                worker_name,
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .output()
+            .expect("spawn worker subprocess");
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(
+            output.status.success(),
+            "worker {worker_name} failed (status {:?}); stdout:\n{stdout}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        stdout
+    }
+
+    /// Not run directly -- see `names_the_repo_checkout_when_no_workspace_copy_exists`.
+    #[tokio::test]
+    #[ignore]
+    async fn worker_repo_checkout_case() {
+        let dir = tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        assert!(
+            !workspace.join(MODS_FOLDERNAME).exists(),
+            "fixture bug: workspace/mods already exists"
+        );
+        run_setup_and_report(&workspace).await;
+    }
+
+    /// `workspace/mods` absent: the debug build must fall back to the repo
+    /// checkout (`../../mods`, relative to the process cwd, which `cargo test
+    /// -p factorio-bot-core` runs from `crates/core`) and say so.
+    #[test]
+    fn names_the_repo_checkout_when_no_workspace_copy_exists() {
+        let repo_mods = fs::canonicalize(PathBuf::from(format!("../../{MODS_FOLDERNAME}")))
+            .expect("this test must run with cwd = crates/core, next to a real ../../mods");
+
+        let output = run_worker_and_capture_stdout(
+            "process::instance_setup::mods_source_tests::worker_repo_checkout_case",
+        );
+
+        assert!(
+            output.contains("Using mods directory"),
+            "no mods-source line printed at all: {output}"
+        );
+        assert!(
+            output.contains(repo_mods.to_str().expect("utf-8 repo mods path")),
+            "line must name the repo checkout {repo_mods:?}, got: {output}"
+        );
+        assert!(
+            output.contains("repo checkout"),
+            "line must say it fell back to the repo checkout, got: {output}"
+        );
+    }
+
+    /// Not run directly -- see `names_the_workspace_copy_when_it_already_exists`.
+    #[tokio::test]
+    #[ignore]
+    async fn worker_workspace_copy_case() {
+        let dir = tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        let workspace_mods = workspace.join(MODS_FOLDERNAME);
+        std::fs::create_dir_all(&workspace_mods).expect("create workspace/mods");
+        std::fs::write(workspace_mods.join("marker.txt"), b"mine").expect("write marker");
+        let workspace_mods = fs::canonicalize(&workspace_mods).expect("canonicalize");
+        // The marker the driver test (a different process, which does not
+        // otherwise know this randomly-named tempdir path) checks the printed
+        // line against.
+        println!("WORKSPACE_MODS={}", workspace_mods.display());
+        run_setup_and_report(&workspace).await;
+    }
+
+    /// `workspace/mods` already present: the debug build must use *that*
+    /// directory -- not the repo checkout -- and say editing the repo has no
+    /// effect on it.
+    #[test]
+    fn names_the_workspace_copy_when_it_already_exists() {
+        let repo_mods = fs::canonicalize(PathBuf::from(format!("../../{MODS_FOLDERNAME}")))
+            .expect("this test must run with cwd = crates/core, next to a real ../../mods");
+
+        let output = run_worker_and_capture_stdout(
+            "process::instance_setup::mods_source_tests::worker_workspace_copy_case",
+        );
+
+        // Not `strip_prefix`: under `--nocapture` libtest prints `test <name>
+        // ... ` immediately before the test's own output starts, on the same
+        // line, so the marker is not necessarily at the start of its line.
+        let workspace_mods = output
+            .lines()
+            .find_map(|line| line.rsplit_once("WORKSPACE_MODS=").map(|(_, rest)| rest.trim()))
+            .unwrap_or_else(|| panic!("worker did not print its WORKSPACE_MODS marker: {output}"));
+
+        assert!(
+            output.contains("Using mods directory"),
+            "no mods-source line printed at all: {output}"
+        );
+        assert!(
+            output.contains(workspace_mods),
+            "line must name the pre-existing workspace copy {workspace_mods}, got: {output}"
+        );
+        assert!(
+            output.contains("pre-existing workspace copy"),
+            "line must say it used the pre-existing workspace copy, got: {output}"
+        );
+        // Negative half of the discrimination: it must not name the repo
+        // checkout instead, proving this isn't just "some path" appearing.
+        assert!(
+            !output.contains(repo_mods.to_str().expect("utf-8 repo mods path")),
+            "line named the repo checkout even though workspace/mods already existed: {output}"
+        );
+    }
+}
+
 /// Runtime behaviour of [`setup_factorio_instance`], as opposed to the
 /// manifest checks above. A separate module because the file already has a
 /// `tests` module (a second one with the same name would not compile) and

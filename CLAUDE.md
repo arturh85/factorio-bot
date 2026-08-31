@@ -250,9 +250,15 @@ The system supports running multiple graphical Factorio clients controlled by Lu
 #            there is NO refresh path -- editing mods/BotBridge has no effect
 #            and the run silently uses the stale copy. Edit workspace/mods/
 #            directly when iterating, or delete it to re-seed.
+#            Every run -- either build, no flag needed -- logs one line
+#            naming which directory actually won: "Using mods directory
+#            <absolute path> (<why>)". That line, not a guess from a
+#            traceback, is the authoritative answer to "did my edit ship".
 #            Same trap for scripts: workspace/scripts/ is a separate copy, and
 #            the CLI resolves a script by bare name against THAT copy, not the
-#            repo. Check the path in any traceback to see which one ran.
+#            repo -- but scripts has no repo-checkout fallback at all (even in
+#            a debug build, a missing workspace/scripts/ is created empty, not
+#            seeded from the repo) and no equivalent log line yet.
 #            Data dir is ~/.local/share/factorio-bot-dev/
 #   release  mods and scripts are include_dir!-embedded into the binary at
 #            COMPILE TIME and extracted once into the workspace. Editing

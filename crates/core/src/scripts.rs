@@ -76,8 +76,9 @@ pub fn scripts_dir(workspace_path: &Path) -> Result<PathBuf> {
 /// directory is left alone -- editing `scripts/*.lua` in the repo has no
 /// effect on it -- so this is safe to call on every start; when it is already
 /// populated this also checks it for drift from the embedded snapshot (once
-/// per process, since callers such as the Tauri commands call this on every
-/// request) and warns if any script is stale, naming [`REFRESH_SCRIPTS_ENV`]
+/// per process, since callers such as the HTTP script routes call this on
+/// every request) and warns if any script is stale, naming
+/// [`REFRESH_SCRIPTS_ENV`]
 /// as the way to refresh it. Debug builds deliberately skip the extraction
 /// and the check: `include_dir!` bundles this repository's own `scripts/`
 /// directory, and a developer checkout already has them.
@@ -113,8 +114,8 @@ pub fn ensure_scripts_dir(workspace_path: &Path) -> Result<PathBuf> {
 #[cfg(not(debug_assertions))]
 pub const REFRESH_SCRIPTS_ENV: &str = "FACTORIO_BOT_REFRESH_SCRIPTS";
 
-/// `ensure_scripts_dir` runs on every Tauri command and every server request
-/// that touches scripts, so checking staleness unconditionally would print
+/// `ensure_scripts_dir` runs on every server request that touches scripts, so
+/// checking staleness unconditionally would print
 /// the same warning over and over for the life of the process. This runs the
 /// check (and an env-gated refresh) exactly once per process instead.
 #[cfg(not(debug_assertions))]

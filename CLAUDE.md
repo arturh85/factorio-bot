@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Factorio Bot is a Tauri+Rust desktop application that orchestrates Factorio game servers and multiple bots via Lua scripting. Use cases include tool-assisted speedruns (TAS), ML training environments, and Factorio experiments.
+Factorio Bot is a Rust application that orchestrates Factorio game servers and multiple bots via Lua scripting, with a browser frontend served by its own HTTP server. It was a Tauri desktop app until plan 5 (`docs/superpowers/plans/2026-08-30-frontend-transport-swap.md`) removed Tauri entirely; the crate directory is still named `app/src-tauri` because renaming it is a deferred mechanical change, not because Tauri is still there. Use cases include tool-assisted speedruns (TAS), ML training environments, and Factorio experiments.
 
 ## Build & Development Commands
 
@@ -21,17 +21,24 @@ just fix
 # Start Factorio server with BotBridge mod
 just factorio
 
-# Development (starts Tauri + Vite dev servers)
-cd app && pnpm start
+# Frontend dev server on :8080, proxying /api to a `just serve` on :7492
+just start          # or: cd app && pnpm start
+
+# The real thing: axum serving the built SPA and the API on :7492
+just serve
 
 # REPL mode (faster build, no GUI, for testing scripting)
 cargo repl
 
-# Run frontend tests
+# Run frontend tests (vitest, watch mode; `pnpm run test:coverage` for one shot
+# plus the enforced coverage gate)
 cd app && pnpm test
 
-# or with nextest
-cargo nextest run
+# Rust tests. `cargo nextest` is NOT installed here -- if you install it, note
+# that it runs one process per test, which contains a hang to a single named
+# failure instead of killing the run, but does NOT run doctests. That is a
+# real trade, not a free upgrade.
+cargo test --workspace
 
 # Lint everything
 cd app && pnpm lint              # TypeScript + ESLint + Vue type checking
@@ -41,7 +48,8 @@ cargo clippy --workspace --all-features --all-targets -- --deny warnings
 cd app && pnpm run precommit:check
 
 # Production build
-cd app && pnpm run tauri:build
+cargo build --release --all-features   # the binary IS the deliverable now
+cd app && pnpm run build:web           # and the SPA it serves
 
 # Build with/without default features
 cargo build --all-features
@@ -54,9 +62,9 @@ These leverage rust-analyzer for accuracy with macros and trait implementations
 ## Architecture
 
 ```
-Desktop App (Vue 3 + PrimeVue)
-    ↓ (IPC + HTTP)
-Tauri Commands (app/src-tauri/)
+Browser (Vue 3; PrimeVue being replaced -- see plan 6)
+    ↓ (HTTP + SSE, no IPC)
+crates/server (axum: /api/v1/*, serves the built SPA)
     ↓
 ┌─────────────────────────────────────────┐
 │ Rust Workspace                          │
@@ -99,7 +107,8 @@ BotBridge Mod (Factorio mod for RPC)
   - `sandbox.rs` - the restricted interpreter every user script runs in
   - `lua_docs.rs` - generates `docs/lua/src/{globals,world,rcon,goal}.lua` from
     the `__doc_entry_*` strings in `globals/`. Those four files are build
-    artifacts (gitignored) written by `app/src-tauri/build.rs`; edit the Rust
+    artifacts (gitignored) written by `app/src-tauri/build.rs` -- which is the
+    CLI crate's build script; the directory name is a leftover; edit the Rust
     strings, never the `.lua`. `docs/lua/src/types.lua` is the exception — it
     is hand-written and tracked, mirroring `crates/core/src/types.rs`.
 

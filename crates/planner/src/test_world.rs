@@ -341,6 +341,109 @@ pub(crate) fn world_with_locked_recipe(recipe: &str, unlockers: &[&str]) -> Fact
     world
 }
 
+/// A world carrying exactly one technology, `tech`, which is unlocked by a
+/// `research_trigger` rather than by science packs.
+///
+/// `trigger_json` is the trigger object verbatim, so a test can state the
+/// shape the game sends rather than a Rust value the parser has already
+/// blessed. The pack fields are all zero/empty, which is what the live game
+/// really reports for a trigger technology — that is the whole reason the
+/// planner used to cost these at nothing.
+///
+/// `unlocks` names a recipe the technology turns on, which is *disabled* in the
+/// resulting world. Passing the same item the trigger asks to craft builds the
+/// self-unlocking cycle that shipped 2.1.17 really contains: `foundry` is
+/// triggered by crafting a foundry and is the only technology unlocking the
+/// foundry recipe.
+pub(crate) fn world_with_trigger(
+    tech: &str,
+    trigger_json: &str,
+    locked_recipe: Option<&str>,
+    unlocked_by: Option<&str>,
+) -> FactorioWorld {
+    let world = fixture_world();
+
+    if let Some(recipe) = locked_recipe {
+        let mut locked = world
+            .recipes
+            .get(recipe)
+            .unwrap_or_else(|| panic!("the shared fixture must define the {recipe} recipe"))
+            .clone();
+        assert!(
+            locked.enabled,
+            "{recipe} is already disabled in the shared fixture; this fixture would then be \
+             asserting nothing"
+        );
+        locked.enabled = false;
+        world
+            .update_recipes(vec![locked])
+            .expect("update_recipes cannot fail for a well-formed recipe");
+    }
+    // Who unlocks the locked recipe: this technology itself (the self-unlocking
+    // cycle) or a separate one, which is the ordinary case and the control for
+    // it. Both have to be expressible, or a guard that refused every locked
+    // trigger item would look correct.
+    let unlocker = unlocked_by.unwrap_or(tech);
+    let own_recipes = match locked_recipe {
+        Some(recipe) if unlocker == tech => format!(r#"["{recipe}"]"#),
+        _ => "[]".to_string(),
+    };
+    let other_technology = match (locked_recipe, unlocked_by) {
+        (Some(recipe), Some(other)) => format!(
+            r#",
+            "{other}": {{
+              "name": "{other}",
+              "enabled": true,
+              "upgrade": false,
+              "researched": false,
+              "prerequisites": [],
+              "research_unit_ingredients": [],
+              "research_unit_count": 1,
+              "research_unit_energy": 60.0,
+              "order": "u-{other}",
+              "level": 1,
+              "valid": true,
+              "unlocked_recipes": ["{recipe}"]
+            }}"#
+        ),
+        _ => String::new(),
+    };
+
+    let json = format!(
+        r#"
+        {{
+          "name": "player",
+          "force_id": 1,
+          "current_research": null,
+          "research_progress": null,
+          "technologies": {{
+            "{tech}": {{
+              "name": "{tech}",
+              "enabled": true,
+              "upgrade": false,
+              "researched": false,
+              "prerequisites": [],
+              "research_unit_ingredients": [],
+              "research_unit_count": 0,
+              "research_unit_energy": 0.0,
+              "order": "t-{tech}",
+              "level": 1,
+              "valid": true,
+              "unlocked_recipes": {own_recipes},
+              "research_trigger": {trigger_json}
+            }}{other_technology}
+          }}
+        }}
+        "#
+    );
+    let force: FactorioForce =
+        serde_json::from_str(&json).expect("the generated trigger force must parse");
+    world
+        .update_force(force)
+        .expect("update_force cannot fail for a well-formed force");
+    world
+}
+
 /// `fixture_world()` plus the force above. Nothing else differs.
 pub(crate) fn world_with_technologies() -> FactorioWorld {
     let world = fixture_world();

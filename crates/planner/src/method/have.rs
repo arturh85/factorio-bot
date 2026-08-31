@@ -24,7 +24,7 @@ use crate::ids::{BotId, Ticks};
 use crate::method::util::{
     free_area_near, ingredients_of, mining_ticks, nearest_resource_tile, output_per_craft,
     recipe_for, recipe_gate, recipe_ticks, research_ingredients, research_ticks,
-    resource_supply_at_least, resource_tiles_for, smelting_ticks, RecipeGate,
+    resource_supply_at_least, resource_tiles_for, smelting_ticks, trigger_requirement, RecipeGate,
 };
 use crate::method::{ExpansionCtx, GoalSite, Method, MethodRegistry, Step};
 use crate::state::PlanState;
@@ -670,8 +670,21 @@ impl Method for Researched {
         // inventory. Prerequisites are not counted — a `Researched` effect is
         // world-scoped and satisfied by whoever ran it, so it pulls nothing
         // into anyone's inventory.
+        //
+        // A trigger technology's requirement counts the same way: it is one
+        // more thing the research action needs in the acting bot's inventory,
+        // so a trigger plus a pack bill converge exactly as two packs would.
+        // `trigger_requirement` cannot report here — `converges` has no error
+        // channel — so an inexpressible trigger contributes nothing and the
+        // refusal is left to `expand`, which is reached either way.
+        let trigger = trigger_requirement(state, &tech)
+            .ok()
+            .flatten()
+            .into_iter()
+            .collect::<Vec<_>>();
         research_ingredients(&tech)
             .iter()
+            .chain(trigger.iter())
             .filter(|(item, count)| needs_producing(state, item, *count))
             .count()
             >= 2
@@ -717,9 +730,25 @@ impl Method for Researched {
             .collect();
         let ingredients = research_ingredients(&tech);
 
+        // A Factorio 2.0 trigger technology, if this is one. The `?` is the
+        // point: a trigger this planner cannot express, or one that only this
+        // technology could unlock, refuses here rather than falling through to
+        // the pack path — where the empty bill and zero energy below would
+        // plan it as free and hand the caller a makespan missing the work.
+        let trigger = trigger_requirement(&ctx.state, &tech)?;
+
         let mut steps: Vec<Step> = Vec::new();
         for prerequisite in &prerequisites {
             steps.push(Step::Subgoal(Goal::Researched(prerequisite.clone())));
+        }
+        // `Holder::Share` for the same reason the pack bill uses it: the
+        // research is one action reading one bot's inventory.
+        if let Some((item, count)) = &trigger {
+            steps.push(Step::Subgoal(Goal::Have {
+                item: item.clone(),
+                count: *count,
+                whose: Holder::Share(ctx.chain_actor),
+            }));
         }
         for (item, count) in &ingredients {
             // `Holder::Share`, not `Holder::Anyone`. The research is one action
@@ -753,6 +782,18 @@ impl Method for Researched {
                 count: *count,
             });
             eff.push(Effect::LoseItem {
+                who: Actor::Role,
+                item: item.clone(),
+                count: *count,
+            });
+        }
+        // A trigger's items are required but **not** spent. The game watches
+        // the crafting; it does not take the result away, so debiting them
+        // here would make a later step re-produce items the bot still holds.
+        // This is the one place the trigger path and the pack path differ in
+        // kind rather than in numbers.
+        if let Some((item, count)) = &trigger {
+            pre.push(Condition::HasItem {
                 who: Actor::Role,
                 item: item.clone(),
                 count: *count,
@@ -893,7 +934,7 @@ mod tests {
     use crate::state::PlanState;
     use factorio_bot_core::factorio::util::calculate_distance;
     use factorio_bot_core::test_utils::fixture_world;
-    use factorio_bot_core::types::Position;
+    use factorio_bot_core::types::{Position, ResearchTrigger};
     use std::sync::Arc;
 
     fn state(bots: &[BotId]) -> PlanState {
@@ -2920,5 +2961,246 @@ mod tests {
             craft_start >= research_end,
             "craft starts at {craft_start}, research ends at {research_end}"
         );
+    }
+
+    // ---- research_trigger technologies -------------------------------------
+    //
+    // Factorio 2.0 technologies that complete when the player *does* something
+    // rather than when a lab eats packs. `research_unit_ingredients` is empty
+    // and `research_unit_energy` is zero for all of them, so before this the
+    // planner costed them at nothing and produced a plan that was correctly
+    // ordered and wrongly timed.
+
+    fn trigger_state(
+        tech: &str,
+        trigger_json: &str,
+        locked_recipe: Option<&str>,
+        unlocked_by: Option<&str>,
+    ) -> PlanState {
+        PlanState::from_world(
+            Arc::new(crate::test_world::world_with_trigger(
+                tech,
+                trigger_json,
+                locked_recipe,
+                unlocked_by,
+            )),
+            &[BotId(1)],
+        )
+    }
+
+    /// The premise: the fixture really does present a technology whose pack
+    /// bill is empty and whose trigger is set. Without this, the tests below
+    /// could pass against a fixture that quietly grew a science cost.
+    #[test]
+    fn the_trigger_fixture_carries_a_trigger_and_no_pack_bill() {
+        let s = trigger_state(
+            "steam-power",
+            r#"{"type": "craft-item", "item": "iron-plate", "count": 50}"#,
+            None,
+            None,
+        );
+        let tech = s.technology("steam-power").expect("the fixture defines it");
+        assert!(
+            tech.research_unit_ingredients.is_empty(),
+            "a trigger technology consumes no packs"
+        );
+        assert_eq!(research_ticks(&tech), 0, "and takes no lab time");
+        assert_eq!(
+            tech.research_trigger,
+            Some(ResearchTrigger::CraftItem {
+                item: "iron-plate".into(),
+                count: 50,
+            })
+        );
+    }
+
+    /// The fix. `steam-power` is really "craft 50 iron plates", and that work
+    /// has to appear in the plan as a subgoal — the step list must *grow*.
+    #[test]
+    fn a_craft_item_trigger_becomes_the_subgoal_it_names() {
+        let s = trigger_state(
+            "steam-power",
+            r#"{"type": "craft-item", "item": "iron-plate", "count": 50}"#,
+            None,
+            None,
+        );
+        let steps = research_steps(&s, "steam-power");
+        assert_eq!(
+            subgoals(&steps),
+            vec![Goal::Have {
+                item: "iron-plate".into(),
+                count: 50,
+                whose: Holder::Share(BotId(1)),
+            }],
+            "the trigger's own work must be planned"
+        );
+    }
+
+    /// The trigger watches a craft; it does not eat the result. So the research
+    /// requires the items to exist and must *not* debit them, unlike the pack
+    /// path which spends what it consumes.
+    #[test]
+    fn a_trigger_requires_its_items_but_does_not_spend_them() {
+        let s = trigger_state(
+            "steam-power",
+            r#"{"type": "craft-item", "item": "iron-plate", "count": 50}"#,
+            None,
+            None,
+        );
+        let steps = research_steps(&s, "steam-power");
+        let Some(Step::Act(action)) = steps.last() else {
+            panic!("the last step must be the research action, got {steps:?}");
+        };
+        assert!(
+            action.pre.contains(&Condition::HasItem {
+                who: Actor::Role,
+                item: "iron-plate".into(),
+                count: 50,
+            }),
+            "the trigger's items must be required, got {:?}",
+            action.pre
+        );
+        assert!(
+            !action
+                .eff
+                .iter()
+                .any(|e| matches!(e, Effect::LoseItem { .. })),
+            "a trigger consumes nothing, got {:?}",
+            action.eff
+        );
+        assert!(action
+            .eff
+            .contains(&Effect::Researched("steam-power".into())));
+    }
+
+    /// `count` is absent in the shipped prototype for a single-item trigger
+    /// (`automation-science-pack` is `{type = "craft-item", item = "lab"}`), and
+    /// an absent count means one. Defaulting it to zero would put the
+    /// under-costing straight back.
+    #[test]
+    fn an_absent_trigger_count_means_one_not_none() {
+        let s = trigger_state(
+            "automation-science-pack",
+            r#"{"type": "craft-item", "item": "iron-plate"}"#,
+            None,
+            None,
+        );
+        let steps = research_steps(&s, "automation-science-pack");
+        assert_eq!(
+            subgoals(&steps),
+            vec![Goal::Have {
+                item: "iron-plate".into(),
+                count: 1,
+                whose: Holder::Share(BotId(1)),
+            }]
+        );
+    }
+
+    /// A trigger kind this planner cannot express as a goal must be *refused*,
+    /// by name, rather than costed at nothing. Silently planning it as free is
+    /// the defect being fixed, so the failure has to be louder than the bug.
+    #[test]
+    fn an_inexpressible_trigger_is_refused_by_name() {
+        let s = trigger_state(
+            "uranium-processing",
+            r#"{"type": "mine-entity"}"#,
+            None,
+            None,
+        );
+        let mut ctx = ExpansionCtx::new(s.fork(), BotId(1));
+        let err = Researched
+            .expand(&Goal::Researched("uranium-processing".into()), &mut ctx)
+            .expect_err("a mine-entity trigger cannot be expressed as a goal");
+        assert!(
+            matches!(
+                &err,
+                PlannerError::UnsupportedResearchTrigger { technology, trigger }
+                    if technology == "uranium-processing" && trigger == "mine-entity"
+            ),
+            "expected an UnsupportedResearchTrigger naming the kind, got {err:?}"
+        );
+    }
+
+    /// The cycle the shipped game really contains: `foundry` is triggered by
+    /// crafting a foundry, and is the only technology that unlocks the foundry
+    /// recipe. Expanding that naively recurses until `ExpansionTooDeep`, which
+    /// tells a caller "a method is probably expanding into itself" — true, and
+    /// useless. It has to be diagnosed where it is understood.
+    #[test]
+    fn a_self_unlocking_trigger_is_refused_rather_than_recursing() {
+        let s = trigger_state(
+            "foundry",
+            r#"{"type": "craft-item", "item": "automation-science-pack", "count": 1}"#,
+            Some("automation-science-pack"),
+            None,
+        );
+        let mut ctx = ExpansionCtx::new(s.fork(), BotId(1));
+        let err = Researched
+            .expand(&Goal::Researched("foundry".into()), &mut ctx)
+            .expect_err("a technology whose trigger only it can unlock is unreachable");
+        assert!(
+            matches!(
+                &err,
+                PlannerError::SelfUnlockingResearchTrigger { technology, item }
+                    if technology == "foundry" && item == "automation-science-pack"
+            ),
+            "expected a SelfUnlockingResearchTrigger, got {err:?}"
+        );
+    }
+
+    /// The guard above must not fire on the ordinary case: a trigger item whose
+    /// recipe is unlocked by a *different* technology is fine, and is how
+    /// `automation-science-pack` (craft a lab, unlocked by `electronics`)
+    /// really works. Without this, refusing everything would pass the test
+    /// above.
+    #[test]
+    fn a_trigger_item_unlocked_by_another_technology_still_expands() {
+        // The trigger item's recipe is *locked* here, so the guard is actually
+        // reached -- but a different technology unlocks it, so it must not
+        // fire. With an enabled trigger item `recipe_gate` returns `Open` and
+        // the guard is short-circuited, which asserts nothing about it.
+        let s = trigger_state(
+            "automation-science-pack",
+            r#"{"type": "craft-item", "item": "automation-science-pack", "count": 1}"#,
+            Some("automation-science-pack"),
+            Some("asp-tech"),
+        );
+        let recipe = recipe_for(&s, "automation-science-pack").expect("still present, just off");
+        assert_eq!(
+            recipe_gate(&s, &recipe),
+            RecipeGate::NeedsResearch("asp-tech".into()),
+            "the fixture must lock the trigger item behind a *different* technology"
+        );
+
+        let steps = research_steps(&s, "automation-science-pack");
+        assert_eq!(
+            subgoals(&steps),
+            vec![Goal::Have {
+                item: "automation-science-pack".into(),
+                count: 1,
+                whose: Holder::Share(BotId(1)),
+            }],
+            "another technology unlocks it, so this trigger is reachable"
+        );
+    }
+
+    /// A pack-researched technology must be completely unaffected: it still
+    /// bills packs, still spends them, and still takes lab time. This is the
+    /// control for every test above.
+    #[test]
+    fn a_pack_researched_technology_is_untouched_by_the_trigger_path() {
+        let s = tech_state(&[BotId(1)]);
+        let tech = s.technology("automation").expect("the fixture defines it");
+        assert_eq!(tech.research_trigger, None);
+        let steps = research_steps(&s, "automation");
+        let Some(Step::Act(action)) = steps.last() else {
+            panic!("the last step must be the research action");
+        };
+        assert_eq!(action.duration, 6000, "10 units at 600 ticks each");
+        assert!(action.eff.contains(&Effect::LoseItem {
+            who: Actor::Role,
+            item: "automation-science-pack".into(),
+            count: 10,
+        }));
     }
 }

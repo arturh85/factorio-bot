@@ -809,6 +809,100 @@ pub struct ChunkResource {
     pub position: Position,
 }
 
+/// How a Factorio 2.0 `research_trigger` technology is unlocked.
+///
+/// These technologies do not consume science packs at all: they complete when
+/// the player *does* something. `research_unit_ingredients` is empty and
+/// `research_unit_energy` is zero for every one of them, so a planner that only
+/// reads the pack fields costs them at nothing — which is correct about the
+/// research itself and silently wrong about the work that triggers it. Live
+/// 2.1.17 has 32 such technologies, including `electronics`, `steam-power`,
+/// `automation-science-pack` and `steel-axe`.
+///
+/// Source: `LuaTechnologyPrototype::research_trigger` in the shipped
+/// `runtime-api.json` (`application_version` 2.1.17, `api_version` 6), whose
+/// `ResearchTrigger` concept is a table tagged by `type` with eight variants.
+/// The trigger lives on the **prototype**, not on `LuaTechnology` — the same
+/// split that already forced `effects` to be read through `.prototype`.
+///
+/// # Why only `craft-item` carries a payload
+///
+/// `craft-item` is the one variant whose runtime shape is unambiguous: `item`
+/// is an `ItemIDFilter` (a table with a `name`) and `count` is a `uint32`. The
+/// others are deliberately modelled as payload-free markers, because the two
+/// shipped schemas disagree about them — `runtime-api.json` documents
+/// `mine-entity` as carrying a singular `entity :: string`, while the shipped
+/// prototype data (`data/base/prototypes/technology.lua`) writes `entities =
+/// {...}`, a list. Guessing between them is exactly the mistake this project
+/// has made twice from recalled API shapes, so the planner is told *that* the
+/// technology has a trigger it cannot express, and refuses, rather than being
+/// handed a field that might not exist.
+///
+/// Carrying the kind is still the whole point: it is what lets a planner
+/// distinguish "this research is genuinely free" from "this research has a cost
+/// I cannot see", and refuse loudly instead of costing the second at zero.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum ResearchTrigger {
+    /// Craft `count` of `item`. The only variant a goal planner can express
+    /// directly, and the one the early tree is built from.
+    CraftItem {
+        item: String,
+        /// Absent in the prototype data for a trigger that wants a single item
+        /// (`automation-science-pack` is `{type = "craft-item", item = "lab"}`
+        /// with no count), so an absent key means one, not none. Costing it at
+        /// zero would reintroduce the very defect this type exists to fix.
+        #[serde(default = "one_item")]
+        count: u32,
+    },
+    CraftFluid,
+    MineEntity,
+    BuildEntity,
+    SendItemToOrbit,
+    CaptureSpawner,
+    CreateSpacePlatform,
+    Scripted,
+    /// A `type` this build does not know — a newer Factorio or a mod. Kept as a
+    /// variant rather than a deserialisation failure so that one unrecognised
+    /// trigger cannot make a whole world unreadable; it still reaches the
+    /// planner as "trigger-based, inexpressible", which is the safe answer.
+    #[serde(other)]
+    Unknown,
+}
+
+fn one_item() -> u32 {
+    1
+}
+
+impl ResearchTrigger {
+    /// The `type` string this trigger came from, for diagnostics that have to
+    /// name it back to a caller.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            ResearchTrigger::CraftItem { .. } => "craft-item",
+            ResearchTrigger::CraftFluid => "craft-fluid",
+            ResearchTrigger::MineEntity => "mine-entity",
+            ResearchTrigger::BuildEntity => "build-entity",
+            ResearchTrigger::SendItemToOrbit => "send-item-to-orbit",
+            ResearchTrigger::CaptureSpawner => "capture-spawner",
+            ResearchTrigger::CreateSpacePlatform => "create-space-platform",
+            ResearchTrigger::Scripted => "scripted",
+            ResearchTrigger::Unknown => "unknown",
+        }
+    }
+}
+
+impl std::fmt::Display for ResearchTrigger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResearchTrigger::CraftItem { item, count } => {
+                write!(f, "craft {} {}", count, item)
+            }
+            other => write!(f, "{}", other.kind()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct FactorioTechnology {
@@ -839,6 +933,15 @@ pub struct FactorioTechnology {
     /// list and is what the old enabled-only world implicitly assumed.
     #[serde(default, deserialize_with = "deserialize_helpers::vec_or_empty_map")]
     pub unlocked_recipes: Vec<String>,
+    /// What the player has to *do* to unlock this, for the Factorio 2.0
+    /// technologies that are not researched with science packs at all.
+    ///
+    /// `None` is the ordinary pack-researched technology, and is what every
+    /// payload captured before this field existed deserialises to — hence
+    /// `#[serde(default)]`. `Some(_)` means the pack fields are meaningless
+    /// here and the real cost is whatever the trigger names.
+    #[serde(default)]
+    pub research_trigger: Option<ResearchTrigger>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
@@ -1534,6 +1637,104 @@ impl IntoLua for FactorioEntity {
 mod tests {
     use super::*;
     use crate::factorio::util::{move_pos, move_position};
+
+    /// The trigger shapes, verbatim from the shipped API definition:
+    /// `workspace/factorio-api-docs/runtime-api.json`, `application_version`
+    /// 2.1.17, concept `ResearchTrigger`. Eight `type` values, and only
+    /// `craft-item` is modelled with a payload.
+    #[test]
+    fn every_documented_trigger_type_deserialises_to_its_own_variant() {
+        let cases: [(&str, ResearchTrigger); 7] = [
+            (r#"{"type":"craft-fluid"}"#, ResearchTrigger::CraftFluid),
+            (r#"{"type":"mine-entity"}"#, ResearchTrigger::MineEntity),
+            (r#"{"type":"build-entity"}"#, ResearchTrigger::BuildEntity),
+            (
+                r#"{"type":"send-item-to-orbit"}"#,
+                ResearchTrigger::SendItemToOrbit,
+            ),
+            (
+                r#"{"type":"capture-spawner"}"#,
+                ResearchTrigger::CaptureSpawner,
+            ),
+            (
+                r#"{"type":"create-space-platform"}"#,
+                ResearchTrigger::CreateSpacePlatform,
+            ),
+            (r#"{"type":"scripted"}"#, ResearchTrigger::Scripted),
+        ];
+        for (json, expected) in cases {
+            let got: ResearchTrigger =
+                serde_json::from_str(json).unwrap_or_else(|e| panic!("{json} must parse: {e}"));
+            assert_eq!(got, expected, "for {json}");
+            assert_ne!(
+                got,
+                ResearchTrigger::Unknown,
+                "{json} is documented and must not fall through to Unknown"
+            );
+        }
+    }
+
+    /// `craft-item` is the one variant the planner can act on, so its payload
+    /// has to survive. The count is the number of items that must be crafted.
+    #[test]
+    fn a_craft_item_trigger_keeps_its_item_and_count() {
+        let got: ResearchTrigger =
+            serde_json::from_str(r#"{"type":"craft-item","item":"steel-plate","count":50}"#)
+                .expect("parses");
+        assert_eq!(
+            got,
+            ResearchTrigger::CraftItem {
+                item: "steel-plate".into(),
+                count: 50,
+            }
+        );
+        assert_eq!(got.to_string(), "craft 50 steel-plate");
+    }
+
+    /// The shipped prototype omits `count` when it means one --
+    /// `automation-science-pack` is `{type = "craft-item", item = "lab"}`. An
+    /// absent count must mean one, not zero: zero would silently restore the
+    /// free-research defect this type exists to remove.
+    #[test]
+    fn an_absent_craft_item_count_defaults_to_one() {
+        let got: ResearchTrigger =
+            serde_json::from_str(r#"{"type":"craft-item","item":"lab"}"#).expect("parses");
+        assert_eq!(
+            got,
+            ResearchTrigger::CraftItem {
+                item: "lab".into(),
+                count: 1,
+            }
+        );
+    }
+
+    /// A newer Factorio or a mod may add a trigger type this build has never
+    /// heard of. That must not make the whole world unreadable -- one strange
+    /// technology would otherwise take every other technology down with it --
+    /// so it lands in `Unknown`, which the planner treats as inexpressible and
+    /// refuses rather than costs at zero.
+    #[test]
+    fn an_unrecognised_trigger_type_falls_back_instead_of_failing_the_parse() {
+        let got: ResearchTrigger =
+            serde_json::from_str(r#"{"type":"teleport-a-biter","entity":"small-biter"}"#)
+                .expect("an unknown type must still parse");
+        assert_eq!(got, ResearchTrigger::Unknown);
+        assert_eq!(got.kind(), "unknown");
+    }
+
+    /// A technology captured before this field existed has no `research_trigger`
+    /// key at all. That is the ordinary pack-researched technology and must
+    /// deserialise to `None`, leaving every existing fixture readable.
+    #[test]
+    fn a_technology_without_a_trigger_key_is_pack_researched() {
+        let tech: FactorioTechnology = serde_json::from_str(
+            r#"{"name":"automation","enabled":true,"upgrade":false,"researched":false,
+                "prerequisites":[],"research_unit_ingredients":[],"research_unit_count":10,
+                "research_unit_energy":600.0,"order":"a","level":1,"valid":true}"#,
+        )
+        .expect("parses without the new key");
+        assert_eq!(tech.research_trigger, None);
+    }
 
     /// The sixteen names and discriminants, verbatim from the shipped API
     /// definition: `workspace/factorio-api-docs/runtime-api.json`,

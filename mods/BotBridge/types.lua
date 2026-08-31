@@ -244,6 +244,51 @@ function serialize_technology(technology)
         end
     end
     record.unlocked_recipes = unlocked
+
+    -- How this technology is unlocked, when it is NOT unlocked by science
+    -- packs.
+    --
+    -- Factorio 2.0 added `research_trigger`: the technology completes when the
+    -- player does a thing (craft 50 steel plates, mine an entity, build one)
+    -- rather than when a lab consumes packs. For those,
+    -- `research_unit_ingredients` is empty and `research_unit_energy` is zero,
+    -- so a planner reading only the pack fields costs them at *nothing* -- it
+    -- orders them correctly and times them wrongly, silently. Live 2.1.17 has
+    -- 32 of them, including `electronics`, `steam-power`,
+    -- `automation-science-pack` and `steel-axe`.
+    --
+    -- Like `effects` above, this lives on LuaTechnologyPrototype and NOT on
+    -- LuaTechnology (runtime-api.json 2.1.17: `LuaTechnology` has no
+    -- `research_trigger` attribute at all), so it has to be reached through
+    -- `.prototype`. The pcall guards the same way.
+    --
+    -- Only `craft-item` is given a payload, because it is the one variant both
+    -- shipped schemas agree on: `item` is an ItemIDFilter -- a *table* with a
+    -- `name`, not a bare string -- and `count` is a uint32 that the prototype
+    -- data omits when it means one. `mine-entity` is the cautionary case:
+    -- runtime-api.json documents a singular `entity` string while the shipped
+    -- prototypes write `entities = {...}`, a list. Sending just the type for
+    -- those tells the planner "trigger-based, and I cannot describe it", which
+    -- is what lets it refuse instead of costing the work at zero.
+    local ok_trigger, trigger = pcall(function()
+        return technology.prototype.research_trigger
+    end)
+    if ok_trigger and trigger ~= nil and trigger.type ~= nil then
+        local out = { type = trigger.type }
+        if trigger.type == "craft-item" and trigger.item ~= nil then
+            if type(trigger.item) == "table" then
+                out.item = trigger.item.name
+            else
+                out.item = trigger.item
+            end
+            out.count = trigger.count or 1
+        end
+        -- Only send a craft-item trigger that actually named an item; a
+        -- half-filled one would deserialise into a goal to craft nothing.
+        if trigger.type ~= "craft-item" or out.item ~= nil then
+            record.research_trigger = out
+        end
+    end
     return record
 end
 

@@ -1,10 +1,11 @@
 //! Helpers shared by more than one method.
 
+use crate::error::PlannerError;
 use crate::ids::Ticks;
 use crate::state::PlanState;
 use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::num_traits::ToPrimitive;
-use factorio_bot_core::types::{FactorioRecipe, FactorioTechnology, Position};
+use factorio_bot_core::types::{FactorioRecipe, FactorioTechnology, Position, ResearchTrigger};
 
 const TICKS_PER_SECOND: f64 = 60.0;
 
@@ -45,17 +46,13 @@ const VANILLA_CHARACTER_MINING_SPEED: f64 = 0.5;
 ///
 /// # The gap this leaves, which meets the above on one technology
 ///
-/// `steel-axe` is a **`research_trigger`** technology (craft 50 steel plates),
-/// and `FactorioTechnology` models only `research_unit_ingredients` /
-/// `research_unit_count`. So the planner sees an empty bill for it and treats
-/// researching it as free.
-///
-/// The two halves meet: a plan that researches `steel-axe` now gets the
-/// resulting mining *rate* right, and still gets that research's own
-/// *duration* wrong. Whoever teaches `FactorioTechnology` about
-/// `research_trigger` closes the second half; until then this step is
-/// correctly ordered but under-costed. `electronics`, `steam-power` and
-/// `automation-science-pack` are the other trigger technologies.
+/// `steel-axe` is a **`research_trigger`** technology (craft 50 steel plates).
+/// Both halves are now closed: `FactorioTechnology::research_trigger` carries
+/// the trigger, and `trigger_requirement` below turns it into the `Goal::Have`
+/// the technology really costs, so a plan that researches `steel-axe` gets the
+/// resulting mining *rate* right and the research's own *cost* right too.
+/// `electronics`, `steam-power` and `automation-science-pack` are the other
+/// trigger technologies in the early tree; live 2.1.17 has 32 in all.
 pub fn character_mining_speed(state: &PlanState) -> f64 {
     let base = state
         .base()
@@ -430,6 +427,64 @@ pub fn research_ingredients(tech: &FactorioTechnology) -> Vec<(String, u32)> {
             )
         })
         .collect()
+}
+
+/// What a `research_trigger` technology actually costs, as the items its
+/// trigger requires be crafted.
+///
+/// `Ok(None)` is the ordinary pack-researched technology, whose bill
+/// `research_ingredients` already describes. `Ok(Some((item, count)))` is a
+/// trigger this planner can express: the technology completes when `count` of
+/// `item` have been crafted, which is an ordinary `Goal::Have`.
+///
+/// Everything else is an error, deliberately. A trigger technology has an empty
+/// pack bill and zero research time, so the alternative to refusing is planning
+/// it as free — which is precisely the defect this function exists to fix, and
+/// which is invisible in the resulting plan. Both error variants name the
+/// technology, so a caller learns which step is not modelled rather than
+/// receiving a makespan that is quietly too small.
+///
+/// # The self-unlocking case
+///
+/// A `craft-item` trigger may ask for an item whose recipe *only this same
+/// technology* unlocks. That is not hypothetical: shipped 2.1.17 has six,
+/// starting with `foundry`, which is triggered by crafting a foundry and is the
+/// only technology unlocking the foundry recipe. Emitting the subgoal anyway
+/// would send the expansion round `Researched(t)` -> `Have(item)` ->
+/// `NeedsResearch(t)` -> `Researched(t)` until the driver's depth guard fired,
+/// reporting `ExpansionTooDeep` — a true statement that names neither the
+/// technology nor the reason. The cycle is understood here, so it is diagnosed
+/// here.
+///
+/// The check reuses `recipe_gate`, so it asks the question the crafting methods
+/// would actually ask, and it reads the overlay: a technology an earlier step
+/// already researched leaves the recipe open and the guard does not fire.
+pub fn trigger_requirement(
+    state: &PlanState,
+    tech: &FactorioTechnology,
+) -> Result<Option<(String, u32)>, PlannerError> {
+    let Some(trigger) = &tech.research_trigger else {
+        return Ok(None);
+    };
+    match trigger {
+        ResearchTrigger::CraftItem { item, count } => {
+            if let Some(recipe) = recipe_for(state, item) {
+                if let RecipeGate::NeedsResearch(unlocker) = recipe_gate(state, &recipe) {
+                    if unlocker == tech.name {
+                        return Err(PlannerError::SelfUnlockingResearchTrigger {
+                            technology: tech.name.clone(),
+                            item: item.clone(),
+                        });
+                    }
+                }
+            }
+            Ok(Some((item.clone(), *count)))
+        }
+        other => Err(PlannerError::UnsupportedResearchTrigger {
+            technology: tech.name.clone(),
+            trigger: other.kind().to_string(),
+        }),
+    }
 }
 
 /// How long a whole research takes, in ticks.

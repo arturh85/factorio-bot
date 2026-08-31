@@ -69,13 +69,12 @@ print("gantt bytes: " .. tostring(#gantt))
 -- that the automation science pack recipe was absent from world data entirely
 -- and the goal failed with "no method can satisfy".
 --
--- One approximation remains, and it is not this increment's: Factorio 2.0
--- introduced `research_trigger` technologies, unlocked by doing something
--- rather than by feeding science packs, and Space Age's early tree uses them.
--- FactorioTechnology models only research_unit_ingredients/research_unit_count,
--- so the planner sees an empty bill for those and treats them as free. The plan
--- is therefore correctly *ordered* but under-costed at the trigger technologies.
--- Here goal.all is exercised with two item goals instead.
+-- Factorio 2.0's `research_trigger` technologies -- unlocked by doing something
+-- rather than by feeding science packs -- used to be costed at nothing here,
+-- leaving plans correctly *ordered* but under-costed. They now carry their
+-- trigger (FactorioTechnology::research_trigger) and expand into the work it
+-- names; see research_smoke.lua, which measures one. Here goal.all is
+-- exercised with two item goals instead.
 local p2 = goal.plan(goal.all { goal.have("iron-plate", 5), goal.have("iron-gear-wheel", 2) })
 print("composed plan: " .. #p2.steps .. " steps over " .. #p2.bots .. " bots"
       .. ", " .. p2:count { kind = "place", entity = "stone-furnace" } .. " furnaces")

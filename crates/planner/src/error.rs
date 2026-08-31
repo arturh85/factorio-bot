@@ -90,6 +90,54 @@ pub enum PlannerError {
     #[diagnostic(code(planner::no_applicable_method))]
     NoApplicableMethod { goal: String },
 
+    /// A Factorio 2.0 `research_trigger` technology whose trigger this planner
+    /// has no goal for.
+    ///
+    /// Deliberately an error rather than a zero cost. These technologies carry
+    /// no science-pack bill and no research time at all, so a planner that
+    /// reads only the pack fields plans them as *free* — the plan comes out
+    /// correctly ordered and wrongly timed, and nothing in it says so. A
+    /// makespan that is quietly missing several steps is worse than a refusal,
+    /// because a caller cannot tell it happened. Refusing names the technology
+    /// and the trigger kind, so a caller can see exactly what is not modelled.
+    #[error("{technology} is unlocked by a {trigger} trigger, which this planner cannot express as a goal")]
+    #[diagnostic(
+        code(planner::unsupported_research_trigger),
+        help(
+            "only `craft-item` triggers can be planned; costing this one at zero would silently \
+             under-report the plan's makespan"
+        )
+    )]
+    UnsupportedResearchTrigger {
+        technology: String,
+        /// The trigger's `type` string, e.g. `mine-entity`.
+        trigger: String,
+    },
+
+    /// A `craft-item` trigger asking for an item whose recipe only this same
+    /// technology unlocks.
+    ///
+    /// Shipped 2.1.17 really contains six of these — `foundry` is triggered by
+    /// crafting a foundry and is the only technology unlocking the foundry
+    /// recipe, and `biochamber`, `big-mining-drill`, `cryogenic-plant`,
+    /// `tungsten-carbide` and `electromagnetic-plant` are the same shape. The
+    /// game resolves them by routes outside this planner's world model.
+    ///
+    /// Diagnosed here rather than left to recurse: expanding it naively goes
+    /// `Researched(t)` -> `Have(item)` -> "that recipe needs `t`" ->
+    /// `Researched(t)` until the driver's depth guard fires, and
+    /// `ExpansionTooDeep` then reports "a method is probably expanding into
+    /// itself" — which is true, and tells a caller nothing about which
+    /// technology or why.
+    #[error(
+        "{technology} is triggered by crafting {item}, but only {technology} unlocks that recipe"
+    )]
+    #[diagnostic(
+        code(planner::self_unlocking_research_trigger),
+        help("this technology cannot be reached from the current world state")
+    )]
+    SelfUnlockingResearchTrigger { technology: String, item: ItemId },
+
     #[error(
         "expansion of {goal} exceeded {depth} levels; a method is probably expanding into itself"
     )]

@@ -89,25 +89,11 @@ async fn run(matches: &ArgMatches, context: &mut Context) -> Result<()> {
     context.app_settings.write().await.restapi.web_root = Some(web_root.clone());
   }
 
-  // Orchestrators, systemd, and `docker stop` all send SIGTERM rather than
-  // Ctrl-C's SIGINT. Waiting on ctrl_c() alone would let SIGTERM kill the
-  // process without ever running the graceful-shutdown path, orphaning
-  // Factorio exactly as before. `signal::unix` is Unix-only, so gate it and
-  // fall back to plain ctrl_c() on other targets (e.g. Windows).
+  // Ctrl-C's SIGINT and the SIGTERM an orchestrator sends both have to reach
+  // the graceful-shutdown path, or Factorio is orphaned. That rule is shared
+  // with `start`, so the wait itself lives in `cli::shutdown_signal`.
   let shutdown = async {
-    #[cfg(unix)]
-    {
-      let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .expect("failed to install SIGTERM handler");
-      tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        _ = sigterm.recv() => {}
-      }
-    }
-    #[cfg(not(unix))]
-    {
-      let _ = tokio::signal::ctrl_c().await;
-    }
+    crate::cli::shutdown_signal().await;
     info!("shutdown signal received, stopping ...");
   };
 

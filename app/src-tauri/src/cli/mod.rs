@@ -72,6 +72,32 @@ pub fn settings_overrides(matches: &ArgMatches) -> SettingsOverrides {
   }
 }
 
+/// Resolves when the user asks this process to stop.
+///
+/// Ctrl-C raises SIGINT, but orchestrators, systemd and `docker stop` all send
+/// SIGTERM instead. Waiting on `ctrl_c()` alone would let SIGTERM end the
+/// process without ever running a shutdown path, which for the commands that
+/// own a `FactorioInstance` means leaving the Factorio children behind --
+/// `InteractiveProcess` has no `Drop`, so nothing else would kill them.
+///
+/// `signal::unix` is Unix-only, so non-Unix targets fall back to plain
+/// `ctrl_c()`.
+pub async fn shutdown_signal() {
+  #[cfg(unix)]
+  {
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+      .expect("failed to install SIGTERM handler");
+    tokio::select! {
+      _ = tokio::signal::ctrl_c() => {}
+      _ = sigterm.recv() => {}
+    }
+  }
+  #[cfg(not(unix))]
+  {
+    let _ = tokio::signal::ctrl_c().await;
+  }
+}
+
 pub fn subcommands() -> Vec<Box<dyn Subcommand>> {
   vec![
     config::build(),

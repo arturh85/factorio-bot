@@ -665,3 +665,382 @@ end
     )?;
     Ok(map_table)
 }
+
+/// The `-- Sends /silent-command remote.call('X', ...)` line in a doc block is
+/// a claim about behaviour, and until now nothing compared it to any.
+///
+/// `lua_docs::write_lua_docs` renders `rcon.lua` *from* the `__doc_entry_*`
+/// strings above, so generation can only ever guarantee that the published
+/// file matches the strings — it says nothing about whether the strings match
+/// the functions. `inventory_contents_at` shipped with a summary reading
+/// "Craft an item with player", a `-- Sends` line naming
+/// `action_start_crafting` and a `@return` describing a map of counts, and a
+/// green build the entire time.
+///
+/// Both halves of every check below are read out of source text, so neither
+/// side is a list somebody has to remember to update.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    /// This file: the `__doc_entry_*` claims and the bindings they describe.
+    const BINDINGS: &str = include_str!("rcon.rs");
+    /// The RCON client the bindings delegate to — where the remote-call names
+    /// are actually written down, as string literals passed to `remote_call*`.
+    const CLIENT: &str = include_str!("../../../core/src/factorio/rcon.rs");
+    /// The mod, which decides what names exist to be called at all.
+    const MOD_CONTROL: &str = include_str!("../../../../mods/BotBridge/control.lua");
+
+    /// The source up to its own `#[cfg(test)]`.
+    ///
+    /// Both Rust files are parsed by scanning for markers that this very test
+    /// module also writes down — `map_table.set(`, `self.`, `remote_call(` —
+    /// and a parser that read its own prose would invent bindings. Cutting at
+    /// the test attribute is what keeps the checks looking only at production
+    /// code. (The literal here cannot match itself: in the file's bytes it is
+    /// a backslash and an `n`, not a newline.)
+    fn production_half(source: &str) -> &str {
+        source.split("\n#[cfg(test)]").next().unwrap_or(source)
+    }
+
+    /// The leading run of identifier characters, which is how every name below
+    /// is read once its opening delimiter has been found.
+    fn leading_ident(text: &str) -> &str {
+        let end = text
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(text.len());
+        &text[..end]
+    }
+
+    /// Lines paired with their byte offsets, exactly — `split_inclusive` keeps
+    /// the terminator in the slice, so the running offset cannot drift the way
+    /// `lines()` plus an assumed `+ 1` does on CRLF.
+    fn lines_with_offsets(src: &str) -> Vec<(usize, &str)> {
+        let mut out = Vec::new();
+        let mut at = 0usize;
+        for raw in src.split_inclusive('\n') {
+            out.push((at, raw.trim_end_matches(['\n', '\r'])));
+            at += raw.len();
+        }
+        out
+    }
+
+    /// The names `remote.add_interface("botbridge", { ... })` registers.
+    ///
+    /// Read off the mod rather than listed here: this is the set of calls that
+    /// exist, and it is the mod's to decide.
+    fn mod_interface_exports() -> BTreeSet<String> {
+        let start = MOD_CONTROL
+            .find("remote.add_interface(\"botbridge\"")
+            .expect("BotBridge's control.lua must register the botbridge interface");
+        let open = MOD_CONTROL[start..]
+            .find('{')
+            .expect("the interface registration must open a table")
+            + start;
+        let close = MOD_CONTROL[open..]
+            .find('}')
+            .expect("the interface table must close")
+            + open;
+        MOD_CONTROL[open + 1..close]
+            .lines()
+            .filter_map(|line| line.split('=').next())
+            .map(str::trim)
+            .filter(|name| {
+                !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            })
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Every `impl`-level `fn` in the RCON client, sliced from one header to
+    /// the next.
+    ///
+    /// Sliced by header position rather than by matching braces: the client is
+    /// full of `format!("{...}")`, and a brace counter that does not know
+    /// about string literals runs off the end of the first function that has
+    /// one — which, measured while building this, silently merged twenty
+    /// functions into one and made every remote call look reachable from every
+    /// method. Slicing between headers cannot do that.
+    fn client_functions() -> BTreeMap<String, &'static str> {
+        let src = production_half(CLIENT);
+        let mut headers: Vec<(usize, String)> = Vec::new();
+        for (offset, line) in lines_with_offsets(src) {
+            let Some(rest) = line.strip_prefix("    ") else {
+                continue;
+            };
+            // Exactly four spaces: anything deeper is nested inside a body.
+            if rest.starts_with(' ') {
+                continue;
+            }
+            let rest = rest
+                .strip_prefix("pub(crate) ")
+                .or_else(|| rest.strip_prefix("pub "))
+                .unwrap_or(rest);
+            let rest = rest.strip_prefix("async ").unwrap_or(rest);
+            let Some(rest) = rest.strip_prefix("fn ") else {
+                continue;
+            };
+            let name = leading_ident(rest);
+            if !name.is_empty() {
+                headers.push((offset, name.to_string()));
+            }
+        }
+        let mut functions = BTreeMap::new();
+        for (index, (offset, name)) in headers.iter().enumerate() {
+            let end = headers
+                .get(index + 1)
+                .map(|(next, _)| *next)
+                .unwrap_or(src.len());
+            functions.insert(name.clone(), &src[*offset..end]);
+        }
+        functions
+    }
+
+    /// The remote-call names a single client function sends itself.
+    fn remote_calls_in(body: &str) -> BTreeSet<String> {
+        let mut names = BTreeSet::new();
+        for marker in ["remote_call(", "remote_call_timed(", "remote_call_json("] {
+            for (idx, _) in body.match_indices(marker) {
+                let after = body[idx + marker.len()..].trim_start();
+                let Some(rest) = after.strip_prefix('"') else {
+                    continue;
+                };
+                let name = leading_ident(rest);
+                if !name.is_empty() {
+                    names.insert(name.to_string());
+                }
+            }
+        }
+        names
+    }
+
+    /// The sibling methods a single client function calls.
+    ///
+    /// `move_player` sends nothing itself; it delegates to `move_player_timed`,
+    /// which delegates to `action_start_walk_waypoints`, which is where the
+    /// name finally appears. Without this edge the check could only see the
+    /// handful of methods that send directly.
+    fn self_calls_in(body: &str) -> BTreeSet<String> {
+        let mut names = BTreeSet::new();
+        for (idx, _) in body.match_indices("self") {
+            // `myself.foo()` is not a self-call.
+            if body[..idx]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                continue;
+            }
+            let after = body[idx + "self".len()..].trim_start();
+            let Some(after) = after.strip_prefix('.') else {
+                continue;
+            };
+            let after = after.trim_start();
+            let name = leading_ident(after);
+            if name.is_empty() {
+                continue;
+            }
+            if after[name.len()..].trim_start().starts_with('(') {
+                names.insert(name.to_string());
+            }
+        }
+        names
+    }
+
+    /// Every remote call reachable from one client method, following
+    /// `self.other(...)` edges.
+    fn reachable_remote_calls(
+        root: &str,
+        functions: &BTreeMap<String, &'static str>,
+    ) -> BTreeSet<String> {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut queue = vec![root.to_string()];
+        let mut calls = BTreeSet::new();
+        while let Some(name) = queue.pop() {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let Some(body) = functions.get(&name) else {
+                continue;
+            };
+            calls.extend(remote_calls_in(body));
+            for edge in self_calls_in(body) {
+                if functions.contains_key(&edge) {
+                    queue.push(edge);
+                }
+            }
+        }
+        calls
+    }
+
+    /// The `map_table.set("KEY", ...)` blocks of this file, keyed and sliced
+    /// from one to the next — so `__doc_entry_move` and the `move` binding it
+    /// documents are both recoverable by name.
+    fn binding_blocks() -> BTreeMap<String, &'static str> {
+        let src = production_half(BINDINGS);
+        let marker = "map_table.set(";
+        let mut starts: Vec<(usize, String)> = Vec::new();
+        for (idx, _) in src.match_indices(marker) {
+            let after = src[idx + marker.len()..].trim_start();
+            let Some(rest) = after.strip_prefix('"') else {
+                continue;
+            };
+            let key = leading_ident(rest);
+            if !key.is_empty() {
+                starts.push((idx, key.to_string()));
+            }
+        }
+        let mut blocks = BTreeMap::new();
+        for (index, (offset, key)) in starts.iter().enumerate() {
+            let end = starts
+                .get(index + 1)
+                .map(|(next, _)| *next)
+                .unwrap_or(src.len());
+            blocks.insert(key.clone(), &src[*offset..end]);
+        }
+        blocks
+    }
+
+    /// The name a doc block's `-- Sends ... remote.call('X', ...)` line claims.
+    fn documented_remote_call(doc: &str) -> Option<String> {
+        let marker = "remote.call('";
+        let idx = doc.find(marker)?;
+        let name = leading_ident(&doc[idx + marker.len()..]);
+        (!name.is_empty()).then(|| name.to_string())
+    }
+
+    /// The client method a binding block actually invokes. Every binding here
+    /// reaches the client the same way: `_rcon.as_ref().method(..)`.
+    fn client_method_of(block: &str) -> Option<String> {
+        let marker = ".as_ref()";
+        let idx = block.find(marker)?;
+        let rest = block[idx + marker.len()..].trim_start();
+        let rest = rest.strip_prefix('.')?;
+        let name = leading_ident(rest.trim_start());
+        (!name.is_empty()).then(|| name.to_string())
+    }
+
+    /// A remote call the client sends but the mod does not export is a script
+    /// error that only shows up against a running game.
+    ///
+    /// Separate from the doc check below and not subsumed by it: this one
+    /// ranges over *every* call the client sends, including the ones no Lua
+    /// binding documents, and it is the mod — not the docs — that it holds
+    /// them to.
+    #[test]
+    fn every_remote_call_the_client_sends_is_exported_by_the_mod() {
+        let exports = mod_interface_exports();
+        assert!(
+            exports.len() >= 20,
+            "only {} names parsed out of BotBridge's remote interface; the parse \
+             broke and this test would then assert nothing",
+            exports.len()
+        );
+        let functions = client_functions();
+        let mut sent: BTreeSet<String> = BTreeSet::new();
+        for body in functions.values() {
+            sent.extend(remote_calls_in(body));
+        }
+        assert!(
+            sent.len() >= 20,
+            "only {} remote calls found in the RCON client; the parse broke and \
+             this test would then assert nothing",
+            sent.len()
+        );
+        let missing: Vec<&String> = sent.difference(&exports).collect();
+        assert!(
+            missing.is_empty(),
+            "the RCON client sends {missing:?}, which `remote.add_interface(\"botbridge\", ..)` \
+             in mods/BotBridge/control.lua does not export -- every such call fails against a \
+             running game. Fix the name in `crates/core/src/factorio/rcon.rs`, or export it \
+             from the mod's interface table."
+        );
+    }
+
+    /// A doc block must name a remote call its own binding can actually send.
+    ///
+    /// This is the check that would have caught `inventory_contents_at`: the
+    /// name it advertised, `action_start_crafting`, is a perfectly real export,
+    /// so the mod on its own has nothing to say about it. What makes it wrong
+    /// is that the binding calls `FactorioRcon::inventory_contents_at`, from
+    /// which `action_start_crafting` is not reachable.
+    ///
+    /// Membership in the reachable set rather than equality with a single
+    /// name, because a method legitimately sends several: `move_player` asks
+    /// for a path and then walks it. Erring towards permissive is deliberate —
+    /// this check should never cry wolf about a doc that is right — and it
+    /// still leaves the sets at two to five names out of the mod's twenty-eight.
+    #[test]
+    fn each_rcon_doc_block_names_the_remote_call_its_binding_reaches() {
+        let blocks = binding_blocks();
+        let functions = client_functions();
+        assert!(
+            functions.len() >= 50,
+            "only {} functions parsed out of the RCON client; the parse broke and \
+             this test would then assert nothing",
+            functions.len()
+        );
+
+        // Counted whether or not the claim holds. An earlier spelling counted
+        // only the blocks that *passed*, which made the floor fire before the
+        // diagnostic did: the mutation used to prove this test discriminates
+        // reduced the count by one and tripped "the parse broke" instead of
+        // naming the wrong call. A health check on the parse must not be
+        // reduced by the defect it is standing guard over.
+        let mut with_sends = 0usize;
+        let mut problems: Vec<String> = Vec::new();
+        for (key, doc) in &blocks {
+            let Some(name) = key.strip_prefix("__doc_entry_") else {
+                continue;
+            };
+            let Some(block) = blocks.get(name) else {
+                problems.push(format!(
+                    "  `__doc_entry_{name}` documents `rcon.{name}`, but no \
+                     `map_table.set(\"{name}\", ..)` installs it -- add the binding, or drop \
+                     the documentation"
+                ));
+                continue;
+            };
+            let Some(method) = client_method_of(block) else {
+                problems.push(format!(
+                    "  `rcon.{name}`'s binding does not reach the client through \
+                     `_rcon.as_ref().<method>(..)`, so its `-- Sends` line cannot be checked -- \
+                     call the client that way, or this guard has to be taught the new shape"
+                ));
+                continue;
+            };
+            let reachable = reachable_remote_calls(&method, &functions);
+            let claim = documented_remote_call(doc);
+            if claim.is_some() {
+                with_sends += 1;
+            }
+            match claim {
+                Some(claimed) if reachable.contains(&claimed) => {}
+                Some(claimed) => problems.push(format!(
+                    "  `rcon.{name}` says it sends remote.call('{claimed}'), but its binding \
+                     calls `FactorioRcon::{method}`, which sends {reachable:?} -- name one of \
+                     those in the `-- Sends` line, or point the binding at the method that \
+                     sends '{claimed}'"
+                )),
+                None if !reachable.is_empty() => problems.push(format!(
+                    "  `rcon.{name}` has no `-- Sends /silent-command remote.call('..')` line, \
+                     but its binding calls `FactorioRcon::{method}`, which sends {reachable:?} \
+                     -- say which one in the doc string"
+                )),
+                None => {}
+            }
+        }
+        assert!(
+            problems.is_empty(),
+            "{} rcon doc block(s) describe a call their binding does not make:\n{}",
+            problems.len(),
+            problems.join("\n")
+        );
+        assert!(
+            with_sends >= 15,
+            "only {with_sends} doc blocks carried a `-- Sends` line at all; the parse \
+             broke and this test would then assert nothing"
+        );
+    }
+}

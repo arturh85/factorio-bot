@@ -15,7 +15,7 @@
 
 import {buildUrl, request} from './http';
 import {AppSettings} from '@/models/settings';
-import {ScriptTreeNode} from '@/models/types';
+import {ScriptTreeNode} from '@/api/types';
 import {
     ExecuteAccepted,
     ExecuteRequest,

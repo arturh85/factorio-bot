@@ -2,7 +2,7 @@
 import {ref, onMounted, computed} from 'vue';
 import Tree from 'primevue/tree';
 import {useScriptStore} from '@/store/scriptStore';
-import {ScriptTreeNode} from '@/models/types';
+import {ScriptTreeNode} from '@/api/types';
 
 const nodes = ref(null as ScriptTreeNode[] | null)
 

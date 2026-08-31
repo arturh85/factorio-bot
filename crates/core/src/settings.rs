@@ -1,13 +1,6 @@
 use std::borrow::Cow;
 
-#[derive(
-    Debug,
-    Clone,
-    typescript_definitions::TypeScriptify,
-    serde::Serialize,
-    serde::Deserialize,
-    utoipa::ToSchema,
-)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 #[allow(non_camel_case_types)]
 pub struct FactorioSettings {
     pub client_count: u8,
@@ -35,14 +28,7 @@ impl Default for FactorioSettings {
     }
 }
 
-#[derive(
-    Debug,
-    Clone,
-    typescript_definitions::TypeScriptify,
-    serde::Serialize,
-    serde::Deserialize,
-    utoipa::ToSchema,
-)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct RestApiSettings {
     pub port: i64,
     /// Directory containing the built SPA. Relative paths resolve against the

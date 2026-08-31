@@ -1,4 +1,4 @@
-import {FactorioSettings, RestApiSettings} from '@/models/types';
+import {FactorioSettings, RestApiSettings} from '@/api/types';
 
 /**
  * The whole of `GET`/`PUT /api/v1/settings` --

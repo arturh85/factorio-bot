@@ -47,7 +47,7 @@ import snapshot from './openapi.snapshot.json';
 // file rather than a bystander: every table entry below is checked against
 // the declaration it claims to describe.
 import type {AppSettings, GuiSettings} from '@/models/settings';
-import type {FactorioSettings, RestApiSettings, ScriptTreeNode} from '@/models/types';
+import type {FactorioSettings, RestApiSettings, ScriptTreeNode} from '@/api/types';
 import type {
     ExecuteAccepted,
     ExecuteRequest,

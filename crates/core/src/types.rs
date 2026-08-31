@@ -9,7 +9,6 @@ use factorio_blueprint::objects::Entity;
 use noisy_float::prelude::*;
 use num_traits::ToPrimitive;
 use serde_json::Value;
-use typescript_definitions::TypeScriptify;
 
 use crate::errors::RectInvalid;
 use crate::factorio::util::{add_to_rect, add_to_rect_turned, calculate_distance, rect_floor_ceil};
@@ -202,7 +201,7 @@ mod deserialize_helpers {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct FactorioRecipe {
     pub name: String,
@@ -219,7 +218,7 @@ pub struct FactorioRecipe {
     pub subgroup: String,
 }
 
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct FactorioBlueprintInfo {
     pub label: String,
@@ -236,7 +235,7 @@ pub struct FactorioBlueprintInfo {
 // a bare `u32` field would reject as soon as the game reports `2.5` for a
 // fluid.
 /// One input of a recipe.
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
 #[serde(rename_all = "snake_case", from = "RawFactorioIngredient")]
 pub struct FactorioIngredient {
     pub name: String,
@@ -249,7 +248,7 @@ pub struct FactorioIngredient {
 // different Factorio versions report. Everything downstream keeps reading a
 // single expected `amount` and an effective `probability`.
 /// One output of a recipe: how much of what, and how likely it is produced.
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
 #[serde(rename_all = "snake_case", from = "RawFactorioProduct")]
 pub struct FactorioProduct {
     pub name: String,
@@ -368,9 +367,7 @@ fn round_to_u32(amount: f64) -> u32 {
 pub type PlayerId = u8;
 pub type ActionId = u32;
 
-#[derive(
-    Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema, utoipa::ToSchema,
-)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct FactorioPlayer {
     pub player_id: PlayerId,
@@ -410,16 +407,14 @@ impl Default for FactorioPlayer {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RequestEntity {
     pub name: String,
     pub position: Position,
 }
 
-#[derive(
-    Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema, utoipa::ToSchema,
-)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct InventoryResponse {
     pub name: String,
@@ -436,7 +431,7 @@ pub struct InventoryResponse {
     pub fuel_inventory: Box<Option<Vec<InventoryItemWithQuality>>>,
 }
 
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct ChunkPosition {
     pub x: i32,
@@ -452,9 +447,7 @@ impl From<&Pos> for ChunkPosition {
     }
 }
 
-#[derive(
-    Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema, utoipa::ToSchema,
-)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct Position {
     pub x: f64,
@@ -610,15 +603,7 @@ impl FromStr for Position {
 }
 
 #[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    TypeScriptify,
-    Serialize,
-    Deserialize,
-    JsonSchema,
-    utoipa::ToSchema,
+    Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, utoipa::ToSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub struct Rect {
@@ -690,9 +675,7 @@ impl FromStr for Rect {
     }
 }
 
-#[derive(
-    Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema, utoipa::ToSchema,
-)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct FactorioTile {
     pub name: String,
@@ -701,14 +684,14 @@ pub struct FactorioTile {
     pub color: Option<[u8; 4]>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, TypeScriptify, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct FactorioChunk {
     pub entities: Vec<FactorioEntity>,
     // pub tiles: Vec<FactorioTile>,
 }
 
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ChunkObject {
     pub name: String,
@@ -727,14 +710,14 @@ pub struct ChunkObject {
     pub fuel_inventory: Box<Option<Vec<InventoryItemWithQuality>>>,
 }
 
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ChunkResource {
     pub name: String,
     pub position: Position,
 }
 
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct FactorioTechnology {
     pub name: String,
@@ -766,7 +749,7 @@ pub struct FactorioTechnology {
     pub unlocked_recipes: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct FactorioForce {
     pub name: String,
@@ -778,7 +761,7 @@ pub struct FactorioForce {
     pub technologies: Box<BTreeMap<String, FactorioTechnology>>,
 }
 
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct FactorioGraphic {
     pub entity_name: String,
@@ -790,9 +773,7 @@ pub struct FactorioGraphic {
                      //picspec.filename..":"..picspec.width..":"..picspec.height..":"..shiftx..":"..shifty..":"..xx..":"..yy..":"..scale
 }
 
-#[derive(
-    Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema, utoipa::ToSchema,
-)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct FactorioFluidBoxPrototype {
     pub pipe_connections: Box<Option<Vec<FactorioFluidBoxConnection>>>,
@@ -804,7 +785,6 @@ pub struct FactorioFluidBoxPrototype {
 //     Display,
 //     Debug,
 //     Clone,
-//     TypeScriptify,
 //     PartialEq,
 //     Serialize,
 //     Deserialize,
@@ -823,7 +803,6 @@ pub struct FactorioFluidBoxPrototype {
 //     Display,
 //     Debug,
 //     Clone,
-//     TypeScriptify,
 //     PartialEq,
 //     Serialize,
 //     Deserialize,
@@ -839,18 +818,14 @@ pub struct FactorioFluidBoxPrototype {
 //     None,
 // }
 
-#[derive(
-    Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema, utoipa::ToSchema,
-)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct FactorioFluidBoxConnection {
     pub max_underground_distance: Option<u32>,
     pub connection_type: Option<String>,
     pub positions: Vec<Position>,
 }
-#[derive(
-    Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema, utoipa::ToSchema,
-)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct FactorioEntityPrototype {
     pub name: String,
@@ -866,15 +841,7 @@ pub struct FactorioEntityPrototype {
 }
 
 #[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    TypeScriptify,
-    Serialize,
-    Deserialize,
-    JsonSchema,
-    utoipa::ToSchema,
+    Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, utoipa::ToSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub struct FactorioEntity {
@@ -1078,16 +1045,7 @@ impl From<factorio_blueprint::objects::Position> for Position {
 }
 
 #[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    TypeScriptify,
-    Serialize,
-    Deserialize,
-    Hash,
-    Eq,
-    JsonSchema,
-    utoipa::ToSchema,
+    Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq, JsonSchema, utoipa::ToSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub struct FactorioItemPrototype {
@@ -1261,16 +1219,7 @@ impl InventoryItem {
 
 /// Inventory item with quality field (Factorio 2.0 format)
 #[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    TypeScriptify,
-    Serialize,
-    Deserialize,
-    JsonSchema,
-    utoipa::ToSchema,
-    Hash,
-    Eq,
+    Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, utoipa::ToSchema, Hash, Eq,
 )]
 #[serde(rename_all = "snake_case")]
 pub struct InventoryItemWithQuality {
@@ -1321,25 +1270,21 @@ pub struct MineTarget {
     pub count: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct FactorioResult {
     pub success: bool,
     pub output: Vec<String>,
 }
 
-#[derive(
-    Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema, utoipa::ToSchema,
-)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct PlaceEntityResult {
     pub player: FactorioPlayer,
     pub entity: FactorioEntity,
 }
 
-#[derive(
-    Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, JsonSchema, utoipa::ToSchema,
-)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct PlaceEntitiesResult {
     pub player: FactorioPlayer,
@@ -1352,11 +1297,7 @@ pub struct PlaceEntitiesResult {
 // Not `Hash`/`Eq`: three of the six are `double`, which has neither. Nothing
 // keyed this type; it is only serialized to websocket clients and deserialized
 // from the mod.
-//
-// Deliberately a `//` comment, not `///`: `TypeScriptify` mirrors doc comments
-// into the generated `app/src/models/types.ts`, and this rationale is about
-// Rust trait derives, which mean nothing there.
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PlayerChangedDistanceEvent {
     pub player_id: PlayerId,
@@ -1368,14 +1309,14 @@ pub struct PlayerChangedDistanceEvent {
     pub resource_reach_distance: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PlayerChangedPositionEvent {
     pub player_id: PlayerId,
     pub position: Position,
 }
 
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct PlayerChangedMainInventoryEvent {
     pub player_id: PlayerId,
@@ -1401,15 +1342,13 @@ impl PlayerChangedMainInventoryEvent {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct PlayerLeftEvent {
     pub player_id: PlayerId,
 }
 
-#[derive(
-    Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq, utoipa::ToSchema,
-)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct ScriptTreeNode {
     pub key: String,

@@ -68,8 +68,6 @@ log = "0.4"
 tempfile = "3"
 
 [build-dependencies]
-typescript-definitions = { version = "0.1", package = "typescript-definitions-ufo-patch", features = ["export-typescript"] }
-factorio-bot-core = { path = "../../crates/core" }
 factorio-bot-server = { path = "../../crates/server", optional = true }
 factorio-bot-scripting-lua = { path = "../../crates/scripting_lua", optional = true }
 tauri-build = { version = "2", features = [], optional = true }

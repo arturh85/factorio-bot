@@ -106,3 +106,29 @@ export interface Job {
 
 /** Which of a job's two output buffers a line came from. */
 export type OutputStream = 'stdout' | 'stderr';
+
+/** A node of `GET /api/v1/scripts/tree` -- mirrors `ScriptTreeNode` in `crates/core/src/types.rs`. */
+export interface ScriptTreeNode {
+    key: string;
+    label: string;
+    leaf: boolean;
+    children: ScriptTreeNode[];
+}
+
+/** The `factorio` field of `GET /api/v1/settings` -- mirrors `FactorioSettings` in `crates/core/src/settings.rs`. */
+export interface FactorioSettings {
+    client_count: number;
+    factorio_archive_path: string;
+    map_exchange_string: string;
+    rcon_pass: string;
+    rcon_port: number;
+    recreate: boolean;
+    seed: string;
+    workspace_path: string;
+}
+
+/** The `restapi` field of `GET /api/v1/settings` -- mirrors `RestApiSettings` in `crates/core/src/settings.rs`. */
+export interface RestApiSettings {
+    port: number;
+    web_root: string | null;
+}

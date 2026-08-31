@@ -6,7 +6,7 @@
 
 **Architecture:** Three layers. (1) `app/src/lib/utils.ts` + `app/src/assets/tailwind.css` hold the design tokens and the `cn()` class merger — the whole theming surface. (2) `app/src/components/ui/` holds small, hand-written, individually-tested components (Button, Card, Input, Textarea, Checkbox, Slider, Label, Toggle, Toaster, TreeView), each wrapping a reka-ui primitive where one exists and plain semantic HTML where one does not. (3) Pages and the layout shell (`App.vue`, `AppTopbar.vue`, `AppMenu.vue`, `AppFooter.vue`) consume those components with Tailwind utilities inline; the `assets/layout/**` SCSS tree and `AppConfig.vue` are deleted. Migration order is one component family at a time, each task swapping its own consumers so the app renders correctly after every commit; Preflight is turned on only in the second-to-last task, when nothing depends on browser-default or SCSS bare-element styling any more.
 
-**Tech Stack:** Vue 3.5, Pinia 4, vue-router 5 (hash history), Vite 8, vitest 4 + @vue/test-utils + jsdom, TypeScript 5.9, ESLint 10 flat config, Tailwind v4, reka-ui 2, lucide-vue-next, class-variance-authority, clsx, tailwind-merge, pnpm 10.34.5.
+**Tech Stack:** Vue 3.5, Pinia 4, vue-router 5 (hash history), Vite 8, vitest 4 + @vue/test-utils + jsdom, TypeScript 5.9, ESLint 10 flat config, Tailwind v4, reka-ui 2, @lucide/vue, class-variance-authority, clsx, tailwind-merge, pnpm 10.34.5.
 
 **Spec:** `.superpowers/ui-inventory.md` (the pre-migration audit: route table, PrimeVue usage counts, SCSS shell structure, dead-PrimeFlex sweep, hardest-parts list). This plan argues from that audit; read it alongside this plan. The decision to replace PrimeVue with shadcn-vue + reka-ui + Tailwind v4, **including rebuilding the SCSS layout shell in Tailwind**, is a settled user decision. It is not open for relitigation, and no task here may propose keeping PrimeVue.
 
@@ -110,7 +110,7 @@ Nothing of substance is lost: `EmptyPage.vue` is the stock "place your custom co
 - **The `Tree` rebuild is hand-written, not reka-ui's `TreeRoot`** (Task 9). Correcting the audit: reka-ui **does** ship a Tree (`TreeRoot`/`TreeItem`, `getKey`/`getChildren`, `flattenItems`). It is nevertheless the wrong fit — it derives an item's expandability from materialised children, and its docs specify `getChildren` must return `undefined` for a childless node, while our directories have *no children in memory until after the user expands them* (`GET /api/v1/scripts?path=` lists one directory at a time). Modelling lazy directories through it needs placeholder child nodes. A recursive `TreeView.vue` with an explicit `expandedKeys` array and a pure `mergeNodes()` function is ~60 lines, has no such ambiguity, and is directly unit-testable.
 - **Toast is hand-written** (Task 3), not reka-ui's Toast. The app's five call sites use an imperative global (`toast.add({severity, summary, detail, life})`) with no component context; a module-level reactive queue reproduces that exactly, in 50 lines, and tests deterministically under `vi.useFakeTimers()`. As a bonus it works outside `setup()`, which PrimeVue's `useToast()` did not.
 - **`Splitter` uses reka-ui** (Task 8): `SplitterGroup` + `SplitterPanel` + `SplitterResizeHandle`, with `auto-save-id` replacing PrimeVue's `stateKey`/`stateStorage="local"` (verified: `autoSaveId` persists the layout to `localStorage`; `direction` is a **required** prop).
-- **Icons move from the `primeicons` font to `lucide-vue-next`** (Tasks 5, 9, 11). Ten glyphs are in use out of ~1600 in the font.
+- **Icons move from the `primeicons` font to `@lucide/vue`** (Tasks 5, 9, 11). Not `lucide-vue-next`: that package is deprecated upstream (`npm view` says "Please use @lucide/vue instead"), its last version is 1.0.0 against `@lucide/vue`'s 1.38.0, and the plan's original `^0.5` constraint does not exist on the registry at all. Ten glyphs are in use out of ~1600 in the font.
 
 ---
 
@@ -166,13 +166,13 @@ Nothing of substance is lost: `EmptyPage.vue` is the stock "place your custom co
 - Produces:
   - `cn(...inputs: ClassValue[]): string` from `@/lib/utils`
   - Tailwind theme tokens usable as utilities: colours `surface card divider ink ink-muted link brand brand-dark brand-light focus success success-dark danger danger-dark warn sidebar sidebar-ink sidebar-active sidebar-active-ink sidebar-border route-active`; radius `card` (`rounded-card`); spacing `sidebar` (`w-sidebar`, `ml-sidebar`) and `topbar` (`h-topbar`, `top-topbar`)
-  - runtime deps `reka-ui`, `lucide-vue-next`, `class-variance-authority`, `clsx`, `tailwind-merge`; dev deps `@vue/test-utils`, `jsdom`
+  - runtime deps `reka-ui`, `@lucide/vue`, `class-variance-authority`, `clsx`, `tailwind-merge`; dev deps `@vue/test-utils`, `jsdom`
   - coverage gate extended to `src/lib/**/*.ts`, `src/composables/**/*.ts`, `src/components/ui/**/*.{ts,vue}`
 
 - [ ] **Step 1: Install the dependencies**
 
 ```bash
-nix develop --command bash -c 'eval "$(mise env -s bash)"; cd app && pnpm add reka-ui@^2 lucide-vue-next@^0.5 class-variance-authority@^0.7 clsx@^2 tailwind-merge@^3'
+nix develop --command bash -c 'eval "$(mise env -s bash)"; cd app && pnpm add reka-ui@^2 @lucide/vue@^1 class-variance-authority@^0.7 clsx@^2 tailwind-merge@^3'
 nix develop --command bash -c 'eval "$(mise env -s bash)"; cd app && pnpm add -D @vue/test-utils@^2 jsdom@^27'
 ```
 
@@ -704,7 +704,7 @@ Create `app/src/components/ui/Toaster.vue`:
 
 ```vue
 <script setup lang="ts">
-import {X} from 'lucide-vue-next';
+import {X} from '@lucide/vue';
 import {toastMessages, useToast, type ToastSeverity} from '@/composables/useToast';
 
 const {remove} = useToast();
@@ -984,7 +984,7 @@ In `app/src/components/ProcessControl.vue`, replace `import Button from 'primevu
 
 ```ts
 import Button from '@/components/ui/Button.vue';
-import {Check} from 'lucide-vue-next';
+import {Check} from '@lucide/vue';
 ```
 
 and replace the `<Button …>` element in the template (the one with `:icon`, `:label`, `:severity`) with:
@@ -1120,7 +1120,7 @@ Create `app/src/components/ui/Toggle.vue`:
 ```vue
 <script setup lang="ts">
 import {computed} from 'vue';
-import {Check, X} from 'lucide-vue-next';
+import {Check, X} from '@lucide/vue';
 import {cn} from '@/lib/utils';
 
 const props = withDefaults(defineProps<{
@@ -1426,7 +1426,7 @@ Create `app/src/components/ui/Checkbox.vue`:
 <script setup lang="ts">
 import {useId} from 'vue';
 import {CheckboxIndicator, CheckboxRoot} from 'reka-ui';
-import {Check} from 'lucide-vue-next';
+import {Check} from '@lucide/vue';
 
 defineProps<{label: string}>();
 
@@ -2507,7 +2507,7 @@ Create `app/src/components/ui/tree/TreeView.vue`:
 
 ```vue
 <script setup lang="ts">
-import {ChevronDown, ChevronRight, FileCode} from 'lucide-vue-next';
+import {ChevronDown, ChevronRight, FileCode} from '@lucide/vue';
 import type {ScriptTreeNode} from '@/api/types';
 
 // Self-referencing by filename: Vue resolves <TreeView> inside this template
@@ -2693,7 +2693,7 @@ Replace the whole of `app/src/components/ScriptTree.vue` with:
 ```vue
 <script setup lang="ts">
 import {computed, onMounted, ref} from 'vue';
-import {Loader2} from 'lucide-vue-next';
+import {Loader2} from '@lucide/vue';
 import type {ScriptTreeNode} from '@/api/types';
 import {useScriptStore} from '@/store/scriptStore';
 import TreeView from '@/components/ui/tree/TreeView.vue';
@@ -3019,7 +3019,7 @@ Create `app/src/AppMenu.spec.ts`:
 // @vitest-environment jsdom
 import {describe, expect, it} from 'vitest';
 import {mount, RouterLinkStub} from '@vue/test-utils';
-import {Cog, Home, Network} from 'lucide-vue-next';
+import {Cog, Home, Network} from '@lucide/vue';
 import AppMenu from './AppMenu.vue';
 import type {MenuEntry} from '@/models/dashboard';
 
@@ -3245,7 +3245,7 @@ import type {Component} from 'vue';
  */
 export type MenuEntry = {
     label: string;
-    /** A lucide-vue-next icon component, rendered with <component :is>. */
+    /** A @lucide/vue icon component, rendered with <component :is>. */
     icon: Component;
     to: string;
 };
@@ -3292,7 +3292,7 @@ Replace the whole of `app/src/AppTopbar.vue` with:
 ```vue
 <script setup lang="ts">
 import {computed} from 'vue';
-import {Menu} from 'lucide-vue-next';
+import {Menu} from '@lucide/vue';
 import {useAppStore} from '@/store/appStore';
 import ProcessControl from '@/components/ProcessControl.vue';
 
@@ -3354,7 +3354,7 @@ Replace the whole of `app/src/App.vue` with the following. Keep the `onMounted` 
 ```vue
 <script setup lang="ts">
 import {computed, onMounted, onUnmounted, ref, watch} from 'vue';
-import {Cog, Home, Network, Terminal} from 'lucide-vue-next';
+import {Cog, Home, Network, Terminal} from '@lucide/vue';
 import AppTopbar from './AppTopbar.vue';
 import AppMenu from './AppMenu.vue';
 import AppFooter from './AppFooter.vue';

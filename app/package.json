@@ -23,13 +23,13 @@
     "precommit:check": "pnpm run lint && pnpm run test:coverage && pnpm run build:web && pnpm run cargo:clippy && pnpm run cargo:test && cd .. && cargo build --all-features && cargo build --no-default-features"
   },
   "dependencies": {
+    "@lucide/vue": "^1.38.0",
     "@primeuix/themes": "^2",
     "@vue/devtools-api": "^8",
     "@vueuse/core": "14.4.0",
     "ansi-html": "0.0.9",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "lucide-vue-next": "^1.0.0",
     "monaco-editor": "0.56.0",
     "pinia": "^4",
     "primeicons": "7.0.0",

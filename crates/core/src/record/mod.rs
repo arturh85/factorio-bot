@@ -16,6 +16,9 @@ use std::time::Instant;
 
 use crate::types::Position;
 
+pub mod splits;
+pub use splits::{Split, derive_splits};
+
 /// What happened. Internally tagged as `kind`, so a line is one flat object.
 ///
 /// [`EventKind::Unknown`] is the `serde(other)` catch-all: a reader built

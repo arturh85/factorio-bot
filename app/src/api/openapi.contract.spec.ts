@@ -274,14 +274,39 @@ type Absentable<Value> = undefined extends Value
         : false;
 
 /**
- * One property's contract, with its nullability tied to the declaration.
+ * The JSON type a declared TypeScript type is allowed to claim.
+ *
+ * Without this, `type` was a free-standing literal with no link to the
+ * declaration: `port: {required: true, type: 'string'}` against `port: number`
+ * passed `tsc`, and the runtime assertions only compare the table's `type`
+ * string to the snapshot -- never to the DTO -- so a table and a declaration
+ * wrong in the SAME direction passed both halves of the guard.
+ *
+ * Non-primitive fields fall through to the full union deliberately: they carry
+ * `ref` or `arrayOf` instead of `type`, and constraining an unused key would
+ * buy nothing. `NonNullable` is applied first so `| null` does not defeat the
+ * match -- nullability is already pinned separately by `Absentable`.
+ */
+type ScalarTypeFor<Value> = [NonNullable<Value>] extends [string]
+    ? 'string'
+    : [NonNullable<Value>] extends [number]
+        ? 'integer'
+        : [NonNullable<Value>] extends [boolean]
+            ? 'boolean'
+            : PropertyContract['type'];
+
+/**
+ * One property's contract, with its nullability AND its JSON type tied to the
+ * declaration.
  *
  * Declaring `nullable` where `types.ts` says the field is always present (or
- * omitting it where `types.ts` says `| null`) is a type error, so the three
- * statements -- spec, table, DTO -- cannot drift apart pairwise.
+ * omitting it where `types.ts` says `| null`) is a type error, and so is
+ * claiming a JSON type the declaration does not have, so the three statements
+ * -- spec, table, DTO -- cannot drift apart pairwise.
  */
 type PropertyContractFor<Value> = PropertyContract &
-    (Absentable<Value> extends true ? {nullable: true} : {nullable?: never});
+    (Absentable<Value> extends true ? {nullable: true} : {nullable?: never}) &
+    {type?: ScalarTypeFor<Value>};
 
 /**
  * The contract for one object schema, keyed by the *TypeScript* declaration

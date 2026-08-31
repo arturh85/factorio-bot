@@ -55,18 +55,20 @@ impl Subcommand for ThisCommand {
   fn name(&self) -> &'static str {
     "restapi"
   }
-  fn build_command(&self, repl: Repl<Context, Error>) -> Repl<Context, Error> {
-    repl.with_command_async(
-      Command::new(self.name()).about("start/stop restapi").arg(
-        Arg::new("action")
-          .default_value(Into::<&str>::into(Action::Start))
-          .value_parser(PossibleValuesParser::new(Action::iter().map(|action| {
-            let message = action.get_message().unwrap();
-            PossibleValue::new(Into::<&str>::into(action)).help(message)
-          })))
-          .help("either start or stop restapi server"),
+  fn build_command(&self, repl: Repl<Context, Error>) -> Result<Repl<Context, Error>> {
+    Ok(
+      repl.with_command_async(
+        Command::new(self.name()).about("start/stop restapi").arg(
+          Arg::new("action")
+            .default_value(Into::<&str>::into(Action::Start))
+            .value_parser(PossibleValuesParser::new(Action::iter().map(|action| {
+              let message = action.get_message().unwrap();
+              PossibleValue::new(Into::<&str>::into(action)).help(message)
+            })))
+            .help("either start or stop restapi server"),
+        ),
+        |args, context| Box::pin(run(args, context)),
       ),
-      |args, context| Box::pin(run(args, context)),
     )
   }
 }

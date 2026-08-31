@@ -71,34 +71,16 @@ impl AppSettings {
 ///
 /// Asking it here instead is the regression this function exists to close.
 ///
-/// **The set of points of use is NOT complete, and this comment used to claim
-/// it was.** Four sites refuse a relative path: the scripts bootstrap in
-/// `serve`, `manage::scripts::scripts_root_path`, `POST /api/v1/instance/start`
-/// and `setup_factorio_instance`.
+/// This comment used to enumerate which call sites resolve and which do not.
+/// That list was wrong twice -- once by claiming completeness, once by naming
+/// a file that had since been deleted -- because a list decays silently and
+/// nothing forces it to be re-checked. The type system now enforces the rule
+/// instead: `scripts::ensure_scripts_dir` demands
+/// `paths::ResolvedWorkspace`, which only `paths::resolve_workspace` can
+/// mint, so a caller that skipped resolution simply cannot reach the
+/// filesystem with an unresolved path. There is no enumeration left to
+/// maintain here.
 ///
-/// Two sites still pass the raw configured string to
-/// `scripts::ensure_scripts_dir`, where it is joined against the process CWD:
-///
-/// - `app/src-tauri/src/scripting.rs:27` -- `PathBuf::from(app_settings
-///   .factorio.workspace_path.to_string())`, no resolution
-/// - `app/src-tauri/src/repl/run_script.rs:47` -- `Path::new(&workspace_path)`
-///   from the same raw string
-///
-/// With a relative `workspace_path` those two read and write
-/// `<cwd>/<relative>/scripts` while `start` refuses the same value -- the app
-/// writes into a workspace it will not start in.
-///
-/// Re-measured after the tauri removal (plan 5 task 14), which shrank this
-/// list rather than changing it: the seven call sites in
-/// `gui/command/script.rs` went with that file, and `cli/lua.rs` no longer
-/// reaches `ensure_scripts_dir` at all, so both are struck. `cli/serve.rs:78`
-/// is not on the list because it resolves first, through
-/// `paths::resolve_workspace`.
-///
-/// Do not read the list above as exhaustive either -- it was wrong once by
-/// claiming completeness and once by naming a file that no longer existed. The
-/// durable fix is to make an unresolved path unable to reach
-/// `ensure_scripts_dir` at all, rather than to enumerate callers.
 /// `Context::new` loads the settings before clap has even chosen a subcommand,
 /// so a load that fails on a relative `workspace_path` fails `config show` and
 /// `config init --force` too -- the two commands whose whole job is to report

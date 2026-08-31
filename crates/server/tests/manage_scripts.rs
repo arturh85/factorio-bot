@@ -321,8 +321,12 @@ async fn a_freshly_bootstrapped_workspace_serves_the_scripts_endpoints() {
     std::fs::create_dir_all(&workspace).unwrap();
     assert!(!workspace.join("scripts").exists());
 
-    // What `serve` now does before binding.
-    factorio_bot_core::scripts::ensure_scripts_dir(&workspace).expect("bootstraps");
+    // What `serve` now does before binding: resolve first (this workspace is
+    // an absolute tempdir path, so resolution always succeeds), then bootstrap.
+    let resolved_workspace =
+        factorio_bot_core::paths::resolve_workspace(&workspace.to_string_lossy())
+            .expect("tempdir-based workspace is absolute");
+    factorio_bot_core::scripts::ensure_scripts_dir(&resolved_workspace).expect("bootstraps");
 
     let mut settings = AppSettings::default();
     settings.factorio.workspace_path = workspace.to_string_lossy().into_owned().into();

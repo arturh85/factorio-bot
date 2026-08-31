@@ -82,7 +82,16 @@ pub fn scripts_dir(workspace_path: &Path) -> Result<PathBuf> {
 /// as the way to refresh it. Debug builds deliberately skip the extraction
 /// and the check: `include_dir!` bundles this repository's own `scripts/`
 /// directory, and a developer checkout already has them.
-pub fn ensure_scripts_dir(workspace_path: &Path) -> Result<PathBuf> {
+///
+/// Takes [`crate::paths::ResolvedWorkspace`], not a bare `&Path`: this
+/// function joins `workspace_path` straight onto `scripts` with no
+/// CWD-relative fallback (unlike [`scripts_dir`]), so an unresolved --
+/// possibly relative -- `workspace_path` reaching here would silently create
+/// and populate `<process cwd>/<relative>/scripts`. Requiring the type that
+/// only [`crate::paths::resolve_workspace`] can mint makes that unreachable
+/// rather than merely undocumented.
+pub fn ensure_scripts_dir(workspace_path: &crate::paths::ResolvedWorkspace) -> Result<PathBuf> {
+    let workspace_path = workspace_path.as_path();
     let workspace_scripts = workspace_path.join("scripts");
     if !workspace_scripts.is_dir() {
         #[cfg(not(debug_assertions))]
@@ -295,6 +304,15 @@ mod tests {
         (dir, canonical)
     }
 
+    /// Test workspace roots here are always absolute tempdir paths, so
+    /// routing them through `resolve_workspace` -- the same thing every real
+    /// caller does -- always succeeds; there is no need for a test-only
+    /// constructor.
+    fn resolved(workspace_path: &Path) -> crate::paths::ResolvedWorkspace {
+        crate::paths::resolve_workspace(&workspace_path.to_string_lossy())
+            .expect("test workspace paths are absolute")
+    }
+
     /// A fresh install has a `workspace/` directory but no `workspace/scripts`
     /// — `Context::new` creates only the former. Without this bootstrap every
     /// `/api/v1/scripts*` route answered "missing scripts directory" and there
@@ -309,7 +327,7 @@ mod tests {
             "fixture bug: scripts/ already exists"
         );
 
-        let scripts = ensure_scripts_dir(&workspace).expect("bootstraps");
+        let scripts = ensure_scripts_dir(&resolved(&workspace)).expect("bootstraps");
 
         assert!(scripts.is_dir(), "{scripts:?} is not a directory");
         // The server canonicalises the root and requires it to exist; proving
@@ -325,6 +343,43 @@ mod tests {
         );
     }
 
+    /// The regression task 3c closes: `scripting.rs` and `run_script.rs` used
+    /// to hand `ensure_scripts_dir` the raw, unresolved `workspace_path`
+    /// string (as a bare `&Path`), so a relative configured value quietly
+    /// created `<process cwd>/<relative>/scripts` instead of erroring.
+    ///
+    /// `ensure_scripts_dir` now takes `&paths::ResolvedWorkspace`, which only
+    /// `resolve_workspace` can mint, so that call shape can no longer be
+    /// written at all -- confirmed here by going through the same two steps
+    /// every real caller now must: `resolve_workspace` first, which refuses a
+    /// relative path outright, so `ensure_scripts_dir` (and its directory
+    /// creation) is never reached.
+    ///
+    /// Asserts the directory itself is absent, not merely that an `Err` came
+    /// back: an `Err` returned after the directory was already created would
+    /// still leave the mess behind. Before this fix (`ensure_scripts_dir`
+    /// taking a bare `&Path`), the equivalent call sequence created the
+    /// directory and this assertion failed.
+    #[test]
+    fn a_relative_workspace_path_never_reaches_ensure_scripts_dir() {
+        let relative = "relative-workspace-hazard-repro-3c";
+        let hazard_dir = std::env::current_dir().expect("cwd").join(relative);
+        let _ = fs::remove_dir_all(&hazard_dir);
+
+        let result = crate::paths::resolve_workspace(relative).map(|ws| ensure_scripts_dir(&ws));
+
+        assert!(
+            result.is_err(),
+            "a relative workspace_path must be refused before it reaches ensure_scripts_dir"
+        );
+        let still_absent = !hazard_dir.join("scripts").exists();
+        let _ = fs::remove_dir_all(&hazard_dir);
+        assert!(
+            still_absent,
+            "ensure_scripts_dir must not create a scripts dir under an unresolved relative workspace"
+        );
+    }
+
     /// Called on every server start, so it must be idempotent and must not
     /// disturb scripts already on disk.
     #[test]
@@ -334,8 +389,8 @@ mod tests {
         fs::create_dir_all(workspace.join("scripts")).expect("mkdir");
         fs::write(workspace.join("scripts").join("mine.lua"), "-- mine").expect("write");
 
-        let scripts = ensure_scripts_dir(&workspace).expect("bootstraps");
-        let scripts_again = ensure_scripts_dir(&workspace).expect("bootstraps twice");
+        let scripts = ensure_scripts_dir(&resolved(&workspace)).expect("bootstraps");
+        let scripts_again = ensure_scripts_dir(&resolved(&workspace)).expect("bootstraps twice");
 
         assert_eq!(scripts, scripts_again);
         assert_eq!(

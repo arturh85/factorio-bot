@@ -21,17 +21,22 @@ impl Subcommand for ThisCommand {
   fn name(&self) -> &'static str {
     "set"
   }
-  fn build_command(&self, repl: Repl<Context, Error>) -> Repl<Context, Error> {
-    repl.with_command_async(
-      Command::new(self.name())
-        .about("set setting by key")
-        .arg(
-          Arg::new("key")
-            .required(true)
-            .help("dotted path to setting"),
-        )
-        .arg(Arg::new("value").required(true).help("new value")),
-      |args, context| Box::pin(run(args, context)),
+  fn build_command(
+    &self,
+    repl: Repl<Context, Error>,
+  ) -> factorio_bot_core::miette::Result<Repl<Context, Error>> {
+    Ok(
+      repl.with_command_async(
+        Command::new(self.name())
+          .about("set setting by key")
+          .arg(
+            Arg::new("key")
+              .required(true)
+              .help("dotted path to setting"),
+          )
+          .arg(Arg::new("value").required(true).help("new value")),
+        |args, context| Box::pin(run(args, context)),
+      ),
     )
   }
 }

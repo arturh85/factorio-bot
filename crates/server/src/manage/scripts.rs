@@ -63,7 +63,7 @@ pub struct ScriptContent {
 fn scripts_root_path(workspace_path: &str) -> Result<PathBuf, ErrorResponse> {
     let workspace_path = factorio_bot_core::paths::resolve_workspace(workspace_path)
         .map_err(|err| ErrorResponse::bad_request(err.to_string()))?;
-    Ok(workspace_path.join("scripts"))
+    Ok(workspace_path.as_path().join("scripts"))
 }
 
 /// Crate-visible because `manage::execute` resolves the same root: a script

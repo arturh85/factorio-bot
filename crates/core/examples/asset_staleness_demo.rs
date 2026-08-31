@@ -19,6 +19,7 @@
 //! exist under `cfg(debug_assertions)`.
 #[cfg(not(debug_assertions))]
 fn main() {
+    use factorio_bot_core::paths::resolve_workspace;
     use factorio_bot_core::process::asset_sync::{refresh_if_requested, warn_if_stale};
     use factorio_bot_core::process::instance_setup::{
         MODS_CONTENT, PLANS_CONTENT, REFRESH_MODS_ENV, REFRESH_PLANS_ENV,
@@ -34,6 +35,11 @@ fn main() {
     // `ensure_scripts_dir` derives the path itself as `<given>/scripts`, so it
     // gets its own workspace root rather than sharing one with mods/plans.
     let scripts_workspace = workspace.join("live_scripts_workspace");
+    // `ensure_scripts_dir` demands a resolved workspace, same as every real
+    // caller -- this path is always absolute (built from `temp_dir()`), so
+    // resolution never fails here.
+    let scripts_workspace = resolve_workspace(&scripts_workspace.to_string_lossy())
+        .expect("temp_dir()-based workspace is absolute");
 
     let step = std::env::args().any(|a| a == "--step=1" || a == "1");
 
@@ -41,7 +47,7 @@ fn main() {
         let _ = std::fs::remove_dir_all(&workspace);
         std::fs::create_dir_all(&mods_path).expect("create mods dir");
         std::fs::create_dir_all(&plans_path).expect("create plans dir");
-        std::fs::create_dir_all(&scripts_workspace).expect("create scripts workspace");
+        std::fs::create_dir_all(scripts_workspace.as_path()).expect("create scripts workspace");
         MODS_CONTENT.extract(&mods_path).expect("extract mods");
         PLANS_CONTENT.extract(&plans_path).expect("extract plans");
         // Exercises the actual production entry point (`crates/core/src/scripts.rs`),

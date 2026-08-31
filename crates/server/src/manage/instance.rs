@@ -119,8 +119,9 @@ pub async fn start_instance(
     // rule, one policy -- refuse. Still a 500: a data-local directory the
     // caller cannot name in the request is the server's problem, not a
     // malformed request.
-    let workspace_path = factorio_bot_core::paths::workspace_to_string(workspace_path)
-        .map_err(|err| ErrorResponse::internal(err.to_string()))?;
+    let workspace_path =
+        factorio_bot_core::paths::workspace_to_string(workspace_path.as_path().to_path_buf())
+            .map_err(|err| ErrorResponse::internal(err.to_string()))?;
     // *This* is what serialises concurrent starts: `AppState::claim_start_slot`
     // takes the slot in a single `compare_exchange`, where a read-then-write
     // pair would leave a window in which two requests both see `false` and

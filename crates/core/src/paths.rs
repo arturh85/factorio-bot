@@ -1,5 +1,5 @@
 use crate::constants::WORKSPACE_FOLDERNAME;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const APP_SETTINGS_FILENAME: &str = "AppSettings.toml";
 
@@ -40,6 +40,24 @@ pub fn workspace_dir() -> PathBuf {
 )]
 pub struct RelativeWorkspacePath {
     pub path: String,
+}
+
+/// A workspace path that has been through [`resolve_workspace`]: absolute,
+/// and therefore independent of the process's working directory.
+///
+/// The field is private, so `resolve_workspace` is the only way to obtain
+/// one -- filesystem entry points that must never see an unresolved
+/// `workspace_path` (such as [`crate::scripts::ensure_scripts_dir`]) demand
+/// this type instead of a bare `&Path`, which makes the resolve-before-use
+/// rule a compile error to skip rather than a convention to remember.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedWorkspace(PathBuf);
+
+impl ResolvedWorkspace {
+    #[must_use]
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
 }
 
 /// A workspace directory whose name is not valid UTF-8.
@@ -106,25 +124,25 @@ pub fn workspace_to_string(path: PathBuf) -> Result<String, NonUtf8WorkspacePath
 /// every subcommand into a startup gate and took `config init --force`, the
 /// documented repair path, down with it.
 ///
-/// **The callers that ask are not all the callers that should.** Four refuse a
-/// relative path: the `serve` scripts bootstrap, `scripts_root_path`,
-/// `POST /api/v1/instance/start` and `setup_factorio_instance`. At least four
-/// more reach `scripts::ensure_scripts_dir` with the raw configured string and
-/// join it against the process CWD. Treat any enumeration here as a snapshot,
-/// not a contract -- an earlier version of this comment listed four sites as
-/// though that were the whole set, and a reader trusted it.
+/// Returns [`ResolvedWorkspace`] rather than a bare `PathBuf` so that
+/// "resolved" is a fact the type carries, not a convention a caller might
+/// skip. An earlier version of this comment enumerated the call sites that
+/// ask versus the ones that should -- that list was wrong twice, because a
+/// list decays silently. `scripts::ensure_scripts_dir` now demands
+/// `&ResolvedWorkspace`, so a caller that never resolved simply cannot reach
+/// it; there is no enumeration left to go stale.
 ///
 /// Deliberately does not create the directory. Whether a missing workspace is
 /// an error or something to bootstrap differs per caller, and the callers that
 /// create it (`Context::new`, `ensure_scripts_dir`) already do so knowingly.
-pub fn resolve_workspace(configured: &str) -> Result<PathBuf, RelativeWorkspacePath> {
+pub fn resolve_workspace(configured: &str) -> Result<ResolvedWorkspace, RelativeWorkspacePath> {
     let resolved = fill_workspace_default(configured);
     if resolved.is_relative() {
         return Err(RelativeWorkspacePath {
             path: resolved.display().to_string(),
         });
     }
-    Ok(resolved)
+    Ok(ResolvedWorkspace(resolved))
 }
 
 #[cfg(test)]
@@ -157,7 +175,7 @@ mod tests {
     #[test]
     fn an_unconfigured_workspace_resolves_to_the_data_local_one() {
         assert_eq!(
-            resolve_workspace("").expect("empty resolves"),
+            resolve_workspace("").expect("empty resolves").as_path(),
             workspace_dir()
         );
     }
@@ -165,7 +183,9 @@ mod tests {
     #[test]
     fn an_absolute_workspace_is_taken_as_given() {
         assert_eq!(
-            resolve_workspace("/srv/factorio").expect("absolute resolves"),
+            resolve_workspace("/srv/factorio")
+                .expect("absolute resolves")
+                .as_path(),
             PathBuf::from("/srv/factorio")
         );
     }

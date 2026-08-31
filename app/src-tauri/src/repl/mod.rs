@@ -41,7 +41,7 @@ pub async fn start(context: Context) -> miette::Result<()> {
     .with_history(paths::data_local_dir().join("repl_history"), 50)
     .with_on_after_command_async(|context| Box::pin(update_prompt(context)));
   for subcommand in subcommands() {
-    repl = subcommand.build_command(repl);
+    repl = subcommand.build_command(repl)?;
   }
   repl.run_async().await.into_diagnostic()?;
   let mut instance_state = instance_state.write().await;
@@ -62,7 +62,12 @@ async fn update_prompt(context: &mut Context) -> Result<Option<String>> {
 
 pub trait Subcommand {
   fn name(&self) -> &'static str;
-  fn build_command(&self, repl: Repl<Context, Error>) -> Repl<Context, Error>;
+  /// Fallible so a subcommand that needs to read settings while building
+  /// itself (`run_script`, which lists the scripts directory) can report a
+  /// malformed settings file instead of `.unwrap()`-ing it -- reachable code
+  /// that would otherwise abort the whole process (`start` runs before any
+  /// subcommand is chosen, and release builds use `panic = "abort"`).
+  fn build_command(&self, repl: Repl<Context, Error>) -> miette::Result<Repl<Context, Error>>;
 }
 
 pub struct Error(miette::Error);

@@ -80,27 +80,29 @@ impl Subcommand for ThisCommand {
   fn name(&self) -> &'static str {
     "dump"
   }
-  fn build_command(&self, repl: Repl<Context, Error>) -> Repl<Context, Error> {
-    repl.with_command_async(
-      Command::new(self.name())
-        .about("dump information")
-        .arg(
-          Arg::new("type")
-            .required(true)
-            .value_parser(PossibleValuesParser::new(DumpType::iter().map(|action| {
-              let message = action.get_message().unwrap();
-              PossibleValue::new(Into::<&str>::into(action)).help(message)
-            })))
-            .help("type of information to dump"),
-        )
-        .arg(
-          Arg::new("save")
-            .default_value("")
-            .long("save")
-            .required(false)
-            .help("path to save at"),
-        ),
-      |args, context| Box::pin(run(args, context)),
+  fn build_command(&self, repl: Repl<Context, Error>) -> Result<Repl<Context, Error>> {
+    Ok(
+      repl.with_command_async(
+        Command::new(self.name())
+          .about("dump information")
+          .arg(
+            Arg::new("type")
+              .required(true)
+              .value_parser(PossibleValuesParser::new(DumpType::iter().map(|action| {
+                let message = action.get_message().unwrap();
+                PossibleValue::new(Into::<&str>::into(action)).help(message)
+              })))
+              .help("type of information to dump"),
+          )
+          .arg(
+            Arg::new("save")
+              .default_value("")
+              .long("save")
+              .required(false)
+              .help("path to save at"),
+          ),
+        |args, context| Box::pin(run(args, context)),
+      ),
     )
   }
 }

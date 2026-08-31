@@ -2,7 +2,6 @@ use crate::settings::load_app_settings;
 use factorio_bot_core::miette;
 use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_scripting_lua::OutputSink;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Resolves the workspace scripts root from settings, then delegates.
@@ -24,7 +23,15 @@ pub async fn run_script_file(
 ) -> miette::Result<(String, String)> {
   // Was `.unwrap()`, which is reachable from the GUI and from `serve`.
   let app_settings = load_app_settings()?;
-  let workspace_path = PathBuf::from(app_settings.factorio.workspace_path.to_string());
+  // Was `PathBuf::from(app_settings.factorio.workspace_path.to_string())` --
+  // the raw configured string, never checked for being absolute, joined by
+  // `ensure_scripts_dir` against the process's working directory. Resolving
+  // first is what `ensure_scripts_dir` now requires (it takes
+  // `&paths::ResolvedWorkspace`, not `&Path`), so a relative `workspace_path`
+  // is refused here instead of silently reading and writing
+  // `<cwd>/<relative>/scripts`.
+  let workspace_path =
+    factorio_bot_core::paths::resolve_workspace(&app_settings.factorio.workspace_path)?;
   let scripts_root = factorio_bot_core::scripts::ensure_scripts_dir(&workspace_path)?;
   // `run_script_file` reports a typed `RunScriptError` so the HTTP server can
   // tell a missing script (404) from a refused traversal (400). Nothing behind

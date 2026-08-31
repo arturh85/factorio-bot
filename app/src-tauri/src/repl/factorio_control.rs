@@ -218,81 +218,83 @@ impl Subcommand for ThisCommand {
   fn name(&self) -> &'static str {
     "factorio"
   }
-  fn build_command(&self, repl: Repl<Context, Error>) -> Repl<Context, Error> {
-    repl
-      .with_keybinding(
-        KeyModifiers::CONTROL,
-        KeyCode::Char('s'),
-        ReedlineEvent::ExecuteHostCommand("factorio status".to_owned()),
-      )
-      .with_keybinding(
-        KeyModifiers::CONTROL,
-        KeyCode::Char('k'),
-        ReedlineEvent::ExecuteHostCommand("factorio toggle-verbose".to_owned()),
-      )
-      .with_command_async(
-        Command::new(self.name())
-          .about("control factorio instances")
-          .arg(
-            Arg::new("action")
-              .default_value(Into::<&str>::into(Action::Start))
-              .value_parser(PossibleValuesParser::new(Action::iter().map(|action| {
-                let message = action.get_message().unwrap();
-                PossibleValue::new(Into::<&str>::into(action)).help(message)
-              })))
-              .help("what action to take"),
-          )
-          .arg(
-            Arg::new("clients")
-              .short('c')
-              .default_value("")
-              .long("clients")
-              .help("number of clients to start in addition to the server"),
-          )
-          .arg(
-            Arg::new("seed")
-              .long("seed")
-              .value_name("seed")
-              .required(false)
-              .help("use given seed to recreate level"),
-          )
-          .arg(
-            Arg::new("map")
-              .long("map")
-              .value_name("map")
-              .required(false)
-              .help("use given map exchange string"),
-          )
-          .arg(
-            Arg::new("new")
-              .long("new")
-              .short('n')
-              .action(ArgAction::SetTrue)
-              .help("recreate level by deleting server map if exists"),
-          )
-          .arg(
-            Arg::new("logs")
-              .short('l')
-              .long("logs")
-              .action(ArgAction::SetTrue)
-              .help("enabled writing server & client logs to workspace"),
-          )
-          .arg(
-            Arg::new("verbose")
-              .short('v')
-              .long("verbose")
-              .action(ArgAction::SetTrue)
-              .help("log server output to console"),
-          )
-          .arg(
-            Arg::new("wait_until_finished")
-              .short('w')
-              .long("wait")
-              .action(ArgAction::SetTrue)
-              .help("wait until world discovery is done"),
-          ),
-        |args, context| Box::pin(run(args, context)),
-      )
+  fn build_command(&self, repl: Repl<Context, Error>) -> Result<Repl<Context, Error>> {
+    Ok(
+      repl
+        .with_keybinding(
+          KeyModifiers::CONTROL,
+          KeyCode::Char('s'),
+          ReedlineEvent::ExecuteHostCommand("factorio status".to_owned()),
+        )
+        .with_keybinding(
+          KeyModifiers::CONTROL,
+          KeyCode::Char('k'),
+          ReedlineEvent::ExecuteHostCommand("factorio toggle-verbose".to_owned()),
+        )
+        .with_command_async(
+          Command::new(self.name())
+            .about("control factorio instances")
+            .arg(
+              Arg::new("action")
+                .default_value(Into::<&str>::into(Action::Start))
+                .value_parser(PossibleValuesParser::new(Action::iter().map(|action| {
+                  let message = action.get_message().unwrap();
+                  PossibleValue::new(Into::<&str>::into(action)).help(message)
+                })))
+                .help("what action to take"),
+            )
+            .arg(
+              Arg::new("clients")
+                .short('c')
+                .default_value("")
+                .long("clients")
+                .help("number of clients to start in addition to the server"),
+            )
+            .arg(
+              Arg::new("seed")
+                .long("seed")
+                .value_name("seed")
+                .required(false)
+                .help("use given seed to recreate level"),
+            )
+            .arg(
+              Arg::new("map")
+                .long("map")
+                .value_name("map")
+                .required(false)
+                .help("use given map exchange string"),
+            )
+            .arg(
+              Arg::new("new")
+                .long("new")
+                .short('n')
+                .action(ArgAction::SetTrue)
+                .help("recreate level by deleting server map if exists"),
+            )
+            .arg(
+              Arg::new("logs")
+                .short('l')
+                .long("logs")
+                .action(ArgAction::SetTrue)
+                .help("enabled writing server & client logs to workspace"),
+            )
+            .arg(
+              Arg::new("verbose")
+                .short('v')
+                .long("verbose")
+                .action(ArgAction::SetTrue)
+                .help("log server output to console"),
+            )
+            .arg(
+              Arg::new("wait_until_finished")
+                .short('w')
+                .long("wait")
+                .action(ArgAction::SetTrue)
+                .help("wait until world discovery is done"),
+            ),
+          |args, context| Box::pin(run(args, context)),
+        ),
+    )
   }
 }
 

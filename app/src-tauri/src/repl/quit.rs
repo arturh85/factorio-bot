@@ -17,11 +17,14 @@ impl Subcommand for ThisCommand {
     "quit"
   }
 
-  fn build_command(&self, repl: Repl<Context, Error>) -> Repl<Context, Error> {
-    repl.with_command_async(
+  fn build_command(
+    &self,
+    repl: Repl<Context, Error>,
+  ) -> factorio_bot_core::miette::Result<Repl<Context, Error>> {
+    Ok(repl.with_command_async(
       Command::new(self.name()).about("stop all running instances and quit"),
       |args, context| Box::pin(run(args, context)),
-    )
+    ))
   }
 }
 

@@ -55,9 +55,10 @@ color-eyre = "0.6" # colorful human oriented error reports via panics
 tempfile = "3"
 
 [build-dependencies]
-factorio-bot-server = { path = "../../crates/server", optional = true }
+# `build.rs` uses exactly one of these: `luaify()` calls
+# `factorio_bot_scripting_lua::lua_docs::write_lua_docs`. `factorio-bot-server`
+# and `serde` were also declared here and referenced by nothing.
 factorio-bot-scripting-lua = { path = "../../crates/scripting_lua", optional = true }
-serde = { version = "1.0", features = [ "derive" ] }
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "^0.1.12"

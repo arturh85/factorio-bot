@@ -300,13 +300,24 @@ rather than patching caveats in one at a time.
 **Instance 1 — walks.** `Status::Success` on a walk meant the ticks were
 measured, not that the bot arrived. Handled by `Evidence::Believed { why }`.
 
-**Instance 2 — transfers (open at time of writing).** A `remove` reported
-success and the inventory read afterwards showed no plates. Two possibilities
-with opposite consequences: either the plates exist and
-`world.player().main_inventory` is stale (it has been, by 1,400 ticks), or the
-plates do not exist and `remove` said success anyway. If the second, then
-**`Status::Success` for a transfer means only "the game did not refuse the
-command", not "items moved"** — and a green row in the replay can be a no-op.
+**Instance 2 — transfers. SETTLED, and it went the other way: transfers are
+genuinely measured.** A `remove` appeared to report success with no plates in
+the inventory afterwards. Resolved by asking the game rather than our snapshot:
+the furnace came back `output_inventory: EMPTY` via two independent mod
+functions, and the mod's own `on_player_main_inventory_changed` writeout shows
+the bot holding 10 iron-plate at exactly the `remove`'s dispatch tick.
+
+A transfer's `Success` asserts MORE than was supposed: for `insert`/`remove`
+the mod's arithmetic check must pass, because `complain` writes into the RCON
+reply body and any leftover line becomes `Failed`. **A zero-move `remove` would
+have failed.** So a green transfer row does mean items moved.
+
+**Two caveats that keep this inside the frame rather than exempting it.** The
+guarantee is **implicit and untested** — it falls out of how `complain`
+interacts with the reply body, not from anything asserting it, so it can be
+broken by an unrelated change to either with nothing going red. And it **does
+not generalise**: `log.rs:60` documents only the weaker reading, and no other
+action kind has been checked.
 
 ## The frame
 
@@ -334,3 +345,33 @@ This is the same family as everything else in this file: **not absent, not
 wrong-looking — confidently right about the wrong thing.** The difference is
 that here we know the shape in advance, so the renderer can be built to expect
 it rather than retrofitted.
+
+
+---
+
+# `world.player()` is FROZEN, not stale — and it is not the map view's source
+
+Worse than the staleness this file previously recorded. `world.player()` binds
+`Planner::plan_world`, a `DashMap` **deep copy taken once at script start and
+never refreshed**. Read before and after a completed run in the same script it
+is identical field-for-field: still listing a furnace placed 5,067 ticks
+earlier, reporting position `(0,0)` against the game's `(-22.29, 35.34)` —
+**41.8 tiles out, at least 6,214 ticks behind.**
+
+`real_world` was correct throughout. Only the Lua binding is wrong. Likely
+vestigial: `plan_world` existed for the old task-graph planner to simulate
+into, that planner was deleted, and `crates/planner` simulates through its own
+`PlanState` overlay instead.
+
+**Consequences for these views:**
+
+  - **The map view is unaffected.** It reads `GET /api/v1/game/find-entities`,
+    which goes to the game, not to `plan_world`. Do not "simplify" it onto a
+    script-side world read.
+  - **Any demo script that prints world state is currently showing pre-run
+    state.** A screencapture built on one would show a frozen world beside a
+    live plan and look like the plan did nothing.
+  - **All six internal move-asides are absent from `obs.walks`** — and at least
+    one was legitimate (3.93 tiles against a reach of 2.7). So those position
+    jumps are real movement the timeline has no row for. Say so in the legend
+    rather than letting a reader infer teleportation.

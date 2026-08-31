@@ -691,6 +691,44 @@ mod tests {
         );
     }
 
+    /// The Lua surface of the 2.x widening, checked through the real
+    /// interpreter.
+    ///
+    /// `scripts/api_test.lua` covers the same ground but is a *shipped sample
+    /// script*, not a test: it prints its own verdict, so when
+    /// `directions_all()` went from 8 to 16 it would have printed `FAIL` at a
+    /// correct API, with nothing in CI to contradict it. This is the assertion
+    /// that goes red instead.
+    #[tokio::test]
+    async fn the_lua_direction_table_is_factorio_2_xs_sixteen_values() {
+        let (_dir, result) = sandboxed(
+            r#"
+            local n = 0
+            for _ in pairs(Direction) do n = n + 1 end
+            assert(n == 16, "Direction must name all sixteen values, got " .. n)
+
+            -- Names keep their meanings; the numbers behind them move.
+            assert(Direction.North == 0, "north is 0")
+            assert(Direction.East == 4, "east is 4, not 2")
+            assert(Direction.South == 8, "south is 8, not 4")
+            assert(Direction.West == 12, "west is 12, not 6")
+            assert(Direction.NorthEast == 2, "northeast is 2, which used to be east")
+            assert(Direction.NorthNorthEast == 1, "the half-diagonals rails use")
+
+            assert(#directions_all() == 16, "directions_all is sixteen now")
+            assert(#directions_compass() == 8, "directions_compass is what it used to return")
+            assert(#directions_orthogonal() == 4, "still the four cardinals")
+
+            assert(direction_clockwise(Direction.North) == Direction.East, "90 degrees")
+            assert(direction_clockwise(Direction.West) == Direction.North, "90 degrees")
+            assert(direction_opposite(Direction.North) == Direction.South, "180 degrees")
+            assert(direction_opposite(Direction.East) == Direction.West, "180 degrees")
+        "#,
+        )
+        .await;
+        result.expect("the direction surface must hold");
+    }
+
     #[tokio::test]
     async fn an_out_of_range_direction_is_reported_not_panicked() {
         // `Direction::from_u8(16)` is `None`, and unwrapping it aborted. This

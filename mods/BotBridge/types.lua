@@ -189,6 +189,30 @@ function serialize_technology(technology)
     end
     record.research_unit_ingredients = ingredients
     record.prerequisites = prerequisites
+    -- Which recipes researching this unlocks.
+    --
+    -- `effects` lives on LuaTechnologyPrototype, NOT on LuaTechnology (see
+    -- runtime-api.json: LuaTechnology has no `effects` attribute at all), so
+    -- it has to be reached through `.prototype`. Each entry is a
+    -- TechnologyModifier -- a table whose `type` selects which other fields
+    -- exist -- and the `unlock-recipe` variant carries a non-optional
+    -- `recipe` string.
+    --
+    -- This is what lets the planner plan *through* a locked recipe: without
+    -- it, a recipe that is disabled today is either invisible (the old
+    -- behaviour, which broke goal.researched for every technology that
+    -- unlocks anything) or visible but unreachable, which would be worse --
+    -- plans that can never execute.
+    local unlocked = {}
+    local ok, effects = pcall(function() return technology.prototype.effects end)
+    if ok and effects ~= nil then
+        for _, effect in pairs(effects) do
+            if effect.type == "unlock-recipe" and effect.recipe ~= nil then
+                table.insert(unlocked, effect.recipe)
+            end
+        end
+    end
+    record.unlocked_recipes = unlocked
     return record
 end
 

@@ -132,8 +132,45 @@ fn the_live_world_snapshot_deserialises() {
     );
     assert_eq!(snapshot.entity_prototypes.len(), 1028);
     assert_eq!(snapshot.item_prototypes.len(), 342);
-    assert_eq!(snapshot.recipes.len(), 23);
+    // 662, not the 23 this fixture carried when `collect_recipes` sent only
+    // the recipes already enabled for the force. A planner asked to plan
+    // toward a *future* state cannot be shown only the current one: the
+    // automation science pack recipe is disabled on a fresh map, so
+    // `goal.researched("automation")` had no recipe to craft its packs with
+    // and failed outright. All 639 of the extra recipes are disabled.
+    assert_eq!(snapshot.recipes.len(), 662);
+    assert_eq!(
+        snapshot.recipes.iter().filter(|r| r.enabled).count(),
+        23,
+        "the same 23 that used to be the whole payload"
+    );
     assert_eq!(snapshot.forces.len(), 1, "only the player force is sent");
+}
+
+/// A disabled recipe arrives, and arrives flagged as disabled.
+///
+/// The pair matters more than either half: a recipe that is missing cannot be
+/// planned with, and a recipe that is present but indistinguishable from an
+/// enabled one gets planned with immediately, producing a craft the game
+/// refuses. `automation-science-pack` is the exact recipe the live defect was
+/// found on.
+#[test]
+fn the_live_world_snapshot_carries_disabled_recipes_flagged_as_disabled() {
+    let snapshot: WorldSnapshot = serde_json::from_str(WORLD_SNAPSHOT).expect("parses");
+    let pack = snapshot
+        .recipes
+        .iter()
+        .find(|recipe| recipe.name == "automation-science-pack")
+        .expect("a live 2.1 game has the automation science pack recipe");
+
+    assert!(
+        !pack.enabled,
+        "it is locked behind its technology on a fresh map"
+    );
+    assert_eq!(
+        pack.category, "crafting",
+        "and is hand-craftable once unlocked"
+    );
 }
 
 /// Proof this capture is 2.x and not another 1.1 fixture.
@@ -239,6 +276,76 @@ fn the_live_world_snapshot_carries_the_player_force_and_its_technologies() {
     assert!(
         !automation.research_unit_ingredients.is_empty(),
         "automation costs science packs"
+    );
+
+    // The other half of planning through a locked recipe: which technology
+    // turns one on. `effects` lives on `LuaTechnologyPrototype`, not on
+    // `LuaTechnology`, so `serialize_technology` has to reach it through
+    // `.prototype` — a capture is the only thing that says it really did.
+    assert_eq!(
+        automation.unlocked_recipes,
+        vec![
+            "assembling-machine-1".to_string(),
+            "long-handed-inserter".to_string()
+        ],
+        "automation's own unlock-recipe effects"
+    );
+
+    // And the mapping that makes `goal.researched(\"automation\")` plannable:
+    // the pack recipe it needs is unlocked by a *different* technology, which
+    // is also one of automation's prerequisites.
+    let pack_tech = force
+        .technologies
+        .get("automation-science-pack")
+        .expect("the technology that unlocks the pack recipe");
+    assert!(pack_tech
+        .unlocked_recipes
+        .contains(&"automation-science-pack".to_string()));
+    assert!(automation
+        .prerequisites
+        .as_ref()
+        .expect("automation lists prerequisites")
+        .contains(&"automation-science-pack".to_string()));
+}
+
+/// Every disabled recipe should name a technology that unlocks it — with eight
+/// real exceptions.
+///
+/// The exceptions are not a rounding error to be papered over: `loader`,
+/// `pistol` and the `infinity-*` entities are editor items no technology ever
+/// unlocks, so a planner that assumed "disabled implies unlockable" would plan
+/// crafts that can never run. `RecipeGate::Unobtainable` exists for exactly
+/// these, and this pins the number so that a future base game growing a ninth
+/// is noticed rather than absorbed.
+#[test]
+fn almost_every_disabled_recipe_names_an_unlocking_technology() {
+    let snapshot: WorldSnapshot = serde_json::from_str(WORLD_SNAPSHOT).expect("parses");
+    let unlockable: BTreeSet<&str> = snapshot.forces[0]
+        .technologies
+        .values()
+        .flat_map(|tech| tech.unlocked_recipes.iter().map(String::as_str))
+        .collect();
+
+    let orphans: BTreeSet<&str> = snapshot
+        .recipes
+        .iter()
+        .filter(|recipe| !recipe.enabled)
+        .map(|recipe| recipe.name.as_str())
+        .filter(|name| !unlockable.contains(name))
+        .collect();
+
+    assert_eq!(
+        orphans,
+        BTreeSet::from([
+            "express-loader",
+            "fast-loader",
+            "heat-interface",
+            "infinity-chest",
+            "infinity-pipe",
+            "loader",
+            "pistol",
+            "turbo-loader",
+        ])
     );
 }
 

@@ -484,12 +484,22 @@ function collect_item_prototypes()
 end
 
 -- FIXME: this assumes that there is only one player force
+--
+-- **All** recipes, not just the enabled ones. Each carries its own `enabled`
+-- flag, so the planner can tell the two apart.
+--
+-- Sending only enabled recipes asked the planner to plan toward a *future*
+-- state while showing it only the *current* one: `goal.researched("automation")`
+-- expands to "have 10 automation-science-pack", and that recipe is disabled
+-- until automation is researched, so the recipe was absent from world data
+-- entirely and the goal failed with "no method can satisfy". That broke
+-- goal.researched for essentially every technology that unlocks anything.
+-- `serialize_technology` sends the matching unlock-recipe effects, so the
+-- planner can pair a locked recipe with the technology that unlocks it.
 function collect_recipes()
 	local result = {}
 	for name, rec in pairs(game.forces["player"].recipes) do
-		if rec.enabled then
-			table.insert(result, serialize_recipe(rec))
-		end
+		table.insert(result, serialize_recipe(rec))
 	end
 	return result
 end

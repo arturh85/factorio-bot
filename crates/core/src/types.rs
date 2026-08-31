@@ -749,6 +749,21 @@ pub struct FactorioTechnology {
     pub order: String,
     pub level: u32,
     pub valid: bool,
+    /// Recipes this technology unlocks, from the prototype's `unlock-recipe`
+    /// effects.
+    ///
+    /// The planner needs this to plan *through* a recipe that is disabled
+    /// today: `collect_recipes` sends every recipe with its `enabled` flag, and
+    /// this is the other half — which technology turns a disabled one on.
+    /// Without it a locked recipe would be visible but unreachable, and the
+    /// planner would emit plans that can never execute.
+    ///
+    /// `#[serde(default)]` because payloads captured before this field existed
+    /// (and fixtures written against them) simply have no key here; an absent
+    /// key means "we do not know of any", which is the same shape as an empty
+    /// list and is what the old enabled-only world implicitly assumed.
+    #[serde(default, deserialize_with = "deserialize_helpers::vec_or_empty_map")]
+    pub unlocked_recipes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, TypeScriptify, Serialize, Deserialize, Hash, Eq)]
@@ -882,10 +897,10 @@ pub struct FactorioEntity {
         deserialize_with = "deserialize_helpers::option_vec_or_empty_map"
     )]
     pub fuel_inventory: Option<Vec<InventoryItemWithQuality>>,
-    pub amount: Option<u32>,               // only type = resource
-    pub recipe: Option<String>,            // only CraftingMachines
-    pub ghost_name: Option<String>,        // only type = entity-ghost
-    pub ghost_type: Option<String>,        // only type = entity-ghost
+    pub amount: Option<u32>,        // only type = resource
+    pub recipe: Option<String>,     // only CraftingMachines
+    pub ghost_name: Option<String>, // only type = entity-ghost
+    pub ghost_type: Option<String>, // only type = entity-ghost
 }
 
 impl crate::aabb_quadtree::Spatial<Rect> for FactorioEntity {
@@ -1467,7 +1482,9 @@ mod tests {
         // A solid 6x6 ore field, elements at tile centres as the game reports
         // them.
         let elements: Vec<Position> = (0..6)
-            .flat_map(|y| (0..6).map(move |x| Position::new(f64::from(x) - 40.5, f64::from(y) + 35.5)))
+            .flat_map(|y| {
+                (0..6).map(move |x| Position::new(f64::from(x) - 40.5, f64::from(y) + 35.5))
+            })
             .collect();
         let patch = ResourcePatch {
             name: "iron-ore".into(),

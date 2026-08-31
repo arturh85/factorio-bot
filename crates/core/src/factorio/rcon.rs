@@ -665,12 +665,19 @@ impl FactorioRcon {
     /// the stdout path parses.
     ///
     /// One call rather than a paged protocol. Measured on Factorio 2.1.17 with
-    /// Space Age on a fresh freeplay map, the whole reply is 393 kB
-    /// (235 kB of entity prototypes, 56 kB of item prototypes, 131 kB for the
-    /// player force's technologies, 8 kB of recipes) and takes 100 ms; a probe
+    /// Space Age on a fresh freeplay map, the whole reply is 744 kB
+    /// (209 kB of entity prototypes, 49 kB of item prototypes, 138 kB for the
+    /// player force's technologies, 345 kB of recipes); a probe
     /// of `rcon.print(string.rep('x', n))` against the same server returned
-    /// 16 MB in a single RCON packet, so the payload has two orders of
-    /// magnitude of headroom. Note that this crate configures the `rcon`
+    /// 16 MB in a single RCON packet, so the payload still has more than an
+    /// order of magnitude of headroom.
+    ///
+    /// It very nearly doubled when `collect_recipes` stopped filtering on
+    /// `enabled` — 393 kB to 744 kB, almost all of it the 639 disabled recipes
+    /// a fresh map has — and that was measured rather than assumed, because a
+    /// truncated payload that silently dropped recipes would be a worse bug
+    /// than the missing-recipe one the change fixes. Note that this crate
+    /// configures the `rcon`
     /// connection with `enable_factorio_quirks(true)`, which reads exactly one
     /// packet per command — a chunked reply would need multi-packet reads that
     /// this client does not do. [`FactorioRcon::remote_call_json`] is what

@@ -41,7 +41,7 @@ So: if you add a fixture, add a row here. If you refresh one, change its row.
 | File | Game version | Captured | Source | Read by |
 |---|---|---|---|---|
 | `live-2.1.17-players.json` | 2.1.17 (build 87315, linux64, space-age) | 2026-08-30 | `remote.call('botbridge', 'players')` | `live_2_1_payloads.rs` |
-| `live-2.1.17-world-snapshot.json` | 2.1.17 (build 87315, linux64, space-age) | 2026-08-30 | `remote.call('botbridge', 'world_snapshot')` | `live_2_1_payloads.rs` |
+| `live-2.1.17-world-snapshot.json` | 2.1.17 (build 87315, linux64, space-age) | 2026-08-30, **recaptured 2026-08-31** | `remote.call('botbridge', 'world_snapshot')` | `live_2_1_payloads.rs` |
 | `live-2.1.17-tiles.json` | 2.1.17 (build 87315, linux64, space-age) | 2026-08-30 | `remote.call('botbridge', 'find_tiles_filtered', {area={{-256,-288},{-248,-280}}})` | `live_2_1_payloads.rs` |
 | `live-2.1.17-entities-spawn.json` | 2.1.17 (build 87315, linux64, space-age) | 2026-08-30 | `remote.call('botbridge', 'find_entities_filtered', {area={{-24,-16},{8,8}}})` | `live_2_1_payloads.rs` |
 | `live-2.1.17-entities-resources.json` | 2.1.17 (build 87315, linux64, space-age) | 2026-08-30 | `remote.call('botbridge', 'find_entities_filtered', {area={{-56,-60},{-40,-44}}})` | `live_2_1_payloads.rs` |
@@ -53,7 +53,7 @@ So: if you add a fixture, add a row here. If you refresh one, change its row.
 ### Game state at capture
 
 All six `live-2.1.17-*` files come from **one** session, so they are mutually
-consistent:
+consistent — with one documented exception, below:
 
 * A freeplay `space-age` save (`workspace/server/saves/level.zip`), mods
   `base`, `elevated-rails`, `quality`, `recycler`, `space-age`, `BotBridge`.
@@ -66,6 +66,26 @@ consistent:
   `serialize_entity` that a pristine spawn does not have: a `stone-furnace` at
   `(2, 2)` (an entity whose inventories are **empty**) and an `inserter` at
   `(4.5, 2.5)` (the only entity type that reports `pickup_position`).
+
+### The world-snapshot recapture
+
+`live-2.1.17-world-snapshot.json` was recaptured on 2026-08-31, from a headless
+`-c 0` server rather than the original session, because the mod changed what the
+call returns: `collect_recipes` stopped filtering on `enabled` and
+`serialize_technology` grew `unlocked_recipes`, without which the planner cannot
+plan through a recipe a technology has yet to unlock.
+
+Recapturing rather than hand-editing is the point of these files, but it does
+break the one-session guarantee, so the delta was checked rather than assumed.
+Against the previous capture: entity prototypes (1028) and item prototypes (342)
+are **byte-identical**, all 277 technologies are unchanged but for the added
+`unlocked_recipes` key, and all 23 previously-sent recipes are present and
+unchanged. The only additions are 639 disabled recipes. `world_snapshot` carries
+no player data, so capturing without a connected client changes nothing in it —
+`live-2.1.17-players.json` is still the original session's.
+
+The reply grew from 393 kB to 744 kB. See `FactorioRcon::world_snapshot` for the
+single-packet headroom that makes that safe.
 
 ### Why these areas
 

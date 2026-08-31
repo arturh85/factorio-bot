@@ -1,0 +1,158 @@
+{
+  "planned_makespan": 250,
+  "refused": null,
+  "steps": [
+    {
+      "attempt_number": null,
+      "bot": 1,
+      "bot_step_index": 0,
+      "error": null,
+      "evidence": {
+        "kind": "believed",
+        "why": "the walk's ticks are measured, but its arrival is not: the path is checked against the goal before dispatch and the resting position is never re-measured afterwards, so where the bot ended up is inferred from the plan rather than observed"
+      },
+      "index": 0,
+      "observed_end_tick": 205,
+      "observed_start_tick": 100,
+      "planned_end_tick": 70,
+      "planned_start_tick": 0,
+      "status": "Success",
+      "what": {
+        "kind": "walk",
+        "to": {
+          "x": 10.0,
+          "y": 20.0
+        }
+      }
+    },
+    {
+      "attempt_number": 1,
+      "bot": 1,
+      "bot_step_index": 1,
+      "error": null,
+      "evidence": {
+        "kind": "measured"
+      },
+      "index": 1,
+      "observed_end_tick": 330,
+      "observed_start_tick": 205,
+      "planned_end_tick": 190,
+      "planned_start_tick": 70,
+      "status": "Success",
+      "what": {
+        "action": 0,
+        "kind": "act",
+        "label": "mine iron-ore"
+      }
+    },
+    {
+      "attempt_number": 3,
+      "bot": 1,
+      "bot_step_index": 2,
+      "error": "not enough iron-plate",
+      "evidence": {
+        "kind": "measured"
+      },
+      "index": 2,
+      "observed_end_tick": null,
+      "observed_start_tick": 340,
+      "planned_end_tick": 250,
+      "planned_start_tick": 190,
+      "status": "Failed",
+      "what": {
+        "action": 1,
+        "kind": "act",
+        "label": "craft iron-gear-wheel"
+      }
+    },
+    {
+      "attempt_number": null,
+      "bot": 2,
+      "bot_step_index": 0,
+      "error": "run ended holding the dispatch",
+      "evidence": {
+        "kind": "believed",
+        "why": "the walk's ticks are measured, but its arrival is not: the path is checked against the goal before dispatch and the resting position is never re-measured afterwards, so where the bot ended up is inferred from the plan rather than observed"
+      },
+      "index": 3,
+      "observed_end_tick": null,
+      "observed_start_tick": 100,
+      "planned_end_tick": 120,
+      "planned_start_tick": 0,
+      "status": "Lost",
+      "what": {
+        "kind": "walk",
+        "to": {
+          "x": 40.0,
+          "y": 5.0
+        }
+      }
+    },
+    {
+      "attempt_number": null,
+      "bot": 2,
+      "bot_step_index": 1,
+      "error": null,
+      "evidence": {
+        "kind": "measured"
+      },
+      "index": 4,
+      "observed_end_tick": null,
+      "observed_start_tick": null,
+      "planned_end_tick": 150,
+      "planned_start_tick": 120,
+      "status": "Pending",
+      "what": {
+        "action": 2,
+        "kind": "act",
+        "label": "place stone-furnace"
+      }
+    },
+    {
+      "attempt_number": 1,
+      "bot": 2,
+      "bot_step_index": 2,
+      "error": null,
+      "evidence": {
+        "kind": "measured"
+      },
+      "index": 5,
+      "observed_end_tick": null,
+      "observed_start_tick": null,
+      "planned_end_tick": 180,
+      "planned_start_tick": 150,
+      "status": "Success",
+      "what": {
+        "action": 3,
+        "kind": "act",
+        "label": "insert coal"
+      }
+    },
+    {
+      "attempt_number": 1,
+      "bot": 2,
+      "bot_step_index": 3,
+      "error": null,
+      "evidence": {
+        "kind": "measured"
+      },
+      "index": 6,
+      "observed_end_tick": null,
+      "observed_start_tick": 400,
+      "planned_end_tick": 240,
+      "planned_start_tick": 180,
+      "status": "Running",
+      "what": {
+        "action": 4,
+        "kind": "act",
+        "label": "research automation"
+      }
+    }
+  ],
+  "unmatched_walks": [
+    {
+      "bot": 3,
+      "bot_step_index": 0
+    }
+  ]
+}

@@ -1,0 +1,93 @@
+{
+  "planned_makespan": 190,
+  "refused": "the wait graph has a cycle: s1 waits on s3, which waits on s1; nothing was dispatched",
+  "steps": [
+    {
+      "attempt_number": null,
+      "bot": 1,
+      "bot_step_index": 0,
+      "error": null,
+      "evidence": {
+        "kind": "believed",
+        "why": "the walk's ticks are measured, but its arrival is not: the path is checked against the goal before dispatch and the resting position is never re-measured afterwards, so where the bot ended up is inferred from the plan rather than observed"
+      },
+      "index": 0,
+      "observed_end_tick": null,
+      "observed_start_tick": null,
+      "planned_end_tick": 70,
+      "planned_start_tick": 0,
+      "status": "Pending",
+      "what": {
+        "kind": "walk",
+        "to": {
+          "x": 10.0,
+          "y": 20.0
+        }
+      }
+    },
+    {
+      "attempt_number": null,
+      "bot": 1,
+      "bot_step_index": 1,
+      "error": null,
+      "evidence": {
+        "kind": "measured"
+      },
+      "index": 1,
+      "observed_end_tick": null,
+      "observed_start_tick": null,
+      "planned_end_tick": 190,
+      "planned_start_tick": 70,
+      "status": "Pending",
+      "what": {
+        "action": 0,
+        "kind": "act",
+        "label": "mine iron-ore"
+      }
+    },
+    {
+      "attempt_number": null,
+      "bot": 2,
+      "bot_step_index": 0,
+      "error": null,
+      "evidence": {
+        "kind": "believed",
+        "why": "the walk's ticks are measured, but its arrival is not: the path is checked against the goal before dispatch and the resting position is never re-measured afterwards, so where the bot ended up is inferred from the plan rather than observed"
+      },
+      "index": 2,
+      "observed_end_tick": null,
+      "observed_start_tick": null,
+      "planned_end_tick": 120,
+      "planned_start_tick": 0,
+      "status": "Pending",
+      "what": {
+        "kind": "walk",
+        "to": {
+          "x": 40.0,
+          "y": 5.0
+        }
+      }
+    },
+    {
+      "attempt_number": null,
+      "bot": 2,
+      "bot_step_index": 1,
+      "error": null,
+      "evidence": {
+        "kind": "measured"
+      },
+      "index": 3,
+      "observed_end_tick": null,
+      "observed_start_tick": null,
+      "planned_end_tick": 150,
+      "planned_start_tick": 120,
+      "status": "Pending",
+      "what": {
+        "action": 2,
+        "kind": "act",
+        "label": "place stone-furnace"
+      }
+    }
+  ],
+  "unmatched_walks": []
+}

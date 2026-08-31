@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import {computed, onMounted, onUnmounted, ref, watch} from 'vue';
-import {Cog, Home, Network, Terminal} from '@lucide/vue';
+import {Cog, Home, Map as MapIcon, Network, Terminal} from '@lucide/vue';
 import AppTopbar from './AppTopbar.vue';
 import AppMenu from './AppMenu.vue';
 import AppFooter from './AppFooter.vue';
@@ -12,15 +12,17 @@ import type {MenuEntry} from '@/models/dashboard';
 
 // The 'Entities'/'Map' entries that used to live here (commented out, pointing
 // at '/workspace') were removed along with that route in an earlier task in
-// this plan. They were unbuilt, not unwanted: a map view is still planned --
-// see .superpowers/sdd/plan-view-requirements.md -- it just has no route to
-// link to yet.
+// this plan. They were unbuilt, not unwanted -- see
+// .superpowers/sdd/plan-view-requirements.md -- and this is that intent, now
+// built at /map (see .superpowers/sdd/map-view/brief.md), not a restoration
+// of the old /workspace stub.
 const menu: MenuEntry[] = [
   {label: 'Dashboard', icon: Home, to: '/'},
   {label: 'Settings', icon: Cog, to: '/settings'},
   {label: 'RCON', icon: Terminal, to: '/rcon'},
   {label: 'LUA Script', icon: Terminal, to: '/script'},
-  {label: 'Tasks', icon: Network, to: '/tasks'}
+  {label: 'Tasks', icon: Network, to: '/tasks'},
+  {label: 'Map', icon: MapIcon, to: '/map'}
 ]
 
 // jsdom reports exactly 1024, and so does a real 1024px viewport, which is the

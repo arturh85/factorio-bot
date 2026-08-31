@@ -5,6 +5,10 @@ import {createRouter, createWebHashHistory} from 'vue-router';
 // "Empty Page" placeholder, and /instances rendered a static card with no data
 // binding. None was reachable from the menu. They are deleted rather than
 // restyled; see docs/superpowers/plans/2026-08-31-shadcn-ui-redesign.md.
+//
+// /map is new, not restored: the commented-out 'Map' menu entry App.vue used
+// to carry pointed at the deleted /workspace above, which was an unbuilt
+// placeholder, not this route. See .superpowers/sdd/map-view/brief.md.
 const routes = [
     {
         path: '/',
@@ -30,6 +34,11 @@ const routes = [
         path: '/tasks',
         name: 'tasks',
         component: () => import('./pages/TasksPage.vue')
+    },
+    {
+        path: '/map',
+        name: 'map',
+        component: () => import('./pages/MapPage.vue')
     }
 ];
 

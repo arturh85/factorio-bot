@@ -138,3 +138,74 @@ export interface RestApiSettings {
     port: number;
     web_root: string | null;
 }
+
+/**
+ * A 2D game-world coordinate. Mirrors `Position` in `crates/core/src/types.rs`.
+ *
+ * `y` increases DOWNWARD -- the same direction screen and SVG coordinates do
+ * -- verified against a live capture (see `Rect` below). A view that flips
+ * this axis to look "more like a normal graph" renders every position wrong
+ * while looking entirely plausible.
+ */
+export interface Position {
+    x: number;
+    y: number;
+}
+
+/**
+ * An axis-aligned bounding box, `left_top` to `right_bottom`. Mirrors `Rect`
+ * in `crates/core/src/types.rs`.
+ *
+ * "Top" has the numerically SMALLER `y`: `crash-site-spaceship` in
+ * `crates/core/tests/live-2.1.17-entities-spawn.json` has
+ * `left_top.y = -9.296875` and `right_bottom.y = -1.5`. Do not swap them when
+ * computing a rect's height, and do not negate `y` when placing one on
+ * screen -- see `app/src/components/map/MapEntities.vue`.
+ */
+export interface Rect {
+    left_top: Position;
+    right_bottom: Position;
+}
+
+/**
+ * One inventory slot, Factorio 2.0's quality-tagged format. Mirrors
+ * `InventoryItemWithQuality` in `crates/core/src/types.rs`.
+ */
+export interface InventoryItemWithQuality {
+    name: string;
+    quality: string;
+    count: number;
+}
+
+/**
+ * One entity as `GET /api/v1/game/find-entities` reports it. Mirrors
+ * `FactorioEntity` in `crates/core/src/types.rs`.
+ *
+ * `name`, `entity_type`, `position`, `bounding_box` and `direction` are
+ * always present. Everything else is `Option<_>` on the Rust side with no
+ * `skip_serializing_if`, so the server always sends the field -- present and
+ * `null`, never omitted -- which is why these are typed `| null` rather than
+ * `?`, matching `InstanceStatus` above.
+ *
+ * The map view (`app/src/components/map/`) reads only the required fields
+ * plus `amount`; the inventory and ghost fields are declared here for
+ * completeness with the server's schema but nothing renders them yet.
+ */
+export interface FactorioEntity {
+    name: string;
+    entity_type: string;
+    position: Position;
+    bounding_box: Rect;
+    /** Factorio 2.x `defines.direction`: 0..=15, north at 0, clockwise. */
+    direction: number;
+    drop_position: Position | null;
+    pickup_position: Position | null;
+    output_inventory: InventoryItemWithQuality[] | null;
+    fuel_inventory: InventoryItemWithQuality[] | null;
+    /** Only present (non-null) for `entity_type: "resource"`. */
+    amount: number | null;
+    /** Only present for crafting machines. */
+    recipe: string | null;
+    ghost_name: string | null;
+    ghost_type: string | null;
+}

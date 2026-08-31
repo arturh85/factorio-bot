@@ -2117,6 +2117,14 @@ vi.mock('@/api/jobEvents');
 
 // Monaco needs a real canvas and web workers, and ScriptTree talks to the
 // store on mount; neither is what this page's own layout test is about.
+// `stubs` is not enough on its own. `ScriptPage.vue` has a static
+// `import Editor from '@/components/Editor.vue'`, so monaco is pulled in at
+// module-load time -- before any stub can apply -- and dies under jsdom with
+// `TypeError: document.queryCommandSupported is not a function`. The module
+// mock below is what actually prevents that; `stubs` then keeps the rendered
+// output clean.
+vi.mock('@/components/Editor.vue', () => ({default: {template: '<div/>'}}));
+
 const stubs = {Editor: true, ScriptTree: true};
 
 beforeEach(() => {

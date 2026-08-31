@@ -758,6 +758,21 @@ pub struct FactorioForce {
     pub current_research: Option<String>,
     // Progress of current research, as a number in range [0, 1].
     pub research_progress: Option<Box<R64>>,
+    /// `LuaForce::manual_mining_speed_modifier`: "the actual mining speed will
+    /// be multiplied by `1 + manual_mining_speed_modifier`". Default `0`.
+    ///
+    /// This is per-force and moves with research — vanilla's `steel-axe`
+    /// grants `character-mining-speed +1`, doubling hand mining — so it cannot
+    /// be a constant on the planner's side; see
+    /// `factorio_bot_planner::method::util::character_mining_speed`.
+    ///
+    /// `R64` rather than `f64` because `FactorioForce` derives `Hash` and
+    /// `Eq`, which is the same reason `research_progress` above is one.
+    /// `Option` with `#[serde(default)]` so that payloads captured before this
+    /// field existed still parse: `None` means "the world did not report one",
+    /// which the planner reads as the documented default of `0`.
+    #[serde(default)]
+    pub manual_mining_speed_modifier: Option<Box<R64>>,
     pub technologies: Box<BTreeMap<String, FactorioTechnology>>,
 }
 

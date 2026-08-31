@@ -1552,8 +1552,9 @@ mod tests {
             }
             other => panic!("expected a mine action, got {:?}", other),
         }
-        // One second per ore in the fixture.
-        assert_eq!(action.duration, 300);
+        // One second of mining time per ore in the fixture, divided by the
+        // character's 0.5 mining speed: two seconds, so 120 ticks each.
+        assert_eq!(action.duration, 600);
     }
 
     #[test]

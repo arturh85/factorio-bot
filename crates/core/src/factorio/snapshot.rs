@@ -220,6 +220,7 @@ mod tests {
                 force_id: 1,
                 current_research: None,
                 research_progress: None,
+                manual_mining_speed_modifier: None,
                 technologies: Box::default(),
             }],
         }
@@ -454,6 +455,7 @@ mod tests {
             force_id: 1,
             current_research: None,
             research_progress: None,
+            manual_mining_speed_modifier: None,
             technologies: Box::default(),
         });
 

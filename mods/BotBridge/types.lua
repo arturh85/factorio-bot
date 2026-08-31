@@ -119,7 +119,10 @@ end
 function serialize_force(force)
     local record = table_properties(
         force,
-        {"name", "index", "research_progress"},
+        -- manual_mining_speed_modifier: hand mining runs at
+        -- character.mining_speed * (1 + this). Vanilla's steel-axe research
+        -- sets it to 1, doubling it, so the planner cannot assume a constant.
+        {"name", "index", "research_progress", "manual_mining_speed_modifier"},
         {index = "force_id", research_progress = "research_progress"}
     )
     if force.current_research ~= nil then

@@ -106,7 +106,7 @@ fn more_bots_finish_sooner() {
     let net_four = expand(&[goal(4)], &state_four, &registry_for(&four), BotId(1)).unwrap();
     let many = schedule(&net_four, &state_four, &four).unwrap().makespan;
 
-    // Measured on this scenario: one = 4765, many = 1881, a 2.533x speedup.
+    // Measured on this scenario: one = 6691, many = 2100, a 3.186x speedup.
     //
     // Both figures moved three times during the planner-hardening pass and this
     // comment is the crate's only record of them, so it states what was
@@ -123,8 +123,13 @@ fn more_bots_finish_sooner() {
     // a stone furnace is 1.398 wide, so single-tile siting produced furnaces
     // the game refuses to place — moved the first one off the copper patch
     // edge: one 4751 -> 4765, many 1870 -> 1881, ratio 2.541x -> 2.533x.
+    // Then hand mining stopped ignoring the character's 0.5 mining speed, so
+    // every mine action doubled: one 4765 -> 6691, many 1881 -> 2100, ratio
+    // 2.533x -> 3.186x. `one` doubled harder than `many` because a single bot
+    // does all the mining serially while four share it, so mining is a larger
+    // fraction of the one-bot makespan.
     //
-    // The floor stays 2x rather than the measured 2.533x, so ordinary
+    // The floor stays 2x rather than the measured 3.186x, so ordinary
     // makespan movement does not trip it.
     assert!(
         many.saturating_mul(2) < one,
@@ -133,12 +138,12 @@ fn more_bots_finish_sooner() {
         one
     );
     // Absolute ceiling: catches a regression even if `one` also moves in a
-    // way that keeps the 2x ratio satisfied. 2100 sits 219 ticks (12%) above
-    // the measured 1881 — room for ordinary movement, but tight enough that a
+    // way that keeps the 2x ratio satisfied. 2350 sits 250 ticks (12%) above
+    // the measured 2100 — room for ordinary movement, but tight enough that a
     // repeat of task 2's 194-tick regression fails here instead of passing
     // silently. Retighten it whenever the measured figure drops again: a
     // ceiling with 74% headroom, which 3200 became, guards nothing.
-    assert!(many < 2100, "four bots regressed past 2100 ticks: {}", many);
+    assert!(many < 2350, "four bots regressed past 2350 ticks: {}", many);
 }
 
 #[test]

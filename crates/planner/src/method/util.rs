@@ -24,8 +24,62 @@ pub fn recipe_for(state: &PlanState, item: &str) -> Option<FactorioRecipe> {
     state.base().recipes.get(item).map(|r| r.clone())
 }
 
-/// Ticks to mine one unit of `item`, from its entity prototype. Defaults to one
-/// second when the prototype carries no mining time.
+/// A vanilla character's mining speed, used only when the world carries no
+/// usable `character` prototype. See [`character_mining_speed`].
+const VANILLA_CHARACTER_MINING_SPEED: f64 = 0.5;
+
+/// How fast the acting character mines by hand, as the world reports it.
+///
+/// `LuaEntityPrototype::mining_speed` is documented as "the mining speed of
+/// this mining drill/**character** prototype", and a vanilla `character` has
+/// 0.5. It is read rather than hardcoded because it is prototype data a mod
+/// can change; the constant is only the fallback for a world that has no
+/// `character` prototype at all, which no real game produces but every
+/// hand-built fixture can.
+///
+/// The acting force's `manual_mining_speed_modifier` multiplies that: "the
+/// actual mining speed will be multiplied by `1 + manual_mining_speed_modifier`"
+/// (`LuaForce::manual_mining_speed_modifier`). It defaults to 0, and vanilla's
+/// `steel-axe` technology grants `character-mining-speed +1`, which doubles
+/// hand mining — so this is not a constant either, and is likewise read.
+///
+/// # The gap this leaves, which meets the above on one technology
+///
+/// `steel-axe` is a **`research_trigger`** technology (craft 50 steel plates),
+/// and `FactorioTechnology` models only `research_unit_ingredients` /
+/// `research_unit_count`. So the planner sees an empty bill for it and treats
+/// researching it as free.
+///
+/// The two halves meet: a plan that researches `steel-axe` now gets the
+/// resulting mining *rate* right, and still gets that research's own
+/// *duration* wrong. Whoever teaches `FactorioTechnology` about
+/// `research_trigger` closes the second half; until then this step is
+/// correctly ordered but under-costed. `electronics`, `steam-power` and
+/// `automation-science-pack` are the other trigger technologies.
+pub fn character_mining_speed(state: &PlanState) -> f64 {
+    let base = state
+        .base()
+        .entity_prototypes
+        .get("character")
+        .and_then(|p| p.mining_speed)
+        .filter(|speed| *speed > 0.)
+        .unwrap_or(VANILLA_CHARACTER_MINING_SPEED);
+    // A modifier of -1 or below would zero or invert the speed. The game does
+    // not produce one, but a mod could, and a zero divisor downstream is worse
+    // than an unmodified rate.
+    let modifier = state.manual_mining_speed_modifier().max(0.);
+    base * (1. + modifier)
+}
+
+/// Ticks to mine one unit of `item` by hand.
+///
+/// Hand mining takes `mining_time / mining_speed` seconds — the prototype's
+/// `mining_time` is the numerator of a division, not the answer. Dividing was
+/// missing, which made every estimate here exactly `1 / 0.5 = 2x` too fast
+/// against a vanilla character.
+///
+/// `mining_time` defaults to one second when the prototype carries none; the
+/// divisor comes from [`character_mining_speed`].
 pub fn mining_ticks(state: &PlanState, item: &str) -> Ticks {
     let seconds = state
         .base()
@@ -33,7 +87,7 @@ pub fn mining_ticks(state: &PlanState, item: &str) -> Ticks {
         .get(item)
         .and_then(|p| p.mining_time)
         .unwrap_or(1.0);
-    seconds_to_ticks(seconds)
+    seconds_to_ticks(seconds / character_mining_speed(state))
 }
 
 /// The tile of `item` nearest `from` that still holds at least `need`.
@@ -328,12 +382,71 @@ mod tests {
     use super::*;
     use crate::ids::BotId;
     use crate::state::PlanState;
+    use factorio_bot_core::serde_json;
     use factorio_bot_core::test_utils::fixture_world;
-    use factorio_bot_core::types::Position;
+    use factorio_bot_core::types::{FactorioForce, Position};
     use std::sync::Arc;
 
     fn state() -> PlanState {
         PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)])
+    }
+
+    /// `fixture_world()` with the `character` prototype's mining speed set to
+    /// `speed`, or the prototype removed entirely when `speed` is `None`.
+    ///
+    /// The fixture ships a real `character` at 0.5, so overwriting it in place
+    /// is what lets a test say "the divisor came from the world" rather than
+    /// "the divisor happens to equal the constant".
+    fn state_with_character_mining_speed(speed: Option<f64>) -> PlanState {
+        let world = fixture_world();
+        match speed {
+            Some(speed) => {
+                let mut character = world
+                    .entity_prototypes
+                    .get("character")
+                    .expect("the fixture ships a character prototype")
+                    .clone();
+                character.mining_speed = Some(speed);
+                world
+                    .entity_prototypes
+                    .insert("character".into(), character);
+            }
+            None => {
+                world.entity_prototypes.remove("character");
+            }
+        }
+        PlanState::from_world(Arc::new(world), &[BotId(1)])
+    }
+
+    /// `fixture_world()` plus one `player` force carrying `modifier` verbatim
+    /// as JSON.
+    ///
+    /// `fixture_world()` deliberately carries no forces (see `test_world.rs`),
+    /// so anything force-scoped has to bolt one on. Built by deserialising
+    /// rather than by struct literal so that these tests also pin the wire
+    /// shape `mods/BotBridge`'s `serialize_force` sends — including that a
+    /// payload with no `manual_mining_speed_modifier` key at all still parses,
+    /// which is what every fixture captured before the field existed looks
+    /// like.
+    fn state_with_force_json(modifier: &str) -> PlanState {
+        let force: FactorioForce = serde_json::from_str(&format!(
+            r#"{{
+              "name": "player",
+              "force_id": 1,
+              "current_research": null,
+              "research_progress": null,
+              {modifier}
+              "technologies": {{}}
+            }}"#
+        ))
+        .expect("the force fixture must parse");
+        let world = fixture_world();
+        world.update_force(force).expect("update_force");
+        PlanState::from_world(Arc::new(world), &[BotId(1)])
+    }
+
+    fn state_with_mining_speed_modifier(modifier: f64) -> PlanState {
+        state_with_force_json(&format!(r#""manual_mining_speed_modifier": {modifier},"#))
     }
 
     #[test]
@@ -494,9 +607,66 @@ mod tests {
     }
 
     #[test]
-    fn mining_a_fixture_ore_takes_one_second() {
+    fn mining_a_fixture_ore_takes_two_seconds_not_one() {
+        // `iron-ore`'s `mining_time` is 1.0 s, but that is the numerator of a
+        // division, not an answer: a character mines at 0.5, so one ore takes
+        // two seconds. Reading `mining_time` straight out of the prototype gave
+        // 60 and made every hand-mining estimate exactly 2x too fast — measured
+        // live, 180 planned against 362 observed for three ore.
         let s = state();
-        assert_eq!(mining_ticks(&s, "iron-ore"), 60);
+        assert_eq!(mining_ticks(&s, "iron-ore"), 120);
+    }
+
+    #[test]
+    fn the_character_mining_speed_comes_from_the_world_not_a_constant() {
+        // The divisor is a prototype value a mod can change, so it has to be
+        // read rather than baked in. Same ore, three different characters.
+        for (speed, expected) in [(1.0, 60), (0.5, 120), (0.25, 240)] {
+            let s = state_with_character_mining_speed(Some(speed));
+            assert_eq!(
+                mining_ticks(&s, "iron-ore"),
+                expected,
+                "a character mining at {speed} should take {expected} ticks per ore"
+            );
+        }
+    }
+
+    #[test]
+    fn the_forces_manual_mining_speed_modifier_speeds_mining_up() {
+        // Vanilla's `steel-axe` research grants `character-mining-speed +1`,
+        // which the game applies as `speed * (1 + modifier)`. A force that has
+        // it mines an ore in one second, not two — so a planner that ignored
+        // the modifier would be 2x too *slow* for a mid-game force, exactly
+        // the mirror of the defect the divisor fixed.
+        for (modifier, expected) in [(0.0, 120), (1.0, 60), (3.0, 30)] {
+            let s = state_with_mining_speed_modifier(modifier);
+            assert_eq!(
+                mining_ticks(&s, "iron-ore"),
+                expected,
+                "a force with manual_mining_speed_modifier {modifier} \
+                 should take {expected} ticks per ore"
+            );
+        }
+    }
+
+    #[test]
+    fn a_force_that_reports_no_modifier_mines_at_the_unmodified_rate() {
+        // `None` is "the world did not tell us", which is the game's own
+        // default of 0 — not an error and not a reason to skip the divisor.
+        let absent = state_with_force_json("");
+        assert_eq!(mining_ticks(&absent, "iron-ore"), 120);
+        let null = state_with_force_json(r#""manual_mining_speed_modifier": null,"#);
+        assert_eq!(mining_ticks(&null, "iron-ore"), 120);
+    }
+
+    #[test]
+    fn a_world_with_no_character_prototype_falls_back_to_the_vanilla_speed() {
+        // Better a documented vanilla default than a silent divide by nothing:
+        // an absent or nonsensical prototype must not turn into 0 or infinity.
+        for missing in [None, Some(0.0)] {
+            let s = state_with_character_mining_speed(missing);
+            assert_eq!(mining_ticks(&s, "iron-ore"), 120);
+        }
     }
 
     #[test]
@@ -515,10 +685,11 @@ mod tests {
     fn mining_time_comes_from_the_prototype_not_a_constant() {
         let s = state();
         // stone-furnace's prototype says 0.2 s; a hardcoded one-second default
-        // would give 60 instead.
-        assert_eq!(mining_ticks(&s, "stone-furnace"), 12);
-        // An item with no prototype at all falls back to one second.
-        assert_eq!(mining_ticks(&s, "not-a-real-entity"), 60);
+        // would give 120 instead. Divided by the character's 0.5, 0.4 s.
+        assert_eq!(mining_ticks(&s, "stone-furnace"), 24);
+        // An item with no prototype at all falls back to one second of mining
+        // time, which is still two seconds of mining.
+        assert_eq!(mining_ticks(&s, "not-a-real-entity"), 120);
     }
 
     #[test]

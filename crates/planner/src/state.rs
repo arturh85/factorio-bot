@@ -239,6 +239,29 @@ impl PlanState {
             .and_then(|entry| entry.technologies.get(name).cloned())
     }
 
+    /// The acting force's `manual_mining_speed_modifier`, or `0.` when the
+    /// world does not report one.
+    ///
+    /// Read through the acting force for the same reason `technology` is: the
+    /// planner acts for exactly one force, and a mining rate taken from a
+    /// different force than the research questions are answered against would
+    /// be the same silent disagreement that field doc describes.
+    ///
+    /// `0.` is the game's own default for an unmodified force, so a world
+    /// with no forces at all (every planner fixture) reads as "no bonus"
+    /// rather than as an error.
+    pub fn manual_mining_speed_modifier(&self) -> f64 {
+        let Some(force) = self.force.as_deref() else {
+            return 0.;
+        };
+        self.base
+            .forces
+            .get(force)
+            .and_then(|entry| entry.manual_mining_speed_modifier.as_deref().copied())
+            .map(f64::from)
+            .unwrap_or(0.)
+    }
+
     /// Every technology the acting force defines, in name order.
     ///
     /// Ordered because `recipe -> technology` lookups scan this and must pick

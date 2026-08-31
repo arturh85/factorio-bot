@@ -233,13 +233,14 @@ end
             r#"
 --- places a whole blueprint
 -- Sends /silent-command remote.call('place_blueprint', ...)
--- @number player_id id of player to give the item to
+-- @number player_id id of the player doing the placing
 -- @string blueprint blueprint string
 -- @param position `types.Position`
 -- @number direction rotates the blueprint in given direction
 -- @bool force_build forces the build even if other entities needs to be removed first
 -- @bool only_ghosts only places ghost version of entities
 -- @tparam {int} helper_player_ids array of player ids which may help
+-- @return {`types.FactorioEntity`} the entities the blueprint placed
 function rcon.place_blueprint(player_id, blueprint, position, direction, force_build, only_ghosts, helper_player_ids)
 end
 "#,
@@ -290,11 +291,12 @@ end
             r#"
 --- CHEATs a whole blueprint
 -- Sends /silent-command remote.call('cheat_blueprint', ...)
--- @number player_id id of player to give the item to
+-- @number player_id id of the player doing the placing
 -- @string blueprint blueprint string
 -- @param position `types.Position`
 -- @number direction rotates the blueprint in given direction
 -- @bool force_build forces the build even if other entities needs to be removed first
+-- @return {`types.FactorioEntity`} the entities the blueprint placed
 function rcon.cheat_blueprint(player_id, blueprint, position, direction, force_build)
 end
 "#,
@@ -334,9 +336,10 @@ end
             r#"
 --- Revives a single ghost entity into the real thing
 -- Sends /silent-command remote.call('revive_ghost', ...)
--- @number player_id id of player to give the item to
+-- @number player_id id of the player doing the reviving
 -- @string name name of entity to revive
--- @param position `types.Position`
+-- @param position `types.Position` of the ghost
+-- @return `types.FactorioEntity` the revived entity
 function rcon.revive_ghost(player_id, name, position)
 end
 "#,
@@ -369,10 +372,13 @@ end
         String::from(
             r#"
 --- Move a player to a different position
+-- Blocks until the game reports the walk finished. A goal the bot cannot get
+-- within `radius` of is refused before anything is dispatched, rather than
+-- walked to somewhere else and reported as success.
 -- Sends /silent-command remote.call('action_start_walk_waypoints', ...)
--- @number player_id id of player to give the item to
--- @param position `types.Position`
--- @number radius radius
+-- @number player_id id of the player to move
+-- @param position `types.Position` to walk to
+-- @number[opt] radius how close counts as arrived; exact arrival if omitted
 function rcon.move(player_id, position, radius)
 end
 "#,
@@ -405,10 +411,10 @@ end
             r#"
 --- Mine a resource with player
 -- Sends /silent-command remote.call('action_start_mining', ...)
--- @number player_id id of player to give the item to
+-- @number player_id id of the player doing the mining
 -- @string name name of resource to mine
--- @param position `types.Position`
--- @number count how many to mine
+-- @param position `types.Position` of the resource
+-- @number[opt=1] count how many to mine
 function rcon.mine(player_id, name, position, count)
 end
 "#,
@@ -447,9 +453,9 @@ end
             r#"
 --- Craft an item with player
 -- Sends /silent-command remote.call('action_start_crafting', ...)
--- @number player_id id of plaer
+-- @number player_id id of the player doing the crafting
 -- @string name name of item to craft
--- @number count how many to craft
+-- @number[opt=1] count how many to craft
 function rcon.craft(player_id, name, count)
 end
 "#,
@@ -563,7 +569,7 @@ end
             r#"
 --- Inserts an item into an inventory
 -- Sends /silent-command remote.call('insert_to_inventory', ...)
--- @number player_id id of plaer
+-- @number player_id id of the player reaching into the inventory
 -- @string entity_name name entity to insert
 -- @param position `types.Position` of inventory
 -- @string inventory_type which type of inventory to place in
@@ -617,7 +623,7 @@ end
             r#"
 --- Removes an item from an inventory
 -- Sends /silent-command remote.call('remove_from_inventory', ...)
--- @number player_id id of plaer
+-- @number player_id id of the player reaching into the inventory
 -- @string entity_name name entity to remove
 -- @param position  `types.Position` of inventory
 -- @string inventory_type which type of inventory to remove from

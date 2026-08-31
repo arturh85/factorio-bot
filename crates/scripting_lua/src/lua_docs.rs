@@ -13,7 +13,7 @@ use factorio_bot_core::schemars::schema::{
 use factorio_bot_core::schemars::schema_for;
 use factorio_bot_core::types::{
     FactorioBlueprintInfo, FactorioEntity, FactorioPlayer, FactorioRecipe, InventoryResponse,
-    Position,
+    Position, Rect,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -85,11 +85,14 @@ pub fn write_lua_docs(target_path: PathBuf) -> LuaResult<()> {
 /// Rust structs themselves.
 ///
 /// This is a list of *roots*, not of documented types: `schema_for!` carries
-/// every type reachable from a root along in `definitions`, so `Rect`,
+/// every type reachable from a root along in `definitions`, so
 /// `FactorioIngredient` and `InventoryItemWithQuality` are described here
 /// without being named here, and a new field of a new type joins the docs the
 /// moment it compiles -- `JsonSchema` is required transitively, so it cannot
-/// be added without one.
+/// be added without one. `Rect` was such a type until
+/// `world.find_free_resource_rect` started naming it: a binding that hands one
+/// back directly makes it a root, and the reconciliation below then requires
+/// it here.
 ///
 /// Nothing in the list is spelled as a string: the name under which each type
 /// is documented is `schemars`' own `title`, which is the Rust type name. A
@@ -108,6 +111,7 @@ fn documented_type_schemas() -> Vec<RootSchema> {
         schema_for!(FactorioRecipe),
         schema_for!(InventoryResponse),
         schema_for!(Position),
+        schema_for!(Rect),
     ]
 }
 

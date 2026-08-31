@@ -213,6 +213,17 @@ end
 -- @tparam table goal a goal value
 -- @tparam[opt] table opts `{ bots = { ... } }` -- bot ids, not a count;
 --   defaults to every bot in this run
+--
+-- Every entry of `plan.steps` carries `bot`, `start`, `finish` and `kind`.
+-- `finish`, never `end`: `end` is a Lua keyword, so `step.end` does not parse.
+-- A `kind == "walk"` step also carries `to` -- a `types.Position` -- and
+-- `radius`, the tolerance that walk's own precondition asked for. `radius` is
+-- what tells "stand on this tile" from "stand near it", which for a place,
+-- insert or remove is the difference between a reachable request and the
+-- entity's own tile; a walk that only has to get close carries a non-zero one.
+-- Both `radius` and the other scalar fields are accepted by `plan:count{...}`
+-- and `plan:find{...}`; `to` and `pos` are not, being tables rather than
+-- comparable values.
 -- @treturn PlanValue the expanded, scheduled plan
 -- @raise if the goal names an unknown item or technology, if any bot in
 --   `opts.bots` is not a connected player, or if `opts.bots` is empty

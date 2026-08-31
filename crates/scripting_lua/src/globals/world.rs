@@ -95,12 +95,15 @@ end
         String::from(
             r#"
 --- find non-blocked rectangle with given resource
--- The ...
--- @string ore_name name of item to craft
--- @number width name of item to craft
--- @number height name of item to craft
--- @param near `types.Position`
--- @return `types.FactorioPlayer`
+-- Searches the resource patches of `ore_name`, nearest to `near` first, for a
+-- free rectangle of the given size. **A patch that has no room is not an
+-- error:** the all-zero rectangle is returned, so check `right_bottom` rather
+-- than assuming a hit.
+-- @string ore_name name of the resource, e.g. "iron-ore"
+-- @number width width of the rectangle to fit, in tiles
+-- @number height height of the rectangle to fit, in tiles
+-- @param near `types.Position` to search outwards from
+-- @return `types.Rect` the free rectangle, or an all-zero rectangle if none fits
 function world.find_free_resource_rect(ore_name, width, height, near)
 end
 "#,
@@ -129,8 +132,10 @@ end
             r#"
 --- Parse blueprint
 -- @string blueprint blueprint string
+-- @string label name to record on the result; it is carried through
+--   unchanged, not read out of the blueprint
 -- @return `types.FactorioBlueprintInfo`
-function world.parse_blueprint(...)
+function world.parse_blueprint(blueprint, label)
 end
 "#,
         ),
@@ -163,8 +168,10 @@ end
         String::from(
             r#"
 --- find entities at given position/radius with optional filters
--- Sends 
--- @param search_center `types.Position` 
+-- Answered from the entity graph this process already holds -- no RCON round
+-- trip, and so no cost per call. `rcon.find_entities_in_radius` is the one
+-- that asks the game.
+-- @param search_center `types.Position`
 -- @number radius searches in circular radius around search_center
 -- @string[opt] search_name name of entity to find
 -- @string[opt] search_type type of entity to find
@@ -232,10 +239,11 @@ end
         String::from(
             r#"
 --- counts how many of a given item the player has
--- The ...
+-- Reads the player's main inventory. An item the player does not carry counts
+-- zero; only an unknown player is an error.
 -- @number player_id id of player
 -- @string item_name name of item
--- @return {`types.FactorioEntity`}
+-- @return number how many the player holds
 function world.inventory(player_id, item_name)
 end
 "#,

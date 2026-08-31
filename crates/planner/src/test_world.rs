@@ -265,6 +265,82 @@ pub(crate) fn world_with_prerequisite_chain(len: u32) -> FactorioWorld {
     world
 }
 
+/// `fixture_world()` with `recipe` switched off and a force whose technologies
+/// unlock it.
+///
+/// **This is the shape the shared fixture cannot express, and that is exactly
+/// why it hid the defect this fixture exists for.** Every recipe in
+/// `fixture_world` is `enabled: true`, so a planner that could only see enabled
+/// recipes passed its whole suite while the live game — where
+/// `automation-science-pack` is disabled until its technology is researched —
+/// had no such recipe at all. A green run against an all-enabled fixture proves
+/// nothing about locked recipes, so tests about them have to build one.
+///
+/// `unlockers` are technology names that will each carry `recipe` in their
+/// `unlocked_recipes`; passing more than one is how the several-unlockers
+/// tie-break is tested, and passing none is how the "disabled and nothing turns
+/// it on" case is. Each is prerequisite-free and pack-free, so the fixture
+/// isolates the unlock question from research cost and prerequisite depth.
+pub(crate) fn world_with_locked_recipe(recipe: &str, unlockers: &[&str]) -> FactorioWorld {
+    let world = fixture_world();
+
+    let mut locked = world
+        .recipes
+        .get(recipe)
+        .unwrap_or_else(|| panic!("the shared fixture must define the {recipe} recipe"))
+        .clone();
+    assert!(
+        locked.enabled,
+        "{recipe} is already disabled in the shared fixture; this fixture would then be \
+         asserting nothing"
+    );
+    locked.enabled = false;
+    world
+        .update_recipes(vec![locked])
+        .expect("update_recipes cannot fail for a well-formed recipe");
+
+    let technologies: Vec<String> = unlockers
+        .iter()
+        .map(|tech| {
+            format!(
+                r#"
+                "{tech}": {{
+                  "name": "{tech}",
+                  "enabled": true,
+                  "upgrade": false,
+                  "researched": false,
+                  "prerequisites": [],
+                  "research_unit_ingredients": [],
+                  "research_unit_count": 1,
+                  "research_unit_energy": 60.0,
+                  "order": "u-{tech}",
+                  "level": 1,
+                  "valid": true,
+                  "unlocked_recipes": ["{recipe}"]
+                }}"#
+            )
+        })
+        .collect();
+    let json = format!(
+        r#"
+        {{
+          "name": "player",
+          "force_id": 1,
+          "current_research": null,
+          "research_progress": null,
+          "technologies": {{ {} }}
+        }}
+        "#,
+        technologies.join(",")
+    );
+    let force: FactorioForce =
+        serde_json::from_str(&json).expect("the generated unlock force must parse");
+    world
+        .update_force(force)
+        .expect("update_force cannot fail for a well-formed force");
+    world
+}
+
 /// `fixture_world()` plus the force above. Nothing else differs.
 pub(crate) fn world_with_technologies() -> FactorioWorld {
     let world = fixture_world();

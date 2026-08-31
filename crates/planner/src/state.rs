@@ -239,6 +239,22 @@ impl PlanState {
             .and_then(|entry| entry.technologies.get(name).cloned())
     }
 
+    /// Every technology the acting force defines, in name order.
+    ///
+    /// Ordered because `recipe -> technology` lookups scan this and must pick
+    /// the same answer on every run; the underlying map is a `BTreeMap`, so the
+    /// order is the data's, not the hash seed's.
+    pub fn technology_names(&self) -> Vec<String> {
+        let Some(force) = self.force.as_deref() else {
+            return Vec::new();
+        };
+        self.base
+            .forces
+            .get(force)
+            .map(|entry| entry.technologies.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
     pub fn bot_ids(&self) -> Vec<BotId> {
         self.bots.keys().copied().collect()
     }

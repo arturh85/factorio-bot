@@ -204,6 +204,81 @@ pub fn recipe_ticks(recipe: &FactorioRecipe) -> Ticks {
     seconds_to_ticks(recipe.energy.to_f64().unwrap_or(0.5))
 }
 
+/// Whether a recipe may be used, and at what cost.
+///
+/// The world sends *every* recipe with an `enabled` flag, not just the ones the
+/// force can currently craft, because a plan is a statement about the future:
+/// `goal.researched("automation")` needs 10 automation science packs, and that
+/// recipe is disabled until its own technology is researched. Hiding the recipe
+/// made the goal unplannable; showing it without this gate would make it
+/// *wrongly* plannable, emitting a craft the game would refuse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecipeGate {
+    /// Craftable as things stand — either the force already has it, or the
+    /// technology that unlocks it is researched (possibly by this very plan).
+    Open,
+    /// Craftable only after this technology is researched.
+    NeedsResearch(String),
+    /// Disabled and no technology unlocks it, so nothing this planner can do
+    /// will ever turn it on. Live 2.1.17 has eight of these — `loader`,
+    /// `pistol`, `infinity-chest` and friends, which are editor or map-editor
+    /// items. A method must decline rather than plan a craft that cannot run.
+    Unobtainable,
+}
+
+/// The technology that unlocks `recipe`, if any.
+///
+/// Scans the acting force's technologies, which `PlanState` holds in a
+/// `BTreeMap`, and takes the **lexicographically smallest** name among those
+/// that unlock the recipe. A handful of recipes really do have several
+/// unlockers (live 2.1.17 has seven, e.g. `roboport` from either
+/// `construction-robotics` or `logistic-robotics`), and they are alternatives:
+/// researching any one of them turns the recipe on. Picking one is therefore
+/// sound, and picking the smallest name makes the choice depend only on the
+/// data and not on iteration order — which is what keeps planning
+/// deterministic. It is *not* claimed to be the cheapest of the alternatives;
+/// costing them and choosing the cheapest is follow-up work.
+///
+/// One already-researched unlocker wins over any unresearched one regardless of
+/// name, because a technology already done costs nothing and asking for a
+/// different one would add work the world has already paid for.
+pub fn unlocking_technology(state: &PlanState, recipe: &str) -> Option<String> {
+    let mut candidate: Option<String> = None;
+    for name in state.technology_names() {
+        let Some(tech) = state.technology(&name) else {
+            continue;
+        };
+        if !tech.unlocked_recipes.iter().any(|r| r == recipe) {
+            continue;
+        }
+        if state.is_researched(&name) {
+            return Some(name);
+        }
+        if candidate.is_none() {
+            candidate = Some(name);
+        }
+    }
+    candidate
+}
+
+/// Classify `recipe` for the acting force under the plan's overlay.
+pub fn recipe_gate(state: &PlanState, recipe: &FactorioRecipe) -> RecipeGate {
+    if recipe.enabled {
+        return RecipeGate::Open;
+    }
+    match unlocking_technology(state, &recipe.name) {
+        // `is_researched` reads the overlay as well as the world, so a
+        // technology an earlier sibling of this expansion already researched
+        // leaves the recipe Open and costs no second subgoal. That is what
+        // keeps the common case free: `Researched` emits its prerequisites
+        // before its science packs, and the technology unlocking a pack's
+        // recipe is normally one of those prerequisites.
+        Some(tech) if state.is_researched(&tech) => RecipeGate::Open,
+        Some(tech) => RecipeGate::NeedsResearch(tech),
+        None => RecipeGate::Unobtainable,
+    }
+}
+
 /// What a whole research costs, as (item, total count) pairs in the order the
 /// technology lists them.
 ///

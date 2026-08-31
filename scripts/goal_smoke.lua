@@ -63,14 +63,19 @@ print("gantt bytes: " .. tostring(#gantt))
 -- The capability this whole increment buys: a plan's shape can be asserted on
 -- directly, with no running game involved.
 --
--- This deliberately does NOT use goal.researched. Factorio 2.0 introduced
--- `research_trigger` technologies -- unlocked by doing something rather than by
--- feeding science packs -- and Space Age's whole early tree uses them.
+-- This deliberately does NOT use goal.researched -- see research_smoke.lua,
+-- which does. `goal.researched("automation")` plans since the mod started
+-- sending disabled recipes and each technology's unlock-recipe effects; before
+-- that the automation science pack recipe was absent from world data entirely
+-- and the goal failed with "no method can satisfy".
+--
+-- One approximation remains, and it is not this increment's: Factorio 2.0
+-- introduced `research_trigger` technologies, unlocked by doing something
+-- rather than by feeding science packs, and Space Age's early tree uses them.
 -- FactorioTechnology models only research_unit_ingredients/research_unit_count,
--- the pack-based path, and the mod never serialises a trigger at all. So the
--- planner computes an empty bill for those technologies and goal.researched
--- cannot be satisfied for anything depending on them, "automation" included.
--- Tracked as its own increment; goal.all is exercised here with two item goals.
+-- so the planner sees an empty bill for those and treats them as free. The plan
+-- is therefore correctly *ordered* but under-costed at the trigger technologies.
+-- Here goal.all is exercised with two item goals instead.
 local p2 = goal.plan(goal.all { goal.have("iron-plate", 5), goal.have("iron-gear-wheel", 2) })
 print("composed plan: " .. #p2.steps .. " steps over " .. #p2.bots .. " bots"
       .. ", " .. p2:count { kind = "place", entity = "stone-furnace" } .. " furnaces")

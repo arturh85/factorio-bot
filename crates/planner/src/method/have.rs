@@ -23,8 +23,8 @@ use crate::goal::{Goal, Holder};
 use crate::ids::{BotId, Ticks};
 use crate::method::util::{
     free_area_near, ingredients_of, mining_ticks, nearest_resource_tile, output_per_craft,
-    recipe_for, recipe_ticks, research_ingredients, research_ticks, resource_supply_at_least,
-    resource_tiles_for,
+    recipe_for, recipe_gate, recipe_ticks, research_ingredients, research_ticks,
+    resource_supply_at_least, resource_tiles_for, RecipeGate,
 };
 use crate::method::{ExpansionCtx, GoalSite, Method, MethodRegistry, Step};
 use crate::state::PlanState;
@@ -135,7 +135,10 @@ impl Method for Smelt {
         if shortfall(state, item, *count, whose) == 0 {
             return false;
         }
-        matches!(recipe_for(state, item), Some(r) if r.category == "smelting")
+        let Some(recipe) = recipe_for(state, item) else {
+            return false;
+        };
+        recipe.category == "smelting" && recipe_gate(state, &recipe) != RecipeGate::Unobtainable
     }
 
     fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
@@ -194,6 +197,17 @@ impl Method for Smelt {
         };
 
         let mut steps: Vec<Step> = Vec::new();
+
+        // A smelting recipe the force has not unlocked yet has to be researched
+        // first — a furnace will not smelt what the force cannot make. The
+        // condition goes on both the inserts and the removal rather than on the
+        // removal alone, so the plan does not load a furnace it may not yet
+        // fire. See `HandCraft::expand` for why the subgoal is emitted first.
+        let mut research_pre: Vec<Condition> = Vec::new();
+        if let RecipeGate::NeedsResearch(tech) = recipe_gate(&ctx.state, &recipe) {
+            steps.push(Step::Subgoal(Goal::Researched(tech.clone())));
+            research_pre.push(Condition::Researched(tech));
+        }
 
         // Ingredients, fuel, and the furnace itself, as subgoals.
         for (ingredient, amount) in &ingredients {
@@ -263,22 +277,26 @@ impl Method for Smelt {
                     item: ingredient.clone(),
                     count: total,
                 },
-                pre: vec![
-                    Condition::AtPosition {
-                        who: Actor::Role,
-                        pos: pos.clone(),
-                        radius: reach,
-                    },
-                    Condition::EntityAt {
-                        pos: pos.clone(),
-                        name: "stone-furnace".into(),
-                    },
-                    Condition::HasItem {
-                        who: Actor::Role,
-                        item: ingredient.clone(),
-                        count: total,
-                    },
-                ],
+                pre: {
+                    let mut pre = vec![
+                        Condition::AtPosition {
+                            who: Actor::Role,
+                            pos: pos.clone(),
+                            radius: reach,
+                        },
+                        Condition::EntityAt {
+                            pos: pos.clone(),
+                            name: "stone-furnace".into(),
+                        },
+                        Condition::HasItem {
+                            who: Actor::Role,
+                            item: ingredient.clone(),
+                            count: total,
+                        },
+                    ];
+                    pre.extend(research_pre.iter().cloned());
+                    pre
+                },
                 eff: vec![Effect::LoseItem {
                     who: Actor::Role,
                     item: ingredient.clone(),
@@ -337,17 +355,21 @@ impl Method for Smelt {
                 item: item.clone(),
                 count: need,
             },
-            pre: vec![
-                Condition::AtPosition {
-                    who: Actor::Role,
-                    pos: pos.clone(),
-                    radius: reach,
-                },
-                Condition::EntityAt {
-                    pos: pos.clone(),
-                    name: "stone-furnace".into(),
-                },
-            ],
+            pre: {
+                let mut pre = vec![
+                    Condition::AtPosition {
+                        who: Actor::Role,
+                        pos: pos.clone(),
+                        radius: reach,
+                    },
+                    Condition::EntityAt {
+                        pos: pos.clone(),
+                        name: "stone-furnace".into(),
+                    },
+                ];
+                pre.extend(research_pre.iter().cloned());
+                pre
+            },
             eff: vec![Effect::GainItem {
                 who: Actor::Role,
                 item: item.clone(),
@@ -493,7 +515,10 @@ impl Method for HandCraft {
         if shortfall(state, item, *count, whose) == 0 {
             return false;
         }
-        matches!(recipe_for(state, item), Some(r) if r.category == "crafting")
+        let Some(recipe) = recipe_for(state, item) else {
+            return false;
+        };
+        recipe.category == "crafting" && recipe_gate(state, &recipe) != RecipeGate::Unobtainable
     }
 
     fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
@@ -512,6 +537,20 @@ impl Method for HandCraft {
         let mut steps: Vec<Step> = Vec::new();
         let mut pre = Vec::new();
         let mut eff = Vec::new();
+
+        // A recipe the force has not unlocked yet is craftable only after its
+        // technology is researched, so say so — both as a subgoal that does the
+        // research and as a precondition, which is what `infer_edges` turns
+        // into the ordering edge that keeps the craft after the research.
+        //
+        // Emitted before the ingredients on purpose: the research subgoal
+        // applies `Effect::Researched` as it expands, so a sibling ingredient
+        // whose own recipe the same technology unlocks comes out `Open` and
+        // costs nothing further.
+        if let RecipeGate::NeedsResearch(tech) = recipe_gate(&ctx.state, &recipe) {
+            steps.push(Step::Subgoal(Goal::Researched(tech.clone())));
+            pre.push(Condition::Researched(tech));
+        }
 
         for (ingredient, amount) in ingredients_of(&recipe) {
             let total = amount.saturating_mul(runs);
@@ -818,8 +857,10 @@ pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::ActionId;
     use crate::ids::BotId;
     use crate::method::expand;
+    use crate::method::util::unlocking_technology;
     use crate::network::ActionNetwork;
     use crate::schedule::{schedule, StepKind};
     use crate::state::PlanState;
@@ -2467,5 +2508,265 @@ mod tests {
         for step in &plan.steps {
             assert_eq!(step.bot, BotId(2), "the caller named bot 2");
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Locked recipes.
+    //
+    // The shared fixture marks every recipe `enabled`, which is precisely how
+    // the live defect went unseen: `world.recipe("automation-science-pack")`
+    // returned nil against a real 2.1.17 game because the mod only serialised
+    // recipes enabled for the force, and the goal failed with "no method can
+    // satisfy" while every unit test stayed green. These build a world where a
+    // recipe really is locked.
+    // ---------------------------------------------------------------
+
+    fn locked_state(recipe: &str, unlockers: &[&str], bots: &[BotId]) -> PlanState {
+        PlanState::from_world(
+            Arc::new(crate::test_world::world_with_locked_recipe(
+                recipe, unlockers,
+            )),
+            bots,
+        )
+    }
+
+    /// The premise: the fixture really does present a disabled recipe.
+    #[test]
+    fn the_locked_fixture_disables_the_recipe_it_names() {
+        let s = locked_state("automation-science-pack", &["asp-tech"], &[BotId(1)]);
+        let recipe = recipe_for(&s, "automation-science-pack").expect("still present, just off");
+        assert!(!recipe.enabled, "the fixture must disable it");
+        assert_eq!(
+            recipe.category, "crafting",
+            "and must not otherwise disturb it"
+        );
+    }
+
+    /// A disabled recipe with a known unlocker is craftable *after* research.
+    #[test]
+    fn a_locked_recipe_gates_on_its_unlocking_technology() {
+        let s = locked_state("automation-science-pack", &["asp-tech"], &[BotId(1)]);
+        let recipe = recipe_for(&s, "automation-science-pack").unwrap();
+        assert_eq!(
+            recipe_gate(&s, &recipe),
+            RecipeGate::NeedsResearch("asp-tech".into())
+        );
+    }
+
+    /// An enabled recipe needs no research, and asks no technology table any
+    /// questions.
+    #[test]
+    fn an_enabled_recipe_is_open() {
+        let s = locked_state("automation-science-pack", &["asp-tech"], &[BotId(1)]);
+        let gear = recipe_for(&s, "iron-gear-wheel").expect("untouched by the fixture");
+        assert_eq!(recipe_gate(&s, &gear), RecipeGate::Open);
+    }
+
+    /// Disabled with nothing to turn it on. Live 2.1.17 really has eight of
+    /// these (`loader`, `pistol`, `infinity-chest`, ...), and planning a craft
+    /// for one would be planning something the game refuses to run.
+    #[test]
+    fn a_locked_recipe_no_technology_unlocks_is_unobtainable() {
+        let s = locked_state("automation-science-pack", &[], &[BotId(1)]);
+        let recipe = recipe_for(&s, "automation-science-pack").unwrap();
+        assert_eq!(recipe_gate(&s, &recipe), RecipeGate::Unobtainable);
+    }
+
+    /// ...and `HandCraft` declines it, rather than emitting a craft that cannot
+    /// run. Declining is what lets the goal come back as "no method can
+    /// satisfy", which is the honest answer.
+    #[test]
+    fn hand_craft_declines_an_unobtainable_recipe() {
+        let s = locked_state("automation-science-pack", &[], &[BotId(1)]);
+        let goal = Goal::Have {
+            item: "automation-science-pack".into(),
+            count: 1,
+            whose: Holder::Share(BotId(1)),
+        };
+        assert!(
+            !HandCraft.applicable(&goal, &s),
+            "nothing can ever unlock this recipe"
+        );
+    }
+
+    /// The same goal *is* claimed when a technology can unlock it — otherwise
+    /// the test above would pass against a method that declined everything.
+    #[test]
+    fn hand_craft_claims_a_locked_recipe_that_can_be_unlocked() {
+        let s = locked_state("automation-science-pack", &["asp-tech"], &[BotId(1)]);
+        let goal = Goal::Have {
+            item: "automation-science-pack".into(),
+            count: 1,
+            whose: Holder::Share(BotId(1)),
+        };
+        assert!(HandCraft.applicable(&goal, &s));
+    }
+
+    /// Crafting through a locked recipe emits the research as a subgoal *and*
+    /// states it as a precondition. The subgoal is what gets the technology
+    /// researched; the precondition is what `infer_edges` turns into the edge
+    /// that keeps the craft after it. One without the other is a plan that
+    /// either never researches or researches too late.
+    #[test]
+    fn crafting_a_locked_recipe_emits_and_requires_the_research() {
+        let s = locked_state("automation-science-pack", &["asp-tech"], &[BotId(1)]);
+        let mut ctx = ExpansionCtx::new(s.fork(), BotId(1));
+        let steps = HandCraft
+            .expand(
+                &Goal::Have {
+                    item: "automation-science-pack".into(),
+                    count: 1,
+                    whose: Holder::Share(BotId(1)),
+                },
+                &mut ctx,
+            )
+            .expect("a locked recipe with an unlocker expands");
+
+        assert!(
+            subgoals(&steps).contains(&Goal::Researched("asp-tech".into())),
+            "the research has to be asked for: {:?}",
+            subgoals(&steps)
+        );
+        let craft = steps
+            .iter()
+            .find_map(|step| match step {
+                Step::Act(action) if matches!(action.kind, ActionKind::Craft { .. }) => {
+                    Some(action)
+                }
+                _ => None,
+            })
+            .expect("a craft action is emitted");
+        assert!(
+            craft
+                .pre
+                .contains(&Condition::Researched("asp-tech".into())),
+            "the craft has to wait for it: {:?}",
+            craft.pre
+        );
+    }
+
+    /// An *enabled* recipe emits no research at all. Without this, a method
+    /// that gated every craft on some technology would pass the test above.
+    #[test]
+    fn crafting_an_enabled_recipe_emits_no_research() {
+        let s = locked_state("automation-science-pack", &["asp-tech"], &[BotId(1)]);
+        let mut ctx = ExpansionCtx::new(s.fork(), BotId(1));
+        let steps = HandCraft
+            .expand(
+                &Goal::Have {
+                    item: "iron-gear-wheel".into(),
+                    count: 1,
+                    whose: Holder::Share(BotId(1)),
+                },
+                &mut ctx,
+            )
+            .expect("the gear recipe is enabled");
+        assert!(
+            !subgoals(&steps)
+                .iter()
+                .any(|g| matches!(g, Goal::Researched(_))),
+            "an unlocked recipe needs no research: {:?}",
+            subgoals(&steps)
+        );
+    }
+
+    /// A technology already researched leaves the recipe open and costs no
+    /// second subgoal — which is what keeps the common case free, since
+    /// `Researched` expands its prerequisites before its science packs.
+    #[test]
+    fn an_already_researched_unlocker_leaves_the_recipe_open() {
+        let mut s = locked_state("automation-science-pack", &["asp-tech"], &[BotId(1)]);
+        let recipe = recipe_for(&s, "automation-science-pack").unwrap();
+        assert_eq!(
+            recipe_gate(&s, &recipe),
+            RecipeGate::NeedsResearch("asp-tech".into()),
+            "baseline: locked before the research"
+        );
+        s.set_researched("asp-tech");
+        assert_eq!(
+            recipe_gate(&s, &recipe),
+            RecipeGate::Open,
+            "and open after it"
+        );
+    }
+
+    /// Several technologies may unlock one recipe (live 2.1.17 has seven such
+    /// recipes). They are alternatives, so choosing one is sound; choosing the
+    /// *same* one every run is what planning determinism requires.
+    #[test]
+    fn several_unlockers_resolve_to_the_lexicographically_smallest() {
+        let s = locked_state(
+            "automation-science-pack",
+            &["zeta-tech", "alpha-tech", "mid-tech"],
+            &[BotId(1)],
+        );
+        assert_eq!(
+            unlocking_technology(&s, "automation-science-pack"),
+            Some("alpha-tech".into())
+        );
+    }
+
+    /// ...unless one of them is already researched, in which case it wins
+    /// whatever its name, because the world has already paid for it.
+    #[test]
+    fn an_already_researched_unlocker_beats_a_smaller_named_one() {
+        let mut s = locked_state(
+            "automation-science-pack",
+            &["zeta-tech", "alpha-tech"],
+            &[BotId(1)],
+        );
+        s.set_researched("zeta-tech");
+        assert_eq!(
+            unlocking_technology(&s, "automation-science-pack"),
+            Some("zeta-tech".into()),
+            "the free one, not the alphabetically first"
+        );
+    }
+
+    /// End to end through the driver: the whole goal schedules, and the craft
+    /// really is ordered after the research rather than merely mentioning it.
+    #[test]
+    fn a_locked_recipe_schedules_its_research_before_its_craft() {
+        let bots = vec![BotId(1)];
+        let s = locked_state("automation-science-pack", &["asp-tech"], &bots);
+        let net = expand(
+            &[Goal::Have {
+                item: "automation-science-pack".into(),
+                count: 1,
+                whose: Holder::Share(BotId(1)),
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a locked recipe with an unlocker plans");
+        assert_eq!(researched_techs(&net), vec!["asp-tech".to_string()]);
+
+        let plan = schedule(&net, &s, &bots).expect("schedulable");
+        // A scheduled step names an `ActionId`, not a kind, so the kinds come
+        // back from the network the schedule was built over.
+        let kind_of = |id: ActionId| net.actions().find(|a| a.id == id).map(|a| a.kind.clone());
+        let mut research_end = None;
+        let mut craft_start = None;
+        for step in &plan.steps {
+            let StepKind::Act { action, .. } = &step.what else {
+                continue;
+            };
+            match kind_of(*action) {
+                Some(ActionKind::Research { tech }) if tech == "asp-tech" => {
+                    research_end = Some(step.end);
+                }
+                Some(ActionKind::Craft { item, .. }) if item == "automation-science-pack" => {
+                    craft_start = Some(step.start);
+                }
+                _ => {}
+            }
+        }
+        let research_end = research_end.expect("the research is scheduled");
+        let craft_start = craft_start.expect("the craft is scheduled");
+        assert!(
+            craft_start >= research_end,
+            "craft starts at {craft_start}, research ends at {research_end}"
+        );
     }
 }

@@ -72,12 +72,28 @@ jobs:
           cd app; pnpm run build:web
 
       # Rust
-      - name: 🏗️ Build the web ui
-        run: |
-          cd app && pnpm run build:web
       - name: 🏗️ Build the server binary
         run: |
           cargo build --release --all-features --timings
+
+      - name: 📦 Stage the release binary
+        shell: bash
+        run: |
+          # Explicit `found` rather than `[ -f x ] && cp x`: that shorter
+          # form is safe under `set -e` (bash exempts the left operand of
+          # `&&`, verified), but it exits 0 when NEITHER file exists, so a
+          # build that produced no binary would publish an empty release
+          # instead of failing.
+          mkdir -p release-artifacts
+          found=0
+          for f in target/release/factorio-bot target/release/factorio-bot.exe; do
+            if [ -f "$f" ]; then cp "$f" release-artifacts/; found=1; fi
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "::error::no release binary found under target/release/" >&2
+            exit 1
+          fi
+          ls -la release-artifacts/
 
       # Publish release binary
       # The desktop auto-updater has no server equivalent: release artefacts
@@ -92,8 +108,17 @@ jobs:
           replacesArtifacts: false
           omitBodyDuringUpdate: true
           omitNameDuringUpdate: true
-          tag: ${{ github.ref_name }}
-          artifacts: "target/release/factorio-bot*"
+          # The SAME expression `create-github-release` tags with (line ~185),
+          # not `github.ref_name`. Those two coincide under the documented
+          # `cargo release` flow and diverge on a hand-cut tag -- and with
+          # `allowUpdates: true` a divergence does not fail, it silently opens
+          # a second, changelog-less release and leaves the real one empty.
+          # Using one expression removes the invariant instead of asserting it.
+          tag: v${{ env.PACKAGE_VERSION }}
+          # Named exactly, not globbed: `target/release/factorio-bot*` also
+          # matches `factorio-bot.d`, a cargo dep-file listing absolute
+          # build-machine source paths, which would be published.
+          artifacts: "release-artifacts/*"
 
       # Prepare gh-pages
       - name: 🏗️ Build rust docs

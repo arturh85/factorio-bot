@@ -3161,6 +3161,38 @@ git commit -m "refactor(app): drop the native file pickers and the restapi contr
 
 ---
 
+## Task 11b: `App.vue` — the poll that makes 202 legible, and the autostart race
+
+Task 11 delivered `SettingsPage.vue` and the two parked decisions. Its Step 3 (`App.vue`) was excluded from that dispatch and is **not** done. I had claimed earlier deviations "absorbed most of this task's scope" — they absorbed the `restapiStore` import and nothing else here.
+
+**Files:** `app/src/App.vue`
+
+### Gap 1 — nothing ever learns a start's outcome
+
+`POST /api/v1/instance/start` answers **202** and runs detached. `App.vue:171-187` calls `checkInstanceState()` exactly **once**, in `onMounted`. There is no poll timer anywhere in production code.
+
+So `starting` goes true and never clears, `last_error` is never read after the initial fetch, and `ProcessControl.vue` cannot learn whether a start succeeded, failed, or is still extracting an archive. **The Start button is currently worse than it was before Task 7**, which is the cost of a 202 with no poller.
+
+**Measured, and it is the sharpest evidence for this task:** the only `setInterval` in the entire codebase is in `instanceStore.spec.ts:136,157`. The tests drive a two-second poll that production has never run. The store's polling behaviour is fully tested and entirely unshipped — a test exercising a loop the app does not have.
+
+- [ ] **Step 1:** Write the failing test — with a start in flight, the app must reach a terminal state (`started` or `failed`) without further user action. Drive it with fake timers; a test that never advances time is testing the initial fetch.
+- [ ] **Step 2:** Run it, confirm it fails **because no poll exists**, not because of a mock. An unexplained red is not a result.
+- [ ] **Step 3:** Add the poll — two seconds, started on mount, **cleared in `onUnmounted`**. A timer that outlives the component leaks one per navigation.
+- [ ] **Step 4:** Run it, confirm it passes.
+- [ ] **Step 5: Mutation** — delete the `clearInterval`, then delete the poll. Input classes: *a component unmounted with a start in flight*, and *a start whose outcome arrives after mount*. Each must fail its own named test with the intended message.
+
+**Decide and state:** a poll that runs forever costs a request every two seconds per open tab, indefinitely. Stop when the instance reaches a terminal state and restart on the next user action, or keep polling and say why.
+
+**Carried from Task 7:** the poll will clear a locally-set `lastError` from a rejected start after ~2 s. If that error is rendered as a banner, decide whether the poll should preserve it.
+
+### Gap 2 — every tab tries to autostart
+
+`onMounted` calls `startInstances()` whenever `enable_autostart` is set and nothing is running. Open three tabs and three starts race. The `compare_exchange` slot in `POST /instance/start` means the losers get **409** rather than three Factorio instances — so this is a wrong-looking-error problem, not a corruption one — but a browser tab is not the right owner of an autostart decision, and N tabs is not a scenario the desktop app had.
+
+- [ ] Decide: drop browser-side autostart entirely (the server can autostart at `serve` time, where "once" is well-defined), or keep it and swallow the 409 as "someone else already started it". **State which and why.** Dropping it is the smaller surface and I lean that way, but the setting is user-visible and removing its effect needs saying out loud.
+
+---
+
 ## Task 12: Delete Tauri from the JavaScript side
 
 **Files:**

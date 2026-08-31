@@ -41,7 +41,7 @@ So: if you add a fixture, add a row here. If you refresh one, change its row.
 | File | Game version | Captured | Source | Read by |
 |---|---|---|---|---|
 | `live-2.1.17-players.json` | 2.1.17 (build 87315, linux64, space-age) | 2026-08-30 | `remote.call('botbridge', 'players')` | `live_2_1_payloads.rs` |
-| `live-2.1.17-world-snapshot.json` | 2.1.17 (build 87315, linux64, space-age) | 2026-08-30, **recaptured 2026-08-31** | `remote.call('botbridge', 'world_snapshot')` | `live_2_1_payloads.rs` |
+| `live-2.1.17-world-snapshot.json` | 2.1.17 (build 87315, linux64, space-age) | 2026-08-30, **recaptured twice on 2026-08-31** | `remote.call('botbridge', 'world_snapshot')` | `live_2_1_payloads.rs` |
 | `live-2.1.17-tiles.json` | 2.1.17 (build 87315, linux64, space-age) | 2026-08-30 | `remote.call('botbridge', 'find_tiles_filtered', {area={{-256,-288},{-248,-280}}})` | `live_2_1_payloads.rs` |
 | `live-2.1.17-entities-spawn.json` | 2.1.17 (build 87315, linux64, space-age) | 2026-08-30 | `remote.call('botbridge', 'find_entities_filtered', {area={{-24,-16},{8,8}}})` | `live_2_1_payloads.rs` |
 | `live-2.1.17-entities-resources.json` | 2.1.17 (build 87315, linux64, space-age) | 2026-08-30 | `remote.call('botbridge', 'find_entities_filtered', {area={{-56,-60},{-40,-44}}})` | `live_2_1_payloads.rs` |
@@ -86,6 +86,31 @@ no player data, so capturing without a connected client changes nothing in it â€
 
 The reply grew from 393 kB to 744 kB. See `FactorioRcon::world_snapshot` for the
 single-packet headroom that makes that safe.
+
+### The second world-snapshot recapture
+
+Recaptured again later on 2026-08-31, after a sweep of every `pcall`-wrapped
+read in `types.lua` fixed four fields the mod had been failing to collect. Same
+method as the first recapture: a headless server started directly from
+`workspace/server/bin/x64/factorio`, the reply taken verbatim off the RCON
+socket.
+
+The delta against the previous capture is **exactly** those four mod changes
+and nothing else, which is what a recapture has to be able to show:
+
+| what changed | records | why |
+|---|---|---|
+| `collision_mask` now holds layer names | 1028 | `serialize_entity_prototype` iterated the 2.0 `CollisionMask` table instead of its `.layers`, so every prototype reported `["layers"]` and friends. 579 of the 1028 now carry a non-empty mask; the other 449 collide with nothing and correctly report none. |
+| `connection_type` on pipe connections | 28 prototypes / 95 connections | read as `type` renamed, which is the 1.1 spelling; `PipeConnectionDefinition` has no `type` in 2.1. Was 0 of 95, now 95 of 95. |
+| `crafting_speed` added | 18 | `get_crafting_speed()` (5e4be5a5). Exactly the crafting machines plus `character`. |
+| `manual_mining_speed_modifier` added | the one force | `serialize_force` grew it in 0d93dc3b, after the previous capture. |
+| `speed` removed from `repair-pack` | 1 | 1c75b866 stopped sending two item fields no Rust type declares. |
+
+`recipes` (662) and all 277 `technologies` are **byte-identical** to the
+previous capture, and both prototype lists still name the same 1028 and 342
+prototypes. So the one-session caveat above is unchanged: nothing in this file
+depends on player state, and `live-2.1.17-players.json` is still the original
+session's.
 
 ### Why these areas
 

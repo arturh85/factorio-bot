@@ -150,11 +150,27 @@ function serialize_force(force)
     return record
 end
 
+-- `connection_type` is read under its own name, NOT as `type` renamed. `conn`
+-- is a `PipeConnectionDefinition`, and 2.1.17 (runtime-api.json) declares that
+-- table with `connection_type` and no `type` at all. Because it is a plain Lua
+-- table rather than a userdata, the missing key did not even raise -- it
+-- returned nil, so `table_properties` dropped the key with nothing to catch,
+-- which is why no pcall diagnosed this one. The live 2.1.17 capture had it on
+-- 0 of 95 pipe connections while `positions`, its neighbour on the very same
+-- table, arrived on 95 of 95.
+--
+-- What it now carries is `PipeConnectionType`: "normal" / "underground" /
+-- "linked" -- 94 normal and 1 underground in vanilla, and that one underground
+-- connection is exactly the one that also reports `max_underground_distance`.
+-- It is NOT the input/output flow direction the commented-out
+-- `FactorioFluidBoxConnectionType` in crates/core/src/types.rs assumes; 2.0
+-- split that off into `flow_direction`, which no Rust type declares and this
+-- function therefore does not send.
 function serialize_fluidbox_connection(conn)
     local record = table_properties(
         conn,
-        {"positions", "type", "max_underground_distance"},
-        {type = "connection_type", max_underground_distance = "max_underground_distance"}
+        {"positions", "connection_type", "max_underground_distance"},
+        {connection_type = "connection_type", max_underground_distance = "max_underground_distance"}
     )
     return record
 end
@@ -234,9 +250,24 @@ end
 function serialize_entity_prototype(entity)
     local collision_mask = nil
     if entity.collision_mask ~= nil then
-        -- In Factorio 2.0, collision_mask might not be iterable with pairs()
+        -- The names of the collision layers this prototype collides with.
+        --
+        -- Iterate `.layers`, not the mask itself. Factorio 2.0 turned
+        -- `collision_mask` from a flat set of layer names into a
+        -- `CollisionMask` table -- `{layers = {name -> true}, plus
+        -- colliding_with_tiles_only / consider_tile_transitions /
+        -- not_colliding_with_itself}` (runtime-api.json, concept
+        -- `CollisionMask`). `pairs()` over the mask therefore yielded that
+        -- outer table's OWN keys and never a layer name: the live 2.1.17
+        -- capture has literally `["layers"]` on 796 of 1028 prototypes and
+        -- one of the three boolean flags alongside it on the rest.
+        --
+        -- That is worse than the nil this file's other 2.0 breakages produced,
+        -- because a non-empty list of plausible-looking strings reads as
+        -- working data. The pcall stays: it guards the iteration itself, which
+        -- is what the original comment was worried about.
         local ok, _ = pcall(function()
-            for k,v in pairs(entity.collision_mask) do
+            for k,v in pairs(entity.collision_mask.layers) do
                 if collision_mask == nil then
                     collision_mask = {}
                 end

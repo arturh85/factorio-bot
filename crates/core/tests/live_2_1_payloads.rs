@@ -349,6 +349,207 @@ fn almost_every_disabled_recipe_names_an_unlocking_technology() {
     );
 }
 
+/// `collision_mask` carries collision *layer* names, not the names of the
+/// fields of the table that holds them.
+///
+/// Factorio 2.0 turned `LuaEntityPrototype::collision_mask` from a flat set of
+/// layer names into a `CollisionMask` table — `{layers = {name -> true}}` plus
+/// three booleans. `serialize_entity_prototype` iterated the mask itself, so
+/// every prototype reported that outer table's own keys: this fixture used to
+/// read `["layers"]` on 796 of 1028 prototypes and `["colliding_with_tiles_only",
+/// "layers"]` or similar on the rest — four distinct values across the whole
+/// game, none of them a layer.
+///
+/// That failure mode is the reason this test asserts *contents* and not
+/// presence. A plausible-looking non-empty list of strings is what a mistaken
+/// read produced here, so "the field arrived" is exactly the check that could
+/// not tell the two apart.
+#[test]
+fn the_live_world_snapshot_carries_real_collision_layer_names() {
+    let snapshot: WorldSnapshot = serde_json::from_str(WORLD_SNAPSHOT).expect("parses");
+    let layers: BTreeSet<&str> = snapshot
+        .entity_prototypes
+        .iter()
+        .filter_map(|prototype| prototype.collision_mask.as_ref())
+        .flat_map(|mask| mask.iter().map(String::as_str))
+        .collect();
+
+    // The four keys of the 2.0 `CollisionMask` table. None is a layer, and
+    // seeing any of them means the mask itself is being iterated again.
+    for not_a_layer in [
+        "layers",
+        "colliding_with_tiles_only",
+        "consider_tile_transitions",
+        "not_colliding_with_itself",
+    ] {
+        assert!(
+            !layers.contains(not_a_layer),
+            "{not_a_layer} is a field of the CollisionMask table, not a \
+             collision layer — serialize_entity_prototype is iterating the \
+             mask instead of its .layers"
+        );
+    }
+
+    // Real layers, from `prototypes.collision_layer` in a 2.1 game.
+    for layer in ["player", "object", "water_tile", "rail", "transport_belt"] {
+        assert!(
+            layers.contains(layer),
+            "{layer} is a vanilla collision layer and must appear somewhere \
+             in 1028 prototypes"
+        );
+    }
+
+    // `stone-furnace` is a building, so it collides with the building set and
+    // emphatically not with `doodad` or `rail`.
+    let furnace = snapshot
+        .entity_prototypes
+        .iter()
+        .find(|prototype| prototype.name == "stone-furnace")
+        .expect("stone-furnace exists");
+    let mask: BTreeSet<&str> = furnace
+        .collision_mask
+        .as_ref()
+        .expect("a building collides with something")
+        .iter()
+        .map(String::as_str)
+        .collect();
+    assert!(mask.contains("object"), "got {mask:?}");
+    assert!(mask.contains("player"), "got {mask:?}");
+    assert!(!mask.contains("doodad"), "got {mask:?}");
+}
+
+/// A pipe connection reports which *kind* of connection it is.
+///
+/// `serialize_fluidbox_connection` asked for `type` and renamed it to
+/// `connection_type`, which is how Factorio 1.1 spelled it.
+/// `PipeConnectionDefinition` in 2.1.17 declares `connection_type` and no
+/// `type` at all — and because it is a plain Lua table rather than a userdata,
+/// the absent key did not raise: it returned nil, so the key was dropped with
+/// no `pcall` involved and nothing to log. It arrived on **0 of 95** pipe
+/// connections while `positions`, its neighbour on the same table, arrived on
+/// all 95.
+///
+/// The `underground` connection is the discriminating case. It is the only one
+/// of the 95 that is not `normal`, and it is the same connection that carries
+/// `max_underground_distance` — so a read that returned a constant, or that
+/// picked up `flow_direction` by mistake, could not produce this pairing.
+#[test]
+fn the_live_world_snapshot_carries_pipe_connection_types() {
+    let snapshot: WorldSnapshot = serde_json::from_str(WORLD_SNAPSHOT).expect("parses");
+    let connections: Vec<_> = snapshot
+        .entity_prototypes
+        .iter()
+        .filter_map(|prototype| prototype.fluidbox_prototypes.as_ref())
+        .flatten()
+        .filter_map(|fluidbox| fluidbox.pipe_connections.as_ref().as_ref())
+        .flatten()
+        .collect();
+
+    assert_eq!(connections.len(), 95, "vanilla 2.1.17 pipe connections");
+    assert!(
+        connections
+            .iter()
+            .all(|connection| connection.connection_type.is_some()),
+        "every pipe connection has a connection_type"
+    );
+
+    let underground: Vec<_> = connections
+        .iter()
+        .filter(|connection| connection.connection_type.as_deref() == Some("underground"))
+        .collect();
+    assert_eq!(underground.len(), 1, "pipe-to-ground is the only one");
+    assert_eq!(
+        underground[0].max_underground_distance,
+        Some(10),
+        "the underground connection is the one with a reach, and no other \
+         connection reports one"
+    );
+    assert_eq!(
+        connections
+            .iter()
+            .filter(|connection| connection.max_underground_distance.is_some())
+            .count(),
+        1
+    );
+}
+
+/// The force's own mining modifier arrives, and is a number rather than a
+/// missing key read as a default.
+///
+/// `character_mining_speed` multiplies the character prototype's mining speed
+/// by `1 + manual_mining_speed_modifier`, so this feeds every hand-mining
+/// duration the planner emits. It is `#[serde(default)]` on `FactorioForce`,
+/// which means a mod that stopped sending it would read as `None` and be
+/// treated as the game's own default of `0` — the same "absent is a legal
+/// outcome" shape that hid `crafting_speed` for four years. `Some(0.0)` and
+/// `None` are indistinguishable downstream; only here can they be told apart.
+#[test]
+fn the_live_world_snapshot_carries_the_forces_manual_mining_speed_modifier() {
+    let snapshot: WorldSnapshot = serde_json::from_str(WORLD_SNAPSHOT).expect("parses");
+    let modifier = snapshot.forces[0]
+        .manual_mining_speed_modifier
+        .as_deref()
+        .copied()
+        .expect("the mod sends the modifier; None means it stopped arriving");
+
+    // A fresh game has not researched steel-axe, so the value itself is 0.
+    // Asserting it is *present* is the point, not that it is zero.
+    assert_eq!(modifier.raw(), 0.0);
+}
+
+/// Every crafting-capable prototype reports a crafting speed, and nothing else
+/// does.
+///
+/// The `get_crafting_speed()` fix has a sharper check available than "some
+/// prototypes have it": the set that does must be exactly the set that can
+/// craft. 2.0 moved the attribute to a method, so the read raised and the
+/// `pcall` reported absence on all 1028 — and a repair that worked for
+/// furnaces but raised for, say, `rocket-silo` would look just as fixed
+/// against a furnace-only assertion.
+#[test]
+fn crafting_speed_arrives_for_exactly_the_prototypes_that_can_craft() {
+    let snapshot: WorldSnapshot = serde_json::from_str(WORLD_SNAPSHOT).expect("parses");
+
+    let with_speed: BTreeSet<&str> = snapshot
+        .entity_prototypes
+        .iter()
+        .filter(|prototype| prototype.crafting_speed.is_some())
+        .map(|prototype| prototype.name.as_str())
+        .collect();
+    let can_craft: BTreeSet<&str> = snapshot
+        .entity_prototypes
+        .iter()
+        .filter(|prototype| {
+            matches!(
+                prototype.entity_type.as_str(),
+                "assembling-machine" | "furnace" | "rocket-silo" | "character"
+            )
+        })
+        .map(|prototype| prototype.name.as_str())
+        .collect();
+
+    assert_eq!(
+        with_speed, can_craft,
+        "crafting_speed must arrive for every crafting machine and for no \
+         other prototype"
+    );
+    assert_eq!(with_speed.len(), 18);
+
+    // The three furnaces the smelting divisor actually chooses between.
+    let speed_of = |name: &str| {
+        snapshot
+            .entity_prototypes
+            .iter()
+            .find(|prototype| prototype.name == name)
+            .and_then(|prototype| prototype.crafting_speed)
+            .unwrap_or_else(|| panic!("{name} has a crafting speed"))
+    };
+    assert_eq!(speed_of("stone-furnace"), 1.0);
+    assert_eq!(speed_of("steel-furnace"), 2.0);
+    assert_eq!(speed_of("electric-furnace"), 2.0);
+    assert_eq!(speed_of("character"), 1.0, "hand crafting is speed 1");
+}
+
 // ---------------------------------------------------------------------------
 // FactorioTile — `remote.call('botbridge', 'find_tiles_filtered')`
 // ---------------------------------------------------------------------------

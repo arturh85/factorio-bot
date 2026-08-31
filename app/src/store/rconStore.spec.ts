@@ -44,22 +44,19 @@ describe('rconStore', () => {
         expect(store.isExecuting).toBe(false);
         expect(store.success).toBe(true);
         expect(store.error).toBe(false);
-        expect(store.lastError).toBeNull();
     });
 
     it('clears the previous failure when a later command succeeds', async () => {
         vi.mocked(client.sendRcon).mockResolvedValue(undefined);
         const store = useRconStore();
         // The state a failed run leaves behind. Starting from the store's
-        // defaults instead would make the three resets in `execute`
-        // unobservable -- they would be assigning what was already there.
+        // defaults instead would make the resets in `execute` unobservable --
+        // they would be assigning what was already there.
         store.error = true;
-        store.lastError = 'the previous command failed';
 
         await store.execute(COMMAND);
 
         expect(store.error).toBe(false);
-        expect(store.lastError).toBeNull();
         expect(store.success).toBe(true);
     });
 
@@ -117,7 +114,6 @@ describe('rconStore', () => {
         expect(store.error).toBe(true);
         expect(store.success).toBe(false);
         expect(store.isExecuting).toBe(false);
-        expect(store.lastError).toBe('rcon connection reset');
     });
 
     /**
@@ -147,7 +143,6 @@ describe('rconStore', () => {
         expect(store.error).toBe(true);
         expect(store.success).toBe(false);
         expect(store.isExecuting).toBe(false);
-        expect(store.lastError).toBe(message);
     });
 
     it('reports a transport failure that carries no application code', async () => {
@@ -159,21 +154,24 @@ describe('rconStore', () => {
         await expect(store.execute(COMMAND)).rejects.toThrow('network down');
 
         expect(store.error).toBe(true);
-        expect(store.lastError).toBe('network down');
         expect(store.isExecuting).toBe(false);
     });
 
-    it('records a rejection that is not an Error at all', async () => {
+    /**
+     * A rejection that is not an `Error`. `RconPage.vue` renders the toast
+     * from this value, so it has to arrive intact and unwrapped -- the page
+     * used to test `err instanceof Error` and show nothing at all when the
+     * test failed, which is the one case where the store having recorded the
+     * message itself would have mattered.
+     */
+    it('rethrows a rejection that is not an Error at all', async () => {
         vi.mocked(client.sendRcon).mockRejectedValue('kaboom');
         const store = useRconStore();
 
         await expect(store.execute(COMMAND)).rejects.toBe('kaboom');
 
         expect(store.error).toBe(true);
-        // Stringified rather than left null: `lastError` is what a caller
-        // reads back off the store, and `null` there would read as "no
-        // failure" on a run that plainly failed.
-        expect(store.lastError).toBe('kaboom');
+        expect(store.success).toBe(false);
         expect(store.isExecuting).toBe(false);
     });
 });

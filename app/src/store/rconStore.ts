@@ -1,11 +1,6 @@
 import {defineStore} from 'pinia'
 import {sendRcon} from '@/api/client';
 
-/** The message of any thrown value, `ApiError` included -- its `message` is the server's. */
-function messageOf(err: unknown): string {
-    return err instanceof Error ? err.message : String(err)
-}
-
 /**
  * Raw RCON commands, over HTTP.
  *
@@ -29,13 +24,24 @@ function messageOf(err: unknown): string {
  * `catch`, and the Tauri store this replaces swallowed the error while *also*
  * setting `success = true`, so that toast could never fire and a failed
  * command looked exactly like one that worked.
+ *
+ * There is deliberately no `lastError` string here, unlike `instanceStore`.
+ * That store needs one because `GET /api/v1/instance` reports the failure of a
+ * start that was accepted minutes earlier -- a failure that reaches the browser
+ * through no rejection at all, so the state field *is* the channel. Here the
+ * failure is the rejection: because it is rethrown unwrapped, every caller
+ * already holds the thrown value, and a copy of its message would be state
+ * derived from something the reader has in hand. Worse, it would be unsafe to
+ * read: the empty-command guard below rejects *before* the resets, so a
+ * `lastError` would still name the previous command's failure at the moment an
+ * accidental blank submit was rejected, and a page trusting it would report the
+ * wrong error.
  */
 export const useRconStore = defineStore('rcon', {
     state: () => ({
         executing: false,
         success: false,
-        error: false,
-        lastError: null as string | null
+        error: false
     }),
     getters: {
         isExecuting(): boolean {
@@ -56,16 +62,15 @@ export const useRconStore = defineStore('rcon', {
             }
             this.error = false
             this.success = false
-            this.lastError = null
             this.executing = true
             try {
                 await sendRcon(command)
                 this.success = true
             } catch (err) {
                 this.error = true
-                this.lastError = messageOf(err)
-                // Rethrown unwrapped: the page reads `message`, and anything
-                // else that catches this still needs the server's `code`.
+                // Rethrown unwrapped: the page renders the message off this
+                // value, and anything else that catches it still needs the
+                // server's `code`.
                 throw err
             } finally {
                 this.executing = false

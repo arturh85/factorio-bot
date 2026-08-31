@@ -13,9 +13,16 @@ const execute = async(command: string) => {
   try {
     await rconStore.execute(command)
   } catch(err) {
-    if (err instanceof Error) {
-      toast.add({severity: 'error', summary: 'Failed to execute rcon', detail: err.message, life: 10000});
-    }
+    // Every rejection gets a toast. The `if (err instanceof Error)` this
+    // replaces let a non-`Error` rejection -- a bare string, anything a
+    // transport can reject with -- pass silently, leaving the button back to
+    // "Run" with no indication the command had failed.
+    toast.add({
+      severity: 'error',
+      summary: 'Failed to execute rcon',
+      detail: err instanceof Error ? err.message : String(err),
+      life: 10000
+    });
   }
 }
 const isExecuting = computed(() => rconStore.isExecuting)

@@ -225,8 +225,14 @@ The system supports running multiple graphical Factorio clients controlled by Lu
 #
 # This is not a preference, the two builds behave differently:
 #
-#   debug    mods resolve to the repo checkout, so editing mods/BotBridge
-#            takes effect on the next run. Scripts are not extracted.
+#   debug    mods resolve to the repo checkout ONLY IF workspace/mods does
+#            not already exist. Once a workspace exists, that copy wins and
+#            there is NO refresh path -- editing mods/BotBridge has no effect
+#            and the run silently uses the stale copy. Edit workspace/mods/
+#            directly when iterating, or delete it to re-seed.
+#            Same trap for scripts: workspace/scripts/ is a separate copy, and
+#            the CLI resolves a script by bare name against THAT copy, not the
+#            repo. Check the path in any traceback to see which one ran.
 #            Data dir is ~/.local/share/factorio-bot-dev/
 #   release  mods and scripts are include_dir!-embedded into the binary at
 #            COMPILE TIME and extracted once into the workspace. Editing
@@ -275,6 +281,18 @@ timeout 180 target/release/factorio-bot lua multi_client_test.lua -c 2
 - **macOS GUI processes**: Clients must use `Stdio::null()` for stdin/stdout/stderr, otherwise GUI windows fail to render.
 - **Lock file conflicts**: Server and clients each need separate `--config` paths pointing to instance-specific `config.ini` files.
 - **JSON parsing**: BotBridge's `helpers.table_to_json({})` returns `"{}"` for empty tables, not `"[]"`. The Rust RCON client handles both cases.
+- **Do not debug the mod with `rcon.print`**: its output lands in the RCON
+  reply body, and the executor reads that reply as the action's result — so a
+  debug line turns a successful action into a reported failure. Use
+  `writeout(...)` (stdout, parsed by `output_parser.rs`) instead.
+- **Resource positions are tile centres.** Every real resource entity sits at
+  `(-40.5, -48.5)`, never `(-41, -49)`, and the mod's
+  `surface.find_entity(name, position)` matches exactly. `EntityGraph` keys
+  resources by `Pos(i32, i32)`, which floors, so anything reading a position
+  back out of that map must restore the half-tile offset. Getting this wrong
+  made mining fail with "no entity to mine" for every ore on every map, while
+  every test passed — `test_utils::spawn_ore` builds ore at integer positions,
+  the one input for which the lossy round-trip is lossless.
 
 ### Critical Bug Fix (Jan 2026): config.ini Creation
 

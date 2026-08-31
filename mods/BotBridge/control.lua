@@ -925,6 +925,185 @@ function chunk_screenshot2(chunk_x, chunk_y)
 	--game.set_wait_for_screenshots_to_finish()
 end
 
+-- ---------------------------------------------------------------------------
+-- Tick-driven frame capture
+-- ---------------------------------------------------------------------------
+--
+-- A frame's filename is a *measurement*, not a claim. The tick in it is read
+-- from `game.tick` inside the game, at the moment the capture is requested --
+-- the same source `stamp_tick` uses to tell an RCON caller when the game
+-- actually saw their command. There is deliberately no second notion of "now"
+-- here.
+--
+-- Why the cadence lives in the mod rather than in a caller's loop: an RCON
+-- command arrives whenever it arrives. The sender does not know the tick and
+-- cannot make one true by writing it into a filename. A loop that fires "every
+-- five seconds" and names its frames 300 apart produces a contiguous,
+-- plausible, authoritative-looking sequence whether or not the game agreed --
+-- it *cannot fail* to look right.
+--
+-- That is not tidiness, because frames drop. `force_render` is asked for
+-- below, but the API does not honour it on a multiplayer client that is
+-- catching up to the server, which is exactly what our bots are. A name built
+-- from `game.tick` turns a drop into a visible gap in the sequence; a name
+-- built from a counter hides it, and the stream then misrepresents itself
+-- precisely when something has gone wrong. So nothing in here renumbers,
+-- backfills, interpolates or retries a missed frame: the gap is the record.
+--
+-- Off unless asked for: `storage.frame_capture` is nil until
+-- `rcon_frame_capture_start` sets it, because a 60-minute three-camera run is
+-- ~1.5 GB of JPEG and nobody wants that unrequested.
+
+local FRAME_CAPTURE_INTERVAL = 300 -- game ticks between frames (5 s at 60 UPS)
+local FRAME_CAPTURE_DIR = "frames"
+local FRAME_CAPTURE_RESOLUTION = {1920, 1080}
+local FRAME_CAPTURE_QUALITY = 85 -- percent; JPEG only. PNG measured ~7x larger.
+local FRAME_CAPTURE_ZOOM = 1
+
+-- Camera ids must be filename-safe and must not contain "-".
+--
+-- `tick-NNNNNNN-<camera>.jpg` is parsed by splitting on the *last* "-", so an
+-- id containing one would be read back as a different camera than the one that
+-- took the frame. Checked rather than assumed, so that adding a per-bot or
+-- area camera later cannot introduce a name the reader silently mis-parses.
+function frame_capture_valid_camera_id(id)
+	return type(id) == "string" and id:match("^[%w_]+$") ~= nil
+end
+
+-- Flat, one directory for every camera: a scrubber sitting at tick T wants
+-- every camera's frame at T, and a shared `tick-NNNNNNN-` prefix gives it that
+-- in one listing, where a directory per camera would not.
+--
+-- Seven digits covers ~46 hours of game time. Past that `%07d` widens rather
+-- than truncates: the name stays true and only lexical sort order suffers.
+function frame_capture_path(tick, camera_id)
+	return FRAME_CAPTURE_DIR .. "/tick-" .. string.format("%07d", tick) .. "-" .. camera_id .. ".jpg"
+end
+
+function frame_capture_take(camera, tick)
+	if camera.kind == "follow" then
+		local player = game.players[camera.player_index]
+		-- No player to follow, so no frame -- and the absence is the record.
+		-- This tick simply has no file, exactly as a dropped render has none.
+		-- Nothing is substituted, deferred to the next tick, or written under
+		-- a tick the game did not agree to.
+		if player == nil or not player.connected then
+			return
+		end
+		game.take_screenshot({
+			player = player,
+			-- One peer, not all of them. `on_nth_tick` runs on every peer in
+			-- a multiplayer game, so without `by_player` each connected
+			-- client would render and write its own copy of the same frame
+			-- into its own script-output. Taking a screenshot reads game
+			-- state and writes none, so the duplication is a waste rather
+			-- than a desync -- but a camera must map to exactly one file for
+			-- its name to mean anything. `by_player` is also what will let a
+			-- per-bot camera exist later without changing anything here.
+			by_player = player,
+			surface = player.surface,
+			position = player.position,
+			resolution = FRAME_CAPTURE_RESOLUTION,
+			zoom = FRAME_CAPTURE_ZOOM,
+			path = frame_capture_path(tick, camera.id),
+			quality = FRAME_CAPTURE_QUALITY,
+			-- Asked for, not relied on: the API does not honour this on a
+			-- multiplayer client catching up. See the header comment.
+			force_render = true,
+			show_entity_info = true,
+			show_gui = false
+		})
+	else
+		-- Unreachable from `rcon_frame_capture_start`, which registers the one
+		-- camera kind that exists. Raising rather than returning keeps a
+		-- future camera kind from producing a silently empty run.
+		error("unknown frame capture camera kind: " .. tostring(camera.kind))
+	end
+end
+
+-- Registered with `script.on_nth_tick` rather than as a modulus inside
+-- `on_tick`: `on_tick` already runs real per-tick work for every client, and a
+-- counter or a remainder in there would both add to that and reintroduce the
+-- caller-side notion of cadence this exists to remove.
+--
+-- Multiplayer: this handler runs on every peer with the same replicated
+-- `storage.frame_capture`, so every peer agrees on whether to capture. Which
+-- peer actually writes the file is settled by `by_player` above. The gate is
+-- deliberately in `storage` and not in `client_local_data`, which the top of
+-- this file marks as desync-causing.
+--
+-- One client cannot capture the same tick twice, which matters because the
+-- filename carries the tick and the camera but not the writer -- so a second
+-- write to the same client's directory would overwrite the first with nothing
+-- left to show it happened. Four things make it impossible rather than merely
+-- unobserved:
+--
+--   * `script.on_nth_tick(n, f)` *replaces* the handler registered for `n`
+--     rather than appending to it, and there is exactly one registration site
+--     below. Re-running this file's top level on every load therefore cannot
+--     stack handlers, however many times a client leaves and rejoins.
+--   * A peer runs one Lua state. There is no separate "server-side context"
+--     inside a client that could run the handler a second time, and however
+--     many peers do run it, `by_player` narrows the write to one machine.
+--   * The nth-tick event fires once for a tick, and a tick never recurs while
+--     the game runs forward.
+--   * Camera ids are checked unique at start, so one tick cannot yield two
+--     frames with one name.
+--
+-- The one way a tick could be re-simulated is playback, and
+-- `take_screenshot` does not run during replay: `allow_in_replay` is left at
+-- its default of false. Loading a save from before the current tick starts a
+-- new run, whose `rcon_frame_capture_start` wipes the directory.
+function on_frame_capture_tick(event)
+	local capture = storage.frame_capture
+	if capture == nil then
+		return
+	end
+	-- `game.tick` rather than `event.tick`: they are the same value here, and
+	-- reading the one `stamp_tick` reads keeps a single source of "now".
+	local tick = game.tick
+	for _, camera in ipairs(capture.cameras) do
+		frame_capture_take(camera, tick)
+	end
+end
+
+function rcon_frame_capture_start()
+	-- Wipe first, so the directory holds this run's frames and only this
+	-- run's. Without it a leftover frame from an earlier run that landed on
+	-- the same tick would fill a gap this run really had, which is the one
+	-- failure mode the naming scheme exists to expose. Runs on every peer,
+	-- each clearing its own script-output.
+	helpers.remove_path(FRAME_CAPTURE_DIR)
+	-- Only the follow camera exists. Per-bot and area cameras are entries in
+	-- this list with a different `kind`; adding one needs no rename here.
+	local cameras = {
+		{ id = "follow", kind = "follow", player_index = 1 }
+	}
+	-- Two cameras sharing an id would write the same `tick-NNNNNNN-<id>.jpg`
+	-- in the same tick, and the second write would silently overwrite the
+	-- first -- a frame disappearing with nothing on disk to say it did. The
+	-- fix is to refuse the configuration, never to uniquify the filename: a
+	-- name has to stay a measurement of *when*, and a `-2` suffix would give
+	-- the double-write a home instead of preventing it.
+	local seen = {}
+	for _, camera in ipairs(cameras) do
+		if not frame_capture_valid_camera_id(camera.id) then
+			error("frame capture camera id is not filename-safe: " .. tostring(camera.id))
+		end
+		if seen[camera.id] then
+			error("duplicate frame capture camera id: " .. camera.id)
+		end
+		seen[camera.id] = true
+	end
+	storage.frame_capture = { cameras = cameras }
+	stamp_tick()
+end
+
+function rcon_frame_capture_stop()
+	storage.frame_capture = nil
+	stamp_tick()
+end
+
 function writeout_tiles(tick, surface, area) -- SLOW! beastie can do ~2.8 per tick
 	--if my_client_id ~= 1 then return end
 	local header = area.left_top.x..","..area.left_top.y..";"..area.right_bottom.x..","..area.right_bottom.y..": "
@@ -1317,6 +1496,11 @@ script.on_event(defines.events.on_player_changed_position, on_player_changed_pos
 --script.on_event(defines.events.on_player_armor_inventory_changed, on_inventory_changed)
 
 script.on_event(defines.events.on_player_crafted_item, on_player_crafted_item)
+
+-- The only registration site for the frame cadence. `on_nth_tick` replaces
+-- the handler for a given period rather than adding to it, so re-running this
+-- file on a load cannot end up with two handlers writing one tick twice.
+script.on_nth_tick(FRAME_CAPTURE_INTERVAL, on_frame_capture_tick)
 
 
 function rcon_action_start_walk_waypoints(action_id, player_id, waypoints) -- e.g. waypoints= { {0,0}, {3,3}, {42,1337} }
@@ -1979,6 +2163,8 @@ end
 remote.add_interface("botbridge", {
 	test=rcon_test,
 	screenshot=rcon_screenshot,
+	frame_capture_start=rcon_frame_capture_start,
+	frame_capture_stop=rcon_frame_capture_stop,
 	whoami=rcon_whoami,
 
 	cheat_item=rcon_cheat_item,

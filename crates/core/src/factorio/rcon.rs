@@ -515,6 +515,49 @@ impl FactorioRcon {
         Ok(())
     }
 
+    /// Turns the mod's tick-driven frame capture on, and reports the game tick
+    /// it took effect at.
+    ///
+    /// The cadence deliberately does *not* live here. A frame's filename
+    /// carries the tick it was taken at, and only the game knows that: an RCON
+    /// command arrives whenever it arrives, so a caller driving the cadence
+    /// from out here could only name frames after its own loop counter -- and
+    /// a counter cannot fail to produce a contiguous, plausible sequence, even
+    /// when the game dropped frames. This is a toggle, not a shutter.
+    ///
+    /// The returned tick is the game's own (BotBridge's `stamp_tick`), so a
+    /// caller can check that every frame it later reads was taken at or after
+    /// the moment capture began, rather than trusting that it was.
+    pub async fn frame_capture_start(&self) -> Result<Option<u64>> {
+        self.frame_capture_toggle("frame_capture_start").await
+    }
+
+    /// Turns the mod's frame capture off, reporting the game tick it stopped
+    /// at. Frames already written stay on disk.
+    pub async fn frame_capture_stop(&self) -> Result<Option<u64>> {
+        self.frame_capture_toggle("frame_capture_stop").await
+    }
+
+    /// The shared half of the two toggles.
+    ///
+    /// Unlike most `remote_call_timed` callers here, this refuses a reply that
+    /// still has text in it after the tick stamp is taken off. The mod raises
+    /// on a camera id it cannot use and on wiping a directory it cannot wipe,
+    /// and the game reports that as "Cannot execute command. Error: ..." in
+    /// the reply body rather than as a transport failure. Dropping those lines
+    /// would turn a capture that never started into a silent success, and the
+    /// first evidence would be an empty frame directory much later.
+    async fn frame_capture_toggle(&self, function_name: &str) -> Result<Option<u64>> {
+        let (lines, tick) = self.remote_call_timed(function_name, vec![]).await?;
+        if let Some(lines) = lines {
+            return Err(RconUnexpectedOutput {
+                output: lines.join("\n"),
+            }
+            .into());
+        }
+        Ok(tick)
+    }
+
     /// Print given message to all Clients as Chat Message from Server loudly using /c
     pub async fn print(&self, message: &str) -> Result<()> {
         self.send(&format!("/c print({})", str_to_lua(message)))

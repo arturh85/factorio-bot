@@ -22,6 +22,9 @@ import {FramesManifest} from './types';
 /** Overlaps `REALISTIC_REPLAY`'s observed range (100-400): a plausible match. */
 export const OVERLAPPING_MANIFEST: FramesManifest = {
     clients: [1],
+    // No sidecar anywhere in these fixtures, so every client's run is
+    // unknown -- which is what `run: null` above says at the manifest level.
+    client_runs: [{client: 1, run: null}],
     run: null,
     frames: [
         {client: 1, tick: 0, camera: 'front', name: 'tick-0000000000-front.jpg', bytes: 111},
@@ -39,6 +42,9 @@ export const OVERLAPPING_MANIFEST: FramesManifest = {
  */
 export const UNRELATED_RUN_MANIFEST: FramesManifest = {
     clients: [1],
+    // No sidecar anywhere in these fixtures, so every client's run is
+    // unknown -- which is what `run: null` above says at the manifest level.
+    client_runs: [{client: 1, run: null}],
     run: null,
     frames: [
         {client: 1, tick: 10000, camera: 'front', name: 'tick-0000010000-front.jpg', bytes: 111},
@@ -50,6 +56,9 @@ export const UNRELATED_RUN_MANIFEST: FramesManifest = {
 /** One entry whose filename did not parse, alongside two that did. */
 export const MANIFEST_WITH_UNPARSED_ENTRY: FramesManifest = {
     clients: [1],
+    // No sidecar anywhere in these fixtures, so every client's run is
+    // unknown -- which is what `run: null` above says at the manifest level.
+    client_runs: [{client: 1, run: null}],
     run: null,
     frames: [
         {client: 1, tick: 200, camera: 'front', name: 'tick-0000000200-front.jpg', bytes: 111},
@@ -60,6 +69,9 @@ export const MANIFEST_WITH_UNPARSED_ENTRY: FramesManifest = {
 
 /** No capture has ever run: `clients` itself is empty. */
 export const EMPTY_MANIFEST: FramesManifest = {clients: [],
+// No sidecar anywhere in these fixtures, so every client's run is
+// unknown -- which is what `run: null` above says at the manifest level.
+client_runs: [],
     run: null, frames: []};
 
 /**
@@ -70,6 +82,9 @@ export const EMPTY_MANIFEST: FramesManifest = {clients: [],
  */
 export const OVERLAPPING_MANIFEST_LATE_START: FramesManifest = {
     clients: [1],
+    // No sidecar anywhere in these fixtures, so every client's run is
+    // unknown -- which is what `run: null` above says at the manifest level.
+    client_runs: [{client: 1, run: null}],
     run: null,
     frames: [
         {client: 1, tick: 200, camera: 'front', name: 'tick-0000000200-front.jpg', bytes: 111},
@@ -98,6 +113,9 @@ export const OVERLAPPING_MANIFEST_LATE_START: FramesManifest = {
  */
 export const MULTI_CAMERA_MANIFEST: FramesManifest = {
     clients: [1],
+    // No sidecar anywhere in these fixtures, so every client's run is
+    // unknown -- which is what `run: null` above says at the manifest level.
+    client_runs: [{client: 1, run: null}],
     run: null,
     frames: [
         {client: 1, tick: 100, camera: 'follow', name: 'tick-0000000100-follow.jpg', bytes: 111},

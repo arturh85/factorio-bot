@@ -313,3 +313,23 @@ export function frameAtTick(sortedFrames: readonly FrameEntry[], tick: Ticks): F
     }
     return best === null || best.tick === null ? null : {frame: best, age: tick - best.tick};
 }
+
+/**
+ * The clients whose frames belong to a run other than `jobId`.
+ *
+ * A client only rewrites its sidecar when it takes part in a capture, so a run
+ * with fewer clients than the last one leaves the extra client's directory
+ * holding older frames. Those frames are real and readable; what makes them
+ * wrong is only that they answer a question nobody asked.
+ *
+ * A `null` sidecar is never stale — unknown is not a mismatch, the same rule
+ * `runIdCheck` follows. And with no `jobId` to compare against, nothing can be
+ * called stale: the answer is an empty list, not a guess about which of the
+ * disagreeing clients is current.
+ */
+export function staleClients(manifest: FramesManifest, jobId: string | null): number[] {
+    if (jobId === null) return [];
+    return manifest.client_runs
+        .filter((entry) => entry.run !== null && entry.run !== jobId)
+        .map((entry) => entry.client);
+}

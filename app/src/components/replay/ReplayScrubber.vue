@@ -40,7 +40,7 @@ import {Ban, Image, ImageOff} from '@lucide/vue';
 import {Replay, observedOrigin, replayAxisCeiling} from '@/api/replay';
 import {FramesManifest} from '@/api/types';
 import {frameUrl} from '@/api/client';
-import {camerasForClient, combineRunMatchChecks, frameAtTick, framesForClient, runIdCheck, tickOverlapCheck} from '@/api/frameJoin';
+import {camerasForClient, combineRunMatchChecks, frameAtTick, framesForClient, runIdCheck, staleClients, tickOverlapCheck} from '@/api/frameJoin';
 import Slider from '@/components/ui/Slider.vue';
 import ReplayView from './ReplayView.vue';
 
@@ -100,6 +100,18 @@ const matchVerdict = computed(() => {
 const showFrameSection = computed(() => matchVerdict.value?.show === true);
 
 const availableClients = computed(() => props.manifest?.clients ?? []);
+
+/**
+ * Clients whose frames belong to a different run than this replay's.
+ *
+ * A client that sat out this run keeps the previous run's frames on disk, and
+ * they list in the manifest looking exactly like current ones. Marking the
+ * client in the picker is the whole point of the manifest reporting each
+ * client's own run id: the frames stay reachable — they are real frames of a
+ * real run — but nobody is told they show this one.
+ */
+const staleClientSet = computed(
+    () => new Set(props.manifest !== null ? staleClients(props.manifest, props.jobId ?? null) : []));
 const selectedClient = ref<number | null>(null);
 const effectiveClient = computed(() => selectedClient.value ?? availableClients.value[0] ?? null);
 
@@ -186,7 +198,9 @@ const current = computed(() =>
           class="rounded border border-divider bg-card px-1 py-0.5 text-ink"
           :value="effectiveClient"
           @change="selectedClient = Number(($event.target as HTMLSelectElement).value)">
-          <option v-for="c in availableClients" :key="c" :value="c">client {{ c }}</option>
+          <option v-for="c in availableClients" :key="c" :value="c">
+            client {{ c }}{{ staleClientSet.has(c) ? ' — frames from another run' : '' }}
+          </option>
         </select>
       </div>
 

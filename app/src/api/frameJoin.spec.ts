@@ -1,5 +1,6 @@
 import {describe, expect, it} from 'vitest';
-import {camerasForClient, combineRunMatchChecks, frameAtTick, framesForClient, manifestTickRange, replayObservedTickRange, tickOverlapCheck} from './frameJoin';
+import {camerasForClient, combineRunMatchChecks, frameAtTick, framesForClient, manifestTickRange, replayObservedTickRange, tickOverlapCheck, staleClients} from './frameJoin';
+import {FramesManifest} from './types';
 import {REALISTIC_REPLAY} from './replay.fixtures';
 import {EMPTY_MANIFEST, MANIFEST_WITH_UNPARSED_ENTRY, MULTI_CAMERA_MANIFEST, OVERLAPPING_MANIFEST, UNRELATED_RUN_MANIFEST} from './frames.fixtures';
 
@@ -148,5 +149,34 @@ describe('framesForClient with a camera', () => {
 
     it('without a camera, returns every camera\'s frames', () => {
         expect(framesForClient(MULTI_CAMERA_MANIFEST, 1).length).toBe(5);
+    });
+});
+
+describe('staleClients', () => {
+    const manifest = (runs: [number, string | null][]): FramesManifest => ({
+        clients: runs.map(([client]) => client),
+        frames: [],
+        run: null,
+        client_runs: runs.map(([client, run]) => ({client, run}))
+    });
+
+    it('names the client whose frames belong to an earlier run', () => {
+        expect(staleClients(manifest([[1, 'now'], [2, 'before']]), 'now')).toEqual([2]);
+    });
+
+    it('treats an unknown sidecar as unknown rather than stale', () => {
+        expect(staleClients(manifest([[1, 'now'], [2, null]]), 'now')).toEqual([]);
+    });
+
+    it('calls nothing stale when there is no run to compare against', () => {
+        // Two clients visibly disagree, and it still returns nothing: without
+        // a reference the manifest cannot say which of them is the current
+        // one, and picking the majority or the lowest index would be inventing
+        // the answer the caller came to get.
+        expect(staleClients(manifest([[1, 'a'], [2, 'b']]), null)).toEqual([]);
+    });
+
+    it('names every stale client, not just the first', () => {
+        expect(staleClients(manifest([[1, 'now'], [2, 'x'], [3, 'y']]), 'now')).toEqual([2, 3]);
     });
 });

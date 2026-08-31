@@ -63,6 +63,29 @@
         ],
         "type": "object"
       },
+      "ClientRun": {
+        "description": "One client's answer to \"which run do your frames belong to\".",
+        "properties": {
+          "client": {
+            "description": "The `N` of the `client<N>` directory.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "run": {
+            "description": "That directory's own run id, `null` when it has no readable sidecar --\n*unknown*, never *no match*, exactly as in `FramesManifest::run`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "client",
+          "run"
+        ],
+        "type": "object"
+      },
       "ErrorResponse": {
         "description": "Error body returned by every failing endpoint.\n\n`status` is the HTTP status [`IntoResponse`] answers with. It is not part of\nthe JSON body — it would be redundant with the response line, and clients\ngenerated from the OpenAPI schema must not see a field the server never\nserializes — so it is `#[serde(skip)]`ped and defaults to 400 on both\nconstruction and deserialization.",
         "properties": {
@@ -588,6 +611,13 @@
       "FramesManifest": {
         "description": "`GET /api/v1/frames` response.\n\n`clients` and `frames` together distinguish the three states a caller must\nnot conflate:\n- no workspace, or no `client<N>` directory at all: `clients` is empty --\n  the run has never happened.\n- a `client<N>` directory exists but has produced no frames yet: `clients`\n  names it, `frames` is empty -- capture has not run.\n- frames are present: both are non-empty.",
         "properties": {
+          "client_runs": {
+            "description": "What each client's own sidecar says, in `clients` order.\n\n`run` above answers \"which run is this manifest about\"; this answers\n\"which run does each client's directory belong to\". They differ exactly\nwhen a client sat out the current run and kept an older one's frames,\nand that is the case a consumer needs to see rather than have decided\nfor it -- the stale client is named, so its frames can be marked\ninstead of silently mixed in with current ones.",
+            "items": {
+              "$ref": "#/components/schemas/ClientRun"
+            },
+            "type": "array"
+          },
           "clients": {
             "description": "Every `client<N>` directory discovered under the workspace, regardless\nof whether it has produced a frame yet.",
             "items": {
@@ -615,7 +645,8 @@
         "required": [
           "clients",
           "frames",
-          "run"
+          "run",
+          "client_runs"
         ],
         "type": "object"
       },

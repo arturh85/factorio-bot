@@ -2,6 +2,8 @@
 import {describe, expect, it} from 'vitest';
 import {mount} from '@vue/test-utils';
 import ReplayScrubber from './ReplayScrubber.vue';
+import {nextTick} from 'vue';
+import {FramesManifest} from '@/api/types';
 import {REALISTIC_REPLAY} from '@/api/replay.fixtures';
 import {EMPTY_MANIFEST, MULTI_CAMERA_MANIFEST, OVERLAPPING_MANIFEST, OVERLAPPING_MANIFEST_LATE_START, UNRELATED_RUN_MANIFEST} from '@/api/frames.fixtures';
 
@@ -200,5 +202,59 @@ describe('ReplayScrubber -- camera selection', () => {
             props: {replay: REALISTIC_REPLAY, manifest: OVERLAPPING_MANIFEST, tick: 0}
         });
         expect(wrapper.find('[data-testid="camera-select"]').exists()).toBe(false);
+    });
+});
+
+describe('stale client marking', () => {
+    /**
+     * A client that sat out this run keeps the previous run's frames, and they
+     * list in the manifest looking exactly like current ones. The picker says
+     * so instead of presenting them as this run's.
+     */
+    it('marks the client whose frames belong to another run', async () => {
+        const manifest: FramesManifest = {
+            clients: [1, 2],
+            run: null,
+            client_runs: [
+                {client: 1, run: 'job-9'},
+                {client: 2, run: 'job-4'}
+            ],
+            frames: [
+                {client: 1, tick: 300, camera: 'follow', name: 'tick-0000000300-follow.jpg', bytes: 10},
+                {client: 2, tick: 300, camera: 'follow', name: 'tick-0000000300-follow.jpg', bytes: 10}
+            ]
+        };
+        const wrapper = mount(ReplayScrubber, {
+            props: {replay: REALISTIC_REPLAY, manifest, jobId: 'job-9'}
+        });
+        await nextTick();
+
+        const options = wrapper.find('[data-testid="client-select"]').findAll('option');
+        expect(options.map((o) => o.text())).toEqual([
+            'client 1',
+            'client 2 — frames from another run'
+        ]);
+    });
+
+    it('marks nothing when the run is unknown', async () => {
+        // No jobId: the two clients still disagree, but nothing here knows
+        // which is current, and a guess would be worse than silence.
+        const manifest: FramesManifest = {
+            clients: [1, 2],
+            run: null,
+            client_runs: [
+                {client: 1, run: 'job-9'},
+                {client: 2, run: 'job-4'}
+            ],
+            frames: [
+                {client: 1, tick: 300, camera: 'follow', name: 'tick-0000000300-follow.jpg', bytes: 10},
+                {client: 2, tick: 300, camera: 'follow', name: 'tick-0000000300-follow.jpg', bytes: 10}
+            ]
+        };
+        const wrapper = mount(ReplayScrubber, {props: {replay: REALISTIC_REPLAY, manifest}});
+        await nextTick();
+
+        const options = wrapper.find('[data-testid="client-select"]').findAll('option');
+        expect(options.map((o) => o.text())).toEqual(['client 1', 'client 2']);
     });
 });

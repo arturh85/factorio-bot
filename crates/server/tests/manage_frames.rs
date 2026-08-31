@@ -411,3 +411,101 @@ async fn no_run_sidecar_is_null() {
     let (_status, body) = get_json(state_with_workspace(dir.path()), "/api/v1/frames").await;
     assert!(body["run"].is_null());
 }
+
+/// Clients that disagree about the run id make the manifest's run *unknown*,
+/// and every client's own id is reported so the disagreement is visible.
+///
+/// This is not a hypothetical. A client only rewrites its sidecar when it
+/// takes part in a capture, so any run with fewer clients than the previous
+/// one leaves the extra client's directory holding the *previous* run's
+/// frames and sidecar. Reading the lowest-numbered client and forwarding its
+/// id — the behaviour this replaces — reported those stale frames under the
+/// current run, turning "I cannot tell whether these match" into "I checked,
+/// they match": the one conversion the sidecar's placement inside `frames/`
+/// exists to prevent.
+///
+/// The manifest does not pick a winner, drop the odd client out, or take a
+/// majority. Each of those decides for the consumer something the consumer
+/// asked to be told.
+#[tokio::test]
+async fn clients_disagreeing_about_the_run_make_it_unknown_not_first_wins() {
+    let dir = tempfile::tempdir().unwrap();
+    for (client, run) in [(1u8, "current"), (2, "stale-previous-run")] {
+        let frames = frames_dir(dir.path(), client);
+        std::fs::create_dir_all(&frames).unwrap();
+        std::fs::write(frames.join("run.json"), format!(r#"{{"run":"{run}"}}"#)).unwrap();
+        std::fs::write(frames.join("tick-0000300-follow.jpg"), b"pixels").unwrap();
+    }
+
+    let (status, body) = get_json(state_with_workspace(dir.path()), "/api/v1/frames").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["run"].is_null(),
+        "disagreement must read as unknown, not as client 1's id; got {}",
+        body["run"]
+    );
+    assert_eq!(
+        body["client_runs"],
+        serde_json::json!([
+            {"client": 1, "run": "current"},
+            {"client": 2, "run": "stale-previous-run"},
+        ]),
+        "each client's own id must survive so the stale one can be identified"
+    );
+}
+
+/// Unanimity still yields the shared id, and a client that has captured
+/// nothing yet does not break it.
+///
+/// A missing sidecar is *no claim*, not a competing one — the manifest reports
+/// the id every client that made a claim agrees on.
+#[tokio::test]
+async fn unanimous_clients_keep_the_run_id_and_a_silent_client_does_not_break_it() {
+    let dir = tempfile::tempdir().unwrap();
+    for client in [1u8, 2] {
+        let frames = frames_dir(dir.path(), client);
+        std::fs::create_dir_all(&frames).unwrap();
+        std::fs::write(frames.join("run.json"), r#"{"run":"job-7"}"#).unwrap();
+    }
+    let silent = frames_dir(dir.path(), 3);
+    std::fs::create_dir_all(&silent).unwrap();
+
+    let (status, body) = get_json(state_with_workspace(dir.path()), "/api/v1/frames").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["run"], "job-7");
+    assert_eq!(
+        body["client_runs"],
+        serde_json::json!([
+            {"client": 1, "run": "job-7"},
+            {"client": 2, "run": "job-7"},
+            {"client": 3, "run": null},
+        ])
+    );
+}
+
+/// A lone stale client outvoted two current ones still makes the run unknown.
+///
+/// This is the shape the two-client case cannot distinguish: with one client
+/// on each side, "they disagree" and "the minority loses" produce the same
+/// answer. Here a majority rule would report `current` and hand back client
+/// 3's older frames under it. The manifest has no majority rule — one
+/// dissenter is enough, because the question is whether *these* frames belong
+/// to *this* run, and for client 3 the answer is no however many peers agree.
+#[tokio::test]
+async fn one_stale_client_among_agreeing_peers_still_makes_the_run_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    for (client, run) in [(1u8, "current"), (2, "current"), (3, "older")] {
+        let frames = frames_dir(dir.path(), client);
+        std::fs::create_dir_all(&frames).unwrap();
+        std::fs::write(frames.join("run.json"), format!(r#"{{"run":"{run}"}}"#)).unwrap();
+    }
+
+    let (status, body) = get_json(state_with_workspace(dir.path()), "/api/v1/frames").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["run"].is_null(),
+        "a majority must not carry the run; got {}",
+        body["run"]
+    );
+    assert_eq!(body["client_runs"][2]["run"], "older");
+}

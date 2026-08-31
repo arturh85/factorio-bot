@@ -91,6 +91,26 @@ pub struct FramesManifest {
     /// never makes and no consumer should have to.
     #[schema(required)]
     pub run: Option<String>,
+    /// What each client's own sidecar says, in `clients` order.
+    ///
+    /// `run` above answers "which run is this manifest about"; this answers
+    /// "which run does each client's directory belong to". They differ exactly
+    /// when a client sat out the current run and kept an older one's frames,
+    /// and that is the case a consumer needs to see rather than have decided
+    /// for it -- the stale client is named, so its frames can be marked
+    /// instead of silently mixed in with current ones.
+    pub client_runs: Vec<ClientRun>,
+}
+
+/// One client's answer to "which run do your frames belong to".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ClientRun {
+    /// The `N` of the `client<N>` directory.
+    pub client: u8,
+    /// That directory's own run id, `null` when it has no readable sidecar --
+    /// *unknown*, never *no match*, exactly as in `FramesManifest::run`.
+    #[schema(required)]
+    pub run: Option<String>,
 }
 
 /// The capture writes this beside the frames it belongs to, holding the opaque
@@ -282,19 +302,33 @@ async fn build_manifest(state: &AppState) -> Result<FramesManifest, ErrorRespons
     }
     sort_frame_entries(&mut frames);
 
-    // Read from the lowest-numbered client that has one. Every peer writes an
-    // identical sidecar in its own directory (the capture runs on each), so
-    // any one of them answers the question; reading them all to compare would
-    // be checking that the mod is consistent with itself, which is not this
-    // route's job.
-    let run = client_dirs
+    // Every client is asked, and the manifest reports an id only when the ones
+    // that answered agree. Reading just the lowest-numbered client looks
+    // equivalent -- a capture writes the same sidecar into every directory it
+    // touches -- but only for clients that took part in the capture. A client
+    // absent from this run still holds the *previous* run's frames and
+    // sidecar, and forwarding a peer's id over it would present those stale
+    // frames as belonging to this run.
+    let client_runs: Vec<ClientRun> = client_dirs
         .iter()
-        .find_map(|dir| read_run_id(&dir.frames_dir));
+        .map(|dir| ClientRun {
+            client: dir.client,
+            run: read_run_id(&dir.frames_dir),
+        })
+        .collect();
+    let mut claimed = client_runs.iter().filter_map(|c| c.run.as_deref());
+    // A missing sidecar is no claim rather than a competing one, so it neither
+    // establishes the id nor breaks agreement on it.
+    let run = claimed
+        .next()
+        .map(str::to_owned)
+        .filter(|first| claimed.all(|other| other == first));
 
     Ok(FramesManifest {
         clients,
         frames,
         run,
+        client_runs,
     })
 }
 

@@ -52,6 +52,7 @@ import type {
     ExecuteAccepted,
     ExecuteRequest,
     ExistsResponse,
+    ClientRun,
     FrameEntry,
     FramesManifest,
     InstanceStatus,
@@ -436,6 +437,11 @@ const SCHEMAS: Record<string, SchemaContract> = {
         // Always present, `null` when unknown -- the same rule the replay
         // document follows: a consumer must never have to distinguish "absent
         // from the document" from "absent as a fact".
+        run: {required: true, type: 'string', nullable: true},
+        client_runs: {required: true, arrayOf: 'ClientRun'}
+    }),
+    ClientRun: objectContract<ClientRun>({
+        client: {required: true, type: 'integer'},
         run: {required: true, type: 'string', nullable: true}
     }),
     // Not `objectContract<…>`: `sendRcon(command)` builds this body as an

@@ -252,4 +252,21 @@ export interface FramesManifest {
      * **unknown**, never *no match* — see `runIdCheck` in `@/api/frameJoin`.
      */
     run: string | null;
+    /**
+     * What each client's own sidecar says, in `clients` order.
+     *
+     * `run` is which run the manifest is about; this is which run each
+     * client's directory belongs to. They diverge when a client sat out the
+     * current run and still holds an older one's frames — the case worth
+     * marking in the UI rather than mixing in silently.
+     */
+    client_runs: ClientRun[];
+}
+
+/** One client's answer to "which run do your frames belong to". */
+export interface ClientRun {
+    /** The `N` of the `client<N>` directory. */
+    client: number;
+    /** That directory's own run id; `null` is **unknown**, never *no match*. */
+    run: string | null;
 }

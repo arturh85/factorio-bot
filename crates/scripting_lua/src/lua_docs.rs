@@ -20,29 +20,42 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub fn write_lua_docs(target_path: PathBuf) -> LuaResult<()> {
-    let lua = crate::sandbox::new_sandboxed_lua()?;
+/// The four module tables the documentation is rendered from, paired with the
+/// file each one is written to, built exactly as a run builds them.
+///
+/// Extracted from [`write_lua_docs`] so that [`crate::doc_guard`] holds the
+/// `__doc_entry_*` strings to the bindings installed *beside* them on these
+/// very tables. Rendering and checking must not each construct their own idea
+/// of what a module contains: the whole defect class those guards close is a
+/// doc string that says something the binding next to it does not do, and a
+/// second construction site is one more place for the two to diverge.
+///
+/// `globals` is `lua.globals()` itself — `create_lua_globals` installs onto the
+/// interpreter's global table rather than returning one — which is why it is
+/// returned rather than looked up by the caller.
+pub(crate) fn binding_tables(
+    lua: &Lua,
+    cwd: &std::path::Path,
+) -> LuaResult<Vec<(&'static str, LuaTable)>> {
     let world = Arc::new(FactorioWorld::new());
     let rcon = Arc::new(FactorioRcon::new_empty());
     let stdout = Arc::new(Mutex::new(String::new()));
     let stderr = Arc::new(Mutex::new(String::new()));
     let planner = Planner::new(world, None);
-    // Doc generation never executes a script, so the sandbox root only has to
-    // be a real directory; the bindings are introspected, not called.
-    let cwd = target_path.parent().unwrap_or(&target_path).to_path_buf();
-    let world_table = create_lua_world(&lua, planner.plan_world.clone(), cwd.clone(), cwd.clone())?;
+    let cwd = cwd.to_path_buf();
+    let world_table = create_lua_world(lua, planner.plan_world.clone(), cwd.clone(), cwd.clone())?;
     let goal_table = create_lua_goal(
-        &lua,
+        lua,
         planner.plan_world.clone(),
         planner.real_world.clone(),
         None,
         vec![],
     )?;
-    let rcon_table = create_lua_rcon(&lua, rcon, planner.real_world)?;
+    let rcon_table = create_lua_rcon(lua, rcon, planner.real_world)?;
     let code_by_path: HashMap<String, String> = HashMap::new();
     let code_by_path: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(code_by_path));
     create_lua_globals(
-        &lua,
+        lua,
         vec![],
         cwd.clone(),
         cwd,
@@ -51,13 +64,23 @@ pub fn write_lua_docs(target_path: PathBuf) -> LuaResult<()> {
         code_by_path,
         None,
     )?;
+    Ok(vec![
+        ("globals.lua", lua.globals()),
+        ("world.lua", world_table),
+        ("goal.lua", goal_table),
+        ("rcon.lua", rcon_table),
+    ])
+}
 
-    let bindings = [
-        ("globals.lua", render_lua_doc(&lua.globals())),
-        ("world.lua", render_lua_doc(&world_table)),
-        ("goal.lua", render_lua_doc(&goal_table)),
-        ("rcon.lua", render_lua_doc(&rcon_table)),
-    ];
+pub fn write_lua_docs(target_path: PathBuf) -> LuaResult<()> {
+    let lua = crate::sandbox::new_sandboxed_lua()?;
+    // Doc generation never executes a script, so the sandbox root only has to
+    // be a real directory; the bindings are introspected, not called.
+    let cwd = target_path.parent().unwrap_or(&target_path).to_path_buf();
+    let bindings: Vec<(&'static str, String)> = binding_tables(&lua, &cwd)?
+        .iter()
+        .map(|(file, table)| (*file, render_lua_doc(table)))
+        .collect();
 
     // `types.lua` is rendered from the Rust types, and then held to what the
     // binding documentation just said a script would be handed. Both halves

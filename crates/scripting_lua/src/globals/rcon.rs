@@ -572,7 +572,9 @@ end
 -- @number player_id id of the player reaching into the inventory
 -- @string entity_name name entity to insert
 -- @param position `types.Position` of inventory
--- @string inventory_type which type of inventory to place in
+-- @number inventory_type which inventory of the entity to place in, as a
+--   `defines.inventory` index -- a number, not a name: it is handed to the
+--   game's own `entity.get_inventory(..)` unchanged
 -- @string item_name which item to insert
 -- @number item_count how many items to insert
 function rcon.insert_to_inventory(player_id, entity_name, position, inventory_type, item_name, item_count)
@@ -626,7 +628,9 @@ end
 -- @number player_id id of the player reaching into the inventory
 -- @string entity_name name entity to remove
 -- @param position  `types.Position` of inventory
--- @string inventory_type which type of inventory to remove from
+-- @number inventory_type which inventory of the entity to remove from, as a
+--   `defines.inventory` index -- a number, not a name: it is handed to the
+--   game's own `entity.get_inventory(..)` unchanged
 -- @string item_name which item to remove
 -- @number item_count how many items to remove
 function rcon.remove_from_inventory(player_id, entity_name, position, inventory_type, item_name, item_count)

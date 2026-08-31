@@ -11,6 +11,11 @@ pub use run_script::{
     language_by_filename, resolve_script, run_script, run_script_file, ResolvedScript,
     RunScriptError,
 };
+/// Holds each `__doc_entry_*` string to the binding installed beside it.
+/// Tests only: it asserts about this crate's own source and its live module
+/// tables, and nothing outside the test harness calls into it.
+#[cfg(test)]
+mod doc_guard;
 mod error;
 pub mod lua_docs;
 pub mod roll_best_seed;

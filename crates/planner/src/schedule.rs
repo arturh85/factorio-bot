@@ -23,8 +23,29 @@ pub fn travel_ticks(from: &Position, to: &Position, radius: f64) -> Ticks {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum StepKind {
-    Act { action: ActionId, label: String },
-    Walk { to: Position },
+    Act {
+        action: ActionId,
+        label: String,
+    },
+    /// Go stand within `radius` of `to`.
+    ///
+    /// **`to` is the thing to get near, not a tile to occupy.** Both fields
+    /// come from the `Condition::AtPosition` this walk exists to satisfy, so
+    /// `to` is routinely a position the bot can never stand on — the tile an
+    /// insert's furnace sits on, or the ore a mine consumes. Anywhere within
+    /// `radius` of it satisfies the condition, and the actuator is expected to
+    /// aim for the ring rather than the centre.
+    ///
+    /// `radius` used to be dropped here while `travel_ticks` went on using it,
+    /// which made every such walk execute as "stand exactly on it". The
+    /// pathfinder cannot route onto an occupied tile, so it silently
+    /// substituted a goal of its own and the bot ended up wherever that
+    /// happened to be — the 2026-08-30 live smelt run's walk `s4`, 9.3 tiles
+    /// from where the plan believed it stood.
+    Walk {
+        to: Position,
+        radius: f64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -301,6 +322,18 @@ pub fn schedule(
                     // what the shared `Arc` base is for.
                     let mut trial = sim.fork();
                     if travel > 0 {
+                        // The radius is deliberately dropped *here* and only
+                        // here. The simulated arrival is the centre, which
+                        // satisfies the condition for every radius and so is
+                        // the one point that cannot make a feasible pair look
+                        // infeasible. Naming a concrete point on the ring
+                        // instead would need to know which points are
+                        // walkable — terrain, water, cliffs, other players —
+                        // and `PlanState` knows only what entities occupy.
+                        // A guess there would turn an optimistic estimate into
+                        // a confidently wrong one, so the ring is resolved
+                        // where the knowledge is: by the game's pathfinder,
+                        // from the radius `StepKind::Walk` now carries.
                         if let Some((pos, _)) = action.required_position() {
                             trial.set_position(bot, pos);
                         }
@@ -370,11 +403,14 @@ pub fn schedule(
         // Walk first, so the AtPosition precondition holds by `act_start`. The
         // walk may finish well before it, if the action waits on a lag.
         if chosen.travel > 0 {
-            let (target, _) = action
+            let (target, radius) = action
                 .required_position()
                 .expect("travel is non-zero only when a position is required");
             steps.push(ScheduledStep {
-                what: StepKind::Walk { to: target.clone() },
+                what: StepKind::Walk {
+                    to: target.clone(),
+                    radius,
+                },
                 bot: chosen.bot,
                 start: chosen.walk_start,
                 end: chosen.walk_start + chosen.travel,
@@ -502,6 +538,7 @@ mod tests {
                 ScheduledStep {
                     what: StepKind::Walk {
                         to: Position::new(10., 20.),
+                        radius: 3.0,
                     },
                     bot: BotId(1),
                     start: 0,
@@ -589,6 +626,44 @@ mod tests {
         assert!(matches!(result.steps[1].what, StepKind::Act { .. }));
         // 30 tiles, radius 3: ceil(27 / 0.15) = 180 travel ticks, then 60 duration.
         assert_eq!(result.makespan, 240);
+    }
+
+    /// The tolerance a walk exists to satisfy travels with the walk.
+    ///
+    /// `Condition::AtPosition` carries a radius and `travel_ticks` has always
+    /// used it, but the emitted step used to carry only `to` — so "stand within
+    /// 10 tiles of the furnace" reached the executor as "stand on the furnace's
+    /// tile", and the game's pathfinder was asked for a tile the plan had just
+    /// built on.
+    ///
+    /// Two actions with **different** radii, not one, because a single walk
+    /// cannot tell a radius read from its condition from any constant that
+    /// happens to match.
+    #[test]
+    fn a_walk_carries_the_radius_of_the_condition_it_satisfies() {
+        let mut gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        net.add(at(&mut gen, "wide", Position::new(30., 0.), 9.5));
+        net.add(at(&mut gen, "tight", Position::new(-30., 0.), 2.25));
+        let bots = [BotId(1)];
+        let result = schedule(&net, &state(&bots), &bots).unwrap();
+
+        let radii: Vec<f64> = result
+            .steps
+            .iter()
+            .filter_map(|s| match &s.what {
+                StepKind::Walk { radius, .. } => Some(*radius),
+                StepKind::Act { .. } => None,
+            })
+            .collect();
+        assert_eq!(radii.len(), 2, "one walk per action: {:?}", result.steps);
+        let mut sorted = radii.clone();
+        sorted.sort_by(f64::total_cmp);
+        assert_eq!(
+            sorted,
+            vec![2.25, 9.5],
+            "each walk carries its own action's radius, not a shared constant"
+        );
     }
 
     #[test]

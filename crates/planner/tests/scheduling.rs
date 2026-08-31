@@ -234,7 +234,7 @@ fn assert_preconditions_hold_over_time(
     let mut timeline: Vec<(Ticks, u8, BotId, Event)> = Vec::new();
     for step in &result.steps {
         match &step.what {
-            StepKind::Walk { to } => {
+            StepKind::Walk { to, .. } => {
                 timeline.push((step.end, 0, step.bot, Event::Arrive(to.clone())));
             }
             StepKind::Act { action, .. } => {
@@ -333,7 +333,10 @@ fn the_time_ordered_replay_catches_an_overlapping_schedule() {
     let second = net.add(mine_at(&mut gen, &pos, available));
 
     let arrive = |bot| ScheduledStep {
-        what: StepKind::Walk { to: pos.clone() },
+        what: StepKind::Walk {
+            to: pos.clone(),
+            radius: 3.0,
+        },
         bot,
         start: 0,
         end: 0,

@@ -43,7 +43,7 @@ pub fn mermaid_gantt(schedule: &Schedule, title: &str) -> String {
         for (step_index, step) in schedule.steps_for(*bot).iter().enumerate() {
             let label = match &step.what {
                 StepKind::Act { label, .. } => label.clone(),
-                StepKind::Walk { to } => format!("walk to {}", to),
+                StepKind::Walk { to, .. } => format!("walk to {}", to),
             };
             // Round up, and never below one second: a 30-tick walk is a real
             // step and a `0s` bar is invisible in the rendered chart.
@@ -118,6 +118,7 @@ mod tests {
                 ScheduledStep {
                     what: StepKind::Walk {
                         to: Position::new(10., 0.),
+                        radius: 3.0,
                     },
                     bot: BotId(1),
                     start: 0,
@@ -203,6 +204,7 @@ mod tests {
             steps: vec![ScheduledStep {
                 what: StepKind::Walk {
                     to: Position::new(1., 0.),
+                    radius: 3.0,
                 },
                 bot: BotId(1),
                 start: 0,

@@ -37,6 +37,10 @@ use std::sync::Arc;
 /// field".
 const KNOWN_PREDICATE_KEYS: &[&str] = &[
     "kind", "bot", "start", "finish", "id", "label", "entity", "item", "count", "tech", "slot",
+    // A walk's tolerance. A plain number, so unlike `to` it compares; the
+    // comparison is exact equality on an `f64`, which is what a caller asking
+    // `{ radius = 10 }` means and all this predicate language offers.
+    "radius",
 ];
 
 /// An expanded, scheduled plan: an [`ActionNetwork`] plus the [`Schedule`]
@@ -277,9 +281,15 @@ fn step_to_lua(lua: &Lua, net: &ActionNetwork, step: &ScheduledStep) -> LuaResul
     t.set("start", start)?;
     t.set("finish", finish)?;
     match &step.what {
-        StepKind::Walk { to } => {
+        StepKind::Walk { to, radius } => {
             t.set("kind", "walk")?;
             t.set("to", position_to_lua(lua, to)?)?;
+            // Additive: `to` keeps the meaning every existing script reads it
+            // with. `radius` is the tolerance the walk's own precondition
+            // asked for, so a script can tell "stand on this" from "stand
+            // near this" -- which for a place/insert/remove is the difference
+            // between a reachable request and the entity's own tile.
+            t.set("radius", *radius)?;
         }
         StepKind::Act { action, label } => {
             let action_id: ActionId = *action;
@@ -541,6 +551,7 @@ mod tests {
         steps.push(ScheduledStep {
             what: StepKind::Walk {
                 to: Position::new(5.0, 5.0),
+                radius: 7.5,
             },
             bot: BotId(2),
             start: 0,
@@ -575,6 +586,12 @@ mod tests {
                 assert(s["end"] == nil, "end is a Lua keyword and must not be a field")
             end
             assert(by_kind.walk.to.x, "walk carries to")
+            -- The tolerance the walk exists to satisfy, beside the thing it
+            -- must get near. Read as a number, not merely present: a `to`
+            -- with no radius is how "stand within 7.5 of the furnace" used to
+            -- reach the game as "stand on the furnace".
+            assert(by_kind.walk.radius == 7.5,
+              "walk carries its radius, got " .. tostring(by_kind.walk.radius))
             assert(by_kind.walk.id == nil, "a walk is not an action")
             assert(by_kind.mine.item and by_kind.mine.count and by_kind.mine.pos)
             assert(by_kind.craft.item and by_kind.craft.count)

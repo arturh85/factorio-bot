@@ -271,7 +271,7 @@ async fn run_bot_signalled(
 
     for (i, step) in mine.iter().enumerate() {
         match &step.what {
-            StepKind::Walk { to } => {
+            StepKind::Walk { to, radius } => {
                 // A walk needs no `ActionId` to be recorded. This loop is one
                 // bot's steps in schedule order, so `(bot, i)` is already a
                 // unique, stable key — the ticks the actuator has always
@@ -279,7 +279,7 @@ async fn run_bot_signalled(
                 // the wall-clock in these plans, so dropping them was the
                 // biggest hole in the timeline.
                 lock(log).start_walk(bot, i, to.clone(), step.start, step.end);
-                match act.walk(bot, to.clone()).await {
+                match act.walk(bot, to.clone(), *radius).await {
                     Ok(ticks) => {
                         // Same order and same reasoning as the action arm:
                         // the observation, then the outcome.
@@ -520,7 +520,7 @@ mod tests {
         pub Act {}
         #[async_trait::async_trait]
         impl Actuator for Act {
-            async fn walk(&self, bot: BotId, to: Position) -> Result<ActionTicks, ActuatorFailure>;
+            async fn walk(&self, bot: BotId, to: Position, radius: f64) -> Result<ActionTicks, ActuatorFailure>;
             async fn mine(&self, bot: BotId, item: &str, at: Position, count: u32) -> Result<ActionTicks, ActuatorFailure>;
             async fn craft(&self, bot: BotId, recipe: &str, count: u32) -> Result<ActionTicks, ActuatorFailure>;
             async fn place(&self, bot: BotId, item: &str, at: Position, direction: u8) -> Result<ActionTicks, ActuatorFailure>;
@@ -529,6 +529,12 @@ mod tests {
             async fn research(&self, tech: &str) -> Result<ActionTicks, ActuatorFailure>;
         }
     }
+
+    /// The tolerance `walk_then_mine_fixture`'s walk carries, and the one its
+    /// mine's `AtPosition` asks for. Deliberately not 1.0 — Factorio's own
+    /// default path radius — so a walk dispatched with the radius thrown away
+    /// is distinguishable from one dispatched with the plan's.
+    const WALK_FIXTURE_RADIUS: f64 = 3.0;
 
     /// The tick pair a mocked dispatch reports when a test does not care which
     /// numbers come back. Deliberately not zero and deliberately far from any
@@ -563,7 +569,7 @@ mod tests {
             pre: vec![Condition::AtPosition {
                 who: Actor::Role,
                 pos: Position::new(10., 10.),
-                radius: 3.0,
+                radius: WALK_FIXTURE_RADIUS,
             }],
             eff: vec![Effect::GainItem {
                 who: Actor::Role,
@@ -592,6 +598,7 @@ mod tests {
         ScheduledStep {
             what: StepKind::Walk {
                 to: Position::new(10., 10.),
+                radius: WALK_FIXTURE_RADIUS,
             },
             bot,
             start,
@@ -762,7 +769,12 @@ mod tests {
     /// a plan value without knowing the schedule.
     #[async_trait::async_trait]
     impl Actuator for RecordingAct {
-        async fn walk(&self, bot: BotId, _to: Position) -> Result<ActionTicks, ActuatorFailure> {
+        async fn walk(
+            &self,
+            bot: BotId,
+            _to: Position,
+            _radius: f64,
+        ) -> Result<ActionTicks, ActuatorFailure> {
             self.record(Dispatch::Walk(bot));
             Self::delay(self.script.walk_delay_ms.get(&bot).copied().unwrap_or(0)).await;
             if self.script.fail_walk.contains(&bot) {
@@ -861,7 +873,7 @@ mod tests {
         act.expect_walk()
             .times(1)
             .in_sequence(&mut seq)
-            .returning(|_, _| Ok(some_ticks()));
+            .returning(|_, _, _| Ok(some_ticks()));
         act.expect_mine()
             .times(1)
             .in_sequence(&mut seq)
@@ -888,7 +900,7 @@ mod tests {
         // 900_001/900_002. Asserting only that the fields *exist* would pass
         // either way, so this asserts they are not the plan's numbers.
         let mut act = MockAct::new();
-        act.expect_walk().returning(|_, _| Ok(some_ticks()));
+        act.expect_walk().returning(|_, _, _| Ok(some_ticks()));
         act.expect_mine().returning(|_, _, _, _| Ok(some_ticks()));
         act.expect_craft().returning(|_, _, _| Ok(some_ticks()));
 
@@ -924,7 +936,7 @@ mod tests {
         // indistinguishable from the `None` of a failure that happened before
         // the game ever saw the command.
         let mut act = MockAct::new();
-        act.expect_walk().returning(|_, _| Ok(some_ticks()));
+        act.expect_walk().returning(|_, _, _| Ok(some_ticks()));
         act.expect_mine().returning(|_, _, _, _| {
             Err(ActuatorError::Rejected("no ore here".into())
                 .at(ActionTicks::new(Some(900_101), Some(900_140))))
@@ -960,7 +972,7 @@ mod tests {
     async fn a_failed_walk_keeps_the_tick_the_game_stamped_on_it() {
         // The same rule for the step that has no action id.
         let mut act = MockAct::new();
-        act.expect_walk().returning(|_, _| {
+        act.expect_walk().returning(|_, _, _| {
             Err(ActuatorError::Rejected("path blocked".into())
                 .at(ActionTicks::new(Some(900_007), None)))
         });
@@ -988,7 +1000,7 @@ mod tests {
         // there in the same struct; the test exists because reaching for them
         // is the tempting wrong thing to do.
         let mut act = MockAct::new();
-        act.expect_walk().returning(|_, _| Ok(some_ticks()));
+        act.expect_walk().returning(|_, _, _| Ok(some_ticks()));
         act.expect_mine()
             .returning(|_, _, _, _| Err(ActuatorError::Rejected("out of reach".into()).into()));
 
@@ -1015,7 +1027,7 @@ mod tests {
         // failures towards escalation — while `Running` would draw a bot that
         // is busy. Neither is true; the run lost the thread.
         let mut act = MockAct::new();
-        act.expect_walk().returning(|_, _| Ok(some_ticks()));
+        act.expect_walk().returning(|_, _, _| Ok(some_ticks()));
         act.expect_mine().returning(|_, _, _, _| {
             Err(ActuatorError::NoVerdict("unreadable action_completed status".into()).into())
         });
@@ -1046,7 +1058,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_step_is_logged_and_stops_that_bot() {
         let mut act = MockAct::new();
-        act.expect_walk().returning(|_, _| Ok(some_ticks()));
+        act.expect_walk().returning(|_, _, _| Ok(some_ticks()));
         act.expect_mine()
             .returning(|_, _, _, _| Err(ActuatorError::Rejected("out of reach".into()).into()));
         // The craft step follows the failing mine in the schedule. If the run
@@ -1076,13 +1088,17 @@ mod tests {
 
         let mut act = MockAct::new();
         act.expect_walk()
-            .with(eq(BotId(0)), eq(Position::new(10., 10.)))
+            .with(
+                eq(BotId(0)),
+                eq(Position::new(10., 10.)),
+                eq(WALK_FIXTURE_RADIUS),
+            )
             .times(1)
-            .returning(|_, _| Ok(some_ticks()));
+            .returning(|_, _, _| Ok(some_ticks()));
         act.expect_walk()
-            .with(eq(BotId(1)), eq(Position::new(5., 5.)))
+            .with(eq(BotId(1)), eq(Position::new(5., 5.)), eq(4.0))
             .times(1)
-            .returning(|_, _| Ok(some_ticks()));
+            .returning(|_, _, _| Ok(some_ticks()));
         act.expect_mine()
             .with(
                 eq(BotId(0)),
@@ -1101,6 +1117,7 @@ mod tests {
         sched.steps.push(ScheduledStep {
             what: StepKind::Walk {
                 to: Position::new(5., 5.),
+                radius: 4.0,
             },
             bot: BotId(1),
             start: 0,
@@ -1115,12 +1132,67 @@ mod tests {
         assert_eq!(log.status(craft_action_id()), Status::Success);
     }
 
+    /// The plan's tolerance is what the actuator is told to walk to.
+    ///
+    /// `Condition::AtPosition` has always carried a radius and the scheduler
+    /// has always used it to *estimate* travel; what it did not do was hand it
+    /// on. So a step meaning "stand within 3 of the ore" arrived at the game
+    /// as "stand on the ore", and for a place/insert/remove — whose target is
+    /// the entity's own tile — the pathfinder could not answer at all.
+    ///
+    /// Two walks with different radii, and `.with` matchers rather than a
+    /// captured value, so the assertion cannot be satisfied by any constant:
+    /// mockall fails the call outright if the radius does not match.
+    #[tokio::test]
+    async fn each_walk_is_dispatched_with_its_own_steps_radius() {
+        use mockall::predicate::eq;
+        let mut act = MockAct::new();
+        act.expect_walk()
+            .with(
+                eq(BotId(0)),
+                eq(Position::new(10., 10.)),
+                eq(WALK_FIXTURE_RADIUS),
+            )
+            .times(1)
+            .returning(|_, _, _| Ok(some_ticks()));
+        act.expect_walk()
+            .with(eq(BotId(1)), eq(Position::new(5., 5.)), eq(9.5))
+            .times(1)
+            .returning(|_, _, _| Ok(some_ticks()));
+        act.expect_mine().returning(|_, _, _, _| Ok(some_ticks()));
+        act.expect_craft().returning(|_, _, _| Ok(some_ticks()));
+
+        let (net, mut sched) = walk_then_mine_fixture();
+        sched.steps.push(ScheduledStep {
+            what: StepKind::Walk {
+                to: Position::new(5., 5.),
+                radius: 9.5,
+            },
+            bot: BotId(1),
+            start: 0,
+            end: 10,
+        });
+
+        let log = run(&act, &sched, &net)
+            .await
+            .expect("the run should have started");
+        assert_eq!(log.failed(), vec![]);
+        assert_eq!(
+            log.walk(BotId(0), 0).expect("bot 0 walked").status,
+            Status::Success
+        );
+        assert_eq!(
+            log.walk(BotId(1), 0).expect("bot 1 walked").status,
+            Status::Success
+        );
+    }
+
     #[tokio::test]
     async fn a_walk_failure_stops_the_bot_before_the_action_runs() {
         let mut act = MockAct::new();
         act.expect_walk()
             .times(1)
-            .returning(|_, _| Err(ActuatorError::Rejected("blocked".into()).into()));
+            .returning(|_, _, _| Err(ActuatorError::Rejected("blocked".into()).into()));
         act.expect_mine().times(0);
 
         let (net, sched) = walk_then_mine_fixture();
@@ -1163,7 +1235,7 @@ mod tests {
         let mut act = MockAct::new();
         act.expect_walk()
             .times(1)
-            .returning(|_, _| Ok(ActionTicks::new(Some(800_010), Some(800_910))));
+            .returning(|_, _, _| Ok(ActionTicks::new(Some(800_010), Some(800_910))));
         act.expect_mine()
             .times(1)
             .returning(|_, _, _, _| Ok(some_ticks()));
@@ -1217,7 +1289,7 @@ mod tests {
         let mut act = MockAct::new();
         act.expect_walk()
             .times(1)
-            .returning(|_, _| Ok(ActionTicks::UNKNOWN));
+            .returning(|_, _, _| Ok(ActionTicks::UNKNOWN));
         act.expect_mine()
             .times(1)
             .returning(|_, _, _, _| Ok(some_ticks()));

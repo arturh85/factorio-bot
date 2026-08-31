@@ -257,7 +257,7 @@ impl Replay {
                         error: attempt.and_then(|a| a.error.clone()),
                     }
                 }
-                StepKind::Walk { to } => {
+                StepKind::Walk { to, .. } => {
                     let walk = log.walk(step.bot, bot_step_index);
                     if walk.is_some() {
                         matched.entry(step.bot).or_default().push(bot_step_index);
@@ -324,6 +324,7 @@ mod tests {
         ScheduledStep {
             what: StepKind::Walk {
                 to: Position::new(x, y),
+                radius: 3.0,
             },
             bot: BotId(bot),
             start,

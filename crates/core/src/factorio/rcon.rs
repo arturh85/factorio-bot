@@ -130,20 +130,26 @@ fn within_resource_reach(player: &Position, target: &Position, reach: f64) -> bo
     calculate_distance(player, target) <= reach
 }
 
-/// The radius to walk to when a mine has to close the distance first.
+/// The path radius to request when a walk must end within `bound` of a goal.
 ///
-/// Asking for `reach` itself is what the 2026-08-30 run did, and it left the
+/// Asking for `bound` itself is what the 2026-08-30 run did, and it left the
 /// bot **3.345** tiles from the ore against a reach of 3 — outside by 0.345.
 /// "Within R of the goal" is not "within R of the goal once you stop": the
 /// path's last waypoint is on a tile centre and the mod's follower stops
 /// within a 0.3-by-0.3 box of it, so a walk to radius R comes to rest at up to
-/// roughly `R + 1.1`. Aiming at half the reach leaves room for that inside the
-/// bound the game enforces.
+/// roughly `R + 1.1`. Aiming at half the bound leaves room for that inside the
+/// bound the caller actually has to satisfy.
 ///
-/// Floored at half a tile so the goal never collapses onto the resource's own
-/// tile, which is the request shape that makes the pathfinder fail outright.
-fn mine_walk_radius(reach: f64) -> f64 {
-    (reach * 0.5).clamp(0.5, reach.max(0.5))
+/// Floored at half a tile so the goal never collapses onto the target's own
+/// tile, which is the request shape that makes the pathfinder fail outright —
+/// and which is exactly what a plan's `AtPosition` target is for a place, an
+/// insert or a remove, since those name the entity's own position.
+///
+/// Public because the executor applies it to the radius a `StepKind::Walk`
+/// carries, which is the same question this answers for a mine's corrective
+/// walk. One rule, one place.
+pub fn approach_radius(bound: f64) -> f64 {
+    (bound * 0.5).clamp(0.5, bound.max(0.5))
 }
 
 /// How far a dispatch got before it failed.
@@ -984,7 +990,7 @@ impl FactorioRcon {
     /// "Within `radius` of the goal" is not "within `radius` of the goal once
     /// you stop" — the path's last waypoint is on a tile centre and the mod's
     /// follower halts within a 0.3-by-0.3 box of it — so the walk now aims at
-    /// [`mine_walk_radius`], comfortably inside the reach, and where it
+    /// [`approach_radius`], comfortably inside the reach, and where it
     /// actually ended is re-measured afterwards. Falling short is
     /// [`Dispatch::NotDispatched`] with [`RconOutOfResourceReach`]: nothing was
     /// sent, so nothing is outstanding, and a six-minute silence becomes an
@@ -1019,7 +1025,7 @@ impl FactorioRcon {
                 world,
                 player_id,
                 position,
-                Some(mine_walk_radius(resource_reach_distance)),
+                Some(approach_radius(resource_reach_distance)),
             )
             .await?;
             // Where the walk *ended*, not where it was aimed. The two differ by
@@ -2586,7 +2592,7 @@ mod positioning_tests {
     #[test]
     fn a_mines_corrective_walk_aims_inside_the_reach() {
         for reach in [2.7_f64, 3.0, 4.0, 10.0] {
-            let radius = mine_walk_radius(reach);
+            let radius = approach_radius(reach);
             assert!(
                 radius < reach,
                 "aiming at the reach itself is the fault; got {radius} for reach {reach}"
@@ -2598,13 +2604,36 @@ mod positioning_tests {
             );
         }
         assert!(
-            mine_walk_radius(0.1) >= 0.5,
+            approach_radius(0.1) >= 0.5,
             "a radius that collapses onto the resource's own tile is the request shape \
              that makes the pathfinder fail outright"
         );
         assert!(
-            mine_walk_radius(f64::MAX).is_finite(),
+            approach_radius(f64::MAX).is_finite(),
             "an uncharactered player's unbounded reach must not become an infinite radius"
         );
+    }
+
+    /// The property a plan's walk needs, which the mine's needs did not cover.
+    ///
+    /// A `StepKind::Walk` names the thing to get near — for a place, insert or
+    /// remove that is the entity's own tile — and a bound of `build_distance`
+    /// or `reach_distance`, both 10 in the game's defaults. The request must
+    /// never be for the tile itself, whatever the bound: a radius of zero is
+    /// what makes `request_path` fail outright on an occupied goal, which is
+    /// the whole fault this exists to prevent.
+    #[test]
+    fn an_approach_never_asks_for_the_targets_own_tile() {
+        for bound in [0.0_f64, 0.4, 1.0, 2.7, 10.0] {
+            let radius = approach_radius(bound);
+            assert!(
+                radius >= 0.5,
+                "a request of {radius} for bound {bound} collapses onto the goal tile"
+            );
+        }
+        // And the halving is a halving, not a floor that swallows every bound:
+        // the game's default build and reach distance is 10, and asking for 0.5
+        // there would walk the bot onto the furnace just as surely.
+        assert_eq!(approach_radius(10.0), 5.0);
     }
 }

@@ -1,6 +1,6 @@
 use crate::actuator::{ActionTicks, Actuator, ActuatorError, ActuatorFailure};
 use async_trait::async_trait;
-use factorio_bot_core::factorio::rcon::{ActionFailure, Dispatch, FactorioRcon};
+use factorio_bot_core::factorio::rcon::{approach_radius, ActionFailure, Dispatch, FactorioRcon};
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::types::{PlayerId, Position};
 use factorio_bot_planner::{BotId, InventorySlot};
@@ -244,10 +244,24 @@ pub fn classify(f: ActionFailure) -> ActuatorFailure {
 /// outstanding work into the log on the strength of a guess.
 #[async_trait]
 impl Actuator for RconActuator {
-    async fn walk(&self, bot: BotId, to: Position) -> Result<ActionTicks, ActuatorFailure> {
+    async fn walk(
+        &self,
+        bot: BotId,
+        to: Position,
+        radius: f64,
+    ) -> Result<ActionTicks, ActuatorFailure> {
         let p = self.player(bot)?;
+        // `None` here — Factorio's own default radius of 1 — is what turned
+        // "stand within 10 tiles of the furnace" into "stand on the furnace",
+        // and the pathfinder answered with a substituted goal 9.3 tiles from
+        // where the plan believed the bot would be. The plan's tolerance is
+        // passed instead, shrunk by `approach_radius` for the same reason a
+        // mine's corrective walk is: the path ends on a tile centre and the
+        // mod's follower stops within a box of it, so a request for R comes to
+        // rest at up to about R + 1.1 and only a request inside the bound
+        // lands inside the bound.
         self.rcon
-            .move_player_timed(&self.world, p, &to, None)
+            .move_player_timed(&self.world, p, &to, Some(approach_radius(radius)))
             .await
             .map_err(classify)
     }
@@ -597,7 +611,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap()
-            .block_on(actuator.walk(BotId(1), Position::new(10.0, 10.0)))
+            .block_on(actuator.walk(BotId(1), Position::new(10.0, 10.0), 3.0))
             .expect_err("a disconnected rcon cannot request a path");
         assert!(
             matches!(f.error, ActuatorError::Rejected(_)),

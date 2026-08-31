@@ -477,7 +477,12 @@ mod tests {
 
     #[async_trait]
     impl Actuator for StubActuator {
-        async fn walk(&self, _bot: BotId, _to: Position) -> Result<ActionTicks, ActuatorFailure> {
+        async fn walk(
+            &self,
+            _bot: BotId,
+            _to: Position,
+            _radius: f64,
+        ) -> Result<ActionTicks, ActuatorFailure> {
             Ok(self.tick())
         }
         async fn mine(
@@ -1019,7 +1024,12 @@ mod tests {
 
     #[async_trait]
     impl Actuator for RecordingActuator {
-        async fn walk(&self, bot: BotId, _to: Position) -> Result<ActionTicks, ActuatorFailure> {
+        async fn walk(
+            &self,
+            bot: BotId,
+            _to: Position,
+            _radius: f64,
+        ) -> Result<ActionTicks, ActuatorFailure> {
             self.note(bot)
         }
         async fn mine(

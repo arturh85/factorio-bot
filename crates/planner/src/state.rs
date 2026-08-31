@@ -312,6 +312,17 @@ impl PlanState {
             .unwrap_or(0)
     }
 
+    /// Every item any bot holds, with the roster-wide total for each.
+    pub fn item_totals(&self) -> BTreeMap<ItemId, u32> {
+        let mut out: BTreeMap<ItemId, u32> = BTreeMap::new();
+        for bot in self.bots.values() {
+            for (item, count) in &bot.inventory {
+                *out.entry(item.clone()).or_insert(0) += *count;
+            }
+        }
+        out
+    }
+
     /// Sum across every bot — the meaning of `Holder::Anyone`.
     pub fn total_count(&self, item: &str) -> u32 {
         self.bots
@@ -802,6 +813,24 @@ mod tests {
         b.gain(BotId(1), "iron-ore", 5);
         assert_eq!(b.inventory_count(BotId(1), "iron-ore"), 5);
         assert_eq!(a.inventory_count(BotId(1), "iron-ore"), 0);
+    }
+
+    /// `item_totals` is the roster's inventory, not one bot's.
+    ///
+    /// It exists so the driver can diff a chain's produce, and a diff that saw
+    /// only the bot it happened to start from would under-count every chain
+    /// whose actor is anyone else — silently, since a smaller diff just
+    /// reserves less.
+    #[test]
+    fn item_totals_reports_every_bots_holdings() {
+        let mut a = state();
+        a.gain(BotId(1), "iron-plate", 3);
+        a.gain(BotId(2), "iron-plate", 4);
+        a.gain(BotId(2), "coal", 1);
+        let totals = a.item_totals();
+        assert_eq!(totals.get("iron-plate"), Some(&7));
+        assert_eq!(totals.get("coal"), Some(&1));
+        assert_eq!(totals.get("wood"), None, "nothing is invented");
     }
 
     #[test]

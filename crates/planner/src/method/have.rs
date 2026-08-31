@@ -5,17 +5,25 @@
 //! pinned.
 //!
 //! A chain stays with one bot because the driver stamps a whole subtree with
-//! one `ChainId`, and the scheduler assigns chains rather than actions. Two
-//! things open a chain, and only these two: a caller naming a bot
-//! (`Holder::Bot`), which additionally records that bot as the chain's owner,
-//! and a method whose decomposition makes several *produced* items meet in one
-//! inventory (`Method::converges`). A goal that merely sits inside a split
-//! opens none, because welding it would serialise work that could have run in
-//! parallel. `HasItem` preconditions alone are not enough:
-//! they keep a *linear* chain together, since only the bot holding the items
-//! can run the next step, but a recipe with two ingredients that each need
-//! producing is a chain with two roots, and neither root has a `HasItem`
-//! precondition to hold it near the other. Red science is exactly that shape.
+//! one `ChainId`, and the scheduler assigns chains rather than actions. Three
+//! things open a chain, and only these three: a caller naming a bot
+//! (`Holder::Bot`), which additionally records that bot as the chain's owner;
+//! a `Holder::Share`, which states that the holding ends up in one inventory
+//! and leaves who runs it to the scheduler; and a method whose decomposition
+//! makes several *produced* items meet in one inventory (`Method::converges`).
+//!
+//! `HasItem` preconditions alone are not enough, for two different reasons.
+//! They keep a *linear* chain together, since only the bot holding the items
+//! can run the next step — but a recipe with two ingredients that each need
+//! producing is a chain with two roots, and neither root has a `HasItem` to
+//! hold it near the other. Red science is exactly that shape, and
+//! `Method::converges` is the answer to it. And even a linear chain is only
+//! held together while *one* bot holds the items: with several smelts in
+//! flight over four bots, several bots hold ore, the scheduler offers the
+//! insert to whichever is cheapest rather than to the one that mined for it,
+//! and the pools fragment until no bot holds a whole insert's worth. A smelt
+//! is welded because it sits under a share, not because it converges — see
+//! `smelting_never_converges`, which is still true and says why.
 
 use crate::action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot};
 use crate::error::PlannerError;
@@ -835,9 +843,11 @@ pub fn default_registry() -> MethodRegistry {
 /// Split a shared goal into one independent chain per bot.
 ///
 /// The chains never coordinate: each mines, smelts and crafts its own share.
-/// They are emitted as `Holder::Bot(_)` subgoals so the other methods handle
+/// They are emitted as `Holder::Share(_)` subgoals so the other methods handle
 /// them without recursing back into this one — and so that the driver opens a
 /// chain per share, which is what keeps each share's steps in one inventory.
+/// A `Share` rather than a `Bot` because a share sizes against a bot without
+/// instructing anyone to run it; the chain it opens therefore has no owner.
 ///
 /// A share of one is still worth emitting: it produces a single chain rather
 /// than a split, and that chain is the whole point. Without it a top-level goal
@@ -2428,13 +2438,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(net.len(), 1, "a shortfall of one is one share, not several");
-        // Mining never converges, so the single share needs no chain either:
-        // nothing downstream needs its output gathered with anything else.
+        // A share states that the holding ends up in one inventory, so it is
+        // chained however trivial its subtree — but it names nobody, so the
+        // chain has no owner and the scheduler still picks the runner.
         let only = net.actions().next().expect("one action");
-        assert!(
-            net.chain_of(only.id).is_none(),
-            "a non-converging single share has nothing to weld to a runner"
-        );
+        let chain = net
+            .chain_of(only.id)
+            .expect("a share is welded to one runner");
+        assert_eq!(net.owner_of(chain), None, "a share commits nobody");
     }
 
     #[test]
@@ -2597,12 +2608,21 @@ mod tests {
         assert!(!HandCraft.converges(&gear, &s));
     }
 
+    /// `Smelt` still does not *converge*, and the distinction is worth keeping.
+    ///
+    /// A furnace is fed by three separate actions — place, insert ore, insert
+    /// coal — and no one of them needs two produced items together, so three
+    /// bots really could each supply one input. `converges` asks exactly that
+    /// question and the honest answer here is no.
+    ///
+    /// A smelt is nevertheless welded to one runner, because the goal above it
+    /// is a `Holder::Share` and a share states that the holding ends up in one
+    /// inventory. That is a different reason, enforced in the driver rather
+    /// than here, and flipping this to `true` to get the same effect would put
+    /// a false claim about a furnace in the place where the claim is read.
     #[test]
     fn smelting_never_converges() {
         let s = state(&[BotId(1)]);
-        // A furnace is fed by three separate actions — place, insert ore,
-        // insert coal — so three different bots can each supply one input.
-        // Nothing has to meet in a single inventory.
         let plate = Goal::Have {
             item: "iron-plate".into(),
             count: 2,
@@ -2611,14 +2631,21 @@ mod tests {
         assert!(!Smelt.converges(&plate, &s));
     }
 
+    /// One smelt is one runner's work; several smelts are still several bots'.
+    ///
+    /// The first half is the fix for the scattering defect — a smelt's ore,
+    /// coal and furnace are a share, and a share is one inventory. The second
+    /// half is the bound on it: welding *within* a smelt must not weld the
+    /// roster, or the planner has bought correctness with the only thing it
+    /// exists for.
     #[test]
-    fn a_linear_goal_gets_no_chain_and_stays_parallel() {
+    fn a_smelt_is_one_runners_work_but_the_roster_still_splits() {
         let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
         let mut s = state(&bots);
         for b in bots {
             s.gain(b, "stone-furnace", 1);
         }
-        let net = expand(
+        let one = expand(
             &[Goal::Have {
                 item: "iron-plate".into(),
                 count: 1,
@@ -2629,15 +2656,37 @@ mod tests {
             BotId(1),
         )
         .unwrap();
-        assert!(
-            net.actions().all(|a| net.chain_of(a.id).is_none()),
-            "a smelt converges nowhere, so nothing needs welding to one bot"
+        let chains: std::collections::BTreeSet<_> =
+            one.actions().map(|a| one.chain_of(a.id)).collect();
+        assert_eq!(
+            chains.len(),
+            1,
+            "one smelt is one chain, so its ore, its coal and its furnace \
+             cannot land on three bots: {chains:?}"
         );
-        let plan = schedule(&net, &s, &bots).expect("schedulable");
+        assert!(
+            chains.iter().all(Option::is_some),
+            "and that chain is a real one: {chains:?}"
+        );
+
+        // Four plates over four bots is four independent shares, and they must
+        // still spread.
+        let four = expand(
+            &[Goal::Have {
+                item: "iron-plate".into(),
+                count: 4,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .unwrap();
+        let plan = schedule(&four, &s, &bots).expect("schedulable");
         let used: std::collections::BTreeSet<_> = plan.steps.iter().map(|s| s.bot).collect();
         assert!(
             used.len() > 1,
-            "the mining roots must not serialise onto one bot"
+            "four independent smelts must not serialise onto one bot, got {used:?}"
         );
     }
 

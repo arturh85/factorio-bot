@@ -45,9 +45,10 @@ pub enum Step {
 /// expansion: every action emitted inside a chained subtree is stamped with it
 /// in the network, so the scheduler can bind the whole chain to one bot instead
 /// of choosing per action. A subtree is chained when a caller named a bot for
-/// it (`Holder::Bot`) or when the method claiming its root `converges` — see
-/// `expand_goal_body`. It is `None` outside such a subtree, which leaves an
-/// action freely assignable.
+/// it (`Holder::Bot`), when the goal is a `Holder::Share` and so states that
+/// its holding ends up in one inventory, or when the method claiming its root
+/// `converges` — see `expand_goal_body`. It is `None` outside such a subtree,
+/// which leaves an action freely assignable.
 ///
 /// `top_level` records whether the goal being expanded is one the *caller*
 /// asked for rather than one a method asked for. See `GoalSite`.
@@ -349,6 +350,7 @@ fn expand_goal_body(
         return Ok(());
     }
 
+    let chain_on_entry = ctx.chain;
     let site = GoalSite {
         top_level: ctx.top_level,
         in_chain: ctx.chain.is_some(),
@@ -360,11 +362,31 @@ fn expand_goal_body(
                 goal: goal.to_string(),
             })?;
 
-    // A chain welds actions to one runner. Two things ask for that: a caller
-    // naming a bot, and a method whose decomposition makes several produced
-    // items meet in one inventory. Nothing else — a goal that merely sits
-    // inside a split does not need welding, and welding it serialises work
-    // that could have run in parallel.
+    // A chain welds actions to one runner. Three things ask for that.
+    //
+    // * **A caller naming a bot** (`Holder::Bot`), which additionally records
+    //   that bot as the chain's owner.
+    // * **A `Holder::Share`**, which states that the holding has to end up in
+    //   *one* inventory. It names a bot only to size the shortfall and to pick
+    //   the inventory the driver simulates against, and commits nobody to
+    //   running the work, so the chain gets no owner. Both places that emit
+    //   one say as much: `SplitAcrossBots` hands a bot a share to mine, smelt
+    //   and craft on its own, and `Researched` asks for packs by share
+    //   "because the research is one action reading one bot's inventory".
+    //   Neither claim was enforced before: a share opened no chain, so its
+    //   producers stayed freely assignable and a smelt's three roots — ore,
+    //   coal and the furnace — scattered across the roster. The `HasItem` on
+    //   each of the smelt's own actions is then checked against a bot holding
+    //   a fraction of what expansion put in one place, and the plan dies on a
+    //   precondition it should have got right (`has 5 stone ... does not hold
+    //   for bot 3`). It cannot show up at one bot, which is why it survived
+    //   until multi-bot plans grew long enough to have two smelts in flight.
+    // * **A method that `converges`**, whose decomposition makes several
+    //   produced items meet in one inventory.
+    //
+    // Nothing else. A goal that merely sits inside a chain needs no second
+    // one, and welding what nobody has to gather serialises work that could
+    // have run in parallel.
     if ctx.chain.is_none() {
         let owner = match goal {
             Goal::Have {
@@ -373,7 +395,14 @@ fn expand_goal_body(
             } => Some(*bot),
             _ => None,
         };
-        if owner.is_some() || method.converges(goal, &ctx.state) {
+        let one_inventory = matches!(
+            goal,
+            Goal::Have {
+                whose: Holder::Bot(_) | Holder::Share(_),
+                ..
+            }
+        );
+        if one_inventory || method.converges(goal, &ctx.state) {
             let chain = ctx.chains.next();
             ctx.chain = Some(chain);
             if let Some(bot) = owner {
@@ -381,6 +410,20 @@ fn expand_goal_body(
             }
         }
     }
+
+    // Whether *this* frame opened the chain, and so owes the ledger entry at
+    // the end of the body. Methods cannot reach `ctx.chain`, so nothing
+    // between here and there can change the answer.
+    //
+    // A roster of one is exempt, and not as an optimisation: the entry below
+    // exists because two chains may be handed to two bots, and with one bot
+    // they cannot be. What one chain made really is in the next chain's hands,
+    // so hiding it would make a single bot mine and smelt a second time for
+    // stock it is already carrying — `researched("automation")` at one bot
+    // goes from 58 steps to 101 with no defect to show for it.
+    let opened_chain =
+        ctx.chain.is_some() && chain_on_entry.is_none() && ctx.state.bot_ids().len() > 1;
+    let produce_before = opened_chain.then(|| ctx.state.item_totals());
 
     let steps = method.expand(goal, ctx)?;
 
@@ -398,6 +441,42 @@ fn expand_goal_body(
     let result = run_steps(steps, ctx, net, registry, &mut promised);
     for (whose, item, count) in &promised {
         ctx.state.release(whose, item, *count);
+    }
+
+    // What a chain made belongs to that chain.
+    //
+    // Expansion simulates every chain's effects into the *same* notional
+    // inventory — `chain_actor`, one bot — while the scheduler is free to put
+    // two sibling chains on two different bots. So the moment a chain closes,
+    // what it produced is stock some *other* runner may be carrying, and a
+    // sibling that sizes itself against it plans work it cannot do: research
+    // `steam-power` (whose trigger is "craft 50 iron plates"), then craft a
+    // lab, and the lab chain sees fifty plates sitting there, smelts none of
+    // its own, and the schedule then hands the two chains to two bots.
+    //
+    // Reserved, not spent, for the same reason as every other entry in this
+    // ledger: `inventory_count` and `lose` still see the items, so the chain's
+    // own arithmetic and its `Condition::HasItem`s are untouched, and only
+    // *other* goals asking `available` are told the stock is spoken for.
+    //
+    // Held for the rest of the expansion rather than released with the
+    // enclosing method, which is the one asymmetry with `run_steps`'
+    // reservations: those exist for one pending action and end with it, this
+    // one records where the items physically are and that does not stop being
+    // true. The caller that asked for the chain is already served by its own
+    // `Have` reservation above and by reading the inventory, not `available`.
+    //
+    // Inert on its own — a plan with no chains has nothing to reserve — so
+    // this is the other half of chaining a share rather than a change in its
+    // own right.
+    if let Some(before) = produce_before {
+        for (item, count) in ctx.state.item_totals() {
+            let gained = count.saturating_sub(before.get(&item).copied().unwrap_or(0));
+            if gained > 0 {
+                ctx.state
+                    .reserve(&Holder::Bot(ctx.chain_actor), &item, gained);
+            }
+        }
     }
     result
 }
@@ -1384,6 +1463,278 @@ mod tests {
             expand(&[goal], &state, &reg, BotId(1)),
             Err(PlannerError::BotsNotInterchangeable { .. })
         ));
+    }
+
+    /// A `Holder::Share` states that the holding has to end up in one
+    /// inventory, and the driver makes that true by opening a chain over its
+    /// subtree.
+    ///
+    /// Written with hand-made methods and invented items so the rule is the
+    /// driver's and not any recipe's: a widget is made from a cog and a spring
+    /// by three separate actions, none of which needs two of them together, so
+    /// no method here `converges`. Without the chain the three actions are
+    /// individually assignable and the scheduler is free to put the cog on one
+    /// bot and the spring on another — which is exactly `Smelt`'s shape, where
+    /// the ore, the coal and the furnace each feed an action of their own.
+    #[test]
+    fn a_share_welds_its_whole_subtree_to_one_chain() {
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1), BotId(2)]);
+        let reg = MethodRegistry::new().with(Box::new(Produce));
+
+        let shared = expand(
+            &[Goal::Have {
+                item: "cog".into(),
+                count: 3,
+                whose: Holder::Share(BotId(1)),
+            }],
+            &state,
+            &reg,
+            BotId(1),
+        )
+        .expect("expands");
+        let chains: BTreeSet<Option<ChainId>> =
+            shared.actions().map(|a| shared.chain_of(a.id)).collect();
+        assert_eq!(chains.len(), 1, "one share, one chain, got {chains:?}");
+        assert!(
+            chains.iter().all(Option::is_some),
+            "a share's actions must carry a chain, got {chains:?}"
+        );
+        let chain = shared
+            .chain_of(shared.actions().next().expect("an action").id)
+            .expect("just asserted");
+        assert_eq!(
+            shared.owner_of(chain),
+            None,
+            "a share sizes against a bot but commits nobody to running it, so the \
+             chain has no owner and the scheduler still picks"
+        );
+
+        // The contrast: `Holder::Anyone` says the roster may hold it between
+        // them, and opens nothing.
+        let scattered = expand(
+            &[Goal::Have {
+                item: "cog".into(),
+                count: 3,
+                whose: Holder::Anyone,
+            }],
+            &state,
+            &reg,
+            BotId(1),
+        )
+        .expect("expands");
+        assert!(
+            scattered
+                .actions()
+                .all(|a| scattered.chain_of(a.id).is_none()),
+            "nothing has to be gathered, so nothing is welded"
+        );
+    }
+
+    /// A chain's produce is not stock a *sibling* chain may count on.
+    ///
+    /// Expansion simulates every chain into the same notional inventory while
+    /// the scheduler may put two chains on two bots, so a sibling that sizes
+    /// itself against what another chain made plans work it cannot do. This is
+    /// the ledger half of chaining a share; `a_share_welds_…` is the other.
+    #[test]
+    fn what_one_chain_made_is_not_offered_to_the_next() {
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1), BotId(2)]);
+        let reg = MethodRegistry::new()
+            .with(Box::new(Enough))
+            .with(Box::new(Produce));
+
+        // Two shares of five cogs each, deliberately sized against the *same*
+        // bot. That is what makes this bite: the second share asks whether
+        // that bot can already count five towards it, and the five the first
+        // chain made are sitting right there in the simulated inventory. Two
+        // different bots would have proved nothing — the second would have
+        // looked at an empty inventory whatever the ledger said.
+        let net = expand(
+            &[
+                Goal::Have {
+                    item: "cog".into(),
+                    count: 5,
+                    whose: Holder::Share(BotId(1)),
+                },
+                Goal::Have {
+                    item: "cog".into(),
+                    count: 5,
+                    whose: Holder::Share(BotId(1)),
+                },
+            ],
+            &state,
+            &reg,
+            BotId(1),
+        )
+        .expect("expands");
+        let made: u32 = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Craft { item, count } if item == "cog" => Some(*count),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(
+            made, 10,
+            "each share makes its own five: the first chain's cogs may end up in \
+             hands the second chain never reaches"
+        );
+    }
+
+    /// With one bot there is nothing to guard against, so nothing is guarded.
+    ///
+    /// The ledger above exists because two chains may be handed to two
+    /// runners. A roster of one cannot do that: what the first chain made is
+    /// in the only pair of hands there is, and hiding it would send that bot
+    /// out to make a second five for no reason. Same two goals as
+    /// `what_one_chain_made_…`, one bot instead of two, opposite answer.
+    #[test]
+    fn one_bot_may_count_what_its_own_earlier_chain_made() {
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
+        let reg = MethodRegistry::new()
+            .with(Box::new(Enough))
+            .with(Box::new(Produce));
+        let net = expand(
+            &[
+                Goal::Have {
+                    item: "cog".into(),
+                    count: 5,
+                    whose: Holder::Share(BotId(1)),
+                },
+                Goal::Have {
+                    item: "cog".into(),
+                    count: 5,
+                    whose: Holder::Share(BotId(1)),
+                },
+            ],
+            &state,
+            &reg,
+            BotId(1),
+        )
+        .expect("expands");
+        let made: u32 = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Craft { item, count } if item == "cog" => Some(*count),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(
+            made, 5,
+            "one bot, one pair of hands: the second share is already holding what \
+             it asked for"
+        );
+    }
+
+    /// Surplus a subgoal produced is still the *chain's* to spend, so a later
+    /// subgoal of the same chain may count it.
+    ///
+    /// The chain ledger is written once, when the chain closes — not at every
+    /// frame beneath it. Writing it per frame would hide a subgoal's overshoot
+    /// from its own siblings and make the chain buy the same thing twice, and
+    /// that is invisible unless something over-produces: `ProducePairs` makes
+    /// cogs two at a time, so asking for one leaves one spare.
+    #[test]
+    fn a_chains_own_surplus_is_still_spendable_inside_that_chain() {
+        /// One widget out of two separate one-cog subgoals.
+        struct Widget;
+        impl Method for Widget {
+            fn name(&self) -> &'static str {
+                "widget"
+            }
+            fn applicable(&self, goal: &Goal, _s: &PlanState) -> bool {
+                matches!(goal, Goal::Have { item, .. } if item == "widget")
+            }
+            fn expand(
+                &self,
+                goal: &Goal,
+                ctx: &mut ExpansionCtx,
+            ) -> Result<Vec<Step>, PlannerError> {
+                let Goal::Have { whose, .. } = goal else {
+                    unreachable!()
+                };
+                let cog = |whose: &Holder| {
+                    Step::Subgoal(Goal::Have {
+                        item: "cog".into(),
+                        count: 1,
+                        whose: whose.clone(),
+                    })
+                };
+                let a = gain_action(ctx, "widget", 1);
+                Ok(vec![cog(whose), cog(whose), Step::Act(Box::new(a))])
+            }
+        }
+
+        /// Cogs come two to a run, so a shortfall of one leaves one spare.
+        struct ProducePairs;
+        impl Method for ProducePairs {
+            fn name(&self) -> &'static str {
+                "produce-pairs"
+            }
+            fn applicable(&self, goal: &Goal, _s: &PlanState) -> bool {
+                matches!(goal, Goal::Have { item, .. } if item == "cog")
+            }
+            fn expand(
+                &self,
+                goal: &Goal,
+                ctx: &mut ExpansionCtx,
+            ) -> Result<Vec<Step>, PlannerError> {
+                let Goal::Have { item, count, whose } = goal else {
+                    unreachable!()
+                };
+                let short = count.saturating_sub(ctx.state.available(whose, item));
+                let runs = short.div_ceil(2);
+                let a = gain_action(ctx, "cog", runs * 2);
+                Ok(vec![Step::Act(Box::new(a))])
+            }
+        }
+
+        // Two bots, because the chain ledger is only written for a roster
+        // that can put two chains on two runners.
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1), BotId(2)]);
+        let reg = MethodRegistry::new()
+            .with(Box::new(Enough))
+            .with(Box::new(Widget))
+            .with(Box::new(ProducePairs));
+        let net = expand(
+            &[Goal::Have {
+                item: "widget".into(),
+                count: 1,
+                whose: Holder::Share(BotId(1)),
+            }],
+            &state,
+            &reg,
+            BotId(1),
+        )
+        .expect("expands");
+        let cogs: u32 = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Craft { item, count } if item == "cog" => Some(*count),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(
+            cogs, 2,
+            "one run of two cogs covers both subgoals: the spare from the first \
+             is still the chain's, and only stops being available to *other* \
+             chains once this one closes"
+        );
+    }
+
+    /// Satisfied when the holder can still count `count` towards this goal.
+    struct Enough;
+    impl Method for Enough {
+        fn name(&self) -> &'static str {
+            "enough"
+        }
+        fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
+            matches!(goal, Goal::Have { item, count, whose }
+                if state.available(whose, item) >= *count)
+        }
+        fn expand(&self, _g: &Goal, _c: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+            Ok(vec![])
+        }
     }
 
     #[test]

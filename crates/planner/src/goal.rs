@@ -13,11 +13,24 @@ pub enum Holder {
     /// A caller's instruction: this bot must end up holding the items. The
     /// scheduler honours it — the chain this goal opens is owned by this bot.
     Bot(BotId),
-    /// One share of a split. Sized against this bot's starting inventory, but
-    /// carrying no commitment about who runs it: the scheduler is free to give
-    /// the work to whichever bot suits.
+    /// One share of a split, and — the part that is easy to miss — a claim
+    /// that the holding ends up in **one** inventory.
     ///
-    /// Naming a bot here is how the driver keeps each share's simulated
+    /// Sized against this bot's starting inventory, but carrying no commitment
+    /// about *who* runs it: the driver opens a chain over a share's subtree,
+    /// so its actions are welded to a single runner, and gives that chain no
+    /// owner, so which bot that is stays the scheduler's decision.
+    ///
+    /// The welding is not decoration. A share is what `SplitAcrossBots` hands
+    /// a bot to mine, smelt and craft on its own, and what `Researched` asks
+    /// for because "the research is one action reading one bot's inventory".
+    /// Both statements are only true while something keeps the share's
+    /// producers and its consumers together: a smelt's ore, coal and furnace
+    /// feed three separate actions, so nothing in the network holds them in
+    /// one pair of hands, and left unwelded the scheduler mines the coal onto
+    /// one bot and loads the furnace from another.
+    ///
+    /// Naming a bot here is also how the driver keeps each share's simulated
     /// inventory separate. That it *works* rests on bots starting
     /// interchangeable — the assumption `ExpansionCtx` documents, made visible
     /// in the type rather than left in prose.

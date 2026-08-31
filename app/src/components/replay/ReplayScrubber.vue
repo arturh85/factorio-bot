@@ -40,7 +40,7 @@ import {Ban, Image, ImageOff} from '@lucide/vue';
 import {Replay, observedOrigin, replayAxisCeiling} from '@/api/replay';
 import {FramesManifest} from '@/api/types';
 import {frameUrl} from '@/api/client';
-import {combineRunMatchChecks, frameAtTick, framesForClient, runIdCheck, tickOverlapCheck} from '@/api/frameJoin';
+import {camerasForClient, combineRunMatchChecks, frameAtTick, framesForClient, runIdCheck, tickOverlapCheck} from '@/api/frameJoin';
 import Slider from '@/components/ui/Slider.vue';
 import ReplayView from './ReplayView.vue';
 
@@ -111,11 +111,40 @@ watch(availableClients, (clients) => {
     }
 });
 
+/**
+ * The cameras this client actually produced frames for, derived from the
+ * manifest rather than from a list this component knows. A camera added to the
+ * capture appears here without a frontend change; one that stopped producing
+ * disappears.
+ */
+const availableCameras = computed(() =>
+    props.manifest === null || effectiveClient.value === null
+        ? []
+        : camerasForClient(props.manifest, effectiveClient.value));
+
+const selectedCamera = ref<string | null>(null);
+const effectiveCamera = computed(() => {
+    const cameras = availableCameras.value;
+    if (selectedCamera.value !== null && cameras.includes(selectedCamera.value)) {
+        return selectedCamera.value;
+    }
+    return cameras[0] ?? null;
+});
+
+// Clear a selection the manifest no longer offers, rather than leaving a
+// camera selected that produces nothing: a stale selection would render "no
+// frame at this tick" for every tick and look like a capture failure.
+watch(availableCameras, (cameras) => {
+    if (selectedCamera.value !== null && !cameras.includes(selectedCamera.value)) {
+        selectedCamera.value = null;
+    }
+});
+
 const clientFrames = computed(() => {
     if (props.manifest === null || effectiveClient.value === null) {
         return [];
     }
-    return framesForClient(props.manifest, effectiveClient.value);
+    return framesForClient(props.manifest, effectiveClient.value, effectiveCamera.value ?? undefined);
 });
 
 const unparsedFrameCount = computed(() => props.manifest?.frames.filter((f) => f.tick === null).length ?? 0);
@@ -158,6 +187,22 @@ const current = computed(() =>
           :value="effectiveClient"
           @change="selectedClient = Number(($event.target as HTMLSelectElement).value)">
           <option v-for="c in availableClients" :key="c" :value="c">client {{ c }}</option>
+        </select>
+      </div>
+
+      <!--
+        Only when there is a choice to make. One camera needs no selector, and
+        an empty one would imply the capture supports something it does not.
+      -->
+      <div v-if="availableCameras.length > 1" class="flex items-center gap-2 text-xs text-ink-muted">
+        <label for="frame-camera-select">camera</label>
+        <select
+          id="frame-camera-select"
+          data-testid="camera-select"
+          class="rounded border border-divider bg-card px-1 py-0.5 text-ink"
+          :value="effectiveCamera"
+          @change="selectedCamera = ($event.target as HTMLSelectElement).value">
+          <option v-for="cam in availableCameras" :key="cam" :value="cam">{{ cam }}</option>
         </select>
       </div>
 

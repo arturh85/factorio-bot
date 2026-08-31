@@ -1,19 +1,7 @@
 import {describe, expect, it} from 'vitest';
-import {
-    combineRunMatchChecks,
-    frameAtTick,
-    framesForClient,
-    manifestTickRange,
-    replayObservedTickRange,
-    tickOverlapCheck
-} from './frameJoin';
+import {camerasForClient, combineRunMatchChecks, frameAtTick, framesForClient, manifestTickRange, replayObservedTickRange, tickOverlapCheck} from './frameJoin';
 import {REALISTIC_REPLAY} from './replay.fixtures';
-import {
-    EMPTY_MANIFEST,
-    MANIFEST_WITH_UNPARSED_ENTRY,
-    OVERLAPPING_MANIFEST,
-    UNRELATED_RUN_MANIFEST
-} from './frames.fixtures';
+import {EMPTY_MANIFEST, MANIFEST_WITH_UNPARSED_ENTRY, MULTI_CAMERA_MANIFEST, OVERLAPPING_MANIFEST, UNRELATED_RUN_MANIFEST} from './frames.fixtures';
 
 describe('replayObservedTickRange', () => {
     it('spans every observed tick in the realistic fixture (100-400)', () => {
@@ -122,5 +110,43 @@ describe('frameAtTick -- honesty requirements 2, 3 and 4', () => {
         const result = frameAtTick(frames, 300);
         expect(result?.frame.tick).toBe(300);
         expect(result?.age).toBe(0);
+    });
+});
+
+describe('camerasForClient', () => {
+    it('lists the cameras that actually produced frames, sorted', () => {
+        expect(camerasForClient(MULTI_CAMERA_MANIFEST, 1)).toEqual(['area', 'bot-1', 'follow']);
+    });
+
+    /**
+     * A camera the capture never ran for must not appear. Offering it and then
+     * showing "no frame" at every tick presents a capture that never happened
+     * as one that happened and produced nothing.
+     */
+    it('omits a client that produced nothing', () => {
+        expect(camerasForClient(MULTI_CAMERA_MANIFEST, 2)).toEqual([]);
+    });
+});
+
+describe('framesForClient with a camera', () => {
+    it('returns only that camera, so a per-camera gap survives', () => {
+        const area = framesForClient(MULTI_CAMERA_MANIFEST, 1, 'area').map((f) => f.tick);
+        const follow = framesForClient(MULTI_CAMERA_MANIFEST, 1, 'follow').map((f) => f.tick);
+        // `area` captured at 0 and not at 300. Merging the cameras would hide
+        // that behind `follow`'s frame and show one camera's picture under
+        // another's name.
+        expect(area).toEqual([100]);
+        expect(follow).toEqual([100, 400]);
+    });
+
+    it('keeps a hyphenated camera id whole', () => {
+        expect(framesForClient(MULTI_CAMERA_MANIFEST, 1, 'bot-1').map((f) => f.name)).toEqual([
+            'tick-0000000100-bot-1.jpg',
+            'tick-0000000400-bot-1.jpg'
+        ]);
+    });
+
+    it('without a camera, returns every camera\'s frames', () => {
+        expect(framesForClient(MULTI_CAMERA_MANIFEST, 1).length).toBe(5);
     });
 });

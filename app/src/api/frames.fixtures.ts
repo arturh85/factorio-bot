@@ -76,3 +76,34 @@ export const OVERLAPPING_MANIFEST_LATE_START: FramesManifest = {
         {client: 1, tick: 350, camera: 'front', name: 'tick-0000000350-front.jpg', bytes: 222}
     ]
 };
+
+/**
+ * Several cameras for one client, using the ids the capture actually emits:
+ * `follow`, `bot-<player_index>` and `area`.
+ *
+ * `bot-1` is hyphenated on purpose. A camera id containing a hyphen is the
+ * case the filename parser splits on the *first* hyphen after the digits for —
+ * a last-hyphen split would read `tick-0000300-bot-1.jpg` as camera `1`, which
+ * does not error and is not obviously wrong on inspection.
+ *
+ * `area` deliberately has a frame at a tick the others do not: cameras are
+ * independent captures and a per-camera gap is a real thing the manifest must
+ * be able to express.
+ *
+ * Ticks are **absolute `game.tick`**, matching `REALISTIC_REPLAY`, whose
+ * observed ticks start at 100 — so these land at 0 and 300 on the scrubber's
+ * shifted axis. A fixture at 0 and 300 absolute would quietly model frames and
+ * plan as sharing an origin, which a real run disproves: planned 0-868 against
+ * observed 60551-61528.
+ */
+export const MULTI_CAMERA_MANIFEST: FramesManifest = {
+    clients: [1],
+    run: null,
+    frames: [
+        {client: 1, tick: 100, camera: 'follow', name: 'tick-0000000100-follow.jpg', bytes: 111},
+        {client: 1, tick: 100, camera: 'bot-1', name: 'tick-0000000100-bot-1.jpg', bytes: 222},
+        {client: 1, tick: 100, camera: 'area', name: 'tick-0000000100-area.jpg', bytes: 333},
+        {client: 1, tick: 400, camera: 'follow', name: 'tick-0000000400-follow.jpg', bytes: 444},
+        {client: 1, tick: 400, camera: 'bot-1', name: 'tick-0000000400-bot-1.jpg', bytes: 555}
+    ]
+};

@@ -3,12 +3,7 @@ import {describe, expect, it} from 'vitest';
 import {mount} from '@vue/test-utils';
 import ReplayScrubber from './ReplayScrubber.vue';
 import {REALISTIC_REPLAY} from '@/api/replay.fixtures';
-import {
-    EMPTY_MANIFEST,
-    OVERLAPPING_MANIFEST,
-    OVERLAPPING_MANIFEST_LATE_START,
-    UNRELATED_RUN_MANIFEST
-} from '@/api/frames.fixtures';
+import {EMPTY_MANIFEST, MULTI_CAMERA_MANIFEST, OVERLAPPING_MANIFEST, OVERLAPPING_MANIFEST_LATE_START, UNRELATED_RUN_MANIFEST} from '@/api/frames.fixtures';
 
 import '@/test/resizeObserverStub';
 
@@ -147,5 +142,63 @@ describe('ReplayScrubber -- axis and scrubber plumbing', () => {
         expect(slider.exists()).toBe(true);
         await slider.vm.$emit('update:modelValue', 10);
         expect(wrapper.emitted('update:tick')).toEqual([[10]]);
+    });
+});
+
+describe('ReplayScrubber -- camera selection', () => {
+    /**
+     * With several cameras the scrubber must show one, and say which.
+     * Merging them would put one camera's picture under another's name — a
+     * frame that is real, current, and not of the thing the label claims.
+     */
+    it('offers only the cameras that produced frames, and shows one of them', () => {
+        const wrapper = mount(ReplayScrubber, {
+            props: {replay: REALISTIC_REPLAY, manifest: MULTI_CAMERA_MANIFEST, tick: 0}
+        });
+        const options = wrapper.get('[data-testid="camera-select"]').findAll('option');
+        expect(options.map((o) => o.text())).toEqual(['area', 'bot-1', 'follow']);
+    });
+
+    it('shows the selected camera\'s frame, not another camera\'s', async () => {
+        const wrapper = mount(ReplayScrubber, {
+            props: {replay: REALISTIC_REPLAY, manifest: MULTI_CAMERA_MANIFEST, tick: 0}
+        });
+        const select = wrapper.get('[data-testid="camera-select"]');
+
+        // Asserted on the image's `src`, not on the caption: the caption says
+        // which tick, and the whole point here is which *camera's* picture is
+        // loaded at that tick. Two cameras share the tick, so only the URL
+        // distinguishes them.
+        const src = () => wrapper.get('[data-testid="frame-image"]').attributes('src') ?? '';
+
+        await select.setValue('bot-1');
+        expect(src()).toContain('bot-1');
+        expect(src()).not.toContain('follow');
+
+        await select.setValue('follow');
+        expect(src()).toContain('follow');
+        expect(src()).not.toContain('bot-1');
+    });
+
+    /**
+     * `area` has a frame at tick 0 and none at 300; `follow` has both. Selecting
+     * `area` at 300 must show the stale state rather than silently borrowing
+     * `follow`'s frame — cameras are independent captures and a gap in one is
+     * not filled by another.
+     */
+    it('a per-camera gap is a gap, not another camera\'s frame', async () => {
+        const wrapper = mount(ReplayScrubber, {
+            props: {replay: REALISTIC_REPLAY, manifest: MULTI_CAMERA_MANIFEST, tick: 300}
+        });
+        await wrapper.get('[data-testid="camera-select"]').setValue('area');
+        expect(wrapper.find('[data-testid="frame-current"]').exists()).toBe(false);
+        expect(wrapper.get('[data-testid="frame-stale"]').text()).toContain('300');
+    });
+
+    it('offers no selector when there is only one camera', () => {
+        const wrapper = mount(ReplayScrubber, {
+            props: {replay: REALISTIC_REPLAY, manifest: OVERLAPPING_MANIFEST, tick: 0}
+        });
+        expect(wrapper.find('[data-testid="camera-select"]').exists()).toBe(false);
     });
 });

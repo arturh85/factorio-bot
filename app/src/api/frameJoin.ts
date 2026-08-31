@@ -242,10 +242,44 @@ export function runIdCheck(manifestRun: string | null, jobId: string | null): Ru
  * frame *count* must still account for what this function drops; see
  * `ReplayScrubber.vue`'s handling of unparsed entries.
  */
-export function framesForClient(manifest: FramesManifest, client: number): FrameEntry[] {
+export function framesForClient(
+    manifest: FramesManifest,
+    client: number,
+    camera?: string
+): FrameEntry[] {
     return manifest.frames
-        .filter((frame): frame is FrameEntry & {tick: number} => frame.client === client && frame.tick !== null)
+        .filter(
+            (frame): frame is FrameEntry & {tick: number} =>
+                frame.client === client &&
+                frame.tick !== null &&
+                (camera === undefined || frame.camera === camera)
+        )
         .sort((a, b) => a.tick - b.tick);
+}
+
+/**
+ * Every camera that produced a frame for `client`, in a stable order.
+ *
+ * Derived from the frames rather than from a list of cameras the UI knows
+ * about: a camera the capture stopped producing must disappear from the
+ * selector, and one added later must appear without a frontend change. The
+ * capture owns which cameras exist and this reads what it did.
+ *
+ * A camera that produced nothing is absent, which is the honest answer —
+ * offering it and then showing "no frame" at every tick would present a
+ * capture that never ran as one that ran and produced nothing.
+ *
+ * Unparsed entries contribute no camera: their filename did not yield one, and
+ * inventing a bucket for them would put a selector item nobody can act on.
+ */
+export function camerasForClient(manifest: FramesManifest, client: number): string[] {
+    const seen = new Set<string>();
+    for (const frame of manifest.frames) {
+        if (frame.client === client && frame.camera !== null && frame.tick !== null) {
+            seen.add(frame.camera);
+        }
+    }
+    return [...seen].sort();
 }
 
 export interface FrameAtTick {

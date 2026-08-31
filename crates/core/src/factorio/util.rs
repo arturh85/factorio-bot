@@ -3,10 +3,10 @@ use crate::graph::entity_graph::QuadTreeRect;
 use crate::types::{
     Direction, FactorioEntity, FactorioEntityPrototype, FactorioTile, Pos, Position, Rect,
 };
+use alphanumeric_sort::compare_str;
 use dashmap::DashMap;
 use factorio_blueprint::BlueprintCodec;
 use factorio_blueprint::Container::{Blueprint, BlueprintBook};
-use alphanumeric_sort::compare_str;
 use itertools::Itertools;
 use miette::{IntoDiagnostic, Result};
 use num_traits::ToPrimitive;

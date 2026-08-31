@@ -62,7 +62,7 @@ These leverage rust-analyzer for accuracy with macros and trait implementations
 ## Architecture
 
 ```
-Browser (Vue 3; PrimeVue being replaced -- see plan 6)
+Browser (Vue 3 + Tailwind v4 + reka-ui)
     ↓ (HTTP + SSE, no IPC)
 crates/server (axum: /api/v1/*, serves the built SPA)
     ↓
@@ -131,9 +131,13 @@ BotBridge Mod (Factorio mod for RPC)
 
 ### Frontend (app/src/)
 
-- Vue 3 + PrimeVue 4 components, themed with the `@primeuix/themes` Lara preset
-  configured in `main.ts` (PrimeVue 4 dropped the shipped theme stylesheets for a
-  runtime theme service, so `app.use(PrimeVue, ...)` is mandatory)
+- Vue 3 with Tailwind v4 and headless `reka-ui` primitives. **PrimeVue and
+  PrimeFlex are gone** (plan 6) — there is no component library to register, so
+  `main.ts` installs only Pinia and the router. Shared primitives live in
+  `components/ui/` in the shadcn style: single-word names, owned in-tree rather
+  than imported, and listed in the `vue/multi-word-component-names` ignore list
+  in `eslint.config.mjs` — extend that list when adding one.
+- Icons come from `@lucide/vue`; `@vueuse/core` supplies the composables.
 - Monaco editor for Lua scripting (`components/Editor.vue`), whose workers are
   wired through Vite's native `?worker` imports
 - Pinia 4 for state management (`defineStore('id', {...})`, not the removed
@@ -144,11 +148,14 @@ BotBridge Mod (Factorio mod for RPC)
   works on ESLint 10. `pnpm lint` runs `tsc`, `vue-tsc` and `eslint` over both
   `.ts` and `.vue` files
 
-Known gap: the templates still carry PrimeFlex 1/2 grid class names (`p-grid`,
-`p-col-12`, `p-formgrid`, `p-field-radiobutton`). PrimeFlex 3 removed the `p-`
-prefix and PrimeFlex itself is archived upstream, so those classes resolve to no
-rules and the affected pages render as stacked blocks rather than grids.
-Restoring the intended layout is open work.
+The frontend/backend contract is pinned by a **snapshot seam**, and it fails
+from both ends on purpose. `app/src/api/openapi.snapshot.json` is generated
+from the utoipa spec (`UPDATE_OPENAPI_SNAPSHOT=1 cargo test -p
+factorio-bot-server --features lua --test openapi`), and
+`app/src/api/openapi.contract.spec.ts` ties every published schema to a
+declaration in `app/src/api/types.ts` via `objectContract<T>`. Adding a field
+in Rust fails the Rust snapshot test until regenerated, then fails the
+TypeScript contract test until mirrored. Neither half can drift quietly.
 
 ### Communication Flow
 
@@ -186,6 +193,42 @@ detached (`crates/server/src/manage/execute.rs`, `crates/server/src/jobs.rs`).
   only filesystem access, and each resolves through `resolve_script_path` /
   `resolve_write_path` (`crates/core/src/scripts.rs`), which refuse any path
   that leaves the scripts root.
+
+### Frames and Replay
+
+A run produces two artefacts that are joined in the UI by `game.tick`, which is
+the only clock both sides share.
+
+- **Replay** — the executor serialises what it actually did, reaching the
+  browser over the job's SSE stream (`WireEvent::Replay`), not a REST route: it
+  belongs to the run that produced it, so it travels with that run's output.
+  `app/src/api/replay.ts` narrows it at runtime (`parseReplay`) rather than
+  casting.
+- **Frames** — the mod screenshots every 300 ticks into
+  `workspace/client<N>/script-output/frames/`, named `tick-<digits>-<camera>.jpg`.
+  Cameras are `follow`, `bot-<player_index>` and `area` (the bounding box of all
+  connected bots, +16 tiles; it writes nothing below zoom 0.05 rather than crop
+  silently). `GET /api/v1/frames` lists them; `GET /api/v1/frames/{client}/{name}`
+  serves the bytes.
+
+**Planned ticks start at zero; observed ticks are absolute `game.tick`.** A run
+dispatching its first step at tick 60,551 would otherwise draw the whole plan in
+the first 1.4% of the axis. `ReplayScrubber.vue` works in shifted ticks and
+converts in exactly one place — `observedOrigin()`.
+
+**The join is checked, never assumed.** `app/src/api/frameJoin.ts` compares tick
+ranges and run ids and reports `contradicted | confirmed | consistent |
+inconclusive`. A missing run id is **unknown, never "no match"** — treating
+absence as mismatch refuses a good join; treating it as a match asserts
+something nobody established. `frames/run.json` sits *inside* `frames/` so a
+per-run wipe clears the id together with the frames it describes.
+
+Each client reports its own run id (`client_runs`), and the manifest's `run` is
+set only when the clients that answered **agree**. A client rewrites its sidecar
+only when it takes part in a capture, so a run with fewer clients than the last
+one leaves the extra client holding the previous run's frames — that client is
+named rather than outvoted, and its frames stay reachable but are marked in the
+picker. There is no majority rule: one dissenter makes the id unknown.
 
 ## Lua Scripts
 

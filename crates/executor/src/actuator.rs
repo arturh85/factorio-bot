@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+pub use factorio_bot_core::factorio::ticks::ActionTicks;
 use factorio_bot_core::types::Position;
 use factorio_bot_planner::{BotId, InventorySlot};
 
@@ -22,24 +23,47 @@ pub enum ActuatorError {
 /// The trait exists mainly so the run loop can be tested without a running
 /// game: `FactorioRcon`'s `automock` is gated on core's own `cfg(test)` and is
 /// therefore invisible from this crate.
+///
+/// # Why every method returns [`ActionTicks`] rather than `()`
+///
+/// This is the executor's **only** game-clock source. Nothing in this crate
+/// reads `game.tick`, and nothing may: a tick invented here would not be a
+/// measurement. So the dispatch itself carries the ticks back — the round trip
+/// was already being paid, and BotBridge stamps the game tick on every response
+/// the executor dispatches (`mods/BotBridge/control.lua`, `stamp_tick`).
+///
+/// Two ticks, not one, because a dispatch genuinely has two observable moments:
+/// when the game received the command and when it reported the outcome. For an
+/// asynchronous action they differ by however long the bot took; for a
+/// synchronous one they are the same tick, which is a fact about the action
+/// rather than a gap being papered over.
+///
+/// An implementation with no clock returns [`ActionTicks::UNKNOWN`]. That is a
+/// legitimate answer and every consumer must handle it — see
+/// [`crate::log::Attempt`] on why an absent tick is never defaulted.
 #[async_trait]
 pub trait Actuator: Send + Sync {
-    async fn walk(&self, bot: BotId, to: Position) -> Result<(), ActuatorError>;
+    async fn walk(&self, bot: BotId, to: Position) -> Result<ActionTicks, ActuatorError>;
     async fn mine(
         &self,
         bot: BotId,
         item: &str,
         at: Position,
         count: u32,
-    ) -> Result<(), ActuatorError>;
-    async fn craft(&self, bot: BotId, recipe: &str, count: u32) -> Result<(), ActuatorError>;
+    ) -> Result<ActionTicks, ActuatorError>;
+    async fn craft(
+        &self,
+        bot: BotId,
+        recipe: &str,
+        count: u32,
+    ) -> Result<ActionTicks, ActuatorError>;
     async fn place(
         &self,
         bot: BotId,
         item: &str,
         at: Position,
         direction: u8,
-    ) -> Result<(), ActuatorError>;
+    ) -> Result<ActionTicks, ActuatorError>;
     #[allow(clippy::too_many_arguments)]
     async fn insert(
         &self,
@@ -49,7 +73,7 @@ pub trait Actuator: Send + Sync {
         slot: InventorySlot,
         item: &str,
         count: u32,
-    ) -> Result<(), ActuatorError>;
+    ) -> Result<ActionTicks, ActuatorError>;
     #[allow(clippy::too_many_arguments)]
     async fn remove(
         &self,
@@ -59,9 +83,9 @@ pub trait Actuator: Send + Sync {
         slot: InventorySlot,
         item: &str,
         count: u32,
-    ) -> Result<(), ActuatorError>;
+    ) -> Result<ActionTicks, ActuatorError>;
     /// Research is server-wide in Factorio: it takes no player id.
-    async fn research(&self, tech: &str) -> Result<(), ActuatorError>;
+    async fn research(&self, tech: &str) -> Result<ActionTicks, ActuatorError>;
 
     /// The game's simulation speed multiplier — Factorio's own `game.speed`,
     /// where `1.0` is normal (60 ticks/second) and the game accepts anything

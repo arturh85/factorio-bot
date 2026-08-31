@@ -1,6 +1,18 @@
+use factorio_bot_core::factorio::ticks::ActionTicks;
 use factorio_bot_planner::{ActionId, Ticks};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+/// Narrows a game tick to the planner's [`Ticks`].
+///
+/// `game.tick` is a `MapTick` (uint64); `Ticks` is 32-bit, which covers about
+/// 2.3 years of game time. A value that does not fit comes back **absent**
+/// rather than wrapped: a wrapped tick would look like a perfectly plausible
+/// early-game measurement and quietly corrupt anything aligned to it, whereas
+/// `None` is a fact a consumer can act on.
+fn narrow(tick: Option<u64>) -> Option<Ticks> {
+    tick.and_then(|t| Ticks::try_from(t).ok())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Status {
@@ -12,24 +24,39 @@ pub enum Status {
 
 /// One execution attempt of one action — always the **latest** one.
 ///
-/// # These ticks are scheduled, not observed
+/// # Two kinds of tick live here, and they must never be confused
 ///
 /// `planned_start_tick` and `planned_end_tick` are named for what they actually
 /// hold. The only writer is `run_into`, which passes `ScheduledStep::start` and
 /// `ScheduledStep::end` — numbers the *scheduler* computed from
 /// `Action::duration` before anything ran. They are the estimate, not a
-/// measurement of it.
+/// measurement of it, and `planned_duration()` is that estimate round-tripped
+/// through the log.
 ///
-/// So `planned_duration()` is a plan value round-tripped through the log, and
-/// an "estimated versus actual" comparison built on it would compare the
-/// estimate with itself and always agree. Real observed timings need the game's
-/// tick at dispatch and at reply, and **the executor has no game-clock source**:
-/// `Actuator` returns `Result<(), ActuatorError>` with no tick in it, and
-/// nothing in this crate reads `game.tick`. Getting one means widening
-/// `Actuator` (or a BotBridge change), and that is not this increment.
+/// `dispatched_tick` and `replied_tick` are the measurement. They are
+/// `game.tick` as the game itself reported it — when it received the command
+/// and when it reported the outcome — carried back through
+/// [`Actuator`](crate::Actuator) as an [`ActionTicks`] and written by
+/// [`ExecutionLog::observe`]. Nothing else may write them.
 ///
-/// Naming them honestly is the point. A vacuous metric that reads like a real
-/// one is worse than an absent one, because a caller will build on it.
+/// **The two are kept side by side deliberately.** The drift between the plan
+/// and the game is the signal — it is what tells you the scheduler's model of
+/// `Action::duration` is wrong, and it is what a consumer aligning captured
+/// frames to a plan needs in order to pin a frame to the tick it was actually
+/// taken at. Renaming `planned_*` to something that sounds measured, or filling
+/// `dispatched_tick`/`replied_tick` in from the schedule when the game did not
+/// answer, would destroy exactly that signal while leaving every reading
+/// plausible.
+///
+/// # An absent tick is a value
+///
+/// `dispatched_tick` and `replied_tick` are `Option` and stay `None` whenever
+/// the game did not tell us: an action that failed before it was dispatched, a
+/// reply whose stamp could not be parsed, a tick too large for [`Ticks`], or an
+/// actuator with no clock at all. `None` is never to be replaced with zero, with
+/// the planned tick, or with the previous action's tick. A consumer must be able
+/// to say "no reply tick for this action"; a fabricated number is worse than a
+/// missing one, because it will be built on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attempt {
     pub status: Status,
@@ -45,6 +72,12 @@ pub struct Attempt {
     /// The tick the *schedule* placed this attempt's end at, once finished.
     /// Not observed.
     pub planned_end_tick: Option<Ticks>,
+    /// `game.tick` when the game **received** this attempt's command.
+    /// `None` if the game never said — see the type docs.
+    pub dispatched_tick: Option<Ticks>,
+    /// `game.tick` when the game **reported the outcome** of this attempt.
+    /// `None` if the game never said — see the type docs.
+    pub replied_tick: Option<Ticks>,
     pub error: Option<String>,
 }
 
@@ -149,9 +182,39 @@ impl ExecutionLog {
                 number,
                 planned_start_tick: tick,
                 planned_end_tick: None,
+                dispatched_tick: None,
+                replied_tick: None,
                 error: None,
             },
         );
+    }
+
+    /// Records the game ticks observed for `id`'s current attempt.
+    ///
+    /// Separate from [`ExecutionLog::succeed`]/[`ExecutionLog::fail`] on
+    /// purpose: those take *plan* numbers, this one takes *game* numbers, and
+    /// keeping the two writers apart is what makes it impossible to pass a
+    /// schedule value here by slipping an argument. It writes nothing but the
+    /// two observed fields.
+    ///
+    /// Only an attempt that already exists is annotated. There is deliberately
+    /// no upsert: an observation with no attempt to attach to would be an
+    /// observation of nothing, and inventing an attempt for it would put an
+    /// action in the log that the run never started.
+    ///
+    /// Guarded by `has_finished` for the same reason `succeed` is — a duplicate
+    /// completion inside one run must not overwrite the timing already
+    /// recorded, or which numbers survive would depend on which writer the game
+    /// answered first. A retry is unaffected: `start` reopens the attempt (and
+    /// clears these fields) before the retry can observe anything.
+    pub fn observe(&mut self, id: ActionId, ticks: ActionTicks) {
+        if self.has_finished(id) {
+            return;
+        }
+        if let Some(a) = self.attempts.get_mut(&id) {
+            a.dispatched_tick = narrow(ticks.dispatched);
+            a.replied_tick = narrow(ticks.replied);
+        }
     }
 
     /// Whether this attempt has already reached an outcome. A superseding
@@ -190,6 +253,8 @@ impl ExecutionLog {
             number: 1,
             planned_start_tick: tick,
             planned_end_tick: None,
+            dispatched_tick: None,
+            replied_tick: None,
             error: None,
         });
         a.status = Status::Success;
@@ -207,6 +272,8 @@ impl ExecutionLog {
             number: 1,
             planned_start_tick: tick,
             planned_end_tick: None,
+            dispatched_tick: None,
+            replied_tick: None,
             error: None,
         });
         a.status = Status::Failed;
@@ -218,9 +285,9 @@ impl ExecutionLog {
     ///
     /// **Not a measurement.** Both endpoints come from the schedule, so this is
     /// `Action::duration` travelling back out of the log, and comparing it to
-    /// the estimate compares the estimate with itself. See `Attempt` for why
-    /// there is no observed duration to offer instead, and what it would take
-    /// to have one.
+    /// the estimate compares the estimate with itself. The measured counterpart
+    /// is [`ExecutionLog::observed_duration`], which is `None` whenever the game
+    /// did not report both ends.
     pub fn planned_duration(&self, id: ActionId) -> Option<Ticks> {
         let a = self.attempts.get(&id)?;
         a.planned_end_tick.map(|end| {
@@ -231,6 +298,20 @@ impl ExecutionLog {
             );
             end.saturating_sub(a.planned_start_tick)
         })
+    }
+
+    /// Ticks the game actually spent on this attempt, when it reported both
+    /// ends.
+    ///
+    /// `None` — never zero, never the planned duration — if either observation
+    /// is missing, because a duration derived from a fabricated endpoint is a
+    /// fabricated duration. `None` also if the reply tick precedes the dispatch
+    /// tick, which cannot happen in a game whose clock only advances and so
+    /// means one of the two numbers is not what it claims to be.
+    pub fn observed_duration(&self, id: ActionId) -> Option<Ticks> {
+        let a = self.attempts.get(&id)?;
+        let (start, end) = (a.dispatched_tick?, a.replied_tick?);
+        end.checked_sub(start)
     }
 
     /// Failed action ids, in ascending id order.
@@ -409,6 +490,131 @@ mod tests {
         log.start(id(1), 2);
         assert_eq!(log.attempts(id(1)), u32::MAX, "saturated, not wrapped");
         assert_ne!(log.attempts(id(1)), 0, "a wrap would read as never started");
+    }
+
+    #[test]
+    fn an_attempt_with_no_observation_reports_absent_ticks_not_zero_or_the_plan() {
+        // The whole point of the pair. An actuator with no game clock, or a
+        // dispatch the game never answered, must leave these empty -- and
+        // emphatically not fall back to the planned numbers sitting right
+        // beside them, which is the failure mode that makes a fabricated
+        // measurement look real.
+        let mut log = ExecutionLog::default();
+        log.start(id(1), 100);
+        log.succeed(id(1), 340);
+        let a = log.attempt(id(1)).expect("attempt");
+        assert_eq!(a.dispatched_tick, None);
+        assert_eq!(a.replied_tick, None);
+        assert_ne!(a.dispatched_tick, Some(0), "absent is not tick zero");
+        assert_ne!(
+            a.dispatched_tick,
+            Some(a.planned_start_tick),
+            "absent must never fall back to the plan"
+        );
+        assert_eq!(log.observed_duration(id(1)), None);
+        assert_eq!(
+            log.planned_duration(id(1)),
+            Some(240),
+            "the estimate is unaffected by there being no measurement"
+        );
+    }
+
+    #[test]
+    fn an_observation_is_recorded_and_is_not_the_planned_tick() {
+        let mut log = ExecutionLog::default();
+        log.start(id(1), 100);
+        log.observe(id(1), ActionTicks::new(Some(70_000), Some(70_240)));
+        log.succeed(id(1), 340);
+
+        let a = log.attempt(id(1)).expect("attempt");
+        assert_eq!(a.dispatched_tick, Some(70_000));
+        assert_eq!(a.replied_tick, Some(70_240));
+        // Both kinds survive side by side: the drift between them is the
+        // signal, so neither may overwrite the other.
+        assert_eq!(a.planned_start_tick, 100);
+        assert_eq!(a.planned_end_tick, Some(340));
+        assert_ne!(a.dispatched_tick, Some(a.planned_start_tick));
+        assert_ne!(a.replied_tick, a.planned_end_tick);
+        assert_eq!(log.observed_duration(id(1)), Some(240));
+    }
+
+    #[test]
+    fn half_an_observation_yields_no_observed_duration() {
+        // The game acknowledged the dispatch and then never reported an
+        // outcome. The dispatch tick is real and is kept; the duration is not
+        // derivable and must not be invented from the planned end.
+        let mut log = ExecutionLog::default();
+        log.start(id(1), 100);
+        log.observe(id(1), ActionTicks::new(Some(70_000), None));
+        log.succeed(id(1), 340);
+        assert_eq!(log.attempt(id(1)).unwrap().dispatched_tick, Some(70_000));
+        assert_eq!(log.attempt(id(1)).unwrap().replied_tick, None);
+        assert_eq!(log.observed_duration(id(1)), None);
+    }
+
+    #[test]
+    fn a_tick_too_large_for_the_planners_width_is_absent_rather_than_wrapped() {
+        // `game.tick` is 64-bit and `Ticks` is 32-bit. A wrapped value would
+        // look like an ordinary early-game measurement and silently misplace
+        // anything aligned to it, so it is dropped instead.
+        let mut log = ExecutionLog::default();
+        log.start(id(1), 100);
+        log.observe(
+            id(1),
+            ActionTicks::new(Some(u64::from(u32::MAX) + 1), Some(5)),
+        );
+        let a = log.attempt(id(1)).expect("attempt");
+        assert_eq!(a.dispatched_tick, None, "dropped, not wrapped to 0");
+        assert_eq!(a.replied_tick, Some(5), "the tick that does fit is kept");
+    }
+
+    #[test]
+    fn observing_an_action_that_was_never_started_records_nothing() {
+        // An observation of nothing. Inventing an attempt to hang it on would
+        // put an action in the log that the run never dispatched.
+        let mut log = ExecutionLog::default();
+        log.observe(id(1), ActionTicks::new(Some(1), Some(2)));
+        assert!(log.attempt(id(1)).is_none());
+        assert_eq!(log.status(id(1)), Status::Pending);
+    }
+
+    #[test]
+    fn a_retry_observes_afresh_rather_than_inheriting_the_failed_attempts_ticks() {
+        // The superseded attempt's measurement belongs to the superseded
+        // attempt. Carrying it forward would report the retry as having been
+        // dispatched before it was.
+        let mut log = ExecutionLog::default();
+        log.start(id(1), 0);
+        log.observe(id(1), ActionTicks::new(Some(1_000), Some(1_060)));
+        log.fail(id(1), 60, "player was busy".to_string());
+
+        log.start(id(1), 500);
+        let a = log.attempt(id(1)).expect("attempt");
+        assert_eq!(
+            a.dispatched_tick, None,
+            "a reopened attempt has observed nothing yet"
+        );
+        assert_eq!(a.replied_tick, None);
+
+        log.observe(id(1), ActionTicks::new(Some(9_000), Some(9_060)));
+        log.succeed(id(1), 560);
+        let a = log.attempt(id(1)).expect("attempt");
+        assert_eq!(a.dispatched_tick, Some(9_000), "the retry's own ticks");
+        assert_eq!(a.replied_tick, Some(9_060));
+    }
+
+    #[test]
+    fn a_second_observation_of_a_finished_attempt_is_ignored() {
+        // Same argument as the second-completion guard: which numbers survive
+        // must not depend on which duplicate writer the game answered first.
+        let mut log = ExecutionLog::default();
+        log.start(id(1), 100);
+        log.observe(id(1), ActionTicks::new(Some(70_000), Some(70_240)));
+        log.succeed(id(1), 340);
+        log.observe(id(1), ActionTicks::new(Some(1), Some(2)));
+        let a = log.attempt(id(1)).expect("attempt");
+        assert_eq!(a.dispatched_tick, Some(70_000));
+        assert_eq!(a.replied_tick, Some(70_240));
     }
 
     #[test]

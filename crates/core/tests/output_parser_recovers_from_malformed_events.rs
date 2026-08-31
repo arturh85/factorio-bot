@@ -184,9 +184,14 @@ fn an_unrecognized_action_status_is_skipped_not_recorded_and_parsing_continues()
         "the well-formed event must parse: {result:?}"
     );
     assert_eq!(
-        world.actions.get(&8).map(|v| v.clone()),
+        world.actions.get(&8).map(|v| v.result.clone()),
         Some(String::from("ok")),
         "parsing must continue past the unrecognized status"
+    );
+    assert_eq!(
+        world.actions.get(&8).map(|v| v.tick),
+        Some(2),
+        "the completion must carry the event's own game tick"
     );
 }
 
@@ -215,9 +220,14 @@ fn a_fail_completion_with_no_message_is_recorded_as_failed_and_parsing_continues
         "a failure with no message is still a failure and must be recorded, not dropped"
     );
     assert_ne!(
-        recorded.as_deref(),
+        recorded.as_ref().map(|o| o.result.as_str()),
         Some("ok"),
         "a messageless failure must never be recorded as success"
+    );
+    assert_eq!(
+        recorded.as_ref().map(|o| o.tick),
+        Some(1),
+        "a failure is still an observation and keeps the tick it happened at"
     );
 
     // A subsequent, well-formed completion must still be recorded --
@@ -228,7 +238,7 @@ fn a_fail_completion_with_no_message_is_recorded_as_failed_and_parsing_continues
         "the well-formed event must parse: {result:?}"
     );
     assert_eq!(
-        world.actions.get(&8).map(|v| v.clone()),
+        world.actions.get(&8).map(|v| v.result.clone()),
         Some(String::from("ok")),
         "parsing must continue past the messageless failure"
     );

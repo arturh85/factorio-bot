@@ -337,10 +337,10 @@ mod tests {
     use factorio_bot_core::test_utils::fixture_world;
     use factorio_bot_core::tokio::sync::{mpsc, watch};
     use factorio_bot_core::types::Position;
-    use factorio_bot_executor::ActuatorError;
+    use factorio_bot_executor::{ActionTicks, ActuatorError};
     use factorio_bot_planner::{schedule, Holder, InventorySlot, Schedule};
     use std::collections::BTreeMap;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::Duration;
 
     /// When the stub refuses an action.
@@ -373,7 +373,23 @@ mod tests {
         /// never opened is how "did `goal.start` return without waiting?"
         /// becomes a question with a definite answer.
         pub(crate) gate: Option<watch::Receiver<bool>>,
+        /// A stand-in game clock, or `None` for an actuator that has none.
+        ///
+        /// `None` is the default because it is the honest default: a stub is
+        /// not a game and has nothing to observe, so it reports
+        /// [`ActionTicks::UNKNOWN`] and every test built on it exercises the
+        /// absent-tick path all the way out to Lua. `with_clock` is for the
+        /// tests that need to prove the ticks a run reports came from the
+        /// actuator and not from the schedule.
+        pub(crate) clock: Option<Arc<AtomicU64>>,
     }
+
+    /// Where [`StubActuator::with_clock`] starts counting.
+    ///
+    /// Far beyond any tick these fixtures schedule, so "is this number the
+    /// plan's or the actuator's?" has an answer that does not depend on
+    /// knowing the schedule.
+    pub(crate) const STUB_CLOCK_BASE: u64 = 500_000;
 
     impl StubActuator {
         pub(crate) fn new(fails: Failure) -> Self {
@@ -382,10 +398,32 @@ mod tests {
                 fails,
                 entered: None,
                 gate: None,
+                clock: None,
             }
         }
 
-        async fn act(&self) -> Result<(), ActuatorError> {
+        /// Gives the stub a monotonic clock, so its dispatches report ticks
+        /// that advance the way a real game's would.
+        pub(crate) fn with_clock(mut self) -> Self {
+            self.clock = Some(Arc::new(AtomicU64::new(STUB_CLOCK_BASE)));
+            self
+        }
+
+        /// Two ticks per dispatch, the second strictly after the first, and
+        /// every dispatch after the one before it — the shape a real run
+        /// produces. `None` when the stub has no clock.
+        fn tick(&self) -> ActionTicks {
+            match &self.clock {
+                None => ActionTicks::UNKNOWN,
+                Some(clock) => {
+                    let dispatched = clock.fetch_add(7, Ordering::SeqCst);
+                    let replied = clock.fetch_add(3, Ordering::SeqCst);
+                    ActionTicks::new(Some(dispatched), Some(replied))
+                }
+            }
+        }
+
+        async fn act(&self) -> Result<ActionTicks, ActuatorError> {
             if let Some(entered) = &self.entered {
                 let _ = entered.send(());
             }
@@ -408,14 +446,14 @@ mod tests {
             if refuse {
                 return Err(ActuatorError::Rejected("stub refuses".to_string()));
             }
-            Ok(())
+            Ok(self.tick())
         }
     }
 
     #[async_trait]
     impl Actuator for StubActuator {
-        async fn walk(&self, _bot: BotId, _to: Position) -> Result<(), ActuatorError> {
-            Ok(())
+        async fn walk(&self, _bot: BotId, _to: Position) -> Result<ActionTicks, ActuatorError> {
+            Ok(self.tick())
         }
         async fn mine(
             &self,
@@ -423,7 +461,7 @@ mod tests {
             _item: &str,
             _at: Position,
             _count: u32,
-        ) -> Result<(), ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorError> {
             self.act().await
         }
         async fn craft(
@@ -431,7 +469,7 @@ mod tests {
             _bot: BotId,
             _recipe: &str,
             _count: u32,
-        ) -> Result<(), ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorError> {
             self.act().await
         }
         async fn place(
@@ -440,7 +478,7 @@ mod tests {
             _item: &str,
             _at: Position,
             _direction: u8,
-        ) -> Result<(), ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorError> {
             self.act().await
         }
         async fn insert(
@@ -451,7 +489,7 @@ mod tests {
             _slot: InventorySlot,
             _item: &str,
             _count: u32,
-        ) -> Result<(), ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorError> {
             self.act().await
         }
         async fn remove(
@@ -462,10 +500,10 @@ mod tests {
             _slot: InventorySlot,
             _item: &str,
             _count: u32,
-        ) -> Result<(), ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorError> {
             self.act().await
         }
-        async fn research(&self, _tech: &str) -> Result<(), ActuatorError> {
+        async fn research(&self, _tech: &str) -> Result<ActionTicks, ActuatorError> {
             self.act().await
         }
     }
@@ -713,10 +751,12 @@ mod tests {
     }
 
     impl RecordingActuator {
-        fn note(&self, bot: BotId) -> Result<(), ActuatorError> {
+        /// No game clock: this actuator records who was dispatched to, not
+        /// when, so it reports [`ActionTicks::UNKNOWN`].
+        fn note(&self, bot: BotId) -> Result<ActionTicks, ActuatorError> {
             #[allow(clippy::unwrap_used)]
             self.bots.lock().unwrap().push(bot);
-            Ok(())
+            Ok(ActionTicks::UNKNOWN)
         }
         fn recorded(&self) -> Vec<BotId> {
             #[allow(clippy::unwrap_used)]
@@ -726,7 +766,7 @@ mod tests {
 
     #[async_trait]
     impl Actuator for RecordingActuator {
-        async fn walk(&self, bot: BotId, _to: Position) -> Result<(), ActuatorError> {
+        async fn walk(&self, bot: BotId, _to: Position) -> Result<ActionTicks, ActuatorError> {
             self.note(bot)
         }
         async fn mine(
@@ -735,10 +775,15 @@ mod tests {
             _item: &str,
             _at: Position,
             _count: u32,
-        ) -> Result<(), ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorError> {
             self.note(bot)
         }
-        async fn craft(&self, bot: BotId, _recipe: &str, _count: u32) -> Result<(), ActuatorError> {
+        async fn craft(
+            &self,
+            bot: BotId,
+            _recipe: &str,
+            _count: u32,
+        ) -> Result<ActionTicks, ActuatorError> {
             self.note(bot)
         }
         async fn place(
@@ -747,7 +792,7 @@ mod tests {
             _item: &str,
             _at: Position,
             _direction: u8,
-        ) -> Result<(), ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorError> {
             self.note(bot)
         }
         async fn insert(
@@ -758,7 +803,7 @@ mod tests {
             _slot: InventorySlot,
             _item: &str,
             _count: u32,
-        ) -> Result<(), ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorError> {
             self.note(bot)
         }
         async fn remove(
@@ -769,11 +814,11 @@ mod tests {
             _slot: InventorySlot,
             _item: &str,
             _count: u32,
-        ) -> Result<(), ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorError> {
             self.note(bot)
         }
-        async fn research(&self, _tech: &str) -> Result<(), ActuatorError> {
-            Ok(())
+        async fn research(&self, _tech: &str) -> Result<ActionTicks, ActuatorError> {
+            Ok(ActionTicks::UNKNOWN)
         }
     }
 

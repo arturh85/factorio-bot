@@ -16,6 +16,25 @@ local run = goal.start(plan)
 print("dispatched, waiting...")
 local final = run:wait()
 
+-- Real game ticks next to the scheduler's estimate.
+--
+-- `planned_*` is what the schedule predicted before anything ran;
+-- `dispatched_tick`/`replied_tick` are `game.tick` as the game itself reported
+-- it. If the two columns ever agree exactly, the observed fields are being
+-- filled from the plan and none of this means anything.
+local ids = {}
+for id, _ in pairs(final.actions) do ids[#ids + 1] = id end
+table.sort(ids)
+print("action | planned_start planned_end | dispatched_tick replied_tick")
+for _, id in ipairs(ids) do
+  local a = final.actions[id]
+  print(string.format("%6s | %13s %11s | %15s %12s  %s",
+    tostring(id),
+    tostring(a.planned_start), tostring(a.planned_end),
+    tostring(a.dispatched_tick), tostring(a.replied_tick),
+    tostring(a.status)))
+end
+
 print("done="   .. tostring(final.done)
    .. " success=" .. tostring(final.success)
    .. " failed="  .. tostring(final.failed)

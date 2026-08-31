@@ -1,4 +1,5 @@
 use crate::factorio::snapshot::WorldSnapshot;
+use crate::factorio::ticks::ActionOutcome;
 use crate::graph::entity_graph::EntityGraph;
 use crate::graph::flow_graph::FlowGraph;
 use crate::types::{
@@ -25,7 +26,15 @@ pub struct FactorioWorld {
     pub entity_prototypes: Arc<DashMap<String, FactorioEntityPrototype>>,
     pub item_prototypes: DashMap<String, FactorioItemPrototype>,
     pub image_cache: DashMap<String, Box<RgbaImage>>,
-    pub actions: DashMap<u32, String>,
+    /// Outcomes the game reported for dispatched actions, keyed by the
+    /// `action_id` the dispatch used.
+    ///
+    /// The value carries the game tick alongside the result. The mod has always
+    /// stamped one on its `action_completed` event; until this map could hold
+    /// it, `OutputParser` threw it away -- which is why the executor had no
+    /// game-clock source, and why every "duration" it reported was a plan value
+    /// round-tripped through the log.
+    pub actions: DashMap<u32, ActionOutcome>,
     pub path_requests: DashMap<u32, String>,
     pub next_action_id: Mutex<u32>,
     pub entity_graph: Arc<EntityGraph>,

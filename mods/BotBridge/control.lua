@@ -971,6 +971,33 @@ function writeout_entities(tick, surface, area)
 	line=nil
 end
 
+-- Stamps the game tick onto an RCON response.
+--
+-- Every RPC the executor dispatches ends with this line, so a caller can record
+-- *when the game actually saw the command* instead of estimating it from the
+-- schedule. It costs no extra round trip: the reply was already being sent.
+--
+-- The sentinel is what keeps the stamp out of the payload. `§tick§` cannot
+-- occur in a JSON body or in any message `complain` builds, and the Rust client
+-- (`crates/core/src/factorio/rcon.rs`, `take_tick_stamp`) strips these lines
+-- before judging the rest -- so a response that used to be empty on success is
+-- still empty, and one that carried a single JSON document still carries
+-- exactly one. Adding a bare `rcon.print` here instead would be read as the
+-- action's result and turn every success into a reported failure.
+--
+-- `game.tick` is a MapTick (uint64). It is printed whole; the narrowing to the
+-- planner's 32-bit `Ticks` happens once, on the Rust side, where it can be
+-- reported as absent rather than wrapped.
+--
+-- Safe outside an RCON command. `rcon_action_start_walk_waypoints` is also
+-- called from `on_tick` (the "not mining the expected target, MOVING!" branch),
+-- where there is no calling RCON interface; the API defines `rcon.print` as
+-- printing "to the calling RCON interface *if any*", so that path stamps
+-- nowhere rather than erroring out of the tick handler.
+function stamp_tick()
+	rcon.print("§tick§" .. game.tick)
+end
+
 function writeout(tick, key, value)
 	print("§"..tick.."§"..key.."§"..tostring(value))
 end
@@ -1283,6 +1310,7 @@ function rcon_action_start_walk_waypoints(action_id, player_id, waypoints) -- e.
 	end
 	--	game.print("waypoints: " .. table_to_string(storage.p[player_id]))
 	storage.p[player_id].walking = {idx=1, waypoints=tmp, action_id=action_id }
+	stamp_tick()
 end
 
 function rcon_action_start_mining(action_id, player_id, name, position, count)
@@ -1306,6 +1334,7 @@ function rcon_action_start_mining(action_id, player_id, name, position, count)
 		storage.p[player_id].mining = nil
 		action_failed(last_tick, action_id)
 	end
+	stamp_tick()
 end
 
 function rcon_place_entity(player_id, item_name, entity_position, direction)
@@ -1346,6 +1375,7 @@ function rcon_place_entity(player_id, item_name, entity_position, direction)
 		on_some_entity_created({tick=last_tick, entity = result})
 		rcon.print(helpers.table_to_json(serialize_entity(result)))
 	end
+	stamp_tick()
 end
 
 function add_to_bounding_box(bb, center_position)
@@ -1406,6 +1436,7 @@ function rcon_insert_to_inventory(player_id, entity_name, entity_pos, inventory_
 			complain("wtf, tried to take "..real_n.."x "..items.name.." from player #"..player_id.." but only got "..check_n..". Isn't supposed to happen?!")
 		end
 	end
+	stamp_tick()
 end
 
 function rcon_remove_from_inventory(player_id, entity_name, entity_pos, inventory_type, items)
@@ -1437,6 +1468,7 @@ function rcon_remove_from_inventory(player_id, entity_name, entity_pos, inventor
 			complain("wtf, couldn't insert "..real_n.."x "..items.name.." into player #"..player_id..", but only "..check_n..". dropping them :(.")
 		end
 	end
+	stamp_tick()
 end
 
 function rcon_whoami(who)
@@ -1553,6 +1585,7 @@ end
 function rcon_add_research(technology_name)
 	local force = game.forces["player"]
 	force.add_research(technology_name)
+	stamp_tick()
 end
 
 function rcon_inventory_contents_at(positions)
@@ -1626,6 +1659,7 @@ function rcon_action_start_crafting(action_id, player_id, recipe, count)
 		if crafting_queue[player_id] == nil then crafting_queue[player_id] = {} end
 		table.insert(crafting_queue[player_id], {recipe=recipe, id=aid})
 	end
+	stamp_tick()
 end
 
 function rcon_revive_ghost(player_id, name, x, y)

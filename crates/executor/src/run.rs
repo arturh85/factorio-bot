@@ -5,7 +5,7 @@
 //! 100 ms poll loop (`crates/core/src/plan/execute.rs:79`) with a completion
 //! signal per action.
 
-use crate::actuator::{Actuator, ActuatorError};
+use crate::actuator::{ActionTicks, Actuator, ActuatorError};
 use crate::log::{ExecutionLog, Status};
 use factorio_bot_core::petgraph::algo::toposort;
 use factorio_bot_core::petgraph::graph::{DiGraph, NodeIndex};
@@ -237,6 +237,9 @@ async fn run_bot_signalled(
     for (i, step) in mine.iter().enumerate() {
         match &step.what {
             StepKind::Walk { to } => {
+                // A walk step is not an action and has no log entry, so its
+                // ticks have nowhere to be recorded. They are still real; if a
+                // consumer ever needs them, the walk needs an id first.
                 if act.walk(bot, to.clone()).await.is_err() {
                     abandon_rest(&mine[i..], senders);
                     return;
@@ -256,13 +259,25 @@ async fn run_bot_signalled(
                 // `perform` awaits, so the guard is taken and dropped around
                 // it, never held across it.
                 match perform(act, bot, &a.kind).await {
-                    Ok(()) => {
-                        lock(log).succeed(*action, step.end);
+                    Ok(ticks) => {
+                        // Observation first, then the plan-side outcome: both
+                        // writes are under the same guard as far as any reader
+                        // is concerned, and `succeed` is what marks the attempt
+                        // finished, after which `observe` would refuse.
+                        {
+                            let mut log = lock(log);
+                            log.observe(*action, ticks);
+                            log.succeed(*action, step.end);
+                        }
                         if let Some(tx) = senders.get(action) {
                             let _ = tx.send(Status::Success);
                         }
                     }
                     Err(e) => {
+                        // No ticks to record. `ActuatorError` carries none, and
+                        // inventing one here — the planned tick, or the tick of
+                        // whatever ran last — is exactly what these fields must
+                        // never hold. They stay `None`.
                         lock(log).fail(*action, step.end, e.to_string());
                         abandon_rest(&mine[i..], senders);
                         return;
@@ -352,11 +367,13 @@ fn ticks_to_wall_clock(ticks: Ticks, speed: f64) -> std::time::Duration {
     std::time::Duration::from_secs_f64(f64::from(ticks) / (60.0 * speed))
 }
 
+/// Dispatches one action and hands back the game ticks the actuator observed
+/// for it.
 async fn perform<A: Actuator + ?Sized>(
     act: &A,
     bot: BotId,
     kind: &ActionKind,
-) -> Result<(), ActuatorError> {
+) -> Result<ActionTicks, ActuatorError> {
     match kind {
         ActionKind::Mine { pos, item, count } => {
             act.mine(bot, item.as_str(), pos.clone(), *count).await
@@ -402,14 +419,22 @@ mod tests {
         pub Act {}
         #[async_trait::async_trait]
         impl Actuator for Act {
-            async fn walk(&self, bot: BotId, to: Position) -> Result<(), ActuatorError>;
-            async fn mine(&self, bot: BotId, item: &str, at: Position, count: u32) -> Result<(), ActuatorError>;
-            async fn craft(&self, bot: BotId, recipe: &str, count: u32) -> Result<(), ActuatorError>;
-            async fn place(&self, bot: BotId, item: &str, at: Position, direction: u8) -> Result<(), ActuatorError>;
-            async fn insert(&self, bot: BotId, entity: &str, at: Position, slot: InventorySlot, item: &str, count: u32) -> Result<(), ActuatorError>;
-            async fn remove(&self, bot: BotId, entity: &str, at: Position, slot: InventorySlot, item: &str, count: u32) -> Result<(), ActuatorError>;
-            async fn research(&self, tech: &str) -> Result<(), ActuatorError>;
+            async fn walk(&self, bot: BotId, to: Position) -> Result<ActionTicks, ActuatorError>;
+            async fn mine(&self, bot: BotId, item: &str, at: Position, count: u32) -> Result<ActionTicks, ActuatorError>;
+            async fn craft(&self, bot: BotId, recipe: &str, count: u32) -> Result<ActionTicks, ActuatorError>;
+            async fn place(&self, bot: BotId, item: &str, at: Position, direction: u8) -> Result<ActionTicks, ActuatorError>;
+            async fn insert(&self, bot: BotId, entity: &str, at: Position, slot: InventorySlot, item: &str, count: u32) -> Result<ActionTicks, ActuatorError>;
+            async fn remove(&self, bot: BotId, entity: &str, at: Position, slot: InventorySlot, item: &str, count: u32) -> Result<ActionTicks, ActuatorError>;
+            async fn research(&self, tech: &str) -> Result<ActionTicks, ActuatorError>;
         }
+    }
+
+    /// The tick pair a mocked dispatch reports when a test does not care which
+    /// numbers come back. Deliberately not zero and deliberately far from any
+    /// tick these fixtures schedule, so a test that *does* care can tell an
+    /// observation from a plan value at a glance.
+    fn some_ticks() -> ActionTicks {
+        ActionTicks::new(Some(900_001), Some(900_002))
     }
 
     // ---------------------------------------------------------------- fixtures
@@ -631,15 +656,18 @@ mod tests {
         }
     }
 
+    /// Reports [`some_ticks`] for every dispatch. The numbers are far outside
+    /// anything these fixtures schedule, so a test can tell an observation from
+    /// a plan value without knowing the schedule.
     #[async_trait::async_trait]
     impl Actuator for RecordingAct {
-        async fn walk(&self, bot: BotId, _to: Position) -> Result<(), ActuatorError> {
+        async fn walk(&self, bot: BotId, _to: Position) -> Result<ActionTicks, ActuatorError> {
             self.record(Dispatch::Walk(bot));
             Self::delay(self.script.walk_delay_ms.get(&bot).copied().unwrap_or(0)).await;
             if self.script.fail_walk.contains(&bot) {
                 return Err(ActuatorError::Rejected("blocked".into()));
             }
-            Ok(())
+            Ok(some_ticks())
         }
 
         async fn mine(
@@ -648,14 +676,14 @@ mod tests {
             item: &str,
             _at: Position,
             _count: u32,
-        ) -> Result<(), ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorError> {
             self.record(Dispatch::MineStart(item.to_string()));
             Self::delay(self.script.mine_delay_ms.get(item).copied().unwrap_or(0)).await;
             self.record(Dispatch::MineEnd(item.to_string()));
             if self.script.fail_mine.contains(item) {
                 return Err(ActuatorError::Rejected("no ore".into()));
             }
-            Ok(())
+            Ok(some_ticks())
         }
 
         async fn craft(
@@ -663,8 +691,8 @@ mod tests {
             _bot: BotId,
             _recipe: &str,
             _count: u32,
-        ) -> Result<(), ActuatorError> {
-            Ok(())
+        ) -> Result<ActionTicks, ActuatorError> {
+            Ok(some_ticks())
         }
 
         async fn place(
@@ -673,8 +701,8 @@ mod tests {
             _item: &str,
             _at: Position,
             _direction: u8,
-        ) -> Result<(), ActuatorError> {
-            Ok(())
+        ) -> Result<ActionTicks, ActuatorError> {
+            Ok(some_ticks())
         }
 
         async fn insert(
@@ -685,8 +713,8 @@ mod tests {
             _slot: InventorySlot,
             _item: &str,
             _count: u32,
-        ) -> Result<(), ActuatorError> {
-            Ok(())
+        ) -> Result<ActionTicks, ActuatorError> {
+            Ok(some_ticks())
         }
 
         async fn remove(
@@ -697,12 +725,12 @@ mod tests {
             _slot: InventorySlot,
             _item: &str,
             _count: u32,
-        ) -> Result<(), ActuatorError> {
-            Ok(())
+        ) -> Result<ActionTicks, ActuatorError> {
+            Ok(some_ticks())
         }
 
-        async fn research(&self, _tech: &str) -> Result<(), ActuatorError> {
-            Ok(())
+        async fn research(&self, _tech: &str) -> Result<ActionTicks, ActuatorError> {
+            Ok(some_ticks())
         }
 
         async fn game_speed(&self) -> Result<f64, ActuatorError> {
@@ -732,15 +760,15 @@ mod tests {
         act.expect_walk()
             .times(1)
             .in_sequence(&mut seq)
-            .returning(|_, _| Ok(()));
+            .returning(|_, _| Ok(some_ticks()));
         act.expect_mine()
             .times(1)
             .in_sequence(&mut seq)
-            .returning(|_, _, _, _| Ok(()));
+            .returning(|_, _, _, _| Ok(some_ticks()));
         act.expect_craft()
             .times(1)
             .in_sequence(&mut seq)
-            .returning(|_, _, _| Ok(()));
+            .returning(|_, _, _| Ok(some_ticks()));
 
         let (net, sched) = walk_then_mine_fixture();
         let log = run(&act, &sched, &net)
@@ -753,9 +781,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_log_records_the_ticks_the_game_reported_not_the_ones_it_planned() {
+        // The test that a field populated from the schedule would fail. The
+        // fixture schedules the mine at 60..120; the actuator reports
+        // 900_001/900_002. Asserting only that the fields *exist* would pass
+        // either way, so this asserts they are not the plan's numbers.
+        let mut act = MockAct::new();
+        act.expect_walk().returning(|_, _| Ok(some_ticks()));
+        act.expect_mine().returning(|_, _, _, _| Ok(some_ticks()));
+        act.expect_craft().returning(|_, _, _| Ok(some_ticks()));
+
+        let (net, sched) = walk_then_mine_fixture();
+        let log = run(&act, &sched, &net).await.expect("the run should start");
+
+        let a = log
+            .attempt(mine_action_id())
+            .expect("the mine was attempted");
+        assert_eq!(a.dispatched_tick, Some(900_001));
+        assert_eq!(a.replied_tick, Some(900_002));
+        assert_eq!(a.planned_start_tick, 60, "the estimate is untouched");
+        assert_eq!(a.planned_end_tick, Some(120));
+        assert_ne!(
+            a.dispatched_tick,
+            Some(a.planned_start_tick),
+            "an observed tick equal to the planned one means the field is \
+             being filled from the schedule"
+        );
+        assert_ne!(a.replied_tick, a.planned_end_tick);
+        // Non-decreasing within the attempt, and across the run.
+        assert!(a.dispatched_tick <= a.replied_tick);
+        let craft = log.attempt(craft_action_id()).expect("the craft ran");
+        assert!(craft.dispatched_tick.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_failure_leaves_the_ticks_absent_rather_than_borrowing_the_plans() {
+        // The actuator's error carries no ticks, so there is nothing to
+        // record. The planned numbers are sitting right there in the same
+        // struct; the test exists because reaching for them is the tempting
+        // wrong thing to do.
+        let mut act = MockAct::new();
+        act.expect_walk().returning(|_, _| Ok(some_ticks()));
+        act.expect_mine()
+            .returning(|_, _, _, _| Err(ActuatorError::Rejected("out of reach".into())));
+
+        let (net, sched) = walk_then_mine_fixture();
+        let log = run(&act, &sched, &net).await.expect("the run should start");
+
+        let a = log
+            .attempt(mine_action_id())
+            .expect("the mine was attempted");
+        assert_eq!(a.status, Status::Failed);
+        assert_eq!(a.dispatched_tick, None);
+        assert_eq!(a.replied_tick, None);
+        assert_eq!(
+            a.planned_start_tick, 60,
+            "the plan is still reported -- it is just not a measurement"
+        );
+    }
+
+    #[tokio::test]
     async fn a_failed_step_is_logged_and_stops_that_bot() {
         let mut act = MockAct::new();
-        act.expect_walk().returning(|_, _| Ok(()));
+        act.expect_walk().returning(|_, _| Ok(some_ticks()));
         act.expect_mine()
             .returning(|_, _, _, _| Err(ActuatorError::Rejected("out of reach".into())));
         // The craft step follows the failing mine in the schedule. If the run
@@ -787,11 +875,11 @@ mod tests {
         act.expect_walk()
             .with(eq(BotId(0)), eq(Position::new(10., 10.)))
             .times(1)
-            .returning(|_, _| Ok(()));
+            .returning(|_, _| Ok(some_ticks()));
         act.expect_walk()
             .with(eq(BotId(1)), eq(Position::new(5., 5.)))
             .times(1)
-            .returning(|_, _| Ok(()));
+            .returning(|_, _| Ok(some_ticks()));
         act.expect_mine()
             .with(
                 eq(BotId(0)),
@@ -800,11 +888,11 @@ mod tests {
                 eq(1u32),
             )
             .times(1)
-            .returning(|_, _, _, _| Ok(()));
+            .returning(|_, _, _, _| Ok(some_ticks()));
         act.expect_craft()
             .with(eq(BotId(0)), eq("iron-gear-wheel"), eq(1u32))
             .times(1)
-            .returning(|_, _, _| Ok(()));
+            .returning(|_, _, _| Ok(some_ticks()));
 
         let (net, mut sched) = walk_then_mine_fixture();
         sched.steps.push(ScheduledStep {
@@ -884,7 +972,7 @@ mod tests {
                 eq(4u32),
             )
             .times(1)
-            .returning(|_, _, _, _, _, _| Ok(()));
+            .returning(|_, _, _, _, _, _| Ok(some_ticks()));
 
         let kind = ActionKind::Insert {
             pos: Position::new(1., 1.),

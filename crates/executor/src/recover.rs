@@ -514,10 +514,16 @@ mod tests {
         mined: std::sync::Mutex<Vec<(BotId, u32)>>,
     }
 
+    /// No game clock: every dispatch reports [`ActionTicks::UNKNOWN`], which is
+    /// the honest answer for a stub and keeps the absent-tick path exercised.
     #[async_trait::async_trait]
     impl crate::actuator::Actuator for CountingAct {
-        async fn walk(&self, _: BotId, _: Position) -> Result<(), crate::ActuatorError> {
-            Ok(())
+        async fn walk(
+            &self,
+            _: BotId,
+            _: Position,
+        ) -> Result<crate::actuator::ActionTicks, crate::ActuatorError> {
+            Ok(crate::actuator::ActionTicks::UNKNOWN)
         }
         async fn mine(
             &self,
@@ -525,12 +531,17 @@ mod tests {
             _item: &str,
             _at: Position,
             count: u32,
-        ) -> Result<(), crate::ActuatorError> {
+        ) -> Result<crate::actuator::ActionTicks, crate::ActuatorError> {
             self.mined.lock().unwrap().push((bot, count));
-            Ok(())
+            Ok(crate::actuator::ActionTicks::UNKNOWN)
         }
-        async fn craft(&self, _: BotId, _: &str, _: u32) -> Result<(), crate::ActuatorError> {
-            Ok(())
+        async fn craft(
+            &self,
+            _: BotId,
+            _: &str,
+            _: u32,
+        ) -> Result<crate::actuator::ActionTicks, crate::ActuatorError> {
+            Ok(crate::actuator::ActionTicks::UNKNOWN)
         }
         async fn place(
             &self,
@@ -538,8 +549,8 @@ mod tests {
             _: &str,
             _: Position,
             _: u8,
-        ) -> Result<(), crate::ActuatorError> {
-            Ok(())
+        ) -> Result<crate::actuator::ActionTicks, crate::ActuatorError> {
+            Ok(crate::actuator::ActionTicks::UNKNOWN)
         }
         async fn insert(
             &self,
@@ -549,8 +560,8 @@ mod tests {
             _: InventorySlot,
             _: &str,
             _: u32,
-        ) -> Result<(), crate::ActuatorError> {
-            Ok(())
+        ) -> Result<crate::actuator::ActionTicks, crate::ActuatorError> {
+            Ok(crate::actuator::ActionTicks::UNKNOWN)
         }
         async fn remove(
             &self,
@@ -560,11 +571,14 @@ mod tests {
             _: InventorySlot,
             _: &str,
             _: u32,
-        ) -> Result<(), crate::ActuatorError> {
-            Ok(())
+        ) -> Result<crate::actuator::ActionTicks, crate::ActuatorError> {
+            Ok(crate::actuator::ActionTicks::UNKNOWN)
         }
-        async fn research(&self, _: &str) -> Result<(), crate::ActuatorError> {
-            Ok(())
+        async fn research(
+            &self,
+            _: &str,
+        ) -> Result<crate::actuator::ActionTicks, crate::ActuatorError> {
+            Ok(crate::actuator::ActionTicks::UNKNOWN)
         }
     }
 

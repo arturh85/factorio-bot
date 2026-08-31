@@ -4,6 +4,7 @@ use crate::errors::{
     RconUnexpectedOutput,
 };
 use crate::factorio::snapshot::WorldSnapshot;
+use crate::factorio::ticks::{take_tick_stamp, ActionTicks};
 use crate::factorio::util::{
     blueprint_build_area, build_entity_path, calculate_distance, hashmap_to_lua, map_blocked_tiles,
     move_pos, move_position, position_to_lua, rect_to_lua, span_rect, str_to_lua, value_to_lua,
@@ -134,6 +135,24 @@ impl FactorioRcon {
         args: Vec<String>,
     ) -> Result<Option<Vec<String>>> {
         self.send(&remote_call_command(function_name, &args)).await
+    }
+
+    /// [`FactorioRcon::remote_call`], with the tick BotBridge stamped on the
+    /// reply taken off it.
+    ///
+    /// The stamp has to come off before the payload is judged: every caller
+    /// below judges the reply by shape -- an action start treats any remaining
+    /// line as an error, `place_entity` demands exactly one JSON document --
+    /// and a stamp left in would turn every success into a failure. See
+    /// [`crate::factorio::ticks::take_tick_stamp`].
+    async fn remote_call_timed(
+        &self,
+        function_name: &str,
+        args: Vec<String>,
+    ) -> Result<(Option<Vec<String>>, Option<u64>)> {
+        Ok(take_tick_stamp(
+            self.remote_call(function_name, args).await?,
+        ))
     }
 
     /// Calls a BotBridge function whose reply must be one *complete* JSON
@@ -291,9 +310,20 @@ impl FactorioRcon {
 
     /// Adds research to the queue
     pub async fn add_research(&self, technology_name: &str) -> Result<()> {
-        self.remote_call("add_research", vec![str_to_lua(technology_name)])
+        self.add_research_timed(technology_name).await.map(|_| ())
+    }
+
+    /// [`FactorioRcon::add_research`], reporting the game tick it ran at.
+    ///
+    /// Research is queued synchronously: the command runs and returns inside
+    /// one tick, so both ends of [`ActionTicks`] are that tick. That is a
+    /// measurement, not a duplicated estimate -- the game really did receive
+    /// and finish with the command in the same tick.
+    pub async fn add_research_timed(&self, technology_name: &str) -> Result<ActionTicks> {
+        let (_lines, tick) = self
+            .remote_call_timed("add_research", vec![str_to_lua(technology_name)])
             .await?;
-        Ok(())
+        Ok(ActionTicks::at(tick))
     }
 
     /// Cheats in an Item in given quantity to given player
@@ -511,11 +541,19 @@ impl FactorioRcon {
         Ok(Some(serde_json::from_str(json.as_str()).into_diagnostic()?))
     }
 
+    /// Waits for the game's verdict on a dispatched action and returns the
+    /// **game tick it arrived at**.
+    ///
+    /// The tick is not new information the game had to be asked for: the mod
+    /// has always stamped it on its `action_completed` event. It used to be
+    /// dropped by `OutputParser`, which is precisely why the executor had no
+    /// game clock and had to describe its timings as planned rather than
+    /// observed.
     async fn sleep_for_action_result(
         &self,
         world: &Arc<FactorioWorld>,
         action_id: ActionId,
-    ) -> Result<()> {
+    ) -> Result<Option<u64>> {
         let wait_start = Instant::now();
         loop {
             sleep(Duration::from_millis(50)).await;
@@ -523,11 +561,14 @@ impl FactorioRcon {
             // then calling `remove` holds the shard's read guard across a call
             // that needs the same shard's write guard, which self-deadlocks the
             // whole task on the first tick the reply is actually there.
-            if let Some((_, result)) = world.actions.remove(&action_id) {
-                if result == "ok" {
-                    return Ok(());
+            if let Some((_, outcome)) = world.actions.remove(&action_id) {
+                if outcome.is_ok() {
+                    return Ok(Some(outcome.tick));
                 } else {
-                    return Err(RconError { message: result }.into());
+                    return Err(RconError {
+                        message: outcome.result,
+                    }
+                    .into());
                 }
             }
             if wait_start.elapsed() > Duration::from_secs(360) {
@@ -564,6 +605,21 @@ impl FactorioRcon {
         goal: &Position,
         radius: Option<f64>,
     ) -> Result<()> {
+        self.move_player_timed(world, player_id, goal, radius)
+            .await
+            .map(|_| ())
+    }
+
+    /// [`FactorioRcon::move_player`], reporting the game ticks it was observed
+    /// at: the tick the game accepted the waypoints, and the tick it reported
+    /// the walk finished at.
+    pub async fn move_player_timed(
+        &self,
+        world: &Arc<FactorioWorld>,
+        player_id: PlayerId,
+        goal: &Position,
+        radius: Option<f64>,
+    ) -> Result<ActionTicks> {
         let mut next_action_id = world.as_ref().next_action_id.lock().await;
         let action_id: ActionId = *next_action_id;
         *next_action_id = (*next_action_id + 1) % 1000;
@@ -571,9 +627,11 @@ impl FactorioRcon {
 
         let waypoints = self.player_path(world, player_id, goal, radius).await?;
 
-        self.action_start_walk_waypoints(action_id, player_id, waypoints)
+        let dispatched = self
+            .action_start_walk_waypoints(action_id, player_id, waypoints)
             .await?;
-        self.sleep_for_action_result(world, action_id).await
+        let replied = self.sleep_for_action_result(world, action_id).await?;
+        Ok(ActionTicks::new(dispatched, replied))
     }
 
     pub async fn player_mine(
@@ -584,6 +642,26 @@ impl FactorioRcon {
         position: &Position,
         count: u32,
     ) -> Result<()> {
+        self.player_mine_timed(world, player_id, name, position, count)
+            .await
+            .map(|_| ())
+    }
+
+    /// [`FactorioRcon::player_mine`], reporting the game ticks it was observed
+    /// at.
+    ///
+    /// If the player has to walk to the resource first, the ticks reported are
+    /// the *mining* action's own -- the walk is a separate dispatch with
+    /// separate ticks, and folding the two together would make the mine look
+    /// like it started when the bot set off.
+    pub async fn player_mine_timed(
+        &self,
+        world: &Arc<FactorioWorld>,
+        player_id: PlayerId,
+        name: &str,
+        position: &Position,
+        count: u32,
+    ) -> Result<ActionTicks> {
         let player = world.players.get(&player_id);
         if player.is_none() {
             return Err(RconPlayerNotFound { player_id }.into());
@@ -601,9 +679,11 @@ impl FactorioRcon {
             self.move_player(world, player_id, position, Some(resource_reach_distance))
                 .await?;
         }
-        self.action_start_mining(action_id, player_id, name, position, count)
+        let dispatched = self
+            .action_start_mining(action_id, player_id, name, position, count)
             .await?;
-        self.sleep_for_action_result(world, action_id).await
+        let replied = self.sleep_for_action_result(world, action_id).await?;
+        Ok(ActionTicks::new(dispatched, replied))
     }
 
     pub async fn player_craft(
@@ -613,13 +693,29 @@ impl FactorioRcon {
         recipe: &str,
         count: u32,
     ) -> Result<()> {
+        self.player_craft_timed(world, player_id, recipe, count)
+            .await
+            .map(|_| ())
+    }
+
+    /// [`FactorioRcon::player_craft`], reporting the game ticks it was observed
+    /// at.
+    pub async fn player_craft_timed(
+        &self,
+        world: &Arc<FactorioWorld>,
+        player_id: PlayerId,
+        recipe: &str,
+        count: u32,
+    ) -> Result<ActionTicks> {
         let mut next_action_id = world.as_ref().next_action_id.lock().await;
         let action_id: ActionId = *next_action_id;
         *next_action_id = (*next_action_id + 1) % 1000;
         drop(next_action_id);
-        self.action_start_crafting(action_id, player_id, recipe, count)
+        let dispatched = self
+            .action_start_crafting(action_id, player_id, recipe, count)
             .await?;
-        self.sleep_for_action_result(world, action_id).await
+        let replied = self.sleep_for_action_result(world, action_id).await?;
+        Ok(ActionTicks::new(dispatched, replied))
     }
 
     pub async fn inventory_contents_at(
@@ -712,6 +808,27 @@ impl FactorioRcon {
         direction: u8,
         world: &Arc<FactorioWorld>,
     ) -> Result<FactorioEntity> {
+        self.place_entity_timed(player_id, item_name, entity_position, direction, world)
+            .await
+            .map(|(entity, _ticks)| entity)
+    }
+
+    /// [`FactorioRcon::place_entity`], reporting the game tick it ran at
+    /// alongside the entity it created.
+    ///
+    /// Placement is synchronous -- `surface.create_entity` returns within the
+    /// tick the command was received -- so both ends of [`ActionTicks`] are the
+    /// same number. On the `§player_blocks_placement§` path the placement is
+    /// retried after a walk, and the tick reported is the *retry's*, because
+    /// that is the dispatch that actually placed the entity.
+    pub async fn place_entity_timed(
+        &self,
+        player_id: PlayerId,
+        item_name: String,
+        entity_position: Position,
+        direction: u8,
+        world: &Arc<FactorioWorld>,
+    ) -> Result<(FactorioEntity, ActionTicks)> {
         let player = world.players.get(&player_id);
         if player.is_none() {
             return Err(RconPlayerNotFound { player_id }.into());
@@ -726,8 +843,8 @@ impl FactorioRcon {
             self.move_player(world, player_id, &entity_position, Some(build_distance))
                 .await?;
         }
-        let lines = self
-            .remote_call(
+        let (lines, tick) = self
+            .remote_call_timed(
                 "place_entity",
                 vec![
                     player_id.to_string(),
@@ -748,7 +865,7 @@ impl FactorioRcon {
                 let chars =
                     UnicodeSegmentation::graphemes(line.as_str(), true).collect::<Vec<&str>>();
                 if chars[0] == "{" {
-                    Ok(serde_json::from_str(line).unwrap())
+                    Ok((serde_json::from_str(line).unwrap(), ActionTicks::at(tick)))
                 } else if &line[..] == "§player_blocks_placement§" {
                     for test_direction in 0..8u8 {
                         let test_position = move_position(
@@ -765,8 +882,8 @@ impl FactorioRcon {
                         {
                             self.move_player(world, player_id, &test_position, Some(1.0))
                                 .await?;
-                            let lines = self
-                                .remote_call(
+                            let (lines, tick) = self
+                                .remote_call_timed(
                                     "place_entity",
                                     vec![
                                         player_id.to_string(),
@@ -787,7 +904,7 @@ impl FactorioRcon {
                                 let chars = UnicodeSegmentation::graphemes(line.as_str(), true)
                                     .collect::<Vec<&str>>();
                                 if chars[0] == "{" {
-                                    Ok(serde_json::from_str(line).unwrap())
+                                    Ok((serde_json::from_str(line).unwrap(), ActionTicks::at(tick)))
                                 } else if &line[..] == "§player_blocks_placement§" {
                                     Err(RconPlayerBlockesPlacement {}.into())
                                 } else {
@@ -825,6 +942,32 @@ impl FactorioRcon {
         item_count: u32,
         world: &Arc<FactorioWorld>,
     ) -> Result<()> {
+        self.insert_to_inventory_timed(
+            player_id,
+            entity_name,
+            entity_position,
+            inventory_type,
+            item_name,
+            item_count,
+            world,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// [`FactorioRcon::insert_to_inventory`], reporting the game tick it ran
+    /// at. Synchronous, so both ends of [`ActionTicks`] are that tick.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_to_inventory_timed(
+        &self,
+        player_id: PlayerId,
+        entity_name: String,
+        entity_position: Position,
+        inventory_type: u32,
+        item_name: String,
+        item_count: u32,
+        world: &Arc<FactorioWorld>,
+    ) -> Result<ActionTicks> {
         let player = world.players.get(&player_id);
         if player.is_none() {
             return Err(RconPlayerNotFound { player_id }.into());
@@ -843,8 +986,8 @@ impl FactorioRcon {
         let mut items: HashMap<String, String> = HashMap::new();
         items.insert(String::from("name"), str_to_lua(&item_name));
         items.insert(String::from("count"), item_count.to_string());
-        let lines = self
-            .remote_call(
+        let (lines, tick) = self
+            .remote_call_timed(
                 "insert_to_inventory",
                 vec![
                     player_id,
@@ -861,7 +1004,7 @@ impl FactorioRcon {
             }
             .into());
         }
-        Ok(())
+        Ok(ActionTicks::at(tick))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -875,6 +1018,32 @@ impl FactorioRcon {
         item_count: u32,
         world: &Arc<FactorioWorld>,
     ) -> Result<()> {
+        self.remove_from_inventory_timed(
+            player_id,
+            entity_name,
+            entity_position,
+            inventory_type,
+            item_name,
+            item_count,
+            world,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// [`FactorioRcon::remove_from_inventory`], reporting the game tick it ran
+    /// at. Synchronous, so both ends of [`ActionTicks`] are that tick.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn remove_from_inventory_timed(
+        &self,
+        player_id: PlayerId,
+        entity_name: String,
+        entity_position: Position,
+        inventory_type: u32,
+        item_name: String,
+        item_count: u32,
+        world: &Arc<FactorioWorld>,
+    ) -> Result<ActionTicks> {
         let player = world.players.get(&player_id);
         if player.is_none() {
             return Err(RconPlayerNotFound { player_id }.into());
@@ -892,8 +1061,8 @@ impl FactorioRcon {
         let mut items: HashMap<String, String> = HashMap::new();
         items.insert(String::from("name"), str_to_lua(&item_name));
         items.insert(String::from("count"), item_count.to_string());
-        let lines = self
-            .remote_call(
+        let (lines, tick) = self
+            .remote_call_timed(
                 "remove_from_inventory",
                 vec![
                     player_id,
@@ -910,7 +1079,7 @@ impl FactorioRcon {
             }
             .into());
         }
-        Ok(())
+        Ok(ActionTicks::at(tick))
     }
 
     pub async fn is_area_empty(&self, area_filter: &AreaFilter) -> Result<bool> {
@@ -1191,7 +1360,7 @@ impl FactorioRcon {
         action_id: ActionId,
         player_id: PlayerId,
         waypoints: Vec<Position>,
-    ) -> Result<()> {
+    ) -> Result<Option<u64>> {
         // set_waypoints(action_id, player_id, waypoints)
         let action_id = action_id.to_string();
         let player_id = player_id.to_string();
@@ -1200,8 +1369,10 @@ impl FactorioRcon {
             .map(position_to_lua)
             .collect::<Vec<String>>()
             .join(", ");
-        let result = self
-            .remote_call(
+        // The tick stamp is taken off first, so the "any reply at all is an
+        // error" rule below still means what it always meant.
+        let (result, tick) = self
+            .remote_call_timed(
                 "action_start_walk_waypoints",
                 vec![action_id, player_id, format!("{{ {} }}", waypoints)],
             )
@@ -1212,7 +1383,7 @@ impl FactorioRcon {
             }
             .into());
         }
-        Ok(())
+        Ok(tick)
     }
 
     pub async fn action_start_mining(
@@ -1222,11 +1393,11 @@ impl FactorioRcon {
         name: &str,
         position: &Position,
         count: u32,
-    ) -> Result<()> {
+    ) -> Result<Option<u64>> {
         let action_id = action_id.to_string();
         let player_id = player_id.to_string();
-        let result = self
-            .remote_call(
+        let (result, tick) = self
+            .remote_call_timed(
                 "action_start_mining",
                 vec![
                     action_id,
@@ -1243,7 +1414,7 @@ impl FactorioRcon {
             }
             .into());
         }
-        Ok(())
+        Ok(tick)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1288,11 +1459,11 @@ impl FactorioRcon {
         player_id: PlayerId,
         recipe: &str,
         count: u32,
-    ) -> Result<()> {
+    ) -> Result<Option<u64>> {
         let action_id = action_id.to_string();
         let player_id = player_id.to_string();
-        let result = self
-            .remote_call(
+        let (result, tick) = self
+            .remote_call_timed(
                 "action_start_crafting",
                 vec![action_id, player_id, str_to_lua(recipe), count.to_string()],
             )
@@ -1303,7 +1474,7 @@ impl FactorioRcon {
             }
             .into());
         }
-        Ok(())
+        Ok(tick)
     }
 
     pub async fn find_offshore_pump_placement_options(
@@ -1503,6 +1674,7 @@ impl RconSettings {
 #[cfg(test)]
 mod wait_for_reply_tests {
     use super::*;
+    use crate::factorio::ticks::ActionOutcome;
     use crate::factorio::world::FactorioWorld;
     use std::sync::mpsc;
 
@@ -1565,15 +1737,26 @@ mod wait_for_reply_tests {
         let waited =
             start(move || block_on(quiet_rcon().sleep_for_action_result(&waiter_world, 7)));
         std::thread::sleep(Duration::from_millis(200));
-        world.actions.insert(7, "ok".to_string());
+        world.actions.insert(
+            7,
+            ActionOutcome {
+                tick: 4242,
+                result: "ok".to_string(),
+            },
+        );
 
-        waited
+        let tick = waited
             .recv_timeout(DEADLINE)
             .expect(
                 "sleep_for_action_result never returned after the reply was delivered \
                  (deadlocked holding a DashMap read guard across remove())",
             )
             .expect("an \"ok\" action result should succeed");
+        assert_eq!(
+            tick,
+            Some(4242),
+            "the completion tick must be the game's, not a plan value"
+        );
         assert!(
             world.actions.get(&7).is_none(),
             "the consumed reply should have been removed from the world"
@@ -1587,9 +1770,13 @@ mod wait_for_reply_tests {
         let waited =
             start(move || block_on(quiet_rcon().sleep_for_action_result(&waiter_world, 8)));
         std::thread::sleep(Duration::from_millis(200));
-        world
-            .actions
-            .insert(8, "target is out of reach".to_string());
+        world.actions.insert(
+            8,
+            ActionOutcome {
+                tick: 11,
+                result: "target is out of reach".to_string(),
+            },
+        );
 
         let err = waited
             .recv_timeout(DEADLINE)

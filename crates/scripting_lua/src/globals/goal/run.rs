@@ -35,6 +35,8 @@ struct FailureRecord {
     attempts: u32,
     planned_start: Option<u32>,
     planned_end: Option<u32>,
+    dispatched_tick: Option<u32>,
+    replied_tick: Option<u32>,
 }
 
 fn status_name(status: Status) -> &'static str {
@@ -57,13 +59,27 @@ fn status_name(status: Status) -> &'static str {
 /// a `BTreeMap`, ascending by `ActionId`, so the first `Failed` action this
 /// loop meets is always the same one on any two runs of the same log.
 ///
-/// `planned_start`/`planned_end`, never `observed_*`: they are
-/// `Attempt::planned_start_tick`/`planned_end_tick` travelling out unchanged,
-/// numbers the *scheduler* computed before anything ran, not a measurement
-/// the executor took (see `factorio_bot_executor::log` for why one is not on
-/// offer). `planned_end` stays `nil` on an unfinished attempt, mirroring
-/// `Attempt::planned_end_tick: Option<Ticks>` -- it is never defaulted to the
-/// start, to zero, or to the makespan.
+/// # The two kinds of tick on each action table
+///
+/// `planned_start`/`planned_end` are `Attempt::planned_start_tick`/
+/// `planned_end_tick` travelling out unchanged: numbers the *scheduler*
+/// computed before anything ran. `planned_end` stays `nil` on an unfinished
+/// attempt, mirroring `Attempt::planned_end_tick: Option<Ticks>` -- it is never
+/// defaulted to the start, to zero, or to the makespan.
+///
+/// `dispatched_tick`/`replied_tick` are the measurement: `game.tick` as the
+/// game reported it, from `Attempt::dispatched_tick`/`replied_tick`. They are
+/// `nil` -- never zero, never the planned tick -- when the game did not say, so
+/// a caller can distinguish "this action has no reply tick" from "this action
+/// replied at tick 0".
+///
+/// They are deliberately **not** named `observed_*`, and
+/// `tick_fields_are_named_planned_not_observed` below still asserts that no
+/// `observed_start`/`observed_end` exists. That test guards the naming rule the
+/// `planned_*` fields exist under -- a field named for a measurement must carry
+/// one -- and adding genuinely measured fields does not weaken it: reusing
+/// `observed_start` would have quietly given the estimate the measured name
+/// this observation surface has always refused it.
 fn build_observation(
     lua: &Lua,
     net: &ActionNetwork,
@@ -91,6 +107,8 @@ fn build_observation(
         let attempts = log.attempts(id);
         let planned_start = attempt.map(|a| a.planned_start_tick);
         let planned_end = attempt.and_then(|a| a.planned_end_tick);
+        let dispatched_tick = attempt.and_then(|a| a.dispatched_tick);
+        let replied_tick = attempt.and_then(|a| a.replied_tick);
         let error = attempt.and_then(|a| a.error.clone());
 
         let t = lua.create_table()?;
@@ -98,6 +116,10 @@ fn build_observation(
         t.set("attempts", attempts)?;
         t.set("planned_start", planned_start)?;
         t.set("planned_end", planned_end)?;
+        // `Option::None` sets the key to `nil`, which is what makes "the game
+        // never told us" expressible rather than being papered over with a 0.
+        t.set("dispatched_tick", dispatched_tick)?;
+        t.set("replied_tick", replied_tick)?;
         if let Some(error) = &error {
             t.set("error", error.clone())?;
         }
@@ -111,6 +133,8 @@ fn build_observation(
                 attempts,
                 planned_start,
                 planned_end,
+                dispatched_tick,
+                replied_tick,
             });
         }
     }
@@ -137,6 +161,8 @@ fn build_observation(
                 t.set("attempts", f.attempts)?;
                 t.set("planned_start", f.planned_start)?;
                 t.set("planned_end", f.planned_end)?;
+                t.set("dispatched_tick", f.dispatched_tick)?;
+                t.set("replied_tick", f.replied_tick)?;
                 out.set(i as i64 + 1, t)?;
             }
             Ok(out)
@@ -484,6 +510,17 @@ mod tests {
         .await;
     }
 
+    /// The estimate must never acquire a measured name.
+    ///
+    /// `planned_start`/`planned_end` are scheduler output. This test has always
+    /// asserted that no `observed_start`/`observed_end` exists beside them, so
+    /// that nobody could rename the estimate into sounding like a measurement.
+    /// Real measurements now *do* travel out of the observation -- as
+    /// `dispatched_tick`/`replied_tick` (see
+    /// `real_ticks_are_reported_and_are_not_the_planned_ones`) -- and this test
+    /// is still exactly right: the point was never that measurements are
+    /// unavailable, it was that `planned_*` are not measurements and must not
+    /// borrow their vocabulary.
     #[tokio::test]
     async fn tick_fields_are_named_planned_not_observed() {
         let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never)));
@@ -499,6 +536,96 @@ mod tests {
                 checked = checked + 1
             end
             assert(checked > 0, "the run had actions to check, got " .. checked)
+        "#,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn real_ticks_are_reported_and_are_not_the_planned_ones() {
+        // `with_clock` starts at STUB_CLOCK_BASE (500_000), far beyond
+        // anything a plan for two iron ore schedules. A `dispatched_tick`
+        // filled in from the schedule would be a small number and would equal
+        // `planned_start`; both are checked, because a test that only asked
+        // whether the field exists would pass against exactly that bug.
+        let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never).with_clock()));
+        exec_bounded(
+            &lua,
+            r#"
+            local obs = goal.run(goal.plan(goal.have("iron-ore", 2)))
+            local checked = 0
+            local last = -1
+            local ids = {}
+            for id, _ in pairs(obs.actions) do ids[#ids+1] = id end
+            table.sort(ids)
+            for _, id in ipairs(ids) do
+                local a = obs.actions[id]
+                assert(type(a.dispatched_tick) == "number",
+                    "dispatched_tick for " .. id .. ": " .. tostring(a.dispatched_tick))
+                assert(type(a.replied_tick) == "number",
+                    "replied_tick for " .. id .. ": " .. tostring(a.replied_tick))
+                assert(a.dispatched_tick >= 500000,
+                    "the tick must come from the actuator, got " .. a.dispatched_tick)
+                assert(a.dispatched_tick ~= a.planned_start,
+                    "an observed tick equal to the planned one means it came from the plan")
+                assert(a.replied_tick ~= a.planned_end,
+                    "an observed tick equal to the planned one means it came from the plan")
+                assert(a.replied_tick > a.dispatched_tick, "a reply follows its dispatch")
+                assert(a.dispatched_tick > last, "ticks must not go backwards")
+                last = a.replied_tick
+                checked = checked + 1
+            end
+            assert(checked > 0, "the run had actions to check")
+        "#,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_actuator_with_no_clock_reports_nil_ticks_rather_than_zero() {
+        // "Absent is a value." The manifest a consumer builds from this has to
+        // be able to say *no reply tick for this action* -- not omit the
+        // action, and not report tick 0, which is a real tick and would place
+        // the action at the start of the map.
+        let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never)));
+        exec_bounded(
+            &lua,
+            r#"
+            local obs = goal.run(goal.plan(goal.have("iron-ore", 2)))
+            local checked = 0
+            for id, a in pairs(obs.actions) do
+                assert(a.status == "success", "the run itself succeeded")
+                assert(a.dispatched_tick == nil,
+                    "a clockless actuator observed nothing, got " .. tostring(a.dispatched_tick))
+                assert(a.replied_tick == nil,
+                    "a clockless actuator observed nothing, got " .. tostring(a.replied_tick))
+                assert(a.planned_start ~= nil, "the estimate is still reported")
+                checked = checked + 1
+            end
+            assert(checked > 0, "the run had actions to check")
+        "#,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_action_reports_absent_ticks_and_is_still_listed() {
+        // The failure path of the same rule: the action must still appear,
+        // with its ticks nil, rather than being dropped from the manifest.
+        let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Always).with_clock()));
+        exec_bounded(
+            &lua,
+            r#"
+            local obs = goal.run(goal.plan(goal.have("iron-ore", 2)))
+            assert(obs.failed > 0, "the stub refuses everything")
+            local fs = obs:failures()
+            assert(#fs > 0, "failures are listed")
+            for i = 1, #fs do
+                assert(fs[i].dispatched_tick == nil,
+                    "a rejected dispatch observed nothing, got " .. tostring(fs[i].dispatched_tick))
+                assert(fs[i].replied_tick == nil, "no reply tick for a rejected dispatch")
+                assert(fs[i].planned_start ~= nil, "the estimate is still there")
+            end
         "#,
         )
         .await;

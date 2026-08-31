@@ -1,4 +1,4 @@
-use crate::actuator::{Actuator, ActuatorError};
+use crate::actuator::{ActionTicks, Actuator, ActuatorError};
 use async_trait::async_trait;
 use factorio_bot_core::factorio::rcon::FactorioRcon;
 use factorio_bot_core::factorio::world::FactorioWorld;
@@ -187,10 +187,10 @@ impl RconActuator {
 
 #[async_trait]
 impl Actuator for RconActuator {
-    async fn walk(&self, bot: BotId, to: Position) -> Result<(), ActuatorError> {
+    async fn walk(&self, bot: BotId, to: Position) -> Result<ActionTicks, ActuatorError> {
         let p = self.player(bot)?;
         self.rcon
-            .move_player(&self.world, p, &to, None)
+            .move_player_timed(&self.world, p, &to, None)
             .await
             .map_err(|e| ActuatorError::Rejected(e.to_string()))
     }
@@ -201,18 +201,23 @@ impl Actuator for RconActuator {
         item: &str,
         at: Position,
         count: u32,
-    ) -> Result<(), ActuatorError> {
+    ) -> Result<ActionTicks, ActuatorError> {
         let p = self.player(bot)?;
         self.rcon
-            .player_mine(&self.world, p, item, &at, count)
+            .player_mine_timed(&self.world, p, item, &at, count)
             .await
             .map_err(|e| ActuatorError::Rejected(e.to_string()))
     }
 
-    async fn craft(&self, bot: BotId, recipe: &str, count: u32) -> Result<(), ActuatorError> {
+    async fn craft(
+        &self,
+        bot: BotId,
+        recipe: &str,
+        count: u32,
+    ) -> Result<ActionTicks, ActuatorError> {
         let p = self.player(bot)?;
         self.rcon
-            .player_craft(&self.world, p, recipe, count)
+            .player_craft_timed(&self.world, p, recipe, count)
             .await
             .map_err(|e| ActuatorError::Rejected(e.to_string()))
     }
@@ -223,15 +228,16 @@ impl Actuator for RconActuator {
         item: &str,
         at: Position,
         direction: u8,
-    ) -> Result<(), ActuatorError> {
+    ) -> Result<ActionTicks, ActuatorError> {
         let p = self.player(bot)?;
         // `place_entity` returns the created FactorioEntity; the executor does
         // not need it, because the plan already knows what it placed and the
         // world snapshot is refreshed by the event stream, not by this reply.
+        // The ticks it also returns are the point of the `_timed` variant.
         self.rcon
-            .place_entity(p, item.to_string(), at, direction, &self.world)
+            .place_entity_timed(p, item.to_string(), at, direction, &self.world)
             .await
-            .map(|_entity| ())
+            .map(|(_entity, ticks)| ticks)
             .map_err(|e| ActuatorError::Rejected(e.to_string()))
     }
 
@@ -243,11 +249,11 @@ impl Actuator for RconActuator {
         slot: InventorySlot,
         item: &str,
         count: u32,
-    ) -> Result<(), ActuatorError> {
+    ) -> Result<ActionTicks, ActuatorError> {
         let p = self.player(bot)?;
         let inv = self.defines.get(slot)?;
         self.rcon
-            .insert_to_inventory(
+            .insert_to_inventory_timed(
                 p,
                 entity.to_string(),
                 at,
@@ -268,11 +274,11 @@ impl Actuator for RconActuator {
         slot: InventorySlot,
         item: &str,
         count: u32,
-    ) -> Result<(), ActuatorError> {
+    ) -> Result<ActionTicks, ActuatorError> {
         let p = self.player(bot)?;
         let inv = self.defines.get(slot)?;
         self.rcon
-            .remove_from_inventory(
+            .remove_from_inventory_timed(
                 p,
                 entity.to_string(),
                 at,
@@ -288,9 +294,9 @@ impl Actuator for RconActuator {
     /// Research is server-wide: `add_research` takes no player id, so `bot`
     /// does not appear here. Two bots researching the same technology is
     /// idempotent in Factorio.
-    async fn research(&self, tech: &str) -> Result<(), ActuatorError> {
+    async fn research(&self, tech: &str) -> Result<ActionTicks, ActuatorError> {
         self.rcon
-            .add_research(tech)
+            .add_research_timed(tech)
             .await
             .map_err(|e| ActuatorError::Rejected(e.to_string()))
     }

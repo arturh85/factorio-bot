@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::factorio::ticks::ActionOutcome;
 use crate::factorio::world::FactorioWorld;
 // use crate::factorio::ws::{
 //     FactorioWebSocketServer, PlayerChangedMainInventoryMessage, PlayerChangedPositionMessage,
@@ -18,7 +19,11 @@ pub struct OutputParser {
 }
 
 impl OutputParser {
-    pub fn parse(&mut self, _tick: u64, action: &str, rest: &str) -> Result<()> {
+    /// `tick` is the game tick the mod stamped on the line
+    /// (`writeout(tick, key, value)`). Most branches have no use for it; the
+    /// `action_completed` branch is the exception, and it is the executor's
+    /// only source of a *real* completion tick.
+    pub fn parse(&mut self, tick: u64, action: &str, rest: &str) -> Result<()> {
         match action {
             "entities" => {
                 let colon_pos = match rest.find(':') {
@@ -267,7 +272,15 @@ impl OutputParser {
                         }
                     };
                     if let Some(result) = result {
-                        self.world.actions.insert(action_id, String::from(result));
+                        // The tick comes from the event line, not from any
+                        // plan: it is when the game said the action finished.
+                        self.world.actions.insert(
+                            action_id,
+                            ActionOutcome {
+                                tick,
+                                result: String::from(result),
+                            },
+                        );
                     }
                 }
             }

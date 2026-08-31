@@ -162,8 +162,15 @@ impl EntityGraph {
             let mut stack: Vec<Pos> = vec![next_pos.clone()];
             positions_by_id.insert(next_pos.clone(), Some(next_id));
             while let Some(pos) = stack.pop() {
-                for direction in Direction::all() {
-                    let other: Pos = (&move_position(&(&pos).into(), direction, 1.0)).into();
+                // The eight compass points: this is an 8-connected flood fill
+                // over ore tiles. `Direction::all()` is sixteen values since
+                // the 2.x widening and would visit eight half-diagonals that
+                // name no tile at all.
+                for direction in Direction::compass() {
+                    let Some(other) = move_position(&(&pos).into(), direction, 1.0) else {
+                        continue;
+                    };
+                    let other: Pos = (&other).into();
                     if let Some(p) = positions_by_id.get(&other) {
                         if p.is_none() {
                             positions_by_id.insert(other.clone(), Some(next_id));
@@ -227,9 +234,11 @@ impl EntityGraph {
         let mut entities: Vec<FactorioEntity> = vec![];
         match decoded {
             Container::Blueprint(blueprint) => {
+                let version = blueprint.version;
                 for ent in blueprint.entities {
                     entities.push(FactorioEntity::from_blueprint_entity(
                         ent,
+                        version,
                         self.entity_prototypes.clone(),
                     )?);
                 }
@@ -280,15 +289,14 @@ impl EntityGraph {
             }
             if entity.name == EntityName::Pumpjack.to_string() {
                 // for some reason pumpjacks report their drop position at their position so we fix it
-                let offset = Direction::from_u8(entity.direction).and_then(|direction| {
-                    match direction {
+                let offset =
+                    Direction::from_u8(entity.direction).and_then(|direction| match direction {
                         Direction::North => Some(Position::new(1., -2.)),
                         Direction::East => Some(Position::new(2., -1.)),
                         Direction::South => Some(Position::new(-1., 2.)),
                         Direction::West => Some(Position::new(-2., 1.)),
                         _ => None,
-                    }
-                });
+                    });
                 match offset {
                     Some(offset) => entity.drop_position = Some(entity.position.add(&offset)),
                     None => {
@@ -649,12 +657,18 @@ impl EntityGraph {
                 }
                 match node.entity_type {
                     EntityType::Splitter => {
-                        let out1 = node
-                            .position
-                            .add(&Position::new(-0.5, -1.).turn(node.direction));
-                        let out2 = node
-                            .position
-                            .add(&Position::new(0.5, -1.).turn(node.direction));
+                        // `turn` is `None` for anything but a cardinal; a
+                        // splitter facing one of the 2.x half-diagonals has no
+                        // computable output tiles, so it gets no output edges
+                        // rather than fabricated ones.
+                        let (Some(o1), Some(o2)) = (
+                            Position::new(-0.5, -1.).turn(node.direction),
+                            Position::new(0.5, -1.).turn(node.direction),
+                        ) else {
+                            continue;
+                        };
+                        let out1 = node.position.add(&o1);
+                        let out2 = node.position.add(&o2);
                         for pos in &[&out1, &out2] {
                             if let Some(next_index) = self.node_at(pos) {
                                 let next = inner.node_weight(next_index).unwrap();
@@ -677,7 +691,7 @@ impl EntityGraph {
                     }
                     EntityType::TransportBelt => {
                         if let Some(next_index) =
-                            self.node_at(&move_position(&node.position, node.direction, 1.0))
+                            self.node_at_moved(&node.position, node.direction, 1.0)
                         {
                             let next = inner.node_weight(next_index).unwrap();
                             if !inner.contains_edge(node_index, next_index)
@@ -703,7 +717,7 @@ impl EntityGraph {
                     }
                     EntityType::OffshorePump => {
                         if let Some(next_index) =
-                            self.node_at(&move_position(&node.position, node.direction, -1.))
+                            self.node_at_moved(&node.position, node.direction, -1.)
                         {
                             let next = inner.node_weight(next_index).unwrap();
                             if next.entity_type.is_fluid_input()
@@ -716,7 +730,7 @@ impl EntityGraph {
                     EntityType::Pipe => {
                         for direction in Direction::orthogonal() {
                             if let Some(next_index) =
-                                self.node_at(&move_position(&node.position, direction, 1.))
+                                self.node_at_moved(&node.position, direction, 1.)
                             {
                                 let next = inner.node_weight(next_index).unwrap();
                                 if next.entity_type.is_fluid_input() {
@@ -731,8 +745,14 @@ impl EntityGraph {
                         }
                     }
                     EntityType::StorageTank => {
+                        // A storage tank is two-way only: the game stores
+                        // `north` or `east` and never the other fourteen
+                        // values. North and south share one connection set, the
+                        // other orientation the mirrored one. Spelling `South`
+                        // out matters after the 2.x widening -- `8` used to be
+                        // unreadable and now means south.
                         for position in &match node.direction {
-                            Direction::North => [
+                            Direction::North | Direction::South => [
                                 node.position.add(&Position::new(-1., -2.)),
                                 node.position.add(&Position::new(-2., -1.)),
                                 node.position.add(&Position::new(2., 1.)),
@@ -764,11 +784,11 @@ impl EntityGraph {
                             if let Some(max_distance) = prototype.max_underground_distance.as_ref()
                             {
                                 for length in 1..=*max_distance {
-                                    if let Some(next_index) = self.node_at(&move_position(
+                                    if let Some(next_index) = self.node_at_moved(
                                         &node.position,
                                         node.direction.opposite(),
                                         length as f64,
-                                    )) {
+                                    ) {
                                         let next = inner.node_weight(next_index).unwrap();
                                         if next.entity_type == EntityType::UndergroundBelt
                                             && next.direction == node.direction
@@ -793,7 +813,7 @@ impl EntityGraph {
                         }
                         if found {
                             if let Some(next_index) =
-                                self.node_at(&move_position(&node.position, node.direction, 1.))
+                                self.node_at_moved(&node.position, node.direction, 1.)
                             {
                                 let next = inner.node_weight(next_index).unwrap();
                                 if !inner.contains_edge(node_index, next_index)
@@ -810,11 +830,11 @@ impl EntityGraph {
                             if let Some(max_distance) = prototype.max_underground_distance.as_ref()
                             {
                                 for length in 1..=*max_distance {
-                                    if let Some(next_index) = self.node_at(&move_position(
+                                    if let Some(next_index) = self.node_at_moved(
                                         &node.position,
                                         node.direction,
                                         -(length as f64),
-                                    )) {
+                                    ) {
                                         let next = inner.node_weight(next_index).unwrap();
                                         if next.entity_type == EntityType::PipeToGround
                                             && next.direction == node.direction.opposite()
@@ -846,7 +866,7 @@ impl EntityGraph {
                         }
                         if found {
                             if let Some(next_index) =
-                                self.node_at(&move_position(&node.position, node.direction, 1.))
+                                self.node_at_moved(&node.position, node.direction, 1.)
                             {
                                 let next = inner.node_weight(next_index).unwrap();
                                 if next.entity_type.is_fluid_input()
@@ -876,6 +896,21 @@ impl EntityGraph {
     }
     pub fn entity_by_id(&self, id: ItemId) -> Option<FactorioEntity> {
         self.entity_tree.read().get(id).cloned()
+    }
+
+    /// [`node_at`] one offset step away along `direction`.
+    ///
+    /// `None` when the direction names no tile -- the Factorio 2.x
+    /// half-diagonals rails report -- as well as when nothing is there.
+    ///
+    /// [`node_at`]: EntityGraph::node_at
+    pub fn node_at_moved(
+        &self,
+        position: &Position,
+        direction: Direction,
+        offset: f64,
+    ) -> Option<NodeIndex> {
+        self.node_at(&move_position(position, direction, offset)?)
     }
 
     pub fn node_at(&self, position: &Position) -> Option<NodeIndex> {
@@ -1211,12 +1246,13 @@ impl std::fmt::Debug for EntityNode {
 impl EntityNode {
     /// `None` when the game reports something this build cannot represent.
     ///
-    /// `Direction` still models Factorio 1.x's eight-value `defines.direction`,
-    /// but 2.x uses sixteen (0..=15), so `from_u8` returns `None` for any of the
-    /// eight new values. Unwrapping it aborted the process -- this crate builds
-    /// `panic = "abort"` -- which let one belt facing a 2.x-only direction kill
-    /// the bot. The same reasoning as 04f8e76f/0cb7636f applies: a game whose
-    /// schema drifts must not be able to crash us. Report loudly and skip.
+    /// `Direction` now covers all sixteen values of 2.x's `defines.direction`,
+    /// so `from_u8` is total over `0..=15` and this arm only fires if the game
+    /// sends 16 or above. It stays because unwrapping it aborted the process --
+    /// this crate builds `panic = "abort"` -- which let one belt facing a
+    /// 2.x-only direction kill the bot back when the enum stopped at 7. The
+    /// same reasoning as 04f8e76f/0cb7636f applies: a game whose schema drifts
+    /// must not be able to crash us. Report loudly and skip.
     ///
     /// Skipping rather than defaulting is deliberate. Defaulting to `North`
     /// would put a node with a fabricated orientation into the graph, and the
@@ -1229,7 +1265,7 @@ impl EntityNode {
     ) -> Option<EntityNode> {
         let Some(direction) = Direction::from_u8(entity.direction) else {
             error!(
-                "<red>unreadable direction</> <bright-blue>{}</> on <bright-blue>{}</> at <bright-blue>{}</>: this build understands 0..=7, Factorio 2.x sends 0..=15 -- entity skipped",
+                "<red>unreadable direction</> <bright-blue>{}</> on <bright-blue>{}</> at <bright-blue>{}</>: defines.direction is 0..=15 -- entity skipped",
                 entity.direction, entity.name, entity.position
             );
             return None;
@@ -1269,15 +1305,18 @@ mod tests {
 
     use super::*;
 
-    /// Factorio 2.x's `defines.direction` runs 0..=15 -- `west` is 12 -- while
-    /// `Direction` still only covers 0..=7. `Direction::from_u8(12)` is `None`,
-    /// and unwrapping it aborted the process (`panic = "abort"`), so one belt
-    /// facing a 2.x-only direction killed the bot. Skip the entity loudly.
+    /// Unwrapping `Direction::from_u8` aborted the process (`panic = "abort"`),
+    /// so one belt facing a direction we could not read killed the bot. Skip
+    /// the entity loudly instead.
+    ///
+    /// This used **12**, which was out of range on the Factorio 1.x scale and
+    /// is `West` on the 2.x one. 16 is the first value still outside
+    /// `defines.direction`, so it is what keeps this path covered.
     #[test]
     fn an_entity_whose_direction_cannot_be_read_is_skipped_not_aborted() {
         let mut belt =
             FactorioEntity::new_transport_belt(&Position::new(0.5, 0.5), Direction::North);
-        belt.direction = 12;
+        belt.direction = 16;
         let graph = entity_graph_from(vec![belt]).expect("adding must not fail");
         assert_eq!(
             graph.inner_graph().node_count(),
@@ -1311,7 +1350,7 @@ mod tests {
         let mut pumpjack =
             FactorioEntity::new_electric_mining_drill(&Position::new(0.5, 0.5), Direction::North);
         pumpjack.name = EntityName::Pumpjack.to_string();
-        pumpjack.direction = 12;
+        pumpjack.direction = 16;
         let graph = entity_graph_from(vec![pumpjack]).expect("adding must not fail");
         assert_eq!(
             graph.inner_graph().node_count(),

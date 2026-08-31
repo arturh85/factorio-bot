@@ -505,16 +505,37 @@ impl From<&Pos> for Position {
 }
 
 #[derive(Primitive, Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Default)]
+/// Factorio 2.x's `defines.direction`, all sixteen values.
+///
+/// Names and discriminants are taken verbatim from the shipped API definition
+/// (`workspace/factorio-api-docs/runtime-api.json`, `application_version`
+/// 2.1.17, `defines.direction`). Before this widening the enum carried Factorio
+/// **1.x**'s eight-value scale, so `East` was `2` -- which 2.x reads as
+/// *northeast* -- and the game's `east` (`4`) was read back as `South`. North
+/// was the only value that survived the round trip.
+///
+/// The odd values are the half-diagonals. Factorio 2.x reports them for rails
+/// and other 16-way entities, so they must be readable; most placement and
+/// pathing helpers (`move_position`, `move_pos`, `Position::turn`) have no tile
+/// offset for them and return `None`.
 pub enum Direction {
     #[default]
     North = 0,
-    NorthEast = 1,
-    East = 2,
-    SouthEast = 3,
-    South = 4,
-    SouthWest = 5,
-    West = 6,
-    NorthWest = 7,
+    NorthNorthEast = 1,
+    NorthEast = 2,
+    EastNorthEast = 3,
+    East = 4,
+    EastSouthEast = 5,
+    SouthEast = 6,
+    SouthSouthEast = 7,
+    South = 8,
+    SouthSouthWest = 9,
+    SouthWest = 10,
+    WestSouthWest = 11,
+    West = 12,
+    WestNorthWest = 13,
+    NorthWest = 14,
+    NorthNorthWest = 15,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -523,21 +544,76 @@ pub enum AreaFilter {
     PositionRadius((Position, Option<f64>)),
 }
 
+/// The first blueprint `version` written by Factorio 2.0.
+///
+/// A blueprint's `version` packs `major` into the top 16 bits, so 2.0.0.0 is
+/// `2 << 48`.
+pub const BLUEPRINT_VERSION_2_0: u64 = 2 << 48;
+
+/// Read a blueprint entity's `direction` on the scale of the Factorio version
+/// that wrote the blueprint.
+///
+/// Blueprint strings are a persisted format, and the eight-value scale did not
+/// vanish when 2.0 widened `defines.direction` -- a blueprint exported from 1.1
+/// still says `east = 2`, and the crates that parse them still hand that number
+/// over unchanged. Reading a 1.x blueprint on the 2.x scale turns every belt in
+/// it 45 degrees; reading a 2.x one on the 1.x scale wraps `west` round to
+/// `south`. The version field is the only thing that distinguishes them, so it
+/// is what this reads.
+///
+/// Never `None`: a 1.x value is folded into `0..=7` before doubling, and a 2.x
+/// value into `0..=15`.
+pub fn blueprint_direction(direction: u8, blueprint_version: u64) -> Direction {
+    let value = if blueprint_version >= BLUEPRINT_VERSION_2_0 {
+        direction % 16
+    } else {
+        // 1.x's eight values sit on 2.x's even ones.
+        (direction % 8) * 2
+    };
+    Direction::from_u8(value).expect("folded into 0..=15")
+}
+
 impl Direction {
+    /// All sixteen values of `defines.direction`, half-diagonals included.
+    ///
+    /// This returned **eight** before the 2.x widening. Callers that wanted the
+    /// eight compass points want [`Direction::compass`].
     pub fn all() -> Vec<Direction> {
-        (0..8).map(|n| Direction::from_u8(n).unwrap()).collect()
+        (0..16).map(|n| Direction::from_u8(n).unwrap()).collect()
     }
+    /// The eight compass points -- the even values. This is what [`all`] used
+    /// to return, and what any 8-connected neighbourhood wants.
+    ///
+    /// [`all`]: Direction::all
+    pub fn compass() -> Vec<Direction> {
+        (0..16)
+            .step_by(2)
+            .map(|n| Direction::from_u8(n as u8).unwrap())
+            .collect()
+    }
+    /// The four cardinals: north, east, south, west. On the 2.x scale those are
+    /// 0, 4, 8 and 12, so the step is four, not two.
     pub fn orthogonal() -> Vec<Direction> {
-        (0..8)
-            .filter(|n| n % 2 == 0)
+        (0..16u8)
+            .filter(|n| n.is_multiple_of(4))
             .map(|n| Direction::from_u8(n).unwrap())
             .collect()
     }
-    pub fn opposite(&self) -> Direction {
-        Direction::from_u8((Direction::to_u8(self).unwrap() + 4) % 8).unwrap()
+    /// True for the eight compass points, false for the eight half-diagonals.
+    pub fn is_compass(&self) -> bool {
+        Direction::to_u8(self).unwrap().is_multiple_of(2)
     }
+    /// 180 degrees. Half of sixteen is **eight**, not four.
+    pub fn opposite(&self) -> Direction {
+        Direction::from_u8((Direction::to_u8(self).unwrap() + 8) % 16).unwrap()
+    }
+    /// 90 degrees clockwise. A quarter of sixteen is **four**, not two.
+    ///
+    /// The semantics are deliberately unchanged: `flow_graph` compares belt
+    /// orientations against `clockwise()`, and turning this into a 45-degree
+    /// step would make every one of those comparisons false.
     pub fn clockwise(&self) -> Direction {
-        Direction::from_u8((Direction::to_u8(self).unwrap() + 2) % 8).unwrap()
+        Direction::from_u8((Direction::to_u8(self).unwrap() + 4) % 16).unwrap()
     }
 }
 
@@ -556,16 +632,24 @@ impl Position {
         Position::new(self.x() + position.x(), self.y() + position.y())
     }
 
-    pub fn turn(&self, direction: Direction) -> Position {
+    /// Rotate by a cardinal direction, or `None` if there is no such rotation.
+    ///
+    /// Only the four cardinals name a rotation this can perform. Before the 2.x
+    /// widening the unhandled arm was `panic!("diagonal turning not
+    /// supported")` and covered four values; it now covers twelve, and this
+    /// crate builds `panic = "abort"`, so it returns `None` instead -- the same
+    /// posture as the direction handling in 64decdcd.
+    pub fn turn(&self, direction: Direction) -> Option<Position> {
         match direction {
-            Direction::North => self.clone(),
-            Direction::East => self
-                .rotate_clockwise()
-                .rotate_clockwise()
-                .rotate_clockwise(),
-            Direction::South => self.rotate_clockwise().rotate_clockwise(),
-            Direction::West => self.rotate_clockwise(),
-            _ => panic!("diagonal turning not supported"),
+            Direction::North => Some(self.clone()),
+            Direction::East => Some(
+                self.rotate_clockwise()
+                    .rotate_clockwise()
+                    .rotate_clockwise(),
+            ),
+            Direction::South => Some(self.rotate_clockwise().rotate_clockwise()),
+            Direction::West => Some(self.rotate_clockwise()),
+            _ => None,
         }
     }
 
@@ -892,14 +976,18 @@ impl crate::aabb_quadtree::Spatial<Rect> for FactorioEntity {
 }
 
 impl FactorioEntity {
+    /// `blueprint_version` is the blueprint's own `version` field, which packs
+    /// the Factorio major version into its top 16 bits. It decides how to read
+    /// `direction`: see [`blueprint_direction`].
     pub fn from_blueprint_entity(
         entity: Entity,
+        blueprint_version: u64,
         prototypes: Arc<DashMap<String, FactorioEntityPrototype>>,
     ) -> Result<Self> {
         let position: Position = entity.position.into();
         let direction: Option<Direction> = entity
             .direction
-            .map(|d| Direction::from_u8(d % 8).expect("should always work"));
+            .map(|d| blueprint_direction(d, blueprint_version));
         Self::from_prototype(
             &entity.name,
             position,
@@ -968,8 +1056,12 @@ impl FactorioEntity {
             position: position.clone(),
             bounding_box: add_to_rect_turned(&Rect::from_wh(0.78, 0.78), position, direction),
             direction: direction.to_u8().unwrap(),
-            drop_position: Some(position.add(&Position::new(0., 1.).turn(direction))),
-            pickup_position: Some(position.add(&Position::new(0., -1.).turn(direction))),
+            drop_position: Position::new(0., 1.)
+                .turn(direction)
+                .map(|p| position.add(&p)),
+            pickup_position: Position::new(0., -1.)
+                .turn(direction)
+                .map(|p| position.add(&p)),
             ..Default::default()
         }
     }
@@ -980,7 +1072,9 @@ impl FactorioEntity {
             position: position.clone(),
             bounding_box: add_to_rect_turned(&Rect::from_wh(1.8, 1.8), position, direction),
             direction: direction.to_u8().unwrap(),
-            drop_position: Some(position.add(&Position::new(-0.5, -1.296875).turn(direction))),
+            drop_position: Position::new(-0.5, -1.296875)
+                .turn(direction)
+                .map(|p| position.add(&p)),
             ..Default::default()
         }
     }
@@ -991,7 +1085,9 @@ impl FactorioEntity {
             position: position.clone(),
             bounding_box: add_to_rect_turned(&Rect::from_wh(1.8, 1.8), position, direction),
             direction: direction.to_u8().unwrap(),
-            drop_position: Some(position.add(&Position::new(0., -2.).turn(direction))),
+            drop_position: Position::new(0., -2.)
+                .turn(direction)
+                .map(|p| position.add(&p)),
             ..Default::default()
         }
     }
@@ -1422,6 +1518,218 @@ impl IntoLua for FactorioEntity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::factorio::util::{move_pos, move_position};
+
+    /// The sixteen names and discriminants, verbatim from the shipped API
+    /// definition: `workspace/factorio-api-docs/runtime-api.json`,
+    /// `application_version` 2.1.17, `defines.direction`. Restating the list
+    /// from memory is how the intercardinal names get subtly wrong, so this
+    /// pins every one of them against the file rather than against four
+    /// well-known cardinals.
+    #[test]
+    fn the_sixteen_directions_match_factorio_2_x_defines_direction() {
+        let expected: [(Direction, u8); 16] = [
+            (Direction::North, 0),
+            (Direction::NorthNorthEast, 1),
+            (Direction::NorthEast, 2),
+            (Direction::EastNorthEast, 3),
+            (Direction::East, 4),
+            (Direction::EastSouthEast, 5),
+            (Direction::SouthEast, 6),
+            (Direction::SouthSouthEast, 7),
+            (Direction::South, 8),
+            (Direction::SouthSouthWest, 9),
+            (Direction::SouthWest, 10),
+            (Direction::WestSouthWest, 11),
+            (Direction::West, 12),
+            (Direction::WestNorthWest, 13),
+            (Direction::NorthWest, 14),
+            (Direction::NorthNorthWest, 15),
+        ];
+        for (direction, value) in expected {
+            assert_eq!(
+                direction.to_u8(),
+                Some(value),
+                "{direction:?} is {value} in defines.direction"
+            );
+        }
+    }
+
+    /// Every value the game can send survives the round trip.
+    ///
+    /// Before the widening exactly **one** did: north. The game's `east` (4)
+    /// read back as `South`, and `East = 2` was read by the game as northeast.
+    #[test]
+    fn every_2_x_direction_survives_the_round_trip() {
+        for n in 0u8..=15 {
+            let direction = Direction::from_u8(n).unwrap_or_else(|| panic!("no direction for {n}"));
+            assert_eq!(
+                direction.to_u8(),
+                Some(n),
+                "{direction:?} does not round-trip from {n}"
+            );
+        }
+        assert!(
+            Direction::from_u8(16).is_none(),
+            "16 is outside defines.direction, and the log-and-skip path needs a value that is"
+        );
+    }
+
+    /// `opposite` is 180 degrees, which is a step of **eight** on a sixteen-value
+    /// scale, not four. A renumber that left the `+ 4` in place would still
+    /// compile and still return a `Direction` -- it would just return the wrong
+    /// one, silently, for all sixteen inputs.
+    #[test]
+    fn opposite_is_a_half_turn_on_the_sixteen_value_scale() {
+        assert_eq!(Direction::North.opposite(), Direction::South);
+        assert_eq!(Direction::South.opposite(), Direction::North);
+        assert_eq!(Direction::East.opposite(), Direction::West);
+        assert_eq!(Direction::West.opposite(), Direction::East);
+        assert_eq!(Direction::NorthEast.opposite(), Direction::SouthWest);
+        // A half-diagonal has an opposite too, and it is another half-diagonal.
+        assert_eq!(
+            Direction::NorthNorthEast.opposite(),
+            Direction::SouthSouthWest
+        );
+        for direction in Direction::all() {
+            assert_eq!(
+                direction.opposite().opposite(),
+                direction,
+                "{direction:?} must be its own double-opposite"
+            );
+        }
+    }
+
+    /// `clockwise` stays a **90 degree** turn, which is a step of four here.
+    ///
+    /// Keeping the arithmetic at `+ 2` would have quietly demoted it to 45
+    /// degrees, and `flow_graph`'s belt-orientation comparisons against
+    /// `clockwise()` would then all be false -- no panic, no failing type, just
+    /// a flow graph with no corners in it.
+    #[test]
+    fn clockwise_is_a_quarter_turn_on_the_sixteen_value_scale() {
+        assert_eq!(Direction::North.clockwise(), Direction::East);
+        assert_eq!(Direction::East.clockwise(), Direction::South);
+        assert_eq!(Direction::South.clockwise(), Direction::West);
+        assert_eq!(Direction::West.clockwise(), Direction::North);
+        assert_eq!(Direction::NorthEast.clockwise(), Direction::SouthEast);
+        for direction in Direction::all() {
+            assert_eq!(
+                direction.clockwise().clockwise(),
+                direction.opposite(),
+                "two quarter turns from {direction:?} must be a half turn"
+            );
+        }
+    }
+
+    /// Sixteen, eight and four -- and which four.
+    ///
+    /// `orthogonal()` still returns the cardinals, but their *values* moved
+    /// from 0/2/4/6 to 0/4/8/12, so the `n % 2 == 0` filter that used to select
+    /// them now selects all eight compass points instead.
+    #[test]
+    fn all_compass_and_orthogonal_return_sixteen_eight_and_four() {
+        assert_eq!(Direction::all().len(), 16);
+        assert_eq!(Direction::compass().len(), 8);
+        assert_eq!(
+            Direction::orthogonal(),
+            vec![
+                Direction::North,
+                Direction::East,
+                Direction::South,
+                Direction::West
+            ],
+            "orthogonal must still be the four cardinals, at 0/4/8/12"
+        );
+        assert!(
+            Direction::compass().iter().all(Direction::is_compass),
+            "compass must contain no half-diagonals"
+        );
+        assert_eq!(
+            Direction::all()
+                .into_iter()
+                .filter(|d| !d.is_compass())
+                .count(),
+            8,
+            "the other eight are the half-diagonals rails use"
+        );
+    }
+
+    /// Blueprint strings are a *persisted* format and did not renumber when
+    /// `defines.direction` did, so the version that wrote the blueprint decides
+    /// how to read its directions.
+    ///
+    /// This is the call site the compiler cannot point at: `from_blueprint_entity`
+    /// took `direction` straight through, and a 1.x blueprint's `east = 2` read
+    /// on the 2.x scale is *northeast* -- every belt in the blueprint turned 45
+    /// degrees, no error anywhere. `entity_graph`'s splitter fixtures are 1.x
+    /// blueprints (`version` 0x1000000000000) and are what caught it.
+    #[test]
+    fn a_blueprints_direction_is_read_on_the_scale_its_version_names() {
+        // Factorio 1.x: eight values, so 2 is east and lands on 2.x's 4.
+        assert_eq!(blueprint_direction(0, 1 << 48), Direction::North);
+        assert_eq!(blueprint_direction(2, 1 << 48), Direction::East);
+        assert_eq!(blueprint_direction(4, 1 << 48), Direction::South);
+        assert_eq!(blueprint_direction(6, 1 << 48), Direction::West);
+        // Factorio 2.x: sixteen values, taken as they are.
+        assert_eq!(
+            blueprint_direction(0, BLUEPRINT_VERSION_2_0),
+            Direction::North
+        );
+        assert_eq!(
+            blueprint_direction(4, BLUEPRINT_VERSION_2_0),
+            Direction::East
+        );
+        assert_eq!(
+            blueprint_direction(8, BLUEPRINT_VERSION_2_0),
+            Direction::South
+        );
+        assert_eq!(
+            blueprint_direction(12, BLUEPRINT_VERSION_2_0),
+            Direction::West
+        );
+        assert_eq!(
+            blueprint_direction(1, BLUEPRINT_VERSION_2_0),
+            Direction::NorthNorthEast,
+            "a 2.x blueprint can contain a rail's half-diagonal"
+        );
+        assert_eq!(
+            BLUEPRINT_VERSION_2_0, 562949953421312,
+            "blueprint version packs major into the top 16 bits"
+        );
+    }
+
+    /// The half-diagonals are readable but name no tile, so the offset helpers
+    /// report their absence instead of inventing one. Before the widening the
+    /// unhandled arm of `turn` was `panic!`, and this crate builds
+    /// `panic = "abort"`.
+    #[test]
+    fn a_half_diagonal_has_no_tile_offset_and_no_rotation() {
+        for direction in Direction::all().into_iter().filter(|d| !d.is_compass()) {
+            let origin = Position::new(0., 0.);
+            assert!(
+                move_position(&origin, direction, 1.).is_none(),
+                "{direction:?} names no tile offset"
+            );
+            assert!(
+                move_pos(&Pos(0, 0), direction, 1).is_none(),
+                "{direction:?} names no tile offset"
+            );
+            assert!(
+                origin.turn(direction).is_none(),
+                "{direction:?} names no rotation"
+            );
+        }
+        assert!(
+            Position::new(1., 0.).turn(Direction::NorthEast).is_none(),
+            "turn only handles the four cardinals, and the other twelve must not abort"
+        );
+        assert_eq!(
+            move_position(&Position::new(0., 0.), Direction::East, 1.),
+            Some(Position::new(1., 0.)),
+            "east is +x, and it is 4 now"
+        );
+    }
 
     /// A free rect must cover exactly the tiles that were asked for.
     ///

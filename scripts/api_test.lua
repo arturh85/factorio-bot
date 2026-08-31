@@ -9,9 +9,13 @@ local content = file_read("/tmp/factorio_api_test.txt")
 print("File I/O: " .. (content == "hello from Factorio bot" and "PASS ✓" or "FAIL ✗"))
 
 -- Test direction utilities
+-- Factorio 2.x's defines.direction has sixteen values (the odd ones are the
+-- half-diagonals rails use), of which eight are compass points and four are
+-- cardinals. This asserted 8 for dirs_all on the old 1.x scale.
 local dirs_all = directions_all()
+local dirs_compass = directions_compass()
 local dirs_ortho = directions_orthogonal()
-print("Direction utilities: " .. (#dirs_all == 8 and #dirs_ortho == 4 and "PASS ✓" or "FAIL ✗"))
+print("Direction utilities: " .. (#dirs_all == 16 and #dirs_compass == 8 and #dirs_ortho == 4 and "PASS ✓" or "FAIL ✗"))
 
 print("\n=== Testing RCON Functions ===")
 

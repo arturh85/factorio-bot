@@ -117,7 +117,7 @@ FactorioEntity = {
     entity_type = '', -- string
     position = nil, -- `Position`
     bounding_box = nil, -- `Rect`
-    direction = 0, -- number
+    direction = 0, -- number, a `Direction` (Factorio 2.x `defines.direction`, 0..=15)
     drop_position = nil, -- `Position`
     pickup_position = nil, -- `Position`
     output_inventory = nil, -- {[string]=int,...}
@@ -187,7 +187,7 @@ InventoryLocation = {
 EntityPlacement = {
     item_name = '', -- string
     position = nil, -- {Position}
-    direction = 0, -- number
+    direction = 0, -- number, a `Direction` (Factorio 2.x `defines.direction`, 0..=15)
 }
 
 --- PositionRadius

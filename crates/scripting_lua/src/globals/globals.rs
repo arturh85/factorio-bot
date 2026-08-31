@@ -21,8 +21,9 @@ use std::sync::Arc;
 
 use super::{path_error, relative_to};
 
-/// `Direction` is `#[repr(u8)]` over 0..=7, so a script passing 9 must get an
-/// error rather than take the process down with it.
+/// `Direction` is `#[repr(u8)]` over 0..=15 -- Factorio 2.x's
+/// `defines.direction` -- so a script passing 16 must get an error rather than
+/// take the process down with it.
 fn direction_from_u8(direction: u8) -> LuaResult<Direction> {
     Direction::from_u8(direction)
         .ok_or_else(|| LuaError::RuntimeError(format!("no such direction: {direction}")))
@@ -286,35 +287,57 @@ globals.all_bots = nil -- {number}
         String::from(
             r#"
 --- Available Directions
+--
+-- These are Factorio 2.x's `defines.direction`, all sixteen values.
+--
+-- **Breaking change:** before this release the values were Factorio 1.x's
+-- eight-value scale, so `East` was 2 -- which a 2.x game reads as *northeast*
+-- -- and an entity the game reported as facing east read back as `South`.
+-- North was the only value that survived the round trip. The names keep their
+-- meanings, so a script that uses `globals.Direction.East` keeps working and
+-- now actually faces east. A script that passes a raw number does not.
+--
+-- The half-diagonal values (`NorthNorthEast = 1` and the other odd numbers)
+-- exist because Factorio 2.x reports them for rails and other 16-way
+-- entities. They can be read back from the world, but most placement and
+-- pathing helpers reject them.
 globals.Direction = {
-    North = 0, -- North = 0 
-    NorthEast = 1, -- NorthEast = 1
-    East = 2,  -- East = 2
-    SouthEast = 3, -- SouthEast = 3
-    South = 4, -- South = 4
-    SouthWest = 5, -- SouthWest = 5
-    West = 6, -- West = 6
-    NorthWest = 7, -- NorthWest = 7
+    North = 0, -- North = 0
+    NorthNorthEast = 1, -- NorthNorthEast = 1 (rails only)
+    NorthEast = 2, -- NorthEast = 2
+    EastNorthEast = 3, -- EastNorthEast = 3 (rails only)
+    East = 4,  -- East = 4
+    EastSouthEast = 5, -- EastSouthEast = 5 (rails only)
+    SouthEast = 6, -- SouthEast = 6
+    SouthSouthEast = 7, -- SouthSouthEast = 7 (rails only)
+    South = 8, -- South = 8
+    SouthSouthWest = 9, -- SouthSouthWest = 9 (rails only)
+    SouthWest = 10, -- SouthWest = 10
+    WestSouthWest = 11, -- WestSouthWest = 11 (rails only)
+    West = 12, -- West = 12
+    WestNorthWest = 13, -- WestNorthWest = 13 (rails only)
+    NorthWest = 14, -- NorthWest = 14
+    NorthNorthWest = 15, -- NorthNorthWest = 15 (rails only)
 }
 "#,
         ),
     )?;
+    // Factorio 2.1.17 `defines.direction`, straight from the shipped
+    // runtime-api.json. The odd values are the half-diagonals rails use.
     let direction = lua.create_table()?;
-    direction.set("North", 0)?;
-    direction.set("NorthEast", 1)?;
-    direction.set("East", 2)?;
-    direction.set("SouthEast", 3)?;
-    direction.set("South", 4)?;
-    direction.set("SouthWest", 5)?;
-    direction.set("West", 6)?;
-    direction.set("NorthWest", 7)?;
+    for value in Direction::all() {
+        direction.set(format!("{value:?}"), direction_to_u8(value)?)?;
+    }
     map_table.set("Direction", direction)?;
 
     map_table.set(
         "__doc_entry_directions_all",
         String::from(
             r#"
---- Return all 8 available directions as list table
+--- Return all 16 available directions as list table
+--
+-- This returned 8 before the Factorio 2.x direction widening. For the eight
+-- compass points -- what it used to return -- use `directions_compass`.
 -- @return {number,...}
 function globals.directions_all()
 end
@@ -332,10 +355,38 @@ end
     )?;
 
     map_table.set(
+        "__doc_entry_directions_compass",
+        String::from(
+            r#"
+--- Return the 8 compass directions as list table
+--
+-- North, northeast, east, southeast, south, southwest, west, northwest -- the
+-- even values. This is what `directions_all` returned before the Factorio 2.x
+-- widening, and it excludes the eight half-diagonals rails use.
+-- @return {number,...}
+function globals.directions_compass()
+end
+"#,
+        ),
+    )?;
+    map_table.set(
+        "directions_compass",
+        lua.create_function(move |_, ()| {
+            Direction::compass()
+                .iter()
+                .map(|d| direction_to_u8(*d))
+                .collect::<LuaResult<Vec<u8>>>()
+        })?,
+    )?;
+
+    map_table.set(
         "__doc_entry_directions_orthogonal",
         String::from(
             r#"
---- Return 4 orthogonal directions as list table
+--- Return the 4 orthogonal (cardinal) directions as list table
+--
+-- North, east, south and west -- still four, though on the Factorio 2.x scale
+-- their values are 0, 4, 8 and 12 rather than 0, 2, 4 and 6.
 -- @return {number,...}
 function globals.directions_orthogonal()
 end
@@ -356,7 +407,10 @@ end
         "__doc_entry_direction_clockwise",
         String::from(
             r#"
---- Turn direction clockwise
+--- Turn direction 90° clockwise
+--
+-- Still a quarter turn: on the Factorio 2.x sixteen-value scale that is a step
+-- of four, not two.
 -- @number direction start `Direction`
 -- @return number
 function globals.direction_clockwise(direction)

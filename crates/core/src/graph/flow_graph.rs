@@ -584,7 +584,7 @@ impl FlowNode {
     ) -> Option<FlowNode> {
         let Some(direction) = Direction::from_u8(entity.direction) else {
             error!(
-                "<red>unreadable direction</> <bright-blue>{}</> on <bright-blue>{}</> at <bright-blue>{}</>: this build understands 0..=7, Factorio 2.x sends 0..=15 -- flow node skipped",
+                "<red>unreadable direction</> <bright-blue>{}</> on <bright-blue>{}</> at <bright-blue>{}</>: defines.direction is 0..=15 -- flow node skipped",
                 entity.direction, entity.name, entity.position
             );
             return None;
@@ -730,13 +730,15 @@ mod tests {
         );
     }
 
-    /// Same 2.x direction scale as `EntityNode::new`: `FlowNode::new` unwrapped
-    /// `Direction::from_u8` and aborted on anything >= 8.
+    /// Same handling as `EntityNode::new`: `FlowNode::new` unwrapped
+    /// `Direction::from_u8` and aborted on anything the enum could not read.
+    /// This used 12, which is `West` since the 2.x widening; 16 is the first
+    /// value still outside `defines.direction`.
     #[test]
     fn a_flow_node_is_not_built_from_a_direction_that_cannot_be_read() {
         let mut belt =
             FactorioEntity::new_transport_belt(&Position::new(0.5, 0.5), Direction::North);
-        belt.direction = 12;
+        belt.direction = 16;
         assert!(
             FlowNode::new(&belt, None, ItemId::default()).is_none(),
             "a node we cannot orient must not be built"

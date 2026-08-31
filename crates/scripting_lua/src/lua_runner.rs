@@ -693,8 +693,11 @@ mod tests {
 
     #[tokio::test]
     async fn an_out_of_range_direction_is_reported_not_panicked() {
-        // `Direction::from_u8(9)` is `None`, and unwrapping it aborted.
-        let (_dir, result) = sandboxed("direction_clockwise(9)").await;
+        // `Direction::from_u8(16)` is `None`, and unwrapping it aborted. This
+        // used to pass 9, which was out of range on the Factorio 1.x scale and
+        // is `SouthSouthWest` on the 2.x one -- 16 is the first value still
+        // outside `defines.direction`.
+        let (_dir, result) = sandboxed("direction_clockwise(16)").await;
         assert_reported_not_panicked(&result);
     }
 

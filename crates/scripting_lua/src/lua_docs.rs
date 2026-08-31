@@ -134,6 +134,7 @@ mod tests {
                 "function globals.direction_clockwise(",
                 "function globals.direction_opposite(",
                 "function globals.directions_all(",
+                "function globals.directions_compass(",
                 "function globals.directions_orthogonal(",
                 "function globals.file_read(",
                 "function globals.file_write(",

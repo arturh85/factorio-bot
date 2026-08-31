@@ -11,7 +11,6 @@ use crate::factorio::util::{
     vec_to_lua, vector_add, vector_multiply, vector_normalize, vector_substract,
 };
 use crate::factorio::world::FactorioWorld;
-use crate::num_traits::FromPrimitive;
 use crate::settings::FactorioSettings;
 use crate::types::{
     ActionId, AreaFilter, Direction, FactorioEntity, FactorioForce, FactorioPlayer, FactorioTile,
@@ -1071,12 +1070,16 @@ impl FactorioRcon {
                 if chars[0] == "{" {
                     Ok((serde_json::from_str(line).unwrap(), ActionTicks::at(tick)))
                 } else if &line[..] == "§player_blocks_placement§" {
-                    for test_direction in 0..8u8 {
-                        let test_position = move_position(
-                            &player_position,
-                            Direction::from_u8(test_direction).unwrap(),
-                            5.0,
-                        );
+                    // The eight compass points. This was `0..8u8` on the
+                    // Factorio 1.x scale, where those were all eight
+                    // directions; on the 2.x scale `0..8` is only half a
+                    // circle, so it has to be named rather than counted.
+                    for test_direction in Direction::compass() {
+                        let Some(test_position) =
+                            move_position(&player_position, test_direction, 5.0)
+                        else {
+                            continue;
+                        };
                         if self
                             .is_area_empty(&AreaFilter::PositionRadius((
                                 test_position.clone(),
@@ -1749,17 +1752,23 @@ impl FactorioRcon {
                 .iter()
                 .filter(|tile| {
                     let pos = (&tile.position).into();
-                    if mapped.contains_key(&move_pos(&pos, pump_direction, 1)) {
+                    // `pump_direction` is a cardinal, so all three of these
+                    // resolve; a half-diagonal names no tile and cannot be
+                    // judged, which is not a shoreline we may build on.
+                    let (Some(ahead), Some(right), Some(left)) = (
+                        move_pos(&pos, pump_direction, 1),
+                        move_pos(&pos, pump_direction.clockwise(), 1),
+                        move_pos(&pos, pump_direction.clockwise().opposite(), 1),
+                    ) else {
+                        return false;
+                    };
+                    if mapped.contains_key(&ahead) {
                         return false;
                     }
-                    if !mapped.contains_key(&move_pos(&pos, pump_direction.clockwise(), 1)) {
+                    if !mapped.contains_key(&right) {
                         return false;
                     }
-                    if !mapped.contains_key(&move_pos(
-                        &pos,
-                        pump_direction.clockwise().opposite(),
-                        1,
-                    )) {
+                    if !mapped.contains_key(&left) {
                         return false;
                     }
                     true

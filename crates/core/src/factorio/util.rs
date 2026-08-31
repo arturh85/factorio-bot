@@ -76,29 +76,38 @@ pub fn calculate_distance(pos1: &Position, pos2: &Position) -> f64 {
     (x * x + y * y).sqrt()
 }
 
-pub fn move_position(pos: &Position, direction: Direction, offset: f64) -> Position {
+/// Step one tile offset along a compass direction, or `None` for a half-diagonal.
+///
+/// The eight compass points name a tile offset. The eight half-diagonals
+/// Factorio 2.x reports for rails (`NorthNorthEast` and the other odd values)
+/// point at 22.5 degrees and name no tile at all, so this reports the absence
+/// rather than inventing one -- the caller treats it as "no neighbour there".
+pub fn move_position(pos: &Position, direction: Direction, offset: f64) -> Option<Position> {
     match direction {
-        Direction::North => Position::new(pos.x(), pos.y() - offset),
-        Direction::NorthWest => Position::new(pos.x() - offset, pos.y() - offset),
-        Direction::NorthEast => Position::new(pos.x() + offset, pos.y() - offset),
-        Direction::South => Position::new(pos.x(), pos.y() + offset),
-        Direction::SouthWest => Position::new(pos.x() - offset, pos.y() + offset),
-        Direction::SouthEast => Position::new(pos.x() + offset, pos.y() + offset),
-        Direction::West => Position::new(pos.x() - offset, pos.y()),
-        Direction::East => Position::new(pos.x() + offset, pos.y()),
+        Direction::North => Some(Position::new(pos.x(), pos.y() - offset)),
+        Direction::NorthWest => Some(Position::new(pos.x() - offset, pos.y() - offset)),
+        Direction::NorthEast => Some(Position::new(pos.x() + offset, pos.y() - offset)),
+        Direction::South => Some(Position::new(pos.x(), pos.y() + offset)),
+        Direction::SouthWest => Some(Position::new(pos.x() - offset, pos.y() + offset)),
+        Direction::SouthEast => Some(Position::new(pos.x() + offset, pos.y() + offset)),
+        Direction::West => Some(Position::new(pos.x() - offset, pos.y())),
+        Direction::East => Some(Position::new(pos.x() + offset, pos.y())),
+        _ => None,
     }
 }
 
-pub fn move_pos(pos: &Pos, direction: Direction, offset: i32) -> Pos {
+/// Tile-grid twin of [`move_position`]; `None` for the same half-diagonals.
+pub fn move_pos(pos: &Pos, direction: Direction, offset: i32) -> Option<Pos> {
     match direction {
-        Direction::North => Pos(pos.0, pos.1 - offset),
-        Direction::NorthWest => Pos(pos.0 - offset, pos.1 - offset),
-        Direction::NorthEast => Pos(pos.0 + offset, pos.1 - offset),
-        Direction::South => Pos(pos.0, pos.1 + offset),
-        Direction::SouthWest => Pos(pos.0 - offset, pos.1 + offset),
-        Direction::SouthEast => Pos(pos.0 + offset, pos.1 + offset),
-        Direction::West => Pos(pos.0 - offset, pos.1),
-        Direction::East => Pos(pos.0 + offset, pos.1),
+        Direction::North => Some(Pos(pos.0, pos.1 - offset)),
+        Direction::NorthWest => Some(Pos(pos.0 - offset, pos.1 - offset)),
+        Direction::NorthEast => Some(Pos(pos.0 + offset, pos.1 - offset)),
+        Direction::South => Some(Pos(pos.0, pos.1 + offset)),
+        Direction::SouthWest => Some(Pos(pos.0 - offset, pos.1 + offset)),
+        Direction::SouthEast => Some(Pos(pos.0 + offset, pos.1 + offset)),
+        Direction::West => Some(Pos(pos.0 - offset, pos.1)),
+        Direction::East => Some(Pos(pos.0 + offset, pos.1)),
+        _ => None,
     }
 }
 
@@ -389,7 +398,11 @@ pub fn build_entity_path(
                     if last_dist > 1 && length > 1 {
                         break;
                     }
-                    let target: Pos = move_pos(current_pos, direction, length as i32);
+                    // `direction` comes from `Direction::orthogonal()`, so
+                    // `move_pos` always yields a tile here.
+                    let Some(target) = move_pos(current_pos, direction, length as i32) else {
+                        continue;
+                    };
                     if !blocked.contains_key(&target) {
                         options.push((
                             (last_pos.clone(), current_pos.clone(), target),

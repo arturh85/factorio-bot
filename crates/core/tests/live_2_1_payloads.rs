@@ -25,8 +25,11 @@
 //! captured.
 
 use factorio_bot_core::factorio::snapshot::WorldSnapshot;
+use factorio_bot_core::num_traits::FromPrimitive;
 use factorio_bot_core::test_utils::entity_graph_from;
-use factorio_bot_core::types::{FactorioEntity, FactorioPlayer, FactorioTile, InventoryResponse};
+use factorio_bot_core::types::{
+    Direction, FactorioEntity, FactorioPlayer, FactorioTile, InventoryResponse,
+};
 use std::collections::BTreeSet;
 
 const PLAYERS: &str = include_str!("live-2.1.17-players.json");
@@ -842,4 +845,93 @@ fn the_live_inventory_contents_at_reply_deserialises_into_inventory_response() {
         record.fuel_inventory.is_none(),
         "a container has no fuel inventory, so the mod sends no key"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Direction — `defines.direction` on the 2.x scale
+// ---------------------------------------------------------------------------
+
+/// The live round trip, taken from the game rather than from a test's own
+/// assumptions.
+///
+/// The starting-area inserter arrives with `direction: 4`, and the *geometry*
+/// the same reply carries says which direction that is. It sits at
+/// `(4.5, 2.5)`, picks up from `(5.5, 2.5)` — one tile **east** — and drops at
+/// `(3.3, 2.5)`, to the **west**. This codebase's convention (see
+/// `FactorioEntity::new_inserter`) is that an inserter picks up from the
+/// direction it faces, so the game's `4` is **east**.
+///
+/// That is exactly what direction equality alone cannot show. Before the
+/// widening, `Direction::from_u8(4)` was `South`, which would put the pickup at
+/// `(4.5, 3.5)` — and a test that only checked `from_u8(4).to_u8() == 4` would
+/// have passed against that too, because the error was symmetric on the way in
+/// and the way out. The pickup and drop positions break the symmetry: they come
+/// from Factorio, not from us.
+///
+/// This is the claim the whole widening rests on, and it needs no running game
+/// to re-check — the reply is captured byte for byte in
+/// `live-2.1.17-entities-spawn.json`.
+#[test]
+fn the_live_inserters_direction_and_geometry_agree_that_four_is_east() {
+    let entities: Vec<FactorioEntity> =
+        serde_json::from_str(ENTITIES_SPAWN).expect("parses as entities");
+    let inserter = entities
+        .iter()
+        .find(|entity| entity.name == "inserter")
+        .expect("the starting area has one inserter");
+
+    assert_eq!(inserter.direction, 4, "the game sent 4");
+    assert_eq!(
+        Direction::from_u8(inserter.direction),
+        Some(Direction::East),
+        "4 is east in Factorio 2.x defines.direction; it read back as South before the widening"
+    );
+
+    let position = &inserter.position;
+    let pickup = inserter.pickup_position.as_ref().expect("has a pickup");
+    let drop = inserter.drop_position.as_ref().expect("has a drop");
+
+    assert!(
+        pickup.x() > position.x() && (pickup.y() - position.y()).abs() < f64::EPSILON,
+        "the game put the pickup due east of the inserter: {position} -> {pickup}"
+    );
+    assert!(
+        drop.x() < position.x() && (drop.y() - position.y()).abs() < f64::EPSILON,
+        "the game put the drop due west of the inserter: {position} -> {drop}"
+    );
+
+    // And the reconstruction agrees: building the same inserter facing East
+    // lands the pickup on the tile the game reports.
+    let ours = FactorioEntity::new_inserter(position, Direction::East);
+    let our_pickup = ours.pickup_position.expect("we compute a pickup");
+    assert_eq!(
+        (our_pickup.x(), our_pickup.y()),
+        (pickup.x(), pickup.y()),
+        "our East inserter must pick up from the tile the live game named"
+    );
+}
+
+/// Nothing in a byte-for-byte 2.1.17 capture carries a direction the enum
+/// cannot read, now that it covers all sixteen.
+///
+/// Under the old eight-value enum this file contained a value (`4`) that was
+/// *readable but wrong*, which is why a range check alone never caught it.
+#[test]
+fn every_direction_in_the_live_captures_is_readable() {
+    for (name, json) in [
+        ("entities-spawn", ENTITIES_SPAWN),
+        ("entities-resources", ENTITIES_RESOURCES),
+    ] {
+        let entities: Vec<FactorioEntity> =
+            serde_json::from_str(json).unwrap_or_else(|err| panic!("{name}: {err}"));
+        for entity in entities {
+            assert!(
+                Direction::from_u8(entity.direction).is_some(),
+                "{name}: {} at {} reports direction {}, outside defines.direction",
+                entity.name,
+                entity.position,
+                entity.direction
+            );
+        }
+    }
 }

@@ -1,44 +1,42 @@
 <script setup lang="ts">
 import {computed, onUnmounted} from 'vue';
 import ansiHTML from 'ansi-html';
+import {SplitterGroup, SplitterPanel, SplitterResizeHandle} from 'reka-ui';
+import {useDebounceFn} from '@vueuse/core';
 import {useScriptStore} from '@/store/scriptStore';
 import {useToast} from '@/composables/useToast';
-import ScriptTree from '@/components/ScriptTree.vue'
-import Editor from '@/components/Editor.vue'
-import Splitter, {SplitterResizeEndEvent} from 'primevue/splitter';
-import SplitterPanel from 'primevue/splitterpanel';
+import ScriptTree from '@/components/ScriptTree.vue';
+import Editor from '@/components/Editor.vue';
+import Card from '@/components/ui/Card.vue';
 import Button from '@/components/ui/Button.vue';
-import {useDebounceFn} from '@vueuse/core';
 
 const scriptStore = useScriptStore()
-const toast = useToast();
-
-const onResize = (e: SplitterResizeEndEvent) => {
-  console.log('onResize', e)
-}
-
+const toast = useToast()
 
 const code = computed(() => scriptStore.getCode)
 const language = computed(() => scriptStore.getLanguage)
-const updateCode = useDebounceFn((code: string) => {
-  scriptStore.setCode(code)
-}, 1000);
 const activeScriptPath = computed(() => scriptStore.getActiveScriptPath)
 const stdout = computed(() => scriptStore.getStdout)
 const stderr = computed(() => scriptStore.getStderr)
+const isExecuting = computed(() => scriptStore.isExecuting)
+
+const updateCode = useDebounceFn((code: string) => {
+  scriptStore.setCode(code)
+}, 1000)
+
 const execute = async () => {
   try {
     await scriptStore.executeScript()
   } catch (err) {
     if (err instanceof Error) {
-      toast.add({severity: 'error', summary: 'Failed to execute script', detail: err.message, life: 10000});
+      toast.add({severity: 'error', summary: 'Failed to execute script', detail: err.message, life: 10000})
     }
   }
 }
-const isExecuting = computed(() => scriptStore.isExecuting)
+
 const loadScriptFile = (path: string) => scriptStore.loadScriptFile(path)
 
-// The SSE connection outlives this component otherwise: the store is a
+// The SSE connection outlives the component otherwise: the store is a
 // singleton, so navigating away would leave an open stream appending into
 // state nothing renders, and the job keeps running on the server either way.
 // Coming back re-runs, or -- if that run still holds the slot -- attaches to
@@ -46,59 +44,48 @@ const loadScriptFile = (path: string) => scriptStore.loadScriptFile(path)
 onUnmounted(() => {
   scriptStore.stopWatching()
 })
-
 </script>
 
 <template>
-  <div class="p-grid">
-    <div class="p-col-12">
-      <div class="card" style="height: 100%">
-        <h5>
-          Lua Script <strong>{{ activeScriptPath }}</strong>
-          <Button :disabled="isExecuting" @click="execute()">{{ isExecuting ? 'Running ...' : 'Run' }}</Button>
-        </h5>
+  <Card>
+    <template #title>
+      <span class="grow">Lua Script <strong class="font-mono text-base">{{ activeScriptPath }}</strong></span>
+      <Button :disabled="isExecuting" data-testid="run-button" @click="execute()">
+        {{ isExecuting ? 'Running ...' : 'Run' }}
+      </Button>
+    </template>
 
-        <Splitter style="min-height: 800px; width: 800px" stateKey="luaScriptSplitter" stateStorage="local">
-          <SplitterPanel :size="20">
-            <ScriptTree @select="loadScriptFile($event)"></ScriptTree>
+    <SplitterGroup direction="horizontal" auto-save-id="luaScriptSplitter" class="h-[70vh] w-full">
+      <SplitterPanel :default-size="20" :min-size="10" class="overflow-auto pr-2" data-testid="script-tree-pane">
+        <ScriptTree @select="loadScriptFile($event)"/>
+      </SplitterPanel>
+
+      <SplitterResizeHandle class="w-1 rounded-card bg-divider transition-colors hover:bg-brand"/>
+
+      <SplitterPanel v-if="activeScriptPath" :default-size="80" class="pl-2">
+        <SplitterGroup direction="vertical" auto-save-id="luaScriptOutputSplitter" class="h-full">
+          <SplitterPanel :default-size="70" class="overflow-hidden" data-testid="editor-pane">
+            <Editor class="size-full" :value="code" :language="language" theme="vs-dark" @change="updateCode"/>
           </SplitterPanel>
-          <SplitterPanel v-if="activeScriptPath" :size="80">
-            <Splitter style="height: 100%" layout="vertical" @resizeend="onResize">
-              <SplitterPanel>
-                <Editor class="editor" :value="code" :language="language" theme="vs-dark" @change="updateCode"></Editor>
-              </SplitterPanel>
-              <SplitterPanel>
-                <div class="outputs">
-                  <pre v-for="(line, idx) in stderr.split('\n')" :key="idx" class="stderr"
-                       :innerHTML="ansiHTML(line)"></pre>
-                  <pre v-for="(line, idx) in stdout.split('\n')" :key="idx" class="stdout"
-                       :innerHTML="ansiHTML(line)"></pre>
-                </div>
-              </SplitterPanel>
-            </Splitter>
+
+          <SplitterResizeHandle class="h-1 rounded-card bg-divider transition-colors hover:bg-brand"/>
+
+          <SplitterPanel :default-size="30" class="overflow-auto bg-card font-mono text-xs" data-testid="output-pane">
+            <pre
+              v-for="(line, idx) in stderr.split('\n')"
+              :key="'stderr' + idx"
+              class="m-0 whitespace-pre-wrap text-danger"
+              data-testid="stderr-line"
+              v-html="ansiHTML(line)"></pre>
+            <pre
+              v-for="(line, idx) in stdout.split('\n')"
+              :key="'stdout' + idx"
+              class="m-0 whitespace-pre-wrap text-ink"
+              data-testid="stdout-line"
+              v-html="ansiHTML(line)"></pre>
           </SplitterPanel>
-        </Splitter>
-      </div>
-    </div>
-  </div>
+        </SplitterGroup>
+      </SplitterPanel>
+    </SplitterGroup>
+  </Card>
 </template>
-
-<style scoped>
-.stderr {
-  color: red;
-  margin: 0;
-}
-
-.stdout {
-  margin: 0;
-}
-
-.editor {
-  width: 100%;
-  height: 100%;
-}
-
-.outputs {
-  width: 100%;
-}
-</style>

@@ -44,15 +44,25 @@ export default defineConfig({
         }
     },
     test: {
+        // Node stays the default so the transport specs keep running against
+        // node's fetch. Component specs opt into a DOM per file with a
+        // `// @vitest-environment jsdom` docblock on line 1.
         environment: 'node',
         coverage: {
             reporter: ['html-spa', 'cobertura', 'text'],
-            // The transport swap's blast radius, and nothing else. Views and
-            // routing were untested before this change and are out of scope
-            // here; widening `include` without writing the tests first would
-            // just move the thresholds down to meaninglessness.
-            include: ['src/api/**/*.ts', 'src/store/**/*.ts'],
-            exclude: ['**/*.spec.ts'],
+            // The transport swap's blast radius plus the components this
+            // redesign introduces. Pages and the layout shell stay out: they
+            // were untested before and a threshold that includes them would
+            // have to be lowered to meaninglessness to pass.
+            include: [
+                'src/api/**/*.ts',
+                'src/store/**/*.ts',
+                'src/lib/**/*.ts',
+                'src/composables/**/*.ts',
+                'src/components/ui/**/*.ts',
+                'src/components/ui/**/*.vue'
+            ],
+            exclude: ['src/api/openapi.snapshot.json', '**/*.spec.ts'],
             thresholds: {
                 lines: 90,
                 functions: 90,

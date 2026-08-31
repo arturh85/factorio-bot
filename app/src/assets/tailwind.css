@@ -11,3 +11,44 @@
 
 @import "tailwindcss/theme.css" layer(theme);
 @import "tailwindcss/utilities.css" layer(utilities);
+
+/* The palette below is the one the app already had: every value is lifted
+ * verbatim from assets/layout/_variables.scss, so turning the SCSS shell into
+ * Tailwind utilities is a change of mechanism, not of appearance. */
+@theme {
+    /* Surfaces */
+    --color-surface: #edf0f5;
+    --color-card: #ffffff;
+    --color-divider: #e3e3e3;
+
+    /* Text */
+    --color-ink: #333333;
+    --color-ink-muted: #707070;
+    --color-link: #2196f3;
+
+    /* Brand: the topbar gradient runs brand -> brand-light */
+    --color-brand: #0388e5;
+    --color-brand-dark: #026fba;
+    --color-brand-light: #07bdf4;
+    --color-focus: #8dcdff;
+
+    /* Status */
+    --color-success: #20d077;
+    --color-success-dark: #1aa75f;
+    --color-danger: #ef6262;
+    --color-danger-dark: #d84a4a;
+    --color-warn: #f9c851;
+
+    /* Sidebar */
+    --color-sidebar: #47555e;
+    --color-sidebar-ink: #ffffff;
+    --color-sidebar-active: #2e3035;
+    --color-sidebar-active-ink: #3aa6f1;
+    --color-sidebar-border: rgba(52, 56, 65, 0.6);
+    --color-route-active: #1fa1fc;
+
+    /* Shell metrics */
+    --radius-card: 3px;
+    --spacing-sidebar: 250px;
+    --spacing-topbar: 50px;
+}

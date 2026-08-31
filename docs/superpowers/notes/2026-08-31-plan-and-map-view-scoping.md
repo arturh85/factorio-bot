@@ -186,3 +186,55 @@ Not the frontend's to fix, but they bound what a replay can honestly show:
 **So a replay can show where the executor BELIEVED the bot was, and that is not
 always where it was.** Until those are fixed, a position track is the
 executor's belief, not ground truth, and should be labelled that way.
+
+
+---
+
+# DECISION: raw log over HTTP, rendered client-side. Not a server-rendered string.
+
+Settled 2026-08-31 between the two sessions. The reason is concrete, not a
+preference: **mermaid gantt cannot express the design.** Its vocabulary is one
+bar per row with a label, a start and a duration. The settled design needs,
+per step:
+
+  - **two rows**, planned against observed, as the primary comparison
+  - **`Lost` distinct from failure** — the entire point of the fifth state
+  - **walk rows marked as belief, not measurement** (a walk reported success
+    9.3 tiles from its target)
+  - **the gap remainder as wait**, derived by subtracting two observed
+    quantities
+  - **a scrubber** — selection and time-seeking, which is interaction, not a
+    diagram
+
+Mermaid gives the first badly and none of the rest. A pre-rendered string is a
+rendering decision taken in Rust that the UI cannot undo, and every bullet
+above is a decision that would have to be undone.
+
+## The data is already shaped for this
+`ExecutionLog` derives `Serialize`. `Attempt` carries `status`, `number`,
+`planned_start_tick` and `planned_end_tick` — the last two explicitly
+documented "not observed". The walk map is `BTreeMap<BotId, BTreeMap<usize,
+WalkObservation>>`, nested rather than tuple-keyed, specifically so it survives
+JSON with contractual iteration order.
+
+## Split of work
+  - **`crates/executor`** owns pairing `Schedule` with `ExecutionLog` into one
+    JSON document: per step, the planned interval, the observed interval **when
+    there is one**, status, and attempt number. It belongs there and not in
+    `crates/planner` because the planner is pure and the executor already
+    depends on it; rendering there would invert the dependency.
+  - **`crates/server`** owns the route.
+  - **the frontend** owns all rendering.
+
+**Absent must stay absent.** A zero and a missing measurement render
+identically if the DTO defaults them. This is the rule the walk-tick work was
+built on and it matters more here than anywhere.
+
+**Keep `number` in the DTO.** An action attempted three times is a different
+story from one attempted once, and it is the only record that a retry happened.
+
+## Boundary — two views, two data paths
+The mermaid gantt stays exactly as it is: it renders `Schedule` only, it
+reaches the browser today as script stdout over SSE, and it is a **plan view**.
+It is not the replay. Conflating them is how a plan view ends up quietly
+claiming to be a replay.

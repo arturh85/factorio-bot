@@ -1,14 +1,9 @@
-import { createApp } from 'vue';
-import router from './router';
+import {createApp} from 'vue';
 import {createPinia} from 'pinia';
-import PrimeVue from 'primevue/config';
-import Lara from '@primeuix/themes/lara';
-import Tooltip from 'primevue/tooltip';
-import Ripple from 'primevue/ripple';
+import router from './router';
 import {useToast} from './composables/useToast';
 
 import './assets/tailwind.css';
-import 'primeicons/primeicons.css';
 
 import App from './App.vue';
 
@@ -22,29 +17,8 @@ router.beforeEach(() => {
 });
 
 const app = createApp(App);
-const store = createPinia()
 
-// PrimeVue 4 replaced the shipped theme stylesheets with a runtime theme
-// service, so app.use(PrimeVue, ...) is mandatory rather than optional and
-// installs $primevue itself. Lara is the closest preset to the saga-blue theme
-// this app used under PrimeVue 3; swapping it for Aura, Nora or Material is a
-// one-line change here.
-app.use(PrimeVue, {
-    ripple: true,
-    theme: {
-        preset: Lara,
-        options: {
-            // The layout shell is a hard-coded light theme, so following the OS
-            // dark-mode preference would darken the controls and nothing else.
-            darkModeSelector: false
-        }
-    }
-});
-
-app.use(store);
+app.use(createPinia());
 app.use(router);
-
-app.directive('tooltip', Tooltip);
-app.directive('ripple', Ripple);
 
 app.mount('#app');

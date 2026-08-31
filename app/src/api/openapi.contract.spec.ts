@@ -431,7 +431,8 @@ const SCHEMAS: Record<string, SchemaContract> = {
         finished_at_ms: {required: false, type: 'integer', nullable: true},
         stdout: {required: true, type: 'string'},
         stderr: {required: true, type: 'string'},
-        error: {required: false, type: 'string', nullable: true}
+        error: {required: false, type: 'string', nullable: true},
+        replay: {required: false, type: 'string', nullable: true}
     }),
     // A `u64` counter serialised as a string so a browser cannot lose
     // precision on it. `types.ts` types every job id as `string` inline (in

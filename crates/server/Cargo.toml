@@ -29,7 +29,10 @@ tokio = { version = "1", features = ["full", "tracing"] }
 tokio-stream = { version = "0.1.19", features = ["sync"], optional = true }
 futures-util = { version = "0.3", optional = true }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# `raw_value` lets the SSE handler embed a replay document (already-serialised
+# JSON from the executor) into the `data:` line verbatim, instead of it coming
+# out as an escaped string a browser would have to `JSON.parse` twice.
+serde_json = { version = "1.0", features = ["raw_value"] }
 miette = { version = "7.4", features = ["fancy"] }
 thiserror = "2.0"
 num-traits = "0.2"

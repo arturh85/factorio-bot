@@ -101,6 +101,12 @@ impl OutputSink for JobSink {
             handle.line(stream, text);
         }
     }
+
+    fn replay(&self, json: &str) {
+        if let Some(handle) = self.lock().as_ref() {
+            handle.replay(json);
+        }
+    }
 }
 
 /// Starts a script and answers immediately with the job that runs it
@@ -324,6 +330,16 @@ enum WireEvent<'a> {
     Lagged {
         skipped: u64,
     },
+    /// A run's replay document. `Box<RawValue>` rather than a `String` field:
+    /// an untagged enum serialises a `String` as an *escaped* JSON string
+    /// (`"{\"steps\":...}"`), which would force the browser to `JSON.parse`
+    /// the payload twice. `RawValue` writes the document out verbatim instead,
+    /// so `data:` carries the object itself -- see the doc on
+    /// [`factorio_bot_scripting::OutputSink::replay`] for why this crate never
+    /// deserialises it into anything more structured than that.
+    Replay {
+        document: Box<serde_json::value::RawValue>,
+    },
 }
 
 impl WireEvent<'_> {
@@ -334,6 +350,7 @@ impl WireEvent<'_> {
             WireEvent::Output { .. } => "output",
             WireEvent::Finished { .. } => "finished",
             WireEvent::Lagged { .. } => "lagged",
+            WireEvent::Replay { .. } => "replay",
         }
     }
 
@@ -357,12 +374,35 @@ fn stream_name(stream: Stream) -> &'static str {
     }
 }
 
+/// Builds the `replay` SSE event from the caller's already-serialised JSON.
+///
+/// This crate does not parse or validate the document (decision 4 of the
+/// replay-wiring brief) -- `RawValue::from_string` only checks that what it
+/// was handed is syntactically valid JSON, which is a transport concern (an
+/// invalid byte sequence here would corrupt the SSE stream for every other
+/// event after it), not a look at what the document means. A caller that
+/// somehow handed over malformed JSON gets it back verbatim in `data:` rather
+/// than losing the event; a client tolerant enough to read `data:` at all can
+/// decide what to do with an unparsable payload.
+fn replay_event(json: &str) -> Event {
+    match serde_json::value::RawValue::from_string(json.to_owned()) {
+        Ok(document) => WireEvent::Replay { document }.into_sse(),
+        Err(_) => Event::default().event("replay").data(json),
+    }
+}
+
 /// The events replayed to a subscriber that attached mid-run, or after the run
 /// was over.
 ///
 /// stdout and stderr are two separate buffers in a [`Job`], so their relative
 /// interleaving is not recoverable here -- the backlog is stdout then stderr.
 /// Live events, which arrive one at a time, keep their real order.
+///
+/// The replay, when there is one, goes *before* the terminal event and after
+/// the output lines -- the same order the live side emits them in (see
+/// [`crate::jobs::JobEvent::Replay`]). A subscriber that attached after the
+/// job already finished must see the identical sequence a subscriber watching
+/// live saw, or which events arrived depends on when the browser connected.
 fn backlog(job: &Job) -> Vec<Event> {
     let lines = std::iter::empty()
         .chain(job.stdout.lines().map(|text| (Stream::Stdout, text)))
@@ -376,6 +416,9 @@ fn backlog(job: &Job) -> Vec<Event> {
             .into_sse()
         })
         .collect();
+    if let Some(json) = &job.replay {
+        events.push(replay_event(json));
+    }
     if job.status != JobStatus::Running {
         events.push(WireEvent::Finished { status: job.status }.into_sse());
     }
@@ -394,6 +437,7 @@ fn live_event(item: Result<JobEvent, BroadcastStreamRecvError>) -> (Event, bool)
             .into_sse(),
             false,
         ),
+        Ok(JobEvent::Replay { json }) => (replay_event(&json), false),
         Ok(JobEvent::Finished { status }) => (WireEvent::Finished { status }.into_sse(), true),
         // Not filtered away. `BroadcastStreamRecvError` has exactly one
         // variant, and dropping it is the tidy-looking edit that deletes the
@@ -461,7 +505,9 @@ fn job_event_stream(
     responses(
         (
             status = 200,
-            description = "Server-Sent Events: `output`, `lagged`, then a terminal `finished`",
+            description = "Server-Sent Events: `output`, `lagged`, an optional `replay` \
+                (the run's replay document, verbatim JSON in `data:`), then a terminal \
+                `finished`",
             content_type = "text/event-stream"
         ),
         (status = 404, body = crate::error::ErrorResponse),
@@ -518,6 +564,7 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             error: None,
+            replay: None,
         };
         let (_never_fires, shutdown) = watch::channel(false);
         let stream = job_event_stream(&job, Some(receiver), shutdown);
@@ -572,5 +619,127 @@ mod tests {
         // Held to the end: dropping it would complete the job and close the
         // channel, which is the other way this stream could have ended.
         drop(handle);
+    }
+
+    /// Test 2 of the replay-wiring brief: a subscriber attached *before* the
+    /// run sees `event: replay` then `event: finished`, in that order.
+    #[tokio::test]
+    async fn a_subscriber_attached_before_the_run_sees_replay_then_finished() {
+        let registry = JobRegistry::new(8);
+        let handle = registry.try_start(Some("a.lua".into())).expect("start");
+        let (job, receiver) = registry.attach(handle.id()).expect("the job exists");
+        let stream = job_event_stream(&job, receiver, registry.shutdown_signal());
+
+        handle.replay(r#"{"steps":[]}"#);
+        handle.finish(Ok((String::new(), String::new())));
+
+        let body = tokio::time::timeout(Duration::from_secs(5), collect(stream))
+            .await
+            .expect("the stream must end at the terminal event");
+        let replay_at = body.find("event: replay").unwrap_or_else(|| {
+            panic!("expected an `event: replay` line in the live stream: {body:?}")
+        });
+        let finished_at = body.find("event: finished").unwrap_or_else(|| {
+            panic!("expected an `event: finished` line in the live stream: {body:?}")
+        });
+        assert!(
+            replay_at < finished_at,
+            "replay must arrive before finished: {body:?}"
+        );
+    }
+
+    /// Test 3 of the replay-wiring brief, and the one the brief calls out as
+    /// mattering most: a subscriber that attaches *after* the job has already
+    /// finished must still get the replay, from the backlog, before
+    /// `finished`. This is the case [`Job::replay`] exists for -- a finished
+    /// job has no live channel left, so a broadcast-only replay would never
+    /// reach this subscriber at all.
+    #[tokio::test]
+    async fn a_subscriber_attaching_after_the_job_finished_still_gets_the_replay() {
+        let registry = JobRegistry::new(8);
+        let handle = registry.try_start(Some("a.lua".into())).expect("start");
+        let id = handle.id();
+        handle.replay(r#"{"steps":[]}"#);
+        handle.finish(Ok((String::new(), String::new())));
+
+        // The channel is gone by now -- `complete` pruned it -- so this is
+        // exactly the "no live channel" case decision 1 exists for.
+        let (job, receiver) = registry.attach(id).expect("a finished job is still known");
+        assert!(
+            receiver.is_none(),
+            "a finished job's channel must already be pruned"
+        );
+        let stream = job_event_stream(&job, receiver, registry.shutdown_signal());
+        let body = tokio::time::timeout(Duration::from_secs(5), collect(stream))
+            .await
+            .expect("a finished job's stream must end immediately, not hang");
+
+        let replay_at = body
+            .find("event: replay")
+            .unwrap_or_else(|| panic!("expected the replay in the backlog: {body:?}"));
+        let finished_at = body
+            .find("event: finished")
+            .unwrap_or_else(|| panic!("expected a terminal event in the backlog: {body:?}"));
+        assert!(
+            replay_at < finished_at,
+            "the backlog must emit replay before finished: {body:?}"
+        );
+    }
+
+    /// Test 4 of the replay-wiring brief: the `data:` line for a `replay`
+    /// event is the document itself, not an escaped string -- decision 3.
+    #[tokio::test]
+    async fn the_replay_data_line_is_the_document_not_an_escaped_string() {
+        let registry = JobRegistry::new(8);
+        let handle = registry.try_start(Some("a.lua".into())).expect("start");
+        let id = handle.id();
+        handle.replay(r#"{"steps":[1,2,3]}"#);
+        handle.finish(Ok((String::new(), String::new())));
+
+        let (job, receiver) = registry.attach(id).expect("a finished job is still known");
+        let stream = job_event_stream(&job, receiver, registry.shutdown_signal());
+        let body = tokio::time::timeout(Duration::from_secs(5), collect(stream))
+            .await
+            .expect("a finished job's stream must end immediately");
+
+        let data_line = body
+            .lines()
+            .skip_while(|line| *line != "event: replay")
+            .nth(1)
+            .unwrap_or_else(|| panic!("expected a data: line after event: replay: {body:?}"));
+        assert!(
+            data_line.starts_with("data: {"),
+            "the data line must carry the document itself, not an escaped string: {data_line:?}"
+        );
+    }
+
+    /// Test 5 of the replay-wiring brief: a job with no replay serialises
+    /// `"replay": null`, and its SSE stream carries no `event: replay` at all.
+    #[tokio::test]
+    async fn a_job_with_no_replay_has_no_replay_event() {
+        let registry = JobRegistry::new(8);
+        let handle = registry.try_start(Some("a.lua".into())).expect("start");
+        let id = handle.id();
+        handle.finish(Ok((String::new(), String::new())));
+
+        let job = registry.get(id).expect("job exists");
+        assert_eq!(
+            serde_json::to_value(&job)
+                .expect("job serialises")
+                .get("replay")
+                .cloned(),
+            Some(serde_json::Value::Null),
+            "the replay key must be present and null, not absent"
+        );
+
+        let (job, receiver) = registry.attach(id).expect("a finished job is still known");
+        let stream = job_event_stream(&job, receiver, registry.shutdown_signal());
+        let body = tokio::time::timeout(Duration::from_secs(5), collect(stream))
+            .await
+            .expect("a finished job's stream must end immediately");
+        assert!(
+            !body.contains("event: replay"),
+            "a job with no replay must not emit a replay event: {body:?}"
+        );
     }
 }

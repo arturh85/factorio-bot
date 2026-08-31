@@ -102,6 +102,12 @@ export interface Job {
     stderr: string;
     /** Set only when `status` is `failed`. */
     error: string | null;
+    /**
+     * The run's replay document, already serialised as JSON, or `null` for a
+     * run that has not produced one. Opaque here on purpose: the server does
+     * not parse it either, so this module never types its shape.
+     */
+    replay: string | null;
 }
 
 /** Which of a job's two output buffers a line came from. */

@@ -38,6 +38,12 @@ export interface JobEventHandlers {
      * continues. `0` means the server did not say how many.
      */
     onLagged(skipped: number): void;
+    /**
+     * The run's replay document, verbatim JSON text -- this module does not
+     * parse it, the same way the server does not. Optional, so existing
+     * callers that do not care about replays do not break.
+     */
+    onReplay?(json: string): void;
     onFinished(status: JobStatus): void;
     onError(error: Error): void;
 }
@@ -141,6 +147,18 @@ export function subscribeJobEvents(
         const data = parse(event);
         const skipped = data !== null && typeof data.skipped === 'number' ? data.skipped : 0;
         handlers.onLagged(skipped);
+    });
+
+    source.addEventListener('replay', (event) => {
+        if (settled) {
+            return;
+        }
+        // Passed through as raw text, not `parse()`d: the server embeds the
+        // document verbatim in `data:` precisely so a caller here gets the
+        // JSON text once, rather than a string it would have to parse again.
+        if (typeof event.data === 'string' && event.data.length > 0) {
+            handlers.onReplay?.(event.data);
+        }
     });
 
     source.addEventListener('finished', (event) => {

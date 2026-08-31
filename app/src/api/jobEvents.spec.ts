@@ -53,6 +53,7 @@ function handlers() {
     return {
         onOutput: vi.fn(),
         onLagged: vi.fn(),
+        onReplay: vi.fn(),
         onFinished: vi.fn(),
         onError: vi.fn()
     };
@@ -73,6 +74,7 @@ function job(overrides: Partial<Job> = {}): Job {
         stdout: 'buffered out',
         stderr: 'buffered err',
         error: null,
+        replay: null,
         ...overrides
     };
 }
@@ -146,6 +148,32 @@ describe('subscribeJobEvents', () => {
         expect(source.emitRaw('output', 'not json')).toBeGreaterThan(0);
         expect(h.onOutput).not.toHaveBeenCalled();
         expect(h.onError).not.toHaveBeenCalled();
+    });
+
+    it('passes a replay event through as raw text, not parsed', () => {
+        const h = handlers();
+        subscribeJobEvents('job-91', h, () => source);
+        const raw = '{"steps":[1,2,3]}';
+        expect(source.emitRaw('replay', raw)).toBeGreaterThan(0);
+        expect(h.onReplay).toHaveBeenCalledWith(raw);
+    });
+
+    it('ignores a replay event with no data', () => {
+        const h = handlers();
+        subscribeJobEvents('job-91', h, () => source);
+        expect(source.emitRaw('replay', '')).toBeGreaterThan(0);
+        expect(h.onReplay).not.toHaveBeenCalled();
+    });
+
+    it('does not require an onReplay handler', () => {
+        const withoutReplay = {
+            onOutput: vi.fn(),
+            onLagged: vi.fn(),
+            onFinished: vi.fn(),
+            onError: vi.fn()
+        };
+        subscribeJobEvents('job-91', withoutReplay, () => source);
+        expect(() => source.emitRaw('replay', '{"steps":[]}')).not.toThrow();
     });
 
     it.each(finishedStatuses)('reports the %s outcome once and closes', (status) => {

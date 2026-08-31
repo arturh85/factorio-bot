@@ -714,6 +714,13 @@
           "id": {
             "$ref": "#/components/schemas/JobId"
           },
+          "replay": {
+            "description": "The run's replay document, already serialised as JSON, or `None` for a\nrun that has not produced one (yet, or ever).\n\nNo `skip_serializing_if`: the key is always present in the JSON, `null`\nwhen there is none, so a consumer never has to distinguish \"absent from\nthe document\" from \"absent as a fact\". This is what makes the backlog\npath -- a subscriber attaching after the job already finished -- able\nto recover the replay at all: a finished job has no live channel left,\nso a broadcast-only replay would be lost for exactly the common case\n(a fast script over before a browser can open the stream).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "script": {
             "description": "Path of the script that was run, or `None` for inline code from the\neditor, which has no path.",
             "type": [
@@ -2032,7 +2039,7 @@
             "content": {
               "text/event-stream": {}
             },
-            "description": "Server-Sent Events: `output`, `lagged`, then a terminal `finished`"
+            "description": "Server-Sent Events: `output`, `lagged`, an optional `replay` (the run's replay document, verbatim JSON in `data:`), then a terminal `finished`"
           },
           "404": {
             "content": {

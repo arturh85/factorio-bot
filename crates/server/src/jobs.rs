@@ -85,8 +85,22 @@ pub enum JobStatus {
 /// shape rather than this type dictating one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobEvent {
-    Output { stream: Stream, text: String },
-    Finished { status: JobStatus },
+    Output {
+        stream: Stream,
+        text: String,
+    },
+    /// A run's replay document, already serialised as JSON by the caller. See
+    /// [`factorio_bot_scripting::OutputSink::replay`] for why this crate never
+    /// parses it. Emitted from the run's own task as it ends, *before*
+    /// [`JobRegistry::complete`] -- so the live order is always `Replay` then
+    /// `Finished`, and [`crate::manage::execute::backlog`] must reproduce that
+    /// same order for a subscriber that attached late.
+    Replay {
+        json: String,
+    },
+    Finished {
+        status: JobStatus,
+    },
 }
 
 /// One script run, live or historical.
@@ -103,6 +117,17 @@ pub struct Job {
     pub stderr: String,
     /// Set only for [`JobStatus::Failed`].
     pub error: Option<String>,
+    /// The run's replay document, already serialised as JSON, or `None` for a
+    /// run that has not produced one (yet, or ever).
+    ///
+    /// No `skip_serializing_if`: the key is always present in the JSON, `null`
+    /// when there is none, so a consumer never has to distinguish "absent from
+    /// the document" from "absent as a fact". This is what makes the backlog
+    /// path -- a subscriber attaching after the job already finished -- able
+    /// to recover the replay at all: a finished job has no live channel left,
+    /// so a broadcast-only replay would be lost for exactly the common case
+    /// (a fast script over before a browser can open the stream).
+    pub replay: Option<String>,
 }
 
 /// Milliseconds since the unix epoch, or `0` for a clock set before 1970.
@@ -206,6 +231,7 @@ impl JobRegistry {
             stdout: String::new(),
             stderr: String::new(),
             error: None,
+            replay: None,
         });
         let (sender, _) = broadcast::channel(BROADCAST_CAPACITY);
         inner.channels.insert(id, sender);
@@ -274,6 +300,28 @@ impl JobRegistry {
             let _ = sender.send(JobEvent::Output {
                 stream,
                 text: text.to_owned(),
+            });
+        }
+    }
+
+    /// Stores a run's replay document and publishes it to subscribers, both
+    /// under the same lock as [`JobRegistry::record_line`] and for the same
+    /// reason: a subscriber's live stream and the stored `Job` must not
+    /// disagree about whether the replay had already landed.
+    ///
+    /// Called from the run's own task as it ends, before
+    /// [`JobRegistry::complete`] -- see [`JobEvent::Replay`] for why the order
+    /// between the two is load-bearing.
+    fn record_replay(&self, id: JobId, json: &str) {
+        let mut inner = self.lock();
+        if let Some(job) = inner.jobs.iter_mut().find(|job| job.id == id) {
+            job.replay = Some(json.to_owned());
+        }
+        if let Some(sender) = inner.channels.get(&id) {
+            // Same reasoning as `record_line`: failure just means nobody is
+            // subscribed right now, which is not an error.
+            let _ = sender.send(JobEvent::Replay {
+                json: json.to_owned(),
             });
         }
     }
@@ -362,6 +410,12 @@ impl OutputSink for JobHandle {
     fn line(&self, stream: Stream, text: &str) {
         if let Some(registry) = self.registry.upgrade() {
             registry.record_line(self.id, stream, text);
+        }
+    }
+
+    fn replay(&self, json: &str) {
+        if let Some(registry) = self.registry.upgrade() {
+            registry.record_replay(self.id, json);
         }
     }
 }
@@ -513,6 +567,54 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("script exploded"));
+    }
+
+    /// Test 1 of the replay-wiring brief: a sink receiving a replay stores it
+    /// on the job, so a caller that reads the job back (rather than watching
+    /// the stream) still finds it.
+    #[test]
+    fn a_replay_handed_to_the_sink_is_stored_on_the_job() {
+        let registry = JobRegistry::new(8);
+        let handle = registry.try_start(Some("a.lua".into())).expect("start");
+        let id = handle.id();
+
+        assert_eq!(
+            registry.get(id).expect("job exists").replay,
+            None,
+            "a job with no replay yet must report it as absent, not empty"
+        );
+
+        handle.replay(r#"{"steps":[]}"#);
+
+        let job = registry.get(id).expect("job exists");
+        assert_eq!(job.replay.as_deref(), Some(r#"{"steps":[]}"#));
+    }
+
+    /// The order [`JobEvent::Replay`] and [`JobEvent::Finished`] arrive in for
+    /// a *live* subscriber -- decision 2 of the replay-wiring brief. The
+    /// backlog case (a subscriber attaching after the job already finished)
+    /// is covered in `crates/server/src/manage/execute.rs`, which is where the
+    /// backlog is assembled.
+    #[test]
+    fn a_live_subscriber_sees_the_replay_before_the_terminal_event() {
+        let registry = JobRegistry::new(8);
+        let handle = registry.try_start(Some("a.lua".into())).expect("start");
+        let (_job, rx) = registry.attach(handle.id()).expect("the job exists");
+        let mut rx = rx.expect("a running job has a live channel");
+
+        handle.replay(r#"{"steps":[]}"#);
+        handle.finish(Ok((String::new(), String::new())));
+
+        assert!(matches!(
+            rx.try_recv().expect("a replay event"),
+            JobEvent::Replay { ref json } if json == r#"{"steps":[]}"#
+        ));
+        assert!(matches!(
+            rx.try_recv().expect("a terminal event"),
+            JobEvent::Finished {
+                status: JobStatus::Succeeded
+            }
+        ));
     }
 
     #[test]

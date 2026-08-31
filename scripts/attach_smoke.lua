@@ -20,12 +20,18 @@ print("iron-plate recipe: category=" .. tostring(recipe.category)
 --    them; with no prototype it answers None and every placement is refused.
 --    Asked through find_free_resource_rect, which needs both the prototype
 --    table and the resource half of the entity graph to answer at all.
+--    Two separate facts, so two separate assertions: nil means the question
+--    could not be answered (no patch, or no room in one), while a rect that
+--    is not the size asked for would mean it was answered wrongly. These used
+--    to be one `width > 0` check, which conflated them because "nowhere" was
+--    spelled as a zero-width rectangle at the origin.
 local rect = world.find_free_resource_rect("iron-ore", 2, 2, {x = 0, y = 0})
-local rect_w = rect.right_bottom.x - rect.left_top.x
+assert(rect ~= nil, "no iron-ore patch in the attached world: the entity graph is empty")
 print("free 2x2 iron-ore rect: "
   .. tostring(rect.left_top.x) .. "," .. tostring(rect.left_top.y) .. " -> "
   .. tostring(rect.right_bottom.x) .. "," .. tostring(rect.right_bottom.y))
-assert(rect_w > 0, "no iron-ore patch in the attached world: the entity graph is empty")
+local rect_w = rect.right_bottom.x - rect.left_top.x
+assert(rect_w == 2, "the iron-ore rect is " .. tostring(rect_w) .. " tiles wide, not the 2 asked for")
 
 -- 3. The rest of the resource layer, not just the one ore. A world that had
 --    merely been handed a hard-coded iron patch would not know these.
@@ -35,11 +41,12 @@ assert(rect_w > 0, "no iron-ore patch in the attached world: the entity graph is
 --    whether the snapshot arrived or not, and proves nothing either way.)
 for _, ore in ipairs({"coal", "stone", "copper-ore"}) do
   local r = world.find_free_resource_rect(ore, 2, 2, {x = 0, y = 0})
+  assert(r ~= nil, "no " .. ore .. " patch in the attached world")
   local w = r.right_bottom.x - r.left_top.x
   print("free 2x2 " .. ore .. " rect at "
     .. tostring(r.left_top.x) .. "," .. tostring(r.left_top.y)
     .. " (width " .. tostring(w) .. ")")
-  assert(w > 0, "no " .. ore .. " patch in the attached world")
+  assert(w == 2, "the " .. ore .. " rect is " .. tostring(w) .. " tiles wide, not the 2 asked for")
 end
 
 -- 4. The whole point: plan and schedule, in one call now (this run has one

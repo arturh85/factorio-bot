@@ -12,7 +12,7 @@ use factorio_bot_core::factorio_blueprint::BlueprintCodec;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::scripts::resolve_write_path;
 use factorio_bot_core::serde_json;
-use factorio_bot_core::types::{FactorioBlueprintInfo, PlayerId, Rect};
+use factorio_bot_core::types::{FactorioBlueprintInfo, PlayerId};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -96,14 +96,16 @@ end
             r#"
 --- find non-blocked rectangle with given resource
 -- Searches the resource patches of `ore_name`, nearest to `near` first, for a
--- free rectangle of the given size. **A patch that has no room is not an
--- error:** the all-zero rectangle is returned, so check `right_bottom` rather
--- than assuming a hit.
+-- free rectangle of the given size. **Finding no room is not an error:** it is
+-- an absence, and it is reported as `nil`. There is no ore, and no size, for
+-- which a successful answer is the all-zero rectangle, so `nil` is the only
+-- value that cannot be mistaken for a site at the map origin.
 -- @string ore_name name of the resource, e.g. "iron-ore"
 -- @number width width of the rectangle to fit, in tiles
 -- @number height height of the rectangle to fit, in tiles
 -- @param near `types.Position` to search outwards from
--- @return `types.Rect` the free rectangle, or an all-zero rectangle if none fits
+-- @return `types.Rect` the free rectangle, or nil if no patch of `ore_name`
+--   has room for one -- including when there is no such patch at all
 function world.find_free_resource_rect(ore_name, width, height, near)
 end
 "#,
@@ -112,16 +114,19 @@ end
     map_table.set(
         "find_free_resource_rect",
         lua.create_function(
-            move |_lua, (ore_name, width, height, near): (String, u32, u32, LuaTable)| {
+            move |lua, (ore_name, width, height, near): (String, u32, u32, LuaTable)| {
                 let patches = world.entity_graph.resource_patches(ore_name.as_str());
                 let near = position_from_lua(&near, "near")?;
                 for patch in patches {
-                    let rect = patch.find_free_rect(width, height, &near);
-                    if let Some(rect) = rect {
-                        return Ok(rect);
+                    if let Some(rect) = patch.find_free_rect(width, height, &near) {
+                        return lua.to_value(&rect);
                     }
                 }
-                Ok(Rect::default())
+                // Not `Rect::default()`. An all-zero rectangle is a valid-looking
+                // 0x0 site at the map origin, so a caller who forgot to check
+                // built there instead of failing, and the wreckage read as a
+                // planner bug rather than a missing patch.
+                Ok(LuaValue::Nil)
             },
         )?,
     )?;

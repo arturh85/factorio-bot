@@ -1446,6 +1446,59 @@ result = world.find_free_resource_rect("iron-ore", 2, 2, {x=0,y=200})
         .await
     }
 
+    // The no-fit path is the one a caller is most likely to get wrong, so it
+    // has to be distinguishable from a hit. It used to answer `Rect::default()`
+    // -- an all-zero rectangle at the map origin -- which reads as a perfectly
+    // good 0x0 site at (0,0). 500x500 does not fit in the fixture's 10x10 iron
+    // field, so every patch is searched and exhausted: this is the "a patch
+    // exists but has no room" case, not the "no such ore" one.
+    #[tokio::test]
+    async fn test_free_rect_absent_when_nothing_fits() {
+        result_test(
+            1,
+            r#"
+local r = world.find_free_resource_rect("iron-ore", 500, 500, {x=0,y=0})
+result = { found = r ~= nil, is_table = type(r) == "table" }
+"#,
+            json!({"found": false, "is_table": false}),
+        )
+        .await
+    }
+
+    // An ore the fixture has no patch of at all reaches the same exit with the
+    // patch loop never entered, so it must answer the same absence.
+    #[tokio::test]
+    async fn test_free_rect_absent_when_ore_is_unknown() {
+        result_test(
+            1,
+            r#"
+result = world.find_free_resource_rect("uranium-ore", 2, 2, {x=0,y=0}) ~= nil
+"#,
+            json!(false),
+        )
+        .await
+    }
+
+    // The companion to the two above: proving the function *can* answer nil is
+    // worth nothing on its own, because always answering nil would prove it
+    // too. A hit must still be a real rectangle with a real extent.
+    #[tokio::test]
+    async fn test_free_rect_present_when_one_fits() {
+        result_test(
+            1,
+            r#"
+local r = world.find_free_resource_rect("iron-ore", 2, 2, {x=0,y=0})
+result = {
+  found = r ~= nil,
+  width = r.right_bottom.x - r.left_top.x,
+  height = r.right_bottom.y - r.left_top.y,
+}
+"#,
+            json!({"found": true, "width": 2.0, "height": 2.0}),
+        )
+        .await
+    }
+
     async fn result_test(bot_count: u8, code: &str, expected: serde_json::Value) {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = std::fs::canonicalize(dir.path()).expect("canonicalize");

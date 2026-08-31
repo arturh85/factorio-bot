@@ -249,8 +249,17 @@ end
 -- Exactly `goal.start(plan):wait()`.
 -- @tparam PlanValue plan a plan returned by `goal.plan`
 -- @treturn table an observation: `{ done, pending, running, success, failed,
---   first_error, actions, walks, failures }` -- see `RunValue`'s own `:wait()`
---   for the shape. `walks` is an array of `{ bot, step_index, to, status,
+--   lost, first_error, actions, walks, failures }` -- see `RunValue`'s own
+--   `:wait()` for the shape.
+--
+--   `lost` counts what was dispatched and never accounted for: the game
+--   answered with no readable outcome, or the run ended still waiting. Those
+--   actions carry `status == "lost"`, and they are deliberately neither
+--   `running` (nothing is in flight) nor `failed` (no verdict was ever
+--   given), so a display that draws `running` as a busy bot does not draw one
+--   for work nobody is watching. `obs:failures()` does not list them.
+--
+--   `walks` is an array of `{ bot, step_index, to, status,
 --   planned_start, planned_end, dispatched_tick, replied_tick }`, one per walk
 --   step the run dispatched, ordered by bot and then step index; a walk has no
 --   action id, so `(bot, step_index)` is what names it. As on an action,
@@ -342,7 +351,7 @@ mod tests {
     use factorio_bot_core::test_utils::fixture_world;
     use factorio_bot_core::tokio::sync::{mpsc, watch};
     use factorio_bot_core::types::Position;
-    use factorio_bot_executor::{ActionTicks, ActuatorError};
+    use factorio_bot_executor::{ActionTicks, ActuatorError, ActuatorFailure};
     use factorio_bot_planner::{schedule, Holder, InventorySlot, Schedule};
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -360,6 +369,11 @@ mod tests {
         /// finish theirs, so the run ends with actions that were never
         /// dispatched and so never reached the log at all.
         First(AtomicBool),
+        /// Every action comes back with no readable verdict — the game
+        /// answered and the answer said nothing usable. Not a refusal: it is
+        /// what an unreadable `action_completed` looks like from here, and it
+        /// is the only way to reach `Status::Lost` from a script.
+        WithoutVerdict,
     }
 
     /// An actuator that never touches a game.
@@ -428,7 +442,7 @@ mod tests {
             }
         }
 
-        async fn act(&self) -> Result<ActionTicks, ActuatorError> {
+        async fn act(&self) -> Result<ActionTicks, ActuatorFailure> {
             if let Some(entered) = &self.entered {
                 let _ = entered.send(());
             }
@@ -443,13 +457,19 @@ mod tests {
             if !self.delay.is_zero() {
                 factorio_bot_core::tokio::time::sleep(self.delay).await;
             }
+            if let Failure::WithoutVerdict = &self.fails {
+                return Err(ActuatorError::NoVerdict(
+                    "stub answers with a status nothing can read".to_string(),
+                )
+                .into());
+            }
             let refuse = match &self.fails {
-                Failure::Never => false,
+                Failure::Never | Failure::WithoutVerdict => false,
                 Failure::Always => true,
                 Failure::First(spent) => !spent.swap(true, Ordering::SeqCst),
             };
             if refuse {
-                return Err(ActuatorError::Rejected("stub refuses".to_string()));
+                return Err(ActuatorError::Rejected("stub refuses".to_string()).into());
             }
             Ok(self.tick())
         }
@@ -457,7 +477,7 @@ mod tests {
 
     #[async_trait]
     impl Actuator for StubActuator {
-        async fn walk(&self, _bot: BotId, _to: Position) -> Result<ActionTicks, ActuatorError> {
+        async fn walk(&self, _bot: BotId, _to: Position) -> Result<ActionTicks, ActuatorFailure> {
             Ok(self.tick())
         }
         async fn mine(
@@ -466,7 +486,7 @@ mod tests {
             _item: &str,
             _at: Position,
             _count: u32,
-        ) -> Result<ActionTicks, ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorFailure> {
             self.act().await
         }
         async fn craft(
@@ -474,7 +494,7 @@ mod tests {
             _bot: BotId,
             _recipe: &str,
             _count: u32,
-        ) -> Result<ActionTicks, ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorFailure> {
             self.act().await
         }
         async fn place(
@@ -483,7 +503,7 @@ mod tests {
             _item: &str,
             _at: Position,
             _direction: u8,
-        ) -> Result<ActionTicks, ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorFailure> {
             self.act().await
         }
         async fn insert(
@@ -494,7 +514,7 @@ mod tests {
             _slot: InventorySlot,
             _item: &str,
             _count: u32,
-        ) -> Result<ActionTicks, ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorFailure> {
             self.act().await
         }
         async fn remove(
@@ -505,10 +525,10 @@ mod tests {
             _slot: InventorySlot,
             _item: &str,
             _count: u32,
-        ) -> Result<ActionTicks, ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorFailure> {
             self.act().await
         }
-        async fn research(&self, _tech: &str) -> Result<ActionTicks, ActuatorError> {
+        async fn research(&self, _tech: &str) -> Result<ActionTicks, ActuatorFailure> {
             self.act().await
         }
     }
@@ -986,7 +1006,7 @@ mod tests {
     impl RecordingActuator {
         /// No game clock: this actuator records who was dispatched to, not
         /// when, so it reports [`ActionTicks::UNKNOWN`].
-        fn note(&self, bot: BotId) -> Result<ActionTicks, ActuatorError> {
+        fn note(&self, bot: BotId) -> Result<ActionTicks, ActuatorFailure> {
             #[allow(clippy::unwrap_used)]
             self.bots.lock().unwrap().push(bot);
             Ok(ActionTicks::UNKNOWN)
@@ -999,7 +1019,7 @@ mod tests {
 
     #[async_trait]
     impl Actuator for RecordingActuator {
-        async fn walk(&self, bot: BotId, _to: Position) -> Result<ActionTicks, ActuatorError> {
+        async fn walk(&self, bot: BotId, _to: Position) -> Result<ActionTicks, ActuatorFailure> {
             self.note(bot)
         }
         async fn mine(
@@ -1008,7 +1028,7 @@ mod tests {
             _item: &str,
             _at: Position,
             _count: u32,
-        ) -> Result<ActionTicks, ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorFailure> {
             self.note(bot)
         }
         async fn craft(
@@ -1016,7 +1036,7 @@ mod tests {
             bot: BotId,
             _recipe: &str,
             _count: u32,
-        ) -> Result<ActionTicks, ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorFailure> {
             self.note(bot)
         }
         async fn place(
@@ -1025,7 +1045,7 @@ mod tests {
             _item: &str,
             _at: Position,
             _direction: u8,
-        ) -> Result<ActionTicks, ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorFailure> {
             self.note(bot)
         }
         async fn insert(
@@ -1036,7 +1056,7 @@ mod tests {
             _slot: InventorySlot,
             _item: &str,
             _count: u32,
-        ) -> Result<ActionTicks, ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorFailure> {
             self.note(bot)
         }
         async fn remove(
@@ -1047,10 +1067,10 @@ mod tests {
             _slot: InventorySlot,
             _item: &str,
             _count: u32,
-        ) -> Result<ActionTicks, ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorFailure> {
             self.note(bot)
         }
-        async fn research(&self, _tech: &str) -> Result<ActionTicks, ActuatorError> {
+        async fn research(&self, _tech: &str) -> Result<ActionTicks, ActuatorFailure> {
             Ok(ActionTicks::UNKNOWN)
         }
     }

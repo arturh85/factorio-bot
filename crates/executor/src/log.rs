@@ -15,12 +15,56 @@ fn narrow(tick: Option<u64>) -> Option<Ticks> {
     tick.and_then(|t| Ticks::try_from(t).ok())
 }
 
+/// Where one attempt (or one walk) stands, as far as the run can tell.
+///
+/// # `Running` and `Lost` are two different facts, and used to be one
+///
+/// `Running` used to mean both "this dispatch is in flight" and "this dispatch
+/// was made and nobody is following it any more", because the second had
+/// nowhere else to go. They need opposite renderings: the first is a bot at
+/// work, the second is a session that has lost the thread, and drawing the
+/// second as the first shows a busy bot for work nobody is watching. That is
+/// the failure mode most worth surfacing, so it has its own name.
+///
+/// `Lost` claims nothing about the action itself. It does not say the action
+/// failed — no verdict arrived, which is exactly the point — and it does not
+/// say it will never finish; the game may well be finishing it right now. It
+/// says only that **this run will not learn the outcome**. Two things put an
+/// attempt here, and both are that same statement:
+///
+/// - The game answered and the answer carried no readable verdict
+///   ([`crate::ActuatorError::NoVerdict`]). `crates/core`'s output parser
+///   deliberately records no completion for an `action_completed` whose status
+///   it cannot read — an unreadable status is not evidence of success — and
+///   this is what that looks like from here.
+/// - The run ended without an outcome for a dispatch it had made: the future
+///   was dropped, the task aborted, the process went down. See
+///   [`ExecutionLog::lose_track_of_outstanding`], which `run_into` calls as it
+///   unwinds.
+///
+/// A `Lost` attempt is **not** finished: it never reached an outcome, so
+/// [`ExecutionLog::planned_duration`] stays `None` and a later
+/// [`ExecutionLog::start`] supersedes it as a retry, counting it exactly as it
+/// counts a retry of an interrupted `Running` attempt.
+///
+/// The four states that existed before this one keep their meanings and their
+/// order. `Lost` is added at the end so nothing that already reads this enum —
+/// the Lua `status` string, a serialized log — changes what it says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Status {
+    /// Never dispatched. The log has no attempt for it at all.
     Pending,
+    /// Dispatched, in flight, and somebody is still waiting for the reply.
     Running,
+    /// The game reported it done.
     Success,
+    /// The game reported a verdict, and the verdict was a failure — or the
+    /// dispatch never reached the game. Either way something is known.
     Failed,
+    /// Dispatched, and this run will not learn what became of it. See the type
+    /// docs: this is a statement about what the run knows, not about the
+    /// action.
+    Lost,
 }
 
 /// One execution attempt of one action — always the **latest** one.
@@ -49,15 +93,41 @@ pub enum Status {
 /// answer, would destroy exactly that signal while leaving every reading
 /// plausible.
 ///
-/// # An absent tick is a value
+/// # An absent tick is a value, and it means exactly one thing
 ///
 /// `dispatched_tick` and `replied_tick` are `Option` and stay `None` whenever
-/// the game did not tell us: an action that failed before it was dispatched, a
-/// reply whose stamp could not be parsed, a tick too large for [`Ticks`], or an
-/// actuator with no clock at all. `None` is never to be replaced with zero, with
-/// the planned tick, or with the previous action's tick. A consumer must be able
-/// to say "no reply tick for this action"; a fabricated number is worse than a
-/// missing one, because it will be built on.
+/// **the game did not tell us**: a command that failed before it ever reached
+/// the game, a reply whose stamp could not be parsed, a tick too large for
+/// [`Ticks`], or an actuator with no clock at all. `None` is never to be
+/// replaced with zero, with the planned tick, or with the previous action's
+/// tick. A consumer must be able to say "no reply tick for this action"; a
+/// fabricated number is worse than a missing one, because it will be built on.
+///
+/// That list used to have one more entry, and it did not belong: **any**
+/// failure. The actuator's error carried no ticks, so a dispatch the game had
+/// stamped and then refused arrived here empty — absent by *plumbing* rather
+/// than by fact, a `None` that meant "we were handed a measurement and dropped
+/// it" sitting beside a `None` that meant "there was nothing to measure", with
+/// no way for a reader to tell which was which. [`crate::ActuatorFailure`]
+/// carries the observation alongside the error, so a failed attempt now keeps
+/// whatever the game stamped before it went wrong, and an absent tick here is
+/// once again a statement about the game rather than about the wiring.
+///
+/// # `status` carries facts the ticks cannot
+///
+/// The ticks say when; `status` says what is known. Four attempts can hold
+/// identical (even identically absent) ticks and still be four different
+/// facts — succeeded unobserved, failed before dispatch, in flight right now,
+/// dispatched and never accounted for — and [`Status`] is the only thing that
+/// separates them.
+///
+/// The last of those is [`Status::Lost`], and it is the one worth naming here:
+/// an attempt whose outcome this run will never learn, because the game's
+/// answer carried no readable verdict or because the run ended still holding
+/// the dispatch. It is not `Running` (nothing is in flight) and not `Failed`
+/// (no verdict was ever given). Such an attempt has no `planned_end_tick`
+/// either, because it never finished — so `planned_duration()` is `None` for
+/// it, exactly as it is for one still in flight.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attempt {
     pub status: Status,
@@ -118,9 +188,13 @@ pub struct Attempt {
 ///   the actuator had no clock, or the reply's stamp did not parse. Nothing
 ///   went wrong and nothing was learned about when.
 /// - **Failed**: `status == Failed`, `error == Some(..)`. The walk did not
-///   happen, which is why there is nothing to have measured.
-/// - **Interrupted**: `status == Running`. The run died between dispatch and
-///   reply, so neither of the above is yet true.
+///   happen — or the game refused it after acknowledging it, in which case the
+///   dispatch tick it stamped *is* kept here (see [`Attempt`]).
+/// - **In flight**: `status == Running`. Dispatched, and somebody is still
+///   waiting for the reply.
+/// - **Lost**: `status == Lost`, `error == Some(..)`. Dispatched, and this run
+///   will never learn how it went — see [`Status::Lost`]. A bot drawn as
+///   walking when nobody is following it is the reason this is not `Running`.
 ///
 /// Collapsing these into "no ticks" would make a bot that never moved
 /// indistinguishable from one that moved unobserved.
@@ -360,6 +434,76 @@ impl ExecutionLog {
         a.error = Some(error);
     }
 
+    /// Records that this run will not learn `id`'s outcome.
+    ///
+    /// The writer for [`Status::Lost`]. `why` explains **why the outcome is
+    /// unknown** — it is not a verdict, and it is deliberately kept in the same
+    /// `error` field a failure uses, because a reader asking "what does this
+    /// log say about this attempt?" should not have to know which of two
+    /// message fields to look in. `status` is what distinguishes them, and it
+    /// is the only thing that can.
+    ///
+    /// Unlike [`ExecutionLog::fail`] this writes **no** `planned_end_tick`.
+    /// That field means "the tick the schedule placed this attempt's end at,
+    /// once finished", and an attempt whose outcome nobody knows never
+    /// finished; filling it in would report a completed span for work that may
+    /// still be running. The consequence is deliberate: a lost attempt is not
+    /// `has_finished`, so a reply that somehow does arrive can still be
+    /// recorded, and a retry supersedes it in [`ExecutionLog::start`] exactly
+    /// as it supersedes an interrupted one.
+    ///
+    /// Only an attempt that exists is marked. Losing track of a dispatch that
+    /// was never made would be a record of nothing — see
+    /// [`ExecutionLog::observe`], same rule.
+    pub fn lose_track(&mut self, id: ActionId, why: &str) {
+        if let Some(a) = self.attempts.get_mut(&id) {
+            a.status = Status::Lost;
+            a.error = Some(why.to_string());
+        }
+    }
+
+    /// [`ExecutionLog::lose_track`] for a walk.
+    pub fn lose_track_walk(&mut self, bot: BotId, step_index: usize, why: &str) {
+        if let Some(w) = self.walk_mut(bot, step_index) {
+            w.status = Status::Lost;
+            w.error = Some(why.to_string());
+        }
+    }
+
+    /// Marks everything still in flight as [`Status::Lost`], returning how many
+    /// entries that was.
+    ///
+    /// For the moment a session stops following this log: the run's future was
+    /// dropped, its task aborted, the process is going down. `run_into` calls
+    /// it as it unwinds, so a run that is abandoned mid-dispatch stops
+    /// reporting a bot as busy — but it is public because the caller that
+    /// abandons a run is often the only one that knows it has.
+    ///
+    /// Only `Running` entries are touched. An attempt with an outcome keeps it
+    /// (which numbers survive must not depend on when somebody gave up), and an
+    /// action nothing ever dispatched stays `Pending` — it was never being
+    /// followed, so there is nothing to lose track of.
+    ///
+    /// Calling it twice is harmless: the second call finds nothing running.
+    pub fn lose_track_of_outstanding(&mut self, why: &str) -> usize {
+        let mut lost = 0;
+        for a in self.attempts.values_mut() {
+            if a.status == Status::Running {
+                a.status = Status::Lost;
+                a.error = Some(why.to_string());
+                lost += 1;
+            }
+        }
+        for w in self.walks.values_mut().flat_map(BTreeMap::values_mut) {
+            if w.status == Status::Running {
+                w.status = Status::Lost;
+                w.error = Some(why.to_string());
+                lost += 1;
+            }
+        }
+        lost
+    }
+
     /// Ticks the schedule allotted this attempt, once finished.
     ///
     /// **Not a measurement.** Both endpoints come from the schedule, so this is
@@ -455,9 +599,12 @@ impl ExecutionLog {
 
     /// Marks a dispatched walk as failed, keeping the actuator's message.
     ///
-    /// The ticks are left exactly as they are — `None` unless the game had
-    /// already stamped a dispatch. `ActuatorError` carries no tick, and the
-    /// planned span sitting in the same record is not a substitute for one.
+    /// The ticks are left exactly as they are: whatever the game stamped
+    /// reached them through [`ExecutionLog::observe_walk`], which the run
+    /// calls on the failure path too now that
+    /// [`crate::ActuatorFailure`] carries an observation. This writer adds
+    /// nothing — and emphatically not the planned span sitting in the same
+    /// record, which is not a substitute for a measurement.
     pub fn fail_walk(&mut self, bot: BotId, step_index: usize, error: String) {
         if let Some(w) = self.walk_mut(bot, step_index) {
             w.status = Status::Failed;
@@ -816,6 +963,124 @@ mod tests {
         }
         assert_eq!(log.attempts(id(1)), 3);
         assert_eq!(log.status(id(1)), Status::Running);
+    }
+
+    // ------------------------------------------------- outstanding vs running
+
+    #[test]
+    fn an_attempt_whose_completion_could_not_be_read_is_lost_not_running() {
+        // The case commit 0cb7636f created: the game answered, the answer
+        // carried a status the parser could not read, and no completion was
+        // recorded. `Running` would say "this bot is busy"; it is not, and
+        // nobody is going to find out what happened.
+        let mut log = ExecutionLog::default();
+        log.start(id(1), 100);
+        log.observe(id(1), ActionTicks::new(Some(70_000), None));
+        log.lose_track(id(1), "the game reported a status this run could not read");
+
+        assert_eq!(log.status(id(1)), Status::Lost);
+        assert_ne!(
+            log.status(id(1)),
+            Status::Running,
+            "an action nobody is following is not an action in progress"
+        );
+        assert_ne!(
+            log.status(id(1)),
+            Status::Failed,
+            "losing the thread is not a verdict"
+        );
+        assert!(
+            log.failed().is_empty(),
+            "recovery escalates on failures; a lost action has not failed"
+        );
+        assert_eq!(
+            log.attempt(id(1)).and_then(|a| a.dispatched_tick),
+            Some(70_000),
+            "the tick the game did stamp survives losing the thread"
+        );
+        assert_eq!(
+            log.attempt(id(1)).and_then(|a| a.error.as_deref()),
+            Some("the game reported a status this run could not read"),
+            "why the outcome is unknown, not a verdict"
+        );
+    }
+
+    #[test]
+    fn an_attempt_still_in_flight_is_running_not_lost() {
+        // The other half of the distinction. If this and the test above cannot
+        // fail independently, the two facts are still collapsed into one.
+        let mut log = ExecutionLog::default();
+        log.start(id(1), 100);
+        assert_eq!(log.status(id(1)), Status::Running);
+        assert_ne!(
+            log.status(id(1)),
+            Status::Lost,
+            "a dispatch still in flight has not been lost track of"
+        );
+        assert_eq!(log.planned_duration(id(1)), None, "and has not finished");
+    }
+
+    #[test]
+    fn losing_track_of_what_is_outstanding_touches_only_what_was_outstanding() {
+        // What a session that stops following a run does. A finished attempt
+        // has an outcome and keeps it; an action nothing ever dispatched was
+        // never being followed in the first place.
+        let mut log = ExecutionLog::default();
+        log.start(id(1), 0);
+        log.succeed(id(1), 10);
+        log.start(id(2), 0);
+        log.fail(id(2), 10, "no ore".to_string());
+        log.start(id(3), 0); // still outstanding
+        dispatch_walk(&mut log, bot(0), 0);
+        log.succeed_walk(bot(0), 0);
+        dispatch_walk(&mut log, bot(0), 1); // still outstanding
+
+        let lost = log.lose_track_of_outstanding("the run ended before the game answered");
+
+        assert_eq!(lost, 2, "one action and one walk were outstanding");
+        assert_eq!(log.status(id(1)), Status::Success);
+        assert_eq!(log.status(id(2)), Status::Failed);
+        assert_eq!(log.status(id(3)), Status::Lost);
+        assert_eq!(log.status(id(4)), Status::Pending, "never dispatched");
+        assert_eq!(log.walk(bot(0), 0).expect("walk").status, Status::Success);
+        assert_eq!(log.walk(bot(0), 1).expect("walk").status, Status::Lost);
+        assert_eq!(
+            log.attempt(id(2)).and_then(|a| a.error.as_deref()),
+            Some("no ore"),
+            "a recorded verdict is not overwritten by the sweep"
+        );
+    }
+
+    #[test]
+    fn picking_up_a_lost_attempt_again_counts_as_a_retry() {
+        // Exactly the `Running` rule (D5): an attempt with no verdict is the
+        // case a retry budget is most for, and a flat count could never trip
+        // one.
+        let mut log = ExecutionLog::default();
+        log.start(id(1), 0);
+        log.lose_track(id(1), "the run ended before the game answered");
+        log.start(id(1), 500);
+        assert_eq!(log.status(id(1)), Status::Running, "reopened");
+        assert_eq!(log.attempts(id(1)), 2);
+        assert_eq!(
+            log.attempt(id(1)).and_then(|a| a.error.as_deref()),
+            None,
+            "the superseded attempt's note does not linger on the retry"
+        );
+    }
+
+    #[test]
+    fn a_lost_walk_is_distinguishable_from_a_failed_one_and_from_a_running_one() {
+        let mut log = ExecutionLog::default();
+        dispatch_walk(&mut log, bot(0), 0);
+        log.fail_walk(bot(0), 0, "path blocked".to_string());
+        dispatch_walk(&mut log, bot(1), 0);
+        log.lose_track_walk(bot(1), 0, "the run ended before the game answered");
+        dispatch_walk(&mut log, bot(2), 0);
+
+        assert_eq!(log.walk(bot(0), 0).expect("walk").status, Status::Failed);
+        assert_eq!(log.walk(bot(1), 0).expect("walk").status, Status::Lost);
+        assert_eq!(log.walk(bot(2), 0).expect("walk").status, Status::Running);
     }
 
     // ------------------------------------------------------------------ walks

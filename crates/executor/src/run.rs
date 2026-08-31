@@ -5,7 +5,7 @@
 //! 100 ms poll loop (`crates/core/src/plan/execute.rs:79`) with a completion
 //! signal per action.
 
-use crate::actuator::{ActionTicks, Actuator, ActuatorError};
+use crate::actuator::{ActionTicks, Actuator, ActuatorError, ActuatorFailure};
 use crate::log::{ExecutionLog, Status};
 use factorio_bot_core::petgraph::algo::toposort;
 use factorio_bot_core::petgraph::graph::{DiGraph, NodeIndex};
@@ -107,6 +107,16 @@ pub async fn run_into(
         }
     }
 
+    // Everything below this line is the dispatching part of the run, and it is
+    // the part that can stop without finishing: this future may be dropped
+    // (a cancelled script, an aborted task, a runtime shutting down) or a bot's
+    // future may panic and unwind through `join_all`. Either way the log is
+    // left holding dispatches nobody will ever hear back about, and reporting
+    // those as `Running` shows busy bots to a session that has lost the thread.
+    // The guard's `Drop` runs on all three exits — normal, dropped, unwinding —
+    // and on the normal one it finds nothing outstanding and does nothing.
+    let _outstanding = LoseTrackOnDrop(progress);
+
     // BTreeSet, so the future order is a function of the schedule alone, not of
     // task completion timing.
     let bots: BTreeSet<BotId> = steps.iter().map(|s| s.bot).collect();
@@ -116,6 +126,31 @@ pub async fn run_into(
     )
     .await;
     Ok(())
+}
+
+/// Why an attempt outstanding when the run stopped is marked
+/// [`Status::Lost`].
+///
+/// Phrased for a reader of the log, who may be looking at it long after the
+/// session that wrote it is gone.
+const RUN_ENDED_OUTSTANDING: &str = "the run ended before the game reported an outcome";
+
+/// Turns whatever is still in flight into [`Status::Lost`] when the run stops
+/// driving it, however it stops.
+///
+/// A guard rather than a line after `join_all` because the two exits that
+/// matter never reach such a line: a dropped future stops being polled, and a
+/// panicking bot unwinds straight through `join_all`. Both are exactly the
+/// cases where the log is left claiming a bot is busy.
+struct LoseTrackOnDrop<'a>(&'a Mutex<ExecutionLog>);
+
+impl Drop for LoseTrackOnDrop<'_> {
+    fn drop(&mut self) {
+        // No `.await` here and none possible: `lose_track_of_outstanding` is a
+        // couple of map walks, so taking the log guard in `Drop` is safe even
+        // while unwinding (`lock` recovers a poisoned mutex).
+        lock(self.0).lose_track_of_outstanding(RUN_ENDED_OUTSTANDING);
+    }
 }
 
 fn act_id(step: &ScheduledStep) -> Option<ActionId> {
@@ -252,13 +287,28 @@ async fn run_bot_signalled(
                         log.observe_walk(bot, i, ticks);
                         log.succeed_walk(bot, i);
                     }
-                    Err(e) => {
-                        // No ticks: `ActuatorError` carries none, and the
-                        // planned span in the same record is not a substitute.
-                        // The entry still exists and is `Failed`, which is what
-                        // keeps a walk that did not happen distinguishable from
-                        // one that happened unobserved.
-                        lock(log).fail_walk(bot, i, e.to_string());
+                    Err(f) => {
+                        // Whatever the game stamped before this went wrong is
+                        // recorded first, exactly as on the success path: a
+                        // walk the game acknowledged and then refused really
+                        // was dispatched at a tick, and dropping that number
+                        // would make it indistinguishable from a walk the game
+                        // never saw.
+                        //
+                        // The entry's `status` is then what keeps a walk that
+                        // did not happen distinguishable from one that happened
+                        // unobserved — and from one whose outcome the game
+                        // never reported, which is neither.
+                        {
+                            let mut log = lock(log);
+                            log.observe_walk(bot, i, f.ticks);
+                            match &f.error {
+                                ActuatorError::NoVerdict(_) => {
+                                    log.lose_track_walk(bot, i, &f.to_string());
+                                }
+                                _ => log.fail_walk(bot, i, f.to_string()),
+                            }
+                        }
                         abandon_rest(&mine[i..], senders);
                         return;
                     }
@@ -292,13 +342,41 @@ async fn run_bot_signalled(
                             let _ = tx.send(Status::Success);
                         }
                     }
-                    Err(e) => {
-                        // No ticks to record. `ActuatorError` carries none, and
-                        // inventing one here — the planned tick, or the tick of
-                        // whatever ran last — is exactly what these fields must
-                        // never hold. They stay `None`.
-                        lock(log).fail(*action, step.end, e.to_string());
-                        abandon_rest(&mine[i..], senders);
+                    Err(f) => {
+                        // The observation first, same order as the success
+                        // path and for the same reason. `f.ticks` is what the
+                        // game had stamped before it went wrong — often
+                        // nothing, sometimes a real dispatch tick — and it is
+                        // the only number allowed anywhere near these fields.
+                        // What is *not* allowed is the planned tick sitting in
+                        // the same record.
+                        //
+                        // A verdict of failure and no verdict at all are then
+                        // different facts and are recorded as different states:
+                        // `Failed` says the game judged this and the judgement
+                        // was no, `Lost` says nobody will ever know. Recovery
+                        // counts the first towards its escalation budget and
+                        // not the second, which is the whole reason the two
+                        // must not be collapsed here.
+                        let lost = matches!(f.error, ActuatorError::NoVerdict(_));
+                        {
+                            let mut log = lock(log);
+                            log.observe(*action, f.ticks);
+                            if lost {
+                                log.lose_track(*action, &f.to_string());
+                            } else {
+                                log.fail(*action, step.end, f.to_string());
+                            }
+                        }
+                        // The waiters are released either way — a dependent
+                        // cannot run on a precondition nobody can vouch for —
+                        // but they are told *which* it was. `abandon_rest`
+                        // starts one past this step, because this step's own
+                        // signal has just been published with the truth.
+                        if let Some(tx) = senders.get(action) {
+                            let _ = tx.send(if lost { Status::Lost } else { Status::Failed });
+                        }
+                        abandon_rest(&mine[i + 1..], senders);
                         return;
                     }
                 }
@@ -346,7 +424,11 @@ async fn await_preds(
             let status = *rx.borrow_and_update();
             match status {
                 Status::Success => break,
-                Status::Failed => return PredOutcome::Abandoned,
+                // A predecessor whose outcome nobody knows is no basis for
+                // dispatching what depends on it: `Lost` is not `Failed`, but
+                // it is just as much a reason not to proceed, because the
+                // precondition this action needs is unvouched for either way.
+                Status::Failed | Status::Lost => return PredOutcome::Abandoned,
                 Status::Pending | Status::Running => {}
             }
             if rx.changed().await.is_err() {
@@ -392,7 +474,7 @@ async fn perform<A: Actuator + ?Sized>(
     act: &A,
     bot: BotId,
     kind: &ActionKind,
-) -> Result<ActionTicks, ActuatorError> {
+) -> Result<ActionTicks, ActuatorFailure> {
     match kind {
         ActionKind::Mine { pos, item, count } => {
             act.mine(bot, item.as_str(), pos.clone(), *count).await
@@ -438,13 +520,13 @@ mod tests {
         pub Act {}
         #[async_trait::async_trait]
         impl Actuator for Act {
-            async fn walk(&self, bot: BotId, to: Position) -> Result<ActionTicks, ActuatorError>;
-            async fn mine(&self, bot: BotId, item: &str, at: Position, count: u32) -> Result<ActionTicks, ActuatorError>;
-            async fn craft(&self, bot: BotId, recipe: &str, count: u32) -> Result<ActionTicks, ActuatorError>;
-            async fn place(&self, bot: BotId, item: &str, at: Position, direction: u8) -> Result<ActionTicks, ActuatorError>;
-            async fn insert(&self, bot: BotId, entity: &str, at: Position, slot: InventorySlot, item: &str, count: u32) -> Result<ActionTicks, ActuatorError>;
-            async fn remove(&self, bot: BotId, entity: &str, at: Position, slot: InventorySlot, item: &str, count: u32) -> Result<ActionTicks, ActuatorError>;
-            async fn research(&self, tech: &str) -> Result<ActionTicks, ActuatorError>;
+            async fn walk(&self, bot: BotId, to: Position) -> Result<ActionTicks, ActuatorFailure>;
+            async fn mine(&self, bot: BotId, item: &str, at: Position, count: u32) -> Result<ActionTicks, ActuatorFailure>;
+            async fn craft(&self, bot: BotId, recipe: &str, count: u32) -> Result<ActionTicks, ActuatorFailure>;
+            async fn place(&self, bot: BotId, item: &str, at: Position, direction: u8) -> Result<ActionTicks, ActuatorFailure>;
+            async fn insert(&self, bot: BotId, entity: &str, at: Position, slot: InventorySlot, item: &str, count: u32) -> Result<ActionTicks, ActuatorFailure>;
+            async fn remove(&self, bot: BotId, entity: &str, at: Position, slot: InventorySlot, item: &str, count: u32) -> Result<ActionTicks, ActuatorFailure>;
+            async fn research(&self, tech: &str) -> Result<ActionTicks, ActuatorFailure>;
         }
     }
 
@@ -680,11 +762,11 @@ mod tests {
     /// a plan value without knowing the schedule.
     #[async_trait::async_trait]
     impl Actuator for RecordingAct {
-        async fn walk(&self, bot: BotId, _to: Position) -> Result<ActionTicks, ActuatorError> {
+        async fn walk(&self, bot: BotId, _to: Position) -> Result<ActionTicks, ActuatorFailure> {
             self.record(Dispatch::Walk(bot));
             Self::delay(self.script.walk_delay_ms.get(&bot).copied().unwrap_or(0)).await;
             if self.script.fail_walk.contains(&bot) {
-                return Err(ActuatorError::Rejected("blocked".into()));
+                return Err(ActuatorError::Rejected("blocked".into()).into());
             }
             Ok(some_ticks())
         }
@@ -695,12 +777,12 @@ mod tests {
             item: &str,
             _at: Position,
             _count: u32,
-        ) -> Result<ActionTicks, ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorFailure> {
             self.record(Dispatch::MineStart(item.to_string()));
             Self::delay(self.script.mine_delay_ms.get(item).copied().unwrap_or(0)).await;
             self.record(Dispatch::MineEnd(item.to_string()));
             if self.script.fail_mine.contains(item) {
-                return Err(ActuatorError::Rejected("no ore".into()));
+                return Err(ActuatorError::Rejected("no ore".into()).into());
             }
             Ok(some_ticks())
         }
@@ -710,7 +792,7 @@ mod tests {
             _bot: BotId,
             _recipe: &str,
             _count: u32,
-        ) -> Result<ActionTicks, ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorFailure> {
             Ok(some_ticks())
         }
 
@@ -720,7 +802,7 @@ mod tests {
             _item: &str,
             _at: Position,
             _direction: u8,
-        ) -> Result<ActionTicks, ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorFailure> {
             Ok(some_ticks())
         }
 
@@ -732,7 +814,7 @@ mod tests {
             _slot: InventorySlot,
             _item: &str,
             _count: u32,
-        ) -> Result<ActionTicks, ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorFailure> {
             Ok(some_ticks())
         }
 
@@ -744,11 +826,11 @@ mod tests {
             _slot: InventorySlot,
             _item: &str,
             _count: u32,
-        ) -> Result<ActionTicks, ActuatorError> {
+        ) -> Result<ActionTicks, ActuatorFailure> {
             Ok(some_ticks())
         }
 
-        async fn research(&self, _tech: &str) -> Result<ActionTicks, ActuatorError> {
+        async fn research(&self, _tech: &str) -> Result<ActionTicks, ActuatorFailure> {
             Ok(some_ticks())
         }
 
@@ -834,15 +916,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_dispatch_keeps_the_tick_the_game_stamped_on_it() {
+        // The game received the command, stamped the tick it received it at,
+        // and only then reported that it had gone wrong. That tick is a
+        // measurement we were handed. It used to be dropped on the floor
+        // because the error had nowhere to carry it, which made this `None`
+        // indistinguishable from the `None` of a failure that happened before
+        // the game ever saw the command.
+        let mut act = MockAct::new();
+        act.expect_walk().returning(|_, _| Ok(some_ticks()));
+        act.expect_mine().returning(|_, _, _, _| {
+            Err(ActuatorError::Rejected("no ore here".into())
+                .at(ActionTicks::new(Some(900_101), Some(900_140))))
+        });
+
+        let (net, sched) = walk_then_mine_fixture();
+        let log = run(&act, &sched, &net).await.expect("the run should start");
+
+        let a = log
+            .attempt(mine_action_id())
+            .expect("the mine was attempted");
+        assert_eq!(a.status, Status::Failed);
+        assert_eq!(
+            a.dispatched_tick,
+            Some(900_101),
+            "the game stamped this; failing afterwards is no reason to lose it"
+        );
+        assert_eq!(a.replied_tick, Some(900_140));
+        assert_eq!(log.observed_duration(mine_action_id()), Some(39));
+        assert_ne!(
+            a.dispatched_tick,
+            Some(a.planned_start_tick),
+            "kept from the game, not borrowed from the schedule"
+        );
+        assert_eq!(
+            a.error.as_deref(),
+            Some("game rejected the command: no ore here"),
+            "and the failure still says what it said"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_walk_keeps_the_tick_the_game_stamped_on_it() {
+        // The same rule for the step that has no action id.
+        let mut act = MockAct::new();
+        act.expect_walk().returning(|_, _| {
+            Err(ActuatorError::Rejected("path blocked".into())
+                .at(ActionTicks::new(Some(900_007), None)))
+        });
+
+        let (net, sched) = walk_then_mine_fixture();
+        let log = run(&act, &sched, &net).await.expect("the run should start");
+
+        let w = log.walk(BotId(0), 0).expect("the walk was dispatched");
+        assert_eq!(w.status, Status::Failed);
+        assert_eq!(w.dispatched_tick, Some(900_007));
+        assert_eq!(
+            w.replied_tick, None,
+            "the game never reported an outcome, and nothing may invent one"
+        );
+        assert_eq!(log.observed_walk_duration(BotId(0), 0), None);
+        assert_ne!(w.dispatched_tick, Some(w.planned_start_tick));
+    }
+
+    #[tokio::test]
     async fn a_failure_leaves_the_ticks_absent_rather_than_borrowing_the_plans() {
-        // The actuator's error carries no ticks, so there is nothing to
-        // record. The planned numbers are sitting right there in the same
-        // struct; the test exists because reaching for them is the tempting
-        // wrong thing to do.
+        // The other direction, and the reason the fix is not just "record a
+        // tick on the failure path". Nothing was stamped here — the failure
+        // happened before the game saw anything — so the ticks are absent as a
+        // *fact*, and must stay absent. The planned numbers are sitting right
+        // there in the same struct; the test exists because reaching for them
+        // is the tempting wrong thing to do.
         let mut act = MockAct::new();
         act.expect_walk().returning(|_, _| Ok(some_ticks()));
         act.expect_mine()
-            .returning(|_, _, _, _| Err(ActuatorError::Rejected("out of reach".into())));
+            .returning(|_, _, _, _| Err(ActuatorError::Rejected("out of reach".into()).into()));
 
         let (net, sched) = walk_then_mine_fixture();
         let log = run(&act, &sched, &net).await.expect("the run should start");
@@ -860,11 +1008,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_action_the_game_gave_no_verdict_for_is_lost_rather_than_failed() {
+        // The executor-visible shape of what commit 0cb7636f left behind: the
+        // game answered and the answer could not be read, so there is no
+        // verdict to record. `Failed` would claim one — and recovery counts
+        // failures towards escalation — while `Running` would draw a bot that
+        // is busy. Neither is true; the run lost the thread.
+        let mut act = MockAct::new();
+        act.expect_walk().returning(|_, _| Ok(some_ticks()));
+        act.expect_mine().returning(|_, _, _, _| {
+            Err(ActuatorError::NoVerdict("unreadable action_completed status".into()).into())
+        });
+        // The bot still stops: an outcome nobody knows is no basis for running
+        // the step that depended on it.
+        act.expect_craft().times(0);
+
+        let (net, sched) = walk_then_mine_fixture();
+        let log = run(&act, &sched, &net).await.expect("the run should start");
+
+        assert_eq!(log.status(mine_action_id()), Status::Lost);
+        assert_ne!(
+            log.status(mine_action_id()),
+            Status::Running,
+            "the run is over; nothing is in flight"
+        );
+        assert!(
+            log.failed().is_empty(),
+            "no verdict arrived, so nothing may be reported as having failed"
+        );
+        assert_eq!(
+            log.status(craft_action_id()),
+            Status::Pending,
+            "the rest of the bot's slice was never dispatched"
+        );
+    }
+
+    #[tokio::test]
     async fn a_failed_step_is_logged_and_stops_that_bot() {
         let mut act = MockAct::new();
         act.expect_walk().returning(|_, _| Ok(some_ticks()));
         act.expect_mine()
-            .returning(|_, _, _, _| Err(ActuatorError::Rejected("out of reach".into())));
+            .returning(|_, _, _, _| Err(ActuatorError::Rejected("out of reach".into()).into()));
         // The craft step follows the failing mine in the schedule. If the run
         // loop pressed on after the failure instead of stopping, this is what
         // it would dispatch next.
@@ -936,7 +1120,7 @@ mod tests {
         let mut act = MockAct::new();
         act.expect_walk()
             .times(1)
-            .returning(|_, _| Err(ActuatorError::Rejected("blocked".into())));
+            .returning(|_, _| Err(ActuatorError::Rejected("blocked".into()).into()));
         act.expect_mine().times(0);
 
         let (net, sched) = walk_then_mine_fixture();
@@ -1374,6 +1558,46 @@ mod tests {
             .await
             .expect("the run should have started");
         assert_eq!(lock(&progress).status(second_action_id()), Status::Success);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_run_dropped_mid_dispatch_stops_reporting_its_actions_as_running() {
+        // The same fixture as `progress_is_readable_while_the_run_is_still_going`,
+        // and deliberately so: the two differ only in whether anybody is still
+        // driving the run. While it is driven, the action is `Running` and that
+        // is true. Once the future is dropped — a cancelled script, an aborted
+        // task, a process going down — nothing will ever poll for that reply
+        // again, and leaving it `Running` draws a bot that looks busy for a
+        // session that has lost the thread.
+        let mut script = Script::default();
+        script.mine_delay_ms.insert("copper-ore".to_string(), 1_000);
+        let act = RecordingAct::new(script);
+        let (net, sched) = cross_bot_fixture(0);
+
+        let progress = Mutex::new(ExecutionLog::default());
+        {
+            let running = run_into(&act, &sched, &net, &progress);
+            tokio::pin!(running);
+            let stalled = tokio::time::timeout(Duration::from_millis(500), &mut running).await;
+            assert!(stalled.is_err(), "the run should still be in progress");
+            assert_eq!(
+                lock(&progress).status(second_action_id()),
+                Status::Running,
+                "while the run is alive, this really is in flight"
+            );
+        }
+
+        let seen = lock(&progress);
+        assert_eq!(
+            seen.status(second_action_id()),
+            Status::Lost,
+            "the run was dropped between dispatch and reply"
+        );
+        assert_eq!(
+            seen.status(first_action_id()),
+            Status::Success,
+            "an action that already had an outcome keeps it"
+        );
     }
 
     // ------------------------------------------------------ circular waits

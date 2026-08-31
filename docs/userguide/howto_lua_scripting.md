@@ -28,8 +28,13 @@ two calls makes that mismatch unrepresentable.
 A `RunValue` is what `goal.start` returns: poll it with `run:progress()` for a
 live snapshot, or block with `run:wait()`, which returns the same observation
 table `goal.run` returns directly: `{ done, pending, running, success, failed,
-first_error, actions, failures }`. A `PlanValue` may be taken for a run only
-once — a second `goal.start`/`goal.run` on the same plan raises.
+lost, first_error, actions, failures }`. A `PlanValue` may be taken for a run
+only once — a second `goal.start`/`goal.run` on the same plan raises.
+
+`lost` is the count of actions that were dispatched and never accounted for —
+the game answered with nothing readable, or the run ended still waiting. It is
+kept apart from `running` on purpose: an action nobody is following any more
+must not be drawn as a bot at work.
 
 `goal.start` is non-blocking, so the bots keep working while the script does
 something else. That is about the call, not the script: a run still going when

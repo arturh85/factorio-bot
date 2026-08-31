@@ -1,4 +1,4 @@
-use crate::actuator::{ActionTicks, Actuator, ActuatorError};
+use crate::actuator::{ActionTicks, Actuator, ActuatorError, ActuatorFailure};
 use async_trait::async_trait;
 use factorio_bot_core::factorio::rcon::FactorioRcon;
 use factorio_bot_core::factorio::world::FactorioWorld;
@@ -185,14 +185,40 @@ impl RconActuator {
     }
 }
 
+/// # What this implementation cannot yet report, and why
+///
+/// Two facts the [`Actuator`] contract now has room for are **not** available
+/// here, and both are lost inside `crates/core` before this crate is reached.
+/// They are stated rather than approximated, because guessing either one would
+/// be exactly the fabrication the contract exists to prevent.
+///
+/// - **A dispatch tick on the failure path.** `FactorioRcon`'s `*_timed`
+///   methods are shaped `let dispatched = action_start_…().await?; let replied
+///   = sleep_for_action_result(…).await?;`, so when the *second* call fails the
+///   first call's tick — a real stamp the game produced — is dropped by the
+///   `?`. Every failure therefore arrives here with nothing attached and is
+///   reported as [`ActionTicks::UNKNOWN`]. Making it available needs those
+///   methods to carry the dispatch tick out on their error path; until then
+///   `UNKNOWN` is the honest answer this crate can give, and
+///   [`ActuatorFailure`] is where the tick will go the moment core surfaces it.
+/// - **[`ActuatorError::NoVerdict`].** A `sleep_for_action_result` timeout is
+///   the executor-visible shape of an `action_completed` whose status the
+///   parser could not read, and it is genuinely "no verdict". But the same
+///   `RconTimeout` also comes back from a *path request* and from the inner
+///   `move_player` a mine may make first — failures where nothing was
+///   dispatched for this action at all. Classifying by error type alone would
+///   report an action as `Lost` ("it may have happened") when the game never
+///   saw it, which overclaims in the direction that matters most. So every
+///   failure here stays `Rejected` until core distinguishes the two at the
+///   point where it knows the difference.
 #[async_trait]
 impl Actuator for RconActuator {
-    async fn walk(&self, bot: BotId, to: Position) -> Result<ActionTicks, ActuatorError> {
+    async fn walk(&self, bot: BotId, to: Position) -> Result<ActionTicks, ActuatorFailure> {
         let p = self.player(bot)?;
         self.rcon
             .move_player_timed(&self.world, p, &to, None)
             .await
-            .map_err(|e| ActuatorError::Rejected(e.to_string()))
+            .map_err(|e| ActuatorError::Rejected(e.to_string()).into())
     }
 
     async fn mine(
@@ -201,12 +227,12 @@ impl Actuator for RconActuator {
         item: &str,
         at: Position,
         count: u32,
-    ) -> Result<ActionTicks, ActuatorError> {
+    ) -> Result<ActionTicks, ActuatorFailure> {
         let p = self.player(bot)?;
         self.rcon
             .player_mine_timed(&self.world, p, item, &at, count)
             .await
-            .map_err(|e| ActuatorError::Rejected(e.to_string()))
+            .map_err(|e| ActuatorError::Rejected(e.to_string()).into())
     }
 
     async fn craft(
@@ -214,12 +240,12 @@ impl Actuator for RconActuator {
         bot: BotId,
         recipe: &str,
         count: u32,
-    ) -> Result<ActionTicks, ActuatorError> {
+    ) -> Result<ActionTicks, ActuatorFailure> {
         let p = self.player(bot)?;
         self.rcon
             .player_craft_timed(&self.world, p, recipe, count)
             .await
-            .map_err(|e| ActuatorError::Rejected(e.to_string()))
+            .map_err(|e| ActuatorError::Rejected(e.to_string()).into())
     }
 
     async fn place(
@@ -228,7 +254,7 @@ impl Actuator for RconActuator {
         item: &str,
         at: Position,
         direction: u8,
-    ) -> Result<ActionTicks, ActuatorError> {
+    ) -> Result<ActionTicks, ActuatorFailure> {
         let p = self.player(bot)?;
         // `place_entity` returns the created FactorioEntity; the executor does
         // not need it, because the plan already knows what it placed and the
@@ -238,7 +264,7 @@ impl Actuator for RconActuator {
             .place_entity_timed(p, item.to_string(), at, direction, &self.world)
             .await
             .map(|(_entity, ticks)| ticks)
-            .map_err(|e| ActuatorError::Rejected(e.to_string()))
+            .map_err(|e| ActuatorError::Rejected(e.to_string()).into())
     }
 
     async fn insert(
@@ -249,7 +275,7 @@ impl Actuator for RconActuator {
         slot: InventorySlot,
         item: &str,
         count: u32,
-    ) -> Result<ActionTicks, ActuatorError> {
+    ) -> Result<ActionTicks, ActuatorFailure> {
         let p = self.player(bot)?;
         let inv = self.defines.get(slot)?;
         self.rcon
@@ -263,7 +289,7 @@ impl Actuator for RconActuator {
                 &self.world,
             )
             .await
-            .map_err(|e| ActuatorError::Rejected(e.to_string()))
+            .map_err(|e| ActuatorError::Rejected(e.to_string()).into())
     }
 
     async fn remove(
@@ -274,7 +300,7 @@ impl Actuator for RconActuator {
         slot: InventorySlot,
         item: &str,
         count: u32,
-    ) -> Result<ActionTicks, ActuatorError> {
+    ) -> Result<ActionTicks, ActuatorFailure> {
         let p = self.player(bot)?;
         let inv = self.defines.get(slot)?;
         self.rcon
@@ -288,17 +314,17 @@ impl Actuator for RconActuator {
                 &self.world,
             )
             .await
-            .map_err(|e| ActuatorError::Rejected(e.to_string()))
+            .map_err(|e| ActuatorError::Rejected(e.to_string()).into())
     }
 
     /// Research is server-wide: `add_research` takes no player id, so `bot`
     /// does not appear here. Two bots researching the same technology is
     /// idempotent in Factorio.
-    async fn research(&self, tech: &str) -> Result<ActionTicks, ActuatorError> {
+    async fn research(&self, tech: &str) -> Result<ActionTicks, ActuatorFailure> {
         self.rcon
             .add_research_timed(tech)
             .await
-            .map_err(|e| ActuatorError::Rejected(e.to_string()))
+            .map_err(|e| ActuatorError::Rejected(e.to_string()).into())
     }
 }
 

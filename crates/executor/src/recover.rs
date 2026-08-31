@@ -44,10 +44,11 @@ use std::collections::BTreeSet;
 ///
 /// Both `Rescheduled` and `Reexpanded` may contain work the game has **already
 /// done**. `recover` retires an action only on `Status::Success`, so an action
-/// left `Running` — started, never finished, because the run died mid-dispatch
-/// — comes back in the proposal. `Running` means precisely that nobody knows
-/// whether it landed, so this is a genuine double-execution risk and not a
-/// theoretical one.
+/// left `Running` or `Lost` — started, never accounted for, because the run
+/// died or was dropped mid-dispatch — comes back in the proposal. Both mean
+/// precisely that nobody knows whether it landed (`Lost` says so in as many
+/// words), so this is a genuine double-execution risk and not a theoretical
+/// one.
 ///
 /// Three `ActionKind`s are **not idempotent** and will visibly double if
 /// re-run: `Insert` (the items go into the chest or furnace a second time),
@@ -61,8 +62,9 @@ use std::collections::BTreeSet;
 /// alternative — surfacing every interrupted action for a decision — needs a
 /// caller that does not exist yet. But it is a default, not a guarantee.
 /// **A caller that cannot tolerate double execution must inspect the log for
-/// `Status::Running` itself, before dispatching either variant's schedule, and
-/// decide per action whether to run it, skip it, or ask a human.** `recover`
+/// `Status::Running` and `Status::Lost` itself, before dispatching either
+/// variant's schedule, and decide per action whether to run it, skip it, or
+/// ask a human.** `recover`
 /// hands back a proposal; it cannot make that call, because deciding needs a
 /// look at the world and this function is pure.
 #[derive(Debug)]
@@ -143,10 +145,10 @@ pub enum Recovery {
 /// `Success` is the only status that retires an action. `Failed` comes back
 /// because retrying it is the entire point; `Pending` never ran at all.
 ///
-/// **`Running` comes back too, and that is the risky one.** An action is
-/// `Running` exactly when nobody knows whether it completed — the run died
-/// between dispatch and the reply — so putting it back in the plan may execute
-/// it a second time. For `Insert`, `Remove` and `Place` that is visible in the
+/// **`Running` and `Lost` come back too, and those are the risky ones.** Both
+/// mean nobody knows whether the action completed — the first because the reply
+/// has not arrived yet, the second because it never will — so putting either
+/// back in the plan may execute it a second time. For `Insert`, `Remove` and `Place` that is visible in the
 /// world: items inserted twice, a slot emptied twice, a second entity on the
 /// tile. `Mine`, `Craft` and `Research` merely over-produce.
 ///
@@ -156,8 +158,8 @@ pub enum Recovery {
 /// and the plan's own preconditions will catch the duplicate before the
 /// omission. This is a judgement about the common case, **not** a safety
 /// property, so it is stated rather than assumed: a caller that cannot tolerate
-/// double execution must filter `Status::Running` itself before dispatching
-/// what `recover` proposed. See the note on `Recovery`.
+/// double execution must filter `Status::Running` and `Status::Lost`
+/// itself before dispatching what `recover` proposed. See the note on `Recovery`.
 fn unfinished(net: &ActionNetwork, log: &ExecutionLog) -> BTreeSet<ActionId> {
     net.actions()
         .map(|a| a.id)
@@ -190,8 +192,10 @@ pub const MAX_TIER_ONE_ATTEMPTS: u32 = 3;
 /// is proposed forever — the caller cannot break that from outside, because
 /// every proposal it gets back is the same valid plan.
 ///
-/// Only `Failed` actions count. An interrupted (`Running`) action has no
-/// verdict yet, and a `Pending` one has not been tried.
+/// Only `Failed` actions count. An interrupted (`Running`) or unaccounted-for
+/// (`Lost`) action has no verdict to escalate on — escalating on one would
+/// spend the budget on an outcome nobody ever reported — and a `Pending` one
+/// has not been tried.
 fn exhausted_tier_one(net: &ActionNetwork, log: &ExecutionLog) -> bool {
     net.actions()
         .map(|a| a.id)
@@ -522,7 +526,7 @@ mod tests {
             &self,
             _: BotId,
             _: Position,
-        ) -> Result<crate::actuator::ActionTicks, crate::ActuatorError> {
+        ) -> Result<crate::actuator::ActionTicks, crate::ActuatorFailure> {
             Ok(crate::actuator::ActionTicks::UNKNOWN)
         }
         async fn mine(
@@ -531,7 +535,7 @@ mod tests {
             _item: &str,
             _at: Position,
             count: u32,
-        ) -> Result<crate::actuator::ActionTicks, crate::ActuatorError> {
+        ) -> Result<crate::actuator::ActionTicks, crate::ActuatorFailure> {
             self.mined.lock().unwrap().push((bot, count));
             Ok(crate::actuator::ActionTicks::UNKNOWN)
         }
@@ -540,7 +544,7 @@ mod tests {
             _: BotId,
             _: &str,
             _: u32,
-        ) -> Result<crate::actuator::ActionTicks, crate::ActuatorError> {
+        ) -> Result<crate::actuator::ActionTicks, crate::ActuatorFailure> {
             Ok(crate::actuator::ActionTicks::UNKNOWN)
         }
         async fn place(
@@ -549,7 +553,7 @@ mod tests {
             _: &str,
             _: Position,
             _: u8,
-        ) -> Result<crate::actuator::ActionTicks, crate::ActuatorError> {
+        ) -> Result<crate::actuator::ActionTicks, crate::ActuatorFailure> {
             Ok(crate::actuator::ActionTicks::UNKNOWN)
         }
         async fn insert(
@@ -560,7 +564,7 @@ mod tests {
             _: InventorySlot,
             _: &str,
             _: u32,
-        ) -> Result<crate::actuator::ActionTicks, crate::ActuatorError> {
+        ) -> Result<crate::actuator::ActionTicks, crate::ActuatorFailure> {
             Ok(crate::actuator::ActionTicks::UNKNOWN)
         }
         async fn remove(
@@ -571,13 +575,13 @@ mod tests {
             _: InventorySlot,
             _: &str,
             _: u32,
-        ) -> Result<crate::actuator::ActionTicks, crate::ActuatorError> {
+        ) -> Result<crate::actuator::ActionTicks, crate::ActuatorFailure> {
             Ok(crate::actuator::ActionTicks::UNKNOWN)
         }
         async fn research(
             &self,
             _: &str,
-        ) -> Result<crate::actuator::ActionTicks, crate::ActuatorError> {
+        ) -> Result<crate::actuator::ActionTicks, crate::ActuatorFailure> {
             Ok(crate::actuator::ActionTicks::UNKNOWN)
         }
     }

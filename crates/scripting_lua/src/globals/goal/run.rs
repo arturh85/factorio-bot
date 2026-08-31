@@ -39,12 +39,20 @@ struct FailureRecord {
     replied_tick: Option<u32>,
 }
 
+/// The lowercase string a script sees. One per [`Status`], and the four that
+/// existed before `lost` keep exactly the spellings scripts already match on.
+///
+/// `"running"` and `"lost"` are deliberately different words for what used to
+/// be one: `"running"` is a bot at work, `"lost"` is a dispatch this run will
+/// never hear back about (see [`Status::Lost`]). A consumer drawing the second
+/// as the first shows a busy bot for work nobody is watching.
 fn status_name(status: Status) -> &'static str {
     match status {
         Status::Pending => "pending",
         Status::Running => "running",
         Status::Success => "success",
         Status::Failed => "failed",
+        Status::Lost => "lost",
     }
 }
 
@@ -101,6 +109,11 @@ fn build_observation(
     let mut running = 0u32;
     let mut success = 0u32;
     let mut failed = 0u32;
+    // Counted on its own line rather than folded into `running` or `failed`.
+    // Folding it into `running` is the bug this state exists to fix — a run
+    // that has stopped would keep reporting bots at work — and folding it into
+    // `failed` would report a verdict nobody ever gave.
+    let mut lost = 0u32;
     let mut failures: Vec<FailureRecord> = Vec::new();
 
     for action in net.actions() {
@@ -111,6 +124,7 @@ fn build_observation(
             Status::Running => running += 1,
             Status::Success => success += 1,
             Status::Failed => failed += 1,
+            Status::Lost => lost += 1,
         }
 
         let attempt = log.attempt(id);
@@ -189,6 +203,7 @@ fn build_observation(
     obs.set("running", running)?;
     obs.set("success", success)?;
     obs.set("failed", failed)?;
+    obs.set("lost", lost)?;
     obs.set("first_error", first_error)?;
     obs.set("actions", actions)?;
     obs.set("walks", walks)?;
@@ -518,6 +533,40 @@ mod tests {
             assert(obs.success > 0, "something succeeded")
             assert(obs.pending == 0 and obs.running == 0, "nothing left outstanding")
             assert(obs.first_error == nil, "no error on a clean run")
+        "#,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_action_the_game_gave_no_verdict_for_is_reported_as_lost() {
+        // The distinction a consumer of this observation actually needs: an
+        // action nobody is following any more must not be drawn as a bot at
+        // work. `running` counts what is in flight; this run is over, so its
+        // outstanding action is `lost` and `running` is zero.
+        let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::WithoutVerdict)));
+        exec_bounded(
+            &lua,
+            r#"
+            local p = goal.plan(goal.have("iron-ore", 2))
+            local obs = goal.run(p)
+            assert(obs.done, "the run is over")
+            assert(obs.lost > 0, "no verdict arrived, got lost = " .. tostring(obs.lost))
+            assert(obs.running == 0,
+                   "the run is over, so nothing is in flight, got " .. tostring(obs.running))
+            assert(obs.failed == 0,
+                   "no verdict arrived, so nothing may be counted as failed, got "
+                   .. tostring(obs.failed))
+            assert(#obs:failures() == 0, "losing the thread is not a failure")
+            local seen = 0
+            for _, a in pairs(obs.actions) do
+                if a.status == "lost" then
+                    seen = seen + 1
+                    assert(type(a.error) == "string", "why the outcome is unknown is reported")
+                end
+                assert(a.status ~= "running", "no action is still running after the run ends")
+            end
+            assert(seen == obs.lost, "every lost action says so")
         "#,
         )
         .await;

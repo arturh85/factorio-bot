@@ -48,6 +48,122 @@ fn collect_stale(dir: &Dir, extracted_root: &Path, out: &mut BTreeSet<PathBuf>) 
     }
 }
 
+/// The outcome of comparing a directory on disk against a *reference*
+/// directory, also on disk.
+///
+/// The three cases are kept apart on purpose. "the copy differs from the
+/// reference" and "there was nothing to compare it against" are different
+/// facts, and a reader must never have to guess which one a message is
+/// reporting: an absent or empty reference is an environmental condition,
+/// while a difference is a real drift someone has to act on.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DirComparison {
+    /// No directory at the reference path at all -- nothing was compared.
+    /// Not a verdict about the copy.
+    NoReference,
+    /// The reference directory exists but holds no files, so again nothing
+    /// was compared. Distinctly *not* "the two agree".
+    NothingToCompare,
+    /// `examined` counts every regular file found under the reference and
+    /// compared -- the ones that matched as well as the ones that did not --
+    /// so the count answers "how much was actually looked at", and stays put
+    /// when a difference appears. `differing` names the subset whose copy is
+    /// missing or holds other bytes.
+    Compared {
+        examined: usize,
+        differing: BTreeSet<PathBuf>,
+    },
+}
+
+/// Compares every regular file under `reference` against the file at the same
+/// relative path under `copy`, byte for byte.
+///
+/// Files the copy has that the reference does not are ignored, matching
+/// [`stale_paths`]: this answers "has the copy drifted from the reference",
+/// not "is the copy pristine". A file that cannot be read on either side is
+/// reported as differing, for the same reason `collect_stale` does: we cannot
+/// show it is the same, and the run is about to load it either way.
+/// Symlinks in the reference are not followed and not counted; the reference
+/// is a source checkout of small text assets.
+pub fn compare_dirs(reference: &Path, copy: &Path) -> DirComparison {
+    if !reference.is_dir() {
+        return DirComparison::NoReference;
+    }
+    let mut files = Vec::new();
+    collect_reference_files(reference, Path::new(""), &mut files);
+    if files.is_empty() {
+        return DirComparison::NothingToCompare;
+    }
+    let mut differing = BTreeSet::new();
+    for relative in &files {
+        let same = match (
+            std::fs::read(reference.join(relative)),
+            std::fs::read(copy.join(relative)),
+        ) {
+            (Ok(reference_bytes), Ok(copy_bytes)) => reference_bytes == copy_bytes,
+            _ => false,
+        };
+        if !same {
+            differing.insert(relative.clone());
+        }
+    }
+    DirComparison::Compared {
+        examined: files.len(),
+        differing,
+    }
+}
+
+fn collect_reference_files(dir: &Path, prefix: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let relative = prefix.join(entry.file_name());
+        if file_type.is_dir() {
+            collect_reference_files(&entry.path(), &relative, out);
+        } else if file_type.is_file() {
+            out.push(relative);
+        }
+    }
+}
+
+/// One sentence describing a comparison, for the log line that names which
+/// directory a run is about to use.
+///
+/// Every wording states what was examined rather than what passed, and the
+/// two "nothing to compare" cases say so in those words -- they never borrow
+/// the vocabulary of agreement ("matches") or of drift ("differs"), so the
+/// reader can tell an environmental gap from a real difference without
+/// knowing which branch produced the line. `remedy` is appended only when
+/// there is something to act on.
+pub fn describe(comparison: &DirComparison, reference: &Path, remedy: &str) -> String {
+    match comparison {
+        DirComparison::NoReference => format!(
+            "not compared against a reference: there is no directory at {reference:?} to compare it with"
+        ),
+        DirComparison::NothingToCompare => format!(
+            "not compared against a reference: the directory at {reference:?} holds no files, so there was nothing to compare"
+        ),
+        DirComparison::Compared {
+            examined,
+            differing,
+        } if differing.is_empty() => format!(
+            "identical to {reference:?}: all {examined} file(s) examined hold the same bytes"
+        ),
+        DirComparison::Compared {
+            examined,
+            differing,
+        } => format!(
+            "DIFFERS from {reference:?}: {} of {examined} file(s) examined differ: {:?} -- {remedy}",
+            differing.len(),
+            differing
+        ),
+    }
+}
+
 /// Logs a warning naming the differing files and how to refresh, if any of
 /// the embedded snapshot's files differ from what is on disk. A no-op when
 /// the copy is already up to date.
@@ -220,5 +336,174 @@ mod tests {
             std::fs::read(dir.path().join("users_own_script.lua")).expect("read"),
             b"-- mine"
         );
+    }
+}
+
+/// Comparing an on-disk copy against an on-disk *reference* directory -- the
+/// debug-build counterpart to the embed comparison above, where the reference
+/// is the repo checkout rather than a compile-time embed.
+///
+/// The discrimination these tests have to prove is not just "a difference is
+/// found". It is that the three outcomes stay apart: a difference, an absent
+/// reference and an empty reference must never be reported in each other's
+/// words, and the file count must report what was *examined*, so introducing
+/// a difference cannot shrink it.
+#[cfg(test)]
+mod dir_comparison_tests {
+    use super::*;
+
+    const REMEDY: &str = "delete the copy and re-run";
+
+    /// A reference holding two files, one of them nested, and an identical
+    /// copy of it. Returned as (tempdir, reference, copy); the tempdir is
+    /// returned so the caller keeps it alive.
+    fn reference_and_copy() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let reference = dir.path().join("reference");
+        let copy = dir.path().join("copy");
+        for root in [&reference, &copy] {
+            std::fs::create_dir_all(root.join("sub")).expect("create dirs");
+            std::fs::write(root.join("a.txt"), b"aaa").expect("write a");
+            std::fs::write(root.join("sub/b.txt"), b"bbb").expect("write b");
+        }
+        (dir, reference, copy)
+    }
+
+    #[test]
+    fn an_identical_copy_is_reported_as_such_with_every_file_counted() {
+        let (_dir, reference, copy) = reference_and_copy();
+
+        assert_eq!(
+            compare_dirs(&reference, &copy),
+            DirComparison::Compared {
+                examined: 2,
+                differing: BTreeSet::new()
+            }
+        );
+    }
+
+    #[test]
+    fn an_edited_copy_names_the_file_and_still_counts_both_as_examined() {
+        let (_dir, reference, copy) = reference_and_copy();
+        std::fs::write(copy.join("sub/b.txt"), b"edited").expect("edit");
+
+        // `examined` stays 2. A count of what *passed* would drop to 1 here,
+        // which would make introducing the very defect this exists to catch
+        // look like less work was done rather than like a difference.
+        assert_eq!(
+            compare_dirs(&reference, &copy),
+            DirComparison::Compared {
+                examined: 2,
+                differing: BTreeSet::from([PathBuf::from("sub/b.txt")])
+            }
+        );
+    }
+
+    #[test]
+    fn a_file_the_copy_never_had_differs() {
+        let (_dir, reference, copy) = reference_and_copy();
+        std::fs::remove_file(copy.join("a.txt")).expect("remove");
+
+        assert_eq!(
+            compare_dirs(&reference, &copy),
+            DirComparison::Compared {
+                examined: 2,
+                differing: BTreeSet::from([PathBuf::from("a.txt")])
+            }
+        );
+    }
+
+    #[test]
+    fn a_file_only_the_copy_has_is_not_a_difference() {
+        let (_dir, reference, copy) = reference_and_copy();
+        std::fs::write(copy.join("extra.txt"), b"mine").expect("write extra");
+
+        assert_eq!(
+            compare_dirs(&reference, &copy),
+            DirComparison::Compared {
+                examined: 2,
+                differing: BTreeSet::new()
+            }
+        );
+    }
+
+    #[test]
+    fn an_absent_reference_is_not_a_verdict_about_the_copy() {
+        let (_dir, reference, copy) = reference_and_copy();
+        std::fs::remove_dir_all(&reference).expect("remove reference");
+
+        assert_eq!(compare_dirs(&reference, &copy), DirComparison::NoReference);
+    }
+
+    #[test]
+    fn a_reference_holding_no_files_is_not_agreement() {
+        let (_dir, reference, copy) = reference_and_copy();
+        std::fs::remove_dir_all(&reference).expect("remove reference");
+        std::fs::create_dir_all(reference.join("empty-subdir")).expect("recreate empty");
+
+        // The subdirectory is deliberate: "no files" has to mean no files
+        // anywhere under the reference, not just none at the top level.
+        assert_eq!(
+            compare_dirs(&reference, &copy),
+            DirComparison::NothingToCompare
+        );
+    }
+
+    #[test]
+    fn the_two_nothing_to_compare_messages_claim_neither_agreement_nor_drift() {
+        let reference = Path::new("/nonexistent/reference");
+        for comparison in [DirComparison::NoReference, DirComparison::NothingToCompare] {
+            let message = describe(&comparison, reference, REMEDY);
+            assert!(
+                message.contains("nothing to compare") || message.contains("no directory at"),
+                "{comparison:?} must say what is missing, got: {message}"
+            );
+            assert!(
+                !message.to_lowercase().contains("differ"),
+                "{comparison:?} must not read as a difference, got: {message}"
+            );
+            assert!(
+                !message.contains("identical"),
+                "{comparison:?} must not read as agreement, got: {message}"
+            );
+            assert!(
+                !message.contains(REMEDY),
+                "{comparison:?} offers a remedy for a difference that was never found, got: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_difference_reads_as_one_and_carries_the_remedy() {
+        let (_dir, reference, copy) = reference_and_copy();
+        std::fs::write(copy.join("a.txt"), b"edited").expect("edit");
+
+        let message = describe(&compare_dirs(&reference, &copy), &reference, REMEDY);
+
+        assert!(message.contains("DIFFERS"), "got: {message}");
+        assert!(
+            message.contains("a.txt"),
+            "must name the file, got: {message}"
+        );
+        assert!(
+            message.contains("1 of 2"),
+            "must report the difference against everything examined, got: {message}"
+        );
+        assert!(message.contains(REMEDY), "got: {message}");
+    }
+
+    #[test]
+    fn agreement_reads_as_agreement_and_offers_no_remedy() {
+        let (_dir, reference, copy) = reference_and_copy();
+
+        let message = describe(&compare_dirs(&reference, &copy), &reference, REMEDY);
+
+        assert!(message.contains("identical"), "got: {message}");
+        assert!(
+            message.contains('2'),
+            "must say how much it looked at, got: {message}"
+        );
+        assert!(!message.to_lowercase().contains("differ"), "got: {message}");
+        assert!(!message.contains(REMEDY), "got: {message}");
     }
 }

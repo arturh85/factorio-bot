@@ -2679,17 +2679,37 @@ mod positioning_tests {
 /// [`judge_transfer_reply`] chain. The only invented part is the game itself.
 ///
 /// What that still cannot see is listed in
-/// `.superpowers/sdd/2026-08-30-goal-values/transfer-guarantee.md`; the short
-/// version is that it reads `mods/BotBridge/control.lua`, and a run whose
-/// `workspace/mods/BotBridge` has drifted from it is running other code.
+/// `.superpowers/sdd/2026-08-30-goal-values/transfer-guarantee.md`. The one
+/// that matters is that this reads the *checkout's*
+/// `mods/BotBridge/control.lua`, while a run loads `workspace/mods`, a copy
+/// that wins over the checkout once it exists and is never refreshed. A run
+/// whose copy has drifted is running other code, and no amount of green here
+/// would say otherwise.
+///
+/// That gap is not closed here, because it cannot be: whether a particular
+/// machine's `workspace/mods` has drifted is a fact about that machine, not
+/// about this source tree, and CI has no workspace at all. Asserting it as a
+/// test would either fail on a fresh checkout or pass vacuously. So it is
+/// reported where it exists instead -- at run time, on the "Using mods
+/// directory" line, which now carries the verdict of comparing the copy in
+/// use against this checkout (see `process::instance_setup`, and
+/// `asset_sync::warn_if_stale` for the release build's equivalent against the
+/// embedded snapshot). The bytes below and the directory that check compares
+/// against both come from `repo_mods_path!`, so the guard and the run-time
+/// report cannot end up talking about different files.
 #[cfg(test)]
 mod transfer_guarantee_tests {
     use super::*;
     use crate::factorio::ticks::take_tick_stamp;
     use mlua::{Lua, LuaOptions, StdLib};
 
-    const CONTROL_LUA: &str = include_str!("../../../../mods/BotBridge/control.lua");
-    const TYPES_LUA: &str = include_str!("../../../../mods/BotBridge/types.lua");
+    use crate::process::instance_setup::repo_mods_path;
+
+    // Derived from the same compile-time constant the run-time drift check
+    // uses, so the bytes this test compiled in and the directory a run is
+    // compared against cannot come apart -- see `repo_mods_path`.
+    const CONTROL_LUA: &str = include_str!(repo_mods_path!("/BotBridge/control.lua"));
+    const TYPES_LUA: &str = include_str!(repo_mods_path!("/BotBridge/types.lua"));
 
     /// The tick the stub game is frozen at. Any value works; a recognisable one
     /// makes a failure message readable.

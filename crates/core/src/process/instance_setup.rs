@@ -13,7 +13,6 @@ use crate::constants::{
 use crate::errors::*;
 use crate::factorio::rcon::RconSettings;
 use crate::factorio::util::{read_to_value, write_value_to};
-#[cfg(not(debug_assertions))]
 use crate::process::asset_sync;
 use crate::process::io_utils::{
     await_lock, extract_archive, get_factorio_binary_path, get_factorio_data_path, symlink,
@@ -37,10 +36,17 @@ use tokio::fs::create_dir;
 //     because extraction is skipped once that directory exists.
 //
 // This divergence is deliberate; do not "fix" it by dropping the embedding.
-// What *is* fixed here: the second bullet used to fail silently. `asset_sync`
-// compares the embedded snapshot against whatever is already on disk and
-// warns when they differ, and `REFRESH_MODS_ENV` / `REFRESH_PLANS_ENV` are the
-// explicit, opt-in way to overwrite a stale copy (see their doc comments).
+// What *is* fixed here: the second bullet used to fail silently, in both
+// builds. `asset_sync` compares whatever is already on disk against the
+// reference that build has -- the embedded snapshot in a release binary, the
+// checkout itself (`repo_mods_path!`) in a debug one -- and the mods line
+// printed on every setup carries the verdict, so "which code am I actually
+// running" is answered where the question is asked rather than in a check
+// that could be skipped. `REFRESH_MODS_ENV` / `REFRESH_PLANS_ENV` are the
+// explicit, opt-in way to overwrite a stale copy in a release build (see
+// their doc comments); a debug build has no snapshot to refresh from, so its
+// remedy is to delete the workspace copy and let the checkout be used
+// directly, which is what the drift report tells the reader to do.
 #[cfg(not(debug_assertions))]
 pub const MODS_CONTENT: include_dir::Dir = include_dir!("mods");
 #[cfg(not(debug_assertions))]
@@ -54,6 +60,36 @@ pub const REFRESH_MODS_ENV: &str = "FACTORIO_BOT_REFRESH_MODS";
 /// Same as [`REFRESH_MODS_ENV`], for `<workspace>/plans`.
 #[cfg(not(debug_assertions))]
 pub const REFRESH_PLANS_ENV: &str = "FACTORIO_BOT_REFRESH_PLANS";
+
+/// The repo's `mods/` directory as a compile-time path, with `$suffix`
+/// appended -- e.g. `repo_mods_path!("/BotBridge/control.lua")`.
+///
+/// This is *the* single definition of "the mods directory this build was
+/// compiled against", and it exists so that two things which must agree
+/// cannot drift apart: the runtime drift check below, which tells a debug run
+/// whether the `workspace/mods` copy it is about to load still matches the
+/// checkout, and `factorio::rcon`'s transfer-guarantee test, which
+/// `include_str!`s the mod's `control.lua` out of that same checkout. If the
+/// guard compiled in bytes from one directory and the run were compared
+/// against another, the green guard would say nothing about the run.
+///
+/// Resolved from `CARGO_MANIFEST_DIR` (this crate) rather than from the
+/// process's working directory, so it names the same place whatever a binary
+/// is later run from. It is a *compile-time* fact: a binary carried away from
+/// its source tree will find nothing there, which the check reports as
+/// "nothing to compare" rather than as agreement.
+// Unused in a release build, which compares against the embedded snapshot
+// instead, and in any non-test build of a release binary nothing imports it.
+#[allow(unused_macros)]
+macro_rules! repo_mods_path {
+    ($suffix:literal) => {
+        // "mods" is `MODS_FOLDERNAME`, which cannot appear here: `concat!`
+        // takes literals only.
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../mods", $suffix)
+    };
+}
+#[cfg(test)]
+pub(crate) use repo_mods_path;
 
 /// The mod this project ships and depends on: without it there is no RCON
 /// bridge, and every other feature is unreachable.
@@ -227,16 +263,16 @@ pub async fn setup_factorio_instance(
     // already cost a live debugging session.
     #[allow(unused_mut, unused_assignments)]
     #[cfg(not(debug_assertions))]
-    let mut mods_source = "pre-existing workspace copy; editing mods/ does NOT update it -- see the staleness warning below, or set FACTORIO_BOT_REFRESH_MODS=1 to refresh it";
+    let mut mods_source = String::from("pre-existing workspace copy; editing mods/ does NOT update it -- see the staleness warning below, or set FACTORIO_BOT_REFRESH_MODS=1 to refresh it");
     #[allow(unused_mut, unused_assignments)]
     #[cfg(debug_assertions)]
     let mut mods_source =
-        "pre-existing workspace copy; editing mods/ does NOT update it, delete it to re-extract";
+        String::from("pre-existing workspace copy; editing mods/ does NOT update it");
     if !workspace_mods_path.exists() {
         #[cfg(debug_assertions)]
         {
             workspace_mods_path = PathBuf::from(format!("../../{}", MODS_FOLDERNAME));
-            mods_source = "repo checkout (debug build); edits apply on the next run";
+            mods_source = String::from("repo checkout (debug build); edits apply on the next run");
         }
         #[cfg(not(debug_assertions))]
         {
@@ -245,18 +281,58 @@ pub async fn setup_factorio_instance(
                 error!("failed to extract static mods content: {:?}", err);
                 return Err(ModExtractFailed {}.into());
             }
-            mods_source =
-                "compile-time snapshot embedded in this release binary; edits to mods/ need a rebuild";
+            mods_source = String::from(
+                "compile-time snapshot embedded in this release binary; edits to mods/ need a rebuild",
+            );
         }
         if !workspace_mods_path.exists() {
             workspace_mods_path = PathBuf::from(MODS_FOLDERNAME);
-            mods_source = "mods/ relative to the current working directory";
+            mods_source = String::from("mods/ relative to the current working directory");
             if !workspace_mods_path.exists() {
                 return Err(MissingModsFolder {}.into());
             }
         }
     } else {
         // The directory already existed, so nothing above extracted into it.
+        // A debug build has the checkout itself to compare against -- the very
+        // directory this crate was compiled from, and the one whose
+        // `control.lua` the transfer-guarantee test in `factorio::rcon`
+        // compiled into itself -- so say, on the line that names the directory
+        // in use, whether the copy about to be loaded is still that code. This
+        // is a derivation from the two directories as they are at this moment,
+        // not a separate gate that could be skipped or forgotten: the line is
+        // printed on every setup, and there is no way to get the name without
+        // the verdict.
+        #[cfg(debug_assertions)]
+        {
+            // Scoped to the bridge mod, not the whole mods directory. The rest
+            // of that directory is not ours to compare: Factorio rewrites
+            // `mod-list.json` and `mod-settings.dat` in place -- the
+            // instance's `mods` symlink points here -- so after any real run
+            // they differ from the checkout by design. Reporting that as drift
+            // would put a permanent, unactionable complaint on the line and
+            // teach the reader to skip it, taking the real report with it.
+            // `BotBridge` is the code the guarantee tests compiled against and
+            // the only part a user's edits are about.
+            let repo_mod = Path::new(repo_mods_path!("")).join(BRIDGE_MOD_NAME);
+            // Cosmetic only, and deliberately infallible: the compile-time
+            // path contains `../..`, which is noise in a log line, but if it
+            // cannot be canonicalized (it is gone) the raw path is still the
+            // right thing to name -- `compare_dirs` will report that there is
+            // nothing there rather than a difference.
+            let repo_mods = fs::canonicalize(&repo_mod).unwrap_or(repo_mod);
+            let comparison =
+                asset_sync::compare_dirs(&repo_mods, &workspace_mods_path.join(BRIDGE_MOD_NAME));
+            let remedy = format!(
+                "the run loads the copy, not the checkout every test compiled against; delete {:?} and re-run to load the checkout directly",
+                workspace_mods_path
+            );
+            mods_source = format!(
+                "{mods_source}; {}",
+                asset_sync::describe(&comparison, &repo_mods, &remedy)
+            );
+        }
+
         // In a release build that copy can only ever be refreshed explicitly
         // -- see `asset_sync` -- so check it for drift from the embedded
         // snapshot rather than staying silent about it.
@@ -269,8 +345,9 @@ pub async fn setup_factorio_instance(
             )
             .into_diagnostic()?
             {
-                mods_source =
-                    "refreshed from the compile-time snapshot embedded in this release binary";
+                mods_source = String::from(
+                    "refreshed from the compile-time snapshot embedded in this release binary",
+                );
             } else {
                 asset_sync::warn_if_stale(
                     &MODS_CONTENT,
@@ -1145,6 +1222,152 @@ mod mods_source_tests {
         );
     }
 
+    /// Copies a directory tree, so a test can stand up a `workspace/mods`
+    /// that really is a copy of the repo checkout -- the state a run reaches
+    /// after a release build extracted one, and the state in which the two
+    /// can then silently drift apart.
+    fn copy_dir_recursive(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).expect("create target dir");
+        for entry in std::fs::read_dir(from).expect("read source dir") {
+            let entry = entry.expect("dir entry");
+            let file_type = entry.file_type().expect("file type");
+            let target = to.join(entry.file_name());
+            if file_type.is_dir() {
+                copy_dir_recursive(&entry.path(), &target);
+            } else if file_type.is_file() {
+                std::fs::copy(entry.path(), &target).expect("copy file");
+            }
+        }
+    }
+
+    /// Not run directly -- see `reports_a_workspace_copy_that_still_matches_the_checkout`.
+    #[tokio::test]
+    #[ignore]
+    async fn worker_matching_workspace_copy_case() {
+        let dir = tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        copy_dir_recursive(
+            Path::new(repo_mods_path!("")),
+            &workspace.join(MODS_FOLDERNAME),
+        );
+        run_setup_and_report(&workspace).await;
+    }
+
+    /// A `workspace/mods` that is a faithful copy of the checkout must be
+    /// reported as such -- and by a count of what was examined, so the line
+    /// says how much of the mod was actually looked at.
+    #[test]
+    fn reports_a_workspace_copy_that_still_matches_the_checkout() {
+        let repo_mods = fs::canonicalize(Path::new(repo_mods_path!("")))
+            .expect("this test needs the repo checkout it was compiled against");
+
+        let output = run_worker_and_capture_stdout(
+            "process::instance_setup::mods_source_tests::worker_matching_workspace_copy_case",
+        );
+
+        assert!(
+            output.contains("identical to"),
+            "an unmodified copy must be reported as identical, got: {output}"
+        );
+        assert!(
+            output.contains(repo_mods.to_str().expect("utf-8 repo mods path")),
+            "the line must name the checkout it was compared against {repo_mods:?}, got: {output}"
+        );
+        assert!(
+            !output.contains("DIFFERS"),
+            "an unmodified copy was reported as drifted: {output}"
+        );
+        assert!(
+            !output.contains("nothing to compare"),
+            "the comparison did not happen at all, which is not the same as agreement: {output}"
+        );
+    }
+
+    /// Not run directly -- see `reports_a_workspace_copy_that_has_drifted`.
+    #[tokio::test]
+    #[ignore]
+    async fn worker_drifted_workspace_copy_case() {
+        let dir = tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        let workspace_mods = workspace.join(MODS_FOLDERNAME);
+        copy_dir_recursive(Path::new(repo_mods_path!("")), &workspace_mods);
+        // Exactly the drift that has cost this project time: the copy the run
+        // loads is one edit away from the file every test compiled against.
+        let drifted = workspace_mods.join(BRIDGE_MOD_NAME).join("control.lua");
+        let mut contents = fs::read_to_string(&drifted).expect("read the copy's control.lua");
+        contents.push_str("\n-- drifted\n");
+        std::fs::write(&drifted, contents).expect("write the drifted copy");
+        run_setup_and_report(&workspace).await;
+    }
+
+    /// The one that matters: a `workspace/mods` whose `control.lua` no longer
+    /// matches the checkout must be named as drifted, with the file named, at
+    /// the moment the run says which directory it is using.
+    #[test]
+    fn reports_a_workspace_copy_that_has_drifted() {
+        let output = run_worker_and_capture_stdout(
+            "process::instance_setup::mods_source_tests::worker_drifted_workspace_copy_case",
+        );
+
+        assert!(
+            output.contains("DIFFERS"),
+            "an edited copy was not reported as drifted: {output}"
+        );
+        assert!(
+            output.contains("BotBridge\"") && output.contains("\"control.lua\""),
+            "the report must name the mod compared and the file that drifted, got: {output}"
+        );
+        assert!(
+            output.contains("1 of "),
+            "the report must weigh the one difference against everything examined, got: {output}"
+        );
+        assert!(
+            !output.contains("identical to"),
+            "a drifted copy was also reported as identical: {output}"
+        );
+    }
+
+    /// Not run directly -- see `does_not_report_game_written_state_as_drift`.
+    #[tokio::test]
+    #[ignore]
+    async fn worker_game_written_state_case() {
+        let dir = tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        let workspace_mods = workspace.join(MODS_FOLDERNAME);
+        copy_dir_recursive(Path::new(repo_mods_path!("")), &workspace_mods);
+        // Factorio owns these two: it rewrites them in the mods directory as
+        // it runs, and the instance's `mods` symlink points here, so after any
+        // real run they differ from the checkout by design.
+        std::fs::write(workspace_mods.join("mod-list.json"), b"{\"mods\":[]}")
+            .expect("write mod-list.json");
+        std::fs::write(
+            workspace_mods.join("mod-settings.dat"),
+            b"rewritten by the game",
+        )
+        .expect("write mod-settings.dat");
+        run_setup_and_report(&workspace).await;
+    }
+
+    /// A drift report nobody can act on is worse than none: it teaches the
+    /// reader to skip the line. Factorio rewriting its own state files in the
+    /// mods directory is not drift in the mod's code, and must not be reported
+    /// as any.
+    #[test]
+    fn does_not_report_game_written_state_as_drift() {
+        let output = run_worker_and_capture_stdout(
+            "process::instance_setup::mods_source_tests::worker_game_written_state_case",
+        );
+
+        assert!(
+            !output.contains("DIFFERS"),
+            "the game's own state files were reported as a drifted mod: {output}"
+        );
+        assert!(
+            output.contains("identical to"),
+            "the mod's code is unchanged and must be reported as such, got: {output}"
+        );
+    }
+
     /// Not run directly -- see `names_the_workspace_copy_when_it_already_exists`.
     #[tokio::test]
     #[ignore]
@@ -1198,10 +1421,22 @@ mod mods_source_tests {
             "line must say it used the pre-existing workspace copy, got: {output}"
         );
         // Negative half of the discrimination: it must not name the repo
-        // checkout instead, proving this isn't just "some path" appearing.
+        // checkout as the directory in use, proving this isn't just "some
+        // path" appearing. The checkout does now appear later in the same
+        // line -- as what the copy was *compared against* -- so this looks at
+        // the directory the line names as in use, not at the whole line.
+        let named_as_in_use = output
+            .split_once("Using mods directory ")
+            .map(|(_, rest)| rest.split_once(" (").map_or(rest, |(dir, _)| dir))
+            .expect("the mods-source line names a directory");
         assert!(
-            !output.contains(repo_mods.to_str().expect("utf-8 repo mods path")),
-            "line named the repo checkout even though workspace/mods already existed: {output}"
+            named_as_in_use.contains(workspace_mods),
+            "the directory named as in use is {named_as_in_use}, not the workspace copy"
+        );
+        assert!(
+            !named_as_in_use.contains(repo_mods.to_str().expect("utf-8 repo mods path")),
+            "line named the repo checkout as the directory in use even though \
+             workspace/mods already existed: {output}"
         );
     }
 }

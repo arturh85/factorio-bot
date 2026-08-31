@@ -32,10 +32,11 @@ jobs:
         with:
           node-version: 24
       - name: 🛠️ Install rust stable
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
+        # actions-rs was archived in 2022 and declares a Node runtime GitHub
+        # has disabled; actionlint reports it as "too old to run".
+        # dtolnay/rust-toolchain installs the minimal profile by default and
+        # takes the toolchain from the ref, so `profile`/`toolchain` are gone.
+        uses: dtolnay/rust-toolchain@stable
       - name: 💾 Cache rust dependencies
         uses: Swatinem/rust-cache@v2
       - name: 🛠️ Install pnpm

@@ -30,12 +30,13 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
+        # See the note in test.yml: actions-rs is archived and its runtime is
+        # disabled, so the SHA pin here pinned something that cannot run.
+        # `override` has no equivalent -- dtolnay/rust-toolchain sets the
+        # default toolchain, which is what `override: true` was for.
+        uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          toolchain: stable
           components: clippy
-          override: true
       - name: 💾 Cache rust dependencies
         uses: Swatinem/rust-cache@v2
 

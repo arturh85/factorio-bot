@@ -23,10 +23,11 @@ jobs:
         with:
           node-version: 24
       - name: 🛠️ Install rust stable
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
+        # actions-rs was archived in 2022 and declares a Node runtime GitHub
+        # has disabled; actionlint reports it as "too old to run".
+        # dtolnay/rust-toolchain installs the minimal profile by default and
+        # takes the toolchain from the ref, so `profile`/`toolchain` are gone.
+        uses: dtolnay/rust-toolchain@stable
       - name: 💾 Cache rust dependencies
         uses: Swatinem/rust-cache@v2
       - name: 🛠️ Install pnpm
@@ -190,12 +191,22 @@ jobs:
         id: release
         shell: bash
         run: |
-          r=$(cat ${{ steps.git-cliff.outputs.changelog }})
-          r="$(printf "$r" | tail -n +3)"
-          r="${r//'%'/'%25'}"
-          r="${r//$'\n'/'%0A'}"
-          r="${r//$'\r'/'%0D'}"
-          echo "::set-output name=release_body::$r"
+          # `::set-output::` is REMOVED, not merely deprecated, so this step
+          # was silently producing an empty release body. $GITHUB_OUTPUT with
+          # a heredoc delimiter carries multi-line values natively, which also
+          # retires the %25/%0A/%0D escaping that only existed because
+          # set-output was single-line.
+          #
+          # `printf '%s' "$r"` rather than `printf "$r"`: the changelog is data,
+          # and a literal % in a commit message was being read as a format
+          # directive.
+          r=$(cat "${{ steps.git-cliff.outputs.changelog }}")
+          r="$(printf '%s' "$r" | tail -n +3)"
+          {
+            echo "release_body<<RELEASE_BODY_EOF"
+            echo "$r"
+            echo "RELEASE_BODY_EOF"
+          } >> "$GITHUB_OUTPUT"
 
 
       - name: 🔖 Create github release

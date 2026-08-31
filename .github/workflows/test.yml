@@ -120,13 +120,10 @@ jobs:
       # Rust
       - name: 🏗️ Build rust code
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
-          APPIMAGE_EXTRACT_AND_RUN: 1
           # Disable incremental compilation to prevent LNK1123/CVT1100 errors on Windows
           CARGO_INCREMENTAL: 0
         run: |
-          cd app; pnpm run tauri:build
+          cargo build --release --workspace
       - name: 🧹 Clean release artifacts
         if: matrix.platform == 'ubuntu-latest'
         run: |

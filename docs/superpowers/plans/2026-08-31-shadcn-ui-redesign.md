@@ -817,13 +817,13 @@ grep -rn "primevue/usetoast\|removeAllGroups" app/src
 grep -rn "primevue/toast" app/src
 ```
 
-Expected: no output from the first; exactly one line from the second — `app/src/main.ts` still registers `primevue/toastservice`, which is harmless and goes with the rest of PrimeVue in Task 12.
+Expected: no output from either. (This originally said `main.ts` would still register `primevue/toastservice` and that Task 12 would remove it. In the event the `ToastService` registration went here: nothing depended on it once toasts stopped using PrimeVue's injection, and leaving it would have meant `main.ts` installing a service with no consumer.)
 
 ```bash
 nix develop --command bash -c 'eval "$(mise env -s bash)"; cd app && pnpm run lint && pnpm run test:coverage && pnpm run build:web'
 ```
 
-Expected: all clean. `ToastService` stays registered in `main.ts` for now — it is harmless and Task 12 removes it with the rest of PrimeVue.
+Expected: all clean. `ToastService` and its `primevue/toastservice` import are removed from `main.ts` in this task, not deferred to Task 12 — see the note above.
 
 - [ ] **Step 12: Commit**
 

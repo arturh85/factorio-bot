@@ -656,21 +656,249 @@ mod tests {
         lua
     }
 
+    /// How long a script gets before it is called a hang.
+    pub(crate) const EXEC_BOUND: Duration = Duration::from_secs(10);
+
+    /// A wall-clock bound that survives a hang which never yields.
+    ///
+    /// This exists because `tokio::time::timeout` **cannot** bound the hang
+    /// these tests are most likely to hit. Every test here is a
+    /// `#[tokio::test]`, i.e. a *current-thread* runtime, and a timer on a
+    /// current-thread runtime is only polled when the wrapped future yields.
+    /// `goal.plan` and `goal.have` are synchronous `create_function`s whose
+    /// bodies (`expand` + `schedule`) are pure CPU work with no await point,
+    /// so a hang inside one never returns control to the runtime and the
+    /// timer never runs. That is not a theory: a probe of
+    /// `while true do i = i + 1 end` under the old guard sat at 99.7% CPU with
+    /// the test thread in state `R` and the 10s timeout never fired —
+    /// the same signature as the run that wedged for 8h52m at ~665% CPU.
+    ///
+    /// So the bound is enforced from a *separate OS thread*, which the
+    /// spinning one cannot starve, and which reports by name.
+    ///
+    /// **Why it exits the process rather than failing one test.** The obvious
+    /// nicer design — run the script on a thread the test abandons on timeout
+    /// — is not available: `mlua::Lua` is `!Send` without mlua's `send`
+    /// feature (`Lua` holds an `XRc<ReentrantMutex<RawLua>>`, and
+    /// `unsafe impl Send for RawLua` is `#[cfg(feature = "send")]`), so
+    /// neither the `Lua` nor a `&Lua` can cross a thread boundary at all.
+    /// Enabling `send` would force `Send` bounds on every production
+    /// `create_function` closure and app-data value, which is a change to
+    /// shipped code in service of a test helper. Since the wedged thread can
+    /// be neither unwound nor abandoned, the watchdog ends the process
+    /// instead. Under `cargo nextest` — the runner this workspace's baseline
+    /// uses — each test is its own process, so that *is* a single named test
+    /// failure with no collateral. Under plain `cargo test` it aborts the run
+    /// with the message below, which is still a bounded, named, loud failure
+    /// rather than a suite that hangs until a human notices.
+    pub(crate) struct Watchdog {
+        /// `true` once the guarded work finished. Paired with a `Condvar` so
+        /// disarming wakes the watchdog immediately instead of leaving one
+        /// sleeping thread per guarded call.
+        finished: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    }
+
+    impl Watchdog {
+        /// Arms a bound of `limit` over whatever runs before this is dropped.
+        fn arm(what: &str, limit: Duration) -> Self {
+            let finished = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+            let watched = Arc::clone(&finished);
+            let what = what.trim().to_owned();
+            let thread = std::thread::current();
+            let test = thread.name().unwrap_or("<unnamed>").to_owned();
+            std::thread::Builder::new()
+                .name("exec-bounded-watchdog".to_owned())
+                .spawn(move || {
+                    let (done, wake) = &*watched;
+                    let (done, timeout) = wake
+                        .wait_timeout_while(lock(done), limit, |done| !*done)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if *done || !timeout.timed_out() {
+                        return;
+                    }
+                    drop(done);
+                    // Not a `panic!`: this thread is not the failing one, and
+                    // a panic here would only unwind the watchdog. And not
+                    // `eprintln!` either -- that routes through libtest's
+                    // per-thread output capture, which `std::thread::spawn`
+                    // inherits, and the captured buffer is never printed
+                    // because the process ends before libtest reports. Writing
+                    // to the `Stderr` handle bypasses the capture, so the
+                    // message survives with or without `--nocapture`.
+                    use std::io::Write;
+                    let message = format!(
+                        "\nexec_bounded: the script did not finish within {limit:?}.\n  \
+                         test:   {test}\n  \
+                         script: {what}\n  \
+                         This is a hang that never yields, so tokio::time::timeout could not \
+                         fire on it and the test thread can be neither unwound nor abandoned \
+                         (mlua::Lua is !Send). Exiting the test process with 101 so this reads \
+                         as a named failure rather than a wedged suite.\n"
+                    );
+                    let mut err = std::io::stderr();
+                    let _ = err.write_all(message.as_bytes());
+                    let _ = err.flush();
+                    std::process::exit(101);
+                })
+                .expect("spawn the exec_bounded watchdog");
+            Self { finished }
+        }
+    }
+
+    impl Drop for Watchdog {
+        fn drop(&mut self) {
+            let (done, wake) = &*self.finished;
+            *lock(done) = true;
+            wake.notify_all();
+        }
+    }
+
+    /// Runs `work` under both bounds, returning `None` if it timed out.
+    ///
+    /// Two bounds, because they catch different failures. The `tokio` timeout
+    /// is the one that can report an *awaiting* hang as an ordinary panic,
+    /// leaving the rest of the suite to run, so it is given the shorter
+    /// deadline and wins whenever it can fire at all. The watchdog is the
+    /// backstop for the case it structurally cannot cover.
+    pub(crate) async fn bounded<F: std::future::Future>(
+        limit: Duration,
+        what: &str,
+        work: F,
+    ) -> Option<F::Output> {
+        let _watchdog = Watchdog::arm(what, limit * 2);
+        factorio_bot_core::tokio::time::timeout(limit, work)
+            .await
+            .ok()
+    }
+
     /// Runs `code`, failing rather than hanging if it does not finish.
     ///
-    /// The timeout is the point. A `goal.start` that waited for its run would
+    /// The bound is the point. A `goal.start` that waited for its run would
     /// block here forever behind the shut gate, and a test that hangs on
     /// regression is not a guard — it reads as a slow suite. This turns it into
-    /// a named assertion failure.
+    /// a named assertion failure. See [`Watchdog`] for the half of that which
+    /// a timeout alone cannot do.
     pub(crate) async fn exec_bounded(lua: &Lua, code: &str) {
-        let outcome = factorio_bot_core::tokio::time::timeout(
-            Duration::from_secs(10),
-            lua.load(code).exec_async(),
-        )
-        .await;
-        match outcome {
-            Err(_) => panic!("the script did not finish within 10s: goal.start blocked"),
-            Ok(result) => result.expect("the script failed"),
+        exec_bounded_within(EXEC_BOUND, lua, code).await;
+    }
+
+    /// [`exec_bounded`] with the deadline named, for the tests *about* the
+    /// bound — they must not wait [`EXEC_BOUND`] to observe it.
+    pub(crate) async fn exec_bounded_within(limit: Duration, lua: &Lua, code: &str) {
+        match bounded(limit, code, lua.load(code).exec_async()).await {
+            None => panic!("the script did not finish within {limit:?}: goal.start blocked"),
+            Some(result) => result.expect("the script failed"),
+        }
+    }
+
+    // -------------------------------------------------- the bound's own proof
+
+    /// The bound a script gets in [`the_bound_fires_on_a_script_that_never_yields`].
+    ///
+    /// Short on purpose: the guard's real deadline is [`EXEC_BOUND`], and a
+    /// test of the guard must not cost that. The watchdog fires at twice this.
+    const PROBE_BOUND: Duration = Duration::from_millis(400);
+
+    /// The probe's full path in this test binary, as libtest's `--exact`
+    /// wants it. A rename that does not update this makes the parent test
+    /// fail (no test matched), not silently pass.
+    const PROBE: &str = "globals::goal::tests::the_watchdog_probe_that_never_yields";
+
+    /// Wedges on purpose, and is meant to.
+    ///
+    /// `#[ignore]`, so no ordinary run selects it;
+    /// [`the_bound_fires_on_a_script_that_never_yields`] runs it as a child
+    /// process and asserts on how it died. The loop is Lua rather than a
+    /// `sleep`: an awaiting hang is the case the old guard already handled,
+    /// and testing only that is precisely why this defect survived. This one
+    /// never returns to the runtime at all, so nothing but the watchdog can
+    /// end it.
+    #[tokio::test]
+    #[ignore = "wedges on purpose; driven as a child process by the_bound_fires_on_a_script_that_never_yields"]
+    async fn the_watchdog_probe_that_never_yields() {
+        let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never)));
+        exec_bounded_within(PROBE_BOUND, &lua, "local i = 0 while true do i = i + 1 end").await;
+        unreachable!("the watchdog must have ended this process");
+    }
+
+    /// The guard bounds a hang that never yields — proven, not asserted.
+    ///
+    /// Necessarily a child process: the whole point is that the guard cannot
+    /// hand control back to a wedged test, so there is no in-process
+    /// observation to make. What is checked is the contract callers rely on —
+    /// it ends, it ends *within the bound*, it ends unsuccessfully, and it
+    /// says which script and which test.
+    ///
+    /// This test bounds its own wait externally (`try_wait` against a
+    /// deadline, then `kill`) rather than through the mechanism under test,
+    /// so a regression in the watchdog shows up here as a failure and never
+    /// as a second hang.
+    #[test]
+    fn the_bound_fires_on_a_script_that_never_yields() {
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+        use std::time::Instant;
+
+        let exe = std::env::current_exe().expect("this test binary's own path");
+        let mut child = Command::new(exe)
+            // No `--test-threads=1`: at concurrency 1 libtest runs the test on
+            // `main` rather than on a thread named after it, and the name is
+            // what puts the test in the watchdog's message.
+            .args([PROBE, "--exact", "--ignored", "--nocapture"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn the probe");
+
+        // Generous next to the watchdog's 800ms, tight next to "forever":
+        // this is the assertion that the bound exists at all.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let started = Instant::now();
+        let status = loop {
+            match child.try_wait().expect("poll the probe") {
+                Some(status) => break status,
+                None if Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!(
+                        "the probe was still spinning after 20s: the bound did not fire. \
+                         This is the pre-fix behaviour -- tokio::time::timeout cannot \
+                         preempt a future that never yields."
+                    );
+                }
+                None => std::thread::sleep(Duration::from_millis(10)),
+            }
+        };
+        let elapsed = started.elapsed();
+
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .expect("piped stderr")
+            .read_to_string(&mut stderr)
+            .expect("read the probe's stderr");
+
+        assert!(
+            !status.success(),
+            "a wedged script must fail the probe, not pass it: {status}\n{stderr}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "the bound must fire near {:?}, not merely eventually: took {elapsed:?}",
+            PROBE_BOUND * 2
+        );
+        for expected in [
+            "exec_bounded: the script did not finish within",
+            "while true do i = i + 1 end",
+            PROBE,
+        ] {
+            assert!(
+                stderr.contains(expected),
+                "the failure must name {expected:?} so the next occurrence is diagnosable, \
+                 not just loud. Got:\n{stderr}"
+            );
         }
     }
 

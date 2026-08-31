@@ -453,8 +453,8 @@ mod tests {
     use super::*;
     use crate::globals::goal::create_lua_goal_with;
     use crate::globals::goal::tests::{
-        exec_bounded, factory, lua_with_goal, mining_plan, science_plan, seeded_world_for, Failure,
-        StubActuator,
+        bounded, exec_bounded, factory, lua_with_goal, mining_plan, science_plan, seeded_world_for,
+        Failure, StubActuator, EXEC_BOUND,
     };
     use factorio_bot_core::tokio::sync::mpsc;
     use factorio_bot_core::types::Position;
@@ -495,17 +495,13 @@ mod tests {
     /// `exec_bounded` (reused from `mod.rs`) is the success-path counterpart;
     /// this is its mirror for the tests here that assert a script must
     /// fail -- `exec_bounded` itself `.expect`s success, so it cannot be used
-    /// for them.
+    /// for them. It shares `bounded`, so it shares the watchdog: the bound
+    /// here also covers a hang that never yields. See `goal::tests::Watchdog`.
     async fn exec_bounded_err(lua: &Lua, code: &str) -> String {
-        let outcome = factorio_bot_core::tokio::time::timeout(
-            Duration::from_secs(10),
-            lua.load(code).exec_async(),
-        )
-        .await;
-        match outcome {
-            Err(_) => panic!("the script did not finish within 10s"),
-            Ok(Ok(())) => panic!("the script was expected to fail but succeeded"),
-            Ok(Err(err)) => err.to_string(),
+        match bounded(EXEC_BOUND, code, lua.load(code).exec_async()).await {
+            None => panic!("the script did not finish within {EXEC_BOUND:?}"),
+            Some(Ok(())) => panic!("the script was expected to fail but succeeded"),
+            Some(Err(err)) => err.to_string(),
         }
     }
 

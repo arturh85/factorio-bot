@@ -8,9 +8,6 @@ jobs:
   build-publish:
     needs: create-github-release
     name: Build & Publish
-    outputs:
-      release_body: ${{ needs.create-github-release.outputs.release_body }}
-      package_version: ${{ needs.create-github-release.outputs.package_version }}
     strategy:
       fail-fast: false
       matrix:
@@ -48,14 +45,11 @@ jobs:
           path: ${{ env.PNPM_STORE_PATH }}
           key: ${{ runner.os }}-pnpm-store-${{ hashFiles('app/pnpm-lock.yaml') }}
           restore-keys: ${{ runner.os }}-pnpm-store-
-      - name: 🛠️ Install tauri-cli
-        run: |
-          cargo install tauri-cli
-      - name: 🛠️ Install webkit2gtk (for tauri)
+      - name: 🛠️ Install lua and build tools (Ubuntu)
         if: matrix.platform == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y webkit2gtk-4.0 libgtksourceview-3.0-dev
+          sudo apt-get install -y liblua5.4-dev pkg-config
       - name: 🛠️ Install zensical
         if: matrix.platform == 'ubuntu-latest'
         uses: actions/setup-python@v6
@@ -67,7 +61,7 @@ jobs:
       - name: 🛠️ Install nodejs dependencies
         run: |
           cd app; pnpm install --frozen-lockfile
-      - name: 🦠 Update version in package.json & tauri.conf.json
+      - name: 🦠 Update version in package.json
         id: create_version
         run: |
           cd app/scripts; node update-package-version.js
@@ -78,40 +72,28 @@ jobs:
           cd app; pnpm run build:web
 
       # Rust
-      - name: 🏗️ Build rust code
-        env:
-          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
-          TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+      - name: 🏗️ Build the web ui
         run: |
-          cargo build --release --timings
-          cd app && pnpm run tauri:build
-
-      # Output Signature
-      - name: 🏗️ Build tauri updater json
-        env:
-          RELEASE_BODY: ${{ needs.create-github-release.outputs.release_body }}
+          cd app && pnpm run build:web
+      - name: 🏗️ Build the server binary
         run: |
-          mkdir updates
-          cd app/scripts; node build-auto-updater-json.js
+          cargo build --release --all-features --timings
 
-      # Upload updater json
-      - name: 📤️ Upload updater json to Job for later
-        uses: actions/upload-artifact@v6
-        with:
-          name: ${{ matrix.platform }}
-          path: updates/*
-
-      # Publish tauri artifacts
-      - name: 📤️ Upload artifacts to Github release
-        uses: tauri-apps/tauri-action@v0
+      # Publish release binary
+      # The desktop auto-updater has no server equivalent: release artefacts
+      # are now just the factorio-bot binary plus the built app/dist, and
+      # updating means replacing the binary.
+      - name: 📤️ Upload release binary
+        uses: ncipollo/release-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          releaseId: ${{ needs.create-github-release.outputs.id }}
-          iconPath: "../public/logo.png"
-          configPath: "tauri.conf.json"
-          projectPath: "./app"
-          tauriScript: "npm run dummy"
+          allowUpdates: true
+          replacesArtifacts: false
+          omitBodyDuringUpdate: true
+          omitNameDuringUpdate: true
+          tag: ${{ github.ref_name }}
+          artifacts: "target/release/factorio-bot*"
 
       # Prepare gh-pages
       - name: 🏗️ Build rust docs
@@ -168,7 +150,7 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 24
-      - name: 🦠 Update version in package.json & tauri.conf.json
+      - name: 🦠 Update version in package.json
         run: |
           cd app/scripts; node update-package-version.js
       - name: Generate changelog
@@ -204,52 +186,3 @@ jobs:
           body: "${{ steps.release.outputs.release_body }}"
           draft: false
           prerelease: true
-
-  publish-autoupdater-json:
-    name: Publish updater json files
-    runs-on: ubuntu-latest
-    needs: build-publish
-    steps:
-      - name: 🔥 Checkout code
-        uses: actions/checkout@v6
-      - name: 🛠️ Install nodejs 16
-        uses: actions/setup-node@v6
-        with:
-          node-version: 24
-
-      # Download update jsons
-      - name: 📥 Download update json files from windows
-        uses: actions/download-artifact@v7
-        with:
-          name: windows-latest
-          path: updates-windows/
-      - name: 📥 Download update json files from linux
-        uses: actions/download-artifact@v7
-        with:
-          name: ubuntu-latest
-          path: updates-linux/
-      - name: 📥 Download update json files from macos
-        uses: actions/download-artifact@v7
-        with:
-          name: macos-latest
-          path: updates-macos/
-
-      # Move update jsons to public/
-      - name: 🏗️ Move to public/
-        run: |
-          mkdir public/
-          mkdir public/updates/
-          mv updates-windows/* public/updates/
-          mv updates-linux/* public/updates/
-          mv updates-macos/* public/updates/
-          cd app/scripts; node merge-auto-updater-json.js
-
-      # Publish gh-pages
-      - name: 📤 Re-Deploy public/ to gh-pages (with keep_files)
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_branch: gh-pages
-          publish_dir: ./public
-          force_orphan: false
-          keep_files: true

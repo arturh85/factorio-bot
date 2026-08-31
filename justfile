@@ -1,5 +1,10 @@
+# Vite dev server on :8080, proxying /api to a `just serve` on :7492
 start:
-    cd app; pnpm run tauri:serve
+    cd app; pnpm run start
+
+# the real thing: axum serving the built SPA and the API on :7492
+serve *ARGS:
+    cargo run --release --no-default-features --features cli,lua,restapi -- serve --web-root app/dist {{ARGS}}
 
 repl *ARGS:
     cargo repl {{ARGS}}

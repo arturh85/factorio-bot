@@ -18,35 +18,24 @@
             lua5_4 # mlua links against system lua 5.4
             openssl
             xz # liblzma, loaded at runtime by the compiled binaries
-          ] ++ lib.optionals stdenv.hostPlatform.isLinux (with pkgs; [
-            webkitgtk_4_1 # also provides javascriptcoregtk-4.1
-            libsoup_3
-            gtk3
-            gtksourceview3
-            glib
-            cairo
-            pango
-            gdk-pixbuf
-            atk
-            librsvg
-            fuse # libfuse2, needed for AppImage bundling
-            dbus # libdbus-1, pulled in by tauri -> tao -> dbus on Linux;
-                 # without it a default-feature `cargo test --workspace`
-                 # fails to link, which is the gate CLAUDE.md documents.
-                 # Goes away with tauri itself (plan 5 task 14).
-          ]);
+          ];
         in {
           # Only native/system libraries live here; the language toolchains are
-          # pinned in mise.toml (rust, node, yarn).
+          # pinned in mise.toml (rust, node, pnpm).
           default = pkgs.mkShell {
             nativeBuildInputs = with pkgs; [ pkg-config ]
-              ++ lib.optionals stdenv.hostPlatform.isLinux [ patchelf file ];
+              ++ lib.optionals stdenv.hostPlatform.isLinux [ patchelf file chromium ];
 
             buildInputs = libs;
 
-            # build scripts and the built binaries load lua/webkit at runtime,
-            # and nothing puts the nix store paths into their rpath
+            # build scripts and the built binaries load lua at runtime, and
+            # nothing puts the nix store paths into their rpath
             LD_LIBRARY_PATH = lib.makeLibraryPath libs;
+
+            # app/e2e/smoke.mjs drives this through playwright-core, which
+            # never downloads a browser of its own.
+            CHROMIUM_BIN =
+              if stdenv.hostPlatform.isLinux then "${pkgs.chromium}/bin/chromium" else "";
           };
         });
     };

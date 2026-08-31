@@ -63,11 +63,5 @@
     "not dead"
   ],
   "license": "MIT",
-  "packageManager": "pnpm@10.34.5",
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "esbuild",
-      "@parcel/watcher"
-    ]
-  }
+  "packageManager": "pnpm@10.34.5"
 }

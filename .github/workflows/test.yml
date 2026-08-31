@@ -54,19 +54,16 @@ jobs:
           path: ${{ env.PNPM_STORE_PATH }}
           key: ${{ runner.os }}-pnpm-store-${{ hashFiles('app/pnpm-lock.yaml') }}
           restore-keys: ${{ runner.os }}-pnpm-store-
-      - name: 🛠️ Install tauri-cli
-        run: |
-          cargo install tauri-cli
       - name: 🛠️ Install tarpaulin (rust code coverage analyser)
         if: matrix.platform == 'ubuntu-latest'
         run: |
           curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
           cargo binstall -y --force cargo-tarpaulin
-      - name: 🛠️ Install webkit2gtk (for tauri)
+      - name: 🛠️ Install lua and build tools (Ubuntu)
         if: matrix.platform == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtksourceview-3.0-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev liblua5.4-dev libfuse2 file patchelf librsvg2-dev
+          sudo apt-get install -y liblua5.4-dev pkg-config
       - name: 🛠️ Install Lua 5.4 (macOS)
         if: matrix.platform == 'macos-latest'
         run: |
@@ -123,7 +120,7 @@ jobs:
           # Disable incremental compilation to prevent LNK1123/CVT1100 errors on Windows
           CARGO_INCREMENTAL: 0
         run: |
-          cargo build --release --workspace
+          cargo build --release --all-features
       - name: 🧹 Clean release artifacts
         if: matrix.platform == 'ubuntu-latest'
         run: |

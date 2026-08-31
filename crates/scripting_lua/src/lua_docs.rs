@@ -12,7 +12,8 @@ use factorio_bot_core::schemars::schema::{
 };
 use factorio_bot_core::schemars::schema_for;
 use factorio_bot_core::types::{
-    FactorioBlueprintInfo, FactorioEntity, FactorioPlayer, FactorioRecipe, Position,
+    FactorioBlueprintInfo, FactorioEntity, FactorioPlayer, FactorioRecipe, InventoryResponse,
+    Position,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -105,6 +106,7 @@ fn documented_type_schemas() -> Vec<RootSchema> {
         schema_for!(FactorioEntity),
         schema_for!(FactorioPlayer),
         schema_for!(FactorioRecipe),
+        schema_for!(InventoryResponse),
         schema_for!(Position),
     ]
 }

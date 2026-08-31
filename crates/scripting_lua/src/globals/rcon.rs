@@ -332,7 +332,7 @@ end
         "__doc_entry_revive_ghost",
         String::from(
             r#"
---- CHEATs a whole blueprint
+--- Revives a single ghost entity into the real thing
 -- Sends /silent-command remote.call('revive_ghost', ...)
 -- @number player_id id of player to give the item to
 -- @string name name of entity to revive
@@ -477,10 +477,12 @@ end
         "__doc_entry_inventory_contents_at",
         String::from(
             r#"
---- Craft an item with player
--- Sends /silent-command remote.call('action_start_crafting', ...)
--- @param inventories table list of `types.Position` to check
--- @return {[string]=number,...}
+--- Read the inventories of entities at given positions
+-- Sends /silent-command remote.call('inventory_contents_at', ...)
+-- @param inventories table list of `{name=string, x=number, y=number}` naming
+--   an entity and where it stands
+-- @return {`types.InventoryResponse`|nil,...} one entry per request, in the
+--   order asked; an entry is nil when no such entity was found there
 function rcon.inventory_contents_at(inventories)
 end
 "#,
@@ -522,8 +524,8 @@ end
             r#"
 --- Places an item by a player
 -- Sends /silent-command remote.call('place_entity', ...)
--- @number player_id id of plaer
--- @string name name of item to craft
+-- @number player_id id of player
+-- @string name name of the entity to place
 -- @param position  `types.Position`
 -- @number direction direction of placed entity
 -- @return `types.FactorioEntity`

@@ -519,15 +519,15 @@ impl FactorioRcon {
         let wait_start = Instant::now();
         loop {
             sleep(Duration::from_millis(50)).await;
-            if let Some(result) = world.actions.get(&action_id) {
-                if &result[..] == "ok" {
-                    world.actions.remove(&action_id);
+            // Take the reply in one operation. Looking it up with `get` and
+            // then calling `remove` holds the shard's read guard across a call
+            // that needs the same shard's write guard, which self-deadlocks the
+            // whole task on the first tick the reply is actually there.
+            if let Some((_, result)) = world.actions.remove(&action_id) {
+                if result == "ok" {
                     return Ok(());
                 } else {
-                    return Err(RconError {
-                        message: result.clone(),
-                    }
-                    .into());
+                    return Err(RconError { message: result }.into());
                 }
             }
             if wait_start.elapsed() > Duration::from_secs(360) {
@@ -544,10 +544,8 @@ impl FactorioRcon {
         let wait_start = Instant::now();
         loop {
             sleep(Duration::from_millis(50)).await;
-            if let Some(result) = world.path_requests.get(&request_id) {
-                // info!("action result: <bright-blue>{}</>", result);
-                let mut result = result.clone();
-                world.path_requests.remove(&request_id);
+            // Take the reply in one operation -- see sleep_for_action_result.
+            if let Some((_, mut result)) = world.path_requests.remove(&request_id) {
                 if result == "{}" {
                     result = String::from("[]");
                 }
@@ -1477,5 +1475,128 @@ impl RconSettings {
             pass: rcon_pass.to_owned(),
             host: server_host,
         }
+    }
+}
+
+/// Regression tests for the "reply arrives, executor never wakes" hang.
+///
+/// `sleep_for_path_request_result` and `sleep_for_action_result` poll a
+/// [`DashMap`](dashmap::DashMap) on the shared [`FactorioWorld`] for a reply the
+/// stdout [`crate::process::output_parser::OutputParser`] inserts. They used to
+/// do that as `if let Some(x) = map.get(&id) { ...; map.remove(&id); }`, which
+/// holds the shard's read guard across a call that wants the same shard's write
+/// guard -- a self-deadlock, on the very first tick where the reply is present.
+/// It looks exactly like "the reply was received and then nothing happened":
+/// the process sleeps, burns no CPU, and never issues another RCON command.
+///
+/// These tests deliver the reply the way the parser does and require the waiter
+/// to come back. They run the waiter on its own thread and wait on a channel,
+/// because a deadlocked future can never be cancelled -- `tokio::time::timeout`
+/// would hang with it instead of failing the test.
+#[cfg(test)]
+mod wait_for_reply_tests {
+    use super::*;
+    use crate::factorio::world::FactorioWorld;
+    use std::sync::mpsc;
+
+    fn quiet_rcon() -> FactorioRcon {
+        FactorioRcon::new_empty()
+    }
+
+    /// Starts `f` on a dedicated thread and hands back its result channel, so
+    /// the test can deliver the reply *while* the waiter is polling. A
+    /// `recv_timeout` that expires means the waiter never came back -- for
+    /// these tests, that it deadlocked.
+    fn start<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> mpsc::Receiver<T> {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx
+    }
+
+    const DEADLINE: Duration = Duration::from_secs(20);
+
+    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    #[test]
+    fn path_request_reply_wakes_the_waiter() {
+        let world = Arc::new(FactorioWorld::new());
+        let waiter_world = world.clone();
+        let waited =
+            start(move || block_on(quiet_rcon().sleep_for_path_request_result(&waiter_world, 1)));
+        // The waiter polls every 50ms; deliver the reply the way the output
+        // parser does, once it is certainly polling.
+        std::thread::sleep(Duration::from_millis(200));
+        world.path_requests.insert(
+            1,
+            r#"[{"x":0.0,"y":0.0},{"x":-15.5,"y":-35.5}]"#.to_string(),
+        );
+
+        let waited = waited.recv_timeout(DEADLINE).expect(
+            "sleep_for_path_request_result never returned after the reply was delivered \
+             (deadlocked holding a DashMap read guard across remove())",
+        );
+        let path = waited.expect("the delivered path should have parsed");
+        assert_eq!(path.len(), 2, "got {path:?}");
+        assert!(
+            world.path_requests.get(&1).is_none(),
+            "the consumed reply should have been removed from the world"
+        );
+    }
+
+    #[test]
+    fn action_result_reply_wakes_the_waiter() {
+        let world = Arc::new(FactorioWorld::new());
+        let waiter_world = world.clone();
+        let waited =
+            start(move || block_on(quiet_rcon().sleep_for_action_result(&waiter_world, 7)));
+        std::thread::sleep(Duration::from_millis(200));
+        world.actions.insert(7, "ok".to_string());
+
+        waited
+            .recv_timeout(DEADLINE)
+            .expect(
+                "sleep_for_action_result never returned after the reply was delivered \
+                 (deadlocked holding a DashMap read guard across remove())",
+            )
+            .expect("an \"ok\" action result should succeed");
+        assert!(
+            world.actions.get(&7).is_none(),
+            "the consumed reply should have been removed from the world"
+        );
+    }
+
+    #[test]
+    fn failed_action_result_is_reported_and_consumed() {
+        let world = Arc::new(FactorioWorld::new());
+        let waiter_world = world.clone();
+        let waited =
+            start(move || block_on(quiet_rcon().sleep_for_action_result(&waiter_world, 8)));
+        std::thread::sleep(Duration::from_millis(200));
+        world
+            .actions
+            .insert(8, "target is out of reach".to_string());
+
+        let err = waited
+            .recv_timeout(DEADLINE)
+            .expect("sleep_for_action_result never returned after the failure was delivered")
+            .expect_err("a non-ok action result should be an error");
+        assert!(
+            format!("{err:?}").contains("target is out of reach"),
+            "error should carry the game's message, got {err:?}"
+        );
+        // Action ids are reused (mod 1000). A failure left behind in the map
+        // makes the next action with that id fail instantly.
+        assert!(
+            world.actions.get(&8).is_none(),
+            "a failed reply must also be consumed, or it poisons the reused action id"
+        );
     }
 }

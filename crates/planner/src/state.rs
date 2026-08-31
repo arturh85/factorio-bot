@@ -1,4 +1,5 @@
 use crate::error::PlannerError;
+use crate::goal::Holder;
 use crate::ids::{BotId, ItemId};
 use factorio_bot_core::factorio::util::add_to_rect;
 use factorio_bot_core::factorio::world::FactorioWorld;
@@ -150,6 +151,21 @@ pub struct PlanState {
     /// ever learns to act for several, this has to become `(force, tech)` at
     /// the same time — the two are one decision, not two.
     researched: BTreeSet<String>,
+    /// Holdings expansion has already promised to an action it is about to
+    /// emit, keyed the way [`Holder`] keys a shortfall: per bot for
+    /// `Holder::Bot`/`Holder::Share`, and once for the roster as a whole for
+    /// `Holder::Anyone`.
+    ///
+    /// This is *not* inventory. Nothing here has been spent — the items are
+    /// still in the bot's hands, and [`PlanState::inventory_count`] and
+    /// [`PlanState::lose`] both still see them, which is what keeps the
+    /// emitted plan's own arithmetic (and `Condition::HasItem`'s check of it)
+    /// reading the real simulated inventory. A reservation only answers a
+    /// different question: how much is left over for some *other* goal to
+    /// count towards itself. See [`PlanState::available`].
+    reserved: BTreeMap<BotId, BTreeMap<ItemId, u32>>,
+    /// The `Holder::Anyone` half of `reserved`, which names no bot.
+    reserved_by_anyone: BTreeMap<ItemId, u32>,
     /// Half the diagonal of the largest collision box among `base`'s known
     /// entity prototypes, or `0.` if it carries none.
     ///
@@ -204,6 +220,8 @@ impl PlanState {
             consumed: Default::default(),
             force,
             researched: Default::default(),
+            reserved: Default::default(),
+            reserved_by_anyone: Default::default(),
             max_prototype_half_diagonal,
         }
     }
@@ -300,6 +318,79 @@ impl PlanState {
             .values()
             .map(|b| b.inventory.get(item).copied().unwrap_or(0))
             .sum()
+    }
+
+    /// How much of `item` is left for a *new* goal to count towards itself:
+    /// what `whose` holds, less what expansion has already promised to an
+    /// action it is about to emit.
+    ///
+    /// This — not `inventory_count`/`total_count` — is the question
+    /// "is this goal already satisfied" has to ask. Asking the raw holding
+    /// double-counts an intermediate two sub-goals of one recipe both draw on:
+    /// a lab's own ten gears are visible to the sub-goal that produces its
+    /// transport belts, which then spends two of them and leaves the lab craft
+    /// short. Reserving is what stops a holding being claimed twice.
+    ///
+    /// A per-bot reservation lowers the roster total too, because the items it
+    /// names are a known bot's and so genuinely spoken for. An `Anyone`
+    /// reservation does *not* lower any one bot's figure, because it names no
+    /// bot: nothing says which of them holds the promised items, and guessing
+    /// would refuse work a bot can really do.
+    pub fn available(&self, whose: &Holder, item: &str) -> u32 {
+        match whose {
+            Holder::Anyone => {
+                let promised: u32 = self
+                    .reserved
+                    .values()
+                    .map(|held| held.get(item).copied().unwrap_or(0))
+                    .sum::<u32>()
+                    .saturating_add(self.reserved_by_anyone.get(item).copied().unwrap_or(0));
+                self.total_count(item).saturating_sub(promised)
+            }
+            Holder::Bot(id) | Holder::Share(id) => self
+                .inventory_count(*id, item)
+                .saturating_sub(self.reserved_for(*id, item)),
+        }
+    }
+
+    fn reserved_for(&self, id: BotId, item: &str) -> u32 {
+        self.reserved
+            .get(&id)
+            .and_then(|held| held.get(item))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Promise `count` of `item` to `whose`, hiding it from [`available`] until
+    /// [`PlanState::release`] gives it back. Reservations add up, so two
+    /// promises of the same item hide both.
+    ///
+    /// [`available`]: PlanState::available
+    pub fn reserve(&mut self, whose: &Holder, item: &str, count: u32) {
+        let ledger = match whose {
+            Holder::Anyone => &mut self.reserved_by_anyone,
+            Holder::Bot(id) | Holder::Share(id) => self.reserved.entry(*id).or_default(),
+        };
+        let entry = ledger.entry(item.to_string()).or_insert(0);
+        *entry = entry.saturating_add(count);
+    }
+
+    /// Undo one [`PlanState::reserve`]. Saturating rather than fallible: a
+    /// release is always paired with a reserve by the caller that made it, so
+    /// there is no failure for a caller to handle, and clamping at zero cannot
+    /// invent stock the way wrapping would.
+    pub fn release(&mut self, whose: &Holder, item: &str, count: u32) {
+        let ledger = match whose {
+            Holder::Anyone => &mut self.reserved_by_anyone,
+            Holder::Bot(id) | Holder::Share(id) => self.reserved.entry(*id).or_default(),
+        };
+        let Some(entry) = ledger.get_mut(item) else {
+            return;
+        };
+        *entry = entry.saturating_sub(count);
+        if *entry == 0 {
+            ledger.remove(item);
+        }
     }
 
     pub fn gain(&mut self, id: BotId, item: &str, count: u32) {
@@ -912,5 +1003,92 @@ mod tests {
         assert!(!a.is_researched("automation"));
         a.set_researched("automation");
         assert!(a.is_researched("automation"));
+    }
+
+    /// A reservation is a claim on stock, not a withdrawal of it. Both halves
+    /// are asserted: `available` must fall, and the inventory the emitted plan
+    /// is checked against must not move at all — a reservation that debited
+    /// the inventory would make `Effect::LoseItem` fail on items the bot
+    /// really holds.
+    #[test]
+    fn a_reservation_hides_stock_from_available_without_spending_it() {
+        let mut a = state();
+        a.gain(BotId(1), "iron-plate", 10);
+        let whose = Holder::Share(BotId(1));
+
+        assert_eq!(a.available(&whose, "iron-plate"), 10);
+        a.reserve(&whose, "iron-plate", 4);
+        assert_eq!(a.available(&whose, "iron-plate"), 6, "four are spoken for");
+        assert_eq!(
+            a.inventory_count(BotId(1), "iron-plate"),
+            10,
+            "but none have been spent"
+        );
+        a.lose(BotId(1), "iron-plate", 10)
+            .expect("a reservation must not block spending what is really held");
+
+        a.release(&whose, "iron-plate", 4);
+        a.gain(BotId(1), "iron-plate", 10);
+        assert_eq!(a.available(&whose, "iron-plate"), 10, "and released again");
+    }
+
+    /// Reservations add up rather than overwrite: two claims on the same item
+    /// hide both, which is the whole point when one recipe's ingredients each
+    /// reduce to the same intermediate.
+    #[test]
+    fn two_reservations_on_one_item_hide_both() {
+        let mut a = state();
+        a.gain(BotId(1), "iron-gear-wheel", 10);
+        let whose = Holder::Share(BotId(1));
+        a.reserve(&whose, "iron-gear-wheel", 6);
+        a.reserve(&whose, "iron-gear-wheel", 3);
+        assert_eq!(a.available(&whose, "iron-gear-wheel"), 1);
+        a.release(&whose, "iron-gear-wheel", 6);
+        assert_eq!(a.available(&whose, "iron-gear-wheel"), 7);
+    }
+
+    /// The two ledgers, and the deliberate asymmetry between them. A bot's
+    /// reservation names a bot, so it lowers the roster total too. An
+    /// `Anyone` reservation names none, so it lowers the total and nobody's
+    /// individual figure.
+    #[test]
+    fn a_bot_reservation_lowers_the_roster_total_but_an_anyone_reservation_lowers_no_bot() {
+        let mut a = state();
+        a.gain(BotId(1), "coal", 4);
+        a.gain(BotId(2), "coal", 6);
+        assert_eq!(a.available(&Holder::Anyone, "coal"), 10);
+
+        a.reserve(&Holder::Share(BotId(1)), "coal", 3);
+        assert_eq!(a.available(&Holder::Share(BotId(1)), "coal"), 1);
+        assert_eq!(
+            a.available(&Holder::Share(BotId(2)), "coal"),
+            6,
+            "one bot's claim says nothing about another's stock"
+        );
+        assert_eq!(
+            a.available(&Holder::Anyone, "coal"),
+            7,
+            "but it is spoken for as far as the roster is concerned"
+        );
+
+        a.reserve(&Holder::Anyone, "coal", 2);
+        assert_eq!(a.available(&Holder::Anyone, "coal"), 5);
+        assert_eq!(
+            a.available(&Holder::Share(BotId(2)), "coal"),
+            6,
+            "an Anyone claim names no bot, so it cannot be charged to one"
+        );
+    }
+
+    /// Releasing more than was reserved clamps at zero rather than wrapping,
+    /// which would otherwise hand a caller `u32::MAX` items of headroom.
+    #[test]
+    fn releasing_more_than_was_reserved_clamps_at_nothing_reserved() {
+        let mut a = state();
+        a.gain(BotId(1), "stone", 5);
+        let whose = Holder::Share(BotId(1));
+        a.reserve(&whose, "stone", 2);
+        a.release(&whose, "stone", 9);
+        assert_eq!(a.available(&whose, "stone"), 5);
     }
 }

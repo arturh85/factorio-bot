@@ -390,12 +390,72 @@ fn expand_goal_body(
     // so its members keep the site the bundle itself had.
     ctx.top_level = false;
 
+    // Save, run, restore, exactly as `expand_goal` does for the chain: a
+    // reservation this method made must be given back however the body exits,
+    // or a caller that continues past an error inherits a state that thinks
+    // items are spoken for by an action that was never emitted.
+    let mut promised: Vec<(Holder, ItemId, u32)> = Vec::new();
+    let result = run_steps(steps, ctx, net, registry, &mut promised);
+    for (whose, item, count) in &promised {
+        ctx.state.release(whose, item, *count);
+    }
+    result
+}
+
+/// Walk one method's steps, expanding subgoals, emitting actions and holding
+/// each satisfied subgoal's produce for the action that asked for it.
+///
+/// **Why the reservations.** A method's `Have` subgoal exists because an
+/// action further down its own step list needs that holding — `HandCraft`
+/// asks for every ingredient of the craft it is about to emit, `Smelt` for the
+/// ore, the coal and the furnace it is about to load. But the action does not
+/// *spend* any of it until the `Step::Act` at the end, so between the subgoal
+/// being satisfied and the action being emitted the items sit in the simulated
+/// inventory looking spare — and the next sibling subgoal, which asks
+/// `shortfall` whether it is already supplied, helps itself to them.
+///
+/// That is the shared-intermediate defect. A lab needs ten iron gear wheels
+/// and four transport belts; the belts are made of gears; the belt sub-goal
+/// finds the lab's own ten gears sitting there, plans no gears of its own, and
+/// spends two — so the lab craft comes to eight and the expansion fails
+/// arithmetic it should have got right. Reserving each subgoal's stated count
+/// as soon as it is satisfied is what makes the sibling see the two gears it
+/// really has to make.
+///
+/// The count reserved is the subgoal's own `count`, not its shortfall: the
+/// action's `Condition::HasItem` demands the whole holding, so the whole
+/// holding is spoken for, whether it was produced here or was already in hand.
+///
+/// A `Goal::All` reserves nothing — it never reaches here, returning from
+/// `expand_goal_body` above. That is deliberate: its members are independent
+/// goals with no action of the caller's waiting to consume them together, and
+/// a `Have` states a holding rather than a delivery, so two members asking for
+/// five gears each still describe one bot holding five.
+fn run_steps(
+    steps: Vec<Step>,
+    ctx: &mut ExpansionCtx,
+    net: &mut ActionNetwork,
+    registry: &MethodRegistry,
+    promised: &mut Vec<(Holder, ItemId, u32)>,
+) -> Result<(), PlannerError> {
     for step in steps {
         match step {
-            Step::Subgoal(g) => expand_goal(&g, ctx, net, registry)?,
+            Step::Subgoal(g) => {
+                expand_goal(&g, ctx, net, registry)?;
+                if let Goal::Have { item, count, whose } = &g {
+                    ctx.state.reserve(whose, item, *count);
+                    promised.push((whose.clone(), item.clone(), *count));
+                }
+            }
             Step::Act(action) => {
                 // Simulate against the chain actor so later siblings see this
                 // action's results. The emitted action stays unpinned.
+                //
+                // The reservations above are still held here, and must be:
+                // `Effect::LoseItem` debits the *inventory*, which reservations
+                // do not touch, so the two ledgers cannot disagree — the items
+                // leave the inventory for real and the promise is given back
+                // when this method's body ends.
                 let binding = ctx.chain_actor;
                 for effect in &action.eff {
                     effect.apply(&mut ctx.state, binding)?;
@@ -641,6 +701,267 @@ mod tests {
         // satisfied, so it produces too — but only because the driver's state
         // actually carries the first goal's 3 coal forward.
         assert_eq!(net.len(), 2);
+    }
+
+    /// The driver holds a satisfied subgoal's produce for the action that
+    /// asked for it, so a *sibling* subgoal cannot count the same items
+    /// towards itself.
+    ///
+    /// Written with invented items and hand-written methods rather than a
+    /// recipe, because the rule is the driver's and not any method's: a widget
+    /// needs four cogs and a gadget, and a gadget is itself a cog. Without the
+    /// reservation the gadget's own cog subgoal looks at the four cogs the
+    /// widget just had made, declares itself supplied, and spends one — and
+    /// the widget is left with three of the four it was promised.
+    #[test]
+    fn a_sibling_subgoal_cannot_spend_what_an_earlier_one_was_asked_to_supply() {
+        /// Satisfied when the holder can still count `count` towards this
+        /// goal — the reservation-aware question, which is the one a method
+        /// has to ask.
+        struct Enough;
+        impl Method for Enough {
+            fn name(&self) -> &'static str {
+                "enough"
+            }
+            fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
+                matches!(goal, Goal::Have { item, count, whose }
+                    if state.available(whose, item) >= *count)
+            }
+            fn expand(&self, _g: &Goal, _c: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+                Ok(vec![])
+            }
+        }
+
+        /// Makes exactly the shortfall, out of nothing.
+        struct MakeCog;
+        impl Method for MakeCog {
+            fn name(&self) -> &'static str {
+                "make-cog"
+            }
+            fn applicable(&self, goal: &Goal, _s: &PlanState) -> bool {
+                matches!(goal, Goal::Have { item, .. } if item == "cog")
+            }
+            fn expand(
+                &self,
+                goal: &Goal,
+                ctx: &mut ExpansionCtx,
+            ) -> Result<Vec<Step>, PlannerError> {
+                let Goal::Have { item, count, whose } = goal else {
+                    unreachable!()
+                };
+                let short = count.saturating_sub(ctx.state.available(whose, item));
+                let a = gain_action(ctx, "cog", short);
+                Ok(vec![Step::Act(Box::new(a))])
+            }
+        }
+
+        /// Turns one cog into one gadget, spending the cog.
+        struct MakeGadget;
+        impl Method for MakeGadget {
+            fn name(&self) -> &'static str {
+                "make-gadget"
+            }
+            fn applicable(&self, goal: &Goal, _s: &PlanState) -> bool {
+                matches!(goal, Goal::Have { item, .. } if item == "gadget")
+            }
+            fn expand(&self, _g: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+                let mut a = gain_action(ctx, "gadget", 1);
+                a.eff.push(Effect::LoseItem {
+                    who: Actor::Role,
+                    item: "cog".into(),
+                    count: 1,
+                });
+                Ok(vec![
+                    Step::Subgoal(Goal::Have {
+                        item: "cog".into(),
+                        count: 1,
+                        whose: Holder::Anyone,
+                    }),
+                    Step::Act(Box::new(a)),
+                ])
+            }
+        }
+
+        /// Four cogs *and* a gadget, both spent.
+        struct MakeWidget;
+        impl Method for MakeWidget {
+            fn name(&self) -> &'static str {
+                "make-widget"
+            }
+            fn applicable(&self, goal: &Goal, _s: &PlanState) -> bool {
+                matches!(goal, Goal::Have { item, .. } if item == "widget")
+            }
+            fn expand(&self, _g: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+                let mut a = gain_action(ctx, "widget", 1);
+                a.eff.push(Effect::LoseItem {
+                    who: Actor::Role,
+                    item: "cog".into(),
+                    count: 4,
+                });
+                a.eff.push(Effect::LoseItem {
+                    who: Actor::Role,
+                    item: "gadget".into(),
+                    count: 1,
+                });
+                Ok(vec![
+                    Step::Subgoal(Goal::Have {
+                        item: "cog".into(),
+                        count: 4,
+                        whose: Holder::Anyone,
+                    }),
+                    Step::Subgoal(Goal::Have {
+                        item: "gadget".into(),
+                        count: 1,
+                        whose: Holder::Anyone,
+                    }),
+                    Step::Act(Box::new(a)),
+                ])
+            }
+        }
+
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
+        let reg = MethodRegistry::new()
+            .with(Box::new(Enough))
+            .with(Box::new(MakeWidget))
+            .with(Box::new(MakeGadget))
+            .with(Box::new(MakeCog));
+        let net = expand(
+            &[Goal::Have {
+                item: "widget".into(),
+                count: 1,
+                whose: Holder::Anyone,
+            }],
+            &state,
+            &reg,
+            BotId(1),
+        )
+        .expect("five cogs is a reachable amount of cogs");
+
+        let cogs: u32 = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Craft { item, count } if item == "cog" => Some(*count),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(
+            cogs,
+            5,
+            "four cogs for the widget and one more for its gadget: {:?}",
+            net.actions().map(|a| &a.label).collect::<Vec<_>>()
+        );
+    }
+
+    /// A reservation lasts exactly as long as the method that made it. Once
+    /// its action has been emitted — and has spent the items for real — the
+    /// promise is given back, or every later goal in the plan would be sized
+    /// against stock that is permanently invisible and the plan would grow
+    /// without bound.
+    ///
+    /// Two independent top-level goals are the shortest way to say it: the
+    /// second is asked for after the first's method has finished, and finds
+    /// exactly the two cogs the first left over.
+    #[test]
+    fn a_reservation_ends_with_the_method_that_made_it() {
+        struct Enough;
+        impl Method for Enough {
+            fn name(&self) -> &'static str {
+                "enough"
+            }
+            fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
+                matches!(goal, Goal::Have { item, count, whose }
+                    if state.available(whose, item) >= *count)
+            }
+            fn expand(&self, _g: &Goal, _c: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+                Ok(vec![])
+            }
+        }
+
+        /// Asks for six cogs and spends four of them, leaving two.
+        struct Spend;
+        impl Method for Spend {
+            fn name(&self) -> &'static str {
+                "spend"
+            }
+            fn applicable(&self, goal: &Goal, _s: &PlanState) -> bool {
+                matches!(goal, Goal::Have { item, .. } if item == "widget")
+            }
+            fn expand(&self, _g: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+                let mut a = gain_action(ctx, "widget", 1);
+                a.eff.push(Effect::LoseItem {
+                    who: Actor::Role,
+                    item: "cog".into(),
+                    count: 4,
+                });
+                Ok(vec![
+                    Step::Subgoal(Goal::Have {
+                        item: "cog".into(),
+                        count: 6,
+                        whose: Holder::Anyone,
+                    }),
+                    Step::Act(Box::new(a)),
+                ])
+            }
+        }
+
+        struct MakeCog;
+        impl Method for MakeCog {
+            fn name(&self) -> &'static str {
+                "make-cog"
+            }
+            fn applicable(&self, goal: &Goal, _s: &PlanState) -> bool {
+                matches!(goal, Goal::Have { item, .. } if item == "cog")
+            }
+            fn expand(
+                &self,
+                goal: &Goal,
+                ctx: &mut ExpansionCtx,
+            ) -> Result<Vec<Step>, PlannerError> {
+                let Goal::Have { item, count, whose } = goal else {
+                    unreachable!()
+                };
+                let short = count.saturating_sub(ctx.state.available(whose, item));
+                let a = gain_action(ctx, "cog", short);
+                Ok(vec![Step::Act(Box::new(a))])
+            }
+        }
+
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
+        let reg = MethodRegistry::new()
+            .with(Box::new(Enough))
+            .with(Box::new(Spend))
+            .with(Box::new(MakeCog));
+        let net = expand(
+            &[
+                Goal::Have {
+                    item: "widget".into(),
+                    count: 1,
+                    whose: Holder::Anyone,
+                },
+                Goal::Have {
+                    item: "cog".into(),
+                    count: 2,
+                    whose: Holder::Anyone,
+                },
+            ],
+            &state,
+            &reg,
+            BotId(1),
+        )
+        .expect("two leftover cogs satisfy a goal asking for two");
+
+        let cogs: u32 = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Craft { item, count } if item == "cog" => Some(*count),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(
+            cogs, 6,
+            "the widget's six cogs, with the two it did not spend left free              for the second goal rather than promised forever: {:?}",
+            net.actions().map(|a| &a.label).collect::<Vec<_>>()
+        );
     }
 
     #[test]

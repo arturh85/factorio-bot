@@ -47,16 +47,19 @@ fn needs_producing(state: &PlanState, item: &str, count: u32) -> bool {
     !state
         .bot_ids()
         .iter()
-        .any(|bot| state.inventory_count(*bot, item) >= count)
+        .any(|bot| state.available(&Holder::Bot(*bot), item) >= count)
 }
 
-/// How much of `item` still needs producing, given what is already held.
+/// How much of `item` still needs producing, given what is already held *and
+/// not already promised elsewhere*.
+///
+/// `PlanState::available` rather than the raw holding, and the difference is
+/// the whole of this crate's shared-intermediate bug: a recipe whose
+/// ingredients both reduce to one intermediate has two sub-goals asking this
+/// question about the same items, and answering it from the raw holding lets
+/// the second one count what the first has already earmarked.
 fn shortfall(state: &PlanState, item: &str, count: u32, whose: &Holder) -> u32 {
-    let held = match whose {
-        Holder::Anyone => state.total_count(item),
-        Holder::Bot(id) | Holder::Share(id) => state.inventory_count(*id, item),
-    };
-    count.saturating_sub(held)
+    count.saturating_sub(state.available(whose, item))
 }
 
 /// The goal is already met. Emits nothing.
@@ -1293,6 +1296,34 @@ mod tests {
         );
     }
 
+    /// Stock that is already promised to a pending action is not stock this
+    /// research can count on, so a convergence it would otherwise have been
+    /// spared is a convergence after all.
+    ///
+    /// This is `needs_producing`'s half of the reservation rule. `shortfall`'s
+    /// half is exercised everywhere; this one has its own question — "does any
+    /// single bot hold the whole count" — and its own way of getting the
+    /// answer wrong, which is to read the raw holding and count items another
+    /// action has already been promised.
+    #[test]
+    fn a_research_converges_again_once_its_stock_is_promised_elsewhere() {
+        let s = tech_state(&[BotId(1)]);
+        let mixed = Goal::Researched("mixed-research".into());
+
+        let mut stocked = s.fork();
+        stocked.gain(BotId(1), "iron-plate", 6);
+        assert!(
+            !Researched.converges(&mixed, &stocked),
+            "the plates are in hand, so only the packs are still produced"
+        );
+
+        stocked.reserve(&Holder::Share(BotId(1)), "iron-plate", 6);
+        assert!(
+            Researched.converges(&mixed, &stocked),
+            "but plates promised to another action have to be made again"
+        );
+    }
+
     /// The roster the Lua runner actually starts: four bots, each carrying the
     /// default inventory `Planner::initiate_missing_players_with_default_
     /// inventory` hands out — one stone furnace apiece, among other things.
@@ -1933,6 +1964,61 @@ mod tests {
         assert!(action.eff.iter().any(
             |e| matches!(e, Effect::LoseItem { item, count, .. } if item == "iron-plate" && *count == 4)
         ));
+    }
+
+    /// Two sub-goals of one craft drawing on the same intermediate.
+    ///
+    /// A lab needs 10 iron gear wheels *and* 4 transport belts, and a
+    /// transport belt is itself made of gears — one gear per two belts. Sized
+    /// against the inventory the expansion started with, the belt sub-goal
+    /// sees the ten gears the lab's *own* gear sub-goal has just produced,
+    /// calls itself supplied, and spends two of them; the lab craft is then
+    /// left holding 8 where it needs 10.
+    ///
+    /// The count is asserted exactly. `>= 10` would also pass against a fix
+    /// that simply over-crafts, which is a different bug wearing this one's
+    /// clothes.
+    #[test]
+    fn a_shared_intermediate_is_crafted_for_every_sub_goal_that_draws_on_it() {
+        let mut s = state(&[BotId(1)]);
+        // Plates enough that nothing has to be mined or smelted: the question
+        // here is how a craft is sized, and ore would only add noise.
+        s.gain(BotId(1), "iron-plate", 200);
+        s.gain(BotId(1), "copper-plate", 200);
+        let net = expand(
+            &[Goal::Have {
+                item: "lab".into(),
+                count: 1,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &default_registry(),
+            BotId(1),
+        )
+        .expect("a lab is craftable from plates alone");
+
+        let crafted = |item: &str| -> u32 {
+            net.actions()
+                .filter_map(|a| match &a.kind {
+                    ActionKind::Craft {
+                        item: crafted,
+                        count,
+                    } if crafted == item => Some(*count),
+                    _ => None,
+                })
+                .sum()
+        };
+        let labels: Vec<&String> = net.actions().map(|a| &a.label).collect();
+        assert_eq!(
+            crafted("iron-gear-wheel"),
+            12,
+            "ten gears for the lab and two more for its four transport belts: {labels:?}"
+        );
+        assert_eq!(
+            crafted("transport-belt"),
+            2,
+            "two runs of a recipe that yields two belts each: {labels:?}"
+        );
     }
 
     #[test]

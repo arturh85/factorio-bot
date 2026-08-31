@@ -166,7 +166,11 @@ end
         lua.create_async_function(move |_lua, ()| {
             let _rcon = rcon.clone();
             async move {
-                let tick = _rcon.as_ref().frame_capture_stop().await.map_err(rcon_error)?;
+                let tick = _rcon
+                    .as_ref()
+                    .frame_capture_stop()
+                    .await
+                    .map_err(rcon_error)?;
                 Ok(tick)
             }
         })?,

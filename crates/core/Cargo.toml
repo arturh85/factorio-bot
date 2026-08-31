@@ -10,7 +10,7 @@ push = false
 publish = false
 
 [dependencies]
-rand = "0.9"
+rand = "0.10"
 rcon = { version = "0.6", features = ["rt-tokio"] }
 bb8 = "0.9.1"
 serde = { version = "1.0", features = ["derive"] }
@@ -35,20 +35,20 @@ tokio = { version = "1", features = ["full", "tracing"] }
 noisy_float = { version = "0.2", features = ["serde"] }
 enum-primitive-derive = "0.3"
 unicode-segmentation = "1.12"
-strum = { version = "0.27", features = ["derive"] }
+strum = { version = "0.28", features = ["derive"] }
 dashmap = {version = "6.1", features = ["serde"] }
 euclid = {version = "0.22", features = ["serde"] }
 smallvec = { version = "1.13", features = ["serde"] }
-base64 = "0.22"
+base64 = "0.23"
 ptree = "0.5"
 rustc-hash = "2.1"
-itertools = "0.14"
+itertools = "0.15"
 alphanumeric-sort = "1.5"
 flate2 = "1.0"
 tar = "0.4"
 liblzma = "0.4"
 zip = "8.6"
-toml = "0.9"
+toml = "1.1"
 regex = "1.11"
 schemars = { version = "0.8.22", features = ["preserve_order"] }
 utoipa = "5.5.0"
@@ -64,6 +64,6 @@ dirs = "6.0"
 windows-sys = { version = "^0.61.2", features = ["Win32_Foundation", "Win32_System_SystemInformation", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
-mockall = "0.14.0"
+mockall = "0.15.0"
 mockall_double = "0.3.1"
 tempfile = "3"

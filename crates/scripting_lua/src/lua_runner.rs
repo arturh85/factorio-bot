@@ -122,10 +122,14 @@ pub async fn run_lua(
     code_by_path.insert(filename.clone(), lua_code.to_owned());
     let code_by_path: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(code_by_path));
     let all_bots = planner.initiate_missing_players_with_default_inventory(bot_count);
-    planner.update_plan_world();
     let lua_code = lua_code.to_owned();
 
-    let plan_world = planner.plan_world.clone();
+    // One world handle, and it is the live one. The bindings used to get a
+    // deep copy taken here and never refreshed, so every `world.*` query
+    // answered from a snapshot frozen at script start -- 41.8 tiles and
+    // 6,214 ticks out by the end of one run, while `rcon.*` and the
+    // executor read the truth. A script checking itself two ways disagreed
+    // with itself. See 01948bec.
     let real_world = planner.real_world.clone();
     let rcon = planner.rcon.clone();
 
@@ -172,13 +176,13 @@ pub async fn run_lua(
             let setup = (|| -> LuaResult<()> {
                 let world = create_lua_world(
                     &lua,
-                    plan_world.clone(),
+                    real_world.clone(),
                     scripts_root.clone(),
                     script_dir.clone(),
                 )?;
                 let goal = create_lua_goal(
                     &lua,
-                    plan_world.clone(),
+                    real_world.clone(),
                     real_world.clone(),
                     rcon.clone(),
                     all_bots.clone(),

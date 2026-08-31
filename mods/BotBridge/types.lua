@@ -263,7 +263,18 @@ function serialize_entity_prototype(entity)
     if ok then record.max_underground_distance = val end
     ok, val = pcall(function() return entity.mining_speed end)
     if ok then record.mining_speed = val end
-    ok, val = pcall(function() return entity.crafting_speed end)
+    -- crafting_speed: a furnace's own speed divides the recipe's time, so a
+    -- steel or electric furnace (2) smelts in half a stone furnace's (1).
+    --
+    -- This is `get_crafting_speed()`, not `.crafting_speed`. Factorio 2.0's
+    -- quality rework turned the attribute into a method taking an optional
+    -- QualityID -- `LuaEntityPrototype::get_crafting_speed`, subclasses
+    -- CraftingMachine and Character -- and left no attribute of that name. The
+    -- attribute read below it used to be raised on every 2.x prototype, the
+    -- pcall swallowed it, and the field arrived nil for all 1028 prototypes of
+    -- a live 2.1.17 game while mining_speed (still an attribute) arrived fine.
+    -- No argument means normal quality, which is what the planner plans for.
+    ok, val = pcall(function() return entity.get_crafting_speed() end)
     if ok then record.crafting_speed = val end
     record.mine_result = mine_result
     if fluidbox_found then

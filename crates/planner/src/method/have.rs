@@ -24,7 +24,7 @@ use crate::ids::{BotId, Ticks};
 use crate::method::util::{
     free_area_near, ingredients_of, mining_ticks, nearest_resource_tile, output_per_craft,
     recipe_for, recipe_gate, recipe_ticks, research_ingredients, research_ticks,
-    resource_supply_at_least, resource_tiles_for, RecipeGate,
+    resource_supply_at_least, resource_tiles_for, smelting_ticks, RecipeGate,
 };
 use crate::method::{ExpansionCtx, GoalSite, Method, MethodRegistry, Step};
 use crate::state::PlanState;
@@ -108,9 +108,21 @@ impl Method for AlreadySatisfied {
 ///
 /// Fuel is worked out from the recipe's own smelting time — a *plates* per
 /// coal figure would be recipe-blind, and applying iron plate's 3.2 s to
-/// steel's 16 s under-fuels by a factor of five. This is still an
-/// approximation: it ignores partial burns carried between smelts, and it
-/// assumes stone-furnace speed. Calibrating it against observed burn rates is
+/// steel's 16 s under-fuels by a factor of five.
+///
+/// Both halves of that division are stone-furnace numbers, which is why the
+/// coal bill is computed from `recipe_ticks` — the speed-1 duration — and not
+/// from the speed-divided `smelting_ticks` the furnace lag uses. Energy is
+/// `power x active time`, so a *correct* generalisation needs the machine's
+/// own `energy_usage`, which the mod does not send: a steel furnace is speed 2
+/// at the same 90 kW (so genuinely half the coal per plate) while an electric
+/// furnace is speed 2 at 180 kW and burns no coal at all. Dividing the coal by
+/// crafting speed alone would get the steel case right by accident and the
+/// electric case wrong, so neither is attempted. Sending `energy_usage` and
+/// costing fuel from energy is the follow-up.
+///
+/// This is still an approximation even for a stone furnace: it ignores partial
+/// burns carried between smelts. Calibrating it against observed burn rates is
 /// follow-up work for the execution increment.
 pub const COAL_BURN_TICKS: Ticks = 2666;
 
@@ -154,6 +166,15 @@ impl Method for Smelt {
             })?;
         let per_craft = output_per_craft(&recipe, item);
         let runs = need.div_ceil(per_craft);
+        // `recipe_ticks`, deliberately, where the lag below uses
+        // `smelting_ticks`. Coal is a quantity of *energy*, not of elapsed
+        // time: this expression is `energy per run / energy per coal`, written
+        // in ticks because both halves are calibrated at the stone furnace's
+        // 90 kW (see `COAL_BURN_TICKS`). Feeding it the speed-divided duration
+        // would make a faster furnace look like it needed less coal *because
+        // it finished sooner*, which is the wrong mechanism even where it
+        // lands on a plausible number. The two must stay decoupled until the
+        // machine's own `energy_usage` is available to divide by properly.
         let coal = recipe_ticks(&recipe)
             .saturating_mul(runs)
             .div_ceil(COAL_BURN_TICKS)
@@ -382,7 +403,13 @@ impl Method for Smelt {
 
         // The furnace runs between the last insert and the removal. The bot is
         // free to do other work across this lag — that is what it is for.
-        let smelt_lag = recipe_ticks(&recipe).saturating_mul(runs);
+        //
+        // `smelting_ticks`, not `recipe_ticks`: a machine divides the recipe's
+        // time by its own crafting speed. `furnace_entity` is the machine
+        // actually acting, so the speed is read for *that* entity rather than
+        // assumed — see `machine_crafting_speed` for why this is written now
+        // even though it changes nothing while the furnace is always stone.
+        let smelt_lag = smelting_ticks(&ctx.state, &recipe, &furnace_entity).saturating_mul(runs);
         for id in insert_ids {
             let lag = if id == fuel_id { 0 } else { smelt_lag };
             steps.push(Step::Link {
@@ -2064,6 +2091,13 @@ mod tests {
     /// `FactorioRecipe::energy` is a `noisy_float` this crate does not depend
     /// on directly.
     fn state_knowing_steel() -> PlanState {
+        state_knowing_steel_at_furnace_speed(None)
+    }
+
+    /// `state_knowing_steel`, with the stone furnace's crafting speed
+    /// optionally overridden — the only way to ask what `Smelt` would do with
+    /// a faster machine, since it places a `stone-furnace` and only that.
+    fn state_knowing_steel_at_furnace_speed(speed: Option<f64>) -> PlanState {
         use factorio_bot_core::serde_json;
         use factorio_bot_core::types::FactorioRecipe;
         let steel: FactorioRecipe = serde_json::from_str(
@@ -2089,6 +2123,17 @@ mod tests {
         .expect("the steel recipe parses");
         let world = fixture_world();
         world.update_recipes(vec![steel]).expect("recipes update");
+        if let Some(speed) = speed {
+            let mut furnace = world
+                .entity_prototypes
+                .get("stone-furnace")
+                .expect("the fixture ships a stone furnace")
+                .clone();
+            furnace.crafting_speed = Some(speed);
+            world
+                .entity_prototypes
+                .insert("stone-furnace".into(), furnace);
+        }
         PlanState::from_world(Arc::new(world), &[BotId(1)])
     }
 
@@ -2112,6 +2157,112 @@ mod tests {
                 _ => None,
             })
             .expect("a fuel subgoal")
+    }
+
+    /// The furnace lag a `Smelt` emits, given a goal.
+    ///
+    /// The lag lives on the `Link` edges between the ore inserts and the
+    /// removal, not on any action's duration, so it has to be read off the
+    /// steps rather than off a schedule. The fuel edge carries 0 by
+    /// construction; the largest is the smelt.
+    fn smelt_lag_for(state: &PlanState, item: &str, count: u32) -> Ticks {
+        let mut ctx = ExpansionCtx::new(state.fork(), BotId(1));
+        let steps = Smelt
+            .expand(
+                &Goal::Have {
+                    item: item.into(),
+                    count,
+                    whose: Holder::Anyone,
+                },
+                &mut ctx,
+            )
+            .expect("smelting expands");
+        steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Link { lag, .. } => Some(*lag),
+                _ => None,
+            })
+            .max()
+            .expect("a smelt emits lag edges")
+    }
+
+    /// `fixture_world()` with the stone furnace's crafting speed overridden.
+    ///
+    /// `Smelt` places a `stone-furnace` and only ever that, so overriding
+    /// *that* prototype is the only way to ask what the method would do with a
+    /// faster machine without first inventing furnace adoption.
+    fn state_with_furnace_speed(speed: f64) -> PlanState {
+        let world = fixture_world();
+        let mut furnace = world
+            .entity_prototypes
+            .get("stone-furnace")
+            .expect("the fixture ships a stone furnace")
+            .clone();
+        furnace.crafting_speed = Some(speed);
+        world
+            .entity_prototypes
+            .insert("stone-furnace".into(), furnace);
+        PlanState::from_world(Arc::new(world), &[BotId(1)])
+    }
+
+    #[test]
+    fn the_furnace_lag_divides_by_the_furnaces_crafting_speed() {
+        // Ten iron plates at 3.2 s each is 192 ticks per run in a stone
+        // furnace (speed 1) and 96 in a steel or electric one (speed 2).
+        //
+        // This is the delayed fuse the change is really about: `Smelt` places
+        // a stone furnace unconditionally today, so the live plan cannot
+        // reach the second row. It is asserted through the method rather than
+        // through `smelting_ticks` alone so that the day someone teaches
+        // `Smelt` to use a better furnace, the wiring is already proved.
+        assert_eq!(
+            smelt_lag_for(&state_with_furnace_speed(1.0), "iron-plate", 10),
+            1920
+        );
+        assert_eq!(
+            smelt_lag_for(&state_with_furnace_speed(2.0), "iron-plate", 10),
+            960,
+            "a furnace at speed 2 smelts the same ten plates in half the time"
+        );
+    }
+
+    #[test]
+    fn a_faster_furnace_does_not_change_the_coal_bill() {
+        // The coupling check, and the reason the coal keeps using
+        // `recipe_ticks` while the lag uses `smelting_ticks`.
+        //
+        // Coal is a quantity of energy, not of elapsed time. A duration fix
+        // that also moved the fuel would mean the two are joined somewhere
+        // they should not be — the plan would be claiming a furnace needs
+        // less coal *because it finished sooner*, which is not how burning
+        // works. Ten iron plates need one coal at speed 1 and must still need
+        // one at speed 4, even though the lag drops fourfold.
+        for speed in [1.0, 2.0, 4.0] {
+            let state = state_with_furnace_speed(speed);
+            assert_eq!(
+                fuel_for(&state, "iron-plate", 10),
+                1,
+                "crafting speed {speed} must not move the coal bill"
+            );
+        }
+        // Same on a recipe whose fuel bill is not pinned at the one-coal
+        // floor, where a coupled implementation would actually be visible:
+        // ten steel plates burn four coal, and four is not the floor. Under
+        // the coupling this test forbids, speed 4 would ask for one.
+        let steel_speeds: Vec<(f64, u32)> = [1.0, 2.0, 4.0]
+            .into_iter()
+            .map(|speed| {
+                let state = state_knowing_steel_at_furnace_speed(Some(speed));
+                (speed, fuel_for(&state, "steel-plate", 10))
+            })
+            .collect();
+        assert_eq!(
+            steel_speeds,
+            vec![(1.0, 4), (2.0, 4), (4.0, 4)],
+            "the coal for ten steel plates is fixed by their energy, not by \
+             how quickly the furnace gets through it"
+        );
     }
 
     #[test]

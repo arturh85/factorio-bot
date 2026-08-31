@@ -253,9 +253,87 @@ pub fn output_per_craft(recipe: &FactorioRecipe, item: &str) -> u32 {
         .unwrap_or(1)
 }
 
-/// A recipe's energy in ticks.
+/// A recipe's `energy` in seconds — the time one run takes in a machine of
+/// crafting speed 1, which is what the field means.
+fn recipe_seconds(recipe: &FactorioRecipe) -> f64 {
+    recipe.energy.to_f64().unwrap_or(0.5)
+}
+
+/// A recipe's energy in ticks: how long one run takes at **crafting speed 1**.
+///
+/// This is the right answer for the hand-craft path, because a vanilla
+/// character's crafting speed really is 1 — confirmed live against 2.1.17,
+/// where `prototypes.entity["character"].get_crafting_speed()` returns 1.
+///
+/// It is deliberately *not* the right answer for a machine, which divides by
+/// its own speed; use [`smelting_ticks`] there. It also stays the basis of the
+/// coal bill in `Smelt::expand`, which is an energy quantity rather than a
+/// duration — see [`crate::method::have::COAL_BURN_TICKS`].
 pub fn recipe_ticks(recipe: &FactorioRecipe) -> Ticks {
-    seconds_to_ticks(recipe.energy.to_f64().unwrap_or(0.5))
+    seconds_to_ticks(recipe_seconds(recipe))
+}
+
+/// A vanilla stone furnace's crafting speed, used only when the world reports
+/// none for the acting machine. See [`machine_crafting_speed`].
+const VANILLA_STONE_FURNACE_CRAFTING_SPEED: f64 = 1.0;
+
+/// How fast `machine` runs a recipe, as the world reports it.
+///
+/// A crafting machine divides a recipe's time by its own crafting speed, and
+/// the furnaces disagree: live 2.1.17 reports 1 for `stone-furnace` and **2**
+/// for both `steel-furnace` and `electric-furnace` (and 0.5 for
+/// `assembling-machine-1`). So this cannot be a constant, and — following
+/// [`character_mining_speed`] — it is read from the world, with the constant
+/// kept only as the fallback for a world that reports nothing.
+///
+/// # Why the fallback is a *stone* furnace and why that matters here
+///
+/// `Smelt::expand` places a `stone-furnace` and nothing else: the entity name
+/// is a literal, the place action requires the bot to be *holding* one, and no
+/// method in this crate ever adopts a furnace already standing in the world.
+/// So today the divisor is 1 whichever branch is taken, and this division
+/// changes no number a current plan produces.
+///
+/// It is written anyway because the alternative is a delayed fuse. The moment
+/// anyone teaches `Smelt` to pick a better furnace, or to use one the save
+/// already has — which a real save will have, and which may well be steel or
+/// electric — every smelting estimate silently becomes 2x too slow, with no
+/// test failing at the commit that breaks it. The divisor being present and
+/// read means that change is correct for free.
+///
+/// # What this still does not model
+///
+/// Modules and beacons multiply a machine's effective speed, and this reads
+/// only the prototype. That is not reachable today: this crate mentions
+/// neither, a vanilla `stone-furnace` has no module slots at all, and nothing
+/// places a beacon. It becomes reachable together with furnace adoption — an
+/// existing furnace in a real save can carry modules and sit in a beacon's
+/// range — so whoever adds adoption owns this too.
+pub fn machine_crafting_speed(state: &PlanState, machine: &str) -> f64 {
+    state
+        .base()
+        .entity_prototypes
+        .get(machine)
+        .and_then(|p| p.crafting_speed)
+        // A zero or negative speed is not a machine that crafts slowly, it is
+        // a divide by zero. Fall back rather than emit an infinite duration.
+        .filter(|speed| *speed > 0.)
+        .unwrap_or(VANILLA_STONE_FURNACE_CRAFTING_SPEED)
+}
+
+/// Ticks for one run of `recipe` in `machine`.
+///
+/// A machine takes `recipe.energy / crafting_speed` seconds per run — the
+/// recipe's `energy` is the numerator of a division, not the answer, exactly
+/// as `mining_time` is in [`mining_ticks`]. The divisor was missing, which is
+/// right for a stone furnace (speed 1) and 2x too slow for a steel or electric
+/// one (speed 2).
+///
+/// Per run, then multiplied by the run count at the call site, so that the
+/// rounding matches what the game does: a furnace rounds each craft, it does
+/// not run one long fractional batch.
+pub fn smelting_ticks(state: &PlanState, recipe: &FactorioRecipe, machine: &str) -> Ticks {
+    seconds_to_ticks(recipe_seconds(recipe) / machine_crafting_speed(state, machine))
 }
 
 /// Whether a recipe may be used, and at what cost.
@@ -778,5 +856,119 @@ mod tests {
 
         // An item this recipe does not produce defaults to one per craft.
         assert_eq!(output_per_craft(&gear, "something-else"), 1);
+    }
+
+    /// `fixture_world()` with `machine`'s crafting speed set to `speed`, or the
+    /// prototype removed entirely when `speed` is `None`.
+    ///
+    /// The fixture ships real furnaces carrying real speeds — 1.0, 2.0, 2.0 —
+    /// so overriding one in place is what lets a test distinguish "the divisor
+    /// came from the world" from "the divisor happens to equal the constant".
+    fn state_with_crafting_speed(machine: &str, speed: Option<f64>) -> PlanState {
+        let world = fixture_world();
+        match speed {
+            Some(speed) => {
+                let mut prototype = world
+                    .entity_prototypes
+                    .get(machine)
+                    .unwrap_or_else(|| panic!("the fixture ships a {machine} prototype"))
+                    .clone();
+                prototype.crafting_speed = Some(speed);
+                world.entity_prototypes.insert(machine.into(), prototype);
+            }
+            None => {
+                world.entity_prototypes.remove(machine);
+            }
+        }
+        PlanState::from_world(Arc::new(world), &[BotId(1)])
+    }
+
+    #[test]
+    fn the_furnaces_report_the_speeds_the_live_game_reports() {
+        // The premise of the whole division, asserted rather than assumed:
+        // the furnaces do NOT all run at the same speed, so a smelting
+        // duration that ignores the machine is only right for one of them.
+        //
+        // These three values were read out of a live 2.1.17 game via
+        // `prototypes.entity[n].get_crafting_speed()`: 1, 2, 2. The fixture
+        // agrees, which is what makes it usable as a stand-in here.
+        let s = state();
+        assert_eq!(machine_crafting_speed(&s, "stone-furnace"), 1.0);
+        assert_eq!(machine_crafting_speed(&s, "steel-furnace"), 2.0);
+        assert_eq!(machine_crafting_speed(&s, "electric-furnace"), 2.0);
+    }
+
+    #[test]
+    fn smelting_in_a_faster_furnace_takes_proportionally_less_time() {
+        // iron-plate's `energy` is 3.2 s. That is the time at crafting speed
+        // 1 and the numerator of a division, not the answer: a steel or
+        // electric furnace runs at 2, so it smelts a plate in 1.6 s.
+        //
+        // Reading `energy` straight out of the recipe gave 192 for all three,
+        // which is right for the stone furnace and exactly 2x too slow for
+        // the other two.
+        let s = state();
+        let iron_plate = recipe_for(&s, "iron-plate").expect("the fixture has iron-plate");
+        assert_eq!(recipe_ticks(&iron_plate), 192, "3.2 s at speed 1");
+
+        assert_eq!(smelting_ticks(&s, &iron_plate, "stone-furnace"), 192);
+        assert_eq!(smelting_ticks(&s, &iron_plate, "steel-furnace"), 96);
+        assert_eq!(smelting_ticks(&s, &iron_plate, "electric-furnace"), 96);
+    }
+
+    #[test]
+    fn the_crafting_speed_comes_from_the_world_not_a_constant() {
+        // The divisor is prototype data a mod can change, and Factorio's own
+        // furnaces already disagree, so it has to be read rather than baked
+        // in. Same recipe, same machine name, four different worlds.
+        let iron_plate = recipe_for(&state(), "iron-plate").expect("the fixture has iron-plate");
+        for (speed, expected) in [(0.5, 384), (1.0, 192), (2.0, 96), (4.0, 48)] {
+            let s = state_with_crafting_speed("stone-furnace", Some(speed));
+            assert_eq!(
+                smelting_ticks(&s, &iron_plate, "stone-furnace"),
+                expected,
+                "a furnace crafting at {speed} should take {expected} ticks per plate"
+            );
+        }
+    }
+
+    #[test]
+    fn a_machine_the_world_cannot_speak_for_falls_back_to_the_vanilla_speed() {
+        // Better a documented vanilla stone furnace than a silent divide by
+        // nothing: an absent, zero or negative speed must not turn a duration
+        // into zero, infinity or a negative number.
+        let iron_plate = recipe_for(&state(), "iron-plate").expect("the fixture has iron-plate");
+        for absent in [None, Some(0.0), Some(-1.0)] {
+            let s = state_with_crafting_speed("stone-furnace", absent);
+            assert_eq!(
+                smelting_ticks(&s, &iron_plate, "stone-furnace"),
+                192,
+                "crafting_speed {absent:?} must fall back, not divide by it"
+            );
+        }
+        // A machine with no prototype at all is the same case.
+        let s = state();
+        assert_eq!(smelting_ticks(&s, &iron_plate, "not-a-real-machine"), 192);
+    }
+
+    #[test]
+    fn the_hand_craft_duration_is_left_at_crafting_speed_one() {
+        // `recipe_ticks` is not a leftover: it is the character's own answer.
+        // A live 2.1.17 `character` prototype reports
+        // `get_crafting_speed() == 1`, so dividing the hand-craft path by it
+        // would change nothing, and this pins that reading rather than
+        // leaving the two paths looking accidentally inconsistent.
+        // The fixture's `character` predates the field and carries no speed,
+        // so it is given the 1 the live game reports — otherwise this would
+        // assert the fallback rather than a reading.
+        let s = state_with_crafting_speed("character", Some(1.0));
+        let gear = recipe_for(&s, "iron-gear-wheel").expect("the fixture has iron-gear-wheel");
+        assert_eq!(recipe_ticks(&gear), 30, "0.5 s at the character's speed 1");
+        assert_eq!(
+            smelting_ticks(&s, &gear, "character"),
+            30,
+            "and the divisor, read from the world, agrees — which is why the \
+             hand-craft path is left alone"
+        );
     }
 }

@@ -260,6 +260,42 @@ pub struct FactorioProduct {
     pub product_type: String,
     pub amount: u32,
     /// How likely this product is produced at all, from 0 to 1.
+    ///
+    /// # Parsed, and deliberately not read
+    ///
+    /// Nothing consumes this. That is a decision, not an oversight, and it has
+    /// an expiry date — so here is the whole of it.
+    ///
+    /// A planner that ignores a probability under-plans by `1 / probability`:
+    /// `crates/planner`'s `output_per_craft` sizes a craft as
+    /// `runs = ceil(need / amount)` where the honest sum is
+    /// `runs = ceil(need / (amount * probability))`. It does not divide, and
+    /// that is safe for exactly one reason: **no recipe the planner can reach
+    /// carries a probability below 1**. Reachability is decided by category,
+    /// and the planner admits only `crafting` and `smelting`.
+    ///
+    /// In the live 2.1.17 capture (`crates/core/tests/live-2.1.17-world-snapshot.json`)
+    /// 123 of 662 recipes' products are uncertain, and every one of them is
+    /// `recycling` (102), `crushing` (15), `organic` (4) or `centrifuging` (2)
+    /// — all disabled, none reachable. The nearest are the four `organic`
+    /// ones, a single gate-widening away: `yumako-processing` and
+    /// `jellynut-processing` at 0.02, `iron-bacteria` and `copper-bacteria` at
+    /// 0.1, where the planner would be 10x short. `crates/planner/tests/recipe_probability.rs`
+    /// asserts both halves of that — that the capture really does carry
+    /// probabilities, and that none is reachable — so widening a gate breaks
+    /// a test rather than quietly breaking a plan.
+    ///
+    /// Deleting the field instead was rejected: unlike the `durability` and
+    /// `speed` pair removed from `FactorioItemPrototype`, this is not a wire
+    /// value dropped at deserialisation. It is the *normalisation* of three
+    /// version-specific keys the mod forwards on purpose (see
+    /// `mods/BotBridge/types.lua::serialize_product` and `RawFactorioProduct`
+    /// below): Factorio 2.1 replaced `probability` with
+    /// `independent_probability` times the `shared_probability` window, and
+    /// this field is the only place that knows it. Whoever widens the gate
+    /// needs that arithmetic and should not have to rediscover it — and when
+    /// they add the division, a probability of 0 must not divide: a product
+    /// that never appears makes the recipe no route to the item at all.
     // `R64` rather than `f64` so this type can derive `Hash`. It serialises as
     // a plain number, which is what `schemars(with)` tells the schema.
     #[schemars(with = "f64")]

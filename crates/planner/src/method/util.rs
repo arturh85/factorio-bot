@@ -240,7 +240,23 @@ pub fn ingredients_of(recipe: &FactorioRecipe) -> Vec<(String, u32)> {
         .unwrap_or_default()
 }
 
+/// The recipe category the hand-craft method admits (`have.rs`, `Craft`).
+///
+/// Named rather than inlined so `tests/recipe_probability.rs` can assert over
+/// the *actual* gate: a copy of the string in the test would keep passing when
+/// the gate widened, which is the one moment the assertion exists for.
+pub const CRAFTING_CATEGORY: &str = "crafting";
+
+/// The recipe category the smelt method admits (`have.rs`, `Smelt`).
+/// Named for the same reason as [`CRAFTING_CATEGORY`].
+pub const SMELTING_CATEGORY: &str = "smelting";
+
 /// How many of `item` one execution of `recipe` yields. Defaults to 1.
+///
+/// Deliberately does **not** divide by `FactorioProduct::probability`, and the
+/// division would belong at the caller's `runs` rather than here in any case —
+/// see the field's own note in `crates/core/src/types.rs` and
+/// `tests/recipe_probability.rs` for why no reachable recipe needs it.
 pub fn output_per_craft(recipe: &FactorioRecipe, item: &str) -> u32 {
     recipe
         .products

@@ -33,6 +33,7 @@ use crate::method::util::{
     free_area_near, ingredients_of, mining_ticks, nearest_resource_tile, output_per_craft,
     recipe_for, recipe_gate, recipe_ticks, research_ingredients, research_ticks,
     resource_supply_at_least, resource_tiles_for, smelting_ticks, trigger_requirement, RecipeGate,
+    CRAFTING_CATEGORY, SMELTING_CATEGORY,
 };
 use crate::method::{ExpansionCtx, GoalSite, Method, MethodRegistry, Step};
 use crate::state::PlanState;
@@ -161,7 +162,8 @@ impl Method for Smelt {
         let Some(recipe) = recipe_for(state, item) else {
             return false;
         };
-        recipe.category == "smelting" && recipe_gate(state, &recipe) != RecipeGate::Unobtainable
+        recipe.category == SMELTING_CATEGORY
+            && recipe_gate(state, &recipe) != RecipeGate::Unobtainable
     }
 
     fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
@@ -556,7 +558,8 @@ impl Method for HandCraft {
         let Some(recipe) = recipe_for(state, item) else {
             return false;
         };
-        recipe.category == "crafting" && recipe_gate(state, &recipe) != RecipeGate::Unobtainable
+        recipe.category == CRAFTING_CATEGORY
+            && recipe_gate(state, &recipe) != RecipeGate::Unobtainable
     }
 
     fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {

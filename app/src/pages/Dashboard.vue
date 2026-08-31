@@ -1,53 +1,45 @@
 <script setup lang="ts">
-import {ref, watch, computed} from 'vue';
+import {computed} from 'vue';
 import {useAppStore} from '@/store/appStore';
 import {useToast} from '@/composables/useToast';
 
-interface MyFactorioClient {
-  name: string,
-  status: string
-}
-
-const toast = useToast();
+const toast = useToast()
 const appStore = useAppStore()
-const clients = ref([] as MyFactorioClient[]);
-const updateClients = () => {
-  let newClients = [];
-  if (appStore.settings) {
-    for (let i = 0; i < appStore.settings.factorio.client_count; i++) {
-      newClients.push({
-        name: 'client' + (i + 1),
-        status: 'not_initialized'
-      })
-    }
-  }
-  clients.value = newClients
-}
-watch(() => appStore.getClientCount, updateClients)
-if (appStore.settings) {
-  updateClients()
-}
-const clientCount = computed(() => appStore.getClientCount)
-const sendTestMessage = async () => {
-  toast.add({severity:'info', summary: 'Info Message', detail:'Message Content', life: 3000});
+
+const clientCount = computed(() => appStore.getClientCount ?? 0)
+
+// One tile per *configured* client slot. There is no per-client status to
+// show -- `GET /api/v1/instance` answers for the group, not per client -- so
+// the tile carries only the name. Do not add a status field here backed by a
+// constant: that was tried, it read 'not_initialized' on every tile
+// regardless of what was actually running, and a user with Factorio up
+// reasonably read it as a reported failure. See Dashboard.spec.ts's
+// "does not fabricate a per-client status" test.
+const clients = computed(() => Array.from({length: clientCount.value}, (_unused, index) => 'client' + (index + 1)))
+
+const sendTestMessage = () => {
+  toast.add({severity: 'info', summary: 'Info Message', detail: 'Message Content', life: 3000})
 }
 </script>
 
 <template>
-  <div class="p-grid p-fluid dashboard">
-    <div class="p-col-12 p-lg-4">
-      <div class="card summary">
-        <span class="title">Instances</span>
-        <span class="detail">Number of configured instances</span>
-        <span class="count visitors" @click="sendTestMessage()">{{  clientCount }}</span>
-      </div>
-    </div>
-    <div class="p-col-12 p-lg-4" v-for="client in clients" :key="client.name">
-      <div class="card summary">
-        <span class="title">{{ client.name }}</span>
-        <span class="detail">{{client.status }}</span>
-      </div>
-    </div>
+  <div class="grid grid-cols-1 gap-4 lg:grid-cols-3">
+    <section class="relative rounded-card bg-card p-4 text-ink">
+      <span class="text-xl">Instances</span>
+      <span class="mt-2 block text-ink-muted">Number of configured instances</span>
+      <button
+        type="button"
+        class="absolute right-2 top-2 cursor-pointer rounded-card bg-success px-3 py-1 text-2xl text-white"
+        data-testid="instance-count"
+        @click="sendTestMessage()">{{ clientCount }}</button>
+    </section>
+
+    <section
+      v-for="client in clients"
+      :key="client"
+      class="rounded-card bg-card p-4 text-ink"
+      data-testid="client-tile">
+      <span class="text-xl">{{ client }}</span>
+    </section>
   </div>
 </template>
-

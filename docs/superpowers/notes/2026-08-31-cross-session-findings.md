@@ -241,3 +241,16 @@ own id carried alongside so the odd one out can be named rather than outvoted.
 "they disagree", "the minority loses" and "the first one wins" all produce the
 same answer. The test that pins the actual rule needs three: two agreeing and
 one stale, where a majority rule would confidently return the wrong id.
+
+This is the set-shaped version of a trap that already caught the regression
+work: *two close points cannot separate a slope from an intercept*. In both
+cases every candidate rule fits the data, so the test pins none of them, and
+it still reports success — the failure is that the test set has the wrong
+**shape**, not that its assertions are too weak. More assertions over the same
+two elements cannot fix it, which is why "add another assert" is the wrong
+reflex when a mutation survives.
+
+The `.any()` mutation here survived both two-element tests and was caught only
+by the single-client case, where `any` over an empty tail is false. That is
+luck, not coverage: had no single-client test existed, a passing suite would
+have accompanied a rule nobody had checked.

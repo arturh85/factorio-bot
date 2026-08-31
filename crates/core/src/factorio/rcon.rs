@@ -58,6 +58,49 @@ fn split_reply(result: &str, silent: bool) -> Option<Vec<String>> {
     Some(body.split('\n').map(|str| str.to_owned()).collect())
 }
 
+/// Judges the reply to an `insert_to_inventory` / `remove_from_inventory` RPC.
+///
+/// # This is where a transfer's `Success` gets its strength
+///
+/// The mod's two transfer handlers do not report a result; they report
+/// **complaints**, and only when something was wrong. Every arithmetic
+/// post-condition they check — entity missing, inventory missing, the player
+/// holding fewer items than asked (`clamping...`), the inventory taking fewer
+/// than offered (`tried to insert N but inserted M`), the player failing to
+/// give up or receive what moved (`wtf, ...`) — routes through
+/// `complain`, and `complain` is `rcon.print` (`mods/BotBridge/control.lua`),
+/// i.e. it writes **into this very reply body**. A handler that moved exactly
+/// what was asked prints nothing but its `§tick§` stamp.
+///
+/// So "the reply is empty once the stamp is off" is not merely "the game did
+/// not throw": it is the mod asserting that the requested count is the count
+/// that moved. Anything left over is a verdict of failure — including a
+/// zero-move, which is the case worth naming, because a zero-move that came
+/// back green would be indistinguishable from a completed transfer to anything
+/// downstream. See `transfer_success_means_items_moved` below, which drives the
+/// real mod source to prove it.
+///
+/// The two mechanisms this rests on are the mod's complaint path and this
+/// function; breaking either silently downgrades every transfer's `Success` to
+/// the weak reading.
+fn judge_transfer_reply(
+    lines: Option<Vec<String>>,
+    tick: Option<u64>,
+) -> Result<ActionTicks, ActionFailure> {
+    if let Some(lines) = lines {
+        // The game answered, so it saw the command and judged it: a verdict
+        // at a real tick, not a command that never landed.
+        return Err(ActionFailure::refused(
+            RconError {
+                message: format!("{lines:?}"),
+            }
+            .into(),
+            ActionTicks::at(tick),
+        ));
+    }
+    Ok(ActionTicks::at(tick))
+}
+
 /// The radius Factorio's `LuaSurface.request_path` uses when none is given.
 ///
 /// Documented as "how close we need to get to the goal. Default 1." The mod
@@ -1414,18 +1457,7 @@ impl FactorioRcon {
                 ],
             )
             .await?;
-        if let Some(lines) = lines {
-            // The game answered, so it saw the command and judged it: a verdict
-            // at a real tick, not a command that never landed.
-            return Err(ActionFailure::refused(
-                RconError {
-                    message: format!("{:?}", lines),
-                }
-                .into(),
-                ActionTicks::at(tick),
-            ));
-        }
-        Ok(ActionTicks::at(tick))
+        judge_transfer_reply(lines, tick)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1497,18 +1529,7 @@ impl FactorioRcon {
                 ],
             )
             .await?;
-        if let Some(lines) = lines {
-            // The game answered, so it saw the command and judged it: a verdict
-            // at a real tick, not a command that never landed.
-            return Err(ActionFailure::refused(
-                RconError {
-                    message: format!("{:?}", lines),
-                }
-                .into(),
-                ActionTicks::at(tick),
-            ));
-        }
-        Ok(ActionTicks::at(tick))
+        judge_transfer_reply(lines, tick)
     }
 
     pub async fn is_area_empty(&self, area_filter: &AreaFilter) -> Result<bool> {
@@ -2635,5 +2656,241 @@ mod positioning_tests {
         // the game's default build and reach distance is 10, and asking for 0.5
         // there would walk the bot onto the furnace just as surely.
         assert_eq!(approach_radius(10.0), 5.0);
+    }
+}
+
+/// The guarantee a green transfer row rests on, driven through the real mod.
+///
+/// # Why this test loads `control.lua` instead of describing what it does
+///
+/// The property under test — *`Success` on an `insert` or a `remove` means the
+/// items moved* — is not implemented anywhere. It is what happens when two
+/// independent mechanisms line up: the mod's `complain` writes into the RCON
+/// **reply body** (it is `rcon.print`, not just `print`), and
+/// [`judge_transfer_reply`] treats any surviving line in that body as a
+/// verdict of failure. Neither half knows about the other, so a test that
+/// hand-writes the reply body it expects the mod to produce would keep passing
+/// after the mod stopped producing it — it would be testing its own fixture.
+///
+/// So the mod's own `control.lua` is loaded into a real Lua 5.4 interpreter
+/// against a stubbed Factorio API, the real handler is called on an inventory
+/// that yields fewer items than asked, and whatever it prints to the RCON
+/// interface is fed through the real [`split_reply`] → [`take_tick_stamp`] →
+/// [`judge_transfer_reply`] chain. The only invented part is the game itself.
+///
+/// What that still cannot see is listed in
+/// `.superpowers/sdd/2026-08-30-goal-values/transfer-guarantee.md`; the short
+/// version is that it reads `mods/BotBridge/control.lua`, and a run whose
+/// `workspace/mods/BotBridge` has drifted from it is running other code.
+#[cfg(test)]
+mod transfer_guarantee_tests {
+    use super::*;
+    use crate::factorio::ticks::take_tick_stamp;
+    use mlua::{Lua, LuaOptions, StdLib};
+
+    const CONTROL_LUA: &str = include_str!("../../../../mods/BotBridge/control.lua");
+    const TYPES_LUA: &str = include_str!("../../../../mods/BotBridge/types.lua");
+
+    /// The tick the stub game is frozen at. Any value works; a recognisable one
+    /// makes a failure message readable.
+    const STUB_TICK: u64 = 64738;
+
+    /// Enough of Factorio's Lua API for `control.lua` to load and for the two
+    /// transfer handlers to run. Everything here is a stub *except* the two
+    /// numbers the handlers do arithmetic on: `_held`, what the player has, and
+    /// `_moves`, what the target inventory will actually accept or give up.
+    fn stub_game(held: i64, moves: i64) -> String {
+        format!(
+            r#"
+            -- `defines.events.on_tick` and friends are read at load time; any
+            -- distinct value will do, so grow them on demand.
+            local function auto()
+                local t = {{}}
+                setmetatable(t, {{ __index = function(tbl, k)
+                    local v = auto(); rawset(tbl, k, v); return v
+                end }})
+                return t
+            end
+            defines = auto()
+            local function noop() end
+            local function nooptable()
+                return setmetatable({{}}, {{ __index = function() return noop end }})
+            end
+            script = nooptable()
+            remote = nooptable()
+            commands = nooptable()
+            helpers = nooptable()
+            require = function() return {{}} end
+            print = noop
+
+            -- The RCON reply body under construction. `complain` and
+            -- `stamp_tick` both land here, which is the whole point.
+            _rcon_lines = {{}}
+            rcon = {{ print = function(s) _rcon_lines[#_rcon_lines + 1] = tostring(s) end }}
+
+            local held = {held}
+            local moves = {moves}
+            local inventory = {{
+                -- What the furnace hands over (remove) or takes (insert).
+                remove = function(items) return moves end,
+                insert = function(items) return moves end,
+            }}
+            local entity = {{ get_inventory = function(t) return inventory end }}
+            local player = {{
+                surface = {{ find_entity = function(name, pos) return entity end }},
+                get_item_count = function(name) return held end,
+                -- The player end of the move always cooperates, so a complaint
+                -- can only come from the count arithmetic itself.
+                insert = function(items) return items.count end,
+                remove_item = function(items) return items.count end,
+            }}
+            game = {{
+                tick = {tick},
+                players = {{ player }},
+                forces = {{ player = {{ print = noop }} }},
+            }}
+        "#,
+            held = held,
+            moves = moves,
+            tick = STUB_TICK,
+        )
+    }
+
+    /// Runs one real transfer handler and returns the verdict the production
+    /// chain reaches for the reply it produced.
+    ///
+    /// `held` is what the bot carries, `moves` is what the target inventory
+    /// really accepts or yields, and `asked` is the count in the command.
+    fn transfer(call: &str, held: i64, moves: i64) -> (Result<ActionTicks, ActionFailure>, String) {
+        // The workspace forbids building an interpreter outside
+        // `scripting_lua::sandbox`, and rightly: that one runs *user* scripts.
+        // This one runs a single file from this repository, `control.lua`, with
+        // no path by which a caller could substitute another, and
+        // `scripting_lua` depends on this crate so the sandbox cannot be
+        // reached from here. The library set is the sandbox's minus
+        // `coroutine`, so this is not a widening of what a Lua chunk can do.
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test-only interpreter for the repo's own mod source; the \
+                      sandbox lives in a crate that depends on this one"
+        )]
+        let lua = Lua::new_with(
+            StdLib::TABLE | StdLib::STRING | StdLib::MATH,
+            LuaOptions::default(),
+        )
+        .expect("test interpreter");
+        lua.load(stub_game(held, moves))
+            .set_name("stub_game")
+            .exec()
+            .expect("stub game");
+        lua.load(TYPES_LUA)
+            .set_name("types.lua")
+            .exec()
+            .expect("mod types.lua");
+        lua.load(CONTROL_LUA)
+            .set_name("control.lua")
+            .exec()
+            .expect("mod control.lua");
+        lua.load(call)
+            .set_name("call")
+            .exec()
+            .expect("handler call");
+
+        let printed: Vec<String> = lua
+            .globals()
+            .get::<mlua::Table>("_rcon_lines")
+            .expect("_rcon_lines")
+            .sequence_values::<String>()
+            .map(|v| v.expect("rcon line"))
+            .collect();
+
+        // The RCON server hands back exactly this: the printed lines, plus the
+        // trailing newline `split_reply` is written to strip.
+        let body = if printed.is_empty() {
+            String::new()
+        } else {
+            printed.join("\n") + "\n"
+        };
+        let (lines, tick) = take_tick_stamp(split_reply(&body, true));
+        (judge_transfer_reply(lines, tick), printed.join("\n"))
+    }
+
+    const REMOVE_TEN: &str = r#"rcon_remove_from_inventory(
+        1, "stone-furnace", {x=-21.0, y=37.0}, 5, {name="iron-plate", count=10})"#;
+    const INSERT_TEN: &str = r#"rcon_insert_to_inventory(
+        1, "stone-furnace", {x=-21.0, y=37.0}, 2, {name="iron-ore", count=10})"#;
+
+    /// **The guarantee.** A `remove` that moved nothing must not come back
+    /// green.
+    ///
+    /// This is the reading a replay view depends on: a green transfer row says
+    /// items moved, not merely that the game did not refuse the command. The
+    /// furnace here is asked for 10 plates and yields 0 — the exact shape of
+    /// "the smelt had not finished yet" — and the run must call that `Failed`.
+    #[test]
+    fn a_remove_that_moved_nothing_is_a_failure() {
+        let (verdict, printed) = transfer(REMOVE_TEN, 0, 0);
+        let failure = verdict.expect_err(
+            "a remove that moved 0 of 10 reported success -- \
+             every green transfer row in the replay is now unfalsifiable",
+        );
+        assert!(
+            matches!(failure.dispatch, Dispatch::Refused),
+            "the game judged this one, so it is a refusal rather than an undelivered \
+             dispatch: got {:?}",
+            failure.dispatch
+        );
+        // The tick survives the failure: the game stamped it before complaining.
+        assert_eq!(failure.ticks, ActionTicks::at(Some(STUB_TICK)));
+        // And the reason has to be the shortfall itself. Without this the test
+        // would still pass if the handler failed for some unrelated reason --
+        // a missing entity, a stub that did not load -- which is exactly the
+        // false green this exists to prevent.
+        assert!(
+            printed.contains("but removed 0"),
+            "the mod must complain about the shortfall *into the reply body*; \
+             it printed {printed:?}"
+        );
+    }
+
+    /// The same for the other half of the pair, on its clamp path.
+    ///
+    /// An `insert` of items the bot does not hold clamps the count to zero and
+    /// moves nothing. The complaint is emitted *before* the clamp, so this
+    /// still fails rather than passing silently.
+    #[test]
+    fn an_insert_that_moved_nothing_is_a_failure() {
+        let (verdict, printed) = transfer(INSERT_TEN, 0, 0);
+        let failure = verdict.expect_err("an insert that moved 0 of 10 reported success");
+        assert!(matches!(failure.dispatch, Dispatch::Refused));
+        assert!(
+            printed.contains("only has 0"),
+            "the clamp must complain into the reply body; it printed {printed:?}"
+        );
+    }
+
+    /// A partial move is a failure too — `Success` asserts the *full* count.
+    #[test]
+    fn a_remove_that_moved_some_but_not_all_is_a_failure() {
+        let (verdict, printed) = transfer(REMOVE_TEN, 0, 7);
+        verdict.expect_err("a remove that moved 7 of 10 reported success");
+        assert!(printed.contains("but removed 7"), "printed {printed:?}");
+    }
+
+    /// The discriminator. Without this the three tests above would all pass
+    /// against a mod that complained about everything, or a judgement that
+    /// refused every transfer.
+    #[test]
+    fn a_transfer_that_moved_everything_asked_for_succeeds() {
+        for (call, held, moves) in [(REMOVE_TEN, 0, 10), (INSERT_TEN, 10, 10)] {
+            let (verdict, printed) = transfer(call, held, moves);
+            assert_eq!(
+                printed,
+                format!("§tick§{STUB_TICK}"),
+                "a complete transfer prints its stamp and nothing else"
+            );
+            let ticks = verdict.expect("a complete transfer must succeed");
+            assert_eq!(ticks, ActionTicks::at(Some(STUB_TICK)));
+        }
     }
 }

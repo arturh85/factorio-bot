@@ -50,13 +50,51 @@ fn narrow(tick: Option<u64>) -> Option<Ticks> {
 /// The four states that existed before this one keep their meanings and their
 /// order. `Lost` is added at the end so nothing that already reads this enum —
 /// the Lua `status` string, a serialized log — changes what it says.
+///
+/// # `Success` asserts a different thing for each action kind
+///
+/// `Success` always means "the game gave a verdict and the verdict was good".
+/// *What the game checked before saying so* is decided by the BotBridge handler
+/// the action dispatches to, and the handlers do not all check the same
+/// strength of thing. A consumer that renders one sentence over every green row
+/// will be right about some kinds and wrong about others.
+///
+/// **`Insert` and `Remove` carry the strong reading: the items moved, in full.**
+/// The mod's transfer handlers `complain` — which is `rcon.print`, so it writes
+/// into the RPC's own reply body — whenever the entity or inventory is missing,
+/// whenever the bot holds fewer items than the command asked to insert, and
+/// whenever the count the inventory actually accepted or yielded differs from
+/// the count requested. `factorio_bot_core::factorio::rcon`'s
+/// `judge_transfer_reply` turns any surviving line into a refusal, so a
+/// transfer of 10 that moved 7 — or 0 — reports [`Status::Failed`]. A green
+/// transfer row may therefore be rendered as *items moved*; that is the one
+/// kind where the count is part of the verdict. It is pinned by
+/// `transfer_guarantee_tests` in that module, which runs the real
+/// `mods/BotBridge/control.lua` rather than a fixture, because the property is
+/// an interaction between the mod and the reply parser and neither half asserts
+/// it alone.
+///
+/// **No other kind carries it, and none of them asserts a quantity.**
+/// A `Place` is checked against a returned JSON entity — the thing exists, not
+/// that it is the thing the plan wanted somewhere else. A `Mine` is checked
+/// against an `action_completed` whose result is `"ok"`; the mod says the
+/// mining finished, not how many items landed in the bot. A `Walk` is checked
+/// against the path's endpoint distance, so it asserts the *path* would have
+/// arrived, not that the bot is standing there now. Craft and research are
+/// likewise `"ok"`/not-`"ok"`.
+///
+/// So: read a green `Insert`/`Remove` as a quantity, and every other green row
+/// as "the game accepted this and did not object". Widening the transfer
+/// reading to the rest would overstate exactly as much as the old one-line
+/// "the game reported it done" understated the transfers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Status {
     /// Never dispatched. The log has no attempt for it at all.
     Pending,
     /// Dispatched, in flight, and somebody is still waiting for the reply.
     Running,
-    /// The game reported it done.
+    /// The game reported it done. **What that is worth depends on the action
+    /// kind** — see the type docs' section below.
     Success,
     /// The game reported a verdict, and the verdict was a failure — or the
     /// dispatch never reached the game. Either way something is known.

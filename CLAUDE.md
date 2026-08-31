@@ -378,6 +378,31 @@ timeout 180 target/release/factorio-bot lua multi_client_test.lua -c 2
   reply body, and the executor reads that reply as the action's result — so a
   debug line turns a successful action into a reported failure. Use
   `writeout(...)` (stdout, parsed by `output_parser.rs`) instead.
+- **An inserter's `direction` points at the side it PICKS UP from**, not the
+  side it drops into. Established empirically (chest / burner-inserter / chest,
+  then machine / inserter / chest): `direction = 12` ("west") is what moves
+  items *west to east*. Getting this backwards produces a layout that places
+  100% correctly, passes every geometry check, and does absolutely nothing --
+  the failure is silent because placement and function are separate concerns.
+  For a row fed from a belt to its north: input and output inserters are both
+  `direction = 0`, feeder and takeoff inserters are `direction = 12`.
+- **`only_ghosts = true` validates nothing.** Ghosts do not collide, so a
+  blueprint whose entities overlap places exactly as many ghosts as a correct
+  one. A ghost-placement count is not evidence that geometry is legal; only a
+  real build (`only_ghosts = false`, with the materials present) is.
+- **Power *coverage* is not power *capacity*.** A layout can have every
+  consumer inside a pole's supply area, be fully connected, and still do
+  nothing at all, because generation is short. This does not degrade
+  gracefully into "slow" -- an under-supplied network can read as completely
+  dead. Solar is the worst offender for tests: output depends on the in-game
+  time of day, so the same blueprint runs or does not run depending on when
+  the run starts. Check generation against demand (assembling-machine-2 is
+  150kW, inserters ~13kW each), and prefer a deterministic source when what
+  you are testing is geometry rather than power.
+- **`Option::None` reaches Lua as mlua's null sentinel, which is light
+  userdata and therefore TRUTHY.** So `local inv = r.output_inventory or {}`
+  does *not* substitute the default, and the next `pairs(inv)` raises
+  "table expected, got light userdata". Guard with `type(x) == "table"`.
 - **Resource positions are tile centres.** Every real resource entity sits at
   `(-40.5, -48.5)`, never `(-41, -49)`, and the mod's
   `surface.find_entity(name, position)` matches exactly. `EntityGraph` keys

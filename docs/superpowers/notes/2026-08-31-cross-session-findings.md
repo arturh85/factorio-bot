@@ -163,3 +163,41 @@ Relevance to plan 6: my task briefs carry measured counts ("seven `<Button>`
 call sites"). Those are deliberately framed as TRIPWIRES — "if you count
 differently, stop and tell me" — never as completion tests. A count used as a
 completion test is the same defect in a different medium.
+
+
+---
+
+## A snapshot test cannot notice its own fixture going soft
+
+Found while specifying a tracked `Replay` JSON fixture so the TypeScript types
+would be checked against a real document instead of being a hand-written
+mirror.
+
+I asked for the fixture to be a **hard case** — every `Status`, both `Evidence`
+variants, both step kinds, a `null` observation, an `attempt_number > 1` —
+because a happy-path fixture pins only the fields that are always present.
+
+**The gap I missed:** a snapshot test compares the committed file to what the
+producer emits. On regeneration **both move together**. So if a later change
+drops a variant, the fixture loses it, the producer stops emitting it, and the
+snapshot test still passes — it was never checking that the document was
+*interesting*, only that it was *current*.
+
+**The fix is an independent assertion about the fixture's content:** the test
+must assert the fixture actually contains each variant. That claim is not
+derived from the producer, so it survives regeneration and fails when the
+fixture goes soft.
+
+Two more properties, both required:
+
+  - **Both discrimination directions.** Edit the fixture -> fail. Edit the
+    producer -> fail. A snapshot test that only catches fixture edits is half
+    a guard.
+  - **The fixture is generated, never hand-authored.** A hand-written JSON file
+    is a third mirror and defeats the exercise.
+
+**Generalised:** *a check that derives both sides from the same source cannot
+detect that source becoming less demanding.* Something outside the derivation
+has to assert what the check is supposed to be exercising. This is the same
+shape as the coverage floor — a threshold is what stops "regenerate until
+green" from being a valid move.

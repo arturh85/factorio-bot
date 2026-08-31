@@ -201,7 +201,7 @@ mod deserialize_helpers {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct FactorioRecipe {
     pub name: String,
@@ -212,13 +212,17 @@ pub struct FactorioRecipe {
     #[serde(deserialize_with = "deserialize_helpers::vec_or_empty_map")]
     pub products: Vec<FactorioProduct>,
     pub hidden: bool,
+    /// How long one craft takes, in seconds.
+    // `R64` rather than `f64` so this type can derive `Hash`. It serialises as
+    // a plain number, which is what `schemars(with)` tells the schema.
+    #[schemars(with = "f64")]
     pub energy: Box<R64>,
     pub order: String,
     pub group: String,
     pub subgroup: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct FactorioBlueprintInfo {
     pub label: String,
@@ -235,7 +239,7 @@ pub struct FactorioBlueprintInfo {
 // a bare `u32` field would reject as soon as the game reports `2.5` for a
 // fluid.
 /// One input of a recipe.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case", from = "RawFactorioIngredient")]
 pub struct FactorioIngredient {
     pub name: String,
@@ -248,13 +252,17 @@ pub struct FactorioIngredient {
 // different Factorio versions report. Everything downstream keeps reading a
 // single expected `amount` and an effective `probability`.
 /// One output of a recipe: how much of what, and how likely it is produced.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case", from = "RawFactorioProduct")]
 pub struct FactorioProduct {
     pub name: String,
     #[serde(default)]
     pub product_type: String,
     pub amount: u32,
+    /// How likely this product is produced at all, from 0 to 1.
+    // `R64` rather than `f64` so this type can derive `Hash`. It serialises as
+    // a plain number, which is what `schemars(with)` tells the schema.
+    #[schemars(with = "f64")]
     pub probability: Box<R64>,
 }
 
@@ -948,6 +956,13 @@ pub struct FactorioEntity {
     pub entity_type: String,
     pub position: Position,
     pub bounding_box: Rect,
+    // Deliberately a `schemars(description)` and not a `///`: `utoipa::ToSchema`
+    // reads doc comments too, and this type's OpenAPI schema is snapshotted in
+    // `app/src/api/openapi.snapshot.json`. Saying it here reaches the Lua docs
+    // without moving the published API surface.
+    #[schemars(
+        description = "Factorio 2.x `defines.direction`: 0..=15, north at 0 and increasing clockwise. See the `Direction` table in the globals module."
+    )]
     pub direction: u8,
     pub drop_position: Option<Position>,
     pub pickup_position: Option<Position>, // only type = inserter

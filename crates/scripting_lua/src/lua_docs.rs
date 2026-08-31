@@ -7,7 +7,14 @@ use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::parking_lot::Mutex;
 use factorio_bot_core::plan::planner::Planner;
-use std::collections::HashMap;
+use factorio_bot_core::schemars::schema::{
+    InstanceType, RootSchema, Schema, SchemaObject, SingleOrVec,
+};
+use factorio_bot_core::schemars::schema_for;
+use factorio_bot_core::types::{
+    FactorioBlueprintInfo, FactorioEntity, FactorioPlayer, FactorioRecipe, Position,
+};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -44,11 +51,151 @@ pub fn write_lua_docs(target_path: PathBuf) -> LuaResult<()> {
         None,
     )?;
 
-    write_lua_doc(target_path.join("globals.lua"), &lua.globals());
-    write_lua_doc(target_path.join("world.lua"), &world_table);
-    write_lua_doc(target_path.join("goal.lua"), &goal_table);
-    write_lua_doc(target_path.join("rcon.lua"), &rcon_table);
+    let bindings = [
+        ("globals.lua", render_lua_doc(&lua.globals())),
+        ("world.lua", render_lua_doc(&world_table)),
+        ("goal.lua", render_lua_doc(&goal_table)),
+        ("rcon.lua", render_lua_doc(&rcon_table)),
+    ];
+
+    // `types.lua` is rendered from the Rust types, and then held to what the
+    // binding documentation just said a script would be handed. Both halves
+    // are derived, so the only way they can disagree is a real change, and the
+    // build says so rather than publishing a broken link.
+    let documented = collect_documented_types();
+    let mut referenced: BTreeSet<String> = BTreeSet::new();
+    for (_, body) in &bindings {
+        referenced.extend(referenced_type_names(body));
+    }
+    reconcile_documented_types(&documented.roots, &referenced).map_err(LuaError::runtime)?;
+
+    for (file, body) in &bindings {
+        fs::write(target_path.join(file), body).expect("failed to write");
+    }
+    fs::write(
+        target_path.join("types.lua"),
+        render_types_doc(&documented.all),
+    )
+    .expect("failed to write");
     Ok(())
+}
+
+/// The types a Lua script is actually handed, as JSON Schemas derived from the
+/// Rust structs themselves.
+///
+/// This is a list of *roots*, not of documented types: `schema_for!` carries
+/// every type reachable from a root along in `definitions`, so `Rect`,
+/// `FactorioIngredient` and `InventoryItemWithQuality` are described here
+/// without being named here, and a new field of a new type joins the docs the
+/// moment it compiles -- `JsonSchema` is required transitively, so it cannot
+/// be added without one.
+///
+/// Nothing in the list is spelled as a string: the name under which each type
+/// is documented is `schemars`' own `title`, which is the Rust type name. A
+/// renamed struct renames its section with no edit here.
+///
+/// The list itself is the one hand-written thing left, and it is not trusted:
+/// [`reconcile_documented_types`] requires it to match, exactly, the set of
+/// `` `types.X` `` references in the four generated binding files -- which are
+/// themselves generated from the `__doc_entry_*` strings. Adding a root that
+/// no binding hands out fails; documenting a return type without a root fails.
+fn documented_type_schemas() -> Vec<RootSchema> {
+    vec![
+        schema_for!(FactorioBlueprintInfo),
+        schema_for!(FactorioEntity),
+        schema_for!(FactorioPlayer),
+        schema_for!(FactorioRecipe),
+        schema_for!(Position),
+    ]
+}
+
+/// Everything `types.lua` describes.
+struct DocumentedTypes {
+    /// The names of the roots -- the types a binding hands back directly, and
+    /// so the ones its `@return` is expected to name. Read off `schemars`'
+    /// `title`, never written down.
+    roots: BTreeSet<String>,
+    /// The roots and everything reachable from them, keyed by name. A reader
+    /// who is handed a `FactorioRecipe` needs `FactorioIngredient` described
+    /// too, even though no `@return` names it.
+    all: BTreeMap<String, SchemaObject>,
+}
+
+/// Walks [`documented_type_schemas`] into the roots and their closure.
+fn collect_documented_types() -> DocumentedTypes {
+    let mut roots: BTreeSet<String> = BTreeSet::new();
+    let mut all: BTreeMap<String, SchemaObject> = BTreeMap::new();
+    for root in documented_type_schemas() {
+        for (name, schema) in root.definitions {
+            all.insert(name, schema.into_object());
+        }
+        let name = root
+            .schema
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.title.clone())
+            .expect("schemars titles every root schema with its type name");
+        roots.insert(name.clone());
+        all.insert(name, root.schema);
+    }
+    DocumentedTypes { roots, all }
+}
+
+/// The `` `types.X` `` names a generated binding file points readers at.
+///
+/// Backticked deliberately: the doc strings talk about `world.player` and
+/// `entity_prototypes.clone()` in prose, and a looser scan would read those as
+/// type references. Only what a reader sees rendered as a type link counts.
+fn referenced_type_names(body: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for candidate in body.split("`types.").skip(1) {
+        let Some(name) = candidate.split('`').next() else {
+            continue;
+        };
+        if !name.is_empty()
+            && name.starts_with(|c: char| c.is_ascii_uppercase())
+            && name.chars().all(|c| c.is_ascii_alphanumeric())
+        {
+            names.insert(name.to_string());
+        }
+    }
+    names
+}
+
+/// The roots `types.lua` describes and the types the binding docs promise must
+/// be the same set.
+///
+/// Roots, not the whole closure: `FactorioIngredient` is described because
+/// `FactorioRecipe` contains one, and no `@return` will ever name it. What must
+/// match is the set of types a binding hands back *directly*.
+///
+/// Returns the disagreement as text rather than asserting, so that the build
+/// itself fails on it: [`write_lua_docs`] runs from `app/src-tauri/build.rs`,
+/// which means a `types.X` reference nobody rendered stops the build instead
+/// of shipping a link to a description that is not there.
+fn reconcile_documented_types(
+    roots: &BTreeSet<String>,
+    referenced: &BTreeSet<String>,
+) -> Result<(), String> {
+    let undescribed: Vec<&String> = referenced.difference(roots).collect();
+    let unreferenced: Vec<&String> = roots.difference(referenced).collect();
+    if undescribed.is_empty() && unreferenced.is_empty() {
+        return Ok(());
+    }
+    let mut message = String::from("types.lua disagrees with the binding documentation:");
+    if !undescribed.is_empty() {
+        message += &format!(
+            "\n  the binding docs promise {undescribed:?}, which no schema describes -- add \
+             `schema_for!(..)` for it to `documented_type_schemas()`"
+        );
+    }
+    if !unreferenced.is_empty() {
+        message += &format!(
+            "\n  {unreferenced:?} is described but no binding hands it to a script -- drop it \
+             from `documented_type_schemas()`, or say so in the `__doc_entry_*` that returns it"
+        );
+    }
+    Err(message)
 }
 
 /// Collects a module table's `__doc_entry_*` strings, sorted by key.
@@ -88,7 +235,10 @@ fn doc_entries(doc_table: &LuaTable) -> Vec<(String, String)> {
     entries
 }
 
-fn write_lua_doc(target_path: PathBuf, doc_table: &LuaTable) {
+/// Renders one module's documentation. Returns the body rather than writing
+/// it, so that the `` `types.X` `` links inside it can be reconciled against
+/// what `types.lua` describes before anything reaches disk.
+fn render_lua_doc(doc_table: &LuaTable) -> String {
     let mut body = doc_table
         .get::<String>("__doc__header")
         .unwrap_or_default()
@@ -105,8 +255,161 @@ fn write_lua_doc(target_path: PathBuf, doc_table: &LuaTable) {
         .unwrap_or_default()
         .trim();
     body += "\n";
+    body
+}
 
-    fs::write(target_path, body).expect("failed to write");
+/// Renders `types.lua` from the schemas, in ldoc's shape.
+///
+/// The file used to be hand-written and tracked, which is why it could say
+/// `FactorioEntity.output_inventory` was `{[string]=int,...}` for as long as
+/// it did while serde had been emitting a list of `InventoryItemWithQuality`.
+/// Everything below is read off the schema, so the only spelling choices left
+/// are how a JSON type is written for a Lua reader.
+fn render_types_doc(documented: &BTreeMap<String, SchemaObject>) -> String {
+    let mut body = String::from(
+        "--- Types\n\
+         --\n\
+         -- The shapes the other modules hand back. These are not tables a script can\n\
+         -- reference by name -- there is no `types` global -- they are what a value\n\
+         -- returned by `world.*` or `rcon.*` looks like once it arrives in Lua.\n\
+         --\n\
+         -- GENERATED from the Rust structs in `crates/core/src/types.rs` via their\n\
+         -- `JsonSchema` derive, which reads the same serde attributes that decide the\n\
+         -- wire shape. Do not edit: the build overwrites it, and a type named by a\n\
+         -- `@return` that nothing here describes fails that build.\n\
+         -- @module types\n",
+    );
+    for (name, schema) in documented {
+        body += "\n";
+        body += &format!("--- {name}\n");
+        if let Some(description) = schema
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.description.as_ref())
+        {
+            body += &comment_lines(description, "-- ");
+        }
+        let Some(object) = &schema.object else {
+            body += &format!(
+                "{name} = nil -- {}\n",
+                lua_field(&Schema::Object(schema.clone())).1
+            );
+            continue;
+        };
+        body += &format!("{name} = {{\n");
+        for (field, field_schema) in &object.properties {
+            if let Schema::Object(field_object) = field_schema {
+                if let Some(description) = field_object
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.description.as_ref())
+                {
+                    body += &comment_lines(description, "    -- ");
+                }
+            }
+            let (placeholder, note) = lua_field(field_schema);
+            body += &format!("    {field} = {placeholder}, -- {note}\n");
+        }
+        body += "}\n";
+    }
+    body
+}
+
+/// A Rust doc comment, re-wrapped as Lua line comments at the given prefix.
+fn comment_lines(text: &str, prefix: &str) -> String {
+    text.lines()
+        .map(|line| format!("{prefix}{}\n", line.trim_end()))
+        .collect()
+}
+
+/// How one field's schema reads to a Lua author: the placeholder to show it
+/// with, and the note describing what it holds.
+fn lua_field(schema: &Schema) -> (&'static str, String) {
+    let Schema::Object(object) = schema else {
+        return ("nil", "any".to_string());
+    };
+    if let Some(reference) = &object.reference {
+        let name = reference.rsplit('/').next().unwrap_or(reference);
+        return ("nil", format!("`{name}`"));
+    }
+    // `Option<T>` over a named type is `anyOf: [T, null]`, not a nullable
+    // `type`; unwrap to the one real variant and mark it optional.
+    if let Some(subschemas) = &object.subschemas {
+        let variants = subschemas
+            .any_of
+            .as_ref()
+            .or(subschemas.one_of.as_ref())
+            .or(subschemas.all_of.as_ref());
+        if let Some(variants) = variants {
+            let real: Vec<&Schema> = variants.iter().filter(|v| !is_null_schema(v)).collect();
+            let optional = real.len() < variants.len();
+            if let [only] = real[..] {
+                let (placeholder, note) = lua_field(only);
+                return if optional {
+                    ("nil", format!("{note}, or nil"))
+                } else {
+                    (placeholder, note)
+                };
+            }
+        }
+    }
+    let Some(instance_type) = &object.instance_type else {
+        return ("nil", "any".to_string());
+    };
+    let types: Vec<InstanceType> = match instance_type {
+        SingleOrVec::Single(one) => vec![**one],
+        SingleOrVec::Vec(many) => many.clone(),
+    };
+    let optional = types.contains(&InstanceType::Null);
+    let Some(primary) = types.iter().find(|t| **t != InstanceType::Null) else {
+        return ("nil", "nil".to_string());
+    };
+    let (placeholder, note) = match primary {
+        InstanceType::String => ("''", "string".to_string()),
+        InstanceType::Integer | InstanceType::Number => ("0", "number".to_string()),
+        InstanceType::Boolean => ("false", "boolean".to_string()),
+        InstanceType::Array => {
+            let item = object
+                .array
+                .as_ref()
+                .and_then(|array| array.items.as_ref())
+                .map(|items| match items {
+                    SingleOrVec::Single(one) => lua_field(one).1,
+                    SingleOrVec::Vec(many) => many
+                        .first()
+                        .map(|one| lua_field(one).1)
+                        .unwrap_or_else(|| "any".to_string()),
+                })
+                .unwrap_or_else(|| "any".to_string());
+            ("nil", format!("{{{item}}}"))
+        }
+        InstanceType::Object => {
+            let value = object
+                .object
+                .as_ref()
+                .and_then(|validation| validation.additional_properties.as_deref())
+                .map(|value| lua_field(value).1)
+                .unwrap_or_else(|| "any".to_string());
+            ("nil", format!("{{[string]={value},...}}"))
+        }
+        InstanceType::Null => ("nil", "nil".to_string()),
+    };
+    if optional {
+        ("nil", format!("{note}, or nil"))
+    } else {
+        (placeholder, note)
+    }
+}
+
+/// `Option<T>` renders its absent arm as a schema whose only type is `null`.
+fn is_null_schema(schema: &Schema) -> bool {
+    let Schema::Object(object) = schema else {
+        return false;
+    };
+    matches!(
+        &object.instance_type,
+        Some(SingleOrVec::Single(one)) if **one == InstanceType::Null
+    )
 }
 
 #[cfg(test)]
@@ -264,6 +567,144 @@ mod tests {
              installs must be the same set: an entry missing from the left is an \
              undocumented binding, one missing from the right is documentation \
              for a function that does not exist"
+        );
+    }
+
+    /// The type names the *binding* documentation actually points a reader at,
+    /// read out of the generated files rather than listed here.
+    ///
+    /// This is the whole reason `types.lua` can no longer drift quietly. The
+    /// four binding files are generated from the `__doc_entry_*` strings, so
+    /// the set of `` `types.X` `` references in them is a function of the Rust
+    /// source; comparing it against the schemas [`documented_type_schemas`]
+    /// actually renders gives a check with a hand-written expectation on
+    /// neither side.
+    fn referenced_in_generated_docs(target: &std::path::Path) -> BTreeSet<String> {
+        let bodies: Vec<String> = ["globals.lua", "world.lua", "rcon.lua", "goal.lua"]
+            .iter()
+            .map(|file| fs::read_to_string(target.join(file)).expect("generated file"))
+            .collect();
+        let mut names = BTreeSet::new();
+        for body in &bodies {
+            names.extend(referenced_type_names(body));
+        }
+        names
+    }
+
+    /// The headings `types.lua` actually emits.
+    fn documented_in_types_lua(target: &std::path::Path) -> BTreeSet<String> {
+        let body = fs::read_to_string(target.join("types.lua")).expect("types.lua");
+        body.lines()
+            .filter_map(|line| line.strip_prefix("--- "))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Every type a binding's documentation names must be described.
+    ///
+    /// `types.lua` used to be hand-written and tracked, and nothing read it, so
+    /// it disagreed with `crates/core/src/types.rs` in ways a green build never
+    /// mentioned: it said `FactorioEntity.output_inventory` was
+    /// `{[string]=int,...}` when serde emits a list of
+    /// `InventoryItemWithQuality`, and it described `EntityPlacement`,
+    /// `InventoryLocation` and `PositionRadius`, none of which derive
+    /// `Serialize` and none of which can therefore ever reach a script.
+    #[test]
+    fn types_lua_documents_every_type_the_binding_docs_reference() {
+        let (_dir, target) = generate();
+        let referenced = referenced_in_generated_docs(&target);
+        assert!(
+            !referenced.is_empty(),
+            "no binding documentation names a `types.X` at all; this test would \
+             then assert nothing"
+        );
+        let documented = documented_in_types_lua(&target);
+        let missing: Vec<&String> = referenced.difference(&documented).collect();
+        assert!(
+            missing.is_empty(),
+            "types.lua does not describe {missing:?}, which the binding \
+             documentation tells readers they will be handed"
+        );
+    }
+
+    /// `types.lua` lists exactly the fields serde emits, for every type.
+    ///
+    /// Not tautological, given this file's history: the failure that shipped
+    /// here was a *renderer* that stopped early and emitted a prefix, with the
+    /// right input all along. Reading the rendered text back and comparing it
+    /// against the schema it was rendered from is what contradicts that.
+    #[test]
+    fn types_lua_lists_every_field_the_rust_schema_has() {
+        let (_dir, target) = generate();
+        let body = fs::read_to_string(target.join("types.lua")).expect("types.lua");
+        let mut checked = 0usize;
+        for (name, schema) in collect_documented_types().all {
+            let expected: Vec<String> = match &schema.object {
+                Some(object) => object.properties.keys().cloned().collect(),
+                None => continue,
+            };
+            if expected.is_empty() {
+                continue;
+            }
+            let start = body
+                .find(&format!("\n{name} = {{\n"))
+                .unwrap_or_else(|| panic!("types.lua has no `{name} = {{` block"));
+            let rest = &body[start + 1..];
+            let end = rest
+                .find("\n}")
+                .unwrap_or_else(|| panic!("{name} block never closes"));
+            let block = &rest[..end];
+            let emitted: Vec<String> = block
+                .lines()
+                .skip(1)
+                .filter_map(|line| line.trim().split(" =").next())
+                .filter(|field| !field.is_empty() && !field.starts_with("--"))
+                .map(str::to_string)
+                .collect();
+            assert_eq!(
+                emitted, expected,
+                "types.lua's `{name}` block and the fields serde emits for it must \
+                 be the same list, in the same order"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 5,
+            "only {checked} types carried fields to compare; the schema walk found \
+             nothing to check and this test would assert nothing"
+        );
+    }
+
+    /// The reconciliation fires in **both** directions, shown on inputs this
+    /// test controls rather than on the live sets.
+    ///
+    /// A type the binding docs promise but nothing renders is a reader sent to
+    /// a description that is not there. A type rendered that no binding hands
+    /// out is documentation of something a script cannot obtain -- which is
+    /// exactly the state the hand-written file was in.
+    #[test]
+    fn reconcile_rejects_a_gap_in_either_direction() {
+        let both: BTreeSet<String> = ["Position".to_string(), "Rect".to_string()]
+            .into_iter()
+            .collect();
+        assert!(
+            reconcile_documented_types(&both, &both).is_ok(),
+            "identical sets must reconcile"
+        );
+
+        let only_referenced: BTreeSet<String> = ["Position".to_string()].into_iter().collect();
+        let err = reconcile_documented_types(&both, &only_referenced)
+            .expect_err("a rendered type nothing references must be rejected");
+        assert!(
+            err.contains("Rect"),
+            "the error must name the unreferenced type, said: {err}"
+        );
+
+        let err = reconcile_documented_types(&only_referenced, &both)
+            .expect_err("a referenced type nothing renders must be rejected");
+        assert!(
+            err.contains("Rect"),
+            "the error must name the undescribed type, said: {err}"
         );
     }
 

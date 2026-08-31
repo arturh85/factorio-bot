@@ -105,12 +105,23 @@ BotBridge Mod (Factorio mod for RPC)
 
 - **crates/scripting_lua**: Lua 5.4 bindings exposing host functions for task queuing, graph queries, and RCON commands
   - `sandbox.rs` - the restricted interpreter every user script runs in
-  - `lua_docs.rs` - generates `docs/lua/src/{globals,world,rcon,goal}.lua` from
-    the `__doc_entry_*` strings in `globals/`. Those four files are build
-    artifacts (gitignored) written by `app/src-tauri/build.rs` -- which is the
-    CLI crate's build script; the directory name is a leftover; edit the Rust
-    strings, never the `.lua`. `docs/lua/src/types.lua` is the exception — it
-    is hand-written and tracked, mirroring `crates/core/src/types.rs`.
+  - `lua_docs.rs` - generates all five files in `docs/lua/src/` — build
+    artifacts, gitignored, written by `app/src-tauri/build.rs` (which is the
+    CLI crate's build script; the directory name is a leftover). Never edit a
+    `.lua` there.
+    - `{globals,world,rcon,goal}.lua` come from the `__doc_entry_*` strings in
+      `globals/`; edit the Rust strings.
+    - `types.lua` comes from `schema_for!` on the roots listed in
+      `documented_type_schemas()`, i.e. from the `JsonSchema` derive on
+      `crates/core/src/types.rs`, which reads the same serde attributes that
+      decide the wire shape. It was hand-written and tracked until it had
+      accumulated two outright lies and was missing the type they lied about.
+    - The two halves are held together: the roots must be **exactly** the set
+      of `` `types.X` `` names the four binding files mention. A `@return`
+      naming a type with no root fails the build; a root no binding hands out
+      fails it too. So documenting a new return type means adding
+      `schema_for!(That)` — and `JsonSchema` is required transitively, so
+      everything it contains is described as well.
 
 - **crates/server**: axum HTTP server (replaces the former Rocket `crates/restapi`)
   - `webserver.rs` - router assembly, static SPA serving, `start()` entry point

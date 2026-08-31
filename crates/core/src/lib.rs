@@ -10,7 +10,7 @@ extern crate strum;
 #[macro_use]
 extern crate include_dir;
 #[macro_use]
-extern crate schemars;
+pub extern crate schemars;
 #[macro_use]
 pub extern crate paris;
 

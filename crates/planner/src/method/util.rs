@@ -295,13 +295,21 @@ mod tests {
         let origin = Position::new(0., 0.);
         let tile = nearest_resource_tile(&s, "iron-ore", &origin, 5).expect("fixture has iron ore");
         assert!(s.resource_available(&tile, "iron-ore") >= 5);
-        // The iron field sits around x -45..-35, y 35..45.
+        // The iron field covers the tiles x -45..=-35, y 35..=45. Tiles are
+        // reported at their *centres* -- where the ore entity actually is, and
+        // the only position `find_entity` will match -- so the positions run
+        // x -44.5..=-34.5, y 35.5..=45.5.
         assert!(
-            tile.x <= -35.0 && tile.x >= -45.0,
+            tile.x <= -34.5 && tile.x >= -44.5,
             "unexpected x: {}",
             tile.x
         );
-        assert!(tile.y >= 35.0 && tile.y <= 45.0, "unexpected y: {}", tile.y);
+        assert!(tile.y >= 35.5 && tile.y <= 45.5, "unexpected y: {}", tile.y);
+        assert_eq!(
+            tile.x.fract().abs(),
+            0.5,
+            "a resource position is a tile centre, not a corner: {tile:?}"
+        );
     }
 
     #[test]
@@ -419,12 +427,13 @@ mod tests {
     #[test]
     fn an_exact_distance_tie_breaks_on_the_lower_position() {
         let s = state();
-        // Exactly halfway between the ore tiles at x = -41 and x = -40 on row
-        // y = 40. Both are equidistant, so the lower (x, y) must win regardless of
+        // Exactly halfway between the ore tiles at x = -41 and x = -40, whose
+        // centres are -40.5 and -39.5, on the row whose centre is y = 39.5.
+        // Both are equidistant, so the lower (x, y) must win regardless of
         // which patch was visited first.
-        let origin = Position::new(-40.5, 40.0);
+        let origin = Position::new(-40.0, 39.5);
         let tile = nearest_resource_tile(&s, "iron-ore", &origin, 1).expect("iron ore");
-        assert_eq!(tile, Position::new(-41.0, 40.0));
+        assert_eq!(tile, Position::new(-40.5, 39.5));
     }
 
     #[test]

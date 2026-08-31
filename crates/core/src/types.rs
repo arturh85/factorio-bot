@@ -1187,7 +1187,14 @@ impl ResourcePatch {
             let mut invalid = false;
             for y in 0i32..height as i32 {
                 for x in 0i32..width as i32 {
-                    let pos = Pos(element.x() as i32 + x, element.y() as i32 + y);
+                    // `floor`, not `as i32`: elements are tile centres, so a
+                    // negative one is `-40.5`, which truncates to `-40` but
+                    // floors to `-41` -- and `element_map` is keyed by `Pos`,
+                    // which floors.
+                    let pos = Pos(
+                        element.x().floor() as i32 + x,
+                        element.y().floor() as i32 + y,
+                    );
                     // let blocked_pos = blocked.get_one(&pos);
                     // if blocked_pos.is_some() && !*blocked_pos.unwrap() {
                     //     invalid = true;

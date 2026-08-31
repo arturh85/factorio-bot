@@ -25,7 +25,9 @@
 //! captured.
 
 use factorio_bot_core::factorio::snapshot::WorldSnapshot;
+use factorio_bot_core::test_utils::entity_graph_from;
 use factorio_bot_core::types::{FactorioEntity, FactorioPlayer, FactorioTile, InventoryResponse};
+use std::collections::BTreeSet;
 
 const PLAYERS: &str = include_str!("live-2.1.17-players.json");
 const WORLD_SNAPSHOT: &str = include_str!("live-2.1.17-world-snapshot.json");
@@ -313,6 +315,65 @@ fn the_live_resource_entities_reply_deserialises_into_factorio_entity() {
     assert_eq!(ore[0].amount, Some(13));
     // A resource has a real bounding box, not the default.
     assert!(ore[0].bounding_box.right_bottom.x > ore[0].bounding_box.left_top.x);
+}
+
+/// Every position `resource_patches` reports must be a position a real ore
+/// entity actually occupies.
+///
+/// Real Factorio resource entities sit at **tile centres** — the capture in
+/// `live-2.1.17-entities-resources.json` is all `x.5`/`y.5`. `EntityGraph`
+/// stores them in `resources: DashMap<String, Vec<Pos>>`, and `Pos` is
+/// `(i32, i32)`: `From<&Position> for Pos` floors, `From<&Pos> for Position`
+/// widens the integer straight back. So an ore at `(-46.5, -52.5)` went in as
+/// `Pos(-47, -53)` and came back out as `(-47.0, -53.0)` — a tile *corner*, a
+/// position no entity is ever at.
+///
+/// That position is what the planner puts in a `Mine` action and what the
+/// executor sends to `action_start_mining`, whose
+/// `surface.find_entity(name, position)` matches the entity position
+/// **exactly**. It therefore found nothing, every time, for any ore: the live
+/// run reported `Error: no entity to mine` while standing 0.83 tiles from 17
+/// reachable iron-ore entities.
+///
+/// No existing test could see this, because `test_utils::spawn_ore` builds ore
+/// from `rect_fields`, which emits *integer* positions — the one input for
+/// which the lossy round-trip happens to be lossless.
+#[test]
+fn resource_patch_elements_are_positions_real_ore_entities_occupy() {
+    let entities: Vec<FactorioEntity> = serde_json::from_str(ENTITIES_RESOURCES)
+        .unwrap_or_else(|err| panic!("live resource entities must parse: {err}"));
+
+    let occupied: BTreeSet<(String, String)> = entities
+        .iter()
+        .filter(|entity| entity.entity_type == "resource")
+        .map(|entity| {
+            (
+                entity.name.clone(),
+                format!("{},{}", entity.position.x(), entity.position.y()),
+            )
+        })
+        .collect();
+    assert!(
+        occupied.iter().any(|(_, pos)| pos.contains(".5")),
+        "the capture must contain half-tile positions, or this proves nothing"
+    );
+
+    let graph = entity_graph_from(entities).expect("the live entities build a graph");
+    for name in ["iron-ore", "stone"] {
+        for patch in graph.resource_patches(name) {
+            for element in &patch.elements {
+                let key = (name.to_string(), format!("{},{}", element.x(), element.y()));
+                assert!(
+                    occupied.contains(&key),
+                    "resource_patches reported {name} at ({}, {}), where the live \
+                     game has no {name} entity; find_entity matches exactly, so \
+                     action_start_mining can never resolve this position",
+                    element.x(),
+                    element.y(),
+                );
+            }
+        }
+    }
 }
 
 /// The inserter branch of `serialize_entity`.

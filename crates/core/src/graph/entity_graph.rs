@@ -177,7 +177,20 @@ impl EntityGraph {
             let mut elements: Vec<Position> = vec![];
             for (k, v) in &positions_by_id {
                 if v.unwrap() == id {
-                    elements.push(k.into());
+                    // Tile *centre*, not tile corner. `resources` is keyed by
+                    // `Pos`, which floors, so the half-tile offset that every
+                    // real resource entity has (`(-40.5, -48.5)`, never
+                    // `(-41, -49)`) is not in the key and must be put back
+                    // here. It matters because these positions leave the
+                    // process: the planner copies one into a `Mine` action and
+                    // the executor sends it to `action_start_mining`, whose
+                    // `surface.find_entity(name, position)` matches the entity
+                    // position *exactly*. A corner matched nothing, so mining
+                    // failed with `Error: no entity to mine` for every ore on
+                    // every map. Same convention as the `resource_tree` insert
+                    // in `add` below, which already recovers the centre with
+                    // `.floor() + 0.5`.
+                    elements.push(Position::new(k.0 as f64 + 0.5, k.1 as f64 + 0.5));
                 }
             }
             patches.push(ResourcePatch {

@@ -17,7 +17,7 @@ use crate::types::{
     ActionId, AreaFilter, Direction, FactorioEntity, FactorioForce, FactorioPlayer, FactorioTile,
     InventoryResponse, PlayerId, Pos, Position, Rect, RequestEntity,
 };
-use miette::{miette, Context, IntoDiagnostic, Result};
+use miette::{miette, Context, IntoDiagnostic, Report, Result};
 use paris::info;
 use parking_lot::RwLock;
 use rcon::Connection;
@@ -31,6 +31,11 @@ use tokio::time::sleep;
 use unicode_segmentation::UnicodeSegmentation;
 
 const RCON_INTERFACE: &str = "botbridge";
+
+/// How long a dispatched action may go without a verdict before the wait gives
+/// up. Unchanged from the literal it replaces; named so the timeout branch is
+/// reachable from a test.
+const ACTION_RESULT_DEADLINE: Duration = Duration::from_secs(360);
 
 /// The `/silent-command remote.call(...)` text for a BotBridge function.
 fn remote_call_command(function_name: &str, args: &[String]) -> String {
@@ -53,6 +58,145 @@ fn split_reply(result: &str, silent: bool) -> Option<Vec<String>> {
     }
     Some(body.split('\n').map(|str| str.to_owned()).collect())
 }
+
+/// How far a dispatch got before it failed.
+///
+/// # The distinction a timeout cannot make on its own
+///
+/// "No reply arrived" is the same observation whether the game never saw the
+/// command or saw it and then went quiet, and those two need opposite
+/// renderings downstream: the second is an action whose outcome this run will
+/// not learn ([`crate::factorio::ticks::ActionTicks`]'s consumer calls that
+/// *lost*), the first is an action that simply did not happen. Classifying by
+/// error type alone therefore cannot work, and guessing costs a bot being
+/// reported as having lost track of work it never started.
+///
+/// So the phase is recorded where it is *known* -- at the call site, by which
+/// statement was executing -- rather than inferred later from the error.
+///
+/// # What counts as evidence of a dispatch
+///
+/// Exactly one thing: **the game itself answered the dispatch RPC.** Every
+/// `action_start_*` and every synchronous `remote_call_timed` below returns
+/// only after BotBridge's `remote.call` ran inside the game and its reply came
+/// back over RCON. That is positive evidence, not an inference from having
+/// written bytes to a socket.
+///
+/// Anything weaker is [`Dispatch::NotDispatched`], including the case where the
+/// RCON round trip itself fails after the command may already have been
+/// written: we cannot tell a failed connect from a failed read, so we do not
+/// claim to. That under-claims -- a command the game ran is reported as one it
+/// never saw -- and that is the direction chosen deliberately, because the
+/// other one invents an outstanding action out of nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dispatch {
+    /// The game never acknowledged the command. Nothing is outstanding.
+    ///
+    /// Every failure before the dispatch RPC returned: a path request that
+    /// timed out or found nothing, a player the world does not know, the walk a
+    /// mine makes first, a dead RCON connection.
+    NotDispatched,
+    /// The game acknowledged the command and gave a verdict, and the verdict
+    /// was no. Something is known, and it is a failure.
+    Refused,
+    /// The game acknowledged the command and no readable verdict ever arrived.
+    ///
+    /// The only state that says an action may still be out there. Produced by
+    /// exactly one place -- [`FactorioRcon::sleep_for_action_result`] running
+    /// out of patience *after* an `action_start_*` returned -- because that is
+    /// the only place where both halves of the claim are established.
+    NoVerdict,
+}
+
+/// A dispatch that failed, plus everything the game had already told us.
+///
+/// # Two facts that used to be destroyed in this file
+///
+/// **When.** These methods are shaped `let dispatched = action_start_...?; let
+/// replied = sleep_for_action_result(...)?;`, so a `?` on the second threw away
+/// the first's tick -- a number the game really produced. The consumer then saw
+/// an absent tick that meant "we were handed a measurement and dropped it"
+/// sitting beside one that meant "there was nothing to measure". `ticks` ends
+/// that: it holds whatever was stamped, and [`ActionTicks::UNKNOWN`] is once
+/// again a statement about the game rather than about the plumbing.
+///
+/// **Whether the game ever saw it.** See [`Dispatch`].
+///
+/// # Nothing here may be invented
+///
+/// The `From<Report>` conversion -- the one `?` uses -- is deliberately the one
+/// that can supply neither: it yields [`Dispatch::NotDispatched`] and
+/// [`ActionTicks::UNKNOWN`]. A pre-dispatch failure therefore stays absent and
+/// unclaimed without anyone having to remember, and asserting either fact takes
+/// an explicit constructor.
+#[derive(Debug)]
+pub struct ActionFailure {
+    /// What went wrong, unchanged from what it always was.
+    pub error: Report,
+    /// What the game had stamped by the time it did. `ActionTicks::UNKNOWN`
+    /// when the game said nothing -- never a zero, never a plan value.
+    pub ticks: ActionTicks,
+    /// How far the dispatch got. See [`Dispatch`].
+    pub dispatch: Dispatch,
+}
+
+impl ActionFailure {
+    /// The game never acknowledged the command. Carries no ticks, because
+    /// nothing stamped one.
+    pub fn not_dispatched(error: Report) -> Self {
+        ActionFailure {
+            error,
+            ticks: ActionTicks::UNKNOWN,
+            dispatch: Dispatch::NotDispatched,
+        }
+    }
+
+    /// The game judged the command and said no, at these ticks.
+    pub fn refused(error: Report, ticks: ActionTicks) -> Self {
+        ActionFailure {
+            error,
+            ticks,
+            dispatch: Dispatch::Refused,
+        }
+    }
+
+    /// The game took the command and never gave a readable verdict. `ticks`
+    /// carries the dispatch stamp, which is the evidence that there is an
+    /// action out there to have lost.
+    pub fn no_verdict(error: Report, ticks: ActionTicks) -> Self {
+        ActionFailure {
+            error,
+            ticks,
+            dispatch: Dispatch::NoVerdict,
+        }
+    }
+
+    /// Drops the two facts on purpose, for the callers that never had them --
+    /// the untimed wrappers, which return the plain error they always returned.
+    ///
+    /// Not a `From` impl: miette's blanket `From<E: Diagnostic> for Report`
+    /// makes that a coherence question nobody should have to think about, and a
+    /// named method reads as the deliberate discard it is.
+    pub fn into_report(self) -> Report {
+        self.error
+    }
+}
+
+/// The conversion `?` uses. It can claim nothing, which is what keeps a
+/// pre-dispatch failure honest by default -- see [`ActionFailure`].
+impl From<Report> for ActionFailure {
+    fn from(error: Report) -> Self {
+        ActionFailure::not_dispatched(error)
+    }
+}
+
+impl std::fmt::Display for ActionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.error, f)
+    }
+}
+
+impl std::error::Error for ActionFailure {}
 
 pub struct FactorioRcon {
     pool: Option<bb8::Pool<ConnectionManager>>,
@@ -310,7 +454,10 @@ impl FactorioRcon {
 
     /// Adds research to the queue
     pub async fn add_research(&self, technology_name: &str) -> Result<()> {
-        self.add_research_timed(technology_name).await.map(|_| ())
+        self.add_research_timed(technology_name)
+            .await
+            .map(|_| ())
+            .map_err(ActionFailure::into_report)
     }
 
     /// [`FactorioRcon::add_research`], reporting the game tick it ran at.
@@ -319,7 +466,10 @@ impl FactorioRcon {
     /// one tick, so both ends of [`ActionTicks`] are that tick. That is a
     /// measurement, not a duplicated estimate -- the game really did receive
     /// and finish with the command in the same tick.
-    pub async fn add_research_timed(&self, technology_name: &str) -> Result<ActionTicks> {
+    pub async fn add_research_timed(
+        &self,
+        technology_name: &str,
+    ) -> Result<ActionTicks, ActionFailure> {
         let (_lines, tick) = self
             .remote_call_timed("add_research", vec![str_to_lua(technology_name)])
             .await?;
@@ -553,7 +703,22 @@ impl FactorioRcon {
         &self,
         world: &Arc<FactorioWorld>,
         action_id: ActionId,
-    ) -> Result<Option<u64>> {
+        dispatched: Option<u64>,
+    ) -> Result<ActionTicks, ActionFailure> {
+        self.sleep_for_action_result_until(world, action_id, dispatched, ACTION_RESULT_DEADLINE)
+            .await
+    }
+
+    /// [`FactorioRcon::sleep_for_action_result`] with the deadline named, so a
+    /// test can reach the timeout branch without waiting six minutes for it.
+    /// Nothing else about the two differs.
+    async fn sleep_for_action_result_until(
+        &self,
+        world: &Arc<FactorioWorld>,
+        action_id: ActionId,
+        dispatched: Option<u64>,
+        deadline: Duration,
+    ) -> Result<ActionTicks, ActionFailure> {
         let wait_start = Instant::now();
         loop {
             sleep(Duration::from_millis(50)).await;
@@ -562,17 +727,31 @@ impl FactorioRcon {
             // that needs the same shard's write guard, which self-deadlocks the
             // whole task on the first tick the reply is actually there.
             if let Some((_, outcome)) = world.actions.remove(&action_id) {
+                let ticks = ActionTicks::new(dispatched, Some(outcome.tick));
                 if outcome.is_ok() {
-                    return Ok(Some(outcome.tick));
-                } else {
-                    return Err(RconError {
+                    return Ok(ticks);
+                }
+                // A verdict, and it was no. Both stamps are real -- the game
+                // told us when it took the command and when it gave up on it --
+                // and the failure carries them for the same reason the success
+                // does.
+                return Err(ActionFailure::refused(
+                    RconError {
                         message: outcome.result,
                     }
-                    .into());
-                }
+                    .into(),
+                    ticks,
+                ));
             }
-            if wait_start.elapsed() > Duration::from_secs(360) {
-                return Err(RconTimeout {}.into());
+            if wait_start.elapsed() > deadline {
+                // The one place in this file entitled to say an action may
+                // still be out there: `action_start_*` already returned, so the
+                // game acknowledged this command, and no verdict followed.
+                // `replied` stays absent because nothing replied.
+                return Err(ActionFailure::no_verdict(
+                    RconTimeout {}.into(),
+                    ActionTicks::new(dispatched, None),
+                ));
             }
         }
     }
@@ -608,6 +787,7 @@ impl FactorioRcon {
         self.move_player_timed(world, player_id, goal, radius)
             .await
             .map(|_| ())
+            .map_err(ActionFailure::into_report)
     }
 
     /// [`FactorioRcon::move_player`], reporting the game ticks it was observed
@@ -619,19 +799,25 @@ impl FactorioRcon {
         player_id: PlayerId,
         goal: &Position,
         radius: Option<f64>,
-    ) -> Result<ActionTicks> {
+    ) -> Result<ActionTicks, ActionFailure> {
         let mut next_action_id = world.as_ref().next_action_id.lock().await;
         let action_id: ActionId = *next_action_id;
         *next_action_id = (*next_action_id + 1) % 1000;
         drop(next_action_id);
 
+        // Everything up to and including `action_start_walk_waypoints` is the
+        // pre-dispatch phase, and every `?` here goes through
+        // `From<Report> for ActionFailure` -- so a path request that times out
+        // comes out `NotDispatched`, with no tick and no claim that anything is
+        // outstanding. That is the case a timeout alone cannot tell from the
+        // one below.
         let waypoints = self.player_path(world, player_id, goal, radius).await?;
 
         let dispatched = self
             .action_start_walk_waypoints(action_id, player_id, waypoints)
             .await?;
-        let replied = self.sleep_for_action_result(world, action_id).await?;
-        Ok(ActionTicks::new(dispatched, replied))
+        self.sleep_for_action_result(world, action_id, dispatched)
+            .await
     }
 
     pub async fn player_mine(
@@ -645,6 +831,7 @@ impl FactorioRcon {
         self.player_mine_timed(world, player_id, name, position, count)
             .await
             .map(|_| ())
+            .map_err(ActionFailure::into_report)
     }
 
     /// [`FactorioRcon::player_mine`], reporting the game ticks it was observed
@@ -661,10 +848,12 @@ impl FactorioRcon {
         name: &str,
         position: &Position,
         count: u32,
-    ) -> Result<ActionTicks> {
+    ) -> Result<ActionTicks, ActionFailure> {
         let player = world.players.get(&player_id);
         if player.is_none() {
-            return Err(RconPlayerNotFound { player_id }.into());
+            return Err(ActionFailure::not_dispatched(
+                RconPlayerNotFound { player_id }.into(),
+            ));
         }
         let player = player.unwrap();
         let mut next_action_id = world.as_ref().next_action_id.lock().await;
@@ -679,11 +868,14 @@ impl FactorioRcon {
             self.move_player(world, player_id, position, Some(resource_reach_distance))
                 .await?;
         }
+        // The walk a mine may make first is a *different* dispatch with its own
+        // action id, so a failure in it leaves this mine un-dispatched -- which
+        // is what the `?` says.
         let dispatched = self
             .action_start_mining(action_id, player_id, name, position, count)
             .await?;
-        let replied = self.sleep_for_action_result(world, action_id).await?;
-        Ok(ActionTicks::new(dispatched, replied))
+        self.sleep_for_action_result(world, action_id, dispatched)
+            .await
     }
 
     pub async fn player_craft(
@@ -696,6 +888,7 @@ impl FactorioRcon {
         self.player_craft_timed(world, player_id, recipe, count)
             .await
             .map(|_| ())
+            .map_err(ActionFailure::into_report)
     }
 
     /// [`FactorioRcon::player_craft`], reporting the game ticks it was observed
@@ -706,7 +899,7 @@ impl FactorioRcon {
         player_id: PlayerId,
         recipe: &str,
         count: u32,
-    ) -> Result<ActionTicks> {
+    ) -> Result<ActionTicks, ActionFailure> {
         let mut next_action_id = world.as_ref().next_action_id.lock().await;
         let action_id: ActionId = *next_action_id;
         *next_action_id = (*next_action_id + 1) % 1000;
@@ -714,8 +907,8 @@ impl FactorioRcon {
         let dispatched = self
             .action_start_crafting(action_id, player_id, recipe, count)
             .await?;
-        let replied = self.sleep_for_action_result(world, action_id).await?;
-        Ok(ActionTicks::new(dispatched, replied))
+        self.sleep_for_action_result(world, action_id, dispatched)
+            .await
     }
 
     pub async fn inventory_contents_at(
@@ -811,6 +1004,7 @@ impl FactorioRcon {
         self.place_entity_timed(player_id, item_name, entity_position, direction, world)
             .await
             .map(|(entity, _ticks)| entity)
+            .map_err(ActionFailure::into_report)
     }
 
     /// [`FactorioRcon::place_entity`], reporting the game tick it ran at
@@ -828,10 +1022,12 @@ impl FactorioRcon {
         entity_position: Position,
         direction: u8,
         world: &Arc<FactorioWorld>,
-    ) -> Result<(FactorioEntity, ActionTicks)> {
+    ) -> Result<(FactorioEntity, ActionTicks), ActionFailure> {
         let player = world.players.get(&player_id);
         if player.is_none() {
-            return Err(RconPlayerNotFound { player_id }.into());
+            return Err(ActionFailure::not_dispatched(
+                RconPlayerNotFound { player_id }.into(),
+            ));
         }
         let player = player.unwrap();
         let player_position = player.position.clone();
@@ -854,12 +1050,20 @@ impl FactorioRcon {
                 ],
             )
             .await?;
+        // Past this point the game has answered the RPC, so every failure below
+        // is a verdict the game gave and carries the tick it gave it at. On the
+        // blocked-and-retry path that stays true: `refused_at` is re-bound to
+        // the retry's stamp, which is the dispatch the outcome belongs to.
+        let refused_at = ActionTicks::at(tick);
         if let Some(lines) = lines {
             if lines.len() != 1 {
-                Err(RconUnexpectedOutput {
-                    output: lines.join("\n"),
-                }
-                .into())
+                Err(ActionFailure::refused(
+                    RconUnexpectedOutput {
+                        output: lines.join("\n"),
+                    }
+                    .into(),
+                    refused_at,
+                ))
             } else {
                 let line = &lines[0];
                 let chars =
@@ -878,10 +1082,12 @@ impl FactorioRcon {
                                 test_position.clone(),
                                 Some(2.0),
                             )))
-                            .await?
+                            .await
+                            .map_err(|e| ActionFailure::refused(e, refused_at))?
                         {
                             self.move_player(world, player_id, &test_position, Some(1.0))
-                                .await?;
+                                .await
+                                .map_err(|e| ActionFailure::refused(e, refused_at))?;
                             let (lines, tick) = self
                                 .remote_call_timed(
                                     "place_entity",
@@ -893,12 +1099,16 @@ impl FactorioRcon {
                                     ],
                                 )
                                 .await?;
+                            let refused_at = ActionTicks::at(tick);
                             return if let Some(lines) = lines {
                                 if lines.len() != 1 {
-                                    return Err(RconUnexpectedOutput {
-                                        output: lines.join("\n"),
-                                    }
-                                    .into());
+                                    return Err(ActionFailure::refused(
+                                        RconUnexpectedOutput {
+                                            output: lines.join("\n"),
+                                        }
+                                        .into(),
+                                        refused_at,
+                                    ));
                                 }
                                 let line = &lines[0];
                                 let chars = UnicodeSegmentation::graphemes(line.as_str(), true)
@@ -906,28 +1116,46 @@ impl FactorioRcon {
                                 if chars[0] == "{" {
                                     Ok((serde_json::from_str(line).unwrap(), ActionTicks::at(tick)))
                                 } else if &line[..] == "§player_blocks_placement§" {
-                                    Err(RconPlayerBlockesPlacement {}.into())
+                                    Err(ActionFailure::refused(
+                                        RconPlayerBlockesPlacement {}.into(),
+                                        refused_at,
+                                    ))
                                 } else {
-                                    Err(RconError {
-                                        message: line.clone(),
-                                    }
-                                    .into())
+                                    Err(ActionFailure::refused(
+                                        RconError {
+                                            message: line.clone(),
+                                        }
+                                        .into(),
+                                        refused_at,
+                                    ))
                                 }
                             } else {
-                                Err(RconUnexpectedEmptyResponse {}.into())
+                                Err(ActionFailure::refused(
+                                    RconUnexpectedEmptyResponse {}.into(),
+                                    refused_at,
+                                ))
                             };
                         }
                     }
-                    Err(RconPlayerBlockesAllPlacement {}.into())
+                    Err(ActionFailure::refused(
+                        RconPlayerBlockesAllPlacement {}.into(),
+                        refused_at,
+                    ))
                 } else {
-                    Err(RconError {
-                        message: line.clone(),
-                    }
-                    .into())
+                    Err(ActionFailure::refused(
+                        RconError {
+                            message: line.clone(),
+                        }
+                        .into(),
+                        refused_at,
+                    ))
                 }
             }
         } else {
-            Err(RconUnexpectedEmptyResponse {}.into())
+            Err(ActionFailure::refused(
+                RconUnexpectedEmptyResponse {}.into(),
+                refused_at,
+            ))
         }
     }
 
@@ -953,6 +1181,7 @@ impl FactorioRcon {
         )
         .await
         .map(|_| ())
+        .map_err(ActionFailure::into_report)
     }
 
     /// [`FactorioRcon::insert_to_inventory`], reporting the game tick it ran
@@ -967,10 +1196,12 @@ impl FactorioRcon {
         item_name: String,
         item_count: u32,
         world: &Arc<FactorioWorld>,
-    ) -> Result<ActionTicks> {
+    ) -> Result<ActionTicks, ActionFailure> {
         let player = world.players.get(&player_id);
         if player.is_none() {
-            return Err(RconPlayerNotFound { player_id }.into());
+            return Err(ActionFailure::not_dispatched(
+                RconPlayerNotFound { player_id }.into(),
+            ));
         }
         let player = player.unwrap();
         let reach_distance = player.reach_distance as f64;
@@ -999,10 +1230,15 @@ impl FactorioRcon {
             )
             .await?;
         if let Some(lines) = lines {
-            return Err(RconError {
-                message: format!("{:?}", lines),
-            }
-            .into());
+            // The game answered, so it saw the command and judged it: a verdict
+            // at a real tick, not a command that never landed.
+            return Err(ActionFailure::refused(
+                RconError {
+                    message: format!("{:?}", lines),
+                }
+                .into(),
+                ActionTicks::at(tick),
+            ));
         }
         Ok(ActionTicks::at(tick))
     }
@@ -1029,6 +1265,7 @@ impl FactorioRcon {
         )
         .await
         .map(|_| ())
+        .map_err(ActionFailure::into_report)
     }
 
     /// [`FactorioRcon::remove_from_inventory`], reporting the game tick it ran
@@ -1043,10 +1280,12 @@ impl FactorioRcon {
         item_name: String,
         item_count: u32,
         world: &Arc<FactorioWorld>,
-    ) -> Result<ActionTicks> {
+    ) -> Result<ActionTicks, ActionFailure> {
         let player = world.players.get(&player_id);
         if player.is_none() {
-            return Err(RconPlayerNotFound { player_id }.into());
+            return Err(ActionFailure::not_dispatched(
+                RconPlayerNotFound { player_id }.into(),
+            ));
         }
         let player = player.unwrap();
         let reach_distance = player.reach_distance as f64;
@@ -1074,10 +1313,15 @@ impl FactorioRcon {
             )
             .await?;
         if let Some(lines) = lines {
-            return Err(RconError {
-                message: format!("{:?}", lines),
-            }
-            .into());
+            // The game answered, so it saw the command and judged it: a verdict
+            // at a real tick, not a command that never landed.
+            return Err(ActionFailure::refused(
+                RconError {
+                    message: format!("{:?}", lines),
+                }
+                .into(),
+                ActionTicks::at(tick),
+            ));
         }
         Ok(ActionTicks::at(tick))
     }
@@ -1734,8 +1978,9 @@ mod wait_for_reply_tests {
     fn action_result_reply_wakes_the_waiter() {
         let world = Arc::new(FactorioWorld::new());
         let waiter_world = world.clone();
-        let waited =
-            start(move || block_on(quiet_rcon().sleep_for_action_result(&waiter_world, 7)));
+        let waited = start(move || {
+            block_on(quiet_rcon().sleep_for_action_result(&waiter_world, 7, Some(4200)))
+        });
         std::thread::sleep(Duration::from_millis(200));
         world.actions.insert(
             7,
@@ -1745,7 +1990,7 @@ mod wait_for_reply_tests {
             },
         );
 
-        let tick = waited
+        let ticks = waited
             .recv_timeout(DEADLINE)
             .expect(
                 "sleep_for_action_result never returned after the reply was delivered \
@@ -1753,9 +1998,14 @@ mod wait_for_reply_tests {
             )
             .expect("an \"ok\" action result should succeed");
         assert_eq!(
-            tick,
+            ticks.replied,
             Some(4242),
             "the completion tick must be the game's, not a plan value"
+        );
+        assert_eq!(
+            ticks.dispatched,
+            Some(4200),
+            "the dispatch stamp must be carried through, not recomputed"
         );
         assert!(
             world.actions.get(&7).is_none(),
@@ -1767,8 +2017,9 @@ mod wait_for_reply_tests {
     fn failed_action_result_is_reported_and_consumed() {
         let world = Arc::new(FactorioWorld::new());
         let waiter_world = world.clone();
-        let waited =
-            start(move || block_on(quiet_rcon().sleep_for_action_result(&waiter_world, 8)));
+        let waited = start(move || {
+            block_on(quiet_rcon().sleep_for_action_result(&waiter_world, 8, Some(4200)))
+        });
         std::thread::sleep(Duration::from_millis(200));
         world.actions.insert(
             8,
@@ -1786,11 +2037,177 @@ mod wait_for_reply_tests {
             format!("{err:?}").contains("target is out of reach"),
             "error should carry the game's message, got {err:?}"
         );
+        assert_eq!(
+            err.dispatch,
+            Dispatch::Refused,
+            "the game judged this one; that is a verdict, not a lost action"
+        );
+        assert_eq!(
+            err.ticks,
+            ActionTicks::new(Some(4200), Some(11)),
+            "a refused dispatch keeps both stamps the game produced"
+        );
         // Action ids are reused (mod 1000). A failure left behind in the map
         // makes the next action with that id fail instantly.
         assert!(
             world.actions.get(&8).is_none(),
             "a failed reply must also be consumed, or it poisons the reused action id"
+        );
+    }
+}
+
+/// What a failed dispatch is allowed to claim.
+///
+/// Two facts, and for each of them both directions, because replacing one false
+/// statement with its mirror image is not progress:
+///
+/// - a dispatch the game stamped and then failed keeps the stamp, **and** one
+///   that failed before any stamp still reports none;
+/// - a timeout *after* the game acknowledged the command is
+///   [`Dispatch::NoVerdict`], **and** a timeout before it is not.
+#[cfg(test)]
+mod dispatch_evidence_tests {
+    use super::*;
+    use crate::factorio::ticks::ActionOutcome;
+    use crate::factorio::world::FactorioWorld;
+
+    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    /// Fact 2, the direction that would overclaim. `RconTimeout` is also what
+    /// a path request produces, and a path request runs before anything is
+    /// dispatched -- so the *same error* must come out `NotDispatched` when it
+    /// is raised in that phase. This is the conversion `?` uses at every
+    /// pre-dispatch call site, exercised with the very error that makes the
+    /// distinction load-bearing.
+    #[test]
+    fn a_timeout_raised_before_the_dispatch_claims_no_dispatch_and_no_tick() {
+        let failure: ActionFailure = Report::from(RconTimeout {}).into();
+        assert_eq!(
+            failure.dispatch,
+            Dispatch::NotDispatched,
+            "a timeout is not evidence of a dispatch; a path request times out too"
+        );
+        assert_eq!(
+            failure.ticks,
+            ActionTicks::UNKNOWN,
+            "nothing stamped this, so nothing may be reported"
+        );
+    }
+
+    /// Fact 1, the direction that would fabricate: a failure raised before the
+    /// game saw anything must report no tick, through the real production path
+    /// rather than a hand-built value. A poolless [`FactorioRcon::new_empty`]
+    /// fails inside `player_path`, which is exactly the pre-dispatch phase.
+    #[test]
+    fn move_player_timed_reports_nothing_when_it_fails_before_dispatching() {
+        let world = Arc::new(FactorioWorld::new());
+        let failure = block_on(FactorioRcon::new_empty().move_player_timed(
+            &world,
+            1,
+            &Position::new(10.0, 10.0),
+            None,
+        ))
+        .expect_err("a disconnected rcon cannot request a path");
+        assert_eq!(
+            failure.ticks,
+            ActionTicks::UNKNOWN,
+            "the game never saw this, so there is no measurement to report"
+        );
+        assert_eq!(failure.ticks.dispatched, None, "absent is not tick zero");
+        assert_eq!(
+            failure.dispatch,
+            Dispatch::NotDispatched,
+            "nothing was dispatched, so nothing can be outstanding"
+        );
+    }
+
+    /// Fact 2, the direction that needs the new state. The wait is entered only
+    /// after `action_start_*` returned, so running out of patience here means
+    /// the game took the command and never answered -- the one case that may
+    /// say an action is still out there.
+    #[test]
+    fn a_dispatched_action_that_never_answers_has_no_verdict() {
+        let world = Arc::new(FactorioWorld::new());
+        let failure = block_on(FactorioRcon::new_empty().sleep_for_action_result_until(
+            &world,
+            3,
+            Some(7_777),
+            Duration::from_millis(120),
+        ))
+        .expect_err("no reply was ever delivered");
+        assert_eq!(
+            failure.dispatch,
+            Dispatch::NoVerdict,
+            "the game acknowledged this command and then went quiet"
+        );
+        assert_eq!(
+            failure.ticks.dispatched,
+            Some(7_777),
+            "the dispatch stamp is the evidence that there is an action to have lost"
+        );
+        assert_eq!(
+            failure.ticks.replied, None,
+            "nothing replied, so no reply tick may be invented"
+        );
+    }
+
+    /// The case that rules out using `ticks.dispatched.is_some()` as the test
+    /// for "was it dispatched". A stamp the mod wrote but nothing could parse
+    /// leaves the tick absent while the dispatch still happened, and the two
+    /// facts are recorded separately precisely so this comes out right.
+    #[test]
+    fn a_dispatch_the_game_did_not_stamp_is_still_a_dispatch() {
+        let world = Arc::new(FactorioWorld::new());
+        let failure = block_on(FactorioRcon::new_empty().sleep_for_action_result_until(
+            &world,
+            4,
+            None,
+            Duration::from_millis(120),
+        ))
+        .expect_err("no reply was ever delivered");
+        assert_eq!(
+            failure.dispatch,
+            Dispatch::NoVerdict,
+            "an unparseable stamp does not un-dispatch the command"
+        );
+        assert_eq!(failure.ticks, ActionTicks::UNKNOWN);
+    }
+
+    /// Fact 1, the direction that used to drop a measurement: the game stamped
+    /// the dispatch, then reported failure, and both numbers survive the error
+    /// path.
+    #[test]
+    fn a_refused_dispatch_keeps_the_stamps_the_game_produced() {
+        let world = Arc::new(FactorioWorld::new());
+        world.actions.insert(
+            5,
+            ActionOutcome {
+                tick: 4_270,
+                result: "out of reach".to_string(),
+            },
+        );
+        let failure = block_on(FactorioRcon::new_empty().sleep_for_action_result_until(
+            &world,
+            5,
+            Some(4_211),
+            Duration::from_secs(5),
+        ))
+        .expect_err("a non-ok outcome is a failure");
+        assert_eq!(
+            failure.ticks,
+            ActionTicks::new(Some(4_211), Some(4_270)),
+            "a failed dispatch carries the same measurement a successful one would"
+        );
+        assert_eq!(
+            failure.dispatch,
+            Dispatch::Refused,
+            "the game gave a verdict; nothing is outstanding"
         );
     }
 }

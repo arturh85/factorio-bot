@@ -1,6 +1,6 @@
 use crate::actuator::{ActionTicks, Actuator, ActuatorError, ActuatorFailure};
 use async_trait::async_trait;
-use factorio_bot_core::factorio::rcon::FactorioRcon;
+use factorio_bot_core::factorio::rcon::{ActionFailure, Dispatch, FactorioRcon};
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::types::{PlayerId, Position};
 use factorio_bot_planner::{BotId, InventorySlot};
@@ -185,32 +185,63 @@ impl RconActuator {
     }
 }
 
-/// # What this implementation cannot yet report, and why
+/// Translates a [`FactorioRcon`] dispatch failure into the executor's own.
 ///
-/// Two facts the [`Actuator`] contract now has room for are **not** available
-/// here, and both are lost inside `crates/core` before this crate is reached.
-/// They are stated rather than approximated, because guessing either one would
-/// be exactly the fabrication the contract exists to prevent.
+/// # Why this is a `match` on a phase and not on an error kind
 ///
-/// - **A dispatch tick on the failure path.** `FactorioRcon`'s `*_timed`
-///   methods are shaped `let dispatched = action_start_…().await?; let replied
-///   = sleep_for_action_result(…).await?;`, so when the *second* call fails the
-///   first call's tick — a real stamp the game produced — is dropped by the
-///   `?`. Every failure therefore arrives here with nothing attached and is
-///   reported as [`ActionTicks::UNKNOWN`]. Making it available needs those
-///   methods to carry the dispatch tick out on their error path; until then
-///   `UNKNOWN` is the honest answer this crate can give, and
-///   [`ActuatorFailure`] is where the tick will go the moment core surfaces it.
-/// - **[`ActuatorError::NoVerdict`].** A `sleep_for_action_result` timeout is
-///   the executor-visible shape of an `action_completed` whose status the
-///   parser could not read, and it is genuinely "no verdict". But the same
-///   `RconTimeout` also comes back from a *path request* and from the inner
-///   `move_player` a mine may make first — failures where nothing was
-///   dispatched for this action at all. Classifying by error type alone would
-///   report an action as `Lost` ("it may have happened") when the game never
-///   saw it, which overclaims in the direction that matters most. So every
-///   failure here stays `Rejected` until core distinguishes the two at the
-///   point where it knows the difference.
+/// The question the log needs answered is "is there an action still out there
+/// whose outcome this run will not learn" — [`crate::Status::Lost`]. The
+/// tempting answer is "the error was a timeout", and it is wrong: a timeout is
+/// also what a *path request* produces, and what the inner `move_player` a mine
+/// may make first produces, and in both of those nothing was ever dispatched
+/// for this action. Marking those `Lost` would report a bot as having lost
+/// track of work it never started — a fabrication in the worst direction, and
+/// the reason this crate reported every failure as `Rejected` until now.
+///
+/// So the classification is not made here at all. [`Dispatch`] is recorded in
+/// `crates/core` at the statement that knows: `NoVerdict` is produced by
+/// exactly one place, `sleep_for_action_result` running out of patience, which
+/// is only ever entered *after* an `action_start_*` returned — i.e. after the
+/// game itself answered the dispatch RPC. Everything weaker, including an RCON
+/// round trip that failed after the bytes may already have gone out, is
+/// `NotDispatched` and stays `Rejected`. That under-claims rather than over-,
+/// which is the direction chosen deliberately.
+///
+/// `f.ticks` is passed through untouched, which is the other half: a dispatch
+/// the game stamped and then refused arrives here with a real tick and keeps
+/// it, while a failure raised before any stamp arrives with
+/// [`ActionTicks::UNKNOWN`] and keeps that.
+pub fn classify(f: ActionFailure) -> ActuatorFailure {
+    let message = f.error.to_string();
+    match f.dispatch {
+        // The game took the command and never gave a readable verdict. Nothing
+        // is known about the outcome, which is not the same as knowing it
+        // failed.
+        Dispatch::NoVerdict => ActuatorError::NoVerdict(message).at(f.ticks),
+        // Either the game judged it and said no, or it never saw it. Both are
+        // `Rejected`: neither leaves an action outstanding.
+        Dispatch::Refused | Dispatch::NotDispatched => ActuatorError::Rejected(message).at(f.ticks),
+    }
+}
+
+/// # What this implementation can and cannot report
+///
+/// Both facts the [`Actuator`] contract has room for are now produced here,
+/// because `crates/core` carries them out of its `*_timed` methods on the error
+/// path rather than dropping them: [`ActionFailure`] holds the ticks the game
+/// stamped and the [`Dispatch`] phase the failure happened in, and [`classify`]
+/// is the whole of the translation. See its docs for why the phase, not the
+/// error kind, is what decides [`ActuatorError::NoVerdict`].
+///
+/// One thing is still deliberately not claimed. When the RCON round trip itself
+/// fails — a broken pipe on a command that may already have been written — the
+/// game may or may not have run it, and nothing distinguishes a failed connect
+/// from a failed read. That comes back as [`Dispatch::NotDispatched`] and so as
+/// `Rejected`, which under-claims: an action the game did run can be reported
+/// as one it never saw. Fixing it needs evidence that does not exist at that
+/// layer (an idempotency key the mod could echo back, or a post-hoc query of
+/// the action's own state), and inventing a `Lost` there would put a bot's
+/// outstanding work into the log on the strength of a guess.
 #[async_trait]
 impl Actuator for RconActuator {
     async fn walk(&self, bot: BotId, to: Position) -> Result<ActionTicks, ActuatorFailure> {
@@ -218,7 +249,7 @@ impl Actuator for RconActuator {
         self.rcon
             .move_player_timed(&self.world, p, &to, None)
             .await
-            .map_err(|e| ActuatorError::Rejected(e.to_string()).into())
+            .map_err(classify)
     }
 
     async fn mine(
@@ -232,7 +263,7 @@ impl Actuator for RconActuator {
         self.rcon
             .player_mine_timed(&self.world, p, item, &at, count)
             .await
-            .map_err(|e| ActuatorError::Rejected(e.to_string()).into())
+            .map_err(classify)
     }
 
     async fn craft(
@@ -245,7 +276,7 @@ impl Actuator for RconActuator {
         self.rcon
             .player_craft_timed(&self.world, p, recipe, count)
             .await
-            .map_err(|e| ActuatorError::Rejected(e.to_string()).into())
+            .map_err(classify)
     }
 
     async fn place(
@@ -264,7 +295,7 @@ impl Actuator for RconActuator {
             .place_entity_timed(p, item.to_string(), at, direction, &self.world)
             .await
             .map(|(_entity, ticks)| ticks)
-            .map_err(|e| ActuatorError::Rejected(e.to_string()).into())
+            .map_err(classify)
     }
 
     async fn insert(
@@ -289,7 +320,7 @@ impl Actuator for RconActuator {
                 &self.world,
             )
             .await
-            .map_err(|e| ActuatorError::Rejected(e.to_string()).into())
+            .map_err(classify)
     }
 
     async fn remove(
@@ -314,23 +345,21 @@ impl Actuator for RconActuator {
                 &self.world,
             )
             .await
-            .map_err(|e| ActuatorError::Rejected(e.to_string()).into())
+            .map_err(classify)
     }
 
     /// Research is server-wide: `add_research` takes no player id, so `bot`
     /// does not appear here. Two bots researching the same technology is
     /// idempotent in Factorio.
     async fn research(&self, tech: &str) -> Result<ActionTicks, ActuatorFailure> {
-        self.rcon
-            .add_research_timed(tech)
-            .await
-            .map_err(|e| ActuatorError::Rejected(e.to_string()).into())
+        self.rcon.add_research_timed(tech).await.map_err(classify)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use factorio_bot_core::errors::{RconError, RconPlayerNotFound, RconTimeout};
     use std::collections::BTreeSet;
 
     #[test]
@@ -477,6 +506,109 @@ mod tests {
     fn no_connected_players_means_every_bot_is_unknown() {
         let connected: BTreeSet<PlayerId> = BTreeSet::new();
         assert!(RconActuator::resolve_player(&connected, BotId(1)).is_err());
+    }
+
+    /// Fact 2, the direction that needs the state: the game acknowledged the
+    /// command and never answered, so the outcome is unknown rather than bad.
+    /// `NoVerdict` is what `run.rs` turns into [`crate::Status::Lost`].
+    #[test]
+    fn a_dispatch_the_game_never_answered_is_reported_as_no_verdict() {
+        let f = classify(ActionFailure::no_verdict(
+            RconTimeout {}.into(),
+            ActionTicks::new(Some(7_777), None),
+        ));
+        assert!(
+            matches!(f.error, ActuatorError::NoVerdict(_)),
+            "a dispatched action with no answer is Lost, not Failed; got {:?}",
+            f.error
+        );
+        assert_eq!(
+            f.ticks.dispatched,
+            Some(7_777),
+            "the dispatch stamp is the evidence that there is an action to have lost"
+        );
+    }
+
+    /// Fact 2, the direction that would overclaim — and the whole reason the
+    /// phase is carried instead of being guessed from the error. This is the
+    /// *same* `RconTimeout` as above; only the phase differs, and it must come
+    /// out `Rejected`, because reporting an action the game never saw as `Lost`
+    /// puts work into the log that no bot ever started.
+    #[test]
+    fn a_timeout_before_any_dispatch_is_not_reported_as_no_verdict() {
+        let f = classify(ActionFailure::not_dispatched(RconTimeout {}.into()));
+        assert!(
+            matches!(f.error, ActuatorError::Rejected(_)),
+            "nothing was dispatched, so nothing can be lost; got {:?}",
+            f.error
+        );
+        assert!(
+            !matches!(f.error, ActuatorError::NoVerdict(_)),
+            "a path request that timed out must never be rendered as an outstanding action"
+        );
+    }
+
+    /// Fact 1, the direction that used to drop a measurement.
+    #[test]
+    fn a_refused_dispatch_arrives_with_the_tick_the_game_stamped() {
+        let f = classify(ActionFailure::refused(
+            RconError {
+                message: "out of reach".to_string(),
+            }
+            .into(),
+            ActionTicks::new(Some(4_211), Some(4_270)),
+        ));
+        assert!(matches!(f.error, ActuatorError::Rejected(_)));
+        assert_eq!(f.ticks, ActionTicks::new(Some(4_211), Some(4_270)));
+        assert!(
+            f.to_string().contains("out of reach"),
+            "the game's own message must survive; got {f}"
+        );
+    }
+
+    /// Fact 1, the direction that would fabricate: nothing stamped it, so
+    /// nothing may be reported — and absent is not tick zero.
+    #[test]
+    fn a_failure_before_any_stamp_still_reports_no_tick() {
+        let f = classify(ActionFailure::not_dispatched(
+            RconPlayerNotFound { player_id: 3 }.into(),
+        ));
+        assert_eq!(f.ticks, ActionTicks::UNKNOWN);
+        assert_eq!(f.ticks.dispatched, None);
+        assert_ne!(f.ticks.dispatched, Some(0), "absent is not tick zero");
+    }
+
+    /// The production trait impl, not just the free function: a real
+    /// [`RconActuator`] whose rcon has no connection fails inside
+    /// `player_path`, which is the pre-dispatch phase, and the answer must come
+    /// back `Rejected` with nothing attached.
+    ///
+    /// Built field-by-field rather than through [`RconActuator::new`], which
+    /// needs a live game to read the roster and the defines table.
+    #[test]
+    fn the_walk_dispatch_reports_a_pre_dispatch_failure_as_rejected_and_untimed() {
+        let actuator = RconActuator {
+            rcon: Arc::new(FactorioRcon::new_empty()),
+            world: Arc::new(FactorioWorld::new()),
+            defines: InventoryDefines::default(),
+            connected: [1u8].into_iter().collect(),
+        };
+        let f = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(actuator.walk(BotId(1), Position::new(10.0, 10.0)))
+            .expect_err("a disconnected rcon cannot request a path");
+        assert!(
+            matches!(f.error, ActuatorError::Rejected(_)),
+            "the game never saw this walk, so it is not Lost; got {:?}",
+            f.error
+        );
+        assert_eq!(
+            f.ticks,
+            ActionTicks::UNKNOWN,
+            "nothing stamped this, so nothing may be reported"
+        );
     }
 
     #[test]

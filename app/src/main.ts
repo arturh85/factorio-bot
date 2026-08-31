@@ -9,7 +9,6 @@ import {useToast} from './composables/useToast';
 
 import './assets/tailwind.css';
 import 'primeicons/primeicons.css';
-import './assets/layout/layout.scss';
 
 import App from './App.vue';
 

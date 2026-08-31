@@ -1,19 +1,17 @@
-/* Tailwind v4, deliberately without Preflight.
+/* Tailwind v4 with Preflight.
  *
- * Preflight is Tailwind's global reset. The layout shell in assets/layout/ is a
- * self-contained SASS design that predates it and styles bare elements
- * (headings, buttons, lists) directly, so enabling the reset now would restyle
- * every page before there is anything Tailwind-native to replace it with.
- *
- * Add `@import "tailwindcss/preflight.css" layer(base);` once the shell has
- * been migrated and the reset is wanted. */
+ * Preflight is Tailwind's global reset. It was held back while the old SCSS
+ * layout shell styled bare elements directly; that shell is gone as of this
+ * commit, every page renders from utilities, and the reset is now what keeps
+ * browser defaults out of the design. */
 @layer theme, base, components, utilities;
 
 @import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(base);
 @import "tailwindcss/utilities.css" layer(utilities);
 
 /* The palette below is the one the app already had: every value is lifted
- * verbatim from assets/layout/_variables.scss, so turning the SCSS shell into
+ * verbatim from the old SCSS layout shell's variables file, so turning it into
  * Tailwind utilities is a change of mechanism, not of appearance. */
 @theme {
     /* Surfaces */
@@ -51,4 +49,21 @@
     --radius-card: 3px;
     --spacing-sidebar: 250px;
     --spacing-topbar: 50px;
+}
+
+/* The three element defaults the app genuinely relies on. Everything else is a
+ * utility on the element that needs it -- headings included, which is why
+ * Preflight zeroing heading sizes is not a problem any more. */
+@layer base {
+    html {
+        font-size: 14px;
+    }
+
+    body {
+        background-color: var(--color-surface);
+        color: var(--color-ink);
+        font-family: var(--font-sans);
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+    }
 }

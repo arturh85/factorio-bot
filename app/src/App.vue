@@ -1,170 +1,59 @@
-<template>
-  <div :class="containerClass" @click="onWrapperClick">
-    <AppTopBar @menu-toggle="onMenuToggle"/>
-    <transition name="layout-sidebar">
-      <div :class="sidebarClass"
-           @click="onSidebarClick"
-           v-show="isSidebarVisible()">
-        <div class="layout-logo">
-          <router-link to="/">
-            <img alt="Logo" src="./assets/logo.png" :width="250"/>
-
-          </router-link>
-        </div>
-
-        <AppMenu :model="menu"
-                 @menuitem-click="onMenuItemClick"/>
-      </div>
-    </transition>
-
-    <div class="layout-main">
-      <router-view/>
-      <Toaster/>
-    </div>
-
-    <AppConfig :layoutMode="layoutMode"
-               :layoutColorMode="layoutColorMode"
-               @layout-change="onLayoutChange"
-               @layout-color-change="onLayoutColorChange"/>
-
-    <AppFooter/>
-  </div>
-</template>
-
 <script setup lang="ts">
-import AppTopBar from './AppTopbar.vue'
-import AppMenu from './AppMenu.vue'
-import AppFooter from './AppFooter.vue'
-import {useAppStore} from '@/store/appStore';
-import AppConfig from '@/AppConfig.vue';
+import {computed, onMounted, onUnmounted, ref, watch} from 'vue';
+import {Cog, Home, Network, Terminal} from '@lucide/vue';
+import AppTopbar from './AppTopbar.vue';
+import AppMenu from './AppMenu.vue';
+import AppFooter from './AppFooter.vue';
 import Toaster from '@/components/ui/Toaster.vue';
+import {useAppStore} from '@/store/appStore';
 import {useInstanceStore} from '@/store/instanceStore';
-import {computed, onBeforeUpdate, onMounted, onUnmounted, ref} from 'vue';
 import {ApiError} from '@/api/http';
-import {DashboardMenu} from '@/models/dashboard';
+import type {MenuEntry} from '@/models/dashboard';
 
-const layoutMode = ref('static')
-const layoutColorMode = ref('dark')
-const staticMenuInactive = ref(false)
-const overlayMenuActive = ref(false)
-const mobileMenuActive = ref(false)
-const menuClick = ref(false)
-const menu = ref([
-      {label: 'Dashboard', icon: 'pi pi-fw pi-home', to: '/'},
-      {label: 'Settings', icon: 'pi pi-fw pi-cog', to: '/settings'},
-      {label: 'RCON', icon: 'pi pi-fw pi-cog', to: '/rcon'},
-      {label: 'LUA Script', icon: 'pi pi-fw pi-cog', to: '/script'},
-      // {label: 'Mods', icon: 'pi pi-fw pi-th-large', to: '/factorioMods'},
-      {label: 'Tasks', icon: 'pi pi-fw pi-sitemap', to: '/tasks'}
-      // {label: 'Entities', icon: 'pi pi-fw pi-sitemap', to: '/workspace'},
-      // {label: 'Map', icon: 'pi pi-fw pi-map-marker', to: '/workspace'},
-      // {label: 'Instances', icon: 'pi pi-fw pi-circle-off', to: '/instances'},
-      // {label: 'REST API Docs', icon: 'pi pi-fw pi-question-circle', to: '/restApiDocss'},
-      // {label: 'LUA API Docs', icon: 'pi pi-fw pi-question-circle', to: '/luaApiDocss'}
-    ] as DashboardMenu[]
-)
+// The 'Entities'/'Map' entries that used to live here (commented out, pointing
+// at '/workspace') were removed along with that route in an earlier task in
+// this plan. They were unbuilt, not unwanted: a map view is still planned --
+// see .superpowers/sdd/plan-view-requirements.md -- it just has no route to
+// link to yet.
+const menu: MenuEntry[] = [
+  {label: 'Dashboard', icon: Home, to: '/'},
+  {label: 'Settings', icon: Cog, to: '/settings'},
+  {label: 'RCON', icon: Terminal, to: '/rcon'},
+  {label: 'LUA Script', icon: Terminal, to: '/script'},
+  {label: 'Tasks', icon: Network, to: '/tasks'}
+]
 
-function onWrapperClick() {
-  if (!menuClick.value) {
-    overlayMenuActive.value = false
-    mobileMenuActive.value = false
-  }
+// jsdom reports exactly 1024, and so does a real 1024px viewport, which is the
+// width Tailwind's `lg:` breakpoint starts at. Use the same comparison the
+// breakpoint uses so the class toggles and the media query agree.
+const isDesktop = () => window.innerWidth >= 1024
 
-  menuClick.value = false
+const sidebarOpen = ref(isDesktop())
+
+function toggleSidebar() {
+  sidebarOpen.value = !sidebarOpen.value
 }
 
-function onMenuToggle(event: CustomEvent<void>) {
-  menuClick.value = true
-
-  if (isDesktop()) {
-    if (layoutMode.value === 'overlay') {
-      if (mobileMenuActive.value === true) {
-        overlayMenuActive.value = true
-      }
-
-      overlayMenuActive.value = !overlayMenuActive.value
-      mobileMenuActive.value = false
-    } else if (layoutMode.value === 'static') {
-      staticMenuInactive.value = !staticMenuInactive.value
-    }
-  } else {
-    mobileMenuActive.value = !mobileMenuActive.value
-  }
-
-  event.preventDefault()
-}
-
-function onSidebarClick() {
-  menuClick.value = true
-}
-
-function onMenuItemClick(event: any) {
-  if (event.item && !event.item.items) {
-    overlayMenuActive.value = false
-    mobileMenuActive.value = false
+function onNavigate() {
+  if (!isDesktop()) {
+    sidebarOpen.value = false
   }
 }
 
-function onLayoutChange(_layoutMode: string) {
-  layoutMode.value = _layoutMode
-}
-
-function onLayoutColorChange(_layoutColorMode: string) {
-  layoutColorMode.value = _layoutColorMode
-}
-
-function addClass(element: Element, className: string) {
-  if (element.classList)
-    element.classList.add(className)
-  else
-    element.className += ' ' + className
-}
-
-function removeClass(element: Element, className: string) {
-  if (element.classList)
-    element.classList.remove(className)
-  else
-    element.className = element.className.replace(new RegExp('(^|\\b)' + className.split(' ').join('|') + '(\\b|$)', 'gi'), ' ')
-}
-
-function isDesktop() {
-  return window.innerWidth > 1024
-}
-
-function isSidebarVisible() {
-  if (isDesktop()) {
-    if (layoutMode.value === 'static')
-      return !staticMenuInactive.value
-    else if (layoutMode.value === 'overlay')
-      return overlayMenuActive.value
-    else
-      return true
-  } else {
-    return true
-  }
-}
-
-const containerClass = computed(() => {
-  return ['layout-wrapper', {
-    'layout-overlay': layoutMode.value === 'overlay',
-    'layout-static': layoutMode.value === 'static',
-    'layout-static-sidebar-inactive': staticMenuInactive.value && layoutMode.value === 'static',
-    'layout-overlay-sidebar-active': overlayMenuActive.value && layoutMode.value === 'overlay',
-    'layout-mobile-sidebar-active': mobileMenuActive.value
-  }]
-})
-const sidebarClass = computed(() => {
-  return ['layout-sidebar', {
-    'layout-sidebar-dark': layoutColorMode.value === 'dark',
-    'layout-sidebar-light': layoutColorMode.value === 'light'
-  }]
+// An open overlay sidebar on a phone must not scroll the page behind it. This
+// replaces the old layoutMode/mobileMenuActive-driven onBeforeUpdate hook:
+// there is now a single sidebarOpen boolean instead of separate static/overlay
+// states, so there is one place to decide whether the sidebar is acting as a
+// phone-width overlay.
+watch(sidebarOpen, open => {
+  document.body.classList.toggle('overflow-hidden', open && !isDesktop())
 })
 
+const appStore = useAppStore()
 const instanceStore = useInstanceStore()
 
 onMounted(async () => {
   await instanceStore.checkInstanceState()
-  const appStore = useAppStore()
   // `maximizeWindow` is gone: sizing the OS window is not something a page in
   // a browser tab can do, and there is no HTTP route that could stand in.
   const settings = await appStore.loadSettings()
@@ -215,12 +104,40 @@ onUnmounted(() => {
   // The poll's timer is not owned by this component's reactive scope and would
   // otherwise outlive it, holding the store and one request every two seconds.
   instanceStore.stopPolling()
+  document.body.classList.remove('overflow-hidden')
 })
 
-onBeforeUpdate(() => {
-  if (mobileMenuActive.value)
-    addClass(document.body, 'body-overflow-hidden')
-  else
-    removeClass(document.body, 'body-overflow-hidden')
-});
+const sidebarClasses = computed(() => sidebarOpen.value ? 'translate-x-0' : '-translate-x-full')
+const shiftedClasses = computed(() => sidebarOpen.value ? 'lg:ml-sidebar' : '')
 </script>
+
+<template>
+  <div class="flex min-h-screen flex-col bg-surface text-ink">
+    <AppTopbar :sidebar-open="sidebarOpen" @menu-toggle="toggleSidebar"/>
+
+    <aside
+      class="fixed inset-y-0 left-0 z-40 w-sidebar overflow-y-auto bg-sidebar shadow-[0_0_6px_0_rgba(0,0,0,0.16)] transition-transform duration-200"
+      :class="sidebarClasses"
+      data-testid="sidebar">
+      <div class="mt-6 text-center">
+        <router-link to="/">
+          <img alt="Logo" src="./assets/logo.png" width="250"/>
+        </router-link>
+      </div>
+      <AppMenu :items="menu" @navigate="onNavigate"/>
+    </aside>
+
+    <div
+      v-if="sidebarOpen"
+      class="fixed inset-0 top-topbar z-30 bg-black/70 lg:hidden"
+      data-testid="sidebar-mask"
+      @click="sidebarOpen = false"></div>
+
+    <main class="flex-1 px-8 pb-8 pt-[70px] transition-[margin] duration-200" :class="shiftedClasses">
+      <router-view/>
+    </main>
+
+    <AppFooter :class="shiftedClasses"/>
+    <Toaster/>
+  </div>
+</template>

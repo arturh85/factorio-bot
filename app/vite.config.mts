@@ -19,9 +19,18 @@ export default defineConfig({
     plugins: [
         vue(),
         tailwindcss(),
+        // Written OUTSIDE `dist/`. `just serve` points `--web-root` at that
+        // directory, so anything in it is served -- and this file was 1.5 MB
+        // of the 4.7 MB build, publicly fetchable at /stats.html, listing
+        // every source file and all 1784 dependency paths. With `--bind
+        // 0.0.0.0` for LAN testing and no authentication on the API, that is a
+        // free inventory of the codebase for anyone on the network.
+        //
+        // It is a developer tool, not a deliverable. `publish.yml` picks it up
+        // from this path for the docs site.
         visualizer({
             title: 'Bundle Size Visualizer',
-            filename: 'dist/stats.html',
+            filename: 'bundle-stats.html',
             template: 'treemap',
             brotliSize: true
         })

@@ -147,7 +147,7 @@ jobs:
       - name: 🚚 Move generated docs and stats to public/ folder
         if: matrix.platform == 'ubuntu-latest'
         run: |
-          mv app/dist/stats.html public/stats.html
+          mv app/bundle-stats.html public/stats.html
           mv target/cargo-timings/ public/cargo-timings/
 
       # Publish gh-pages

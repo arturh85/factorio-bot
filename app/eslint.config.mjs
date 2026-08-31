@@ -11,7 +11,7 @@ import pluginVue from 'eslint-plugin-vue';
 export default defineConfig([
     // was .eslintignore; patterns resolve relative to this file's directory,
     // which is the same anchoring .eslintignore had
-    globalIgnores(['**/*.d.ts', 'src/models/types.ts']),
+    globalIgnores(['**/*.d.ts']),
 
     // Order matters: typescript-eslint's base config carries no `files` key, so
     // it sets the parser for every file including .vue. The vue configs must

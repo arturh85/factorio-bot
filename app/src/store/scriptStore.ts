@@ -8,11 +8,11 @@ import {ExecuteRequest, JobStatus, OutputStream} from '@/api/types';
 /**
  * One node of the scripts tree, as `GET /api/v1/scripts` returns it.
  *
- * Taken from the client's own return type rather than imported by name: the
- * nominal `ScriptTreeNode` currently lives in the *generated*
- * `@/models/types`, which is deleted when the TypeScript emitter goes, and
- * `@/api/types` does not carry it. Deriving it here keeps this store out of
- * that move entirely -- it follows whatever the client says the route returns.
+ * `@/api/types` does now export a nominal `ScriptTreeNode`, so this could be a
+ * plain import. It stays derived from the client's return type on purpose:
+ * that way the store follows whatever the route actually returns, and a change
+ * to `listScripts`'s signature is a type error here rather than a silent
+ * disagreement between two names that happen to match today.
  */
 type ScriptTreeNode = Awaited<ReturnType<typeof listScripts>>[number];
 

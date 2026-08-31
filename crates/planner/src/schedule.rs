@@ -468,9 +468,9 @@ mod tests {
     }
 
     /// An action needing nothing, at the origin, taking `duration` ticks.
-    fn free(gen: &mut ActionIdGen, label: &str, duration: Ticks) -> Action {
+    fn free(id_gen: &mut ActionIdGen, label: &str, duration: Ticks) -> Action {
         Action {
-            id: gen.next(),
+            id: id_gen.next(),
             kind: ActionKind::Craft {
                 item: "iron-gear-wheel".into(),
                 count: 1,
@@ -484,9 +484,9 @@ mod tests {
     }
 
     /// An action requiring the bot to stand within `radius` of `pos`.
-    fn at(gen: &mut ActionIdGen, label: &str, pos: Position, radius: f64) -> Action {
+    fn at(id_gen: &mut ActionIdGen, label: &str, pos: Position, radius: f64) -> Action {
         Action {
-            id: gen.next(),
+            id: id_gen.next(),
             kind: ActionKind::Craft {
                 item: "iron-gear-wheel".into(),
                 count: 1,
@@ -505,14 +505,14 @@ mod tests {
 
     /// Like `at`, but with a caller-chosen duration.
     fn at_for(
-        gen: &mut ActionIdGen,
+        id_gen: &mut ActionIdGen,
         label: &str,
         pos: Position,
         radius: f64,
         duration: Ticks,
     ) -> Action {
         Action {
-            id: gen.next(),
+            id: id_gen.next(),
             kind: ActionKind::Craft {
                 item: "iron-gear-wheel".into(),
                 count: 1,
@@ -579,10 +579,10 @@ mod tests {
 
     #[test]
     fn independent_actions_run_in_parallel_on_two_bots() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        net.add(free(&mut gen, "a", 100));
-        net.add(free(&mut gen, "b", 100));
+        net.add(free(&mut id_gen, "a", 100));
+        net.add(free(&mut id_gen, "b", 100));
         let bots = [BotId(1), BotId(2)];
         let result = schedule(&net, &state(&bots), &bots).unwrap();
         assert_eq!(result.makespan, 100, "two bots should overlap the work");
@@ -590,10 +590,10 @@ mod tests {
 
     #[test]
     fn one_bot_serialises_the_same_actions() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        net.add(free(&mut gen, "a", 100));
-        net.add(free(&mut gen, "b", 100));
+        net.add(free(&mut id_gen, "a", 100));
+        net.add(free(&mut id_gen, "b", 100));
         let bots = [BotId(1)];
         let result = schedule(&net, &state(&bots), &bots).unwrap();
         assert_eq!(result.makespan, 200);
@@ -601,10 +601,10 @@ mod tests {
 
     #[test]
     fn a_dependency_lag_delays_the_successor() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let a = net.add(free(&mut gen, "insert", 10));
-        let b = net.add(free(&mut gen, "remove", 10));
+        let a = net.add(free(&mut id_gen, "insert", 10));
+        let b = net.add(free(&mut id_gen, "remove", 10));
         net.link(a, b, 200);
         let bots = [BotId(1), BotId(2)];
         let result = schedule(&net, &state(&bots), &bots).unwrap();
@@ -614,9 +614,9 @@ mod tests {
 
     #[test]
     fn a_walk_is_emitted_when_the_bot_is_out_of_range() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        net.add(at(&mut gen, "far", Position::new(30., 0.), 3.0));
+        net.add(at(&mut id_gen, "far", Position::new(30., 0.), 3.0));
         let bots = [BotId(1)];
         let result = schedule(&net, &state(&bots), &bots).unwrap();
         assert!(
@@ -641,10 +641,10 @@ mod tests {
     /// happens to match.
     #[test]
     fn a_walk_carries_the_radius_of_the_condition_it_satisfies() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        net.add(at(&mut gen, "wide", Position::new(30., 0.), 9.5));
-        net.add(at(&mut gen, "tight", Position::new(-30., 0.), 2.25));
+        net.add(at(&mut id_gen, "wide", Position::new(30., 0.), 9.5));
+        net.add(at(&mut id_gen, "tight", Position::new(-30., 0.), 2.25));
         let bots = [BotId(1)];
         let result = schedule(&net, &state(&bots), &bots).unwrap();
 
@@ -668,9 +668,9 @@ mod tests {
 
     #[test]
     fn no_walk_is_emitted_when_already_in_range() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        net.add(at(&mut gen, "near", Position::new(1., 1.), 5.0));
+        net.add(at(&mut id_gen, "near", Position::new(1., 1.), 5.0));
         let bots = [BotId(1)];
         let result = schedule(&net, &state(&bots), &bots).unwrap();
         assert_eq!(result.steps.len(), 1);
@@ -679,9 +679,9 @@ mod tests {
 
     #[test]
     fn a_pinned_action_goes_to_its_bot() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let mut action = free(&mut gen, "pinned", 60);
+        let mut action = free(&mut id_gen, "pinned", 60);
         action.pinned = Some(BotId(2));
         let id = net.add(action);
         let bots = [BotId(1), BotId(2)];
@@ -691,9 +691,9 @@ mod tests {
 
     #[test]
     fn an_unsatisfiable_precondition_is_an_error() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let mut action = free(&mut gen, "needs plates", 60);
+        let mut action = free(&mut id_gen, "needs plates", 60);
         action.pre = vec![Condition::HasItem {
             who: Actor::Role,
             item: "iron-plate".into(),
@@ -706,15 +706,15 @@ mod tests {
 
     #[test]
     fn effects_accumulate_so_a_later_action_sees_them() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let mut producer = free(&mut gen, "produce", 10);
+        let mut producer = free(&mut id_gen, "produce", 10);
         producer.eff = vec![Effect::GainItem {
             who: Actor::Role,
             item: "iron-plate".into(),
             count: 5,
         }];
-        let mut consumer = free(&mut gen, "consume", 10);
+        let mut consumer = free(&mut id_gen, "consume", 10);
         consumer.pre = vec![Condition::HasItem {
             who: Actor::Role,
             item: "iron-plate".into(),
@@ -731,11 +731,11 @@ mod tests {
 
     #[test]
     fn a_bot_walks_across_a_dependency_lag() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
         // Insert the ore, then remove the plate 200 ticks later, 30 tiles away.
-        let insert = net.add(free(&mut gen, "insert", 10));
-        let remove = net.add(at_for(&mut gen, "remove", Position::new(30., 0.), 3.0, 60));
+        let insert = net.add(free(&mut id_gen, "insert", 10));
+        let remove = net.add(at_for(&mut id_gen, "remove", Position::new(30., 0.), 3.0, 60));
         net.link(insert, remove, 200);
 
         let bots = [BotId(1)];
@@ -767,18 +767,18 @@ mod tests {
         s.set_position(BotId(1), Position::new(0., 0.));
         s.set_position(BotId(2), Position::new(100., 0.));
 
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
 
         // Producing happens at the origin, where only bot 1 stands.
-        let mut producer = at_for(&mut gen, "produce", Position::new(0., 0.), 3.0, 10);
+        let mut producer = at_for(&mut id_gen, "produce", Position::new(0., 0.), 3.0, 10);
         producer.eff = vec![Effect::GainItem {
             who: Actor::Role,
             item: "iron-ore".into(),
             count: 5,
         }];
         // Consuming happens where only bot 2 stands, but needs the producer's ore.
-        let mut consumer = at_for(&mut gen, "consume", Position::new(100., 0.), 3.0, 10);
+        let mut consumer = at_for(&mut id_gen, "consume", Position::new(100., 0.), 3.0, 10);
         consumer.pre.push(Condition::HasItem {
             who: Actor::Role,
             item: "iron-ore".into(),
@@ -803,7 +803,7 @@ mod tests {
     #[test]
     fn a_branching_chain_lands_wholly_on_one_bot() {
         use crate::ids::ChainIdGen;
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
 
         // Two independent producers of *different* items — a branching chain
@@ -811,19 +811,19 @@ mod tests {
         // could keep it near the other. The consumer needs both, from one
         // inventory, because `Actor::Role` binds to the single bot that runs
         // it.
-        let mut iron = free(&mut gen, "make iron", 10);
+        let mut iron = free(&mut id_gen, "make iron", 10);
         iron.eff = vec![Effect::GainItem {
             who: Actor::Role,
             item: "iron-plate".into(),
             count: 1,
         }];
-        let mut copper = free(&mut gen, "make copper", 10);
+        let mut copper = free(&mut id_gen, "make copper", 10);
         copper.eff = vec![Effect::GainItem {
             who: Actor::Role,
             item: "copper-plate".into(),
             count: 1,
         }];
-        let mut consumer = free(&mut gen, "craft the pack", 10);
+        let mut consumer = free(&mut id_gen, "craft the pack", 10);
         consumer.pre = vec![
             Condition::HasItem {
                 who: Actor::Role,
@@ -878,10 +878,10 @@ mod tests {
         s.set_position(BotId(1), Position::new(0., 0.));
         s.set_position(BotId(2), Position::new(200., 0.));
 
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let first = net.add(at_for(&mut gen, "first", Position::new(0., 0.), 3.0, 600));
-        let second = net.add(at_for(&mut gen, "second", Position::new(0., 0.), 3.0, 600));
+        let first = net.add(at_for(&mut id_gen, "first", Position::new(0., 0.), 3.0, 600));
+        let second = net.add(at_for(&mut id_gen, "second", Position::new(0., 0.), 3.0, 600));
 
         let mut chains = ChainIdGen::new();
         net.set_chain(first, chains.next());
@@ -914,10 +914,10 @@ mod tests {
         let mut s = state(&bots);
         s.gain(BotId(1), "stone-furnace", 1);
 
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let first = net.add(free(&mut gen, "opens chain A", 10));
-        let mut needs_furnace = free(&mut gen, "opens chain B", 10);
+        let first = net.add(free(&mut id_gen, "opens chain A", 10));
+        let mut needs_furnace = free(&mut id_gen, "opens chain B", 10);
         needs_furnace.pre = vec![Condition::HasItem {
             who: Actor::Role,
             item: "stone-furnace".into(),
@@ -948,10 +948,10 @@ mod tests {
     #[test]
     fn a_chain_bound_elsewhere_refuses_a_contradicting_pin() {
         use crate::ids::ChainIdGen;
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let first = net.add(free(&mut gen, "opens the chain", 10));
-        let mut pinned = free(&mut gen, "pinned elsewhere", 10);
+        let first = net.add(free(&mut id_gen, "opens the chain", 10));
+        let mut pinned = free(&mut id_gen, "pinned elsewhere", 10);
         pinned.pinned = Some(BotId(2));
         let second = net.add(pinned);
         net.link(first, second, 0);
@@ -993,9 +993,9 @@ mod tests {
         // Before the owner was compared here the pin simply won: the action
         // ran on bot 1 while its chain belonged to bot 2, silently, with no
         // error anywhere.
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let mut pinned = free(&mut gen, "pinned away from its owner", 10);
+        let mut pinned = free(&mut id_gen, "pinned away from its owner", 10);
         pinned.pinned = Some(BotId(1));
         let action = net.add(pinned);
         let chain = ChainId(0);
@@ -1030,9 +1030,9 @@ mod tests {
     fn a_pin_that_agrees_with_the_chain_owner_is_allowed() {
         // The companion to the test above: the check rejects contradiction,
         // not the presence of a pin on an owned chain.
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let mut pinned = free(&mut gen, "pinned to its own owner", 10);
+        let mut pinned = free(&mut id_gen, "pinned to its own owner", 10);
         pinned.pinned = Some(BotId(2));
         let action = net.add(pinned);
         let chain = ChainId(0);
@@ -1050,9 +1050,9 @@ mod tests {
         // the spec answers by re-planning from observed state. A caller naming
         // a bot that cannot meet the chain's own precondition is not that: the
         // instruction itself is unsatisfiable, and re-planning meets it again.
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let mut needs_ore = free(&mut gen, "the chain the caller asked for", 10);
+        let mut needs_ore = free(&mut id_gen, "the chain the caller asked for", 10);
         needs_ore.pre = vec![Condition::HasItem {
             who: Actor::Role,
             item: "uranium-ore".into(),
@@ -1093,10 +1093,10 @@ mod tests {
 
     #[test]
     fn scheduling_is_deterministic() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
         for i in 0..6 {
-            net.add(free(&mut gen, &format!("a{}", i), 40));
+            net.add(free(&mut id_gen, &format!("a{}", i), 40));
         }
         let bots = [BotId(1), BotId(2), BotId(3)];
         let first = schedule(&net, &state(&bots), &bots).unwrap();
@@ -1111,10 +1111,10 @@ mod tests {
         s.set_position(BotId(1), Position::new(0., 0.));
         s.set_position(BotId(2), Position::new(200., 0.));
 
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let first = net.add(at_for(&mut gen, "first", Position::new(0., 0.), 3.0, 600));
-        let second = net.add(at_for(&mut gen, "second", Position::new(0., 0.), 3.0, 600));
+        let first = net.add(at_for(&mut id_gen, "first", Position::new(0., 0.), 3.0, 600));
+        let second = net.add(at_for(&mut id_gen, "second", Position::new(0., 0.), 3.0, 600));
 
         let result = schedule(&net, &s, &bots).unwrap();
 
@@ -1134,10 +1134,10 @@ mod tests {
         s.set_position(BotId(1), Position::new(0., 0.));
         s.set_position(BotId(2), Position::new(30., 0.));
 
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let first = net.add(at_for(&mut gen, "first", Position::new(0., 0.), 3.0, 600));
-        let second = net.add(at_for(&mut gen, "second", Position::new(0., 0.), 3.0, 600));
+        let first = net.add(at_for(&mut id_gen, "first", Position::new(0., 0.), 3.0, 600));
+        let second = net.add(at_for(&mut id_gen, "second", Position::new(0., 0.), 3.0, 600));
 
         let result = schedule(&net, &s, &bots).unwrap();
 
@@ -1150,11 +1150,11 @@ mod tests {
 
     #[test]
     fn ties_break_on_end_time_before_action_id() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
         // Lower id, longer duration. Higher id, shorter duration. One bot.
-        let long = net.add(free(&mut gen, "long", 100));
-        let short = net.add(free(&mut gen, "short", 10));
+        let long = net.add(free(&mut id_gen, "long", 100));
+        let short = net.add(free(&mut id_gen, "short", 10));
         let bots = [BotId(1)];
 
         let result = schedule(&net, &state(&bots), &bots).unwrap();

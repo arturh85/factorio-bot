@@ -260,10 +260,10 @@ mod tests {
         use crate::ids::{ActionIdGen, ChainIdGen};
         use crate::network::ActionNetwork;
 
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let node = |gen: &mut ActionIdGen| Action {
-            id: gen.next(),
+        let node = |id_gen: &mut ActionIdGen| Action {
+            id: id_gen.next(),
             kind: ActionKind::Craft {
                 item: "iron-gear-wheel".into(),
                 count: 1,
@@ -274,9 +274,9 @@ mod tests {
             pinned: None,
             label: "craft".into(),
         };
-        let first = net.add(node(&mut gen));
-        let second = net.add(node(&mut gen));
-        let loose = net.add(node(&mut gen));
+        let first = net.add(node(&mut id_gen));
+        let second = net.add(node(&mut id_gen));
+        let loose = net.add(node(&mut id_gen));
 
         let mut chains = ChainIdGen::new();
         net.set_chain(first, chains.next());
@@ -308,9 +308,9 @@ mod tests {
         use crate::ids::ActionIdGen;
         use crate::network::ActionNetwork;
 
-        fn node(gen: &mut ActionIdGen, label: &str) -> Action {
+        fn node(id_gen: &mut ActionIdGen, label: &str) -> Action {
             Action {
-                id: gen.next(),
+                id: id_gen.next(),
                 kind: ActionKind::Craft {
                     item: "iron-gear-wheel".into(),
                     count: 1,
@@ -323,10 +323,10 @@ mod tests {
             }
         }
 
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let a = net.add(node(&mut gen, "insert ore"));
-        let b = net.add(node(&mut gen, "remove \"plate\""));
+        let a = net.add(node(&mut id_gen, "insert ore"));
+        let b = net.add(node(&mut id_gen, "remove \"plate\""));
         net.link(a, b, 192);
 
         let out = graphviz(&net);

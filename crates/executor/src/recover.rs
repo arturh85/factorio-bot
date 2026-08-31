@@ -364,9 +364,9 @@ mod tests {
         Position::new(500., 500.)
     }
 
-    fn mine_at(gen: &mut ActionIdGen, pos: &Position, count: u32) -> Action {
+    fn mine_at(id_gen: &mut ActionIdGen, pos: &Position, count: u32) -> Action {
         Action {
-            id: gen.next(),
+            id: id_gen.next(),
             kind: ActionKind::Mine {
                 pos: pos.clone(),
                 item: "iron-ore".into(),
@@ -417,10 +417,10 @@ mod tests {
     ) -> (Goal, ActionNetwork, PlanState, Vec<BotId>, ExecutionLog) {
         let s = state();
         let tile = ore_tile(&s);
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let done = net.add(mine_at(&mut gen, &tile, 2));
-        let failed = net.add(mine_at(&mut gen, &tile, 2));
+        let done = net.add(mine_at(&mut id_gen, &tile, 2));
+        let failed = net.add(mine_at(&mut id_gen, &tile, 2));
 
         let mut log = ExecutionLog::default();
         log.start(done, 0);
@@ -438,10 +438,10 @@ mod tests {
     fn ore_patch_exhausted() -> (Goal, ActionNetwork, PlanState, Vec<BotId>, ExecutionLog) {
         let s = state();
         let gone = barren_tile();
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let done = net.add(mine_at(&mut gen, &gone, 2));
-        let failed = net.add(mine_at(&mut gen, &gone, 2));
+        let done = net.add(mine_at(&mut id_gen, &gone, 2));
+        let failed = net.add(mine_at(&mut id_gen, &gone, 2));
 
         let mut log = ExecutionLog::default();
         log.start(done, 0);
@@ -469,10 +469,10 @@ mod tests {
     fn everything_succeeded() -> (Goal, ActionNetwork, PlanState, Vec<BotId>, ExecutionLog) {
         let s = state();
         let tile = ore_tile(&s);
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let first = net.add(mine_at(&mut gen, &tile, 2));
-        let second = net.add(mine_at(&mut gen, &tile, 2));
+        let first = net.add(mine_at(&mut id_gen, &tile, 2));
+        let second = net.add(mine_at(&mut id_gen, &tile, 2));
 
         let mut log = ExecutionLog::default();
         for (id, start) in [(first, 0), (second, 60)] {
@@ -603,10 +603,10 @@ mod tests {
     async fn a_tier_one_proposal_run_as_documented_actually_reaches_the_game() {
         let s = state();
         let tile = ore_tile(&s);
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let done = net.add(mine_at(&mut gen, &tile, 2));
-        let stuck = net.add(mine_at(&mut gen, &tile, 2));
+        let done = net.add(mine_at(&mut id_gen, &tile, 2));
+        let stuck = net.add(mine_at(&mut id_gen, &tile, 2));
         // The edge is the trigger: without it nothing waits on the succeeded
         // action and the abandonment has nobody to strand.
         net.link(done, stuck, 0);
@@ -670,10 +670,10 @@ mod tests {
 
         let s = state();
         let tile = ore_tile(&s);
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let smelt = net.add(mine_at(&mut gen, &tile, 2));
-        let collect = net.add(mine_at(&mut gen, &tile, 2));
+        let smelt = net.add(mine_at(&mut id_gen, &tile, 2));
+        let collect = net.add(mine_at(&mut id_gen, &tile, 2));
         net.link(smelt, collect, LAG);
 
         let mut log = ExecutionLog::default();
@@ -745,10 +745,10 @@ mod tests {
         let fixture = |attempts: u32| {
             let s = state();
             let tile = ore_tile(&s);
-            let mut gen = ActionIdGen::new();
+            let mut id_gen = ActionIdGen::new();
             let mut net = ActionNetwork::new();
-            let done = net.add(mine_at(&mut gen, &tile, 2));
-            let doomed = net.add(mine_at(&mut gen, &tile, 2));
+            let done = net.add(mine_at(&mut id_gen, &tile, 2));
+            let doomed = net.add(mine_at(&mut id_gen, &tile, 2));
             net.link(done, doomed, 0);
 
             let mut log = ExecutionLog::default();

@@ -341,8 +341,8 @@ mod tests {
         );
     }
 
-    fn mine(gen: &mut ActionIdGen, item: &str, count: u32) -> Action {
-        let id = gen.next();
+    fn mine(id_gen: &mut ActionIdGen, item: &str, count: u32) -> Action {
+        let id = id_gen.next();
         Action {
             id,
             kind: ActionKind::Mine {
@@ -366,8 +366,8 @@ mod tests {
         }
     }
 
-    fn craft(gen: &mut ActionIdGen, from: &str, need: u32, to: &str) -> Action {
-        let id = gen.next();
+    fn craft(id_gen: &mut ActionIdGen, from: &str, need: u32, to: &str) -> Action {
+        let id = id_gen.next();
         Action {
             id,
             kind: ActionKind::Craft {
@@ -399,10 +399,10 @@ mod tests {
 
     #[test]
     fn inference_links_a_producer_to_its_consumer() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let m = net.add(mine(&mut gen, "iron-plate", 2));
-        let c = net.add(craft(&mut gen, "iron-plate", 2, "iron-gear-wheel"));
+        let m = net.add(mine(&mut id_gen, "iron-plate", 2));
+        let c = net.add(craft(&mut id_gen, "iron-plate", 2, "iron-gear-wheel"));
         net.infer_edges();
         assert_eq!(net.preds(c), vec![(m, 0)]);
         assert!(net.preds(m).is_empty());
@@ -410,21 +410,21 @@ mod tests {
 
     #[test]
     fn inference_does_not_link_unrelated_items() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        net.add(mine(&mut gen, "copper-ore", 2));
-        let c = net.add(craft(&mut gen, "iron-plate", 2, "iron-gear-wheel"));
+        net.add(mine(&mut id_gen, "copper-ore", 2));
+        let c = net.add(craft(&mut id_gen, "iron-plate", 2, "iron-gear-wheel"));
         net.infer_edges();
         assert!(net.preds(c).is_empty());
     }
 
     #[test]
     fn inference_never_creates_a_cycle() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
         // Two actions that each produce what the other consumes.
-        let a = net.add(craft(&mut gen, "iron-plate", 1, "iron-gear-wheel"));
-        let b = net.add(craft(&mut gen, "iron-gear-wheel", 1, "iron-plate"));
+        let a = net.add(craft(&mut id_gen, "iron-plate", 1, "iron-gear-wheel"));
+        let b = net.add(craft(&mut id_gen, "iron-gear-wheel", 1, "iron-plate"));
         net.infer_edges();
         net.validate()
             .expect("inference must not introduce a cycle");
@@ -438,20 +438,20 @@ mod tests {
 
     #[test]
     fn explicit_links_carry_lag() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let insert = net.add(mine(&mut gen, "iron-ore", 1));
-        let remove = net.add(mine(&mut gen, "iron-plate", 1));
+        let insert = net.add(mine(&mut id_gen, "iron-ore", 1));
+        let remove = net.add(mine(&mut id_gen, "iron-plate", 1));
         net.link(insert, remove, 192);
         assert_eq!(net.preds(remove), vec![(insert, 192)]);
     }
 
     #[test]
     fn an_explicit_cycle_fails_validation() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let a = net.add(mine(&mut gen, "iron-ore", 1));
-        let b = net.add(mine(&mut gen, "coal", 1));
+        let a = net.add(mine(&mut id_gen, "iron-ore", 1));
+        let b = net.add(mine(&mut id_gen, "coal", 1));
         net.link(a, b, 0);
         net.link(b, a, 0);
         assert!(net.validate().is_err());
@@ -459,19 +459,19 @@ mod tests {
 
     #[test]
     fn topo_order_respects_edges() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let m = net.add(mine(&mut gen, "iron-plate", 2));
-        let c = net.add(craft(&mut gen, "iron-plate", 2, "iron-gear-wheel"));
+        let m = net.add(mine(&mut id_gen, "iron-plate", 2));
+        let c = net.add(craft(&mut id_gen, "iron-plate", 2, "iron-gear-wheel"));
         net.infer_edges();
         assert_eq!(net.topo_order().unwrap(), vec![m, c]);
     }
 
     #[test]
     fn pinned_actions_survive_the_round_trip() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let mut action = mine(&mut gen, "coal", 1);
+        let mut action = mine(&mut id_gen, "coal", 1);
         action.pinned = Some(BotId(2));
         let id = net.add(action);
         assert_eq!(net.action(id).unwrap().pinned, Some(BotId(2)));
@@ -480,11 +480,11 @@ mod tests {
     #[test]
     fn a_chain_stamp_survives_the_round_trip() {
         use crate::ids::ChainIdGen;
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut chains = ChainIdGen::new();
         let mut net = ActionNetwork::new();
-        let a = net.add(mine(&mut gen, "coal", 1));
-        let b = net.add(mine(&mut gen, "stone", 1));
+        let a = net.add(mine(&mut id_gen, "coal", 1));
+        let b = net.add(mine(&mut id_gen, "stone", 1));
         let first = chains.next();
         let second = chains.next();
         net.set_chain(a, first);
@@ -496,9 +496,9 @@ mod tests {
 
     #[test]
     fn an_unstamped_action_belongs_to_no_chain() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let a = net.add(mine(&mut gen, "coal", 1));
+        let a = net.add(mine(&mut id_gen, "coal", 1));
         assert_eq!(
             net.chain_of(a),
             None,
@@ -508,10 +508,10 @@ mod tests {
 
     #[test]
     fn relinking_the_same_pair_keeps_the_larger_lag() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let a = net.add(mine(&mut gen, "iron-ore", 1));
-        let b = net.add(mine(&mut gen, "iron-plate", 1));
+        let a = net.add(mine(&mut id_gen, "iron-ore", 1));
+        let b = net.add(mine(&mut id_gen, "iron-plate", 1));
         net.link(a, b, 5);
         net.link(a, b, 200);
         assert_eq!(net.preds(b), vec![(a, 200)], "the larger lag must win");
@@ -525,12 +525,12 @@ mod tests {
 
     #[test]
     fn preds_are_sorted_by_predecessor_id() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let a = net.add(mine(&mut gen, "iron-ore", 1));
-        let b = net.add(mine(&mut gen, "coal", 1));
-        let c = net.add(mine(&mut gen, "stone", 1));
-        let sink = net.add(craft(&mut gen, "iron-ore", 1, "iron-gear-wheel"));
+        let a = net.add(mine(&mut id_gen, "iron-ore", 1));
+        let b = net.add(mine(&mut id_gen, "coal", 1));
+        let c = net.add(mine(&mut id_gen, "stone", 1));
+        let sink = net.add(craft(&mut id_gen, "iron-ore", 1, "iron-gear-wheel"));
         // Linked in descending order; preds must still come back ascending.
         net.link(c, sink, 0);
         net.link(b, sink, 0);
@@ -539,7 +539,7 @@ mod tests {
     }
 
     /// Place a furnace at `pos`, requiring the tile to be free first.
-    fn place(gen: &mut ActionIdGen, pos: Position) -> Action {
+    fn place(id_gen: &mut ActionIdGen, pos: Position) -> Action {
         let furnace = FactorioEntity {
             name: "stone-furnace".into(),
             entity_type: "furnace".into(),
@@ -547,7 +547,7 @@ mod tests {
             ..Default::default()
         };
         Action {
-            id: gen.next(),
+            id: id_gen.next(),
             kind: ActionKind::Place {
                 entity: Box::new(furnace.clone()),
             },
@@ -560,9 +560,9 @@ mod tests {
     }
 
     /// Insert ore into the furnace standing at `pos`.
-    fn insert(gen: &mut ActionIdGen, pos: Position) -> Action {
+    fn insert(id_gen: &mut ActionIdGen, pos: Position) -> Action {
         Action {
-            id: gen.next(),
+            id: id_gen.next(),
             kind: ActionKind::Insert {
                 pos: pos.clone(),
                 entity: "stone-furnace".into(),
@@ -581,9 +581,9 @@ mod tests {
         }
     }
 
-    fn research(gen: &mut ActionIdGen, tech: &str) -> Action {
+    fn research(id_gen: &mut ActionIdGen, tech: &str) -> Action {
         Action {
-            id: gen.next(),
+            id: id_gen.next(),
             kind: ActionKind::Research { tech: tech.into() },
             pre: vec![],
             eff: vec![Effect::Researched(tech.into())],
@@ -594,9 +594,9 @@ mod tests {
     }
 
     /// An action gated on `tech` having been researched.
-    fn needs_research(gen: &mut ActionIdGen, tech: &str) -> Action {
+    fn needs_research(id_gen: &mut ActionIdGen, tech: &str) -> Action {
         Action {
-            id: gen.next(),
+            id: id_gen.next(),
             kind: ActionKind::Craft {
                 item: "transport-belt".into(),
                 count: 1,
@@ -611,11 +611,11 @@ mod tests {
 
     #[test]
     fn inference_links_a_placement_to_what_needs_the_entity() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
         let pos = Position::new(5., 5.);
-        let p = net.add(place(&mut gen, pos.clone()));
-        let i = net.add(insert(&mut gen, pos));
+        let p = net.add(place(&mut id_gen, pos.clone()));
+        let i = net.add(insert(&mut id_gen, pos));
         net.infer_edges();
         // The spec's Smelt method emits exactly this pair; before the general
         // matcher the insert got no edge back to the place at all.
@@ -625,74 +625,74 @@ mod tests {
 
     #[test]
     fn inference_matches_an_entity_by_tile_not_by_exact_position() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
         // The furnace sits at the tile's centre; the condition names its corner.
-        let p = net.add(place(&mut gen, Position::new(5.5, 5.5)));
-        let i = net.add(insert(&mut gen, Position::new(5., 5.)));
+        let p = net.add(place(&mut id_gen, Position::new(5.5, 5.5)));
+        let i = net.add(insert(&mut id_gen, Position::new(5., 5.)));
         net.infer_edges();
         assert_eq!(net.preds(i), vec![(p, 0)]);
     }
 
     #[test]
     fn inference_does_not_link_a_placement_of_another_entity() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let mut other = place(&mut gen, Position::new(5., 5.));
+        let mut other = place(&mut id_gen, Position::new(5., 5.));
         other.eff = vec![Effect::CreateEntity(Box::new(FactorioEntity {
             name: "wooden-chest".into(),
             position: Position::new(5., 5.),
             ..Default::default()
         }))];
         net.add(other);
-        let i = net.add(insert(&mut gen, Position::new(5., 5.)));
+        let i = net.add(insert(&mut id_gen, Position::new(5., 5.)));
         net.infer_edges();
         assert!(net.preds(i).is_empty(), "a chest is not a furnace");
     }
 
     #[test]
     fn inference_links_a_removal_to_what_needs_the_tile_free() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
         let pos = Position::new(5., 5.);
-        let mut clear = place(&mut gen, Position::new(0., 0.));
+        let mut clear = place(&mut id_gen, Position::new(0., 0.));
         clear.pre = vec![];
         clear.eff = vec![Effect::RemoveEntity { pos: pos.clone() }];
         clear.label = "mine the tree away".into();
         let r = net.add(clear);
-        let p = net.add(place(&mut gen, pos));
+        let p = net.add(place(&mut id_gen, pos));
         net.infer_edges();
         assert_eq!(net.preds(p), vec![(r, 0)]);
     }
 
     #[test]
     fn inference_links_research_to_what_it_unlocks() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let r = net.add(research(&mut gen, "logistics"));
-        let c = net.add(needs_research(&mut gen, "logistics"));
+        let r = net.add(research(&mut id_gen, "logistics"));
+        let c = net.add(needs_research(&mut id_gen, "logistics"));
         net.infer_edges();
         assert_eq!(net.preds(c), vec![(r, 0)]);
     }
 
     #[test]
     fn inference_does_not_link_an_unrelated_technology() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        net.add(research(&mut gen, "automation"));
-        let c = net.add(needs_research(&mut gen, "logistics"));
+        net.add(research(&mut id_gen, "automation"));
+        let c = net.add(needs_research(&mut id_gen, "logistics"));
         net.infer_edges();
         assert!(net.preds(c).is_empty());
     }
 
     #[test]
     fn inference_ignores_quantities_and_links_every_producer() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
         // Two producers of one plate each; a consumer that needs four.
-        let p1 = net.add(mine(&mut gen, "iron-plate", 1));
-        let p2 = net.add(mine(&mut gen, "iron-plate", 1));
-        let c = net.add(craft(&mut gen, "iron-plate", 4, "iron-gear-wheel"));
+        let p1 = net.add(mine(&mut id_gen, "iron-plate", 1));
+        let p2 = net.add(mine(&mut id_gen, "iron-plate", 1));
+        let c = net.add(craft(&mut id_gen, "iron-plate", 4, "iron-gear-wheel"));
         net.infer_edges();
         assert_eq!(net.preds(c), vec![(p1, 0), (p2, 0)]);
     }
@@ -708,12 +708,12 @@ mod tests {
 
     #[test]
     fn inference_does_not_link_across_chains() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let a_mine = net.add(mine(&mut gen, "iron-plate", 2));
-        let a_craft = net.add(craft(&mut gen, "iron-plate", 2, "iron-gear-wheel"));
-        let b_mine = net.add(mine(&mut gen, "iron-plate", 2));
-        let b_craft = net.add(craft(&mut gen, "iron-plate", 2, "iron-gear-wheel"));
+        let a_mine = net.add(mine(&mut id_gen, "iron-plate", 2));
+        let a_craft = net.add(craft(&mut id_gen, "iron-plate", 2, "iron-gear-wheel"));
+        let b_mine = net.add(mine(&mut id_gen, "iron-plate", 2));
+        let b_craft = net.add(craft(&mut id_gen, "iron-plate", 2, "iron-gear-wheel"));
         net.set_chain(a_mine, ChainId(0));
         net.set_chain(a_craft, ChainId(0));
         net.set_chain(b_mine, ChainId(1));
@@ -727,10 +727,10 @@ mod tests {
 
     #[test]
     fn inference_still_links_when_either_side_has_no_chain() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let m = net.add(mine(&mut gen, "iron-plate", 2));
-        let c = net.add(craft(&mut gen, "iron-plate", 2, "iron-gear-wheel"));
+        let m = net.add(mine(&mut id_gen, "iron-plate", 2));
+        let c = net.add(craft(&mut id_gen, "iron-plate", 2, "iron-gear-wheel"));
         net.set_chain(c, ChainId(0));
         // The producer belongs to no chain, so nothing says these are separate
         // work — the edge must stand.
@@ -758,11 +758,11 @@ mod tests {
         // task's original, too-broad exclusion would have produced (see
         // `inference_does_not_link_across_chains` for the HasItem case that
         // *should* drop).
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
         let pos = Position::new(5., 5.);
-        let p = net.add(place(&mut gen, pos.clone()));
-        let i = net.add(insert(&mut gen, pos));
+        let p = net.add(place(&mut id_gen, pos.clone()));
+        let i = net.add(insert(&mut id_gen, pos));
         net.set_chain(p, ChainId(0));
         net.set_chain(i, ChainId(1));
         net.infer_edges();
@@ -770,9 +770,9 @@ mod tests {
     }
 
     /// Produce `count` of `item` into a *named* bot's inventory.
-    fn produce_into(gen: &mut ActionIdGen, bot: BotId, item: &str, count: u32) -> Action {
+    fn produce_into(id_gen: &mut ActionIdGen, bot: BotId, item: &str, count: u32) -> Action {
         Action {
-            id: gen.next(),
+            id: id_gen.next(),
             kind: ActionKind::Mine {
                 pos: Position::new(1., 1.),
                 item: item.into(),
@@ -791,9 +791,9 @@ mod tests {
     }
 
     /// Consume out of a *named* bot's inventory, whoever runs it.
-    fn consume_from(gen: &mut ActionIdGen, bot: BotId, item: &str, count: u32) -> Action {
+    fn consume_from(id_gen: &mut ActionIdGen, bot: BotId, item: &str, count: u32) -> Action {
         Action {
-            id: gen.next(),
+            id: id_gen.next(),
             kind: ActionKind::Craft {
                 item: "iron-gear-wheel".into(),
                 count: 1,
@@ -819,10 +819,10 @@ mod tests {
         // dropping the edge left the consumer free to run 490 ticks before
         // its producer. Classifying by condition *kind* alone was the bug;
         // `who` is half the hypothesis.
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let producer = net.add(produce_into(&mut gen, BotId(1), "coal", 5));
-        let consumer = net.add(consume_from(&mut gen, BotId(1), "coal", 5));
+        let producer = net.add(produce_into(&mut id_gen, BotId(1), "coal", 5));
+        let consumer = net.add(consume_from(&mut id_gen, BotId(1), "coal", 5));
         net.set_chain(producer, ChainId(0));
         net.set_chain(consumer, ChainId(1));
         net.infer_edges();
@@ -838,10 +838,10 @@ mod tests {
     fn inference_still_drops_a_role_scoped_item_condition_across_chains() {
         // The companion to the test above: with `who: Role` on both sides the
         // skip is still correct, so the narrowing did not simply disable it.
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let producer = net.add(mine(&mut gen, "coal", 5));
-        let consumer = net.add(craft(&mut gen, "coal", 5, "iron-gear-wheel"));
+        let producer = net.add(mine(&mut id_gen, "coal", 5));
+        let consumer = net.add(craft(&mut id_gen, "coal", 5, "iron-gear-wheel"));
         net.set_chain(producer, ChainId(0));
         net.set_chain(consumer, ChainId(1));
         net.infer_edges();
@@ -850,11 +850,11 @@ mod tests {
 
     #[test]
     fn retaining_keeps_only_the_named_actions_and_the_edges_between_them() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let a = net.add(mine(&mut gen, "iron-plate", 2));
-        let b = net.add(craft(&mut gen, "iron-plate", 2, "iron-gear-wheel"));
-        let c = net.add(craft(&mut gen, "iron-gear-wheel", 1, "iron-plate"));
+        let a = net.add(mine(&mut id_gen, "iron-plate", 2));
+        let b = net.add(craft(&mut id_gen, "iron-plate", 2, "iron-gear-wheel"));
+        let c = net.add(craft(&mut id_gen, "iron-gear-wheel", 1, "iron-plate"));
         net.link(a, b, 7);
         net.link(b, c, 0);
 
@@ -883,10 +883,10 @@ mod tests {
 
     #[test]
     fn retaining_carries_chain_identity_and_chain_owners_for_what_it_keeps() {
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let kept_action = net.add(mine(&mut gen, "coal", 5));
-        let dropped_action = net.add(mine(&mut gen, "stone", 5));
+        let kept_action = net.add(mine(&mut id_gen, "coal", 5));
+        let dropped_action = net.add(mine(&mut id_gen, "stone", 5));
         net.set_chain(kept_action, ChainId(0));
         net.set_chain(dropped_action, ChainId(1));
         net.set_chain_owner(ChainId(0), BotId(3));
@@ -919,9 +919,9 @@ mod tests {
     fn retaining_ignores_ids_this_network_never_had() {
         // The caller is an executor computing "what did not finish" from a
         // log, and a log may name actions from another network entirely.
-        let mut gen = ActionIdGen::new();
+        let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let a = net.add(mine(&mut gen, "coal", 1));
+        let a = net.add(mine(&mut id_gen, "coal", 1));
         let kept = net.retaining(&BTreeSet::from([a, ActionId(9_999)]));
         assert_eq!(kept.len(), 1);
         assert!(kept.action(ActionId(9_999)).is_none());

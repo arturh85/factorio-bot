@@ -1,5 +1,6 @@
 use factorio_bot_core::factorio::ticks::ActionTicks;
-use factorio_bot_planner::{ActionId, Ticks};
+use factorio_bot_core::types::Position;
+use factorio_bot_planner::{ActionId, BotId, Ticks};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -81,6 +82,66 @@ pub struct Attempt {
     pub error: Option<String>,
 }
 
+/// One walk step, as the run observed it.
+///
+/// # Why walks are recorded at all, and why they need no `ActionId`
+///
+/// A walk is not an `Action` — the scheduler emits it as its own `StepKind`
+/// with no id — and for that reason its ticks used to be measured and thrown
+/// away: `Actuator::walk` has always returned [`ActionTicks`], and `run.rs`
+/// kept only the failure bit. The stated reason was that "the walk needs an id
+/// first". It does not. `run_bot_signalled` walks **one bot's steps in schedule
+/// order**, so the pair `(bot, step_index)` is already unique and stable for
+/// the run, and that pair is what these are keyed by.
+///
+/// Walking is most of the wall-clock in these plans, so this was the largest
+/// hole in the timeline: without it a consumer aligning frames to a plan can
+/// only render an undifferentiated "walk + wait" span, not because the split is
+/// unobservable but because the observation was being discarded.
+///
+/// # The same two kinds of tick as [`Attempt`], under the same rules
+///
+/// `planned_start_tick`/`planned_end_tick` are `ScheduledStep::start`/`end` —
+/// what the *scheduler* predicted before anything ran. Unlike [`Attempt`]'s,
+/// both are known the moment the step exists (a walk's span is fixed by the
+/// schedule, not discovered by finishing), so neither is an `Option`.
+///
+/// `dispatched_tick`/`replied_tick` are the measurement: `game.tick` as the
+/// game reported it, and they are `None` — never zero, never the planned value,
+/// never the previous step's — whenever the game did not say.
+///
+/// # An unmeasured walk and a failed walk are different facts
+///
+/// Both carry `None` ticks, and `status` is what tells them apart:
+///
+/// - **Unmeasured**: `status == Success`, `error == None`. The walk happened;
+///   the actuator had no clock, or the reply's stamp did not parse. Nothing
+///   went wrong and nothing was learned about when.
+/// - **Failed**: `status == Failed`, `error == Some(..)`. The walk did not
+///   happen, which is why there is nothing to have measured.
+/// - **Interrupted**: `status == Running`. The run died between dispatch and
+///   reply, so neither of the above is yet true.
+///
+/// Collapsing these into "no ticks" would make a bot that never moved
+/// indistinguishable from one that moved unobserved.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WalkObservation {
+    pub status: Status,
+    /// Where the schedule sent the bot. `StepKind::Walk`'s own `to`.
+    pub to: Position,
+    /// The tick the *schedule* placed this walk's start at. Not observed.
+    pub planned_start_tick: Ticks,
+    /// The tick the *schedule* placed this walk's end at. Not observed.
+    pub planned_end_tick: Ticks,
+    /// `game.tick` when the game **received** the walk command.
+    /// `None` if the game never said — see the type docs.
+    pub dispatched_tick: Option<Ticks>,
+    /// `game.tick` when the game **reported the bot had arrived**.
+    /// `None` if the game never said — see the type docs.
+    pub replied_tick: Option<Ticks>,
+    pub error: Option<String>,
+}
+
 /// Execution state, keyed by action.
 ///
 /// Deliberately separate from `Schedule`: the schedule is an immutable plan
@@ -90,9 +151,27 @@ pub struct Attempt {
 ///
 /// Only the latest attempt of each action is kept; `Attempt::number` says how
 /// many there have been. See `start` for why a count rather than a history.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Walks live in a second map because they are keyed by something else
+/// entirely: they have no `ActionId`, and `(bot, step_index)` is what
+/// identifies them (see [`WalkObservation`]). It is nested rather than keyed by
+/// a `(BotId, usize)` tuple so the whole log stays JSON-serializable — serde's
+/// JSON map keys must be scalars, and a tuple key would silently turn this
+/// derive into a runtime error for anyone who ever serialized it.
+///
+/// # Why `Eq` is derived on [`Attempt`] but not here
+///
+/// [`WalkObservation`] holds a [`Position`], whose fields are `f64`. Float
+/// equality is not an equivalence relation, so `Eq` would be a false claim.
+/// `PartialEq` — which is all any caller and every `assert_eq!` needs — is
+/// kept.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionLog {
     attempts: BTreeMap<ActionId, Attempt>,
+    /// `bot -> step_index -> observation`. Both levels are `BTreeMap` for the
+    /// same reason `attempts` is: iteration order is part of the contract, so
+    /// `walks()` yields the same sequence on any two runs of the same log.
+    walks: BTreeMap<BotId, BTreeMap<usize, WalkObservation>>,
 }
 
 impl ExecutionLog {
@@ -314,6 +393,106 @@ impl ExecutionLog {
         end.checked_sub(start)
     }
 
+    /// Records that a walk step has been dispatched.
+    ///
+    /// Takes only *plan* numbers, exactly like [`ExecutionLog::start`] — the
+    /// game ticks arrive separately through [`ExecutionLog::observe_walk`], and
+    /// keeping the two writers apart is what makes it impossible to fill a
+    /// measured field from the schedule by slipping an argument.
+    ///
+    /// Overwrites any entry already under this key, and does so deliberately.
+    /// `(bot, step_index)` identifies a walk *within one run*; a later
+    /// `run_into` against the same log (a recovery proposal, say) carries a
+    /// different schedule, in which the same index is a different walk. The
+    /// current run's dispatch is the current fact for that slot, and keeping
+    /// the superseded schedule's ticks under it would report the bot as having
+    /// walked somewhere this run never sent it.
+    pub fn start_walk(
+        &mut self,
+        bot: BotId,
+        step_index: usize,
+        to: Position,
+        planned_start: Ticks,
+        planned_end: Ticks,
+    ) {
+        self.walks.entry(bot).or_default().insert(
+            step_index,
+            WalkObservation {
+                status: Status::Running,
+                to,
+                planned_start_tick: planned_start,
+                planned_end_tick: planned_end,
+                dispatched_tick: None,
+                replied_tick: None,
+                error: None,
+            },
+        );
+    }
+
+    /// Records the game ticks observed for a walk. The counterpart of
+    /// [`ExecutionLog::observe`], and it writes nothing but the two observed
+    /// fields.
+    ///
+    /// Only a walk that was started is annotated: an observation with no
+    /// dispatch to attach to would be an observation of nothing, and inventing
+    /// an entry for it would put a walk in the log that the run never made.
+    pub fn observe_walk(&mut self, bot: BotId, step_index: usize, ticks: ActionTicks) {
+        if let Some(w) = self.walk_mut(bot, step_index) {
+            w.dispatched_tick = narrow(ticks.dispatched);
+            w.replied_tick = narrow(ticks.replied);
+        }
+    }
+
+    /// Marks a dispatched walk as arrived. Its ticks, if the game reported
+    /// any, came from [`ExecutionLog::observe_walk`]; a success with none is a
+    /// walk that happened unobserved, which is a different fact from a failure
+    /// — see [`WalkObservation`].
+    pub fn succeed_walk(&mut self, bot: BotId, step_index: usize) {
+        if let Some(w) = self.walk_mut(bot, step_index) {
+            w.status = Status::Success;
+        }
+    }
+
+    /// Marks a dispatched walk as failed, keeping the actuator's message.
+    ///
+    /// The ticks are left exactly as they are — `None` unless the game had
+    /// already stamped a dispatch. `ActuatorError` carries no tick, and the
+    /// planned span sitting in the same record is not a substitute for one.
+    pub fn fail_walk(&mut self, bot: BotId, step_index: usize, error: String) {
+        if let Some(w) = self.walk_mut(bot, step_index) {
+            w.status = Status::Failed;
+            w.error = Some(error);
+        }
+    }
+
+    fn walk_mut(&mut self, bot: BotId, step_index: usize) -> Option<&mut WalkObservation> {
+        self.walks.get_mut(&bot)?.get_mut(&step_index)
+    }
+
+    /// One walk, if this run made it.
+    pub fn walk(&self, bot: BotId, step_index: usize) -> Option<&WalkObservation> {
+        self.walks.get(&bot)?.get(&step_index)
+    }
+
+    /// Every walk, ascending by bot and then by step index.
+    ///
+    /// The order is a function of the log alone, so a consumer rendering a
+    /// timeline gets the same sequence every time.
+    pub fn walks(&self) -> impl Iterator<Item = (BotId, usize, &WalkObservation)> {
+        self.walks
+            .iter()
+            .flat_map(|(bot, steps)| steps.iter().map(move |(i, w)| (*bot, *i, w)))
+    }
+
+    /// Ticks the game actually spent on a walk, when it reported both ends.
+    ///
+    /// `None` — never zero, never the planned span — under exactly the same
+    /// conditions as [`ExecutionLog::observed_duration`].
+    pub fn observed_walk_duration(&self, bot: BotId, step_index: usize) -> Option<Ticks> {
+        let w = self.walk(bot, step_index)?;
+        w.replied_tick?.checked_sub(w.dispatched_tick?)
+    }
+
     /// Failed action ids, in ascending id order.
     pub fn failed(&self) -> Vec<ActionId> {
         self.attempts
@@ -323,8 +502,13 @@ impl ExecutionLog {
             .collect()
     }
 
+    /// Whether the log knows nothing at all.
+    ///
+    /// Walks count. A run that dispatched a walk and got no further has
+    /// observed something — where it sent the bot, and how that turned out —
+    /// and reporting that as an empty log would hide the only record of it.
     pub fn is_empty(&self) -> bool {
-        self.attempts.is_empty()
+        self.attempts.is_empty() && self.walks.is_empty()
     }
 }
 
@@ -632,5 +816,247 @@ mod tests {
         }
         assert_eq!(log.attempts(id(1)), 3);
         assert_eq!(log.status(id(1)), Status::Running);
+    }
+
+    // ------------------------------------------------------------------ walks
+
+    fn bot(n: u8) -> BotId {
+        BotId(n)
+    }
+
+    fn to() -> Position {
+        Position::new(10., 12.)
+    }
+
+    /// Dispatch a walk with a planned span deliberately far from any tick the
+    /// tests below observe, so a measured field filled in from the plan is
+    /// visible at a glance.
+    fn dispatch_walk(log: &mut ExecutionLog, b: BotId, i: usize) {
+        log.start_walk(b, i, to(), 100, 340);
+    }
+
+    #[test]
+    fn a_walk_is_recorded_under_its_bot_and_step_index_with_no_action_id() {
+        // The whole point: `(bot, step_index)` is enough. Nothing had to be
+        // invented for the walk to be identifiable.
+        let mut log = ExecutionLog::default();
+        dispatch_walk(&mut log, bot(0), 3);
+        log.observe_walk(bot(0), 3, ActionTicks::new(Some(70_000), Some(70_500)));
+        log.succeed_walk(bot(0), 3);
+
+        let w = log.walk(bot(0), 3).expect("walk");
+        assert_eq!(w.status, Status::Success);
+        assert_eq!(w.to, to());
+        assert_eq!(w.dispatched_tick, Some(70_000));
+        assert_eq!(w.replied_tick, Some(70_500));
+        assert_eq!(log.observed_walk_duration(bot(0), 3), Some(500));
+        // Nothing leaked into the neighbouring keys.
+        assert!(log.walk(bot(0), 2).is_none());
+        assert!(log.walk(bot(1), 3).is_none());
+    }
+
+    #[test]
+    fn a_walks_observed_ticks_are_never_its_planned_ones() {
+        // The measurement and the estimate live side by side and the drift
+        // between them is the signal. A test that only asserted the fields
+        // exist would pass against fields populated from the schedule.
+        let mut log = ExecutionLog::default();
+        dispatch_walk(&mut log, bot(0), 0);
+        log.observe_walk(bot(0), 0, ActionTicks::new(Some(70_000), Some(70_500)));
+        log.succeed_walk(bot(0), 0);
+
+        let w = log.walk(bot(0), 0).expect("walk");
+        assert_eq!(w.planned_start_tick, 100);
+        assert_eq!(w.planned_end_tick, 340);
+        assert_ne!(w.dispatched_tick, Some(w.planned_start_tick));
+        assert_ne!(w.replied_tick, Some(w.planned_end_tick));
+        assert_ne!(
+            log.observed_walk_duration(bot(0), 0),
+            Some(w.planned_end_tick - w.planned_start_tick),
+            "the observed span is not the planned span round-tripped"
+        );
+    }
+
+    #[test]
+    fn an_unmeasured_walk_reports_absent_ticks_not_zero_and_not_the_plan() {
+        // An actuator with no game clock. The walk happened; when is unknown.
+        let mut log = ExecutionLog::default();
+        dispatch_walk(&mut log, bot(0), 0);
+        log.observe_walk(bot(0), 0, ActionTicks::UNKNOWN);
+        log.succeed_walk(bot(0), 0);
+
+        let w = log.walk(bot(0), 0).expect("walk");
+        assert_eq!(w.dispatched_tick, None);
+        assert_eq!(w.replied_tick, None);
+        assert_ne!(w.dispatched_tick, Some(0), "absent is not tick zero");
+        assert_ne!(
+            w.dispatched_tick,
+            Some(w.planned_start_tick),
+            "absent must never fall back to the plan"
+        );
+        assert_eq!(log.observed_walk_duration(bot(0), 0), None);
+    }
+
+    #[test]
+    fn a_failed_walk_is_distinguishable_from_an_unmeasured_one() {
+        // Both carry `None` ticks, and they are different facts: one bot never
+        // moved, the other moved unobserved. `status` is what separates them,
+        // and nothing else can.
+        let mut log = ExecutionLog::default();
+
+        dispatch_walk(&mut log, bot(0), 0);
+        log.observe_walk(bot(0), 0, ActionTicks::UNKNOWN);
+        log.succeed_walk(bot(0), 0);
+
+        dispatch_walk(&mut log, bot(1), 0);
+        log.fail_walk(bot(1), 0, "path blocked".to_string());
+
+        let unmeasured = log.walk(bot(0), 0).expect("walk");
+        let failed = log.walk(bot(1), 0).expect("walk");
+
+        assert_eq!(unmeasured.dispatched_tick, failed.dispatched_tick);
+        assert_eq!(unmeasured.replied_tick, failed.replied_tick);
+        assert_ne!(
+            unmeasured.status, failed.status,
+            "the ticks cannot tell these apart, so the status must"
+        );
+        assert_eq!(unmeasured.status, Status::Success);
+        assert_eq!(unmeasured.error, None);
+        assert_eq!(failed.status, Status::Failed);
+        assert_eq!(failed.error.as_deref(), Some("path blocked"));
+    }
+
+    #[test]
+    fn a_failed_walk_does_not_borrow_the_planned_span_as_a_measurement() {
+        // The failure path has no ticks to record and must not reach for the
+        // planned ones sitting in the same record.
+        let mut log = ExecutionLog::default();
+        dispatch_walk(&mut log, bot(0), 0);
+        log.fail_walk(bot(0), 0, "path blocked".to_string());
+        let w = log.walk(bot(0), 0).expect("walk");
+        assert_eq!(w.dispatched_tick, None);
+        assert_eq!(w.replied_tick, None);
+        assert_eq!(w.planned_start_tick, 100, "the estimate is still recorded");
+    }
+
+    #[test]
+    fn an_interrupted_walk_is_neither_a_success_nor_a_failure() {
+        let mut log = ExecutionLog::default();
+        dispatch_walk(&mut log, bot(0), 0);
+        assert_eq!(log.walk(bot(0), 0).expect("walk").status, Status::Running);
+    }
+
+    #[test]
+    fn walks_iterate_ascending_by_bot_then_step_index() {
+        // Iteration order is part of the contract, exactly as it is for
+        // `failed()`: a timeline built from this must not reshuffle between
+        // runs of the same log.
+        let mut log = ExecutionLog::default();
+        for (b, i) in [(1u8, 4usize), (0, 9), (1, 0), (0, 2)] {
+            dispatch_walk(&mut log, bot(b), i);
+        }
+        let seen: Vec<(u8, usize)> = log.walks().map(|(b, i, _)| (b.0, i)).collect();
+        assert_eq!(seen, vec![(0, 2), (0, 9), (1, 0), (1, 4)]);
+    }
+
+    #[test]
+    fn observing_a_walk_that_was_never_dispatched_records_nothing() {
+        // An observation of nothing. Inventing an entry would put a walk in
+        // the log that the run never made.
+        let mut log = ExecutionLog::default();
+        log.observe_walk(bot(0), 0, ActionTicks::new(Some(1), Some(2)));
+        log.succeed_walk(bot(0), 0);
+        log.fail_walk(bot(0), 0, "x".to_string());
+        assert!(log.walk(bot(0), 0).is_none());
+        assert_eq!(log.walks().count(), 0);
+    }
+
+    #[test]
+    fn a_walk_tick_too_large_for_the_planners_width_is_absent_rather_than_wrapped() {
+        // Same rule as an action's: a wrapped tick would look like an ordinary
+        // early-game measurement.
+        let mut log = ExecutionLog::default();
+        dispatch_walk(&mut log, bot(0), 0);
+        log.observe_walk(
+            bot(0),
+            0,
+            ActionTicks::new(Some(u64::from(u32::MAX) + 1), Some(5)),
+        );
+        let w = log.walk(bot(0), 0).expect("walk");
+        assert_eq!(w.dispatched_tick, None, "dropped, not wrapped to 0");
+        assert_eq!(w.replied_tick, Some(5), "the tick that does fit is kept");
+        assert_eq!(
+            log.observed_walk_duration(bot(0), 0),
+            None,
+            "half an observation yields no duration"
+        );
+    }
+
+    #[test]
+    fn a_reply_tick_before_the_dispatch_tick_yields_no_duration() {
+        // Cannot happen in a game whose clock only advances, so it means one
+        // of the two numbers is not what it claims to be. Better no duration
+        // than a wrapped one.
+        let mut log = ExecutionLog::default();
+        dispatch_walk(&mut log, bot(0), 0);
+        log.observe_walk(bot(0), 0, ActionTicks::new(Some(500), Some(400)));
+        assert_eq!(log.observed_walk_duration(bot(0), 0), None);
+    }
+
+    #[test]
+    fn a_later_run_supersedes_the_walk_under_a_reused_key() {
+        // `(bot, step_index)` identifies a walk within one run. A recovery
+        // proposal is a different schedule, in which index 0 is a different
+        // walk; carrying the old ticks forward would report the bot as having
+        // walked somewhere this run never sent it.
+        let mut log = ExecutionLog::default();
+        dispatch_walk(&mut log, bot(0), 0);
+        log.observe_walk(bot(0), 0, ActionTicks::new(Some(70_000), Some(70_500)));
+        log.succeed_walk(bot(0), 0);
+
+        log.start_walk(bot(0), 0, Position::new(-3., -4.), 900, 1_000);
+        let w = log.walk(bot(0), 0).expect("walk");
+        assert_eq!(w.status, Status::Running);
+        assert_eq!(w.to, Position::new(-3., -4.));
+        assert_eq!(
+            w.dispatched_tick, None,
+            "a re-dispatched walk has observed nothing yet"
+        );
+        assert_eq!(w.replied_tick, None);
+    }
+
+    #[test]
+    fn a_log_holding_only_a_walk_is_not_empty() {
+        // A run that dispatched a walk and got no further has observed
+        // something, and reporting that as an empty log would hide the only
+        // record of it.
+        let mut log = ExecutionLog::default();
+        assert!(log.is_empty());
+        dispatch_walk(&mut log, bot(0), 0);
+        log.fail_walk(bot(0), 0, "path blocked".to_string());
+        assert!(!log.is_empty());
+    }
+
+    #[test]
+    fn walks_and_attempts_do_not_disturb_each_other() {
+        // Two maps, two key spaces. A walk at step 1 is not the action with
+        // `ActionId(1)`.
+        let mut log = ExecutionLog::default();
+        log.start(id(1), 100);
+        log.observe(id(1), ActionTicks::new(Some(60_000), Some(60_100)));
+        log.succeed(id(1), 340);
+        dispatch_walk(&mut log, bot(0), 1);
+        log.observe_walk(bot(0), 1, ActionTicks::new(Some(70_000), Some(70_500)));
+        log.succeed_walk(bot(0), 1);
+
+        assert_eq!(
+            log.attempt(id(1)).expect("attempt").replied_tick,
+            Some(60_100)
+        );
+        assert_eq!(
+            log.walk(bot(0), 1).expect("walk").replied_tick,
+            Some(70_500)
+        );
+        assert_eq!(log.failed(), vec![]);
     }
 }

@@ -235,7 +235,7 @@ pub(crate) fn install_goal_plan(
 /// `Position` has no `IntoLua` impl of its own (only `FromLuaMulti`, for the
 /// `x, y` argument pairs elsewhere in this crate), so this is written by
 /// hand rather than reused.
-fn position_to_lua(lua: &Lua, pos: &Position) -> LuaResult<LuaTable> {
+pub(super) fn position_to_lua(lua: &Lua, pos: &Position) -> LuaResult<LuaTable> {
     let t = lua.create_table()?;
     t.set("x", pos.x)?;
     t.set("y", pos.y)?;

@@ -237,12 +237,31 @@ async fn run_bot_signalled(
     for (i, step) in mine.iter().enumerate() {
         match &step.what {
             StepKind::Walk { to } => {
-                // A walk step is not an action and has no log entry, so its
-                // ticks have nowhere to be recorded. They are still real; if a
-                // consumer ever needs them, the walk needs an id first.
-                if act.walk(bot, to.clone()).await.is_err() {
-                    abandon_rest(&mine[i..], senders);
-                    return;
+                // A walk needs no `ActionId` to be recorded. This loop is one
+                // bot's steps in schedule order, so `(bot, i)` is already a
+                // unique, stable key — the ticks the actuator has always
+                // measured here now have somewhere to go. Walking is most of
+                // the wall-clock in these plans, so dropping them was the
+                // biggest hole in the timeline.
+                lock(log).start_walk(bot, i, to.clone(), step.start, step.end);
+                match act.walk(bot, to.clone()).await {
+                    Ok(ticks) => {
+                        // Same order and same reasoning as the action arm:
+                        // the observation, then the outcome.
+                        let mut log = lock(log);
+                        log.observe_walk(bot, i, ticks);
+                        log.succeed_walk(bot, i);
+                    }
+                    Err(e) => {
+                        // No ticks: `ActuatorError` carries none, and the
+                        // planned span in the same record is not a substitute.
+                        // The entry still exists and is `Failed`, which is what
+                        // keeps a walk that did not happen distinguishable from
+                        // one that happened unobserved.
+                        lock(log).fail_walk(bot, i, e.to_string());
+                        abandon_rest(&mine[i..], senders);
+                        return;
+                    }
                 }
             }
             StepKind::Act { action, .. } => {
@@ -927,8 +946,118 @@ mod tests {
 
         // The action never even started: the log has no attempt for it at all,
         // not merely a non-Failed status.
-        assert!(log.is_empty());
+        //
+        // Asserted as "no attempts", not `log.is_empty()`, since the log is no
+        // longer empty here — the failed walk is now recorded, which is the
+        // point of recording walks at all. The claim this test makes is about
+        // the *action*, and that is what it now says.
+        assert_eq!(log.failed(), vec![]);
+        assert!(log.attempt(mine_action_id()).is_none());
+        assert!(log.attempt(craft_action_id()).is_none());
         assert_eq!(log.status(mine_action_id()), Status::Pending);
+
+        // And the walk that stopped the bot left the only record of why.
+        let w = log.walk(BotId(0), 0).expect("the failed walk is recorded");
+        assert_eq!(w.status, Status::Failed);
+        assert_eq!(
+            w.error.as_deref(),
+            Some("game rejected the command: blocked")
+        );
+        assert_eq!(w.dispatched_tick, None, "a walk that failed has no ticks");
+        assert_eq!(w.replied_tick, None);
+    }
+
+    #[tokio::test]
+    async fn a_walks_game_ticks_are_recorded_and_are_not_the_scheduled_ones() {
+        // The regression this whole change exists for. `Actuator::walk` has
+        // always returned `ActionTicks`; `run.rs` kept only the failure bit,
+        // so the largest span in a plan — walking — was unobservable.
+        //
+        // The mocked ticks are deliberately nowhere near the fixture's
+        // schedule, so a field quietly populated from `ScheduledStep` would
+        // fail here rather than look plausible.
+        let mut act = MockAct::new();
+        act.expect_walk()
+            .times(1)
+            .returning(|_, _| Ok(ActionTicks::new(Some(800_010), Some(800_910))));
+        act.expect_mine()
+            .times(1)
+            .returning(|_, _, _, _| Ok(some_ticks()));
+        act.expect_craft()
+            .times(1)
+            .returning(|_, _, _| Ok(some_ticks()));
+
+        let (net, sched) = walk_then_mine_fixture();
+        // The plan-side numbers this must not be confused with.
+        let walk_step = sched
+            .steps
+            .iter()
+            .find(|s| matches!(s.what, StepKind::Walk { .. }))
+            .expect("the fixture has a walk");
+
+        let log = run(&act, &sched, &net)
+            .await
+            .expect("the run should have started");
+
+        let w = log.walk(BotId(0), 0).expect("the walk is recorded");
+        assert_eq!(w.status, Status::Success);
+        assert_eq!(
+            w.to,
+            Position::new(10., 10.),
+            "the destination it was sent to"
+        );
+        assert_eq!(w.dispatched_tick, Some(800_010));
+        assert_eq!(w.replied_tick, Some(800_910));
+        assert_eq!(log.observed_walk_duration(BotId(0), 0), Some(900));
+
+        // The estimate travels out beside the measurement, unchanged.
+        assert_eq!(w.planned_start_tick, walk_step.start);
+        assert_eq!(w.planned_end_tick, walk_step.end);
+        assert_ne!(
+            w.dispatched_tick,
+            Some(w.planned_start_tick),
+            "a field named for a measurement must not hold the plan"
+        );
+        assert_ne!(w.replied_tick, Some(w.planned_end_tick));
+
+        // Exactly one walk, and it is the only thing keyed by a bot rather
+        // than an action.
+        assert_eq!(log.walks().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_walk_the_actuator_could_not_time_stays_absent_rather_than_defaulting() {
+        // An actuator with no game clock is a legitimate implementation
+        // (`ActionTicks::UNKNOWN`), and the walk still happened. "When" is
+        // simply not known, and must not be filled in from the schedule.
+        let mut act = MockAct::new();
+        act.expect_walk()
+            .times(1)
+            .returning(|_, _| Ok(ActionTicks::UNKNOWN));
+        act.expect_mine()
+            .times(1)
+            .returning(|_, _, _, _| Ok(some_ticks()));
+        act.expect_craft()
+            .times(1)
+            .returning(|_, _, _| Ok(some_ticks()));
+
+        let (net, sched) = walk_then_mine_fixture();
+        let log = run(&act, &sched, &net)
+            .await
+            .expect("the run should have started");
+
+        let w = log.walk(BotId(0), 0).expect("the walk is recorded");
+        assert_eq!(
+            w.status,
+            Status::Success,
+            "it walked; we just cannot time it"
+        );
+        assert_eq!(w.dispatched_tick, None);
+        assert_eq!(w.replied_tick, None);
+        assert_ne!(w.dispatched_tick, Some(0));
+        assert_ne!(w.dispatched_tick, Some(w.planned_start_tick));
+        assert_eq!(log.observed_walk_duration(BotId(0), 0), None);
+        assert_eq!(w.error, None, "an unmeasured walk is not a failed one");
     }
 
     #[tokio::test]

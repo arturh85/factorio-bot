@@ -12,7 +12,7 @@
 //! [`RunSlot::take`] -- which is also what makes "a plan may be run once"
 //! true without a registry of its own to police it.
 
-use super::plan::{PlanValue, RunSlot};
+use super::plan::{position_to_lua, PlanValue, RunSlot};
 use super::{goal_error, lock, ActuatorFactory};
 use crate::lua_runner::PendingWork;
 use factorio_bot_core::mlua::prelude::*;
@@ -80,6 +80,16 @@ fn status_name(status: Status) -> &'static str {
 /// one -- and adding genuinely measured fields does not weaken it: reusing
 /// `observed_start` would have quietly given the estimate the measured name
 /// this observation surface has always refused it.
+///
+/// # `walks` is a separate array because a walk has no action id
+///
+/// The scheduler emits a walk as its own `StepKind`, not as an `Action`, so it
+/// can never appear in `actions` — which is why its ticks used to be measured
+/// by the actuator and discarded by the executor. `(bot, step_index)` names it
+/// instead, and both are carried on each entry. Walking is most of the
+/// wall-clock in these plans, so a consumer rendering a timeline without this
+/// can only draw one undifferentiated "walk + wait" span; the split is
+/// observable, and this is where it surfaces.
 fn build_observation(
     lua: &Lua,
     net: &ActionNetwork,
@@ -141,6 +151,38 @@ fn build_observation(
 
     let first_error = failures.first().map(|f| f.error.clone());
 
+    // `obs.walks`: the array the action table has no room for, because a walk
+    // has no `ActionId` to be keyed by.
+    //
+    // An *array*, not a map, and ordered by `ExecutionLog::walks()` -- ascending
+    // by bot and then by step index -- so a consumer laying out a timeline gets
+    // the same sequence on any two reads of the same log. `bot` and
+    // `step_index` are carried in each entry because together they are the
+    // walk's identity; nothing else names it.
+    //
+    // The same two kinds of tick as the action tables, under the same rules:
+    // `planned_start`/`planned_end` are what the scheduler predicted,
+    // `dispatched_tick`/`replied_tick` are `game.tick` as the game reported it,
+    // and the latter are `nil` -- never zero, never the planned value -- when
+    // the game did not say. `status` is what separates a walk that failed from
+    // one that merely went unobserved: both have `nil` ticks.
+    let walks = lua.create_table()?;
+    for (i, (bot, step_index, w)) in log.walks().enumerate() {
+        let t = lua.create_table()?;
+        t.set("bot", bot.0)?;
+        t.set("step_index", step_index)?;
+        t.set("to", position_to_lua(lua, &w.to)?)?;
+        t.set("status", status_name(w.status))?;
+        t.set("planned_start", w.planned_start_tick)?;
+        t.set("planned_end", w.planned_end_tick)?;
+        t.set("dispatched_tick", w.dispatched_tick)?;
+        t.set("replied_tick", w.replied_tick)?;
+        if let Some(error) = &w.error {
+            t.set("error", error.clone())?;
+        }
+        walks.set(i as i64 + 1, t)?;
+    }
+
     let obs = lua.create_table()?;
     obs.set("done", done)?;
     obs.set("pending", pending)?;
@@ -149,6 +191,7 @@ fn build_observation(
     obs.set("failed", failed)?;
     obs.set("first_error", first_error)?;
     obs.set("actions", actions)?;
+    obs.set("walks", walks)?;
     obs.set(
         "failures",
         lua.create_function(move |lua, _self: Option<LuaValue>| {
@@ -625,6 +668,123 @@ mod tests {
                     "a rejected dispatch observed nothing, got " .. tostring(fs[i].dispatched_tick))
                 assert(fs[i].replied_tick == nil, "no reply tick for a rejected dispatch")
                 assert(fs[i].planned_start ~= nil, "the estimate is still there")
+            end
+        "#,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn walks_are_reported_with_the_ticks_the_game_gave_them() {
+        // The gap this closes. `Actuator::walk` has always returned
+        // `ActionTicks` and the executor threw them away, so `obs` could
+        // describe every action's timing and nothing about the walking between
+        // them -- which is most of the wall-clock in these plans.
+        //
+        // `with_clock` starts at STUB_CLOCK_BASE (500_000), far beyond any tick
+        // a plan for two iron ore schedules, so a field populated from the
+        // schedule fails here instead of looking plausible.
+        let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never).with_clock()));
+        exec_bounded(
+            &lua,
+            r#"
+            local obs = goal.run(goal.plan(goal.have("iron-ore", 2)))
+            assert(type(obs.walks) == "table", "obs.walks is a table")
+            assert(#obs.walks > 0, "the plan walked somewhere, got " .. #obs.walks)
+            for i = 1, #obs.walks do
+                local w = obs.walks[i]
+                -- `(bot, step_index)` is the walk's whole identity: it has no
+                -- action id, and needed none.
+                assert(type(w.bot) == "number", "bot")
+                assert(type(w.step_index) == "number", "step_index")
+                assert(type(w.to) == "table" and type(w.to.x) == "number"
+                    and type(w.to.y) == "number", "the destination it was sent to")
+                assert(w.status == "success", "status: " .. tostring(w.status))
+                assert(type(w.dispatched_tick) == "number",
+                    "dispatched_tick: " .. tostring(w.dispatched_tick))
+                assert(type(w.replied_tick) == "number",
+                    "replied_tick: " .. tostring(w.replied_tick))
+                assert(w.dispatched_tick >= 500000,
+                    "the tick must come from the actuator, got " .. w.dispatched_tick)
+                -- A field filled from the schedule would be a small number and
+                -- would equal the planned one. Asserting only that the field
+                -- exists would pass against exactly that bug.
+                assert(type(w.planned_start) == "number", "the estimate is reported too")
+                assert(type(w.planned_end) == "number", "planned_end")
+                assert(w.dispatched_tick ~= w.planned_start,
+                    "an observed tick equal to the planned one came from the plan")
+                assert(w.replied_tick ~= w.planned_end,
+                    "an observed tick equal to the planned one came from the plan")
+                assert(w.replied_tick > w.dispatched_tick, "a reply follows its dispatch")
+            end
+        "#,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn walk_and_action_ticks_interleave_without_overlapping() {
+        // The property the live run is checked against: a walk's ticks fall
+        // between the previous dispatch's reply and the next one's dispatch.
+        // One bot dispatches one thing at a time, so sorting every observed
+        // span -- walks and actions together -- by its dispatch tick must yield
+        // spans that never overlap. If walk ticks were coming from anywhere but
+        // the game's clock they would not slot in.
+        let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never).with_clock()));
+        exec_bounded(
+            &lua,
+            r#"
+            local obs = goal.run(goal.plan(goal.have("iron-ore", 2)))
+            local spans = {}
+            for id, a in pairs(obs.actions) do
+                if a.dispatched_tick then
+                    spans[#spans+1] = { kind = "action " .. id,
+                        from = a.dispatched_tick, to = a.replied_tick }
+                end
+            end
+            for i = 1, #obs.walks do
+                local w = obs.walks[i]
+                spans[#spans+1] = { kind = "walk " .. w.bot .. "/" .. w.step_index,
+                    from = w.dispatched_tick, to = w.replied_tick }
+            end
+            assert(#spans > 1, "there is something to interleave, got " .. #spans)
+            table.sort(spans, function(l, r) return l.from < r.from end)
+            local walks_seen = 0
+            for i = 1, #spans do
+                if i > 1 then
+                    assert(spans[i].from >= spans[i-1].to,
+                        spans[i].kind .. " dispatched at " .. spans[i].from
+                        .. " overlaps " .. spans[i-1].kind .. " which replied at "
+                        .. spans[i-1].to)
+                end
+                if spans[i].kind:sub(1, 4) == "walk" then walks_seen = walks_seen + 1 end
+            end
+            assert(walks_seen > 0, "walks took part in the interleaving")
+        "#,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_clockless_walk_reports_nil_ticks_rather_than_zero() {
+        // Same rule as an action's: the walk happened, and when is simply not
+        // known. Tick 0 is a real tick -- the start of the map -- so defaulting
+        // to it would place every walk before the game began.
+        let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never)));
+        exec_bounded(
+            &lua,
+            r#"
+            local obs = goal.run(goal.plan(goal.have("iron-ore", 2)))
+            assert(#obs.walks > 0, "the plan walked somewhere")
+            for i = 1, #obs.walks do
+                local w = obs.walks[i]
+                assert(w.status == "success", "it walked; we just cannot time it")
+                assert(w.error == nil, "an unmeasured walk is not a failed one")
+                assert(w.dispatched_tick == nil,
+                    "a clockless actuator observed nothing, got " .. tostring(w.dispatched_tick))
+                assert(w.replied_tick == nil,
+                    "a clockless actuator observed nothing, got " .. tostring(w.replied_tick))
+                assert(w.planned_start ~= nil, "the estimate is still reported")
             end
         "#,
         )

@@ -249,8 +249,13 @@ end
 -- Exactly `goal.start(plan):wait()`.
 -- @tparam PlanValue plan a plan returned by `goal.plan`
 -- @treturn table an observation: `{ done, pending, running, success, failed,
---   first_error, actions, failures }` -- see `RunValue`'s own `:wait()` for
---   the shape
+--   first_error, actions, walks, failures }` -- see `RunValue`'s own `:wait()`
+--   for the shape. `walks` is an array of `{ bot, step_index, to, status,
+--   planned_start, planned_end, dispatched_tick, replied_tick }`, one per walk
+--   step the run dispatched, ordered by bot and then step index; a walk has no
+--   action id, so `(bot, step_index)` is what names it. As on an action,
+--   `dispatched_tick`/`replied_tick` are `game.tick` as the game reported it
+--   and are `nil` -- never zero, never the planned value -- when it did not.
 -- @raise on the same conditions as `goal.start`, and if the run was refused
 --   before it started at all (a schedule implying a circular wait): nothing
 --   ran, so there is no observation to report

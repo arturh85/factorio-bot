@@ -26,7 +26,7 @@
  */
 import {computed} from 'vue';
 import {AlertTriangle, Ban} from '@lucide/vue';
-import {Replay, replayAxisCeiling} from '@/api/replay';
+import {Replay, observedOrigin, replayAxisCeiling} from '@/api/replay';
 import {LEGEND_ENTRIES} from './statusVisual';
 import ReplayStepRow from './ReplayStepRow.vue';
 
@@ -47,6 +47,7 @@ const attemptedButUnmeasured = computed(() =>
     props.replay.steps.every((step) => step.status === 'Pending'));
 
 const axisCeiling = computed(() => (props.replay !== null ? replayAxisCeiling(props.replay) : 0));
+const origin = computed(() => (props.replay === null ? 0 : observedOrigin(props.replay)));
 </script>
 
 <template>
@@ -102,6 +103,7 @@ const axisCeiling = computed(() => (props.replay !== null ? replayAxisCeiling(pr
         v-for="step in replay.steps"
         :key="step.index"
         :step="step"
+        :observed-origin="origin"
         :axis-ceiling="axisCeiling"/>
     </div>
 

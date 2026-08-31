@@ -300,13 +300,52 @@ export function parseReplayJson(json: string): {replay: Replay} | {error: string
  */
 export function replayAxisCeiling(replay: Replay): Ticks {
     let max = replay.planned_makespan;
+    const origin = observedOrigin(replay);
     for (const step of replay.steps) {
-        if (step.observed_start_tick !== null && step.observed_start_tick > max) {
-            max = step.observed_start_tick;
-        }
-        if (step.observed_end_tick !== null && step.observed_end_tick > max) {
-            max = step.observed_end_tick;
+        for (const tick of [step.observed_start_tick, step.observed_end_tick]) {
+            if (tick !== null) {
+                const shifted = tick - origin;
+                if (shifted > max) {
+                    max = shifted;
+                }
+            }
         }
     }
     return max;
+}
+
+/**
+ * The tick the observed timeline is measured from.
+ *
+ * **Planned and observed ticks are in different origins**, which is not
+ * obvious and was drawn wrongly before this existed. `planned_start_tick`
+ * comes from a `Schedule` built before anything ran, so it counts from zero at
+ * run start. `observed_start_tick` is `game.tick` — an absolute clock that was
+ * already at 60,551 when this run's first step was dispatched.
+ *
+ * Rendering both against one origin put every planned bar in the first 1.4% of
+ * the axis and every observed bar at the far right, so the two rows looked
+ * like a comparison and their positions meant nothing. Durations were the only
+ * honest reading, and nothing said so.
+ *
+ * The origin is the earliest observed tick in the run: the first moment the
+ * game acknowledged anything. **It is an anchor, not run start** — the run
+ * began some ticks earlier, when the script was launched — so a shifted
+ * observed timeline says "this much later than the first dispatch", not "this
+ * much after the run began". The two differ by however long setup took, and
+ * nothing in the document records that.
+ *
+ * `0` when nothing was observed, which makes the shift a no-op and leaves a
+ * plan-only replay drawn exactly as before.
+ */
+export function observedOrigin(replay: Replay): Ticks {
+    let origin: Ticks | null = null;
+    for (const step of replay.steps) {
+        for (const tick of [step.observed_start_tick, step.observed_end_tick]) {
+            if (tick !== null && (origin === null || tick < origin)) {
+                origin = tick;
+            }
+        }
+    }
+    return origin ?? 0;
 }

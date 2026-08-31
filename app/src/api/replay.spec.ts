@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {parseReplay, parseReplayJson, replayAxisCeiling} from './replay';
+import {observedOrigin, parseReplay, parseReplayJson, replayAxisCeiling} from './replay';
 import {REALISTIC_REPLAY, REALISTIC_REPLAY_JSON, REFUSED_REPLAY_JSON} from './replay.fixtures';
 
 describe('parseReplay against the tracked, Rust-generated documents', () => {
@@ -101,5 +101,47 @@ describe('replayAxisCeiling', () => {
 
     it('never lets a null observed tick pull the ceiling down or throw', () => {
         expect(() => replayAxisCeiling(REALISTIC_REPLAY)).not.toThrow();
+    });
+});
+
+describe('observedOrigin', () => {
+    /**
+     * Planned and observed ticks are in different origins, which is not
+     * obvious and was rendered wrongly before this existed. A `Schedule` is
+     * built before anything runs, so `planned_start_tick` counts from zero;
+     * `observed_start_tick` is `game.tick`, an absolute clock already tens of
+     * thousands of ticks in.
+     *
+     * Measured from a real run: planned 0-868, observed 60551-61528. Drawn
+     * against one origin, every planned bar sat in the first 1.4% of the axis
+     * and every observed bar at the far right — two rows that looked like a
+     * comparison whose positions meant nothing.
+     */
+    it('is the earliest observed tick, so the two rows share an origin', () => {
+        const replay = {
+            ...REALISTIC_REPLAY,
+            planned_makespan: 868,
+            steps: [
+                {...REALISTIC_REPLAY.steps[0], observed_start_tick: 60551, observed_end_tick: 60919},
+                {...REALISTIC_REPLAY.steps[1], observed_start_tick: 60924, observed_end_tick: 61528}
+            ]
+        };
+        expect(observedOrigin(replay)).toBe(60551);
+        // 61528 - 60551 = 977, which is the real extent of the run. Without
+        // the shift the ceiling would be 61528 and the plan would be invisible.
+        expect(replayAxisCeiling(replay)).toBe(977);
+    });
+
+    it('is zero when nothing was observed, leaving a plan-only replay unchanged', () => {
+        const replay = {
+            ...REALISTIC_REPLAY,
+            steps: REALISTIC_REPLAY.steps.map((s) => ({
+                ...s,
+                observed_start_tick: null,
+                observed_end_tick: null
+            }))
+        };
+        expect(observedOrigin(replay)).toBe(0);
+        expect(replayAxisCeiling(replay)).toBe(replay.planned_makespan);
     });
 });

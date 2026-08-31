@@ -37,7 +37,7 @@
  */
 import {computed, ref, watch} from 'vue';
 import {Ban, Image, ImageOff} from '@lucide/vue';
-import {Replay, replayAxisCeiling} from '@/api/replay';
+import {Replay, observedOrigin, replayAxisCeiling} from '@/api/replay';
 import {FramesManifest} from '@/api/types';
 import {frameUrl} from '@/api/client';
 import {combineRunMatchChecks, frameAtTick, framesForClient, runIdCheck, tickOverlapCheck} from '@/api/frameJoin';
@@ -60,6 +60,18 @@ const props = defineProps<{
 const tick = defineModel<number>('tick', {default: 0});
 
 const axisCeiling = computed(() => (props.replay !== null ? replayAxisCeiling(props.replay) : 0));
+
+/**
+ * The absolute `game.tick` that axis position 0 corresponds to.
+ *
+ * The scrubber works in **shifted** ticks, matching the step rows below it —
+ * planned ticks count from zero while `game.tick` was already at 60,551 when
+ * this run's first step dispatched, so an unshifted axis put the whole plan in
+ * its first 1.4%. Frame ticks are absolute, so they are shifted onto this axis
+ * for display and shifted back for the lookup: `frameAtTick` is asked in the
+ * clock the filenames are written in, which is the only clock the frames know.
+ */
+const origin = computed(() => (props.replay !== null ? observedOrigin(props.replay) : 0));
 
 function pct(t: number): number {
     return axisCeiling.value <= 0 ? 0 : Math.max(0, Math.min(100, (t / axisCeiling.value) * 100));
@@ -109,7 +121,11 @@ const clientFrames = computed(() => {
 const unparsedFrameCount = computed(() => props.manifest?.frames.filter((f) => f.tick === null).length ?? 0);
 const totalFrameCount = computed(() => props.manifest?.frames.length ?? 0);
 
-const current = computed(() => (clientFrames.value.length > 0 ? frameAtTick(clientFrames.value, tick.value) : null));
+// `tick` is on the shifted axis; frames are keyed by absolute `game.tick`.
+// The conversion lives here and nowhere else, so there is one place where the
+// two clocks meet rather than a subtraction scattered through the template.
+const current = computed(() =>
+    clientFrames.value.length > 0 ? frameAtTick(clientFrames.value, tick.value + origin.value) : null);
 </script>
 
 <template>
@@ -155,7 +171,7 @@ const current = computed(() => (clientFrames.value.length > 0 ? frameAtTick(clie
             data-testid="frame-tick-mark"
             :data-tick="frame.tick"
             class="absolute top-0 h-full w-0.5 -translate-x-1/2 bg-brand"
-            :style="{left: pct(frame.tick as number) + '%'}"
+            :style="{left: pct((frame.tick as number) - origin) + '%'}"
             :title="`frame at tick ${frame.tick}`"/>
         </div>
       </div>

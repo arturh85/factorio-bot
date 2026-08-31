@@ -29,7 +29,14 @@ import {ReplayStep} from '@/api/replay';
 import EvidenceMark from './EvidenceMark.vue';
 import {STATUS_VISUAL} from './statusVisual';
 
-const props = defineProps<{step: ReplayStep; axisCeiling: number}>();
+const props = defineProps<{
+  /**
+   * The tick observed positions are measured from — see `observedOrigin`.
+   * Planned ticks count from zero at run start; observed ticks are absolute
+   * `game.tick`. Without this shift the two rows share an axis their positions
+   * are not comparable on.
+   */
+  observedOrigin?: number;step: ReplayStep; axisCeiling: number}>();
 
 function pct(ticks: number): number {
     return props.axisCeiling <= 0 ? 0 : Math.max(0, Math.min(100, (ticks / props.axisCeiling) * 100));
@@ -53,7 +60,9 @@ const hasFullObserved = computed(() =>
 
 /** Exactly one of the two observed ticks is known -- a marker, never a bar. */
 const partialObservedTick = computed(() => {
-    const {observed_start_tick: start, observed_end_tick: end} = props.step;
+    const origin = props.observedOrigin ?? 0;
+    const start = props.step.observed_start_tick === null ? null : props.step.observed_start_tick - origin;
+    const end = props.step.observed_end_tick === null ? null : props.step.observed_end_tick - origin;
     if (start !== null && end === null) {
         return start;
     }
@@ -67,7 +76,7 @@ const observedStyle = computed(() => {
     if (!hasFullObserved.value) {
         return {};
     }
-    const start = props.step.observed_start_tick as number;
+    const start = (props.step.observed_start_tick as number) - (props.observedOrigin ?? 0);
     const end = props.step.observed_end_tick as number;
     return {left: pct(start) + '%', width: pct(end - start) + '%'};
 });

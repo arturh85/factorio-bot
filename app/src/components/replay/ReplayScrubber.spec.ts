@@ -94,8 +94,14 @@ describe('ReplayScrubber -- honesty requirement 3: a stale frame must say how st
     });
 
     it('does not call an exact-match frame stale', () => {
+        // `tick` is on the SHIFTED axis, which counts from the run's first
+        // observed tick — 100 for `REALISTIC_REPLAY`. So 200 here addresses the
+        // frame whose filename says 300. Planned ticks count from zero while
+        // `game.tick` does not, and the axis shows the two against one origin
+        // so their positions are comparable; the lookup converts back, because
+        // absolute is the only clock a filename knows.
         const wrapper = mount(ReplayScrubber, {
-            props: {replay: REALISTIC_REPLAY, manifest: OVERLAPPING_MANIFEST, tick: 300}
+            props: {replay: REALISTIC_REPLAY, manifest: OVERLAPPING_MANIFEST, tick: 200}
         });
         expect(wrapper.find('[data-testid="frame-stale"]').exists()).toBe(false);
         expect(wrapper.find('[data-testid="frame-current"]').exists()).toBe(true);
@@ -112,10 +118,12 @@ describe('ReplayScrubber -- honesty requirement 4: gaps in the frame sequence st
     });
 
     it('a scrubber sitting inside a dropped-frame gap shows the stale frame before it, not a fabricated current one', () => {
-        // Gap is 300 -> 1200 (900 ticks, versus the normal 300-tick cadence).
-        // At 700 the true age of the nearest frame (300) is 400.
+        // Gap is 300 -> 1200 in absolute ticks (900, versus the 300-tick
+        // cadence). Scrubber ticks are shifted by the run's origin of 100, so
+        // 600 here is absolute 700, and the nearest frame at 300 is 400 ticks
+        // old — the true age, never shrunk to make the gap look smaller.
         const wrapper = mount(ReplayScrubber, {
-            props: {replay: REALISTIC_REPLAY, manifest: OVERLAPPING_MANIFEST, tick: 700}
+            props: {replay: REALISTIC_REPLAY, manifest: OVERLAPPING_MANIFEST, tick: 600}
         });
         expect(wrapper.find('[data-testid="frame-current"]').exists()).toBe(false);
         const stale = wrapper.get('[data-testid="frame-stale"]');

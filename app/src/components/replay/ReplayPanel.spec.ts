@@ -3,7 +3,7 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {mount} from '@vue/test-utils';
 import {createPinia, setActivePinia} from 'pinia';
 import {nextTick} from 'vue';
-import GanttChart from './GanttChart.vue';
+import ReplayPanel from './ReplayPanel.vue';
 import * as client from '@/api/client';
 import * as jobEvents from '@/api/jobEvents';
 import {Job} from '@/api/types';
@@ -60,10 +60,10 @@ afterEach(() => {
     useReplayStore().stopWatching();
 });
 
-describe('GanttChart', () => {
+describe('ReplayPanel', () => {
     it('shows the neutral empty state before any job has produced a replay', async () => {
         vi.mocked(client.listJobs).mockResolvedValue([]);
-        const wrapper = mount(GanttChart);
+        const wrapper = mount(ReplayPanel);
         await flush();
 
         expect(wrapper.find('[data-testid="empty-state"]').exists()).toBe(true);
@@ -72,7 +72,7 @@ describe('GanttChart', () => {
 
     it('renders the most recent job with a replay on mount', async () => {
         vi.mocked(client.listJobs).mockResolvedValue([job('1', REALISTIC_REPLAY_JSON)]);
-        const wrapper = mount(GanttChart);
+        const wrapper = mount(ReplayPanel);
         await flush();
 
         expect(wrapper.find('[data-testid="step-list"]').exists()).toBe(true);
@@ -83,7 +83,7 @@ describe('GanttChart', () => {
         const unsubscribe = vi.fn();
         vi.mocked(jobEvents.subscribeJobEvents).mockImplementation(() => unsubscribe);
         vi.mocked(client.listJobs).mockResolvedValue([job('1', null, 'running')]);
-        const wrapper = mount(GanttChart);
+        const wrapper = mount(ReplayPanel);
         await flush();
 
         wrapper.unmount();

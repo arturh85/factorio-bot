@@ -9,7 +9,7 @@
  *
  * One copy rather than four. This had been pasted identically into
  * `Slider.spec.ts`, `SettingsPage.spec.ts` and `ReplayScrubber.spec.ts`, and a
- * fourth was about to go into `GanttChart.spec.ts` — at which point whoever
+ * fourth was about to go into `ReplayPanel.spec.ts` — at which point whoever
  * hit it next would paste a fifth.
  *
  * Deliberately not a vitest `setupFiles`: the project's default environment is

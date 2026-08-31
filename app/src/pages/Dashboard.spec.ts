@@ -82,4 +82,27 @@ describe('Dashboard', () => {
         expect(tiles[1].text()).toBe('client2');
         expect(tiles[2].text()).toBe('client3');
     });
+
+    /**
+     * The count is a figure, not a control.
+     *
+     * It used to be a `<button>` wired to a toast reading "Info Message /
+     * Message Content" — Sigma-template demo wiring that survived the
+     * redesign because porting it unchanged was the right call for a
+     * restyling task, and removing it was a separate decision.
+     *
+     * Asserted rather than left to inspection: a clickable-looking count
+     * promises an action, and the next person to want one here should have to
+     * change a test that says so.
+     */
+    it('renders the instance count as a figure, not something clickable', () => {
+        const store = useAppStore();
+        store.settings = settingsFixture(2);
+        const wrapper = mount(Dashboard);
+
+        const count = wrapper.get('[data-testid="instance-count"]');
+        expect(count.element.tagName).toBe('SPAN');
+        expect(wrapper.find('[data-testid="instance-count"] button').exists()).toBe(false);
+        expect(wrapper.html()).not.toContain('Info Message');
+    });
 });

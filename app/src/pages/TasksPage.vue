@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import GanttChart from '@/components/GanttChart.vue';
+import ReplayPanel from '@/components/replay/ReplayPanel.vue';
 import Card from '@/components/ui/Card.vue';
 </script>
 
 <template>
   <Card title="Tasks">
-    <GanttChart/>
+    <ReplayPanel/>
   </Card>
 </template>

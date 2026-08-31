@@ -8,10 +8,11 @@
 //! Only the handle indirection goes: a run is now a value a script holds
 //! directly, exactly the shift `PlanValue` (`plan.rs`) already made for a
 //! plan, and the two compose the same way -- `goal.start` calls
-//! [`PlanValue::take_for_run`], which is also what makes "a plan may be run
-//! once" true without a registry of its own to police it.
+//! [`PlanValue::reserve_for_run`] and, once dispatch is certain,
+//! [`RunSlot::take`] -- which is also what makes "a plan may be run once"
+//! true without a registry of its own to police it.
 
-use super::plan::PlanValue;
+use super::plan::{PlanValue, RunSlot};
 use super::{goal_error, lock, ActuatorFactory};
 use crate::lua_runner::PendingWork;
 use factorio_bot_core::mlua::prelude::*;
@@ -292,16 +293,26 @@ async fn await_completion(
 /// about what "starting" means: `goal.run` calls this and then
 /// [`await_completion`], rather than re-driving `run_into` itself.
 ///
-/// `taken` is computed by the caller, synchronously, from
-/// [`PlanValue::take_for_run`] before this function -- and the `async`
+/// `reserved` is computed by the caller, synchronously, from
+/// [`PlanValue::reserve_for_run`] before this function -- and the `async`
 /// closure that calls it -- ever exist, so no borrow of the plan's userdata
 /// survives into the returned future either.
+///
+/// The reservation is *taken* last, once every check below has passed and the
+/// actuator is in hand, because taking it is what spends the plan. Doing it
+/// up front burned the plan on failures that had nothing to do with it -- and
+/// the next `goal.start` then reported "already taken for a run" for a plan
+/// nothing had ever dispatched, which is precisely the absent-fact-rendered-
+/// as-present error [`RunValue::start_error`] exists to prevent one function
+/// away. (Same rule, same reason, as the HTTP script-execution job registry,
+/// which claims its single slot only after the body, the running Factorio
+/// instance and the script path have all checked out.)
 async fn start_impl(
     lua: &Lua,
-    taken: LuaResult<(Arc<ActionNetwork>, Arc<Schedule>)>,
+    reserved: LuaResult<RunSlot>,
     actuator: &ActuatorFactory,
 ) -> LuaResult<RunValue> {
-    let (net, sched) = taken?;
+    let reserved = reserved?;
     // Checked before anything is spawned, not after: registration is what
     // stops a fire-and-forget `goal.start` from being killed mid-plan when
     // `run_lua` drops its tokio runtime (see `PendingWork` in
@@ -322,6 +333,9 @@ async fn start_impl(
     // to the defines query) is a setup error the script should hear about at
     // the call, not a run that silently never happened.
     let act = actuator().await.map_err(goal_error)?;
+    // Last: nothing below this line can fail, so the plan is spent only by a
+    // start that really does dispatch.
+    let (net, sched) = reserved.take()?;
     let (run, join) = spawn(act, sched, net);
     pending.register(join);
     Ok(run)
@@ -337,23 +351,25 @@ pub(crate) fn install_goal_run(
     table.set(
         "start",
         lua.create_async_function(move |lua, plan: LuaUserDataRef<PlanValue>| {
-            // `take_for_run` is the whole synchronous part of this call: it
-            // is what flips a plan from unrun to running, and doing it here
-            // -- not inside the future below -- is what keeps `plan`'s
-            // borrow from ever crossing an `.await`.
-            let taken = plan.take_for_run();
+            // `reserve_for_run` is the whole synchronous part of this call:
+            // it clones the plan's contents and the right to spend it out
+            // into a `RunSlot`, and doing it here -- not inside the future
+            // below -- is what keeps `plan`'s borrow from ever crossing an
+            // `.await`. It does not spend the plan; `start_impl` does that
+            // last, once dispatch is certain.
+            let reserved = plan.reserve_for_run();
             let actuator = start_actuator.clone();
-            async move { start_impl(&lua, taken, &actuator).await }
+            async move { start_impl(&lua, reserved, &actuator).await }
         })?,
     )?;
 
     table.set(
         "run",
         lua.create_async_function(move |lua, plan: LuaUserDataRef<PlanValue>| {
-            let taken = plan.take_for_run();
+            let reserved = plan.reserve_for_run();
             let actuator = actuator.clone();
             async move {
-                let run = start_impl(&lua, taken, &actuator).await?;
+                let run = start_impl(&lua, reserved, &actuator).await?;
                 await_completion(&lua, run.net, run.log, run.finished_rx, run.start_error).await
             }
         })?,
@@ -571,6 +587,69 @@ mod tests {
         assert!(err.contains("already"), "{err}");
     }
 
+    /// An actuator factory that never yields one -- exactly what production
+    /// does for every plan-only script: `create_lua_goal`'s factory
+    /// (`mod.rs`) errors with "no rcon connection" whenever `rcon` is `None`.
+    fn refusing_factory() -> ActuatorFactory {
+        Arc::new(|| {
+            Box::pin(async { Err("no rcon connection; goal.run needs a running game".to_string()) })
+        })
+    }
+
+    /// A `goal.start` that fails for a reason that is *not* the plan must
+    /// leave the plan runnable.
+    ///
+    /// The failure here is the live production path, not a contrivance: with
+    /// no game connected the actuator factory refuses, and it refuses again
+    /// on the next call. If the first refusal has already consumed the plan,
+    /// the second answers "plan has already been taken for a run" -- an
+    /// absent fact rendered as a present one, and the real cause hidden
+    /// behind it. Only a start that is actually going to dispatch may take
+    /// the plan.
+    #[tokio::test]
+    async fn a_start_that_dispatched_nothing_leaves_the_plan_runnable() {
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        lua.set_app_data(crate::lua_runner::PendingWork::default());
+        let table = create_lua_goal_with(
+            &lua,
+            seeded_world_for(&[1, 2]),
+            refusing_factory(),
+            vec![1, 2],
+        )
+        .expect("goal table");
+        lua.globals().set("goal", table).expect("install");
+
+        exec_bounded(
+            &lua,
+            r#"
+            p = goal.plan(goal.have("iron-ore", 20))
+            local ok, err = pcall(goal.start, p)
+            assert(not ok, "with no actuator, goal.start must fail")
+            first = tostring(err)
+            local ok2, err2 = pcall(goal.start, p)
+            assert(not ok2, "with still no actuator, it must fail again")
+            second = tostring(err2)
+            "#,
+        )
+        .await;
+
+        let first: String = lua.globals().get("first").expect("first");
+        let second: String = lua.globals().get("second").expect("second");
+        assert!(
+            first.contains("no rcon connection"),
+            "the first failure should name the real cause: {first}"
+        );
+        assert!(
+            second.contains("no rcon connection"),
+            "the second attempt must report the real cause, not a plan the \
+             first attempt burned without dispatching anything: {second}"
+        );
+        assert!(
+            !second.contains("already"),
+            "nothing was dispatched, so the plan was never taken for a run: {second}"
+        );
+    }
+
     #[tokio::test]
     async fn goal_run_equals_start_then_wait() {
         let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never)));
@@ -579,6 +658,7 @@ mod tests {
             r#"
             local direct = goal.run(goal.plan(goal.have("iron-ore", 2)))
             local staged = goal.start(goal.plan(goal.have("iron-ore", 2))):wait()
+            assert(direct.success > 0, "the run must have done something, got " .. direct.success)
             assert(direct.done == staged.done, "done")
             assert(direct.success == staged.success, "success")
             assert(direct.failed == staged.failed, "failed")
@@ -878,11 +958,24 @@ mod tests {
         .expect("goal table");
         lua.globals().set("goal", table).expect("install");
 
-        let err =
-            exec_bounded_err(&lua, r#"goal.start(goal.plan(goal.have("iron-ore", 20)))"#).await;
+        let err = exec_bounded_err(
+            &lua,
+            r#"p = goal.plan(goal.have("iron-ore", 20)) goal.start(p)"#,
+        )
+        .await;
         assert!(
             err.contains("PendingWork"),
             "the error should name what is missing: {err}"
+        );
+
+        // The refusal dispatched nothing, so it must not have consumed the
+        // plan either: the second attempt has to report the same real cause
+        // rather than a plan the first attempt spent on nothing.
+        let again = exec_bounded_err(&lua, r#"goal.start(p)"#).await;
+        assert!(
+            again.contains("PendingWork"),
+            "a start refused before dispatch must leave the plan runnable, so \
+             the next attempt names the real cause: {again}"
         );
 
         let dispatched =

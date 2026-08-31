@@ -189,15 +189,53 @@ mod tests {
         ),
     ];
 
-    /// `goal.lua`, in **both** directions.
+    /// The functions `create_lua_goal` really installs on the `goal` table.
+    ///
+    /// Read off the live table rather than listed here, which is the whole
+    /// point of [`the_goal_doc_entries_are_exactly_the_goal_surface`]: a list
+    /// compared against a list is a mirror in both directions, and a mirror
+    /// cannot notice a binding nobody documented.
+    ///
+    /// Reading both halves of each pair as `LuaValue` for the same reason
+    /// [`doc_entries`] does: the table holds bound functions beside
+    /// documentation strings, and a typed `pairs` stops the walk at the first
+    /// value that will not convert.
+    fn goal_table_functions() -> std::collections::BTreeSet<String> {
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandboxed lua");
+        let planner = Planner::new(Arc::new(FactorioWorld::new()), None);
+        let goal_table = create_lua_goal(
+            &lua,
+            planner.plan_world.clone(),
+            planner.real_world.clone(),
+            None,
+            vec![],
+        )
+        .expect("goal table");
+        let mut names = std::collections::BTreeSet::new();
+        for pair in goal_table.pairs::<LuaValue, LuaValue>() {
+            let Ok((key, value)) = pair else { continue };
+            let (Some(key), LuaValue::Function(_)) = (key.as_string(), &value) else {
+                continue;
+            };
+            names.insert(key.to_string_lossy());
+        }
+        names
+    }
+
+    /// `goal.lua`, in **both** directions, against the **real** goal table.
     ///
     /// [`every_documented_binding_reaches_the_generated_file`] asserts only
     /// that each listed entry is present, so it catches a function that is
     /// *removed* and stays silent on one that is *added* — the list is then a
     /// mirror of the code rather than a check on it, and it stays green when
-    /// a seventh function appears. This compares the set the generator
-    /// actually emitted against the set that is meant to exist, so an
-    /// undocumented addition fails as loudly as a lost entry.
+    /// a seventh function appears.
+    ///
+    /// The first fix for that compared the emitted set against a *hardcoded*
+    /// set, which is still a mirror: a binding added to the goal table with
+    /// no `__doc_entry_*` beside it changes neither side. So the expected set
+    /// is taken from [`goal_table_functions`] — the functions
+    /// `create_lua_goal` actually installs. An undocumented binding and an
+    /// unimplemented doc entry now fail from opposite directions.
     ///
     /// Only `goal.lua`: it is the file this change churns, and the other
     /// three carry longer lists that nothing here is renaming.
@@ -207,15 +245,24 @@ mod tests {
 
         let (_dir, target) = generate();
         let body = fs::read_to_string(target.join("goal.lua")).expect("goal.lua");
-        let emitted: BTreeSet<&str> = body
+        let emitted: BTreeSet<String> = body
             .lines()
             .filter_map(|line| line.strip_prefix("function goal."))
             .filter_map(|rest| rest.split('(').next())
+            .map(str::to_string)
             .collect();
-        let expected: BTreeSet<&str> = ["all", "have", "plan", "researched", "run", "start"].into();
+        let installed = goal_table_functions();
+        assert!(
+            !installed.is_empty(),
+            "the goal table installed no functions at all; this test would then \
+             assert nothing"
+        );
         assert_eq!(
-            emitted, expected,
-            "goal.lua doc entries drifted from the goal table"
+            emitted, installed,
+            "goal.lua's `__doc_entry_*` set and the functions `create_lua_goal` \
+             installs must be the same set: an entry missing from the left is an \
+             undocumented binding, one missing from the right is documentation \
+             for a function that does not exist"
         );
     }
 

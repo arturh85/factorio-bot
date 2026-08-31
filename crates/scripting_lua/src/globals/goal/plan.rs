@@ -52,12 +52,62 @@ pub(crate) struct PlanValue {
     /// The bots the plan was scheduled for, in roster order. Exposed as
     /// `plan.bots` and walked by `for_bot`.
     roster: Vec<BotId>,
-    /// Set the first time [`PlanValue::take_for_run`] succeeds. A plan may
-    /// only be run once -- running it twice would dispatch every action
-    /// against the game a second time -- and this flag is where that rule
-    /// lives, which is why the run side (`RunValue`) needs no registry of
-    /// its own to enforce it.
-    consumed: AtomicBool,
+    /// Set the first time a [`RunSlot`] is actually taken. A plan may only be
+    /// run once -- running it twice would dispatch every action against the
+    /// game a second time -- and this flag is where that rule lives, which is
+    /// why the run side (`RunValue`) needs no registry of its own to enforce
+    /// it.
+    ///
+    /// An `Arc` rather than a bare flag so [`RunSlot`] can carry the right to
+    /// set it *without* carrying a borrow of the plan's userdata. That is
+    /// what lets `goal.start` defer the flip past its `.await` on the
+    /// actuator: the reservation is made synchronously, the flip happens only
+    /// once dispatch is certain.
+    consumed: Arc<AtomicBool>,
+}
+
+/// A reservation on a plan: everything an about-to-start run needs, plus the
+/// right to consume the plan -- and nothing that borrows the plan itself.
+///
+/// It exists because "a plan may be run once" and "a plan is spent" are two
+/// different facts, and the second must only become true when a run is
+/// actually going to dispatch. `goal.start` can fail after the reservation
+/// for reasons that have nothing to do with the plan -- no `PendingWork`, no
+/// actuator (which is what *every* plan-only script hits: `create_lua_goal`'s
+/// factory refuses with "no rcon connection") -- and a plan burned by one of
+/// those answers the next `goal.start` with "already taken for a run",
+/// reporting an absent fact as a present one and hiding the real cause behind
+/// it. So [`take`](RunSlot::take) is called last, after every check that can
+/// fail has passed and the actuator is in hand.
+pub(crate) struct RunSlot {
+    net: Arc<ActionNetwork>,
+    schedule: Arc<Schedule>,
+    consumed: Arc<AtomicBool>,
+}
+
+impl RunSlot {
+    /// Consumes the plan and hands over its network and schedule.
+    ///
+    /// The check is repeated here, not merely made at reservation time: two
+    /// reservations can be outstanding at once (each `goal.start` awaits its
+    /// actuator, and a script may have several coroutines in flight), and the
+    /// `swap` is what makes exactly one of them win.
+    pub(crate) fn take(self) -> LuaResult<(Arc<ActionNetwork>, Arc<Schedule>)> {
+        if self.consumed.swap(true, Ordering::SeqCst) {
+            return Err(already_taken());
+        }
+        Ok((self.net, self.schedule))
+    }
+}
+
+/// The one refusal a spent plan gives, worded the same wherever it is raised.
+///
+/// It names no run, because a run is not a named thing here: `RunValue`
+/// carries a log, a network and a completion signal, and no identity a second
+/// caller could be pointed at. Saying "the run started at line 12" would be
+/// inventing one.
+fn already_taken() -> LuaError {
+    goal_error("plan has already been taken for a run; a plan may be executed at most once, so re-plan to retry")
 }
 
 impl PlanValue {
@@ -70,17 +120,27 @@ impl PlanValue {
             net,
             schedule,
             roster,
-            consumed: AtomicBool::new(false),
+            consumed: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// Hands the plan's network and schedule to a caller about to execute it,
-    /// refusing a second call with an error naming the reason.
-    pub(crate) fn take_for_run(&self) -> LuaResult<(Arc<ActionNetwork>, Arc<Schedule>)> {
-        if self.consumed.swap(true, Ordering::SeqCst) {
-            return Err(goal_error("plan has already been taken for a run"));
+    /// Reserves the plan for a run that is about to be attempted, cloning out
+    /// everything the attempt needs so no borrow of this userdata survives
+    /// into the attempt's future.
+    ///
+    /// Reserving does **not** consume: [`RunSlot::take`] does, and only once
+    /// dispatch is certain. An already-spent plan is refused here, before the
+    /// caller wastes an actuator on it -- so a genuinely second run still
+    /// hears "already taken", and only that case does.
+    pub(crate) fn reserve_for_run(&self) -> LuaResult<RunSlot> {
+        if self.consumed.load(Ordering::SeqCst) {
+            return Err(already_taken());
         }
-        Ok((self.net.clone(), self.schedule.clone()))
+        Ok(RunSlot {
+            net: self.net.clone(),
+            schedule: self.schedule.clone(),
+            consumed: self.consumed.clone(),
+        })
     }
 }
 
@@ -175,7 +235,6 @@ pub(crate) fn install_goal_plan(
 /// `Position` has no `IntoLua` impl of its own (only `FromLuaMulti`, for the
 /// `x, y` argument pairs elsewhere in this crate), so this is written by
 /// hand rather than reused.
-#[allow(dead_code)]
 fn position_to_lua(lua: &Lua, pos: &Position) -> LuaResult<LuaTable> {
     let t = lua.create_table()?;
     t.set("x", pos.x)?;
@@ -191,7 +250,6 @@ fn position_to_lua(lua: &Lua, pos: &Position) -> LuaResult<LuaTable> {
 /// the executor, which only needs to open the right inventory, but a Lua
 /// script asking "was this a furnace or an assembler" deserves the answer the
 /// planner itself uses to tell them apart.
-#[allow(dead_code)]
 fn slot_name(slot: InventorySlot) -> &'static str {
     match slot {
         InventorySlot::Chest => "chest",
@@ -211,7 +269,6 @@ fn slot_name(slot: InventorySlot) -> &'static str {
 /// field reachable only as `step["end"]` is a trap rather than an API. Every
 /// other field is looked up by joining `StepKind::Act`'s bare [`ActionId`]
 /// against `net`, per the table in the module doc.
-#[allow(dead_code)]
 fn step_to_lua(lua: &Lua, net: &ActionNetwork, step: &ScheduledStep) -> LuaResult<LuaTable> {
     let t = lua.create_table()?;
     t.set("bot", step.bot.0)?;
@@ -290,7 +347,6 @@ fn step_to_lua(lua: &Lua, net: &ActionNetwork, step: &ScheduledStep) -> LuaResul
 
 /// A predicate table's key, as a plain `String`. `count`/`find` predicates are
 /// always string-keyed field names, never anything else.
-#[allow(dead_code)]
 fn require_predicate_key(key: &LuaValue) -> LuaResult<String> {
     match key {
         LuaValue::String(s) => Ok(s.to_string_lossy()),
@@ -313,7 +369,6 @@ fn require_predicate_key(key: &LuaValue) -> LuaResult<String> {
 /// A step lacking a field the predicate asks about (e.g. `item` on a `walk`
 /// step) is simply not a match -- not an error -- exactly like a normal Lua
 /// table with a missing key reading `nil`.
-#[allow(dead_code)]
 fn step_matches(step: &LuaTable, predicate: &LuaTable) -> LuaResult<bool> {
     let mut matches = true;
     for pair in predicate.pairs::<LuaValue, LuaValue>() {
@@ -635,9 +690,31 @@ mod tests {
     #[test]
     fn a_plan_can_only_be_taken_for_a_run_once() {
         let plan = every_kind();
-        plan.take_for_run().expect("first");
-        let err = plan.take_for_run().expect_err("second").to_string();
+        plan.reserve_for_run()
+            .expect("first reservation")
+            .take()
+            .expect("first take");
+        let err = plan
+            .reserve_for_run()
+            .err()
+            .expect("a second reservation must be refused")
+            .to_string();
         assert!(err.contains("already"), "{err}");
+    }
+
+    /// A reservation that is never taken leaves the plan runnable.
+    ///
+    /// This is the whole reason [`RunSlot`] exists: `goal.start` reserves,
+    /// then can still fail on something that is not the plan, and the plan
+    /// must survive that untouched.
+    #[test]
+    fn a_reservation_that_is_dropped_does_not_spend_the_plan() {
+        let plan = every_kind();
+        drop(plan.reserve_for_run().expect("reservation"));
+        plan.reserve_for_run()
+            .expect("the plan is still runnable")
+            .take()
+            .expect("and can still be taken");
     }
 
     #[test]
@@ -725,6 +802,7 @@ mod tests {
             r#"
             local p = goal.plan(goal.have("iron-plate", 8), { bots = { 1, 2 } })
             assert(#p.bots == 2, "two bots asked for, got " .. #p.bots)
+            assert(#p.steps > 0, "a two-bot plan is still a plan")
             for _, s in ipairs(p.steps) do
                 assert(s.bot == 1 or s.bot == 2, "no step may land on bot " .. s.bot)
             end

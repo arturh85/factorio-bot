@@ -103,9 +103,7 @@ pub(crate) fn goal_from_lua(value: &LuaTable) -> LuaResult<Goal> {
             let item = require_item(value.get("item")?)?;
             let count = require_count(value.get("count")?)?;
             let whose = match require_bot(value.get("bot")?)? {
-                Some(bot) => Holder::Bot(BotId(u8::try_from(bot).map_err(|_| {
-                    goal_error(format!("bot {bot} does not fit a player id (0-255)"))
-                })?)),
+                Some(bot) => Holder::Bot(BotId(bot)),
                 None => Holder::Anyone,
             };
             Ok(Goal::Have { item, count, whose })
@@ -122,7 +120,7 @@ pub(crate) fn goal_from_lua(value: &LuaTable) -> LuaResult<Goal> {
             }
             Ok(Goal::All(out))
         }
-        other => Err(goal_error(format!("unknown goal kind \"{other}\""))),
+        other => Err(unknown_kind(other)),
     }
 }
 
@@ -149,7 +147,7 @@ fn render_goal(t: &LuaTable) -> LuaResult<String> {
             }
             Ok(format!("all {{ {} }}", parts.join(", ")))
         }
-        other => Err(goal_error(format!("unknown goal kind \"{other}\""))),
+        other => Err(unknown_kind(other)),
     }
 }
 
@@ -161,12 +159,37 @@ fn require_kind(t: &LuaTable) -> LuaResult<String> {
     }
 }
 
-/// A `goal.all` element: must be a table carrying a `kind`, i.e. something a
-/// constructor (or an equally careful hand-built table) produced.
+/// The three kinds a goal table may name. Fixed by this module -- no world is
+/// consulted to decide whether a `kind` is one of them, which is why an
+/// unknown one is a shape error rather than a semantic one.
+const KINDS: &[&str] = &["have", "researched", "all"];
+
+/// [`require_kind`], plus the check that it names a kind that exists.
+fn require_known_kind(t: &LuaTable) -> LuaResult<String> {
+    let kind = require_kind(t)?;
+    if !KINDS.contains(&kind.as_str()) {
+        return Err(unknown_kind(&kind));
+    }
+    Ok(kind)
+}
+
+fn unknown_kind(kind: &str) -> LuaError {
+    goal_error(format!(
+        "unknown goal kind \"{kind}\"; expected one of {}",
+        KINDS.join(", ")
+    ))
+}
+
+/// A `goal.all` element: must be a table naming a known `kind`, i.e.
+/// something a constructor (or an equally careful hand-built table) produced.
+///
+/// The kind is checked here, at construction, not deferred to `goal.plan`:
+/// `goal.all` is the one constructor that takes a caller-built table, and
+/// which kinds exist is this module's own fact, needing no world.
 fn require_goal_table(value: LuaValue) -> LuaResult<LuaTable> {
     match value {
         LuaValue::Table(t) => {
-            require_kind(&t)?;
+            require_known_kind(&t)?;
             Ok(t)
         }
         other => Err(goal_error(format!(
@@ -217,13 +240,23 @@ fn require_count(value: LuaValue) -> LuaResult<u32> {
     }
 }
 
-fn require_bot(value: LuaValue) -> LuaResult<Option<i64>> {
-    match value {
-        LuaValue::Nil => Ok(None),
-        LuaValue::Integer(n) if n >= 1 => Ok(Some(n)),
-        LuaValue::Number(n) if n >= 1.0 && n.fract() == 0.0 => Ok(Some(n as i64)),
-        _ => Err(goal_error("bot must be an integer >= 1")),
-    }
+/// A `{ bot = id }` option, as the [`BotId`] the planner uses.
+///
+/// Narrowed to `u8` here rather than at `goal.plan`, because that is what a
+/// bot id *is*: `BotId` wraps a `u8` and the number is the Factorio player
+/// id, so 300 is not a player this world happens to lack -- it is not a
+/// player id at all. That makes it a shape error, and the spec puts shape
+/// errors on the line that contains them.
+fn require_bot(value: LuaValue) -> LuaResult<Option<u8>> {
+    let n = match value {
+        LuaValue::Nil => return Ok(None),
+        LuaValue::Integer(n) if n >= 1 => n,
+        LuaValue::Number(n) if n >= 1.0 && n.fract() == 0.0 => n as i64,
+        _ => return Err(goal_error("bot must be an integer >= 1")),
+    };
+    u8::try_from(n)
+        .map(Some)
+        .map_err(|_| goal_error(format!("bot {n} is not a player id (1-255)")))
 }
 
 #[cfg(test)]
@@ -285,6 +318,14 @@ mod tests {
             (r#"goal.all({})"#, "at least one"),
             (r#"goal.all({ 42 })"#, "goal"),
             (r#"goal.have("iron-plate", 1, { bot = 0 })"#, "bot"),
+            // `BotId` is a `u8` and *is* the Factorio player id, so a bot
+            // outside 1..=255 is a shape error, not a "no such player"
+            // semantic one -- there is no world in which it could be right.
+            (r#"goal.have("iron-plate", 1, { bot = 300 })"#, "player id"),
+            // An unrecognised `kind` is a shape error too: `goal.all` is the
+            // one constructor that accepts a caller-built table, and the set
+            // of kinds is fixed by this module, not by the world.
+            (r#"goal.all({ { kind = "bogus" } })"#, "bogus"),
         ] {
             let err = lua.load(src).exec().expect_err(src).to_string();
             assert!(err.contains(want), "{src}: {err} lacks {want}");

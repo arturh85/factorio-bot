@@ -175,7 +175,16 @@ named as follow-up work below.
 
 A plan is computed against a world state. Running it again after that state has changed
 would re-issue placements and mining against a world that no longer matches. The second
-call raises, naming the first run. To retry, re-plan.
+call raises. To retry, re-plan.
+
+The error does **not** name the first run: a run value carries a log, a network and a
+completion signal, and no identity a second caller could be pointed at, so there is nothing
+truthful to name. It says the plan is spent and that a plan may be executed at most once.
+
+**Only a run that actually dispatches spends the plan.** `goal.start` can fail for reasons
+that are not the plan — no game connected, so no actuator — and those must leave the plan
+runnable, so the next attempt reports the real cause rather than a plan the previous
+attempt burned on nothing.
 
 ## Testing
 

@@ -1,7 +1,7 @@
 use crate::errors::{
-    RconError, RconNoWaterFound, RconPlayerBlockesAllPlacement, RconPlayerBlockesPlacement,
-    RconPlayerNotFound, RconRadiusLimitReached, RconTimeout, RconUnexpectedEmptyResponse,
-    RconUnexpectedOutput,
+    RconError, RconNoWaterFound, RconOutOfResourceReach, RconPlayerBlockesAllPlacement,
+    RconPlayerBlockesPlacement, RconPlayerNotFound, RconRadiusLimitReached, RconTimeout,
+    RconUnexpectedEmptyResponse, RconUnexpectedOutput, RconWalkFallsShort,
 };
 use crate::factorio::snapshot::WorldSnapshot;
 use crate::factorio::ticks::{take_tick_stamp, ActionTicks};
@@ -56,6 +56,94 @@ fn split_reply(result: &str, silent: bool) -> Option<Vec<String>> {
         info!("<cyan>rcon</>  ⮞ <green>{}</>", body);
     }
     Some(body.split('\n').map(|str| str.to_owned()).collect())
+}
+
+/// The radius Factorio's `LuaSurface.request_path` uses when none is given.
+///
+/// Documented as "how close we need to get to the goal. Default 1." The mod
+/// forwards a `nil` radius unchanged, so a caller passing `None` is asking for
+/// this, not for an exact landing.
+const DEFAULT_PATH_RADIUS: f64 = 1.0;
+
+/// How much further than the requested radius a returned path may end from the
+/// goal and still count as reaching it.
+///
+/// Factorio's pathfinder puts every waypoint on a tile centre, so a goal that
+/// is not itself a tile centre is up to `sqrt(2)/2 = 0.707` tiles from the
+/// nearest waypoint that could serve as the path's end. Rounded up to a whole
+/// tile.
+///
+/// The number is checked against the three legitimate paths of the 2026-08-30
+/// live run (`.superpowers/sdd/2026-08-30-goal-values/live-smelt-run.md`),
+/// whose endpoints landed 0.707, 1.000 and 2.828 tiles from their goals — the
+/// last with an explicit radius of 3 — while that run's silently substituted
+/// goal landed **9.30** tiles out. The tolerance separates 1.000 from 9.30
+/// with a factor of four to spare in both directions.
+const PATH_ENDPOINT_SLACK: f64 = 1.0;
+
+/// Where a walk along `waypoints` will actually leave a player who currently
+/// stands at `current`.
+///
+/// An empty path is not a failure to arrive: the pathfinder returns nothing
+/// when there is nowhere to go, and the mod completes such a walk on the next
+/// tick without moving. The honest end position in that case is where the
+/// player already is — which the caller may not know, hence the `Option`.
+fn walk_end_position<'a>(
+    waypoints: &'a [Position],
+    current: Option<&'a Position>,
+) -> Option<&'a Position> {
+    waypoints.last().or(current)
+}
+
+/// Whether a walk that ends at `end` counts as having arrived at `goal`.
+///
+/// This is the question [`FactorioRcon::player_path`] deliberately does not
+/// answer. That method is best effort: when the goal is unreachable — the
+/// classic case being a tile the bot has just built on — it retries against a
+/// synthesised goal offset away from the real one by the radius, and returns
+/// the path to *that*. The path is real and the walk along it succeeds, so
+/// every downstream signal says success while the bot stands somewhere it was
+/// never asked to be.
+///
+/// The tolerance is the radius the caller asked for plus
+/// [`PATH_ENDPOINT_SLACK`]; `None` means the caller asked for Factorio's own
+/// default of [`DEFAULT_PATH_RADIUS`], not for an exact landing.
+fn walk_arrives(goal: &Position, radius: Option<f64>, end: &Position) -> bool {
+    calculate_distance(end, goal) <= arrival_tolerance(radius)
+}
+
+/// The tolerance [`walk_arrives`] applies, exposed so a failure can report it.
+fn arrival_tolerance(radius: Option<f64>) -> f64 {
+    radius.unwrap_or(DEFAULT_PATH_RADIUS) + PATH_ENDPOINT_SLACK
+}
+
+/// Whether a player at `player` may mine a resource at `target`.
+///
+/// `reach` is the player's own `resource_reach_distance`, a `double` read from
+/// the game — 2.7 for a plain character, `f64::MAX` for a player with no
+/// character at all. It is never assumed to be 3.
+///
+/// The game enforces this bound silently: a `mining_state` aimed at a resource
+/// outside it produces no event, no error and no progress, so a dispatch from
+/// out of reach costs the whole action deadline and yields nothing.
+fn within_resource_reach(player: &Position, target: &Position, reach: f64) -> bool {
+    calculate_distance(player, target) <= reach
+}
+
+/// The radius to walk to when a mine has to close the distance first.
+///
+/// Asking for `reach` itself is what the 2026-08-30 run did, and it left the
+/// bot **3.345** tiles from the ore against a reach of 3 — outside by 0.345.
+/// "Within R of the goal" is not "within R of the goal once you stop": the
+/// path's last waypoint is on a tile centre and the mod's follower stops
+/// within a 0.3-by-0.3 box of it, so a walk to radius R comes to rest at up to
+/// roughly `R + 1.1`. Aiming at half the reach leaves room for that inside the
+/// bound the game enforces.
+///
+/// Floored at half a tile so the goal never collapses onto the resource's own
+/// tile, which is the request shape that makes the pathfinder fail outright.
+fn mine_walk_radius(reach: f64) -> f64 {
+    (reach * 0.5).clamp(0.5, reach.max(0.5))
 }
 
 /// How far a dispatch got before it failed.
@@ -792,6 +880,27 @@ impl FactorioRcon {
     /// [`FactorioRcon::move_player`], reporting the game ticks it was observed
     /// at: the tick the game accepted the waypoints, and the tick it reported
     /// the walk finished at.
+    ///
+    /// # A walk that cannot arrive is refused rather than walked
+    ///
+    /// [`FactorioRcon::player_path`] is best effort: when the goal itself is
+    /// unreachable it retries against a *synthesised* goal offset away from the
+    /// real one by the radius, and returns the path to that. The walk along
+    /// such a path completes normally, so every signal downstream — the mod's
+    /// `action_completed`, the actuator, the execution log — says success while
+    /// the bot stands somewhere it was never asked to be. In the 2026-08-30
+    /// live run that was 9.30 tiles out, because the goal was the tile the bot
+    /// had just put a furnace on, and nothing downstream could tell.
+    ///
+    /// So the path is checked against the goal the *caller* asked for, before
+    /// anything is dispatched, and a path that does not reach it is
+    /// [`Dispatch::NotDispatched`] with [`RconWalkFallsShort`]. That is the
+    /// honest classification and it uses no new signal: the walk genuinely did
+    /// not happen, nothing is outstanding, and the executor renders it
+    /// `Failed` rather than `Lost`. Checking here rather than inside
+    /// `player_path` keeps that method usable as the "get near" primitive its
+    /// other callers want, and checking *before* the dispatch means the bot is
+    /// not marched across the map for nothing.
     pub async fn move_player_timed(
         &self,
         world: &Arc<FactorioWorld>,
@@ -811,6 +920,27 @@ impl FactorioRcon {
         // outstanding. That is the case a timeout alone cannot tell from the
         // one below.
         let waypoints = self.player_path(world, player_id, goal, radius).await?;
+
+        // The arrival check. `player_path` may have substituted the goal, so
+        // the path is judged against what the caller asked for. An unknown
+        // player position with an empty path leaves nothing to judge, and an
+        // unjudgeable walk is dispatched rather than refused on a guess.
+        let here = world.players.get(&player_id).map(|p| p.position.clone());
+        if let Some(end) = walk_end_position(&waypoints, here.as_ref()) {
+            if !walk_arrives(goal, radius, end) {
+                return Err(ActionFailure::not_dispatched(
+                    RconWalkFallsShort {
+                        goal_x: goal.x(),
+                        goal_y: goal.y(),
+                        end_x: end.x(),
+                        end_y: end.y(),
+                        shortfall: calculate_distance(end, goal),
+                        tolerance: arrival_tolerance(radius),
+                    }
+                    .into(),
+                ));
+            }
+        }
 
         let dispatched = self
             .action_start_walk_waypoints(action_id, player_id, waypoints)
@@ -840,6 +970,25 @@ impl FactorioRcon {
     /// the *mining* action's own -- the walk is a separate dispatch with
     /// separate ticks, and folding the two together would make the mine look
     /// like it started when the bot set off.
+    ///
+    /// # The reach is re-checked after that walk, and the mine is refused if it
+    /// still is not met
+    ///
+    /// The game enforces `resource_reach_distance` **silently**: a
+    /// `mining_state` aimed at a resource outside it produces no event, no
+    /// error and no progress. In the 2026-08-30 live run the corrective walk
+    /// left the bot 3.345 tiles from the ore against a reach of 3, the mine was
+    /// dispatched regardless, and the action sat unanswered for 21,400 ticks
+    /// until the 360-second deadline declared it lost.
+    ///
+    /// "Within `radius` of the goal" is not "within `radius` of the goal once
+    /// you stop" — the path's last waypoint is on a tile centre and the mod's
+    /// follower halts within a 0.3-by-0.3 box of it — so the walk now aims at
+    /// [`mine_walk_radius`], comfortably inside the reach, and where it
+    /// actually ended is re-measured afterwards. Falling short is
+    /// [`Dispatch::NotDispatched`] with [`RconOutOfResourceReach`]: nothing was
+    /// sent, so nothing is outstanding, and a six-minute silence becomes an
+    /// immediate refusal the executor can retry.
     pub async fn player_mine_timed(
         &self,
         world: &Arc<FactorioWorld>,
@@ -859,13 +1008,40 @@ impl FactorioRcon {
         let action_id: ActionId = *next_action_id;
         *next_action_id = (*next_action_id + 1) % 1000;
         drop(next_action_id);
+        // The reach is the value the game reported for this player -- 2.7 for a
+        // plain character, `f64::MAX` for one without a character. Never 3.
         let resource_reach_distance = player.resource_reach_distance;
-        let distance = calculate_distance(&player.position, position);
+        let here = player.position.clone();
         drop(player); // wow, without this factorio (?) freezes (!)
-        if distance > resource_reach_distance {
+        if !within_resource_reach(&here, position, resource_reach_distance) {
             warn!("too far away, moving first!");
-            self.move_player(world, player_id, position, Some(resource_reach_distance))
-                .await?;
+            self.move_player(
+                world,
+                player_id,
+                position,
+                Some(mine_walk_radius(resource_reach_distance)),
+            )
+            .await?;
+            // Where the walk *ended*, not where it was aimed. The two differ by
+            // about a tile, and that difference is the whole of this fault.
+            let landed = world
+                .players
+                .get(&player_id)
+                .map(|p| p.position.clone())
+                .ok_or_else(|| {
+                    ActionFailure::not_dispatched(RconPlayerNotFound { player_id }.into())
+                })?;
+            if !within_resource_reach(&landed, position, resource_reach_distance) {
+                return Err(ActionFailure::not_dispatched(
+                    RconOutOfResourceReach {
+                        target_x: position.x(),
+                        target_y: position.y(),
+                        distance: calculate_distance(&landed, position),
+                        reach: resource_reach_distance,
+                    }
+                    .into(),
+                ));
+            }
         }
         // The walk a mine may make first is a *different* dispatch with its own
         // action id, so a failure in it leaves this mine un-dispatched -- which
@@ -2217,6 +2393,218 @@ mod dispatch_evidence_tests {
             failure.dispatch,
             Dispatch::Refused,
             "the game gave a verdict; nothing is outstanding"
+        );
+    }
+}
+
+/// Positioning: what a walk and a mine are allowed to claim.
+///
+/// Every number in here is a measurement from the live
+/// `goal.have("iron-plate", 10)` run recorded in
+/// `.superpowers/sdd/2026-08-30-goal-values/live-smelt-run.md`, read off the
+/// mod's own `on_script_path_request_finished` and
+/// `on_player_changed_position` writeouts. Both faults and both non-faults of
+/// that run are here, so each guard is pinned from both sides by the same
+/// afternoon's evidence rather than by invented geometry.
+#[cfg(test)]
+mod positioning_tests {
+    use super::*;
+
+    /// Walk s0 of the run. Goal `(-21, 37)`, no radius; the pathfinder's answer
+    /// ended at `(-20.5, 37.5)`, 0.707 tiles away, and the bot really did
+    /// arrive. **The direction that must keep working:** a tile-centre
+    /// endpoint beside a non-tile-centre goal is arrival, not a shortfall.
+    #[test]
+    fn a_path_that_ends_beside_the_goal_has_arrived() {
+        let goal = Position::new(-21.0, 37.0);
+        let end = Position::new(-20.5, 37.5);
+        assert!(
+            walk_arrives(&goal, None, &end),
+            "0.707 tiles is the tile-centre quantisation of the goal, not a failure to arrive"
+        );
+    }
+
+    /// Walk s2 of the run, the widest legitimate endpoint with no radius:
+    /// goal `(-71.5, -36.5)`, path ended at `(-70.5, -36.5)`, exactly 1.0 tiles
+    /// away — Factorio's own default radius. It must not be rejected.
+    #[test]
+    fn a_path_that_stops_at_factorios_default_radius_has_arrived() {
+        assert!(
+            walk_arrives(
+                &Position::new(-71.5, -36.5),
+                None,
+                &Position::new(-70.5, -36.5)
+            ),
+            "`None` asks for request_path's default radius of 1, so ending 1.0 away is arrival"
+        );
+    }
+
+    /// The mine's pre-walk: goal `(-22.5, 36.5)` with an explicit radius of 3,
+    /// path ended at `(-24.5, 34.5)`, 2.828 tiles away — inside the radius that
+    /// was asked for. A radius the caller supplied must widen the tolerance.
+    #[test]
+    fn an_explicit_radius_widens_what_counts_as_arrival() {
+        let goal = Position::new(-22.5, 36.5);
+        let end = Position::new(-24.5, 34.5);
+        assert!(
+            walk_arrives(&goal, Some(3.0), &end),
+            "2.828 is inside the radius of 3 the caller asked for"
+        );
+        assert!(
+            !walk_arrives(&goal, None, &end),
+            "the very same endpoint is a shortfall when the caller asked for the default radius"
+        );
+    }
+
+    /// **Fault 1, the direction that used to lie.** Walk s4 asked for
+    /// `(-21, 37)` — the tile the bot's own furnace had just been placed on.
+    /// The pathfinder answered `Error: failed to path find`, `player_path`
+    /// silently retried against a goal offset by 10 tiles, and the path it
+    /// returned ends at `(-26.5, 29.5)`: **9.30 tiles** from where the plan put
+    /// the bot. That walk was reported as a success.
+    #[test]
+    fn the_substituted_goal_of_the_live_run_is_not_an_arrival() {
+        let goal = Position::new(-21.0, 37.0);
+        let end = Position::new(-26.5, 29.5);
+        assert!(
+            (calculate_distance(&end, &goal) - 9.3).abs() < 0.01,
+            "the run's own numbers: 9.30 tiles short"
+        );
+        assert!(
+            !walk_arrives(&goal, None, &end),
+            "a path to a synthesised goal 10 tiles away is not a path to the goal"
+        );
+    }
+
+    /// An empty path is not a shortfall. The pathfinder returns nothing when
+    /// there is nowhere to go and the mod completes such a walk on the next
+    /// tick without moving, so the honest end position is where the player
+    /// already stands.
+    #[test]
+    fn an_empty_path_ends_where_the_player_already_is() {
+        let here = Position::new(3.0, 4.0);
+        assert_eq!(walk_end_position(&[], Some(&here)), Some(&here));
+        assert!(walk_arrives(&Position::new(3.2, 4.1), None, &here));
+        assert!(!walk_arrives(&Position::new(30.0, 40.0), None, &here));
+        assert_eq!(
+            walk_end_position(&[], None),
+            None,
+            "with no waypoints and no known position there is nothing to check against"
+        );
+    }
+
+    /// The last waypoint is the end of the walk, not the first or the nearest.
+    #[test]
+    fn the_end_of_a_path_is_its_last_waypoint() {
+        let path = vec![
+            Position::new(0.0, 0.0),
+            Position::new(5.5, 5.5),
+            Position::new(-20.5, 37.5),
+        ];
+        let here = Position::new(0.0, 0.0);
+        assert_eq!(
+            walk_end_position(&path, Some(&here)),
+            Some(&Position::new(-20.5, 37.5)),
+            "a known path overrides the player's current position"
+        );
+    }
+
+    /// **Fault 2, the direction that used to hang.** After its one corrective
+    /// walk the bot came to rest at `(-24.902344, 34.171875)` with the ore at
+    /// `(-22.5, 36.5)`: 3.345 tiles, against a `resource_reach_distance` of 3.
+    /// The mine was dispatched anyway and the game refused it silently for
+    /// 21,400 ticks.
+    #[test]
+    fn the_live_runs_mine_was_dispatched_from_outside_reach() {
+        let player = Position::new(-24.90234375, 34.171875);
+        let ore = Position::new(-22.5, 36.5);
+        assert!(
+            (calculate_distance(&player, &ore) - 3.345).abs() < 0.001,
+            "the run's own numbers: 3.345 tiles"
+        );
+        assert!(
+            !within_resource_reach(&player, &ore, 3.0),
+            "0.345 tiles outside the reach the mod reported"
+        );
+        assert!(
+            !within_resource_reach(&player, &ore, 2.7),
+            "and 0.645 outside the 2.7 a real character actually has"
+        );
+    }
+
+    /// **The direction that must keep working.** The run's *other* mine — one
+    /// coal at `(-71.5, -36.5)`, dispatched with the bot at
+    /// `(-70.222656, -36.277344)`, 1.297 tiles away — succeeded in the game and
+    /// must still be dispatched. Without this half the fix is just "never
+    /// mine".
+    #[test]
+    fn the_live_runs_successful_mine_is_still_within_reach() {
+        let player = Position::new(-70.22265625, -36.27734375);
+        let coal = Position::new(-71.5, -36.5);
+        assert!(
+            (calculate_distance(&player, &coal) - 1.297).abs() < 0.001,
+            "the run's own numbers: 1.297 tiles"
+        );
+        assert!(
+            within_resource_reach(&player, &coal, 3.0),
+            "this mine ran and returned one coal; it must still be dispatched"
+        );
+        assert!(
+            within_resource_reach(&player, &coal, 2.7),
+            "and it is inside a real character's 2.7 as well"
+        );
+    }
+
+    /// The reach is whatever the game says it is — never a hard-coded 3. A
+    /// player with no character reports `f64::MAX`, and nothing is out of that
+    /// player's reach.
+    #[test]
+    fn reach_is_read_from_the_player_and_not_assumed() {
+        let player = Position::new(0.0, 0.0);
+        let far = Position::new(1_000.0, 1_000.0);
+        assert!(!within_resource_reach(&player, &far, 3.0));
+        assert!(
+            within_resource_reach(&player, &far, f64::MAX),
+            "a player with no character has unbounded resource reach"
+        );
+        // The boundary itself is inclusive: the game's check is `<=`.
+        assert!(within_resource_reach(
+            &player,
+            &Position::new(2.7, 0.0),
+            2.7
+        ));
+        assert!(!within_resource_reach(
+            &player,
+            &Position::new(2.7001, 0.0),
+            2.7
+        ));
+    }
+
+    /// A mine's corrective walk must aim comfortably *inside* the reach, since
+    /// where a walk is aimed and where it comes to rest differ by roughly a
+    /// tile. Aiming at the reach itself is what put the run 0.345 outside it.
+    #[test]
+    fn a_mines_corrective_walk_aims_inside_the_reach() {
+        for reach in [2.7_f64, 3.0, 4.0, 10.0] {
+            let radius = mine_walk_radius(reach);
+            assert!(
+                radius < reach,
+                "aiming at the reach itself is the fault; got {radius} for reach {reach}"
+            );
+            assert!(
+                radius + 1.2 <= reach || reach < 2.4,
+                "the walk must leave room for the ~1.1 tiles between a path's end and \
+                 where the follower stops; got {radius} for reach {reach}"
+            );
+        }
+        assert!(
+            mine_walk_radius(0.1) >= 0.5,
+            "a radius that collapses onto the resource's own tile is the request shape \
+             that makes the pathfinder fail outright"
+        );
+        assert!(
+            mine_walk_radius(f64::MAX).is_finite(),
+            "an uncharactered player's unbounded reach must not become an infinite radius"
         );
     }
 }

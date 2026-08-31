@@ -691,9 +691,21 @@ function on_tick(event)
 				local ent = storage.p[idx].mining.entity
 
 				if ent and ent.valid then -- mining complete
-					if distance(player.position, ent.position) > 6 then
+					-- The bound the *game* enforces is resource_reach_distance, and it
+					-- enforces it silently: mining_state aimed past it produces no event,
+					-- no error and no progress. This guard used to be a flat `> 6`, which
+					-- is looser than the ~2.7 a character actually has, so a request the
+					-- game would refuse was accepted here and then hung until the caller's
+					-- 360s deadline. Guarding with the real value turns that silence into
+					-- an immediate, readable rejection.
+					--
+					-- It also has to *stop*: the old branch reported the failure and then
+					-- fell straight through into setting mining_state anyway, so the same
+					-- action could be reported failed and later completed.
+					if distance(player.position, ent.position) > player.resource_reach_distance then
 						action_failed(event.tick, storage.p[idx].mining.action_id, "ERROR: too far too mine")
-					end
+						storage.p[idx].mining = nil
+					else
 
 					-- unfortunately, factorio doesn't offer a "select this entity" function
 					-- we need to select stuff depending on the cursor position, which *might*
@@ -715,6 +727,8 @@ function on_tick(event)
 						end
 					else
 						player.mining_state = { mining=true, position=ent.position }
+					end
+
 					end
 				else
 					-- the entity to be mined has been deleted, but p[idx].mining is still true.
@@ -1244,7 +1258,13 @@ function on_player_changed_distance(event)
 			drop_item_distance = player.drop_item_distance,
 			item_pickup_distance = to_i64(math.ceil(player.item_pickup_distance)),
 			loot_pickup_distance = to_i64(math.ceil(player.loot_pickup_distance)),
-			resource_reach_distance = to_i64(math.ceil(player.resource_reach_distance)),
+			-- NOT ceiled. This is the bound the caller checks a mine against, and
+			-- rounding it *up* is the direction that makes the check pass a request
+			-- the game will refuse: a character's real 2.7 was reported as 3, so a
+			-- bot 2.9 tiles from an ore looked in reach and mined nothing. The Rust
+			-- side has taken this as a `double` since 4651d609; the two ceiled
+			-- neighbours above are unused and left alone.
+			resource_reach_distance = to_i64(player.resource_reach_distance),
 		}))
 	end
 end

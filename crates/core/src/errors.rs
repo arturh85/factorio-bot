@@ -177,3 +177,47 @@ pub struct RconNoPathFound {}
 pub struct RectInvalid {
     pub invalid_input: String,
 }
+
+/// A walk was asked to end at a position no path could reach.
+///
+/// Raised *before* any walk is dispatched, by `FactorioRcon::move_player_timed`,
+/// when the best path the pathfinder produced ends further from the requested
+/// goal than the requested radius allows. It exists because
+/// `FactorioRcon::player_path` is a best-effort primitive: when the goal itself
+/// is unreachable it retries against a synthesised goal offset away from the
+/// real one, and the caller must not read the resulting path as evidence that
+/// the bot will end up where it asked to be.
+#[derive(Error, Debug, Diagnostic)]
+#[error("no path to [{goal_x}, {goal_y}] — the best one found ends [{shortfall:.3}] tiles away at [{end_x}, {end_y}], outside the [{tolerance:.3}] tile arrival tolerance")]
+#[diagnostic(
+    code(factorio::rcon::walk_falls_short),
+    help("the goal is very likely blocked — a tile the bot itself built on is the usual cause; pick a standing position beside the target instead of on it")
+)]
+pub struct RconWalkFallsShort {
+    pub goal_x: f64,
+    pub goal_y: f64,
+    pub end_x: f64,
+    pub end_y: f64,
+    pub shortfall: f64,
+    pub tolerance: f64,
+}
+
+/// A mine was about to be dispatched from outside the player's resource reach.
+///
+/// Raised *before* any mining command is sent, by
+/// `FactorioRcon::player_mine_timed`, after the walk it makes first has
+/// finished and left the bot still too far away. The game silently refuses to
+/// mine a resource outside `resource_reach_distance` — no event, no error — so
+/// dispatching anyway costs the whole action deadline in silence.
+#[derive(Error, Debug, Diagnostic)]
+#[error("still [{distance:.3}] tiles from [{target_x}, {target_y}] after walking, outside the [{reach:.3}] tile resource reach")]
+#[diagnostic(
+    code(factorio::rcon::out_of_resource_reach),
+    help("the game refuses such a mine silently, so it is rejected here instead; retry, or plan a standing position closer to the resource")
+)]
+pub struct RconOutOfResourceReach {
+    pub target_x: f64,
+    pub target_y: f64,
+    pub distance: f64,
+    pub reach: f64,
+}

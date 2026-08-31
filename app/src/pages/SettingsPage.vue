@@ -1,10 +1,8 @@
 <script setup lang="ts">
 import {computed, watch, ref} from 'vue';
 import {useAppStore} from '@/store/appStore';
-import {open} from '@tauri-apps/plugin-dialog'
 import InputText from 'primevue/inputtext';
 import Slider from 'primevue/slider';
-import Button from 'primevue/button';
 import Checkbox from 'primevue/checkbox';
 
 const appStore = useAppStore();
@@ -73,75 +71,46 @@ const seed = computed({
   }
 })
 
-async function selectWorkspacePath() {
-  if (!appStore.settings) {
-    throw new Error('missing settings')
-  }
-  const newPath = await open({
-    defaultPath: isWorkspacePathValid.value ? appStore.settings.factorio.workspace_path : undefined,
-    directory: true,
-    multiple: false
-  })
-  if (newPath) {
-    await appStore.updateWorkspacePath(newPath as string)
-  }
-}
-
-async function selectFactorioArchivePath() {
-  if (!appStore.settings) {
-    throw new Error('missing settings')
-  }
-  const newPath = await open({
-    defaultPath: isFactorioArchivePathValid.value ? appStore.settings.factorio.factorio_archive_path : undefined,
-    directory: false,
-    multiple: false
-  })
-  if (newPath) {
-    await appStore.updateFactorioArchivePath(newPath as string)
-  }
-}
-
-async function testIsWorkspacePathValid(path: string) {
-  if (await appStore.fileExists(path)) {
-    // try {
-    //   await readDir(path)
-    //   return true
-    // } catch (err) {
-    //   console.error('testIsWorkspacePathValid failed for', path, 'because of:', err)
-    //   return false
-    // }
-    return true
-  } else {
-    console.error('testIsWorkspacePathValid failed for', path, 'because it does not exist')
-    return false
-  }
-}
-
-async function testIsFactorioArchivePathValid(path: string): Promise<boolean> {
-  return await appStore.fileExists(path) as boolean
+/**
+ * Both configured paths name the *server's* filesystem, so only the server can
+ * say whether they exist.
+ *
+ * This is why the two "Select" buttons are gone rather than ported. They
+ * opened a Tauri native picker, which browses the machine the *UI* runs on --
+ * already the wrong disk whenever the server was remote, and not something a
+ * browser can do at all: a file input hands back a `File`, never a path. A
+ * text field checked against `GET /api/v1/fs/exists` is the honest
+ * replacement.
+ *
+ * An empty path is reported invalid, not skipped: "" is not a directory on the
+ * server either, and the field is only rendered once settings have loaded.
+ */
+async function existsOnServer(path: string | null): Promise<boolean> {
+  return path ? appStore.fileExists(path) : false
 }
 
 const isWorkspacePathValid = ref(true)
 const isFactorioArchivePathValid = ref(true)
-// The port field no longer shows an "already in use" invalid state: the check
-// behind it was a Tauri `is_port_available` call, and a browser cannot probe
-// the server host's ports. The port is persisted only and is bound at the next
-// `factorio-bot serve`, which is where a clash would surface.
 
-if (appStore.settings) {
-  watch(() => appStore.getWorkspacePath, async () => {
-    if (appStore.settings) {
-      isWorkspacePathValid.value = await testIsWorkspacePathValid(appStore.settings.factorio.workspace_path)
-    }
-  })
-  watch(() => appStore.getFactorioArchivePath, async () => {
-    if (appStore.settings) {
-      isFactorioArchivePathValid.value = await testIsFactorioArchivePathValid(appStore.settings.factorio.factorio_archive_path)
-    }
-  })
-  testIsWorkspacePathValid(appStore.settings.factorio.workspace_path).then(valid => isWorkspacePathValid.value = valid)
-  testIsFactorioArchivePathValid(appStore.settings.factorio.factorio_archive_path).then(valid => isFactorioArchivePathValid.value = valid)
-}
+// The port field no longer shows an "already in use" invalid state. The check
+// behind it was Tauri's `is_port_available`, an in-process probe of the host
+// the UI ran on; a browser cannot probe the server's ports, and there is no
+// HTTP route that could stand in. Adding one would not restore the guarantee
+// either -- the server binds the port at the next `factorio-bot serve`, so a
+// port free at check time can be taken by then. A clash therefore surfaces at
+// that start, and the field is persisted validation-free.
+
+// Registered unconditionally and with `immediate`. Guarding this on
+// `appStore.settings` -- which is null on the first render whenever the page
+// is opened directly, since `App.vue` loads settings asynchronously -- left
+// the watchers unregistered for the life of the component, so neither field
+// was ever validated.
+watch(() => appStore.getWorkspacePath, async (path) => {
+  isWorkspacePathValid.value = await existsOnServer(path)
+}, {immediate: true})
+watch(() => appStore.getFactorioArchivePath, async (path) => {
+  isFactorioArchivePathValid.value = await existsOnServer(path)
+}, {immediate: true})
 
 // `openInBrowser` is gone with the rest of the Tauri surface. The links below
 // are plain anchors now -- a page that is already in a browser does not need a
@@ -165,10 +134,10 @@ const settings = computed(() => appStore.getSettings)
         </h5>
         <div class="p-formgrid p-grid">
           <div class="p-field p-col">
-            <div class="p-inputgroup">
-              <InputText v-model="factorioArchivePath" :class="isFactorioArchivePathValid ? '' : 'p-invalid'"/>
-              <Button label="Select" @click="selectFactorioArchivePath()"/>
-            </div>
+            <InputText v-model="factorioArchivePath" :class="isFactorioArchivePathValid ? '' : 'p-invalid'"/>
+            <small v-if="!isFactorioArchivePathValid" class="p-error">
+              no such file on the server
+            </small>
           </div>
         </div>
       </div>
@@ -198,9 +167,17 @@ const settings = computed(() => appStore.getSettings)
         persisted only and takes effect on the next `factorio-bot serve`.
       -->
       <div class="card p-fluid">
+        <!--
+          Relative, not `http://localhost:<the port field>`. This page was
+          served by the API, so same-origin is right by construction, whereas
+          the old absolute URL was wrong twice over a remote server: `localhost`
+          named the viewer's machine, and the port came from an input the user
+          may have just edited without restarting anything.
+        -->
         <h5>REST API
-          <a :href="'http://localhost:' + restapiPort + '/swagger-ui/'"
-             target="_blank" rel="noopener noreferrer">{{ 'swagger-ui' }}</a>
+          <a href="/swagger-ui/" target="_blank" rel="noopener noreferrer">swagger-ui</a>
+          &middot;
+          <a href="/openapi.json" target="_blank" rel="noopener noreferrer">openapi.json</a>
         </h5>
         <div class="p-formgrid p-grid">
           <div class="p-field p-col">
@@ -245,10 +222,10 @@ const settings = computed(() => appStore.getSettings)
         <h5>Workspace Folder</h5>
         <div class="p-formgrid p-grid">
           <div class="p-field p-col">
-            <div class="p-inputgroup">
-              <InputText v-model="workspacePath" :class="isWorkspacePathValid ? '' : 'p-invalid'"/>
-              <Button label="Select" @click="selectWorkspacePath()"/>
-            </div>
+            <InputText v-model="workspacePath" :class="isWorkspacePathValid ? '' : 'p-invalid'"/>
+            <small v-if="!isWorkspacePathValid" class="p-error">
+              no such directory on the server
+            </small>
           </div>
         </div>
       </div>

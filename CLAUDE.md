@@ -307,6 +307,12 @@ timeout 180 target/release/factorio-bot lua multi_client_test.lua -c 2
 - **macOS GUI processes**: Clients must use `Stdio::null()` for stdin/stdout/stderr, otherwise GUI windows fail to render.
 - **Lock file conflicts**: Server and clients each need separate `--config` paths pointing to instance-specific `config.ini` files.
 - **JSON parsing**: BotBridge's `helpers.table_to_json({})` returns `"{}"` for empty tables, not `"[]"`. The Rust RCON client handles both cases.
+- **A graphical client needs the GPU driver path first.** The dev shell's
+  `LD_LIBRARY_PATH` masks `NIX_LD_LIBRARY_PATH`, so SDL finds no video device
+  and the client dies with `No available video device` — even with a working
+  display. Put `/run/opengl-driver/lib` ahead of it. This has cost several
+  sessions an hour each, every time diagnosed as "no display" when the display
+  was fine.
 - **Do not debug the mod with `rcon.print`**: its output lands in the RCON
   reply body, and the executor reads that reply as the action's result — so a
   debug line turns a successful action into a reported failure. Use

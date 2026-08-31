@@ -47,6 +47,22 @@ use std::sync::Arc;
 #[derive(Default, Clone)]
 pub struct PendingWork(Arc<Mutex<Vec<JoinHandle<()>>>>);
 
+/// The run's [`OutputSink`], published into the Lua state's app data so a
+/// binding below the Lua seam can reach it.
+///
+/// The same seam [`PendingWork`] uses, for the same reason: `create_lua_goal`
+/// is given a world, an actuator factory and a bot roster, and threading a
+/// sink through it as a fifth argument would put the sink in the signature of
+/// every binding that has nothing to do with output.
+///
+/// Unlike `PendingWork`, **absence is an ordinary state, not an error**. A
+/// missing `PendingWork` means a run could be silently killed, so `goal.start`
+/// refuses; a missing sink means only that nobody is listening — every
+/// `run_lua(.., None)` caller, the CLI included, is in exactly that position.
+/// A run with no sink emits no replay and is otherwise identical.
+#[derive(Clone)]
+pub struct ReplaySink(pub Arc<dyn OutputSink>);
+
 impl PendingWork {
     /// Registers a spawned task the run must outlive.
     pub fn register(&self, handle: JoinHandle<()>) {
@@ -146,6 +162,12 @@ pub async fn run_lua(
             // The seam bindings opt into. Set before the chunk runs so a binding
             // called from the very first line can already reach it.
             lua.set_app_data(pending.clone());
+            // The same seam for the replay sink. Only when there is one: a
+            // `None` sink must leave no app data behind, so `goal.start` reads
+            // an honest absence rather than a wrapper around nothing.
+            if let Some(sink) = sink.clone() {
+                lua.set_app_data(ReplaySink(sink));
+            }
             let _code_by_path = code_by_path.clone();
             let setup = (|| -> LuaResult<()> {
                 let world = create_lua_world(
@@ -181,6 +203,8 @@ pub async fn run_lua(
                 }
                 #[cfg(test)]
                 install_unawaited_work_probe(&lua, &globals, test_pending, test_root)?;
+                #[cfg(test)]
+                install_replay_sink_probe(&lua, &globals)?;
                 Ok(())
             })();
             let to_report = |err: LuaError| {
@@ -256,6 +280,32 @@ pub async fn run_lua(
 /// `register = false` is the negative control: the same task, not registered,
 /// must be *lost*. Without it a passing positive test would not distinguish
 /// "the drain waited" from "the task happened to finish first".
+/// Reaches the [`ReplaySink`] the way `goal.start` reaches it — out of the
+/// Lua state's app data — and forwards a string to it, answering whether one
+/// was there.
+///
+/// This is the only way to test the seam from *inside* a real `run_lua`. A
+/// replay comes from a run, and a run cannot be started here: `run_lua` builds
+/// its actuator from an rcon connection these tests do not have, so
+/// `goal.start` is unreachable and the wiring `run_lua` is responsible for —
+/// publishing its sink where a binding can find it — would otherwise be
+/// covered only by tests that set the app data themselves and so could not
+/// notice `run_lua` failing to.
+#[cfg(test)]
+fn install_replay_sink_probe(lua: &Lua, globals: &LuaTable) -> LuaResult<()> {
+    let probe =
+        lua.create_function(
+            |lua: &Lua, json: String| match lua.app_data_ref::<ReplaySink>() {
+                Some(sink) => {
+                    sink.0.replay(&json);
+                    Ok(true)
+                }
+                None => Ok(false),
+            },
+        )?;
+    globals.set("__replay_sink_probe", probe)
+}
+
 #[cfg(test)]
 fn install_unawaited_work_probe(
     lua: &Lua,
@@ -290,8 +340,15 @@ fn install_unawaited_work_probe(
     Ok(())
 }
 
+/// `pub(crate)`: [`RecordingSink`] is the one [`OutputSink`] implementation
+/// this crate owns, and `globals::goal::run`'s tests drive it too — a run is
+/// the only thing that produces a replay, and a run cannot be started from
+/// here (`run_lua` builds its actuator from an rcon connection these tests do
+/// not have). Sharing the one implementation is the point: a second recorder
+/// written next to the run tests could record a `replay` call the real
+/// implementer never grew.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use factorio_bot_core::factorio::rcon::FactorioRcon;
     use factorio_bot_core::serde_json::json;
     use factorio_bot_core::test_utils::fixture_world;
@@ -876,13 +933,24 @@ mod tests {
     /// captured the server's own logging, could not attribute a line to a job,
     /// and yielded nothing until the run was over.
     #[derive(Default)]
-    struct RecordingSink {
-        lines: Mutex<Vec<(Stream, String)>>,
+    pub(crate) struct RecordingSink {
+        pub(crate) lines: Mutex<Vec<(Stream, String)>>,
+        /// Every string handed to [`OutputSink::replay`], verbatim.
+        ///
+        /// Kept as the raw JSON rather than parsed on arrival: what a
+        /// consumer receives is the text, and a recorder that deserialised
+        /// would hide a document whose serialisation is wrong from the tests
+        /// that exist to catch exactly that.
+        pub(crate) replays: Mutex<Vec<String>>,
     }
 
     impl OutputSink for RecordingSink {
         fn line(&self, stream: Stream, text: &str) {
             self.lines.lock().push((stream, text.to_owned()));
+        }
+
+        fn replay(&self, json: &str) {
+            self.replays.lock().push(json.to_owned());
         }
     }
 
@@ -949,6 +1017,66 @@ mod tests {
         );
         assert_eq!(stdout, "out\nWARN: careful\n", "stdout transcript");
         assert_eq!(stderr, "ERROR: bad\n", "stderr transcript");
+    }
+
+    /// `run_lua` must publish its sink where a binding below the Lua seam can
+    /// reach it, and what reaches the sink must be the string, byte for byte.
+    ///
+    /// The probe stands in for `goal.start`, which cannot run here — see
+    /// [`install_replay_sink_probe`]. What it proves is the half `goal::run`'s
+    /// own tests cannot: they install a `ReplaySink` themselves, so they would
+    /// pass unchanged against a `run_lua` that published none.
+    #[tokio::test]
+    async fn a_sink_given_to_run_lua_is_reachable_as_app_data_and_gets_the_string_verbatim() {
+        let sink = Arc::new(RecordingSink::default());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let world = Arc::new(fixture_world());
+        let mut planner = Planner::new(world, None);
+        // Quoted, braced and non-ASCII: a document is JSON, and a transport
+        // that re-encoded or truncated it would show up here.
+        let payload = r#"{"planned_makespan":250,"steps":[],"note":"a\"b — ü"}"#;
+        run_lua(
+            &mut planner,
+            &format!("result = __replay_sink_probe({payload:?})"),
+            None,
+            &root,
+            1,
+            Some(sink.clone()),
+        )
+        .await
+        .expect("run_lua failed");
+
+        assert_eq!(
+            sink.replays.lock().clone(),
+            vec![payload.to_owned()],
+            "the sink must receive exactly the string it was handed"
+        );
+    }
+
+    /// The negative control. Without it the test above cannot tell "the sink
+    /// was published" from "the probe found some sink".
+    #[tokio::test]
+    async fn a_run_lua_with_no_sink_publishes_no_replay_sink_at_all() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let world = Arc::new(fixture_world());
+        let mut planner = Planner::new(world, None);
+        let (result, _) = run_lua(
+            &mut planner,
+            "result = __replay_sink_probe(\"{}\")",
+            None,
+            &root,
+            1,
+            None,
+        )
+        .await
+        .expect("run_lua failed");
+        assert_eq!(
+            result,
+            Some(json!(false)),
+            "no sink means no app data, not a wrapper around nothing"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

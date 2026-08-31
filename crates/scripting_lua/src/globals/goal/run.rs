@@ -14,11 +14,12 @@
 
 use super::plan::{position_to_lua, PlanValue, RunSlot};
 use super::{goal_error, lock, ActuatorFactory};
-use crate::lua_runner::PendingWork;
+use crate::lua_runner::{PendingWork, ReplaySink};
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::tokio::sync::watch;
-use factorio_bot_executor::{run_into, Actuator, ExecutionLog, Status};
+use factorio_bot_executor::{run_into, Actuator, ExecutionLog, Replay, Status};
 use factorio_bot_planner::{ActionNetwork, Schedule};
+use factorio_bot_scripting::OutputSink;
 use std::sync::{Arc, Mutex};
 
 /// One failed action, exactly as `goal.run`/`:wait()` last observed it.
@@ -308,6 +309,70 @@ impl LuaUserData for RunValue {
     }
 }
 
+/// Hands this run's [`Replay`] to `sink`, serialised, exactly once.
+///
+/// # When, and why there
+///
+/// From the run's **own task**, as it ends, before the completion signal is
+/// published. Three consequences, each of them the reason:
+///
+/// - **A run nobody waited on still emits.** `goal.start` with no matching
+///   `:wait()` is an ordinary thing for a script to do, and its bots really do
+///   run to completion — `PendingWork` awaits this very task before the
+///   interpreter's runtime is dropped. Emitting from [`await_completion`]
+///   instead would tie the replay to the observing rather than to the run, and
+///   the fire-and-forget run — the one whose outcome the script never looked
+///   at, so the one most worth replaying — would silently produce nothing.
+/// - **Exactly one document per run.** [`await_completion`] may be entered any
+///   number of times (`goal.run`, then `:wait()` again, from any number of
+///   places); this task runs once.
+/// - **The replay is on the stream before `:wait()` returns.** The completion
+///   signal is sent after this, so anything the script does once its wait comes
+///   back is ordered after the replay a consumer already has.
+///
+/// # A failed run emits; a refused one does not
+///
+/// Failure is not a reason to stay quiet — it is the reason the document
+/// exists. A run whose actions were rejected, whose verdicts were unreadable
+/// ([`Status::Lost`]), or which abandoned a bot's whole tail undispatched is
+/// emitted in full, and each of those facts has its own row and its own status.
+/// This function is not given the outcome and does not ask for it.
+///
+/// A run [`run_into`] refused outright is the one case that emits nothing, and
+/// the caller decides that by not calling here. Such a run dispatched nothing,
+/// so the only document available would be the whole schedule with every row
+/// `Pending` and no observation anywhere — indistinguishable from a run that
+/// simply measured nothing, which is a claim about the run that is not true.
+/// The document has no field saying "refused" and must not grow one to carry
+/// what [`RunValue::start_error`] already carries and every observation of that
+/// run already raises.
+///
+/// # Serialisation happens here, not in the sink
+///
+/// [`OutputSink::replay`] takes a prepared string on purpose — see its own
+/// doc. Doing the work here also means a document that cannot be serialised
+/// costs the run nothing: [`Replay`] carries `Position`s, and serde_json
+/// refuses a non-finite float, so this is reachable rather than theoretical. A
+/// run that reached the end is not failed retroactively over its report, so the
+/// failure goes out on the run's own error stream and the run stands.
+fn emit_replay(sink: Option<&dyn OutputSink>, sched: &Schedule, log: &Mutex<ExecutionLog>) {
+    let Some(sink) = sink else {
+        return;
+    };
+    // The log's guard is a temporary of this statement, so it is released
+    // before the sink is called: `replay` is an implementation this crate does
+    // not control, and holding the run's log across it would let a slow one
+    // block a concurrent `:progress()`.
+    let replay = Replay::new(sched, &lock(log));
+    match factorio_bot_core::serde_json::to_string(&replay) {
+        Ok(json) => sink.replay(&json),
+        Err(err) => sink.line(
+            factorio_bot_scripting::Stream::Stderr,
+            &format!("the run finished, but its replay could not be serialised: {err}"),
+        ),
+    }
+}
+
 /// Spawns `sched` against `act`, returning the run immediately and the
 /// task's own `JoinHandle` so the caller can register it into
 /// [`PendingWork`] -- the same split `Runs::spawn` used to make in `mod.rs`,
@@ -317,6 +382,7 @@ fn spawn(
     act: Arc<dyn Actuator>,
     sched: Arc<Schedule>,
     net: Arc<ActionNetwork>,
+    sink: Option<Arc<dyn OutputSink>>,
 ) -> (RunValue, factorio_bot_core::tokio::task::JoinHandle<()>) {
     let log = Arc::new(Mutex::new(ExecutionLog::default()));
     let start_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -329,8 +395,9 @@ fn spawn(
         // as empty as it started. Recording *why* is what keeps the
         // observation from reading as a finished run with everything still
         // pending -- see [`RunValue::start_error`].
-        if let Err(err) = run_into(&*act, &sched, &task_net, &task_log).await {
-            *lock(&task_error) = Some(err.to_string());
+        match run_into(&*act, &sched, &task_net, &task_log).await {
+            Err(err) => *lock(&task_error) = Some(err.to_string()),
+            Ok(()) => emit_replay(sink.as_deref(), &sched, &task_log),
         }
         // No receiver is an ordinary outcome, not a failure: it just means
         // nothing (`:wait()`, `PendingWork`'s drain) is waiting on this run.
@@ -417,10 +484,14 @@ async fn start_impl(
     // to the defines query) is a setup error the script should hear about at
     // the call, not a run that silently never happened.
     let act = actuator().await.map_err(goal_error)?;
+    // Optional, unlike `PendingWork` above: no sink simply means nobody is
+    // listening for a replay. See [`ReplaySink`] for why the two absences are
+    // treated differently.
+    let sink = lua.app_data_ref::<ReplaySink>().map(|sink| sink.0.clone());
     // Last: nothing below this line can fail, so the plan is spent only by a
     // start that really does dispatch.
     let (net, sched) = reserved.take()?;
-    let (run, join) = spawn(act, sched, net);
+    let (run, join) = spawn(act, sched, net, sink);
     pending.register(join);
     Ok(run)
 }
@@ -469,8 +540,10 @@ mod tests {
     use crate::globals::goal::create_lua_goal_with;
     use crate::globals::goal::tests::{
         bounded, exec_bounded, factory, lua_with_goal, mining_plan, science_plan, seeded_world_for,
-        Failure, StubActuator, EXEC_BOUND,
+        Failure, StubActuator, EXEC_BOUND, STUB_CLOCK_BASE,
     };
+    use crate::lua_runner::tests::RecordingSink;
+    use factorio_bot_core::serde_json::{self, json, Value};
     use factorio_bot_core::tokio::sync::mpsc;
     use factorio_bot_core::types::Position;
     use factorio_bot_planner::{
@@ -1032,6 +1105,7 @@ mod tests {
             Arc::new(StubActuator::new(Failure::First(AtomicBool::new(false)))),
             sched,
             net,
+            None,
         );
         let lua = observing_lua();
         let obs = await_completion(&lua, run.net, run.log, run.finished_rx, run.start_error)
@@ -1071,7 +1145,7 @@ mod tests {
             ..StubActuator::new(Failure::Never)
         };
 
-        let (run, _join) = spawn(Arc::new(stub), sched, net);
+        let (run, _join) = spawn(Arc::new(stub), sched, net, None);
         entered_rx.recv().await.expect("an action was dispatched");
 
         let lua = observing_lua();
@@ -1093,7 +1167,12 @@ mod tests {
         let total = net.len() as u32;
         assert!(total > 0, "the fixture plan must contain actions");
 
-        let (run, _join) = spawn(Arc::new(StubActuator::new(Failure::Never)), sched, net);
+        let (run, _join) = spawn(
+            Arc::new(StubActuator::new(Failure::Never)),
+            sched,
+            net,
+            None,
+        );
         let lua = observing_lua();
         let obs = await_completion(&lua, run.net, run.log, run.finished_rx, run.start_error)
             .await
@@ -1117,7 +1196,12 @@ mod tests {
         let total = net.len() as u32;
         assert!(total > 0, "the fixture plan must contain actions");
 
-        let (run, _join) = spawn(Arc::new(StubActuator::new(Failure::Always)), sched, net);
+        let (run, _join) = spawn(
+            Arc::new(StubActuator::new(Failure::Always)),
+            sched,
+            net,
+            None,
+        );
         let lua = observing_lua();
         let obs = await_completion(&lua, run.net, run.log, run.finished_rx, run.start_error)
             .await
@@ -1184,7 +1268,12 @@ mod tests {
     #[tokio::test]
     async fn a_run_refused_before_it_started_raises_instead_of_reporting_done() {
         let (net, sched) = circular_wait_plan();
-        let (run, _join) = spawn(Arc::new(StubActuator::new(Failure::Never)), sched, net);
+        let (run, _join) = spawn(
+            Arc::new(StubActuator::new(Failure::Never)),
+            sched,
+            net,
+            None,
+        );
         let lua = observing_lua();
 
         // Waiting on it must raise rather than hand back an observation. The
@@ -1229,6 +1318,347 @@ mod tests {
             err.contains("circular wait"),
             "the script must hear why nothing ran: {err}"
         );
+    }
+
+    // ------------------------------------------------------------ the replay
+
+    /// The recorder, plus the `Replay` document a run handed it.
+    ///
+    /// Every assertion below reads the *string* the sink received and parses
+    /// it here, never a `Replay` built on the side. What crosses the sink is
+    /// what a consumer gets, and a test that rebuilt the document itself would
+    /// pass against a producer that emitted an empty one.
+    fn only_replay(sink: &RecordingSink) -> Value {
+        let replays = sink.replays.lock();
+        assert_eq!(
+            replays.len(),
+            1,
+            "a run emits its replay exactly once, got {}",
+            replays.len()
+        );
+        serde_json::from_str(&replays[0]).expect("the emitted string must be JSON")
+    }
+
+    /// Every `status` in the document, in row order.
+    fn statuses(doc: &Value) -> Vec<String> {
+        doc["steps"]
+            .as_array()
+            .expect("steps must be an array")
+            .iter()
+            .map(|s| s["status"].as_str().expect("a status string").to_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_finished_run_hands_its_replay_to_the_sink_as_json() {
+        let (net, sched) = mining_plan();
+        let expected = sched.clone();
+        let sink = Arc::new(RecordingSink::default());
+        let (run, _join) = spawn(
+            Arc::new(StubActuator::new(Failure::Never).with_clock()),
+            sched,
+            net,
+            Some(sink.clone()),
+        );
+        let lua = observing_lua();
+        await_completion(&lua, run.net, run.log, run.finished_rx, run.start_error)
+            .await
+            .expect("the run finished");
+
+        let doc = only_replay(&sink);
+        assert_eq!(
+            doc["planned_makespan"],
+            json!(expected.makespan),
+            "the makespan must be the schedule's, not a stand-in"
+        );
+        let steps = doc["steps"].as_array().expect("steps");
+        assert_eq!(
+            steps.len(),
+            expected.steps.len(),
+            "one row per scheduled step"
+        );
+
+        // The planned interval, row by row, against the schedule this run was
+        // given. `is_number()` would pass against a document whose rows
+        // collapsed to 0, so every row is checked by value.
+        for (row, step) in steps.iter().zip(expected.steps.iter()) {
+            assert_eq!(
+                row["planned_start_tick"],
+                json!(step.start),
+                "row {} planned start must be the schedule's",
+                row["index"]
+            );
+            assert_eq!(
+                row["planned_end_tick"],
+                json!(step.end),
+                "row {} planned end must be the schedule's",
+                row["index"]
+            );
+        }
+        assert!(
+            expected.steps.iter().any(|s| s.start > 0),
+            "this fixture must schedule something away from the origin, or the \
+             check above cannot tell a real planned tick from a zero"
+        );
+
+        // The observed interval is the actuator's clock, which starts far
+        // beyond any tick this plan schedules -- so a document that filled
+        // observations in from the plan is caught by value, not by nullness.
+        assert!(u64::from(expected.makespan) < STUB_CLOCK_BASE);
+        for row in steps {
+            let observed = row["observed_start_tick"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("every step of this run was measured: {row}"));
+            assert!(
+                observed >= STUB_CLOCK_BASE,
+                "an observed tick must come from the game's clock, not the plan: {row}"
+            );
+            assert!(
+                row["observed_end_tick"].as_u64().expect("a reply tick") > observed,
+                "the reply must land after the dispatch: {row}"
+            );
+        }
+
+        assert!(
+            statuses(&doc).iter().all(|s| s == "Success"),
+            "nothing failed in this run: {:?}",
+            statuses(&doc)
+        );
+
+        // Walk rows carry the belief caveat the document promises; action rows
+        // must not. Asserted here because the sink is the only place a
+        // consumer ever sees it.
+        let walks: Vec<&Value> = steps
+            .iter()
+            .filter(|s| s["what"]["kind"] == json!("walk"))
+            .collect();
+        assert!(!walks.is_empty(), "this plan walks");
+        for walk in walks {
+            assert_eq!(walk["evidence"]["kind"], json!("believed"), "{walk}");
+        }
+        for act in steps.iter().filter(|s| s["what"]["kind"] == json!("act")) {
+            assert_eq!(act["evidence"]["kind"], json!("measured"), "{act}");
+            assert!(
+                act["what"]["label"].is_string(),
+                "an action row names what it was: {act}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn waiting_on_a_run_twice_does_not_emit_a_second_replay() {
+        // The replay is emitted by the run's own task, not by the observing of
+        // it, so a script that waits twice -- or waits after `goal.start` --
+        // must not put two documents on the stream. `only_replay` asserts the
+        // count.
+        let (net, sched) = mining_plan();
+        let sink = Arc::new(RecordingSink::default());
+        let (run, _join) = spawn(
+            Arc::new(StubActuator::new(Failure::Never)),
+            sched,
+            net,
+            Some(sink.clone()),
+        );
+        let lua = observing_lua();
+        for _ in 0..2 {
+            await_completion(
+                &lua,
+                run.net.clone(),
+                run.log.clone(),
+                run.finished_rx.clone(),
+                run.start_error.clone(),
+            )
+            .await
+            .expect("the run finished");
+        }
+        only_replay(&sink);
+    }
+
+    #[tokio::test]
+    async fn a_run_nobody_waited_on_still_emits_its_replay() {
+        // `goal.start` without a matching `:wait()`. The run's task is awaited
+        // by `PendingWork` before the interpreter's runtime is dropped, and
+        // that -- not the waiting -- is what the replay hangs off, so a
+        // fire-and-forget run is replayable exactly like a waited one. Emitting
+        // from `await_completion` instead would silently lose this case.
+        let (net, sched) = mining_plan();
+        let sink = Arc::new(RecordingSink::default());
+        let (_run, join) = spawn(
+            Arc::new(StubActuator::new(Failure::Never)),
+            sched,
+            net,
+            Some(sink.clone()),
+        );
+        join.await.expect("the run's task finished");
+        let doc = only_replay(&sink);
+        assert!(
+            !doc["steps"].as_array().expect("steps").is_empty(),
+            "the document must describe the run, not merely exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_partly_failed_run_emits_a_document_that_says_which_rows_failed() {
+        // The case a replay is most wanted for. One bot's first action is
+        // refused, so `abandon_rest` leaves the rest of its slice never
+        // dispatched while the other bots finish theirs: one document holding
+        // failed, pending and succeeded rows at once.
+        let (net, sched) = science_plan();
+        let sink = Arc::new(RecordingSink::default());
+        let (run, _join) = spawn(
+            Arc::new(StubActuator::new(Failure::First(AtomicBool::new(false)))),
+            sched,
+            net,
+            Some(sink.clone()),
+        );
+        let lua = observing_lua();
+        await_completion(&lua, run.net, run.log, run.finished_rx, run.start_error)
+            .await
+            .expect("the run finished");
+
+        let doc = only_replay(&sink);
+        let statuses = statuses(&doc);
+        assert!(
+            statuses.contains(&"Failed".to_owned()),
+            "the refused action must be on the document: {statuses:?}"
+        );
+        assert!(
+            statuses.contains(&"Pending".to_owned()),
+            "the abandoned tail must be on it too, as never-dispatched: {statuses:?}"
+        );
+        assert!(
+            statuses.contains(&"Success".to_owned()),
+            "the other bots carried on and that must survive: {statuses:?}"
+        );
+
+        let steps = doc["steps"].as_array().expect("steps");
+        let failed = steps
+            .iter()
+            .find(|s| s["status"] == json!("Failed"))
+            .expect("a failed row");
+        assert_eq!(
+            failed["error"],
+            json!("game rejected the command: stub refuses"),
+            "the verdict must reach the consumer, not just the status: {failed}"
+        );
+        assert_eq!(
+            failed["attempt_number"],
+            json!(1),
+            "the failed row records which attempt this was: {failed}"
+        );
+
+        // The never-dispatched rows: no measurement, but a full plan. This is
+        // the collapse the document exists to prevent -- an unobserved step
+        // rendered at the origin looks like a step that ran instantly.
+        let abandoned: Vec<&Value> = steps
+            .iter()
+            .filter(|s| s["status"] == json!("Pending"))
+            .collect();
+        assert!(!abandoned.is_empty());
+        for row in abandoned {
+            assert_eq!(row["observed_start_tick"], Value::Null, "{row}");
+            assert_eq!(row["observed_end_tick"], Value::Null, "{row}");
+            assert_eq!(row["attempt_number"], Value::Null, "{row}");
+            assert!(
+                row["planned_end_tick"].as_u64().expect("a planned end") > 0,
+                "a never-run step still knows where the plan put it: {row}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_run_whose_verdicts_were_unreadable_emits_lost_not_failed() {
+        // `Lost` and `Failed` are different facts and the replay must keep them
+        // apart: `Lost` says this run will never learn the outcome, not that
+        // the step went wrong.
+        let (net, sched) = mining_plan();
+        let sink = Arc::new(RecordingSink::default());
+        let (run, _join) = spawn(
+            Arc::new(StubActuator::new(Failure::WithoutVerdict)),
+            sched,
+            net,
+            Some(sink.clone()),
+        );
+        let lua = observing_lua();
+        await_completion(&lua, run.net, run.log, run.finished_rx, run.start_error)
+            .await
+            .expect("the run finished");
+
+        let statuses = statuses(&only_replay(&sink));
+        assert!(
+            statuses.contains(&"Lost".to_owned()),
+            "an unreadable verdict is Lost: {statuses:?}"
+        );
+        assert!(
+            !statuses.contains(&"Failed".to_owned()),
+            "nothing here returned a bad verdict, so nothing may read as Failed: \
+             {statuses:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_refused_before_it_started_emits_no_replay() {
+        // Nothing was dispatched, so the only document available would be the
+        // whole schedule with every row `Pending` and no observation at all --
+        // shape-identical to a run that simply measured nothing. The document
+        // has no field for "this run was refused" and must not grow one to
+        // carry a fact the run's own error already carries, so the honest
+        // emission is none. `a_run_refused_before_it_started_raises_instead_of_
+        // reporting_done` covers what a script hears instead.
+        let (net, sched) = circular_wait_plan();
+        let sink = Arc::new(RecordingSink::default());
+        let (run, join) = spawn(
+            Arc::new(StubActuator::new(Failure::Never)),
+            sched,
+            net,
+            Some(sink.clone()),
+        );
+        join.await.expect("the run's task finished");
+        let lua = observing_lua();
+        let _ = await_completion(&lua, run.net, run.log, run.finished_rx, run.start_error).await;
+        assert!(
+            sink.replays.lock().is_empty(),
+            "a run that dispatched nothing must not emit a document claiming a \
+             schedule ran and measured nothing: {:?}",
+            sink.replays.lock()
+        );
+    }
+
+    #[tokio::test]
+    async fn goal_run_emits_the_replay_through_the_sink_in_the_lua_states_app_data() {
+        // Above the Lua seam, through the binding a script really calls: the
+        // sink is reached from `lua.app_data`, exactly as `run_lua` publishes
+        // it, so this covers the wiring the `spawn`-level tests reach around.
+        let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never).with_clock()));
+        let sink = Arc::new(RecordingSink::default());
+        lua.set_app_data(ReplaySink(sink.clone()));
+        exec_bounded(&lua, "goal.run(goal.plan(goal.have('iron-ore', 20)))").await;
+
+        let doc = only_replay(&sink);
+        assert!(
+            !doc["steps"].as_array().expect("steps").is_empty(),
+            "the run's steps must reach the sink: {doc}"
+        );
+        assert!(
+            statuses(&doc).iter().all(|s| s == "Success"),
+            "this run succeeded: {:?}",
+            statuses(&doc)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_with_no_sink_registered_is_otherwise_unchanged() {
+        // No sink is the ordinary state -- the CLI, and every `run_lua(..,
+        // None)` -- and it must cost the run nothing. `lua_with_goal` sets no
+        // `ReplaySink`, so this is a run whose app data holds none.
+        let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never)));
+        exec_bounded(
+            &lua,
+            "local obs = goal.run(goal.plan(goal.have('iron-ore', 20)))\n\
+             assert(obs.done)\n\
+             assert(obs.failed == 0)",
+        )
+        .await;
     }
 
     // ------------------------------------------------------- the bindings

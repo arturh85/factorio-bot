@@ -2,7 +2,7 @@
 import {computed, onUnmounted} from 'vue';
 import ansiHTML from 'ansi-html';
 import {useScriptStore} from '@/store/scriptStore';
-import {useToast} from 'primevue/usetoast';
+import {useToast} from '@/composables/useToast';
 import ScriptTree from '@/components/ScriptTree.vue'
 import Editor from '@/components/Editor.vue'
 import Splitter, {SplitterResizeEndEvent} from 'primevue/splitter';

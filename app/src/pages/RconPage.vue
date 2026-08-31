@@ -3,7 +3,7 @@ import Textarea from 'primevue/textarea';
 import Button from 'primevue/button';
 import {computed, ref} from 'vue';
 import {useRconStore} from '../store/rconStore';
-import {useToast} from 'primevue/usetoast';
+import {useToast} from '@/composables/useToast';
 
 const rconStore = useRconStore()
 const toast = useToast();

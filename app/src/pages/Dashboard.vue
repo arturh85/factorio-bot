@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {ref, watch, computed} from 'vue';
 import {useAppStore} from '@/store/appStore';
-import {useToast} from 'primevue/usetoast';
+import {useToast} from '@/composables/useToast';
 
 interface MyFactorioClient {
   name: string,

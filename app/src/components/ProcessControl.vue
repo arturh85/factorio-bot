@@ -2,7 +2,7 @@
 import {computed} from 'vue';
 import {useInstanceStore} from '@/store/instanceStore';
 import Button from 'primevue/button';
-import { useToast } from 'primevue/usetoast';
+import {useToast} from '@/composables/useToast';
 import {useAppStore} from '@/store/appStore';
 import ToggleButton from 'primevue/togglebutton';
 

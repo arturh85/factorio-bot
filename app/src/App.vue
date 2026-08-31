@@ -19,7 +19,7 @@
 
     <div class="layout-main">
       <router-view/>
-      <Toast position="bottom-right"/>
+      <Toaster/>
     </div>
 
     <AppConfig :layoutMode="layoutMode"
@@ -37,12 +37,10 @@ import AppMenu from './AppMenu.vue'
 import AppFooter from './AppFooter.vue'
 import {useAppStore} from '@/store/appStore';
 import AppConfig from '@/AppConfig.vue';
-import Toast from 'primevue/toast';
+import Toaster from '@/components/ui/Toaster.vue';
 import {useInstanceStore} from '@/store/instanceStore';
 import {computed, onBeforeUpdate, onMounted, onUnmounted, ref} from 'vue';
 import {ApiError} from '@/api/http';
-import {onBeforeRouteLeave} from 'vue-router';
-import {useToast} from 'primevue/usetoast';
 import {DashboardMenu} from '@/models/dashboard';
 
 const layoutMode = ref('static')
@@ -65,13 +63,6 @@ const menu = ref([
       // {label: 'LUA API Docs', icon: 'pi pi-fw pi-question-circle', to: '/luaApiDocss'}
     ] as DashboardMenu[]
 )
-
-onBeforeRouteLeave(() => {
-  // menuActive.value = false
-
-  const toast = useToast()
-  toast.removeAllGroups()
-})
 
 function onWrapperClick() {
   if (!menuClick.value) {
@@ -233,9 +224,3 @@ onBeforeUpdate(() => {
     removeClass(document.body, 'body-overflow-hidden')
 });
 </script>
-
-<style lang="scss">
-.p-toast.p-toast-bottom-right {
-  z-index: 1000;
-}
-</style>

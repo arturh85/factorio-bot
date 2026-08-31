@@ -72,11 +72,14 @@ export default defineConfig([
                 }
             ],
 
-            // These two components predate the rule and renaming them would
-            // touch every import and template that references them.
+            // Editor and Dashboard predate the rule and renaming them would
+            // touch every import and template that references them. The
+            // shadcn-style primitives under components/ui/ (Toaster, and more
+            // arriving in later redesign tasks) are deliberately single-word,
+            // matching the upstream shadcn/ui naming this redesign follows.
             'vue/multi-word-component-names': [
                 'error',
-                { ignores: ['Editor', 'Dashboard'] }
+                { ignores: ['Editor', 'Dashboard', 'Toaster'] }
             ],
 
             'space-before-function-paren': 'off',

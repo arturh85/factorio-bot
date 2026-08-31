@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import {computed, watch, ref} from 'vue';
+import {computed, ref, watch} from 'vue';
 import {useAppStore} from '@/store/appStore';
-import InputText from 'primevue/inputtext';
-import Slider from 'primevue/slider';
-import Checkbox from 'primevue/checkbox';
+import Card from '@/components/ui/Card.vue';
+import Label from '@/components/ui/Label.vue';
+import Input from '@/components/ui/Input.vue';
+import Checkbox from '@/components/ui/Checkbox.vue';
+import Slider from '@/components/ui/Slider.vue';
 
 const appStore = useAppStore();
+
 const factorioArchivePath = computed({
   get(): string {
     return appStore.getFactorioArchivePath as string
@@ -30,9 +33,13 @@ const clientCount = computed({
     appStore.updateClientCount(val)
   }
 })
+// `getRecreateLevel` is `boolean | undefined` -- `undefined` before settings
+// have loaded. Narrowed to `=== true` so this checkbox and ProcessControl.vue's
+// Toggle (Task 5) agree on the unloaded state instead of one showing checked
+// and the other unchecked for the same underlying setting.
 const recreateLevel = computed({
   get(): boolean {
-    return appStore.getRecreateLevel as boolean
+    return appStore.getRecreateLevel === true
   },
   set(val: boolean) {
     appStore.updateRecreateLevel(val)
@@ -40,7 +47,7 @@ const recreateLevel = computed({
 })
 const enableAutostart = computed({
   get(): boolean {
-    return appStore.getEnableAutostart as boolean
+    return appStore.getEnableAutostart === true
   },
   set(val: boolean) {
     appStore.updateEnableAutostart(val)
@@ -48,7 +55,7 @@ const enableAutostart = computed({
 })
 const restapiPort = computed({
   get(): string {
-    return appStore.getRestapiPort as any
+    return String(appStore.getRestapiPort ?? '')
   },
   set(val: string) {
     appStore.updateRestapiPort(parseInt(val, 10))
@@ -119,120 +126,72 @@ const settings = computed(() => appStore.getSettings)
 </script>
 
 <template>
-  <div class="p-grid" v-if="settings">
-    <div class="p-col-12">
-      <div class="card">
-        <h5>Settings</h5>
-        <p>Use this page to start from scratch and place your custom content.</p>
-      </div>
+  <div v-if="settings" class="mx-auto max-w-3xl">
+    <Card title="Settings">
+      <p class="text-ink-muted">Everything below is stored on the server and applies to the Factorio instances it manages.</p>
+    </Card>
 
+    <Card>
+      <template #title>
+        Factorio Archive &mdash; download from
+        <a class="text-link" href="https://factorio.com/download" target="_blank" rel="noopener noreferrer">factorio.com/download</a>
+      </template>
+      <Label for="factorio-archive-path">Archive path on the server</Label>
+      <Input
+        id="factorio-archive-path"
+        v-model="factorioArchivePath"
+        :invalid="!isFactorioArchivePathValid"
+        data-testid="archive-input"/>
+      <p v-if="!isFactorioArchivePathValid" class="mt-1 text-sm text-danger">no such file on the server</p>
+    </Card>
 
-      <div class="card p-fluid">
-        <h5>Factorio Archive - Download from <a href="https://factorio.com/download"
-                                                target="_blank"
-                                                rel="noopener noreferrer">https://factorio.com/download</a>
-        </h5>
-        <div class="p-formgrid p-grid">
-          <div class="p-field p-col">
-            <InputText v-model="factorioArchivePath" :class="isFactorioArchivePathValid ? '' : 'p-invalid'"/>
-            <small v-if="!isFactorioArchivePathValid" class="p-error">
-              no such file on the server
-            </small>
-          </div>
-        </div>
-      </div>
-      <div class="card p-fluid">
-        <h5>Recreate Level on Start</h5>
-        <div class="p-formgrid p-grid">
-          <div class="p-field p-col">
-            <div class="p-inputgroup">
-              <Checkbox v-model="recreateLevel" :binary="true" label="Recreate Level"/>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div class="card p-fluid">
-        <h5>Autostart Factorio</h5>
-        <div class="p-formgrid p-grid">
-          <div class="p-field p-col">
-            <div class="p-inputgroup">
-              <Checkbox v-model="enableAutostart" :binary="true" label="Enable Autostart"/>
-            </div>
-          </div>
-        </div>
-      </div>
-      <!--
-        No "Enable REST API" checkbox any more: the REST API is the server that
-        served this page, so it cannot be switched off from here. The port is
-        persisted only and takes effect on the next `factorio-bot serve`.
-      -->
-      <div class="card p-fluid">
-        <!--
-          Relative, not `http://localhost:<the port field>`. This page was
-          served by the API, so same-origin is right by construction, whereas
-          the old absolute URL was wrong twice over a remote server: `localhost`
-          named the viewer's machine, and the port came from an input the user
-          may have just edited without restarting anything.
-        -->
-        <h5>REST API
-          <a href="/swagger-ui/" target="_blank" rel="noopener noreferrer">swagger-ui</a>
-          &middot;
-          <a href="/openapi.json" target="_blank" rel="noopener noreferrer">openapi.json</a>
-        </h5>
-        <div class="p-formgrid p-grid">
-          <div class="p-field p-col">
-            <div class="p-inputgroup">
-              Port
-              <InputText v-model="restapiPort" type="number" min="1" max="65535" />
-            </div>
-          </div>
-        </div>
-      </div>
-      <div class="card p-fluid">
-        <h5>Map Exchange String</h5>
-        <div class="p-formgrid p-grid">
-          <div class="p-field p-col">
-            <div class="p-inputgroup">
-              <InputText v-model="mapExchangeString"/>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div class="card p-fluid">
-        <h5>Seed</h5>
-        <div class="p-formgrid p-grid">
-          <div class="p-field p-col">
-            <div class="p-inputgroup">
-              <InputText v-model="seed"/>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div class="card p-fluid">
-        <h5>Number of Factorio Client Instances</h5>
-        <div class="p-formgrid p-grid">
-          <div class="p-field p-col">
-            <label for="client_count">Client Instances: {{ clientCount }}</label>
-            <Slider id="client_count" v-model="clientCount" :min="0" :max="16"/>
-          </div>
-        </div>
-      </div>
+    <Card title="Workspace Folder">
+      <Label for="workspace-path">Directory path on the server</Label>
+      <Input
+        id="workspace-path"
+        v-model="workspacePath"
+        :invalid="!isWorkspacePathValid"
+        data-testid="workspace-input"/>
+      <p v-if="!isWorkspacePathValid" class="mt-1 text-sm text-danger">no such directory on the server</p>
+    </Card>
 
-      <div class="card p-fluid">
-        <h5>Workspace Folder</h5>
-        <div class="p-formgrid p-grid">
-          <div class="p-field p-col">
-            <InputText v-model="workspacePath" :class="isWorkspacePathValid ? '' : 'p-invalid'"/>
-            <small v-if="!isWorkspacePathValid" class="p-error">
-              no such directory on the server
-            </small>
-          </div>
-        </div>
+    <Card title="Startup">
+      <div class="flex flex-col gap-3 sm:flex-row sm:gap-8">
+        <Checkbox v-model="recreateLevel" label="Recreate level on start" data-testid="recreate-checkbox"/>
+        <Checkbox v-model="enableAutostart" label="Start Factorio automatically" data-testid="autostart-checkbox"/>
       </div>
-    </div>
+    </Card>
+
+    <Card title="HTTP API">
+      <p class="mb-3 text-ink-muted">
+        This page is served by the same server that exposes the API.
+        <a class="text-link" href="/swagger-ui/" target="_blank" rel="noopener noreferrer">Swagger UI</a>
+        &middot;
+        <a class="text-link" href="/openapi.json" target="_blank" rel="noopener noreferrer">openapi.json</a>
+      </p>
+      <Label for="restapi-port">Port (applies on the next server start)</Label>
+      <Input
+        id="restapi-port"
+        v-model="restapiPort"
+        type="number"
+        min="1"
+        max="65535"
+        data-testid="port-input"/>
+    </Card>
+
+    <Card title="Map Exchange String">
+      <Label for="map-exchange-string">Pasted from Factorio's map generator</Label>
+      <Input id="map-exchange-string" v-model="mapExchangeString" data-testid="map-exchange-input"/>
+    </Card>
+
+    <Card title="Seed">
+      <Label for="seed">Map seed</Label>
+      <Input id="seed" v-model="seed" data-testid="seed-input"/>
+    </Card>
+
+    <Card title="Factorio Client Instances">
+      <Label data-testid="client-count-label">Client Instances: {{ clientCount }}</Label>
+      <Slider v-model="clientCount" :min="0" :max="16" label="Client Instances"/>
+    </Card>
   </div>
 </template>
-
-<style scoped>
-
-</style>

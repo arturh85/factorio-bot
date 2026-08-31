@@ -32,12 +32,32 @@ Plan 6 Task 10 restyles its container only and leaves the stub. Reachable at
    (After `0d93dc3b` actions track observation at ~1.01x; the rule stands
    because the reason it existed can recur.)
 
-3. **Walk drift is a FIXED ~135-tick per-walk overhead, not proportional
-   error.** Established by fitting multiplicative and additive models on walk 1
-   and predicting walk 2: multiplicative residual +76 ticks, additive -3. The
-   `0.15` tiles/tick rate is correct. **Consequence for rendering: short walks
-   are dominated by the constant and long walks are nearly accurate.** A single
-   ratio would be most wrong exactly where walks are shortest and most numerous.
+3. **Walk drift is PROPORTIONAL — it is the pathfinder's detour. There is no
+   fixed cost.**
+
+   **This entry previously said the opposite** (a fixed ~135-tick per-walk
+   overhead) and was wrong. That came from fitting multiplicative against
+   additive models on two walks, both fitted against **straight-line
+   distance**, which is not what the bot walks.
+
+   A later run logged the game's full waypoint lists, separating actual path
+   length from straight-line distance for the first time. Against
+   `ceil(polyline_length / 0.15)`:
+
+       walk 1   planned 217   observed 363   error vs polyline   +2 ticks
+       walk 2   planned 575   observed 650   error vs polyline  +10 ticks
+       walk 3   planned 528   observed 610   error vs polyline   +6 ticks
+
+   Fit on walk 1, predict the others: 8 and 4 ticks, 1.2% and 0.7%.
+
+   So `0.15` tiles/tick is correct and the whole discrepancy is detour —
+   actual paths run 9-27% longer than the straight line. A detour proportional
+   to distance *looks* like a constant across two samples of similar length,
+   which is why the additive model fitted better by accident.
+
+   **Consequence for rendering, and it is the reverse of what this note used to
+   say: every walk is off by roughly its own detour ratio, and a long walk is
+   off by MORE ticks than a short one. Do not render a fixed offset.**
 
 4. **`Status::Lost` legend footnote, verbatim:**
    *Lost appearing is trustworthy. Lost not appearing is not proof the run
@@ -76,8 +96,10 @@ Three facts that change the shape of the work. All verified against the tree.
 `grep -rn ExecutionLog crates/planner/src/render.rs` returns nothing.
 
 So "render goal.gantt" gives you **predicted** durations. Everything measured
-tonight says those are still wrong for walks: a fixed ~135-tick per-walk
-overhead that the model does not carry. Actions track observation at ~1.01x
+tonight says those are still wrong for walks: the planner costs a walk by
+straight-line distance, but the bot follows the pathfinder's route, which runs
+9-27% longer. The error is proportional to the walk, not a constant — see
+finding 3 above, which this note originally got backwards. Actions track observation at ~1.01x
 since `0d93dc3b`; walks do not.
 
 **Consequence: a gantt drawn from the schedule alone is a plan view, not a
@@ -127,3 +149,40 @@ unknown.
 `GanttChart.vue` is the mount point, already routed at `/tasks` and already in
 the menu. Its commented-out body is the intended shape. Task 10 restyled its
 container and left the stub, deliberately.
+
+
+---
+
+# Later corrections and additions (same night, after the first live multi-step run)
+
+## Two data sources that will mislead a timeline
+
+  - **`world.player().main_inventory` is not live.** It reported a furnace the
+    player had placed 1,400 ticks earlier. Do not drive a timeline or an
+    inventory panel from it without establishing its staleness first.
+  - **The executor's two internal move-asides — blocked placement and pre-mine
+    — move the bot but never appear in `obs.walks`.** A timeline built from
+    `obs.walks` alone will show unexplained position jumps. Either surface them
+    or say in the legend that not every movement is recorded.
+
+## `Status::Lost` fired correctly on its first live outing
+*"the game reported no readable outcome: no action result received in time"* —
+and the run distinguished it from a failure. The legend footnote in this file
+still stands: appearing is trustworthy, not appearing is not proof.
+
+## Two live positioning faults, in `crates/core/src/factorio/rcon.rs`
+Not the frontend's to fix, but they bound what a replay can honestly show:
+
+  - **A walk reported success 9.3 tiles from the planned target.** The target
+    tile was occupied by the bot's own just-placed furnace, so pathfinding
+    failed and `player_path`'s fallback silently retargeted ~10 tiles short —
+    returning success. **A walk that did not arrive but said it did.**
+  - **`player_mine` then dispatched from 3.345 tiles against a
+    `resource_reach_distance` of 3.** The mod's guard is `> 6`, so it accepted,
+    set `mining_state` every tick, and the game silently refused: zero position
+    and zero inventory events for 21,400 ticks until the action was declared
+    `Lost`.
+
+**So a replay can show where the executor BELIEVED the bot was, and that is not
+always where it was.** Until those are fixed, a position track is the
+executor's belief, not ground truth, and should be labelled that way.

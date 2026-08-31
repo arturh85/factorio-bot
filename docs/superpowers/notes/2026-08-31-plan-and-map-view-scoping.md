@@ -238,3 +238,53 @@ The mermaid gantt stays exactly as it is: it renders `Schedule` only, it
 reaches the browser today as script stdout over SSE, and it is a **plan view**.
 It is not the replay. Conflating them is how a plan view ends up quietly
 claiming to be a replay.
+
+
+---
+
+# CORRECTION: there is no route to write. It is a fourth SSE event.
+
+The decision above says "`crates/server` owns the route". **Measured after the
+serialisation landed (`db8e651d`), that route has no source and should not
+exist.**
+
+  - `ExecutionLog` is created at `crates/scripting_lua/src/globals/goal/run.rs:321`
+    inside an `Arc<Mutex<>>` **scoped to one script run**, and dropped when the
+    script ends.
+  - `grep -rn "ExecutionLog\|Schedule" crates/server/src/` returns **nothing**.
+    The server process never holds either.
+  - `Job` stores `stdout`, `stderr`, `status` and timestamps. Nothing
+    structured.
+
+`GET /api/v1/replay/{id}` would therefore need the server to hold execution
+state it has no reason to hold, with a lifetime somebody would have to invent.
+
+## What to build instead
+
+`crates/server/src/manage/execute.rs:329` already has `WireEvent` with three
+named SSE events — `output`, `finished`, `lagged` — each `json_data`-serialised
+with an `event:` name the browser switches on, already consumed by
+`app/src/api/jobEvents.ts`.
+
+**Add a fourth variant carrying `Replay` verbatim.** The replay then arrives on
+the same stream as the run it describes, which is the right coupling: a replay
+without its run is meaningless. `subscribeJobEvents` gains `onReplay` beside
+`onOutput`. No new route, no server-held state, no lifetime question.
+
+## The one obstacle, and it is in the scripting crates
+
+`OutputSink` (`crates/scripting/src/lib.rs:16`) is
+`fn line(&self, stream: Stream, text: &str)` — **text only**. There is no path
+from the Lua runtime to a structured event today. Preference order:
+
+  1. a second trait method, `fn replay(&self, json: &str)`, defaulting to a
+     no-op so no existing implementer breaks
+  2. a separate channel alongside the sink
+  3. **NOT** a sentinel-delimited blob scraped out of stdout — that is parsing
+     our own output format forever
+
+## Split, corrected
+  - `crates/scripting` + `crates/scripting_lua` + `crates/executor`: getting a
+    `Replay` from the run to the sink (the peer session's area)
+  - `crates/server`: the `WireEvent` variant, its OpenAPI docs, the snapshot
+  - frontend: `onReplay`, and all rendering

@@ -11,7 +11,6 @@ import './assets/tailwind.css';
 import 'primeicons/primeicons.css';
 import './assets/layout/layout.scss';
 
-import './plugins/configure-ynetwork';
 import App from './App.vue';
 
 // Vue Router 5 deprecates the next() callback; returning undefined continues

@@ -27,12 +27,17 @@ export default defineConfig({
         })
     ],
     server: {
+        port: 8080,
         proxy: {
             '/api': {
                 target: backendTarget,
                 changeOrigin: true
             },
             '/openapi.json': {
+                target: backendTarget,
+                changeOrigin: true
+            },
+            '/swagger-ui': {
                 target: backendTarget,
                 changeOrigin: true
             }

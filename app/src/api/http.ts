@@ -13,8 +13,9 @@ export type QueryValue = string | number | boolean | undefined;
  *
  * Empty by default: in production the axum server serves both the SPA and the
  * API from one origin. `VITE_API_BASE` exists for a Vite dev server that is
- * not proxying to the backend -- as of this commit `vite.config.mts` declares
- * no `server.proxy`, so a dev session needs either that proxy or this variable.
+ * not proxying to the backend; `vite.config.mts` now declares a `server.proxy`
+ * for `/api`, `/openapi.json` and `/swagger-ui`, so a normal dev session needs
+ * this variable only when the backend is not at that proxy's target.
  */
 export function apiBase(): string {
     return (import.meta.env.VITE_API_BASE as string | undefined) ?? '';

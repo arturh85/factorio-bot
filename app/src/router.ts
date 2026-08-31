@@ -1,10 +1,15 @@
-import { createRouter, createWebHashHistory } from 'vue-router';
+import {createRouter, createWebHashHistory} from 'vue-router';
 
+// Six further routes existed until this commit: /empty, /factorioMods,
+// /restApiDocss, /luaApiDocss and /workspace all rendered the same stock
+// "Empty Page" placeholder, and /instances rendered a static card with no data
+// binding. None was reachable from the menu. They are deleted rather than
+// restyled; see docs/superpowers/plans/2026-08-31-shadcn-ui-redesign.md.
 const routes = [
     {
         path: '/',
         name: 'dashboard',
-        component:  () => import('./pages/Dashboard.vue')
+        component: () => import('./pages/Dashboard.vue')
     },
     {
         path: '/settings',
@@ -20,36 +25,6 @@ const routes = [
         path: '/rcon',
         name: 'rcon',
         component: () => import('./pages/RconPage.vue')
-    },
-    {
-        path: '/empty',
-        name: 'empty',
-        component: () => import('./pages/EmptyPage.vue')
-    },
-    {
-        path: '/factorioMods',
-        name: 'factorioMods',
-        component: () => import('./pages/EmptyPage.vue')
-    },
-    {
-        path: '/restApiDocss',
-        name: 'restApiDocss',
-        component: () => import('./pages/EmptyPage.vue')
-    },
-    {
-        path: '/luaApiDocss',
-        name: 'luaApiDocss',
-        component: () => import('./pages/EmptyPage.vue')
-    },
-    {
-        path: '/workspace',
-        name: 'workspace',
-        component: () => import('./pages/EmptyPage.vue')
-    },
-    {
-        path: '/instances',
-        name: 'instances',
-        component: () => import('./pages/GameInstances.vue')
     },
     {
         path: '/tasks',

@@ -951,14 +951,29 @@ end
 -- backfills, interpolates or retries a missed frame: the gap is the record.
 --
 -- Off unless asked for: `storage.frame_capture` is nil until
--- `rcon_frame_capture_start` sets it, because a 60-minute three-camera run is
--- ~1.5 GB of JPEG and nobody wants that unrequested.
+-- `rcon_frame_capture_start` sets it, because the frames are big and there is
+-- one set of them per camera. Measured: 0.72 MB per frame at JPEG quality 85
+-- and 1920x1080, and 300 ticks is 12 frames a minute, so one camera costs
+-- ~520 MB an hour and the three cameras of a one-bot run cost ~1.56 GB an
+-- hour. The camera count is `2 + one per player the game knows of` (see
+-- `rcon_frame_capture_start`), so each additional bot adds another ~520 MB an
+-- hour. Wiped per run, never accumulated across runs.
 
 local FRAME_CAPTURE_INTERVAL = 300 -- game ticks between frames (5 s at 60 UPS)
 local FRAME_CAPTURE_DIR = "frames"
 local FRAME_CAPTURE_RESOLUTION = {1920, 1080}
 local FRAME_CAPTURE_QUALITY = 85 -- percent; JPEG only. PNG measured ~7x larger.
 local FRAME_CAPTURE_ZOOM = 1
+
+-- Tiles of empty ground kept between the outermost bot and the edge of an
+-- `area` frame, so a bot that defines the bounding box is not sliced in half
+-- by the frame it defines.
+local FRAME_CAPTURE_AREA_MARGIN = 16
+-- The zoom below which the `area` camera stops writing a frame rather than
+-- start cropping. At 1920x1080 and 32 px per tile, 0.05 covers 1200x675 tiles
+-- -- bots spread wider than that get no area frame for that tick, which is
+-- the honest outcome; see `frame_capture_take_area`.
+local FRAME_CAPTURE_AREA_MIN_ZOOM = 0.05
 
 -- The run id sidecar lives *inside* `frames/`, not one level up in
 -- script-output, and that placement is the whole point of it.
@@ -978,14 +993,29 @@ local FRAME_CAPTURE_ZOOM = 1
 -- only ever be as old as the frames beside it.
 local FRAME_CAPTURE_RUN_FILE = FRAME_CAPTURE_DIR .. "/run.json"
 
--- Camera ids must be filename-safe and must not contain "-".
+-- Camera ids must be filename-safe. Interior hyphens are allowed; leading,
+-- trailing and doubled ones are not.
 --
--- `tick-NNNNNNN-<camera>.jpg` is parsed by splitting on the *last* "-", so an
--- id containing one would be read back as a different camera than the one that
--- took the frame. Checked rather than assumed, so that adding a per-bot or
--- area camera later cannot introduce a name the reader silently mis-parses.
+-- `tick-NNNNNNN-<camera>.jpg` is parsed by taking the digit run after `tick-`
+-- and reading *everything after the next hyphen* as the camera id, so
+-- `tick-0001800-bot-1.jpg` reads back as tick 1800, camera `bot-1`: an id may
+-- contain hyphens without becoming ambiguous. What would be ambiguous is an id
+-- that begins or ends with one, or contains an empty component, because the
+-- name then no longer says which characters were the separator -- so those are
+-- refused here rather than assumed absent. This is checked, not trusted,
+-- because a mis-parsed name attributes a frame to a camera that did not take
+-- it, and nothing downstream could notice.
 function frame_capture_valid_camera_id(id)
-	return type(id) == "string" and id:match("^[%w_]+$") ~= nil
+	if type(id) ~= "string" then
+		return false
+	end
+	if id:match("^[%w_%-]+$") == nil then
+		return false
+	end
+	if id:sub(1, 1) == "-" or id:sub(-1) == "-" or id:find("%-%-") ~= nil then
+		return false
+	end
+	return true
 end
 
 -- Flat, one directory for every camera: a scrubber sitting at tick T wants
@@ -998,43 +1028,161 @@ function frame_capture_path(tick, camera_id)
 	return FRAME_CAPTURE_DIR .. "/tick-" .. string.format("%07d", tick) .. "-" .. camera_id .. ".jpg"
 end
 
-function frame_capture_take(camera, tick)
-	if camera.kind == "follow" then
-		local player = game.players[camera.player_index]
-		-- No player to follow, so no frame -- and the absence is the record.
-		-- This tick simply has no file, exactly as a dropped render has none.
-		-- Nothing is substituted, deferred to the next tick, or written under
-		-- a tick the game did not agree to.
-		if player == nil or not player.connected then
+-- Every connected player, ordered by player index.
+--
+-- Ordered rather than however `pairs` happens to walk the table, because the
+-- first entry decides which peer writes an `area` frame and which player's
+-- vision it is rendered through. An unordered pick would make that vary
+-- between ticks and between peers for no reason a reader of the frames could
+-- see.
+function frame_capture_connected_players()
+	local indexes = {}
+	for _, player in pairs(game.players) do
+		if player.connected then
+			table.insert(indexes, player.index)
+		end
+	end
+	table.sort(indexes)
+	local players = {}
+	for _, index in ipairs(indexes) do
+		table.insert(players, game.players[index])
+	end
+	return players
+end
+
+-- A camera that follows one player. `follow` and every `bot-N` are this.
+function frame_capture_take_follow(camera, tick)
+	local player = game.players[camera.player_index]
+	-- No player to follow, so no frame -- and the absence is the record.
+	-- This tick simply has no file, exactly as a dropped render has none.
+	-- Nothing is substituted, deferred to the next tick, or written under
+	-- a tick the game did not agree to.
+	--
+	-- This is the whole of what a per-bot camera does for a bot that is not
+	-- connected, and it has to stay this: a placeholder frame -- black, or the
+	-- previous one, or another camera's -- would be indistinguishable from a
+	-- capture of that bot, and would put a picture of nothing beside a step
+	-- that really happened.
+	if player == nil or not player.connected then
+		return
+	end
+	game.take_screenshot({
+		player = player,
+		-- One peer, not all of them. `on_nth_tick` runs on every peer in
+		-- a multiplayer game, so without `by_player` each connected
+		-- client would render and write its own copy of the same frame
+		-- into its own script-output. Taking a screenshot reads game
+		-- state and writes none, so the duplication is a waste rather
+		-- than a desync -- but a camera must map to exactly one file for
+		-- its name to mean anything. `by_player` is also what lets the
+		-- per-bot cameras exist: each writes on the peer it photographs.
+		by_player = player,
+		surface = player.surface,
+		position = player.position,
+		resolution = FRAME_CAPTURE_RESOLUTION,
+		zoom = FRAME_CAPTURE_ZOOM,
+		path = frame_capture_path(tick, camera.id),
+		quality = FRAME_CAPTURE_QUALITY,
+		-- Asked for, not relied on: the API does not honour this on a
+		-- multiplayer client catching up. See the header comment.
+		force_render = true,
+		show_entity_info = true,
+		show_gui = false
+	})
+end
+
+-- The `area` camera frames **the bounding box of all connected bots**: the
+-- axis-aligned box through every connected player's position, widened by
+-- `FRAME_CAPTURE_AREA_MARGIN`, centred on the box's centre, zoomed to fit.
+--
+-- That claim was chosen because it is self-describing and checkable against
+-- the picture: "every bot that was connected at this tick is inside this
+-- frame". It is deliberately not "where the action is" -- nothing in this mod
+-- defines action, so such a camera would be pointing at a thing it had
+-- invented, and a viewer could never tell whether it had found it.
+--
+-- The degenerate cases, which is where a framing claim usually turns into a
+-- lie:
+--
+--   * **No connected bot: no file for this tick.** There is no bounding box of
+--     nothing. A frame of the map origin would be a picture of nobody, filed
+--     under a camera that says it shows everybody.
+--   * **One connected bot: this is the `follow` camera with extra steps, and
+--     it is written anyway.** The box is a point, the margin makes it 32 tiles
+--     across, and the fit zoom clamps to `FRAME_CAPTURE_ZOOM` -- so the output
+--     is `follow` pointed at that bot. Said plainly here rather than dressed
+--     up as something else. It is still written because the claim it makes is
+--     still true of it, and because a camera that vanished at one bot would
+--     make its own absence mean two different things.
+--   * **Bots far apart: it zooms out, and legibility is what gives way.** A
+--     frame where the bots are specks still answers "where is everyone"
+--     truthfully; a zoom held at a readable level would silently *crop* bots
+--     out and hand back a picture that looks like the whole party. Cropping is
+--     the one thing this must not do, so below `FRAME_CAPTURE_AREA_MIN_ZOOM`
+--     it writes nothing instead. A consumer can tell that gap from a stopped
+--     capture: the follow and per-bot frames for the same tick are there.
+--   * **Bots on more than one surface: no file.** One image cannot contain two
+--     surfaces, and framing one of them would show a subset under a name that
+--     claims the set.
+function frame_capture_take_area(camera, tick)
+	local players = frame_capture_connected_players()
+	if #players == 0 then
+		return
+	end
+	-- Lowest connected index: the peer that writes the file and the vision the
+	-- world is rendered through. Any single choice does, as long as it is the
+	-- same one every tick.
+	local anchor = players[1]
+	local surface = anchor.surface
+	local min_x, min_y = anchor.position.x, anchor.position.y
+	local max_x, max_y = min_x, min_y
+	for _, player in ipairs(players) do
+		if player.surface.index ~= surface.index then
 			return
 		end
-		game.take_screenshot({
-			player = player,
-			-- One peer, not all of them. `on_nth_tick` runs on every peer in
-			-- a multiplayer game, so without `by_player` each connected
-			-- client would render and write its own copy of the same frame
-			-- into its own script-output. Taking a screenshot reads game
-			-- state and writes none, so the duplication is a waste rather
-			-- than a desync -- but a camera must map to exactly one file for
-			-- its name to mean anything. `by_player` is also what will let a
-			-- per-bot camera exist later without changing anything here.
-			by_player = player,
-			surface = player.surface,
-			position = player.position,
-			resolution = FRAME_CAPTURE_RESOLUTION,
-			zoom = FRAME_CAPTURE_ZOOM,
-			path = frame_capture_path(tick, camera.id),
-			quality = FRAME_CAPTURE_QUALITY,
-			-- Asked for, not relied on: the API does not honour this on a
-			-- multiplayer client catching up. See the header comment.
-			force_render = true,
-			show_entity_info = true,
-			show_gui = false
-		})
+		local position = player.position
+		if position.x < min_x then min_x = position.x end
+		if position.x > max_x then max_x = position.x end
+		if position.y < min_y then min_y = position.y end
+		if position.y > max_y then max_y = position.y end
+	end
+	-- 32 pixels to a tile at zoom 1, so this is the zoom at which the box plus
+	-- its margin exactly fills the frame. Never zoom *in* past
+	-- FRAME_CAPTURE_ZOOM: a closer view of two bots standing together would
+	-- not be more true, and it would make the scale jump around.
+	local width = (max_x - min_x) + 2 * FRAME_CAPTURE_AREA_MARGIN
+	local height = (max_y - min_y) + 2 * FRAME_CAPTURE_AREA_MARGIN
+	local zoom = math.min(
+		FRAME_CAPTURE_RESOLUTION[1] / (32 * width),
+		FRAME_CAPTURE_RESOLUTION[2] / (32 * height),
+		FRAME_CAPTURE_ZOOM)
+	if zoom < FRAME_CAPTURE_AREA_MIN_ZOOM then
+		return
+	end
+	game.take_screenshot({
+		player = anchor,
+		by_player = anchor,
+		surface = surface,
+		position = { x = (min_x + max_x) / 2, y = (min_y + max_y) / 2 },
+		resolution = FRAME_CAPTURE_RESOLUTION,
+		zoom = zoom,
+		path = frame_capture_path(tick, camera.id),
+		quality = FRAME_CAPTURE_QUALITY,
+		force_render = true,
+		show_entity_info = true,
+		show_gui = false
+	})
+end
+
+function frame_capture_take(camera, tick)
+	if camera.kind == "follow" then
+		frame_capture_take_follow(camera, tick)
+	elseif camera.kind == "area" then
+		frame_capture_take_area(camera, tick)
 	else
-		-- Unreachable from `rcon_frame_capture_start`, which registers the one
-		-- camera kind that exists. Raising rather than returning keeps a
-		-- future camera kind from producing a silently empty run.
+		-- Unreachable from `rcon_frame_capture_start`, which registers only
+		-- the kinds above. Raising rather than returning keeps a future camera
+		-- kind from producing a silently empty run.
 		error("unknown frame capture camera kind: " .. tostring(camera.kind))
 	end
 end
@@ -1085,6 +1233,61 @@ function on_frame_capture_tick(event)
 	end
 end
 
+-- The camera that follows one bot. A per-bot camera has no `kind` of its own
+-- because it has no behaviour of its own: it *is* a follow camera pointed at
+-- player N, and a second name for one mechanism would only invite the two to
+-- drift apart.
+function frame_capture_bot_camera(player_index)
+	return { id = "bot-" .. player_index, kind = "follow", player_index = player_index }
+end
+
+-- Two cameras sharing an id would write the same `tick-NNNNNNN-<id>.jpg` in
+-- the same tick, and the second write would silently overwrite the first -- a
+-- frame disappearing with nothing on disk to say it did. The fix is to refuse
+-- the configuration, never to uniquify the filename: a name has to stay a
+-- measurement of *when*, and a `-2` suffix would give the double-write a home
+-- instead of preventing it.
+function frame_capture_validate_cameras(cameras)
+	local seen = {}
+	for _, camera in ipairs(cameras) do
+		if not frame_capture_valid_camera_id(camera.id) then
+			error("frame capture camera id is not filename-safe: " .. tostring(camera.id))
+		end
+		if seen[camera.id] then
+			error("duplicate frame capture camera id: " .. camera.id)
+		end
+		seen[camera.id] = true
+	end
+end
+
+-- Gives a bot that joins *during* a run its own camera from the tick it
+-- arrived, and does nothing at all when no capture is running.
+--
+-- Without this a late joiner would have no camera for the whole run, and its
+-- total absence from the frames would be indistinguishable from a bot that was
+-- there and never photographed. With it, the frames say what actually
+-- happened: nothing before it joined, because it was not there, and frames
+-- from the tick it was.
+--
+-- Deterministic across peers: `on_player_joined_game` fires on every peer with
+-- the same event, and `storage` is replicated, so every peer appends the same
+-- camera at the same tick. Nothing is removed on leave -- the camera staying
+-- and writing nothing is exactly how a disconnected bot's absence is recorded.
+function frame_capture_on_player_joined(player_index)
+	local capture = storage.frame_capture
+	if capture == nil then
+		return
+	end
+	local camera = frame_capture_bot_camera(player_index)
+	for _, existing in ipairs(capture.cameras) do
+		if existing.id == camera.id then
+			return
+		end
+	end
+	frame_capture_validate_cameras({ camera })
+	table.insert(capture.cameras, camera)
+end
+
 -- `run_id` is an opaque tag for this capture run, echoed verbatim into
 -- `frames/run.json` as `{"run":"<run_id>"}` and used for nothing else here.
 --
@@ -1114,27 +1317,42 @@ function rcon_frame_capture_start(run_id)
 	-- This takes `run.json` with it, and must: the wipe and the sidecar have
 	-- to move together or the id can outlive the frames it names.
 	helpers.remove_path(FRAME_CAPTURE_DIR)
-	-- Only the follow camera exists. Per-bot and area cameras are entries in
-	-- this list with a different `kind`; adding one needs no rename here.
+	-- Three vantage points, `2 + one per bot` cameras in total:
+	--
+	--   `follow`  one bot, player 1, the original camera and unchanged.
+	--   `bot-N`   one per player the game knows of, following that player.
+	--   `area`    all connected bots at once; see `frame_capture_take_area`
+	--             for what it centres on and what it does when it cannot.
+	--
+	-- Costed before it is added to, not after: see the header comment for the
+	-- measured per-frame size and what one more camera costs per hour.
 	local cameras = {
 		{ id = "follow", kind = "follow", player_index = 1 }
 	}
-	-- Two cameras sharing an id would write the same `tick-NNNNNNN-<id>.jpg`
-	-- in the same tick, and the second write would silently overwrite the
-	-- first -- a frame disappearing with nothing on disk to say it did. The
-	-- fix is to refuse the configuration, never to uniquify the filename: a
-	-- name has to stay a measurement of *when*, and a `-2` suffix would give
-	-- the double-write a home instead of preventing it.
-	local seen = {}
-	for _, camera in ipairs(cameras) do
-		if not frame_capture_valid_camera_id(camera.id) then
-			error("frame capture camera id is not filename-safe: " .. tostring(camera.id))
-		end
-		if seen[camera.id] then
-			error("duplicate frame capture camera id: " .. camera.id)
-		end
-		seen[camera.id] = true
+	-- Every player the game knows, connected right now or not, and that is the
+	-- point rather than an oversight. A camera whose player is absent writes
+	-- no file for that tick (`frame_capture_take_follow`), so a bot that is
+	-- offline for part of a run has frames either side of the gap and nothing
+	-- in it, which is where the bot actually was. Registering only the
+	-- connected ones would instead delete the camera and leave a viewer unable
+	-- to tell "this bot was away" from "nobody ever pointed a camera at it".
+	--
+	-- `bot-<player_index>`, with the hyphen: a frame name is parsed by taking
+	-- everything after the tick's separator, so `tick-0001800-bot-1.jpg` reads
+	-- back as camera `bot-1` intact.
+	local player_indexes = {}
+	for _, player in pairs(game.players) do
+		table.insert(player_indexes, player.index)
 	end
+	table.sort(player_indexes)
+	for _, index in ipairs(player_indexes) do
+		table.insert(cameras, frame_capture_bot_camera(index))
+	end
+	-- Last, so the per-bot cameras of a tick are written before the frame that
+	-- claims to contain all of them. Nothing depends on the order; it just
+	-- reads better in a directory listing.
+	table.insert(cameras, { id = "area", kind = "area" })
+	frame_capture_validate_cameras(cameras)
 	storage.frame_capture = { cameras = cameras }
 	-- After the wipe, and only when asked for. The ordering is what keeps the
 	-- id honest: the directory is emptied first and the sidecar written
@@ -1268,6 +1486,7 @@ function on_player_joined_game(event)
 --	game.write_file("players_connected.txt", game.players[event.player_index].name..'\n', true, 0) -- only on server
 	storage.n_clients = storage.n_clients + 1
 	wait_for_player_inventory(event)
+	frame_capture_on_player_joined(event.player_index)
 
 	if client_local_data.whoami == "client1" then
 		for chunk_y=-512,512,32 do

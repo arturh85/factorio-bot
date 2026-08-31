@@ -593,6 +593,23 @@ impl FactorioRcon {
     /// sidecar at all, and a consumer that finds none knows it cannot tell,
     /// which is the honest answer. It never inherits the previous run's id.
     ///
+    /// # What gets captured, and what it costs
+    ///
+    /// The mod registers `2 + one per bot` cameras: `follow` (player 1),
+    /// `bot-<player_index>` for every player the game knows of, and `area`,
+    /// which frames the bounding box of all connected bots. A camera whose bot
+    /// is not connected writes **no file** for that tick rather than a
+    /// substitute, so a bot that joined late has no frames from before it
+    /// joined.
+    ///
+    /// **0.72 MB per frame**, measured at JPEG quality 85 and 1920x1080. One
+    /// frame per camera every 300 ticks is 12 a minute, so **one camera costs
+    /// ~520 MB an hour and the three cameras of a one-bot run cost ~1.56 GB an
+    /// hour** — and each further bot adds a camera, hence another ~520 MB an
+    /// hour. It is wiped per run and never accumulates across runs, but a long
+    /// run with several bots fills a disk. The number is here so that whoever
+    /// adds a fourth camera reads it before adding it rather than afterwards.
+    ///
     /// Taken by value rather than as `Option<&str>` because this `impl` is
     /// `#[automock]`ed and mockall cannot elide a lifetime inside a generic.
     pub async fn frame_capture_start(&self, run_id: Option<String>) -> Result<Option<u64>> {

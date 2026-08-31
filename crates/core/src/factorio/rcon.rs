@@ -37,6 +37,61 @@ const RCON_INTERFACE: &str = "botbridge";
 const ACTION_RESULT_DEADLINE: Duration = Duration::from_secs(360);
 
 /// The `/silent-command remote.call(...)` text for a BotBridge function.
+/// Renders `value` as a Lua string literal safe to paste into a `remote.call`
+/// command line.
+///
+/// [`str_to_lua`] only wraps in quotes, which is fine for the identifiers and
+/// prototype names it is used for but not for a value chosen by someone else.
+/// A run id is opaque by contract -- this side does not get to say what may be
+/// in it -- so a `'`, a backslash or a newline has to survive as data rather
+/// than end the literal and let the rest be read as Lua. The `\ddd` escapes
+/// cover the two characters that would terminate the command line itself:
+/// RCON commands are newline-delimited, so an embedded newline would otherwise
+/// split one call into two.
+fn lua_string_literal(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('\'');
+    for ch in value.chars() {
+        match ch {
+            '\'' => out.push_str("\\'"),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\010"),
+            '\r' => out.push_str("\\013"),
+            other => out.push(other),
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Judges the reply to either frame-capture toggle.
+///
+/// Unlike most `remote_call_timed` callers here, this refuses a reply that
+/// still has text in it after the tick stamp is taken off. The mod raises on a
+/// camera id it cannot use, on a run id that is not a string, and on wiping a
+/// directory it cannot wipe, and the game reports that as "Cannot execute
+/// command. Error: ..." in the reply body rather than as a transport failure.
+/// Dropping those lines would turn a capture that never started into a silent
+/// success, and the first evidence would be an empty frame directory much
+/// later.
+///
+/// A free function taking the reply, rather than a method taking the call's
+/// name: the name has to stay a literal in each toggle's own body, because
+/// that is where `each_rcon_doc_block_names_the_remote_call_its_binding_reaches`
+/// reads it from. Passing the name down to a shared sender hid it from that
+/// check, which is exactly the check that catches a doc block promising a
+/// `remote.call` the binding does not make.
+fn frame_capture_verdict(reply: (Option<Vec<String>>, Option<u64>)) -> Result<Option<u64>> {
+    let (lines, tick) = reply;
+    if let Some(lines) = lines {
+        return Err(RconUnexpectedOutput {
+            output: lines.join("\n"),
+        }
+        .into());
+    }
+    Ok(tick)
+}
+
 fn remote_call_command(function_name: &str, args: &[String]) -> String {
     let mut arg_string: String = args.join(", ");
     if !arg_string.is_empty() {
@@ -528,34 +583,30 @@ impl FactorioRcon {
     /// The returned tick is the game's own (BotBridge's `stamp_tick`), so a
     /// caller can check that every frame it later reads was taken at or after
     /// the moment capture began, rather than trusting that it was.
-    pub async fn frame_capture_start(&self) -> Result<Option<u64>> {
-        self.frame_capture_toggle("frame_capture_start").await
+    ///
+    /// `run_id` tags the run with an opaque identifier the mod echoes into
+    /// `frames/run.json` and never interprets. Pass one when the frames will
+    /// have to be matched against something produced elsewhere in the same run
+    /// -- a replay document, say -- so a consumer can check the two came from
+    /// the same capture instead of trusting that ticks lining up means they
+    /// did. Pass `None` when nothing needs correlating: the mod then writes no
+    /// sidecar at all, and a consumer that finds none knows it cannot tell,
+    /// which is the honest answer. It never inherits the previous run's id.
+    ///
+    /// Taken by value rather than as `Option<&str>` because this `impl` is
+    /// `#[automock]`ed and mockall cannot elide a lifetime inside a generic.
+    pub async fn frame_capture_start(&self, run_id: Option<String>) -> Result<Option<u64>> {
+        let args = match run_id.as_deref() {
+            Some(run_id) => vec![lua_string_literal(run_id)],
+            None => vec![],
+        };
+        frame_capture_verdict(self.remote_call_timed("frame_capture_start", args).await?)
     }
 
     /// Turns the mod's frame capture off, reporting the game tick it stopped
     /// at. Frames already written stay on disk.
     pub async fn frame_capture_stop(&self) -> Result<Option<u64>> {
-        self.frame_capture_toggle("frame_capture_stop").await
-    }
-
-    /// The shared half of the two toggles.
-    ///
-    /// Unlike most `remote_call_timed` callers here, this refuses a reply that
-    /// still has text in it after the tick stamp is taken off. The mod raises
-    /// on a camera id it cannot use and on wiping a directory it cannot wipe,
-    /// and the game reports that as "Cannot execute command. Error: ..." in
-    /// the reply body rather than as a transport failure. Dropping those lines
-    /// would turn a capture that never started into a silent success, and the
-    /// first evidence would be an empty frame directory much later.
-    async fn frame_capture_toggle(&self, function_name: &str) -> Result<Option<u64>> {
-        let (lines, tick) = self.remote_call_timed(function_name, vec![]).await?;
-        if let Some(lines) = lines {
-            return Err(RconUnexpectedOutput {
-                output: lines.join("\n"),
-            }
-            .into());
-        }
-        Ok(tick)
+        frame_capture_verdict(self.remote_call_timed("frame_capture_stop", vec![]).await?)
     }
 
     /// Print given message to all Clients as Chat Message from Server loudly using /c
@@ -2955,5 +3006,28 @@ mod transfer_guarantee_tests {
             let ticks = verdict.expect("a complete transfer must succeed");
             assert_eq!(ticks, ActionTicks::at(Some(STUB_TICK)));
         }
+    }
+
+    /// A run id is opaque by contract, so the quoting has to survive a value
+    /// this side did not choose. Without escaping, a `'` closes the literal
+    /// and everything after it is read as Lua by the game.
+    #[test]
+    fn a_run_id_containing_a_quote_stays_one_lua_string() {
+        assert_eq!(lua_string_literal("job-7"), "'job-7'");
+        assert_eq!(
+            lua_string_literal("a'); game.print('pwned"),
+            "'a\\'); game.print(\\'pwned'"
+        );
+        assert_eq!(lua_string_literal("back\\slash"), "'back\\\\slash'");
+    }
+
+    /// RCON commands are newline-delimited: an unescaped newline would end the
+    /// command and leave the remainder to be run as the next one.
+    #[test]
+    fn a_run_id_containing_a_newline_does_not_end_the_command() {
+        let literal = lua_string_literal("one\ntwo\r");
+        assert!(!literal.contains('\n'), "{literal:?} still holds a newline");
+        assert!(!literal.contains('\r'), "{literal:?} still holds a return");
+        assert_eq!(literal, "'one\\010two\\013'");
     }
 }

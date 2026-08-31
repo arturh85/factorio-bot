@@ -116,6 +116,63 @@ end
     )?;
     let rcon = _rcon.clone();
     map_table.set(
+        "__doc_entry_frame_capture_start",
+        String::from(
+            r#"
+--- starts the mod's tick-driven frame capture, wiping any earlier run's frames
+-- Sends /silent-command remote.call('frame_capture_start', run_id)
+-- The optional run_id is opaque: it is echoed verbatim into frames/run.json as
+-- {"run":"<run_id>"} and interpreted by nothing in the game. Pass one when the
+-- frames must later be matched against something produced elsewhere in the
+-- same run, so a consumer can check they belong together instead of trusting
+-- that tick numbers lining up means they do. Omit it and no run.json is
+-- written at all -- notably, the previous run's is gone and is not inherited.
+-- @string[opt] run_id opaque tag for this capture run
+-- @treturn number the game tick capture began at
+function rcon.frame_capture_start(run_id)
+end
+"#,
+        ),
+    )?;
+    map_table.set(
+        "frame_capture_start",
+        lua.create_async_function(move |_lua, run_id: Option<String>| {
+            let _rcon = rcon.clone();
+            async move {
+                let tick = _rcon
+                    .as_ref()
+                    .frame_capture_start(run_id)
+                    .await
+                    .map_err(rcon_error)?;
+                Ok(tick)
+            }
+        })?,
+    )?;
+    let rcon = _rcon.clone();
+    map_table.set(
+        "__doc_entry_frame_capture_stop",
+        String::from(
+            r#"
+--- stops frame capture; frames already written stay on disk
+-- Sends /silent-command remote.call('frame_capture_stop')
+-- @treturn number the game tick capture stopped at
+function rcon.frame_capture_stop()
+end
+"#,
+        ),
+    )?;
+    map_table.set(
+        "frame_capture_stop",
+        lua.create_async_function(move |_lua, ()| {
+            let _rcon = rcon.clone();
+            async move {
+                let tick = _rcon.as_ref().frame_capture_stop().await.map_err(rcon_error)?;
+                Ok(tick)
+            }
+        })?,
+    )?;
+    let rcon = _rcon.clone();
+    map_table.set(
         "__doc_entry_add_research",
         String::from(
             r#"

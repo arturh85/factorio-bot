@@ -960,6 +960,24 @@ local FRAME_CAPTURE_RESOLUTION = {1920, 1080}
 local FRAME_CAPTURE_QUALITY = 85 -- percent; JPEG only. PNG measured ~7x larger.
 local FRAME_CAPTURE_ZOOM = 1
 
+-- The run id sidecar lives *inside* `frames/`, not one level up in
+-- script-output, and that placement is the whole point of it.
+--
+-- The id exists so a consumer can tell whether the frames it is looking at and
+-- the replay document it is looking at came from the same run. Frames are
+-- per-run because `rcon_frame_capture_start` wipes this directory; a replay is
+-- per-job and any past job's replay can be opened. Without a shared id, job
+-- 3's plan joins to job 7's pictures by tick number alone and the join
+-- succeeds -- both sides name ticks from `game.tick`, so nothing complains.
+--
+-- Put the sidecar one level up and the wipe no longer reaches it. Then a run
+-- that cleared the frames and failed before rewriting the id would leave an id
+-- describing frames that no longer exist, and a consumer checking it would
+-- confirm a match that is wrong. A stale id is worse than no id: it turns "I
+-- cannot tell" into "I checked, they match". Inside the directory, the id can
+-- only ever be as old as the frames beside it.
+local FRAME_CAPTURE_RUN_FILE = FRAME_CAPTURE_DIR .. "/run.json"
+
 -- Camera ids must be filename-safe and must not contain "-".
 --
 -- `tick-NNNNNNN-<camera>.jpg` is parsed by splitting on the *last* "-", so an
@@ -1067,12 +1085,34 @@ function on_frame_capture_tick(event)
 	end
 end
 
-function rcon_frame_capture_start()
+-- `run_id` is an opaque tag for this capture run, echoed verbatim into
+-- `frames/run.json` as `{"run":"<run_id>"}` and used for nothing else here.
+--
+-- Deliberately uninterpreted. The caller passes a job id, but this mod must
+-- never learn that: it does not parse it, validate its shape, derive a
+-- filename from it or compare it to anything. Both sides then hold the same
+-- identifier while only the caller knows what it identifies. That ignorance is
+-- the design -- a mod that understood the id would have to be changed every
+-- time the caller's notion of a run changed.
+--
+-- Omitting it is a real choice, not a degraded one: a capture that nobody
+-- needs to correlate simply has no sidecar, and a consumer that finds none
+-- knows it cannot tell rather than being told something false.
+function rcon_frame_capture_start(run_id)
+	-- Checked before the wipe, so a call this function is going to refuse
+	-- cannot first destroy the previous run's frames. The check is on the
+	-- *type* only -- reading the value would be interpreting it.
+	if run_id ~= nil and type(run_id) ~= "string" then
+		error("frame capture run id must be a string or absent, got " .. type(run_id))
+	end
 	-- Wipe first, so the directory holds this run's frames and only this
 	-- run's. Without it a leftover frame from an earlier run that landed on
 	-- the same tick would fill a gap this run really had, which is the one
 	-- failure mode the naming scheme exists to expose. Runs on every peer,
 	-- each clearing its own script-output.
+	--
+	-- This takes `run.json` with it, and must: the wipe and the sidecar have
+	-- to move together or the id can outlive the frames it names.
 	helpers.remove_path(FRAME_CAPTURE_DIR)
 	-- Only the follow camera exists. Per-bot and area cameras are entries in
 	-- this list with a different `kind`; adding one needs no rename here.
@@ -1096,6 +1136,22 @@ function rcon_frame_capture_start()
 		seen[camera.id] = true
 	end
 	storage.frame_capture = { cameras = cameras }
+	-- After the wipe, and only when asked for. The ordering is what keeps the
+	-- id honest: the directory is emptied first and the sidecar written
+	-- second, so `run.json` is always newer than the wipe that preceded it.
+	--
+	-- A start with no id therefore leaves no `run.json` at all -- the previous
+	-- run's went out with the wipe and nothing replaced it. An untagged run
+	-- inheriting the last run's identity would be the worst outcome available
+	-- here, and the only way to prevent it is to have no branch that writes
+	-- the file with a remembered value: there is no fallback, no
+	-- `run_id or storage.something`, nothing carried across.
+	--
+	-- Written on every peer, matching the wipe above: each peer clears its own
+	-- script-output, so each peer's `frames/` gets its own sidecar.
+	if run_id ~= nil then
+		helpers.write_file(FRAME_CAPTURE_RUN_FILE, helpers.table_to_json({ run = run_id }), false)
+	end
 	stamp_tick()
 end
 

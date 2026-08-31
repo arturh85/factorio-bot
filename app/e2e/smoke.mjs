@@ -111,8 +111,17 @@ try {
 
     // 3. The script tree rendered, i.e. GET /api/v1/scripts answered.
     await page.goto(base + '/#/script', {waitUntil: 'networkidle'});
-    await page.waitForSelector('.p-tree', {timeout: 10000}).catch(() => {
-        fail('the script tree never rendered');
+    // `[role="tree"]`, not the old `.p-tree`: that was PrimeVue's own class and
+    // it vanished when the tree was rebuilt (plan 6 task 9), turning this check
+    // red against a working page. A CSS class is an implementation detail of
+    // whichever library renders the tree; the ARIA role is what the tree IS,
+    // and it survives the next restyling too.
+    //
+    // Asserting on the ITEMS rather than the container: an empty `<ul
+    // role="tree">` would satisfy a container-only check while telling the
+    // user nothing, which is the failure this whole file exists to catch.
+    await page.waitForSelector('[role="treeitem"]', {timeout: 10000}).catch(() => {
+        fail('the script tree never rendered any items');
     });
     await page.screenshot({path: path.join(shots, 'script.png'), fullPage: true});
 

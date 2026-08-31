@@ -1,58 +1,78 @@
 <script setup lang="ts">
-import {ref, onMounted, computed} from 'vue';
-import Tree from 'primevue/tree';
+import {computed, onMounted, ref} from 'vue';
+import {Loader2} from '@lucide/vue';
+import type {ScriptTreeNode} from '@/api/types';
 import {useScriptStore} from '@/store/scriptStore';
-import {ScriptTreeNode} from '@/api/types';
-
-const nodes = ref(null as ScriptTreeNode[] | null)
+import TreeView from '@/components/ui/tree/TreeView.vue';
+import {mergeNodes} from '@/components/ui/tree/mergeNodes';
 
 const scriptStore = useScriptStore()
-const loadingScriptsInDirectory = computed(() => scriptStore.getLoadingScriptsInDirectory)
 
-onMounted(async() => {
-  nodes.value = await scriptStore.loadScriptsInDirectory('/')
+const nodes = ref([] as ScriptTreeNode[])
+const expandedKeys = ref([] as string[])
+const selectedKey = ref(null as string | null)
+const error = ref(null as string | null)
+
+// Directories whose listing has already been fetched. Without it, collapsing
+// and re-expanding a directory would re-fetch it every time.
+const loadedKeys = ref([] as string[])
+
+const loading = computed(() => scriptStore.getLoadingScriptsInDirectory)
+
+const emit = defineEmits<{select: [key: string]}>()
+
+async function list(path: string): Promise<ScriptTreeNode[] | null> {
+  try {
+    const listed = await scriptStore.loadScriptsInDirectory(path)
+    error.value = null
+    return listed
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+    return null
+  }
+}
+
+onMounted(async () => {
+  const root = await list('/')
+  if (root !== null) {
+    nodes.value = root
+  }
 })
 
-const emit = defineEmits(['select']);
-
-function mergeNodes(nodes: ScriptTreeNode[], new_key: string, new_nodes: ScriptTreeNode[]):ScriptTreeNode[] {
-  const parts = new_key.substr(1).split('/')
-  let pointer: ScriptTreeNode | null = null;
-  for (let part of parts) {
-    if (pointer) {
-      pointer = pointer.children.find(node => node.label === part) || null
-    } else {
-      pointer = nodes.find(node => node.label === part) || null
+async function onToggle(node: ScriptTreeNode) {
+  if (expandedKeys.value.includes(node.key)) {
+    expandedKeys.value = expandedKeys.value.filter(key => key !== node.key)
+    return
+  }
+  if (!loadedKeys.value.includes(node.key)) {
+    const children = await list(node.key)
+    if (children === null) {
+      return
     }
+    nodes.value = mergeNodes(nodes.value, node.key, children)
+    loadedKeys.value = [...loadedKeys.value, node.key]
   }
-  if (pointer) {
-    pointer.children = new_nodes
-  }
-  return nodes
+  expandedKeys.value = [...expandedKeys.value, node.key]
 }
 
-
-const onNodeExpand = async(node: ScriptTreeNode) => {
-  const subNodes = await scriptStore.loadScriptsInDirectory(node.key)
-  nodes.value = mergeNodes(nodes.value as ScriptTreeNode[], node.key, subNodes)
+function onSelect(node: ScriptTreeNode) {
+  selectedKey.value = node.key
+  emit('select', node.key)
 }
-const onNodeSelect = async(node: ScriptTreeNode) => {
-  if (node.leaf) {
-    emit('select', node.key)
-  }
-}
-
 </script>
 
 <template>
-  <Tree selectionMode="single"
-        v-if="nodes"
-        :value="nodes"
-        @nodeSelect="onNodeSelect"
-        @nodeExpand="onNodeExpand"
-        :loading="loadingScriptsInDirectory"></Tree>
+  <div>
+    <p v-if="error" class="mb-2 text-sm text-danger" data-testid="tree-error">{{ error }}</p>
+    <p v-if="loading" class="mb-2 flex items-center gap-2 text-sm text-ink-muted">
+      <Loader2 class="size-4 animate-spin" aria-hidden="true"/>
+      Loading ...
+    </p>
+    <TreeView
+      :nodes="nodes"
+      :expanded-keys="expandedKeys"
+      :selected-key="selectedKey"
+      @toggle="onToggle"
+      @select="onSelect"/>
+  </div>
 </template>
-
-<style scoped>
-
-</style>

@@ -288,3 +288,49 @@ from the Lua runtime to a structured event today. Preference order:
     `Replay` from the run to the sink (the peer session's area)
   - `crates/server`: the `WireEvent` variant, its OpenAPI docs, the snapshot
   - frontend: `onReplay`, and all rendering
+
+
+---
+
+# RENDERER PRINCIPLE: a replay shows the executor's CONCLUSIONS, not the world
+
+Forced by a second instance of the same problem, and worth stating as a frame
+rather than patching caveats in one at a time.
+
+**Instance 1 — walks.** `Status::Success` on a walk meant the ticks were
+measured, not that the bot arrived. Handled by `Evidence::Believed { why }`.
+
+**Instance 2 — transfers (open at time of writing).** A `remove` reported
+success and the inventory read afterwards showed no plates. Two possibilities
+with opposite consequences: either the plates exist and
+`world.player().main_inventory` is stale (it has been, by 1,400 ticks), or the
+plates do not exist and `remove` said success anyway. If the second, then
+**`Status::Success` for a transfer means only "the game did not refuse the
+command", not "items moved"** — and a green row in the replay can be a no-op.
+
+## The frame
+
+Do not treat these as a growing list of exceptions to "success means it
+worked". Treat them as the normal case:
+
+**Every row in the replay is a claim by the executor about what it believes
+happened. `Evidence` records how strong that claim is. The renderer's job is to
+show the claim and its strength, never to assert an effect on the world.**
+
+Consequences for the design:
+
+  - **Do not build success styling that asserts an effect.** A green bar that
+    reads as "this worked" is a stronger statement than the data supports for
+    at least walks, and possibly transfers.
+  - `Evidence` currently marks **only walks**. If transfers turn out to be the
+    weaker thing, the fix belongs in `Evidence` — a variant for transfers — and
+    **not** in the renderer. The renderer should already be rendering whatever
+    `Evidence` says, so a new variant is a new label and no new code path.
+  - Build the evidence display **first**, before the happy path looks finished.
+    A renderer that treats caveats as an afterthought will have styled success
+    as certainty by the time the first caveat arrives.
+
+This is the same family as everything else in this file: **not absent, not
+wrong-looking — confidently right about the wrong thing.** The difference is
+that here we know the shape in advance, so the renderer can be built to expect
+it rather than retrofitted.

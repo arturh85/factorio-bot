@@ -1210,12 +1210,18 @@ impl ResourcePatch {
                 }
             }
             if !invalid {
+                // Anchor on the element's tile *corner*, not its centre.
+                // Elements are centres (`-36.5`), so building the rect from one
+                // directly and then `rect_floor_ceil`ing it widens the box by a
+                // tile in each axis -- floor(-36.5) = -37 and ceil(-34.5) = -34
+                // spans three tiles for a two-tile request. Flooring first makes
+                // the rect exactly `width` x `height`, and leaves
+                // `rect_floor_ceil` a no-op rather than an inflator.
+                let left = element.x().floor();
+                let top = element.y().floor();
                 return Some(rect_floor_ceil(&Rect {
-                    left_top: element.clone(),
-                    right_bottom: Position::new(
-                        element.x() + width as f64,
-                        element.y() + height as f64,
-                    ),
+                    left_top: Position::new(left, top),
+                    right_bottom: Position::new(left + width as f64, top + height as f64),
                 }));
             }
         }
@@ -1447,6 +1453,51 @@ impl IntoLua for FactorioEntity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A free rect must cover exactly the tiles that were asked for.
+    ///
+    /// The coordinate-specific `test_free_rect_*` cases in `scripting_lua` pin
+    /// *where* the rect lands; this pins its *size*, which is the property that
+    /// broke when resource elements moved from tile corners to tile centres.
+    /// Anchoring on a centre and then `rect_floor_ceil`ing widened every rect by
+    /// one tile in each axis, so a 2x2 request silently returned 3x3 -- a
+    /// difference no positional assertion states outright.
+    #[test]
+    fn a_free_rect_is_exactly_the_requested_size() {
+        // A solid 6x6 ore field, elements at tile centres as the game reports
+        // them.
+        let elements: Vec<Position> = (0..6)
+            .flat_map(|y| (0..6).map(move |x| Position::new(f64::from(x) - 40.5, f64::from(y) + 35.5)))
+            .collect();
+        let patch = ResourcePatch {
+            name: "iron-ore".into(),
+            id: 1,
+            rect: Rect {
+                left_top: Position::new(-41.0, 35.0),
+                right_bottom: Position::new(-35.0, 41.0),
+            },
+            elements,
+        };
+
+        let mut checked = 0;
+        for (w, h) in [(1u32, 1u32), (2, 2), (3, 2), (2, 3), (4, 4)] {
+            let rect = patch
+                .find_free_rect(w, h, &Position::new(0.0, 0.0))
+                .unwrap_or_else(|| panic!("no {w}x{h} rect in a solid 6x6 field"));
+            assert_eq!(
+                rect.right_bottom.x() - rect.left_top.x(),
+                f64::from(w),
+                "width for a {w}x{h} request: {rect:?}"
+            );
+            assert_eq!(
+                rect.right_bottom.y() - rect.left_top.y(),
+                f64::from(h),
+                "height for a {w}x{h} request: {rect:?}"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 5, "every size was exercised");
+    }
 
     /// The shape `mods/BotBridge/types.lua` produces on Factorio 2.0, where
     /// `LuaInventory.get_contents()` returns an array with quality.

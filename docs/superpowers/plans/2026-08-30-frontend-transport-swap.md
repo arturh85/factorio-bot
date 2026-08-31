@@ -3193,6 +3193,12 @@ So `starting` goes true and never clears, `last_error` is never read after the i
 
 ---
 
+> **Two things Task 11b left, both needing an owner rather than a fix here.**
+>
+> **`enable_autostart` has no server-side owner.** Verified: nothing in `crates/` ever *reads* it — `app_settings.rs` only persists it, and every other hit is a test asserting round-trip persistence. So autostart stayed in the browser, correctly; I had leaned toward dropping it on the theory the server could own it, and the server does not. If a `serve`-time autostart ever lands, `App.vue`'s branch must be deleted in the same change or the setting fires twice.
+>
+> **Pre-existing, and user-visible:** an unreachable server at mount makes the initial `checkInstanceState()` reject unhandled, which skips `loadSettings()` and autostart **silently**. So pointing the SPA at a server that is not running gives a page that renders and does nothing, with no error. That is the "absent fact rendered as a present one" shape in the app shell, and it should be fixed before Task 17's browser verification, which would otherwise be verifying a page that fails silently.
+
 ## Task 12: Delete Tauri from the JavaScript side
 
 **Files:**

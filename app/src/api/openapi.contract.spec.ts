@@ -52,6 +52,8 @@ import type {
     ExecuteAccepted,
     ExecuteRequest,
     ExistsResponse,
+    FrameEntry,
+    FramesManifest,
     InstanceStatus,
     Job,
     JobStatus,
@@ -237,6 +239,21 @@ const OPERATIONS: readonly OperationContract[] = [
         // parses this as JSON -- but the media type is still part of what it
         // assumes.
         response: {status: '200', mediaType: 'text/event-stream'}
+    },
+    {
+        path: '/api/v1/frames',
+        method: 'get',
+        caller: 'frames',
+        response: {status: '200', schema: 'FramesManifest'}
+    },
+    {
+        path: '/api/v1/frames/{name}',
+        method: 'get',
+        caller: 'frameUrl',
+        pathParams: ['name'],
+        // `frameUrl` builds a URL for an `<img>` tag, not a `request()` call --
+        // the response is immutable JPEG bytes, never parsed as JSON.
+        response: {status: '200', mediaType: 'image/jpeg'}
     }
 ] as const;
 
@@ -399,6 +416,20 @@ const SCHEMAS: Record<string, SchemaContract> = {
     }),
     ExistsResponse: objectContract<ExistsResponse>({
         exists: {required: true, type: 'boolean'}
+    }),
+    FrameEntry: objectContract<FrameEntry>({
+        client: {required: true, type: 'integer'},
+        // `tick`/`camera` are always serialised (no `skip_serializing_if`),
+        // so `types.ts` declares both present and nullable -- a name that
+        // does not parse is reported with nulls, not omitted.
+        tick: {required: false, type: 'integer', nullable: true},
+        camera: {required: false, type: 'string', nullable: true},
+        name: {required: true, type: 'string'},
+        bytes: {required: true, type: 'integer'}
+    }),
+    FramesManifest: objectContract<FramesManifest>({
+        clients: {required: true, type: 'array'},
+        frames: {required: true, arrayOf: 'FrameEntry'}
     }),
     // Not `objectContract<…>`: `sendRcon(command)` builds this body as an
     // inline literal, so there is no declaration in `types.ts` to bind it to

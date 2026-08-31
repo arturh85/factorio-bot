@@ -543,6 +543,74 @@
         ],
         "type": "object"
       },
+      "FrameEntry": {
+        "description": "One frame file exactly as it exists on disk. One entry per file found\nunder a client's frames directory -- nothing is computed, nothing is\ninferred about files that are not there.",
+        "properties": {
+          "bytes": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "camera": {
+            "description": "The camera id, parsed from the filename, or `null` alongside `tick`\nwhen the name does not parse.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "client": {
+            "description": "Which `client<N>` directory this frame was captured by.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "description": "The filename exactly as it appears on disk.",
+            "type": "string"
+          },
+          "tick": {
+            "description": "`game.tick` at capture, parsed from the filename, or `null` when the\nname does not fit the pattern. Always present as a key -- `null` says\n\"we looked and there is nothing to report\", not \"we didn't ask\".",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "client",
+          "name",
+          "bytes"
+        ],
+        "type": "object"
+      },
+      "FramesManifest": {
+        "description": "`GET /api/v1/frames` response.\n\n`clients` and `frames` together distinguish the three states a caller must\nnot conflate:\n- no workspace, or no `client<N>` directory at all: `clients` is empty --\n  the run has never happened.\n- a `client<N>` directory exists but has produced no frames yet: `clients`\n  names it, `frames` is empty -- capture has not run.\n- frames are present: both are non-empty.",
+        "properties": {
+          "clients": {
+            "description": "Every `client<N>` directory discovered under the workspace, regardless\nof whether it has produced a frame yet.",
+            "items": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "frames": {
+            "description": "One entry per file actually on disk, sorted by `(client, tick,\ncamera)` with unparsed entries last, so iteration order is contractual\nrather than filesystem order.",
+            "items": {
+              "$ref": "#/components/schemas/FrameEntry"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "clients",
+          "frames"
+        ],
+        "type": "object"
+      },
       "GuiSettings": {
         "properties": {
           "enable_autostart": {
@@ -1005,6 +1073,87 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/frames": {
+      "get": {
+        "description": "Derived from a directory listing on every call -- see the module docs for\nwhy this is not computed from a start tick and a stride.",
+        "operationId": "list_frames",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FramesManifest"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Returns the manifest of frames captured so far.",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/frames/{name}": {
+      "get": {
+        "description": "The route carries no client segment, so `name` is tried against each\ndiscovered `client<N>` directory in turn (lowest client number first),\nanswering the first match. Each directory is bounds-checked with\n[`resolve_script_path`] -- the same traversal guard\n`manage::scripts` uses -- rather than a second, independent\nimplementation of it: this endpoint is unauthenticated, so that guard is\nwhat stands between an HTTP caller and the filesystem.\n\nDoes not invent a way to disambiguate two clients that happen to have\nproduced a same-named file: the first match wins, silently. Nothing in\nthis feature deduplicates or renames a colliding name -- a `-1`-style\nsuffix would let a genuine double-write live on disk indistinguishably\nfrom two legitimate frames, which is worse than the ambiguity it would\npaper over.",
+        "operationId": "get_frame",
+        "parameters": [
+          {
+            "description": "a frame's filename, as reported by GET /api/v1/frames",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "image/jpeg": {}
+            },
+            "description": "the frame's JPEG bytes"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Serves one frame's JPEG bytes.",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
     "/api/v1/fs/exists": {
       "get": {
         "operationId": "exists",

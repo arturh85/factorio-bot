@@ -1,5 +1,6 @@
 #[cfg(feature = "lua")]
 pub mod execute;
+pub mod frames;
 pub mod fs;
 pub mod instance;
 pub mod rcon;
@@ -23,7 +24,9 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(scripts::write_script))
         .routes(routes!(scripts::create_script))
         .routes(routes!(scripts::delete_script))
-        .routes(routes!(fs::exists));
+        .routes(routes!(fs::exists))
+        .routes(routes!(frames::list_frames))
+        .routes(routes!(frames::get_frame));
 
     // Script execution and the job history it produces exist only in a build
     // that has an interpreter: `factorio-bot-scripting-lua` is an optional

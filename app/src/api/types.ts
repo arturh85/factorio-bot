@@ -209,3 +209,39 @@ export interface FactorioEntity {
     ghost_name: string | null;
     ghost_type: string | null;
 }
+
+/**
+ * One frame file exactly as it exists on disk -- `crates/server/src/manage/frames.rs`.
+ *
+ * A frame's filename is a measurement, not a claim: the mod names it from
+ * `game.tick` inside the game, and `tick`/`camera` here are only ever parsed
+ * back out of that name. Both are `| null`, always present as keys, for a
+ * name that does not fit the `tick-<digits>-<camera>.jpg` pattern -- such a
+ * file is reported, never dropped from the list.
+ */
+export interface FrameEntry {
+    /** Which `client<N>` directory this frame was captured by. */
+    client: number;
+    tick: number | null;
+    camera: string | null;
+    /** The filename exactly as it appears on disk; pass to `frameUrl`. */
+    name: string;
+    bytes: number;
+}
+
+/**
+ * `GET /api/v1/frames` response.
+ *
+ * `clients` and `frames` together distinguish three states that must not be
+ * conflated: no `clients` at all means the run has never happened; a
+ * `clients` entry with no matching `frames` means capture has not produced
+ * anything yet; both non-empty means frames are present. Never computed from
+ * a start tick and a stride -- always a live directory listing, so a dropped
+ * frame (multiplayer clients catching up do not honour `force_render`) shows
+ * up as a genuine gap rather than being smoothed over.
+ */
+export interface FramesManifest {
+    /** `client<N>` directories discovered under the workspace. */
+    clients: number[];
+    frames: FrameEntry[];
+}

@@ -20,6 +20,7 @@ import {
     ExecuteAccepted,
     ExecuteRequest,
     ExistsResponse,
+    FramesManifest,
     InstanceStatus,
     Job,
     ScriptContent,
@@ -117,4 +118,22 @@ export function getJob(id: string): Promise<Job> {
  */
 export function jobEventsUrl(id: string): string {
     return buildUrl('/api/v1/jobs/' + encodeURIComponent(id) + '/events');
+}
+
+/**
+ * The manifest of captured frames, derived fresh from a directory listing on
+ * every call -- see `FramesManifest` for why nothing here is computed from a
+ * start tick and a stride.
+ */
+export function frames(): Promise<FramesManifest> {
+    return request<FramesManifest>('/api/v1/frames');
+}
+
+/**
+ * The URL for one frame's JPEG bytes, for an `<img>` tag rather than a
+ * `request()` call -- the response is immutable image bytes, not JSON.
+ * `name` is a `FrameEntry.name` as reported by `frames()`.
+ */
+export function frameUrl(name: string): string {
+    return buildUrl('/api/v1/frames/' + encodeURIComponent(name));
 }

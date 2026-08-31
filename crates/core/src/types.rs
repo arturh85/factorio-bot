@@ -303,7 +303,11 @@ pub struct FactorioProduct {
 }
 
 /// The `Ingredient` shape as it arrives from `mods/BotBridge`.
-#[derive(Debug, Clone, Deserialize)]
+// `JsonSchema` is required by schemars 1.x, which -- unlike 0.8 -- honours
+// `#[serde(from = "...")]` and so needs the *source* type described to build
+// the deserialize contract. Nothing documents this type directly: `types.lua`
+// is generated from the serialize contract, which is the shape Lua receives.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct RawFactorioIngredient {
     pub name: String,
@@ -337,7 +341,11 @@ impl From<RawFactorioIngredient> for FactorioIngredient {
 /// Every field is therefore optional, and missing probability information means
 /// "produced with certainty" (1.0), which is what the game does when a product
 /// declares none.
-#[derive(Debug, Clone, Deserialize)]
+// `JsonSchema` is required by schemars 1.x, which -- unlike 0.8 -- honours
+// `#[serde(from = "...")]` and so needs the *source* type described to build
+// the deserialize contract. Nothing documents this type directly: `types.lua`
+// is generated from the serialize contract, which is the shape Lua receives.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct RawFactorioProduct {
     pub name: String,
@@ -363,7 +371,9 @@ pub struct RawFactorioProduct {
 
 /// `SharedProbabilityDefinition` from the runtime API: the product is given
 /// when the craft's single shared roll falls into `[min, max]`.
-#[derive(Debug, Clone, Deserialize)]
+// `JsonSchema` for the same reason as the Raw types above: reachable from a
+// deserialize contract schemars 1.x now builds, never documented itself.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct SharedProbabilityDefinition {
     pub min: f64,
     pub max: f64,

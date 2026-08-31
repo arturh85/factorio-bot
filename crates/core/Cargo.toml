@@ -50,7 +50,15 @@ liblzma = "0.4"
 zip = "8.6"
 toml = "1.1"
 regex = "1.11"
-schemars = { version = "0.8.22", features = ["preserve_order"] }
+# Deliberately WITHOUT `preserve_order`. In schemars 0.8 that feature ordered
+# schemars' own map; in 1.x schemars uses `serde_json::Map`, so it forwards to
+# `serde_json/preserve_order` and switches that map from BTreeMap to IndexMap
+# for every crate in the graph -- reordering the keys of every JSON object this
+# workspace serialises, wire payloads included. It buys declaration-ordered
+# fields in the generated `docs/lua/src/types.lua` and costs a workspace-wide
+# change in JSON output. Four tests asserting exact JSON strings catch it if
+# anyone re-adds it; this comment is here so nobody has to.
+schemars = "1.2"
 utoipa = "5.5.0"
 mlua = { version = "0.12", features = ["lua54", "serialize", "macros"] }
 miette = {version = "7.4", features = ["fancy"] }

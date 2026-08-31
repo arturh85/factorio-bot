@@ -7,10 +7,9 @@ use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::parking_lot::Mutex;
 use factorio_bot_core::plan::planner::Planner;
-use factorio_bot_core::schemars::schema::{
-    InstanceType, RootSchema, Schema, SchemaObject, SingleOrVec,
-};
-use factorio_bot_core::schemars::schema_for;
+use factorio_bot_core::schemars::generate::SchemaSettings;
+use factorio_bot_core::schemars::{JsonSchema, SchemaGenerator};
+use factorio_bot_core::serde_json::Value;
 use factorio_bot_core::types::{
     FactorioBlueprintInfo, FactorioEntity, FactorioPlayer, FactorioRecipe, InventoryResponse,
     Position, Rect,
@@ -126,16 +125,37 @@ pub fn write_lua_docs(target_path: PathBuf) -> LuaResult<()> {
 /// `` `types.X` `` references in the four generated binding files -- which are
 /// themselves generated from the `__doc_entry_*` strings. Adding a root that
 /// no binding hands out fails; documenting a return type without a root fails.
-fn documented_type_schemas() -> Vec<RootSchema> {
+fn documented_type_schemas() -> Vec<Value> {
     vec![
-        schema_for!(FactorioBlueprintInfo),
-        schema_for!(FactorioEntity),
-        schema_for!(FactorioPlayer),
-        schema_for!(FactorioRecipe),
-        schema_for!(InventoryResponse),
-        schema_for!(Position),
-        schema_for!(Rect),
+        serialize_schema::<FactorioBlueprintInfo>(),
+        serialize_schema::<FactorioEntity>(),
+        serialize_schema::<FactorioPlayer>(),
+        serialize_schema::<FactorioRecipe>(),
+        serialize_schema::<InventoryResponse>(),
+        serialize_schema::<Position>(),
+        serialize_schema::<Rect>(),
     ]
+}
+
+/// One type's schema, described as it is **serialised**.
+///
+/// The contract is chosen explicitly rather than taken from `schema_for!`,
+/// whose default describes deserialisation. The two differ wherever serde is
+/// told to convert: `FactorioProduct` is `#[serde(from = "RawFactorioProduct")]`,
+/// so its deserialize contract is the mod's wire shape and its serialize
+/// contract is its own fields. Lua is *handed* these values, so the serialize
+/// contract is the true one, and the deserialize contract would document
+/// fields (`shared_probability`, `independent_probability`) that a script can
+/// never see.
+///
+/// schemars 0.8 had no contracts and always described the struct's own
+/// fields, which made it accidentally right here. 1.x makes it a choice, and
+/// taking the default would have silently rewritten two of these types into
+/// shapes no Lua caller receives.
+fn serialize_schema<T: JsonSchema>() -> Value {
+    let generator = SchemaGenerator::new(SchemaSettings::default().for_serialize());
+    let schema = generator.into_root_schema_for::<T>();
+    Value::from(schema)
 }
 
 /// Everything `types.lua` describes.
@@ -147,25 +167,31 @@ struct DocumentedTypes {
     /// The roots and everything reachable from them, keyed by name. A reader
     /// who is handed a `FactorioRecipe` needs `FactorioIngredient` described
     /// too, even though no `@return` names it.
-    all: BTreeMap<String, SchemaObject>,
+    all: BTreeMap<String, Value>,
 }
 
 /// Walks [`documented_type_schemas`] into the roots and their closure.
 fn collect_documented_types() -> DocumentedTypes {
     let mut roots: BTreeSet<String> = BTreeSet::new();
-    let mut all: BTreeMap<String, SchemaObject> = BTreeMap::new();
-    for root in documented_type_schemas() {
-        for (name, schema) in root.definitions {
-            all.insert(name, schema.into_object());
+    let mut all: BTreeMap<String, Value> = BTreeMap::new();
+    for mut root in documented_type_schemas() {
+        // The reachable closure travels with the root under `$defs` (0.8 called
+        // it `definitions`); lift it out so every named type is a peer, and drop
+        // the key so a root does not carry a copy of its own dependencies.
+        if let Some(object) = root.as_object_mut()
+            && let Some(Value::Object(defs)) = object.remove("$defs")
+        {
+            for (name, schema) in defs {
+                all.insert(name, schema);
+            }
         }
         let name = root
-            .schema
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.title.clone())
-            .expect("schemars titles every root schema with its type name");
+            .get("title")
+            .and_then(Value::as_str)
+            .expect("schemars titles every root schema with its type name")
+            .to_owned();
         roots.insert(name.clone());
-        all.insert(name, root.schema);
+        all.insert(name, root);
     }
     DocumentedTypes { roots, all }
 }
@@ -294,7 +320,7 @@ fn render_lua_doc(doc_table: &LuaTable) -> String {
 /// it did while serde had been emitting a list of `InventoryItemWithQuality`.
 /// Everything below is read off the schema, so the only spelling choices left
 /// are how a JSON type is written for a Lua reader.
-fn render_types_doc(documented: &BTreeMap<String, SchemaObject>) -> String {
+fn render_types_doc(documented: &BTreeMap<String, Value>) -> String {
     let mut body = String::from(
         "--- Types\n\
          --\n\
@@ -311,28 +337,16 @@ fn render_types_doc(documented: &BTreeMap<String, SchemaObject>) -> String {
     for (name, schema) in documented {
         body += "\n";
         body += &format!("--- {name}\n");
-        if let Some(description) = schema
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.description.as_ref())
-        {
+        if let Some(description) = schema.get("description").and_then(Value::as_str) {
             body += &comment_lines(description, "-- ");
         }
-        let Some(object) = &schema.object else {
-            body += &format!(
-                "{name} = nil -- {}\n",
-                lua_field(&Schema::Object(schema.clone())).1
-            );
+        let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+            body += &format!("{name} = nil -- {}\n", lua_field(schema).1);
             continue;
         };
         body += &format!("{name} = {{\n");
-        for (field, field_schema) in &object.properties {
-            if let Schema::Object(field_object) = field_schema
-                && let Some(description) = field_object
-                    .metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.description.as_ref())
-            {
+        for (field, field_schema) in properties {
+            if let Some(description) = field_schema.get("description").and_then(Value::as_str) {
                 body += &comment_lines(description, "    -- ");
             }
             let (placeholder, note) = lua_field(field_schema);
@@ -352,75 +366,59 @@ fn comment_lines(text: &str, prefix: &str) -> String {
 
 /// How one field's schema reads to a Lua author: the placeholder to show it
 /// with, and the note describing what it holds.
-fn lua_field(schema: &Schema) -> (&'static str, String) {
-    let Schema::Object(object) = schema else {
+fn lua_field(schema: &Value) -> (&'static str, String) {
+    let Some(object) = schema.as_object() else {
         return ("nil", "any".to_string());
     };
-    if let Some(reference) = &object.reference {
+    if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
         let name = reference.rsplit('/').next().unwrap_or(reference);
         return ("nil", format!("`{name}`"));
     }
     // `Option<T>` over a named type is `anyOf: [T, null]`, not a nullable
     // `type`; unwrap to the one real variant and mark it optional.
-    if let Some(subschemas) = &object.subschemas {
-        let variants = subschemas
-            .any_of
-            .as_ref()
-            .or(subschemas.one_of.as_ref())
-            .or(subschemas.all_of.as_ref());
-        if let Some(variants) = variants {
-            let real: Vec<&Schema> = variants.iter().filter(|v| !is_null_schema(v)).collect();
-            let optional = real.len() < variants.len();
-            if let [only] = real[..] {
-                let (placeholder, note) = lua_field(only);
-                return if optional {
-                    ("nil", format!("{note}, or nil"))
-                } else {
-                    (placeholder, note)
-                };
-            }
+    if let Some(variants) = ["anyOf", "oneOf", "allOf"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_array))
+    {
+        let real: Vec<&Value> = variants.iter().filter(|v| !is_null_schema(v)).collect();
+        let optional = real.len() < variants.len();
+        if let [only] = real[..] {
+            let (placeholder, note) = lua_field(only);
+            return if optional {
+                ("nil", format!("{note}, or nil"))
+            } else {
+                (placeholder, note)
+            };
         }
     }
-    let Some(instance_type) = &object.instance_type else {
-        return ("nil", "any".to_string());
+    let types: Vec<&str> = match object.get("type") {
+        Some(Value::String(one)) => vec![one.as_str()],
+        Some(Value::Array(many)) => many.iter().filter_map(Value::as_str).collect(),
+        _ => return ("nil", "any".to_string()),
     };
-    let types: Vec<InstanceType> = match instance_type {
-        SingleOrVec::Single(one) => vec![**one],
-        SingleOrVec::Vec(many) => many.clone(),
-    };
-    let optional = types.contains(&InstanceType::Null);
-    let Some(primary) = types.iter().find(|t| **t != InstanceType::Null) else {
+    let optional = types.contains(&"null");
+    let Some(primary) = types.iter().find(|t| **t != "null") else {
         return ("nil", "nil".to_string());
     };
-    let (placeholder, note) = match primary {
-        InstanceType::String => ("''", "string".to_string()),
-        InstanceType::Integer | InstanceType::Number => ("0", "number".to_string()),
-        InstanceType::Boolean => ("false", "boolean".to_string()),
-        InstanceType::Array => {
+    let (placeholder, note) = match *primary {
+        "string" => ("''", "string".to_string()),
+        "integer" | "number" => ("0", "number".to_string()),
+        "boolean" => ("false", "boolean".to_string()),
+        "array" => {
             let item = object
-                .array
-                .as_ref()
-                .and_then(|array| array.items.as_ref())
-                .map(|items| match items {
-                    SingleOrVec::Single(one) => lua_field(one).1,
-                    SingleOrVec::Vec(many) => many
-                        .first()
-                        .map(|one| lua_field(one).1)
-                        .unwrap_or_else(|| "any".to_string()),
-                })
+                .get("items")
+                .map(|items| lua_field(items).1)
                 .unwrap_or_else(|| "any".to_string());
             ("nil", format!("{{{item}}}"))
         }
-        InstanceType::Object => {
+        "object" => {
             let value = object
-                .object
-                .as_ref()
-                .and_then(|validation| validation.additional_properties.as_deref())
+                .get("additionalProperties")
                 .map(|value| lua_field(value).1)
                 .unwrap_or_else(|| "any".to_string());
             ("nil", format!("{{[string]={value},...}}"))
         }
-        InstanceType::Null => ("nil", "nil".to_string()),
+        _ => ("nil", "any".to_string()),
     };
     if optional {
         ("nil", format!("{note}, or nil"))
@@ -430,14 +428,8 @@ fn lua_field(schema: &Schema) -> (&'static str, String) {
 }
 
 /// `Option<T>` renders its absent arm as a schema whose only type is `null`.
-fn is_null_schema(schema: &Schema) -> bool {
-    let Schema::Object(object) = schema else {
-        return false;
-    };
-    matches!(
-        &object.instance_type,
-        Some(SingleOrVec::Single(one)) if **one == InstanceType::Null
-    )
+fn is_null_schema(schema: &Value) -> bool {
+    schema.get("type").and_then(Value::as_str) == Some("null")
 }
 
 #[cfg(test)]
@@ -667,8 +659,8 @@ mod tests {
         let body = fs::read_to_string(target.join("types.lua")).expect("types.lua");
         let mut checked = 0usize;
         for (name, schema) in collect_documented_types().all {
-            let expected: Vec<String> = match &schema.object {
-                Some(object) => object.properties.keys().cloned().collect(),
+            let expected: Vec<String> = match schema.get("properties").and_then(Value::as_object) {
+                Some(properties) => properties.keys().cloned().collect(),
                 None => continue,
             };
             if expected.is_empty() {

@@ -343,42 +343,22 @@ mod tests {
         );
     }
 
-    /// The regression task 3c closes: `scripting.rs` and `run_script.rs` used
-    /// to hand `ensure_scripts_dir` the raw, unresolved `workspace_path`
-    /// string (as a bare `&Path`), so a relative configured value quietly
-    /// created `<process cwd>/<relative>/scripts` instead of erroring.
-    ///
-    /// `ensure_scripts_dir` now takes `&paths::ResolvedWorkspace`, which only
-    /// `resolve_workspace` can mint, so that call shape can no longer be
-    /// written at all -- confirmed here by going through the same two steps
-    /// every real caller now must: `resolve_workspace` first, which refuses a
-    /// relative path outright, so `ensure_scripts_dir` (and its directory
-    /// creation) is never reached.
-    ///
-    /// Asserts the directory itself is absent, not merely that an `Err` came
-    /// back: an `Err` returned after the directory was already created would
-    /// still leave the mess behind. Before this fix (`ensure_scripts_dir`
-    /// taking a bare `&Path`), the equivalent call sequence created the
-    /// directory and this assertion failed.
-    #[test]
-    fn a_relative_workspace_path_never_reaches_ensure_scripts_dir() {
-        let relative = "relative-workspace-hazard-repro-3c";
-        let hazard_dir = std::env::current_dir().expect("cwd").join(relative);
-        let _ = fs::remove_dir_all(&hazard_dir);
-
-        let result = crate::paths::resolve_workspace(relative).map(|ws| ensure_scripts_dir(&ws));
-
-        assert!(
-            result.is_err(),
-            "a relative workspace_path must be refused before it reaches ensure_scripts_dir"
-        );
-        let still_absent = !hazard_dir.join("scripts").exists();
-        let _ = fs::remove_dir_all(&hazard_dir);
-        assert!(
-            still_absent,
-            "ensure_scripts_dir must not create a scripts dir under an unresolved relative workspace"
-        );
-    }
+    // There is deliberately NO runtime test that "a relative workspace_path
+    // cannot reach ensure_scripts_dir". After a43e19b2 that is a COMPILE-TIME
+    // guarantee -- `ensure_scripts_dir` takes a `ResolvedWorkspace`, which only
+    // `paths::resolve_workspace` can mint -- so the hazardous call shape does
+    // not compile and cannot be exercised from a test.
+    //
+    // A test was written here and removed. It read
+    // `resolve_workspace(relative).map(|ws| ensure_scripts_dir(&ws))`, and
+    // since `Result::map` does not run its closure on `Err`, it never called
+    // `ensure_scripts_dir` at all: it re-tested `resolve_workspace`, which
+    // `paths::tests::a_relative_workspace_is_refused_rather_than_joined_to_the_cwd`
+    // already covers. It could not fail for the reason its name claimed, and a
+    // test that cannot fail is worse than no test because it reads as coverage.
+    //
+    // If the newtype ever grows a public constructor, this becomes testable
+    // again -- and that is the change to refuse, not the test to restore.
 
     /// Called on every server start, so it must be idempotent and must not
     /// disturb scripts already on disk.

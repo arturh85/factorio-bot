@@ -180,8 +180,8 @@ pub async fn setup_factorio_instance(
     //
     // A bare `?`: `RelativeWorkspacePath` is a `Diagnostic`, so the `help`
     // naming the setting and its fix survives into the report.
-    let workspace_path = crate::paths::resolve_workspace(workspace_path_str)?;
-    let workspace_path = workspace_path.as_path();
+    let resolved_workspace = crate::paths::resolve_workspace(workspace_path_str)?;
+    let workspace_path = resolved_workspace.as_path();
     if !workspace_path.exists() {
         error!(
             "Failed to find workspace at <bright-blue>{:?}</>",
@@ -421,7 +421,7 @@ pub async fn setup_factorio_instance(
                     }
                 }
                 update_map_gen_settings(
-                    workspace_path_str,
+                    &resolved_workspace,
                     instance_name,
                     factorio_port,
                     rcon_settings,
@@ -530,14 +530,20 @@ pub async fn setup_factorio_instance(
 }
 
 pub async fn update_map_gen_settings(
-    workspace_path: &str,
+    workspace: &crate::paths::ResolvedWorkspace,
     instance_name: &str,
     factorio_port: Option<u16>,
     rcon_settings: &RconSettings,
     map_exchange_string: &str,
     silent: bool,
 ) -> Result<()> {
-    let workspace_path = Path::new(&workspace_path);
+    // Takes the resolved type rather than a `&str` it re-derives a `Path`
+    // from. `setup_factorio_instance` had already resolved the path and then
+    // passed this function the ORIGINAL raw string, so the guarantee stopped
+    // one function short of the filesystem work it was meant to cover. That
+    // was harmless only because of the order of two checks upstream -- which
+    // is the convention this newtype exists to replace.
+    let workspace_path = workspace.as_path();
     if !workspace_path.exists() {
         error!(
             "Failed to find workspace at <bright-blue>{:?}</>",

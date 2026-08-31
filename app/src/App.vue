@@ -39,7 +39,8 @@ import {useAppStore} from '@/store/appStore';
 import AppConfig from '@/AppConfig.vue';
 import Toast from 'primevue/toast';
 import {useInstanceStore} from '@/store/instanceStore';
-import {computed, onBeforeUpdate, onMounted, ref} from 'vue';
+import {computed, onBeforeUpdate, onMounted, onUnmounted, ref} from 'vue';
+import {ApiError} from '@/api/http';
 import {onBeforeRouteLeave} from 'vue-router';
 import {useToast} from 'primevue/usetoast';
 import {DashboardMenu} from '@/models/dashboard';
@@ -168,9 +169,10 @@ const sidebarClass = computed(() => {
   }]
 })
 
+const instanceStore = useInstanceStore()
+
 onMounted(async () => {
-  const instanceStore = useInstanceStore()
-  const started = await instanceStore.checkInstanceState()
+  await instanceStore.checkInstanceState()
   const appStore = useAppStore()
   // `maximizeWindow` is gone: sizing the OS window is not something a page in
   // a browser tab can do, and there is no HTTP route that could stand in.
@@ -180,10 +182,48 @@ onMounted(async () => {
     // fetched its settings from *is* the REST API, so it is running by
     // definition; `settings.gui.enable_restapi` no longer gates anything the
     // browser can act on.
-    if (!started && settings.gui.enable_autostart) {
-      await instanceStore.startInstances();
+    //
+    // `starting` is checked as well as `started`, which the previous version
+    // did not: `checkInstanceState` returns only `started`, so reloading this
+    // tab during the 8-10 minutes an extraction takes fired a second start
+    // that the server could only answer 409.
+    //
+    // Autostart stays in the browser rather than moving to the server. It is
+    // the weaker home for it -- N open tabs make N attempts where `serve`
+    // would have one well-defined "once" -- but nothing under `crates/` reads
+    // `enable_autostart` today (`app_settings.rs` only persists it), so
+    // deleting the browser side would leave a user-visible setting with no
+    // effect anywhere. The race it loses is a presentation one: the start
+    // route claims its slot in a single `compare_exchange`, so exactly one
+    // start happens regardless and the losers get a 409, which is handled
+    // below rather than shown as a failure this tab caused.
+    if (settings.gui.enable_autostart && !instanceStore.started && !instanceStore.starting) {
+      try {
+        await instanceStore.startInstances()
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 409) {
+          // "instance already started" or "instance is already starting" --
+          // either way someone got there first and the server's view is the
+          // truth. Adopting it also clears the `lastError` `startInstances`
+          // just set, so this tab shows "Starting ..." rather than "Failed".
+          await instanceStore.checkInstanceState()
+        }
+        // Anything else keeps the store's own `lastError`, which is the only
+        // report a failure at mount time gets: there is no click to toast.
+      }
     }
   }
+  // A no-op unless a start is in flight, so an idle tab costs the one request
+  // above and nothing after it. This covers the start that was already running
+  // before this tab loaded; a start *this* tab makes is polled by
+  // `startInstances` itself.
+  instanceStore.pollWhileStarting()
+})
+
+onUnmounted(() => {
+  // The poll's timer is not owned by this component's reactive scope and would
+  // otherwise outlive it, holding the store and one request every two seconds.
+  instanceStore.stopPolling()
 })
 
 onBeforeUpdate(() => {

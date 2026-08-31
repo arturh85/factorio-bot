@@ -57,6 +57,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+    // The poll's timer handle is module-scoped, so it outlives the pinia
+    // instance each test builds. Clearing it here -- while the fake clock this
+    // test installed is still the one that owns it -- keeps a test that leaves
+    // a start in flight from carrying a live interval into the next one.
+    useInstanceStore().stopPolling();
     vi.useRealTimers();
 });
 
@@ -118,29 +123,57 @@ describe('instanceStore', () => {
             expect(store.clientCount).toBe(3);
             expect(store.isFailed).toBe(false);
         });
+
+        it('clears a failure once a later poll no longer reports one', async () => {
+            vi.mocked(client.getInstance)
+                .mockResolvedValueOnce(status({last_error: 'archive missing'}))
+                .mockResolvedValue(status({started: true, client_count: 3}));
+            const store = useInstanceStore();
+
+            await store.checkInstanceState();
+            expect(store.isFailed).toBe(true);
+            expect(store.getLastError).toBe('archive missing');
+
+            await store.checkInstanceState();
+
+            // A retry that worked has to clear the banner; a `failed` flag
+            // that only ever latches true would leave the UI stuck on
+            // "Failed" over a running game.
+            expect(store.isFailed).toBe(false);
+            expect(store.getLastError).toBeNull();
+        });
     });
 
     /**
-     * The store owns no timer -- App.vue does -- so these drive one over the
-     * store's single-poll action and assert on transitions the first response
-     * did not produce.
+     * The 202 made legible.
+     *
+     * These drive the store's *own* timer. The previous version of this block
+     * built a `setInterval` in the test and called `checkInstanceState` from
+     * it -- which passed while production ran no poll at all, because the only
+     * `setInterval` in the repository was the one in this file.
      */
-    describe('driven by a two second poll', () => {
-        it('flips starting to started when a later poll says so', async () => {
+    describe('pollWhileStarting', () => {
+        /** Advances past `n` poll ticks, letting each tick's promise settle. */
+        function tick(n = 1) {
+            return vi.advanceTimersByTimeAsync(2000 * n);
+        }
+
+        it('carries an accepted start through to started without further user action', async () => {
             vi.useFakeTimers();
+            vi.mocked(client.startInstance).mockResolvedValue({accepted: true});
             vi.mocked(client.getInstance)
                 .mockResolvedValueOnce(status({starting: true}))
                 .mockResolvedValueOnce(status({starting: true}))
                 .mockResolvedValue(status({started: true, client_count: 3}));
+            withArchivePath();
             const store = useInstanceStore();
-            const timer = setInterval(() => void store.checkInstanceState(), 2000);
 
-            await vi.advanceTimersByTimeAsync(2000);
-            expect(store.isStarting).toBe(true);
-            expect(store.isStarted).toBe(false);
+            // The 202 is the last thing the user's click produces. Everything
+            // below happens with no further interaction.
+            await store.startInstances();
+            expect(client.getInstance).not.toHaveBeenCalled();
 
-            await vi.advanceTimersByTimeAsync(4000);
-            clearInterval(timer);
+            await tick(3);
 
             expect(client.getInstance).toHaveBeenCalledTimes(3);
             expect(store.isStarted).toBe(true);
@@ -148,27 +181,135 @@ describe('instanceStore', () => {
             expect(store.clientCount).toBe(3);
         });
 
-        it('clears a failure once a later poll no longer reports one', async () => {
+        it('carries an accepted start through to a failure without further user action', async () => {
             vi.useFakeTimers();
+            vi.mocked(client.startInstance).mockResolvedValue({accepted: true});
             vi.mocked(client.getInstance)
-                .mockResolvedValueOnce(status({last_error: 'archive missing'}))
-                .mockResolvedValue(status({started: true, client_count: 3}));
+                .mockResolvedValueOnce(status({starting: true}))
+                .mockResolvedValue(status({last_error: 'archive missing'}));
+            withArchivePath();
             const store = useInstanceStore();
-            const timer = setInterval(() => void store.checkInstanceState(), 2000);
 
-            await vi.advanceTimersByTimeAsync(2000);
+            await store.startInstances();
+            await tick(2);
+
+            // A start that dies minutes after its 202 has no other channel to
+            // the browser than `last_error` on this route.
             expect(store.isFailed).toBe(true);
             expect(store.getLastError).toBe('archive missing');
+            expect(store.isStarting).toBe(false);
+        });
 
-            await vi.advanceTimersByTimeAsync(2000);
-            clearInterval(timer);
+        it('stops polling once the start reaches a terminal state', async () => {
+            vi.useFakeTimers();
+            vi.mocked(client.startInstance).mockResolvedValue({accepted: true});
+            vi.mocked(client.getInstance).mockResolvedValue(
+                status({started: true, client_count: 3})
+            );
+            withArchivePath();
+            const store = useInstanceStore();
 
-            // A retry that worked has to clear the banner; a `failed` flag
-            // that only ever latches true would leave the UI stuck on
-            // "Failed" over a running game.
-            expect(client.getInstance).toHaveBeenCalledTimes(2);
+            await store.startInstances();
+            await tick();
+            expect(client.getInstance).toHaveBeenCalledTimes(1);
+
+            await tick(10);
+
+            // A tab left open all afternoon must not spend a request every two
+            // seconds on an instance whose outcome is already known.
+            expect(client.getInstance).toHaveBeenCalledTimes(1);
+        });
+
+        it('stops polling when the app shell is torn down mid-start', async () => {
+            vi.useFakeTimers();
+            vi.mocked(client.startInstance).mockResolvedValue({accepted: true});
+            vi.mocked(client.getInstance).mockResolvedValue(status({starting: true}));
+            withArchivePath();
+            const store = useInstanceStore();
+
+            await store.startInstances();
+            await tick();
+            expect(client.getInstance).toHaveBeenCalledTimes(1);
+
+            // What `onUnmounted` in App.vue calls. The start is still in
+            // flight, so nothing else would ever stop this timer.
+            store.stopPolling();
+            await tick(10);
+
+            expect(client.getInstance).toHaveBeenCalledTimes(1);
+        });
+
+        it('makes no requests when no start is in flight', async () => {
+            vi.useFakeTimers();
+            vi.mocked(client.getInstance).mockResolvedValue(status());
+            const store = useInstanceStore();
+
+            // The mount-time call on a tab that opened onto an idle server.
+            store.pollWhileStarting();
+            await tick(10);
+
+            expect(client.getInstance).not.toHaveBeenCalled();
+        });
+
+        it('keeps polling when one poll fails', async () => {
+            vi.useFakeTimers();
+            vi.mocked(client.startInstance).mockResolvedValue({accepted: true});
+            vi.mocked(client.getInstance)
+                .mockRejectedValueOnce(new ApiError(502, '502', null, ''))
+                .mockResolvedValue(status({started: true, client_count: 3}));
+            withArchivePath();
+            const store = useInstanceStore();
+
+            await store.startInstances();
+            await tick();
+
+            // A proxy hiccup is not an outcome: the start is still in flight
+            // and giving up here would strand the UI on "Starting ..." forever.
+            expect(store.isStarting).toBe(true);
             expect(store.isFailed).toBe(false);
-            expect(store.getLastError).toBeNull();
+
+            await tick();
+
+            expect(client.getInstance).toHaveBeenCalledTimes(2);
+            expect(store.isStarted).toBe(true);
+        });
+
+        it('resolves rather than rejecting when a poll fails', async () => {
+            vi.mocked(client.getInstance).mockRejectedValue(new ApiError(502, '502', null, ''));
+            const store = useInstanceStore();
+            store.starting = true;
+
+            // The tick that calls this is a `setInterval` callback: a rejection
+            // escaping here has nowhere to go but an unhandled rejection, which
+            // no `try` in this application could catch. `keeps polling when one
+            // poll fails` does not see it -- the timer survives either way --
+            // so the swallow needs its own assertion.
+            await expect(store.pollOnce()).resolves.toBeUndefined();
+        });
+
+        it('does not stack requests while a poll is still outstanding', async () => {
+            vi.useFakeTimers();
+            vi.mocked(client.startInstance).mockResolvedValue({accepted: true});
+            let settle: (value: InstanceStatus) => void = () => undefined;
+            vi.mocked(client.getInstance).mockReturnValueOnce(
+                new Promise<InstanceStatus>((resolve) => {
+                    settle = resolve;
+                })
+            );
+            vi.mocked(client.getInstance).mockResolvedValue(status({starting: true}));
+            withArchivePath();
+            const store = useInstanceStore();
+
+            await store.startInstances();
+            // Five ticks against one request the server has not answered.
+            await tick(5);
+
+            expect(client.getInstance).toHaveBeenCalledTimes(1);
+
+            settle(status({starting: true}));
+            await tick();
+
+            expect(client.getInstance).toHaveBeenCalledTimes(2);
         });
     });
 

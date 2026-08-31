@@ -368,6 +368,12 @@ Doing this first removes four of the nine dead-PrimeFlex files before anyone has
 Create `app/src/router.spec.ts`:
 
 ```ts
+// @vitest-environment jsdom
+//
+// Not a component spec, but it still needs a DOM: `router.ts` calls
+// `createWebHashHistory()` at module scope, which reads `location`. Under the
+// project's default `environment: 'node'` the import throws
+// `ReferenceError: location is not defined` before either assertion runs.
 import {describe, expect, it} from 'vitest';
 import router from './router';
 

@@ -1630,11 +1630,36 @@ function on_player_crafted_item(event)
 	table.insert(recent_item_additions[event.player_index], tmp_recent_item_addition)
 end
 
+-- Count items in an inventory by name.
+--
+-- Factorio 2.0 changed `LuaInventory.get_contents()` from a `name -> count`
+-- dictionary to an array of `{name, count, quality}`. Every in-Lua read in this
+-- file still indexed it as a dictionary, so every lookup answered nil:
+-- `rcon_place_blueprint` could never build anything and always left ghosts,
+-- `rcon_revive_ghost` refused every request with "player has no <item>" no
+-- matter what the bot held, and `sum_inventory` summed tables under the integer
+-- keys of the array.
+--
+-- It stayed invisible because the Rust side had already adapted -- see
+-- `item_counts_map_or_seq` in crates/core/src/types.rs, which accepts either
+-- shape -- so everything crossing the wire looked healthy while the mod's own
+-- reads did not work at all.
+--
+-- Counts are summed across qualities: callers ask "does this bot hold one of
+-- these", and a normal and an uncommon inserter both answer yes.
+function inventory_counts(inventory)
+	local counts = {}
+	for _, stack in pairs(inventory.get_contents()) do
+		counts[stack.name] = (counts[stack.name] or 0) + stack.count
+	end
+	return counts
+end
+
 function sum_inventory(ent, is)
 	local sum = {}
 	for _,inv_type in ipairs(is) do
-		inv = ent.get_inventory(inv_type)
-		for item,amount in pairs(inv.get_contents()) do
+		local inv = ent.get_inventory(inv_type)
+		for item, amount in pairs(inventory_counts(inv)) do
 			sum[item] = (sum[item] or 0) + amount
 		end
 	end
@@ -2147,7 +2172,7 @@ function rcon_revive_ghost(player_id, name, x, y)
 		return
 	end
 	local main_inventory = player.get_main_inventory()
-	local contents = main_inventory.get_contents()
+	local contents = inventory_counts(main_inventory)
 	if contents[name] == nil or contents[name] < 1 then
 		complain("Error: player has no " .. name)
 		return
@@ -2257,15 +2282,22 @@ function rcon_place_blueprint(player_id, blueprint, pos_x, pos_y, direction, for
 	local main_inventory = player.get_main_inventory()
 	local nothing = true
 	for _, ghost in pairs(ghosts) do
+		-- Reviving an entity destroys any ghost that overlapped it, so a ghost
+		-- captured by `build_blueprint` above can already be invalid by the time
+		-- this loop reaches it. Touching one raises, which aborted the whole
+		-- placement and hid every entity that did get built. Skip it instead: a
+		-- blueprint whose entities cannot all coexist should show up as a short
+		-- result the caller can compare against what it asked for.
+		if not ghost.valid then goto continue end
 		nothing = false
 		local item = ghost.ghost_name
 		local item_source_player_id
-		local inventory = main_inventory.get_contents()
+		local inventory = inventory_counts(main_inventory)
 		if inventory[item] ~= nil and inventory[item] > 0 then
 			item_source_player_id = player_id
 		else
 			for _, inventory_player_id in pairs(inventory_player_ids) do
-				local inventory_player = get_player(inventory_player_id).get_main_inventory().get_contents()
+				local inventory_player = inventory_counts(get_player(inventory_player_id).get_main_inventory())
 				if inventory_player[item] ~= nil and inventory_player[item] > 0 then
 					item_source_player_id = inventory_player_id
 				end
@@ -2311,6 +2343,7 @@ function rcon_place_blueprint(player_id, blueprint, pos_x, pos_y, direction, for
 		else
 			table.insert(result, serialize_entity(ghost))
 		end
+		::continue::
 	end
 	if nothing == true then
 		rcon.print("Error: failed to build anything")

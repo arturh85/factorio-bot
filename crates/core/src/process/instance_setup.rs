@@ -1179,7 +1179,10 @@ mod mods_source_tests {
         // line, so the marker is not necessarily at the start of its line.
         let workspace_mods = output
             .lines()
-            .find_map(|line| line.rsplit_once("WORKSPACE_MODS=").map(|(_, rest)| rest.trim()))
+            .find_map(|line| {
+                line.rsplit_once("WORKSPACE_MODS=")
+                    .map(|(_, rest)| rest.trim())
+            })
             .unwrap_or_else(|| panic!("worker did not print its WORKSPACE_MODS marker: {output}"));
 
         assert!(

@@ -2206,6 +2206,23 @@ function rcon_cheat_all_technologies()
 	force.research_all_technologies()
 end
 
+-- Charge one `item` to the bot that was found holding it, and report whether it
+-- was actually paid for.
+--
+-- The holder is whichever bot the inventory search in `rcon_place_blueprint`
+-- found with the item, which is NOT necessarily the bot placing the blueprint.
+-- Charging the placing bot unconditionally -- as the first revive path did
+-- until 2026-08-31 -- builds the entity for free whenever a helper supplied the
+-- material: `remove` finds nothing to take, returns 0, and that discarded
+-- return value is what kept it silent.
+function charge_item_to(holder_player_id, item)
+	local holder = get_player(holder_player_id)
+	if holder == nil then
+		return false
+	end
+	return holder.get_main_inventory().remove({name=item, count=1}) == 1
+end
+
 function rcon_place_blueprint(player_id, blueprint, pos_x, pos_y, direction, force_build, only_ghosts, inventory_player_ids)
 	local player = get_player(player_id)
 	if player == nil then
@@ -2257,9 +2274,15 @@ function rcon_place_blueprint(player_id, blueprint, pos_x, pos_y, direction, for
 		if only_ghosts == false and item_source_player_id ~= nil then
 			local success, entity = ghost.revive()
 			if entity ~= nil then
-				main_inventory.remove({name=item, count=1})
-				inventory = main_inventory.get_contents()
-				table.insert(result, serialize_entity(entity))
+				if charge_item_to(item_source_player_id, item) then
+					table.insert(result, serialize_entity(entity))
+				else
+					-- The search above found a bot holding this item, so failing
+					-- to take it would leave the entity standing unpaid for. Undo
+					-- the build rather than report a placement nobody paid for.
+					writeout(game.tick, "place_blueprint_unpaid", item)
+					entity.destroy()
+				end
 			else
 				local prototype = prototypes.entity[item]
 --				print("player position: " .. helpers.table_to_json(player.position))
@@ -2272,8 +2295,12 @@ function rcon_place_blueprint(player_id, blueprint, pos_x, pos_y, direction, for
 					player.teleport({x = bb.right_bottom.x + 1, y = bb.right_bottom.y + 1})
 					local success, entity = ghost.revive()
 					if entity ~= nil then
-						get_player(item_source_player_id).get_main_inventory().remove({name=item, count=1})
-						table.insert(result, serialize_entity(entity))
+						if charge_item_to(item_source_player_id, item) then
+							table.insert(result, serialize_entity(entity))
+						else
+							writeout(game.tick, "place_blueprint_unpaid", item)
+							entity.destroy()
+						end
 					else
 						table.insert(result, serialize_entity(ghost))
 					end

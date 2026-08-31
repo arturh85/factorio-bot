@@ -28,6 +28,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use factorio_bot_core::record::parse_frame_name;
 use factorio_bot_core::scripts::resolve_script_path;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -120,48 +121,6 @@ pub struct ClientRun {
 /// exist, which converts "I cannot tell whether these match" into "I checked,
 /// they match".
 const RUN_SIDECAR: &str = "run.json";
-
-/// Parses `tick-<digits>-<camera>.jpg`, or reports that a name does not fit
-/// the pattern by answering `(None, None)`.
-///
-/// Deliberately does **not** assume the camera id is hyphen-free: it splits on
-/// the *first* hyphen after the digit run and takes everything up to `.jpg` as
-/// the camera id, however many hyphens that contains. `tick-0001800-bot-1.jpg`
-/// must yield tick `1800`, camera `bot-1` -- a last-hyphen split would instead
-/// read camera `1` and silently fold `bot` into a mis-parsed tick component,
-/// which is a plausible-looking wrong answer, exactly the failure mode this
-/// module exists to avoid. Splitting from the correct end (immediately after
-/// the numeric tick, which cannot itself contain a hyphen) removes any
-/// dependency on the producer's camera-naming scheme.
-fn parse_frame_name(name: &str) -> (Option<u64>, Option<String>) {
-    let Some(rest) = name.strip_prefix("tick-") else {
-        return (None, None);
-    };
-    // The digit run cannot contain a hyphen, so the first hyphen in `rest`
-    // (if any) is exactly the separator between the tick and the camera id.
-    let separator = match rest.find('-') {
-        Some(index) => index,
-        None => return (None, None),
-    };
-    let (tick_str, remainder) = rest.split_at(separator);
-    if tick_str.is_empty() || !tick_str.bytes().all(|byte| byte.is_ascii_digit()) {
-        return (None, None);
-    }
-    let Ok(tick) = tick_str.parse::<u64>() else {
-        return (None, None);
-    };
-    // `remainder` still carries the separating hyphen itself.
-    let Some(camera_and_extension) = remainder.strip_prefix('-') else {
-        return (None, None);
-    };
-    let Some(camera) = camera_and_extension.strip_suffix(".jpg") else {
-        return (None, None);
-    };
-    if camera.is_empty() {
-        return (None, None);
-    }
-    (Some(tick), Some(camera.to_string()))
-}
 
 /// One `client<N>` directory discovered under the workspace, and where its
 /// frames would live.

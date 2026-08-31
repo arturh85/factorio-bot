@@ -16,7 +16,9 @@ use std::time::Instant;
 
 use crate::types::Position;
 
+pub mod frames;
 pub mod splits;
+pub use frames::{ArchivedFrame, archive_frames, parse_frame_name};
 pub use splits::{Split, derive_splits};
 
 /// What happened. Internally tagged as `kind`, so a line is one flat object.

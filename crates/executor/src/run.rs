@@ -337,6 +337,18 @@ async fn run_bot_signalled(
                             let mut log = lock(log);
                             log.observe(*action, ticks);
                             log.succeed(*action, step.end);
+                            // Drained here, not inside `perform`/`place`
+                            // itself: this scope is the first place with both
+                            // the actuator and the scheduler's `ActionId` for
+                            // what just finished, which is exactly what
+                            // `Actuator::take_placement` needs to attach the
+                            // fact to. A placement waits in the actuator at
+                            // most this long -- a bot's own steps run
+                            // strictly in order, so nothing can queue a
+                            // second one behind it before it is claimed.
+                            if let Some(placement) = act.take_placement(bot) {
+                                log.record_placement(*action, placement);
+                            }
                         }
                         if let Some(tx) = senders.get(action) {
                             let _ = tx.send(Status::Success);
@@ -511,7 +523,8 @@ async fn perform<A: Actuator + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use factorio_bot_core::types::Position;
+    use factorio_bot_core::record::map::{EntitySnapshot, Placement};
+    use factorio_bot_core::types::{FactorioEntity, Position};
     use factorio_bot_planner::{Action, Actor, Condition, Effect, InventorySlot};
     use mockall::mock;
     use std::time::Duration;
@@ -687,6 +700,10 @@ mod tests {
         /// behave exactly like normal speed, the same as every test written
         /// before this field existed.
         speed: f64,
+        /// What `RecordingAct::take_placement` hands back, once, to whichever
+        /// bot asks first. `None` for every test written before this field
+        /// existed, matching `Actuator::take_placement`'s own default.
+        placement: Option<Placement>,
     }
 
     impl Default for Script {
@@ -697,6 +714,7 @@ mod tests {
                 fail_walk: BTreeSet::new(),
                 fail_mine: BTreeSet::new(),
                 speed: 1.0,
+                placement: None,
             }
         }
     }
@@ -848,6 +866,10 @@ mod tests {
 
         async fn game_speed(&self) -> Result<f64, ActuatorError> {
             Ok(self.script.speed)
+        }
+
+        fn take_placement(&self, _bot: BotId) -> Option<Placement> {
+            self.script.placement.clone()
         }
     }
 
@@ -1553,6 +1575,65 @@ mod tests {
         assert!(
             gap >= Duration::from_millis(500) && gap < Duration::from_millis(1_000),
             "expected a ~500ms wait at double speed, got {gap:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_placement_the_actuator_reports_lands_on_its_attempts_placed_field() {
+        // `RconActuator::place` cannot be driven here without a live game, but
+        // `Actuator::take_placement`'s contract is exactly what it hands back
+        // once one is claimed. This proves the settle path in `run_bot_signalled`
+        // actually drains it onto the right `Attempt` -- the kind of wiring
+        // that compiles and does nothing if nobody calls it.
+        let placement = Placement {
+            intent: EntitySnapshot {
+                name: "stone-furnace".to_string(),
+                position: Position::new(-12.0, 8.0),
+                direction: 0,
+            },
+            actual: EntitySnapshot {
+                name: "stone-furnace".to_string(),
+                position: Position::new(-12.0, 8.0),
+                direction: 0,
+            },
+            drift: None,
+        };
+        let script = Script {
+            placement: Some(placement.clone()),
+            ..Default::default()
+        };
+        let act = RecordingAct::new(script);
+
+        let place_id = ActionId(0);
+        let mut net = ActionNetwork::new();
+        net.add(Action {
+            id: place_id,
+            kind: ActionKind::Place {
+                entity: Box::new(FactorioEntity {
+                    name: "stone-furnace".to_string(),
+                    position: Position::new(-12.0, 8.0),
+                    direction: 0,
+                    ..Default::default()
+                }),
+            },
+            pre: vec![],
+            eff: vec![],
+            duration: 30,
+            pinned: None,
+            label: "place stone-furnace".into(),
+        });
+        let sched = Schedule {
+            steps: vec![act_step(place_id, BotId(0), 0, 30)],
+            makespan: 30,
+        };
+
+        let log = run(&act, &sched, &net).await.expect("the run should start");
+
+        let a = log.attempt(place_id).expect("the place was attempted");
+        assert_eq!(
+            a.placed,
+            Some(placement),
+            "the actuator's placement must reach the attempt it belongs to"
         );
     }
 

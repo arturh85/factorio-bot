@@ -1,4 +1,5 @@
 use factorio_bot_core::factorio::ticks::ActionTicks;
+use factorio_bot_core::record::map::Placement;
 use factorio_bot_core::types::Position;
 use factorio_bot_planner::{ActionId, BotId, Ticks};
 use serde::{Deserialize, Serialize};
@@ -198,7 +199,7 @@ pub struct Attempt {
     /// intent, the entity the game hands back is the truth. Nothing in this
     /// crate reads the field yet; it exists so a later task can carry it out
     /// to `map.jsonl` alongside the rest of the run record.
-    pub placed: Option<factorio_bot_core::record::map::Placement>,
+    pub placed: Option<Placement>,
 }
 
 /// One walk step, as the run observed it.
@@ -463,6 +464,22 @@ impl ExecutionLog {
         });
         a.status = Status::Success;
         a.planned_end_tick = Some(tick);
+    }
+
+    /// Attaches a placement to `id`'s attempt, once the game has confirmed it.
+    ///
+    /// Called from `run.rs`'s settle path right after [`ExecutionLog::succeed`]
+    /// for the same id, once `Actuator::take_placement` has handed the fact
+    /// back — so by the time this runs the attempt it belongs to always
+    /// exists. No upsert regardless: unlike `succeed`/`fail`, a placement with
+    /// no attempt to attach to describes work this log never started, and
+    /// inventing one for it would be the same fabrication `observe` refuses
+    /// for the same shape of call. Silently a no-op in that case, following
+    /// [`ExecutionLog::lose_track`]'s convention rather than panicking.
+    pub fn record_placement(&mut self, id: ActionId, placement: Placement) {
+        if let Some(a) = self.attempts.get_mut(&id) {
+            a.placed = Some(placement);
+        }
     }
 
     /// Records a failure. Upserts, and ignores a second completion, for the

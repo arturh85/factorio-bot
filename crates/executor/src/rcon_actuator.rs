@@ -125,17 +125,17 @@ pub struct RconActuator {
     /// the game fails as `UnknownBot` rather than being silently renumbered
     /// onto whoever happens to be present.
     connected: BTreeSet<PlayerId>,
-    /// The placement each bot most recently made, waiting to be claimed.
+    /// The placement each bot most recently made, waiting to be claimed by
+    /// [`Actuator::take_placement`].
     ///
     /// `Actuator::place` carries no `ActionId` — that belongs to the
-    /// scheduler, not to this trait, and giving the trait one now would touch
-    /// every implementation of it, including the mocks in `run.rs` and
-    /// `recover.rs`'s tests, for a value nothing calls yet. Keyed by bot
-    /// rather than a single slot so two bots placing concurrently cannot
-    /// clobber each other's fact; [`RconActuator::take_placement`] removes the
-    /// entry it returns, so a later task wiring this into `Attempt::placed`
-    /// claims each placement exactly once rather than replaying a stale one
-    /// onto a different attempt.
+    /// scheduler, not to this trait — so there is nothing here to attach a
+    /// `Placement` to directly. Keyed by bot rather than a single slot so two
+    /// bots placing concurrently cannot clobber each other's fact; the trait
+    /// method that reads this removes the entry it returns, so `run.rs`'s
+    /// settle path, which does have the `ActionId`, claims each placement
+    /// exactly once rather than risking a stale one landing on a later,
+    /// unrelated attempt.
     placements: Mutex<BTreeMap<PlayerId, Placement>>,
 }
 
@@ -174,19 +174,6 @@ impl RconActuator {
             connected,
             placements: Mutex::new(BTreeMap::new()),
         })
-    }
-
-    /// Claims the placement `bot` most recently made, if one is waiting.
-    ///
-    /// Removes it: a placement is a fact about one attempt, and leaving it in
-    /// place would let a second, unrelated attempt read the same fact. See the
-    /// `placements` field doc for why this exists ahead of anything calling
-    /// it.
-    pub fn take_placement(&self, bot: PlayerId) -> Option<Placement> {
-        self.placements
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&bot)
     }
 
     /// The Factorio player a `BotId` names: itself.
@@ -419,6 +406,20 @@ impl Actuator for RconActuator {
     /// idempotent in Factorio.
     async fn research(&self, tech: &str) -> Result<ActionTicks, ActuatorFailure> {
         self.rcon.add_research_timed(tech).await.map_err(classify)
+    }
+
+    /// Claims the placement `bot` most recently made, if one is waiting.
+    ///
+    /// Removes it: a placement is a fact about one attempt, and leaving it in
+    /// place would let a later, unrelated attempt read the same fact. See the
+    /// `placements` field doc for why the cache exists; `run.rs`'s settle path
+    /// is the caller, with the `ActionId` this trait cannot see, right after
+    /// marking that action's `Attempt` done.
+    fn take_placement(&self, bot: BotId) -> Option<Placement> {
+        self.placements
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&bot.0)
     }
 }
 

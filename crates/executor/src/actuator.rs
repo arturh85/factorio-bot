@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 pub use factorio_bot_core::factorio::ticks::ActionTicks;
+use factorio_bot_core::record::map::Placement;
 use factorio_bot_core::types::Position;
 use factorio_bot_planner::{BotId, InventorySlot};
 
@@ -214,6 +215,27 @@ pub trait Actuator: Send + Sync {
     /// [`ActuatorFailure`] to carry.
     async fn game_speed(&self) -> Result<f64, ActuatorError> {
         Ok(1.0)
+    }
+
+    /// Claims the placement `bot` most recently made, if this actuator is
+    /// tracking one.
+    ///
+    /// A default rather than a required method, and deliberately not async:
+    /// giving `place` an `ActionId` to attach a `Placement` to directly would
+    /// mean threading one through this whole trait and every implementation
+    /// of it, including the two `mockall` mocks in `run.rs`'s and
+    /// `recover.rs`'s tests, for a value most of them have no use for. Instead
+    /// `run.rs`'s settle path calls this once the *scheduler's* id for the
+    /// just-completed action is back in hand, and attaches whatever comes
+    /// back to that action's `Attempt`.
+    ///
+    /// The default returns `None`: an actuator that tracks no placements has
+    /// none to give, which is the honest answer for every implementation that
+    /// does not override this — in particular every mock, which inherits it
+    /// unmodified and so needs no change to keep compiling or passing.
+    fn take_placement(&self, bot: BotId) -> Option<Placement> {
+        let _ = bot;
+        None
     }
 }
 

@@ -55,6 +55,27 @@ changes nothing in the world. The planner does model triggers — it has
 planned — so the gap is likely between planning the trigger and *performing*
 it, not in recognising it. Someone should confirm before fixing.
 
+### What was ruled out
+
+`rcon_add_research` discards the return value of `LuaForce.add_research`, which
+is documented as a boolean saying whether the technology entered the queue.
+That looked like the answer -- the same shape as the discarded `remove()` count
+fixed in `place_blueprint` earlier the same night -- so a guard was added and
+then **reverted**, because it could not be shown to fire.
+
+Probed live: `electronics`, `steam-power`, `automation`, `automation` a second
+time, and a technology that does not exist. **All five were accepted.** A
+nonexistent technology being accepted is not something this explanation
+survives, and the mod under test was confirmed to be the edited one --
+`workspace/mods` is the single copy, symlinked from both the server and the
+clients.
+
+So: the discarded boolean is still a latent defect worth fixing on its own
+merits, but it is **not** the cause of the research loop, and the guard was
+removed rather than shipped as a check that never fires. Whoever picks this up
+starts from "why does `add_research` accept a technology that does not exist",
+which is a much sharper question than the one this night started with.
+
 Archive: `workspace/runs/run-1788225725-75943/` — 190 events, 666 frames,
 4 splits, and the whole loop visible in the task lanes.
 

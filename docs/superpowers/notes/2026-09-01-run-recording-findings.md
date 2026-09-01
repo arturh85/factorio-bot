@@ -87,6 +87,35 @@ down here rather than guessed at.
 judged, a trigger technology refuses immediately and says why, instead of
 looping for 61345 ticks while reporting success.
 
+### `Goal::Produced` landed, and moved the failure
+
+`cf0d7bff`. The trigger loop is fixed, and the live before/after on the same
+four-milestone run is unambiguous:
+
+    before   stuck_silent   plans 63 -> 26 -> 4 -> 4 -> 4   no errors at all
+    after    stuck          plans 57 -> 37 -> 27 -> 26 -> 25   a named error
+
+The plan now genuinely converges, and the halt is `stuck` -- failures reported
+-- rather than `stuck_silent`, which is the state for "no progress while
+everything claims to work". Trigger technologies plan as pure production:
+`researched(automation-science-pack)` is 34 steps with **zero** research
+actions, where it used to emit one that did nothing.
+
+**It does not yet complete**, and the thing now blocking it is different in kind:
+
+    tried to remove 10 copper-plate but removed 9
+
+That is a *correct guard*, in `rcon_remove_from_inventory`, catching a real
+discrepancy: the plan pulls ten plates from a furnace that has produced nine.
+Not a logic error -- a smelting-time estimate, the same drift class as mining
+running 2x and walks 1.4-1.6x over prediction. The supervisor absorbs it by
+replanning (57 down to 25) but does not converge inside the iteration cap, and
+the final iteration ran 25 planned steps while dispatching **zero** actions,
+which is its own question.
+
+So: the research critical path is now blocked on *estimation*, not on a silent
+lie. That is a much better place to be stuck, and a different piece of work.
+
 ### Ghosts and the entity graph: checked, not a defect
 
 `EntityGraph` filters `FlyingText` and `Fish` by `entity_type` but not

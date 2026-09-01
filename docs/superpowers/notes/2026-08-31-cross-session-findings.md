@@ -254,3 +254,43 @@ The `.any()` mutation here survived both two-element tests and was caught only
 by the single-client case, where `any` over an empty tail is false. That is
 luck, not coverage: had no single-client test existed, a passing suite would
 have accompanied a rule nobody had checked.
+
+## A seventh shape: the working duplicate that hides the broken original
+
+Every `tracing::` call in this workspace emitted nothing, for months. No
+subscriber was ever installed — the only installer sat behind the non-default
+`tokio-console` feature — and a `tracing` macro with no subscriber compiles,
+runs, and discards the event without a word.
+
+Seven call sites, including two error paths and the line naming the address the
+server had just bound.
+
+**What made it survive is not that the line was missing. It is that a line was
+there.** `serve.rs` prints its own `serving http://...` through `paris`, one
+line away in the same startup sequence, saying nearly the same thing. Anyone
+watching a server start saw a URL appear and had no reason to ask which of the
+two mechanisms produced it. The broken original was masked by a working
+duplicate that nobody had connected to it.
+
+This is the inverse of the "not wired to anything" shape. There, the thing was
+absent and nothing depended on it. Here the thing was absent, something *did*
+depend on it, and a coincidence supplied the same observable — so the
+dependency appeared satisfied.
+
+**The generalisation: when two mechanisms produce the same observable, the
+observable stops being evidence for either.** Duplicated output is usually
+filed as redundancy or mild untidiness. It is also a place where one of the two
+can die undetected, and the tidier the duplication looks, the longer that lasts.
+
+**The evidence was already collected.** Serve logs captured hours earlier while
+testing something unrelated contain the paris line and not the tracing one. The
+diagnosis, once asked properly, was `grep -c "listening on"` on a log already on
+disk: 0 before the fix, 1 after. Nothing needed reproducing. Past logs answer
+questions nobody asked when they were written, and re-reading them is cheaper
+than every other diagnostic available.
+
+Related: this would have been *created* rather than discovered by the migration
+it was found in front of. Converting 207 working `paris` calls into `tracing`
+would have silenced the application, with a green suite and a clean release
+build — the tests assert on captured stdout, and stdout would simply have had
+nothing in it. Fixed in `74269106`, before the migration rather than after.

@@ -317,6 +317,7 @@ describe('milestonesOf', () => {
 describe('inventoryAtFailure', () => {
     const botsSample = (tick: number, id: number, inventory: Record<string, number>): Sample => ({
         kind: 'bots',
+        schema: 1,
         tick,
         run: null,
         bots: [{id, position: {x: 0, y: 0}, inventory, crafting_queue: 0, mining: null}]
@@ -347,6 +348,7 @@ describe('inventoryAtFailure', () => {
     it('ignores non-bots samples', () => {
         const force: Sample = {
             kind: 'force',
+            schema: 1,
             tick: 50,
             run: null,
             research: null,

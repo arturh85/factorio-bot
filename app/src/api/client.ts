@@ -26,6 +26,7 @@ import {
     RunDetail,
     RunFramesResponse,
     RunLanesResponse,
+    RunSamplesResponse,
     RunsResponse,
     ScriptContent,
     StartAccepted
@@ -177,4 +178,14 @@ export function runFrameUrl(id: string, bot: number, file: string): string {
 /** What each bot did, derived from the run's event log. */
 export function getRunLanes(id: string): Promise<RunLanesResponse> {
     return request<RunLanesResponse>(`/api/v1/runs/${encodeURIComponent(id)}/lanes`);
+}
+
+/**
+ * A run's archived world-state samples.
+ *
+ * Empty for a run recorded before sampling existed, or one the mod never
+ * captured samples for -- not an error.
+ */
+export function getRunSamples(id: string): Promise<RunSamplesResponse> {
+    return request<RunSamplesResponse>(`/api/v1/runs/${encodeURIComponent(id)}/samples`);
 }

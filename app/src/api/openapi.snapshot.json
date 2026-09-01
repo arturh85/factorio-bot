@@ -67,6 +67,50 @@
         ],
         "type": "object"
       },
+      "BotSample": {
+        "properties": {
+          "crafting_queue": {
+            "description": "Queue *length*, not its contents: the contents are large, change every\ntick, and answer no question we have.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "inventory": {
+            "additionalProperties": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "description": "Item name to count. Built mod-side from Factorio 2.0's\n`get_contents()`, which returns an array of `{name, count, quality}`.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "mining": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "position": {
+            "$ref": "#/components/schemas/Position",
+            "description": "As the game reports it. A tile centre stays `-40.5`; nothing rounds."
+          }
+        },
+        "required": [
+          "id",
+          "position",
+          "inventory",
+          "crafting_queue"
+        ],
+        "type": "object"
+      },
       "CheatItemBody": {
         "properties": {
           "count": {
@@ -1436,6 +1480,61 @@
         ],
         "type": "object"
       },
+      "PowerSample": {
+        "properties": {
+          "consumed_kw": {
+            "format": "double",
+            "type": "number"
+          },
+          "generated_kw": {
+            "format": "double",
+            "type": "number"
+          },
+          "satisfaction": {
+            "description": "Consumed over demanded. Coverage is not capacity: an under-supplied\nnetwork reads as dead rather than slow, so this is the field that makes\nthat visible after the fact.",
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "generated_kw",
+          "consumed_kw",
+          "satisfaction"
+        ],
+        "type": "object"
+      },
+      "ProductionSample": {
+        "properties": {
+          "consumed": {
+            "additionalProperties": {
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "made": {
+            "additionalProperties": {
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "description": "Cumulative from game start, never per-interval: deltas are derivable\nfrom totals, and totals are unrecoverable from deltas once one sample\nis lost.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "made",
+          "consumed"
+        ],
+        "type": "object"
+      },
       "RconBody": {
         "properties": {
           "command": {
@@ -1494,6 +1593,31 @@
           "inventory_type",
           "item_name",
           "item_count"
+        ],
+        "type": "object"
+      },
+      "ResearchSample": {
+        "properties": {
+          "eta_ticks": {
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "progress": {
+            "description": "0.0 to 1.0.",
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "name",
+          "progress"
         ],
         "type": "object"
       },
@@ -1564,6 +1688,21 @@
         },
         "required": [
           "lanes"
+        ],
+        "type": "object"
+      },
+      "RunSamplesResponse": {
+        "description": "`GET /api/v1/runs/{id}/samples` response.",
+        "properties": {
+          "samples": {
+            "items": {
+              "$ref": "#/components/schemas/Sample"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "samples"
         ],
         "type": "object"
       },
@@ -1650,6 +1789,113 @@
           "runs"
         ],
         "type": "object"
+      },
+      "Sample": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/SampleKind"
+          },
+          {
+            "properties": {
+              "run": {
+                "description": "The run id the mod stamped on this line, or `None` for a line written\nbefore this field existed. Absence must be distinguishable from a\nmismatch: [`ingest_samples`] treats a named-but-different run as a\nconfident exclusion and an absent run as a tick guess, and those are\nnot the same confidence level.\n\n`#[serde(default)]`, deliberately unlike the \"present-and-null, never\nabsent\" fields elsewhere in this module: those describe values a\n*current* producer always has an answer for (even if the answer is\n\"nothing\"), where here the missing-key case is a *past* producer that\nnever knew to ask. A key present with a `null` value and a key never\nwritten must both mean \"we don't know\", so both must decode to `None`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tick": {
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "tick"
+            ],
+            "type": "object"
+          }
+        ],
+        "description": "One line of `samples.jsonl`."
+      },
+      "SampleKind": {
+        "oneOf": [
+          {
+            "properties": {
+              "bots": {
+                "items": {
+                  "$ref": "#/components/schemas/BotSample"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "enum": [
+                  "bots"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "bots",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "force"
+                ],
+                "type": "string"
+              },
+              "power": {
+                "$ref": "#/components/schemas/PowerSample"
+              },
+              "production": {
+                "$ref": "#/components/schemas/ProductionSample"
+              },
+              "research": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ResearchSample",
+                    "description": "Null when nothing is queued -- present and null, so \"we looked and\nnothing was researching\" is distinguishable from \"we never asked\"."
+                  }
+                ]
+              },
+              "techs_unlocked": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "techs_unlocked",
+              "production",
+              "power",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A kind this build does not know. Readers skip it; writers never emit it.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "ScriptContent": {
         "properties": {
@@ -3260,6 +3506,58 @@
           }
         },
         "summary": "What each bot did, derived from the run's event log.",
+        "tags": [
+          "Runs"
+        ]
+      }
+    },
+    "/api/v1/runs/{id}/samples": {
+      "get": {
+        "operationId": "get_run_samples",
+        "parameters": [
+          {
+            "description": "the run id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunSamplesResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "A run's world-state samples.",
         "tags": [
           "Runs"
         ]

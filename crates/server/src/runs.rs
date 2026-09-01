@@ -18,7 +18,8 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use factorio_bot_core::record::{
-    ArchivedFrame, Event, Lane, Manifest, Split, derive_lanes, derive_splits, read_events,
+    ArchivedFrame, Event, Lane, Manifest, Sample, Split, derive_lanes, derive_splits, read_events,
+    read_samples,
 };
 use factorio_bot_core::scripts::resolve_script_path;
 use serde::{Deserialize, Serialize};
@@ -114,6 +115,12 @@ pub struct RunLanesResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct RunFramesResponse {
     pub frames: Vec<ArchivedFrame>,
+}
+
+/// `GET /api/v1/runs/{id}/samples` response.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct RunSamplesResponse {
+    pub samples: Vec<Sample>,
 }
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
@@ -328,6 +335,38 @@ pub async fn get_run_frames(
     Ok(Json(RunFramesResponse { frames }))
 }
 
+/// A run's world-state samples.
+#[utoipa::path(
+    get,
+    path = "/api/v1/runs/{id}/samples",
+    tag = "Runs",
+    params(("id" = String, Path, description = "the run id")),
+    responses(
+        (status = 200, body = RunSamplesResponse),
+        (status = 400, body = crate::error::ErrorResponse),
+        (status = 404, body = crate::error::ErrorResponse),
+    )
+)]
+pub async fn get_run_samples(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<RunSamplesResponse>, ErrorResponse> {
+    let dir = run_dir(&runs_root(&state).await?, &id)?;
+    let path = dir.join("samples.jsonl");
+    // A run recorded before sampling existed -- or one for which the mod
+    // never captured any -- is not an error; it just has none.
+    if !path.exists() {
+        return Ok(Json(RunSamplesResponse {
+            samples: Vec::new(),
+        }));
+    }
+    let read = read_samples(&path)
+        .map_err(|err| ErrorResponse::internal(format!("failed to read samples: {err}")))?;
+    Ok(Json(RunSamplesResponse {
+        samples: read.samples,
+    }))
+}
+
 /// One archived frame's bytes.
 #[utoipa::path(
     get,
@@ -384,4 +423,5 @@ pub fn router() -> utoipa_axum::router::OpenApiRouter<AppState> {
         .routes(routes!(get_run_frames))
         .routes(routes!(get_run_lanes))
         .routes(routes!(get_run_frame))
+        .routes(routes!(get_run_samples))
 }

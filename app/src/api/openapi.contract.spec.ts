@@ -50,6 +50,7 @@ import type {AppSettings, GuiSettings} from '@/models/settings';
 import type {FactorioSettings, RestApiSettings, ScriptTreeNode} from '@/api/types';
 import type {
     ArchivedFrame,
+    BotSample,
     ClientRun,
     ExecuteAccepted,
     ExecuteRequest,
@@ -61,10 +62,17 @@ import type {
     JobStatus,
     RunDetail,
     Lane,
+    Position,
+    PowerSample,
+    ProductionSample,
+    ResearchSample,
     RunFramesResponse,
     RunLanesResponse,
+    RunSamplesResponse,
     RunSummary,
     RunsResponse,
+    Sample,
+    SampleKind,
     ScriptContent,
     Split,
     StartAccepted
@@ -77,6 +85,17 @@ interface SchemaObject {
     items?: SchemaObject;
     properties?: Record<string, SchemaObject>;
     required?: string[];
+    /**
+     * An internally tagged Rust enum (`#[serde(tag = "kind")]`), published as
+     * one member per variant. See `taggedUnionContract`.
+     */
+    oneOf?: SchemaObject[];
+    /**
+     * A `#[serde(flatten)]` of a tagged enum into its containing struct,
+     * published as `[ {$ref: the enum}, {the struct's own fields} ]`. See
+     * `mergeContract`.
+     */
+    allOf?: SchemaObject[];
 }
 
 interface Parameter {
@@ -161,6 +180,13 @@ const OPERATIONS: readonly OperationContract[] = [
         caller: 'getRunLanes',
         pathParams: ['id'],
         response: {status: '200', schema: 'RunLanesResponse'}
+    },
+    {
+        path: '/api/v1/runs/{id}/samples',
+        method: 'get',
+        caller: 'getRunSamples',
+        pathParams: ['id'],
+        response: {status: '200', schema: 'RunSamplesResponse'}
     },
     {
         path: '/api/v1/settings',
@@ -301,7 +327,7 @@ interface PropertyContract {
     /** Listed in the schema's `required` array. */
     required: boolean;
     /** The JSON type, for a property the client reads as a primitive. */
-    type?: 'string' | 'integer' | 'boolean' | 'array' | 'object';
+    type?: 'string' | 'integer' | 'number' | 'boolean' | 'array' | 'object';
     /** The schema this property `$ref`s, for a nested object. */
     ref?: string;
     /** A JSON array of that schema. */
@@ -313,7 +339,13 @@ interface PropertyContract {
 type SchemaContract =
     | {kind: 'object'; properties: Record<string, PropertyContract>}
     | {kind: 'enum'; values: readonly string[]}
-    | {kind: 'scalar'; type: string};
+    | {kind: 'scalar'; type: string}
+    // An internally tagged Rust enum (`#[serde(tag = "kind")]`), published as
+    // `oneOf`, one inline object per variant.
+    | {kind: 'taggedUnion'; discriminant: string; variants: Record<string, Record<string, PropertyContract>>}
+    // A `#[serde(flatten)]` of a tagged union into its containing struct,
+    // published as `allOf: [{$ref: the union}, {the struct's own fields}]`.
+    | {kind: 'merge'; base: string; extra: Record<string, PropertyContract>};
 
 /**
  * Whether the DTO declares a field as absent-able: `| null`, or optional with
@@ -342,11 +374,17 @@ type Absentable<Value> = undefined extends Value
  * `ref` or `arrayOf` instead of `type`, and constraining an unused key would
  * buy nothing. `NonNullable` is applied first so `| null` does not defeat the
  * match -- nullability is already pinned separately by `Absentable`.
+ *
+ * A TS `number` allows *either* `'integer'` or `'number'`: the two JSON types
+ * are indistinguishable in TypeScript (`u32` and `f64` are both just
+ * `number`), so this cannot force one -- only the runtime assertion against
+ * the snapshot, which compares the table's literal to the actual published
+ * type, catches a mismatch there.
  */
 type ScalarTypeFor<Value> = [NonNullable<Value>] extends [string]
     ? 'string'
     : [NonNullable<Value>] extends [number]
-        ? 'integer'
+        ? 'integer' | 'number'
         : [NonNullable<Value>] extends [boolean]
             ? 'boolean'
             : PropertyContract['type'];
@@ -390,6 +428,51 @@ function objectContract<T>(properties: {[K in keyof T]-?: PropertyContractFor<T[
  */
 function enumContract<T extends string>(values: Record<T, true>): SchemaContract {
     return {kind: 'enum', values: Object.keys(values)};
+}
+
+/**
+ * The contract for an internally tagged Rust enum (`#[serde(tag = "kind")]`),
+ * keyed by the *TypeScript* discriminated union the client reads it as.
+ *
+ * utoipa publishes this as `oneOf`, one inline object per variant, each
+ * carrying its own literal `kind`. `{[K in T['kind']]-?: …}` demands an entry
+ * for every variant the union declares, and `Extract<T, {kind: K}>` narrows
+ * each entry to exactly that variant's own fields (via `objectContract`'s
+ * mechanism, minus the discriminant itself) -- so a variant added, removed or
+ * renamed only in `types.ts` fails `tsc` the same way a plain field does.
+ */
+function taggedUnionContract<T extends {kind: string}>(
+    variants: {
+        [K in T['kind']]: {
+            [P in keyof Omit<Extract<T, {kind: K}>, 'kind'>]-?: PropertyContractFor<
+                Extract<T, {kind: K}>[P]
+            >;
+        };
+    }
+): SchemaContract {
+    return {
+        kind: 'taggedUnion',
+        discriminant: 'kind',
+        variants: variants as unknown as Record<string, Record<string, PropertyContract>>
+    };
+}
+
+/**
+ * The contract for a `#[serde(flatten)]` of a tagged-union enum into its
+ * containing struct.
+ *
+ * utoipa cannot fold the flatten back into one flat object -- it publishes
+ * `allOf: [{$ref: the enum}, {the struct's own fields}]` instead. `base`
+ * names the enum's own entry in `SCHEMAS`; `extra` is keyed like
+ * `objectContract`, but exhaustive only over the fields `T` adds beyond the
+ * enum (`Exclude<keyof T, 'kind'>`, since `keyof` on a union already
+ * collapses to the fields common to every variant).
+ */
+function mergeContract<T extends {kind: string}>(
+    base: string,
+    extra: {[K in Exclude<keyof T, 'kind'>]-?: PropertyContractFor<T[K]>}
+): SchemaContract {
+    return {kind: 'merge', base, extra: extra as unknown as Record<string, PropertyContract>};
 }
 
 /**
@@ -534,6 +617,66 @@ const SCHEMAS: Record<string, SchemaContract> = {
         file: {required: true, type: 'string'}
     }),
 
+    // -- world-state samples (crates/core/src/record/samples.rs) ----------
+    RunSamplesResponse: objectContract<RunSamplesResponse>({
+        samples: {required: true, arrayOf: 'Sample'}
+    }),
+    // `SampleKind` flattened into `Sample`: utoipa cannot fold a
+    // `#[serde(flatten)]` back into one flat object, so it publishes
+    // `allOf: [{$ref: SampleKind}, {tick, run}]` instead of a single object
+    // schema. `mergeContract` is exhaustive only over what `Sample` adds
+    // beyond `SampleKind` -- `tick` and `run`.
+    Sample: mergeContract<Sample>('SampleKind', {
+        tick: {required: true, type: 'integer'},
+        // `None` for a line written before this field existed. Always
+        // serialised (never omitted), so present-and-null, not absent --
+        // like every other such field in this API.
+        run: {required: false, type: 'string', nullable: true}
+    }),
+    // An internally tagged enum (`#[serde(tag = "kind")]`): utoipa publishes
+    // one inline object per variant rather than a single schema, so this is
+    // `taggedUnionContract`, not `objectContract`.
+    SampleKind: taggedUnionContract<SampleKind>({
+        bots: {
+            bots: {required: true, arrayOf: 'BotSample'}
+        },
+        force: {
+            // Present-and-null: "nothing queued" is a fact, not an absence.
+            research: {required: false, ref: 'ResearchSample', nullable: true},
+            techs_unlocked: {required: true, type: 'integer'},
+            production: {required: true, ref: 'ProductionSample'},
+            power: {required: true, ref: 'PowerSample'}
+        },
+        // A kind this build does not know. The server never emits it, but a
+        // future variant must still decode rather than fail to parse.
+        unknown: {}
+    }),
+    BotSample: objectContract<BotSample>({
+        id: {required: true, type: 'integer'},
+        position: {required: true, ref: 'Position'},
+        inventory: {required: true, type: 'object'},
+        crafting_queue: {required: true, type: 'integer'},
+        mining: {required: false, type: 'string', nullable: true}
+    }),
+    ResearchSample: objectContract<ResearchSample>({
+        name: {required: true, type: 'string'},
+        progress: {required: true, type: 'number'},
+        eta_ticks: {required: false, type: 'integer', nullable: true}
+    }),
+    ProductionSample: objectContract<ProductionSample>({
+        made: {required: true, type: 'object'},
+        consumed: {required: true, type: 'object'}
+    }),
+    PowerSample: objectContract<PowerSample>({
+        generated_kw: {required: true, type: 'number'},
+        consumed_kw: {required: true, type: 'number'},
+        satisfaction: {required: true, type: 'number'}
+    }),
+    Position: objectContract<Position>({
+        x: {required: true, type: 'number'},
+        y: {required: true, type: 'number'}
+    }),
+
     ClientRun: objectContract<ClientRun>({
         client: {required: true, type: 'integer'},
         run: {required: true, type: 'string', nullable: true}
@@ -605,7 +748,100 @@ const SCHEMAS: Record<string, SchemaContract> = {
 };
 
 function schemaName(schema: SchemaObject | undefined): string | undefined {
-    return schema?.$ref?.replace('#/components/schemas/', '');
+    if (schema?.$ref) {
+        return schema.$ref.replace('#/components/schemas/', '');
+    }
+    // A nullable $ref (an `Option<T>` naming another schema, e.g.
+    // `SampleKind::Force::research`) is published as
+    // `oneOf: [{type: "null"}, {$ref: ...}]` rather than a bare `$ref`.
+    const refMember = schema?.oneOf?.find(member => member.$ref !== undefined);
+    return refMember?.$ref?.replace('#/components/schemas/', '');
+}
+
+/** Whether a property schema allows `null`, in either form utoipa emits it. */
+function isNullable(schema: SchemaObject | undefined): boolean {
+    if (Array.isArray(schema?.type)) {
+        return schema.type.includes('null');
+    }
+    return schema?.oneOf?.some(member => member.type === 'null') ?? false;
+}
+
+/**
+ * Field-set and required-set assertions shared by a plain object schema and
+ * by one variant of a tagged union -- the same comparison, just against a
+ * narrower slice of the spec and the contract in the union case.
+ */
+function expectFieldsMatch(
+    where: string,
+    schemaProperties: Record<string, SchemaObject> | undefined,
+    schemaRequired: string[] | undefined,
+    contractProperties: Record<string, PropertyContract>
+): void {
+    expect(
+        Object.keys(schemaProperties ?? {}).sort(),
+        where + ' publishes different fields than app/src/api/types.ts declares. ' +
+            'A renamed or added field has to be mirrored there before this passes.'
+    ).toEqual(Object.keys(contractProperties).sort());
+
+    const expectedRequired = Object.entries(contractProperties)
+        .filter(([, property]) => property.required)
+        .map(([field]) => field)
+        .sort();
+    expect(
+        [...(schemaRequired ?? [])].sort(),
+        where + ' publishes a different required set. A newly required field is a ' +
+            'breaking change for every caller that omits it.'
+    ).toEqual(expectedRequired);
+}
+
+/** Per-field type and nullability assertions, shared the same way. */
+function expectFieldTypesMatch(
+    where: string,
+    schemaProperties: Record<string, SchemaObject> | undefined,
+    contractProperties: Record<string, PropertyContract>
+): void {
+    const properties = schemaProperties ?? {};
+    for (const [field, expected] of Object.entries(contractProperties)) {
+        const property = properties[field];
+        expect(property, where + '.' + field + ' is missing').toBeDefined();
+        const fieldWhere = where + '.' + field;
+
+        if (expected.ref) {
+            expect(schemaName(property), fieldWhere + ' no longer refs ' + expected.ref)
+                .toBe(expected.ref);
+            expect(
+                isNullable(property),
+                fieldWhere + (expected.nullable
+                    ? ' is no longer nullable, but types.ts declares `| null`'
+                    : ' became nullable, and types.ts does not declare `| null`')
+            ).toBe(expected.nullable === true);
+            continue;
+        }
+        if (expected.arrayOf) {
+            expect(property.type, fieldWhere + ' is no longer an array').toBe('array');
+            expect(
+                schemaName(property.items),
+                fieldWhere + ' is no longer an array of ' + expected.arrayOf
+            ).toBe(expected.arrayOf);
+            continue;
+        }
+
+        // utoipa writes a nullable field as `type: [t, "null"]` and a
+        // non-nullable one as `type: t`, so both facts come out of the same
+        // key.
+        const types = Array.isArray(property.type) ? property.type : [property.type];
+        expect(
+            types,
+            fieldWhere + ' is published as ' + JSON.stringify(property.type) +
+                ', but types.ts reads it as a ' + expected.type
+        ).toContain(expected.type);
+        expect(
+            types.includes('null'),
+            fieldWhere + (expected.nullable
+                ? ' is no longer nullable, but types.ts declares `| null`'
+                : ' became nullable, and types.ts does not declare `| null`')
+        ).toBe(expected.nullable === true);
+    }
 }
 
 function findOperation(contract: OperationContract): Operation | undefined {
@@ -749,21 +985,7 @@ describe('the schemas app/src/api/types.ts mirrors', () => {
                 throw new Error('filtered above');
             }
             const schema = spec.components.schemas[name];
-            expect(
-                Object.keys(schema.properties ?? {}).sort(),
-                name + ' publishes different fields than app/src/api/types.ts declares. ' +
-                    'A renamed or added field has to be mirrored there before this passes.'
-            ).toEqual(Object.keys(contract.properties).sort());
-
-            const expectedRequired = Object.entries(contract.properties)
-                .filter(([, property]) => property.required)
-                .map(([field]) => field)
-                .sort();
-            expect(
-                [...(schema.required ?? [])].sort(),
-                name + ' publishes a different required set. A newly required field is a ' +
-                    'breaking change for every caller that omits it.'
-            ).toEqual(expectedRequired);
+            expectFieldsMatch(name, schema.properties, schema.required, contract.properties);
         }
     );
 
@@ -774,41 +996,97 @@ describe('the schemas app/src/api/types.ts mirrors', () => {
             if (contract.kind !== 'object') {
                 throw new Error('filtered above');
             }
-            const properties = spec.components.schemas[name].properties ?? {};
-            for (const [field, expected] of Object.entries(contract.properties)) {
-                const property = properties[field];
-                expect(property, name + '.' + field + ' is missing').toBeDefined();
-                const where = name + '.' + field;
+            expectFieldTypesMatch(name, spec.components.schemas[name].properties, contract.properties);
+        }
+    );
 
-                if (expected.ref) {
-                    expect(schemaName(property), where + ' no longer refs ' + expected.ref)
-                        .toBe(expected.ref);
+    it.each(names.filter(name => SCHEMAS[name].kind === 'merge'))(
+        '%s (a flattened union) has exactly the extra fields the client declares',
+        name => {
+            const contract = SCHEMAS[name];
+            if (contract.kind !== 'merge') {
+                throw new Error('filtered above');
+            }
+            const schema = spec.components.schemas[name];
+            const [baseMember, extraMember] = schema.allOf ?? [];
+            expect(
+                schemaName(baseMember),
+                name + ' no longer flattens ' + contract.base
+            ).toBe(contract.base);
+            expect(
+                extraMember,
+                name + ' is no longer published as allOf[base, extra fields]'
+            ).toBeDefined();
+            expectFieldsMatch(
+                name,
+                extraMember?.properties,
+                extraMember?.required,
+                contract.extra
+            );
+        }
+    );
+
+    it.each(names.filter(name => SCHEMAS[name].kind === 'merge'))(
+        '%s (a flattened union) publishes each extra field with the type the client reads',
+        name => {
+            const contract = SCHEMAS[name];
+            if (contract.kind !== 'merge') {
+                throw new Error('filtered above');
+            }
+            const schema = spec.components.schemas[name];
+            const extraMember = schema.allOf?.[1];
+            expectFieldTypesMatch(name, extraMember?.properties, contract.extra);
+        }
+    );
+
+    it.each(names.filter(name => SCHEMAS[name].kind === 'taggedUnion'))(
+        '%s publishes exactly the variants the client union lists',
+        name => {
+            const contract = SCHEMAS[name];
+            if (contract.kind !== 'taggedUnion') {
+                throw new Error('filtered above');
+            }
+            const schema = spec.components.schemas[name];
+            const members = schema.oneOf ?? [];
+            const tagsPublished = members
+                .map(member => member.properties?.[contract.discriminant]?.enum?.[0])
+                .filter((tag): tag is string => tag !== undefined)
+                .sort();
+            expect(
+                tagsPublished,
+                name + ' publishes a different set of ' + contract.discriminant +
+                    ' variants than the union in types.ts. A variant added or removed has to be ' +
+                    'mirrored there before this passes.'
+            ).toEqual(Object.keys(contract.variants).sort());
+        }
+    );
+
+    it.each(names.filter(name => SCHEMAS[name].kind === 'taggedUnion'))(
+        '%s publishes each variant with exactly the fields the client declares',
+        name => {
+            const contract = SCHEMAS[name];
+            if (contract.kind !== 'taggedUnion') {
+                throw new Error('filtered above');
+            }
+            const schema = spec.components.schemas[name];
+            for (const member of schema.oneOf ?? []) {
+                const tag = member.properties?.[contract.discriminant]?.enum?.[0];
+                if (tag === undefined || !(tag in contract.variants)) {
+                    // Reported as a set mismatch by the test above already.
                     continue;
                 }
-                if (expected.arrayOf) {
-                    expect(property.type, where + ' is no longer an array').toBe('array');
-                    expect(
-                        schemaName(property.items),
-                        where + ' is no longer an array of ' + expected.arrayOf
-                    ).toBe(expected.arrayOf);
-                    continue;
-                }
-
-                // utoipa writes a nullable field as `type: [t, "null"]` and a
-                // non-nullable one as `type: t`, so both facts come out of the
-                // same key.
-                const types = Array.isArray(property.type) ? property.type : [property.type];
-                expect(
-                    types,
-                    where + ' is published as ' + JSON.stringify(property.type) +
-                        ', but types.ts reads it as a ' + expected.type
-                ).toContain(expected.type);
-                expect(
-                    types.includes('null'),
-                    where + (expected.nullable
-                        ? ' is no longer nullable, but types.ts declares `| null`'
-                        : ' became nullable, and types.ts does not declare `| null`')
-                ).toBe(expected.nullable === true);
+                const variantProperties = contract.variants[tag];
+                // The discriminant itself is not one of the variant's own
+                // fields in the contract -- every variant carries it, and
+                // spelling it out per variant would buy nothing.
+                const propertiesMinusTag = {...member.properties};
+                delete propertiesMinusTag[contract.discriminant];
+                const requiredMinusTag = (member.required ?? []).filter(
+                    field => field !== contract.discriminant
+                );
+                const where = name + '[' + tag + ']';
+                expectFieldsMatch(where, propertiesMinusTag, requiredMinusTag, variantProperties);
+                expectFieldTypesMatch(where, propertiesMinusTag, variantProperties);
             }
         }
     );

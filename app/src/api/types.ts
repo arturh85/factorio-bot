@@ -381,3 +381,78 @@ export interface Lane {
 export interface RunLanesResponse {
     lanes: Lane[];
 }
+
+/** One bot's world state at the sample's tick. */
+export interface BotSample {
+    id: number;
+    /** As the game reports it. A tile centre stays `-40.5`; nothing rounds. */
+    position: Position;
+    /** Item name to count. */
+    inventory: Record<string, number>;
+    /** Queue *length*, not its contents. */
+    crafting_queue: number;
+    mining: string | null;
+}
+
+/** What the force is researching, if anything. */
+export interface ResearchSample {
+    name: string;
+    /** 0.0 to 1.0. */
+    progress: number;
+    eta_ticks: number | null;
+}
+
+/** Cumulative item counts, never per-interval. */
+export interface ProductionSample {
+    made: Record<string, number>;
+    consumed: Record<string, number>;
+}
+
+export interface PowerSample {
+    generated_kw: number;
+    consumed_kw: number;
+    /** Consumed over demanded. */
+    satisfaction: number;
+}
+
+/**
+ * The payload half of one `samples.jsonl` line, tagged by `kind`.
+ *
+ * Mirrors `factorio_bot_core::record::samples::SampleKind`, an internally
+ * tagged Rust enum -- the server publishes it as an OpenAPI `oneOf`, one
+ * member per variant, each carrying its own literal `kind`.
+ */
+export type SampleKind =
+    | {kind: 'bots'; bots: BotSample[]}
+    | {
+          kind: 'force';
+          /** Null when nothing is queued -- present and null, not absent. */
+          research: ResearchSample | null;
+          techs_unlocked: number;
+          production: ProductionSample;
+          power: PowerSample;
+      }
+    /** A kind this build does not know. The server never emits it, but a
+     *  future variant decodes to this rather than failing to parse. */
+    | {kind: 'unknown'};
+
+/**
+ * One line of `samples.jsonl`.
+ *
+ * Mirrors `factorio_bot_core::record::samples::Sample`: the `#[serde(flatten)]`
+ * of `SampleKind` into `Sample` is why the server publishes this as an
+ * `allOf` of `SampleKind` and `{tick, run}` rather than a single flat object.
+ */
+export type Sample = SampleKind & {
+    tick: number;
+    /**
+     * The run id the mod stamped on this line, or `null` for a line written
+     * before this field existed.
+     */
+    run: string | null;
+};
+
+/** `GET /api/v1/runs/{id}/samples` response. */
+export interface RunSamplesResponse {
+    samples: Sample[];
+}

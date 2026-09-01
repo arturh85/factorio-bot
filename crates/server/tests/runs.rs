@@ -167,6 +167,36 @@ async fn a_run_with_no_frames_reports_an_empty_index_rather_than_404() {
 }
 
 #[tokio::test]
+async fn a_run_with_no_sample_file_reports_an_empty_list_rather_than_404() {
+    // The mod may not have shipped, or the run may predate sampling entirely.
+    let ws = workspace("nosamples");
+    seed_run(&ws, "planning", MILESTONES, None, None);
+    let (status, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/planning/samples").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a run recorded before sampling existed is not an error"
+    );
+    assert_eq!(body["samples"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn a_runs_archived_samples_are_served() {
+    let ws = workspace("samples");
+    seed_run(&ws, "alpha", MILESTONES, Some(MANIFEST), None);
+    std::fs::write(
+        ws.join("runs").join("alpha").join("samples.jsonl"),
+        r#"{"kind":"bots","schema":1,"tick":310,"run":"alpha","bots":[]}"#,
+    )
+    .unwrap();
+    let (status, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/alpha/samples").await;
+    assert_eq!(status, StatusCode::OK);
+    let samples = body["samples"].as_array().unwrap();
+    assert_eq!(samples.len(), 1);
+    assert_eq!(samples[0]["tick"], 310);
+}
+
+#[tokio::test]
 async fn an_unfinished_run_sorts_by_the_time_in_its_id_not_to_the_bottom() {
     // A crashed run is usually the newest and the most interesting; sorting
     // every manifest-less run last buries exactly the ones worth opening.

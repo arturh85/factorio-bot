@@ -24,6 +24,10 @@ pub mod splits;
 pub use frames::{ArchivedFrame, archive_frames, parse_frame_name};
 pub use lanes::{Lane, derive_lanes};
 pub use retention::{DEFAULT_KEEP, KEEP_MARKER, Reaped, reap};
+pub use samples::{
+    BotSample, PowerSample, ProductionSample, ReadSamples, ResearchSample, Sample, SampleKind,
+    ingest_samples, read_samples,
+};
 pub use splits::{Split, derive_splits};
 
 /// What happened. Internally tagged as `kind`, so a line is one flat object.
@@ -138,6 +142,10 @@ pub struct Manifest {
     pub events: usize,
     pub frames: usize,
     pub splits: usize,
+    /// How many samples were archived. A count, not a size: a reader deciding
+    /// whether to fetch the stream cares how many records it will get.
+    #[serde(default)]
+    pub samples: usize,
 }
 
 /// Writes a run's event log.
@@ -257,6 +265,13 @@ impl RunRecorder {
         workspace: Option<&Path>,
         keep: usize,
     ) -> io::Result<(Manifest, retention::Reaped)> {
+        // Captured before the finishing event's own tick can raise the
+        // high-water mark: `record()` below folds `tick` -- the run's closing
+        // reading -- into `high_tick`, and an un-attributed sample recorded
+        // partway through the run must not be excluded by a cutoff drawn from
+        // the run's own final moment.
+        let sample_cutoff = self.not_before(0);
+
         self.record(
             tick,
             EventKind::RunFinished {
@@ -277,6 +292,13 @@ impl RunRecorder {
             None => 0,
         };
 
+        let samples = match workspace {
+            Some(workspace) => {
+                samples::ingest_samples(workspace, &self.dir, &self.run_id, sample_cutoff)?
+            }
+            None => 0,
+        };
+
         let manifest = Manifest {
             run_id: self.run_id.clone(),
             started_unix: self.started_unix,
@@ -291,6 +313,7 @@ impl RunRecorder {
             events: read.events.len(),
             frames,
             splits: splits.len(),
+            samples,
         };
         fs::write(
             self.dir.join("manifest.json"),
@@ -697,6 +720,44 @@ mod finish_tests {
             "a run must never reap itself -- it is the newest, and its manifest \
              is written before the reap so it sorts that way"
         );
+    }
+
+    #[test]
+    fn finish_counts_the_samples_it_archived() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let out = workspace.join("server/script-output/botbridge");
+        fs::create_dir_all(&out).unwrap();
+        fs::write(
+            out.join("samples.jsonl"),
+            "{\"kind\":\"bots\",\"schema\":1,\"tick\":900,\"bots\":[]}\n",
+        )
+        .unwrap();
+
+        let mut rec = RunRecorder::start(&tmp.path().join("runs"), "run-1").unwrap();
+        rec.record(
+            800,
+            EventKind::MilestoneStarted {
+                index: 1,
+                goal: "g".into(),
+            },
+        )
+        .unwrap();
+        let (manifest, _) = rec.finish(1000, "done", Some(&workspace), 5).unwrap();
+
+        assert_eq!(manifest.samples, 1);
+    }
+
+    #[test]
+    fn a_run_with_no_sample_file_reports_zero_rather_than_failing() {
+        // The mod may not have shipped, or the run may predate sampling. Neither
+        // is a reason to lose the events the run did produce.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut rec = RunRecorder::start(&tmp.path().join("runs"), "run-2").unwrap();
+        let (manifest, _) = rec
+            .finish(1000, "done", Some(&tmp.path().join("workspace")), 5)
+            .unwrap();
+        assert_eq!(manifest.samples, 0);
     }
 
     #[test]

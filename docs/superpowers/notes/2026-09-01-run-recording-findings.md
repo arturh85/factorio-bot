@@ -116,6 +116,48 @@ which is its own question.
 So: the research critical path is now blocked on *estimation*, not on a silent
 lie. That is a much better place to be stuck, and a different piece of work.
 
+### The furnace lag, and why it was the only one of its kind
+
+`tried to remove 10 copper-plate but removed 9` was not a rate error. Measured
+against a real stone furnace, plates arrive about 3.2 s apart -- exactly what
+`smelting_ticks` models. The mistake was using that number as a **point
+estimate** where it functions as a **schedule constraint**: a removal placed at
+the predicted completion is right half the time by construction.
+
+The two sides are not symmetric, which is what settles the fix. Being early
+costs a whole replan cycle. Being late costs scheduled slack the bot spends on
+other work anyway -- that is what the lag is *for*. So the lag now carries one
+craft cycle of headroom, covering a real mechanism rather than padding a guess:
+the furnace cannot begin before the ore lands, and the insert action's reply
+tick is when the *mod* returned, not when the furnace next looked at its input
+slot.
+
+**Audited for the same shape and found exactly one instance**, which is worth
+knowing. The smelt lag is the only `Step::Link` carrying a lag in the planner.
+Everything else is a `duration`, and the difference is what made this one
+fragile: a duration is a makespan estimate while the executor waits on an
+actual completion signal, so under-estimating it costs accuracy in a prediction.
+A lag gates a *dependent action on elapsed time* with no signal behind it, so
+under-estimating it dispatches into a world that is not ready. One is a
+prediction, the other is a promise.
+
+### A measurement instrument that read a constant
+
+Reading the game clock from a script was not possible, so `rcon.last_tick()` is
+new. The first probe built on it reported all ten plates arriving at `+0 ticks`
+-- a result that would have been written up as "smelting is instantaneous" if
+the wall-clock timestamps in the log had not been three seconds apart.
+
+The clock was frozen. `last_tick` is advanced by *timed* calls, and the query
+calls -- `inventory_contents_at`, `find_entities_in_radius` -- use the untimed
+`remote_call` and never take a stamp off the reply. Polling with one leaves the
+clock at whatever the last action reported.
+
+Worse: the documentation I had written for `last_tick` an hour earlier
+recommended `inventory_contents_at` as a timestamped sample. The doc now names
+which calls advance it and warns about the frozen loop specifically. A wrong
+doc on a new primitive is a trap laid for whoever uses it next.
+
 ### Ghosts and the entity graph: checked, not a defect
 
 `EntityGraph` filters `FlyingText` and `Fish` by `entity_type` but not

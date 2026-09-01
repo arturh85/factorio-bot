@@ -9,7 +9,6 @@ use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::ids::{ActionId, ActionIdGen, BotId, ChainId, ChainIdGen, ItemId, Ticks};
 use crate::state::PlanState;
-use std::collections::BTreeSet;
 
 /// One element of a method's expansion.
 #[derive(Clone, Debug)]
@@ -224,7 +223,6 @@ pub fn expand(
     if state.bot(chain_actor).is_none() {
         return Err(PlannerError::UnknownBot(chain_actor));
     }
-    check_bots_interchangeable(state, goals)?;
     let mut ctx = ExpansionCtx::new(state.fork(), chain_actor);
     let mut net = ActionNetwork::new();
     for goal in goals {
@@ -233,83 +231,6 @@ pub fn expand(
     net.infer_edges();
     net.validate()?;
     Ok(net)
-}
-
-/// The driver sizes each bot's share of a goal against one bot's inventory and
-/// assumes any bot would do (see `ExpansionCtx` docs) -- but only for the one
-/// shape that actually does that sizing: `SplitAcrossBots` reads every bot's
-/// count of a top-level `Goal::Have { whose: Holder::Anyone, .. }`'s own
-/// `item` (see its `expand`, `ctx.state.inventory_count(*bot, item)`).
-/// Nothing else in this crate compares two bots' inventories against each
-/// other -- every other method sizes a shortfall against one `Holder` (a
-/// named bot, a share, or the roster's sum), which is well-defined whatever
-/// the distribution -- so comparing whole inventories over-scopes the guard.
-/// It refused a live `have(iron-ore, 20)` run because bot 1 alone held
-/// starting iron *plates*, an item that goal never reads.
-///
-/// Only the items `scattered_items` names are read across the roster, so
-/// only those are compared. Enforced before forking the state: comparing
-/// inventories only, never positions, since travel cost is exactly what
-/// legitimately makes bots sit apart.
-fn check_bots_interchangeable(state: &PlanState, goals: &[Goal]) -> Result<(), PlannerError> {
-    let bot_ids = state.bot_ids();
-    let Some((&first, rest)) = bot_ids.split_first() else {
-        return Ok(());
-    };
-    // `bot_ids` come from a `BTreeMap`, so `first` is deterministic and the
-    // caller's `chain_actor` need not be it. `scattered_items` is a
-    // `BTreeSet`, so the item compared first (and thus named on a tie of
-    // several differences) is deterministic too.
-    for item in &scattered_items(goals) {
-        let first_count = state.inventory_count(first, item);
-        for &other in rest {
-            let other_count = state.inventory_count(other, item);
-            if first_count != other_count {
-                return Err(PlannerError::BotsNotInterchangeable {
-                    a: first,
-                    b: other,
-                    item: item.clone(),
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-/// The items a top-level `Goal::Have { whose: Holder::Anyone, .. }` names,
-/// flattened through `Goal::All`.
-///
-/// This mirrors exactly what makes a goal eligible for `SplitAcrossBots`:
-/// `claims` requires `site.top_level && !site.in_chain`, and every member of
-/// a top-level `Goal::All` keeps that site (see `expand_goal_body`), so each
-/// one is independently a candidate the method may scatter -- a run naming
-/// several such goals must have its guard cover every one of their items, not
-/// just the first, or a second `Have` sized against a bot's earlier share
-/// would silently reintroduce the mis-sized-share bug this guard exists to
-/// prevent. Anything else -- `Holder::Bot`/`Holder::Share` goals, and every
-/// subgoal a method (rather than the caller) asks for, which `expand_goal`
-/// always marks non-top-level -- reads at most one bot's inventory and needs
-/// no cross-bot agreement.
-fn scattered_items(goals: &[Goal]) -> BTreeSet<ItemId> {
-    let mut items = BTreeSet::new();
-    collect_scattered_items(goals, &mut items);
-    items
-}
-
-fn collect_scattered_items(goals: &[Goal], items: &mut BTreeSet<ItemId>) {
-    for goal in goals {
-        match goal {
-            Goal::Have {
-                item,
-                whose: Holder::Anyone,
-                ..
-            } => {
-                items.insert(item.clone());
-            }
-            Goal::All(inner) => collect_scattered_items(inner, items),
-            _ => {}
-        }
-    }
 }
 
 fn expand_goal(
@@ -591,6 +512,7 @@ mod tests {
     use crate::ids::BotId;
     use crate::state::PlanState;
     use factorio_bot_core::test_utils::fixture_world;
+    use std::collections::BTreeSet;
     use std::sync::Arc;
 
     fn ctx() -> ExpansionCtx {
@@ -1481,30 +1403,27 @@ mod tests {
         assert_eq!(ctx.depth, 0, "the depth must survive an error");
     }
 
-    /// The regression the interchangeable-bots guard exists to stand in for.
+    /// T4 -- asymmetric end to end, through the public `expand()`.
     ///
-    /// The guard's stated fear (`docs/superpowers/specs/2026-09-01-per-bot-share-sizing-design.md`
-    /// §4, quoting `docs/superpowers/plans/2026-08-30-planner-hardening.md` Task 5)
-    /// is that an asymmetric roster makes `expand` succeed and `schedule` fail
-    /// "forty actions later" — a defect `expand`'s own success can never catch,
-    /// because it would only show up once a real bot roster tries to run the
-    /// plan. `check_bots_interchangeable` refuses this exact roster before
-    /// `SplitAcrossBots` ever runs, so `expand()` cannot be used to find out
-    /// whether the fear is still justified now that shares are sized against
-    /// each bot's own `available` stock (see `have.rs`'s `SplitAcrossBots`).
+    /// Four bots, only bot 1 holding a freeplay-like starting inventory (8
+    /// iron plates, a furnace, a drill, a wood), goal `Have{iron-plate, 40,
+    /// Anyone}`. Bots differ in the goal's own item, which is exactly the
+    /// shape `check_bots_interchangeable` used to refuse -- the guard's own
+    /// five tests described it as the one shape that was not safe to let
+    /// through. This is the permanent replacement for that guard: not just
+    /// that `expand()` succeeds, but that the resulting network still
+    /// schedules to a plan that actually uses the roster's spare capacity,
+    /// which is the property the guard's removal put at risk (see
+    /// `docs/superpowers/specs/2026-09-01-per-bot-share-sizing-design.md` §4).
     ///
-    /// So this test calls `expand_goal` directly — the same per-goal body
-    /// `expand()` calls in its loop — skipping only the guard, and then feeds
-    /// the resulting network to `schedule()`, exactly as `expand()`'s callers
-    /// do. If a mis-sized share were going to surface as an unschedulable
-    /// network, this is where it would show up.
-    ///
-    /// Bots differ in the goal's own item (`iron-plate`), which is exactly
-    /// the shape the guard exists to refuse: bot 1 starts with a freeplay-like
-    /// head start (8 plates, a furnace, a drill, a wood) and bots 2-4 start
-    /// with nothing extra.
+    /// A lower-level probe of the same scenario -- calling `expand_goal`
+    /// directly to reach expansion underneath the guard while it still
+    /// existed -- passed before this deletion; see the "pin that an
+    /// asymmetric roster survives expand and schedule" commit. That probe is
+    /// superseded by this test once the guard is gone: `expand()` itself now
+    /// takes the asymmetric roster, so there is nothing left to bypass.
     #[test]
-    fn an_asymmetric_roster_expands_and_schedules_bypassing_the_guard() {
+    fn a_freeplay_roster_plans_and_schedules() {
         use crate::schedule::schedule;
 
         let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
@@ -1520,33 +1439,15 @@ mod tests {
             whose: Holder::Anyone,
         };
         let registry = have::registry_for(&bots);
-
-        // The guarded path a caller actually takes: `check_bots_interchangeable`
-        // refuses this roster today, which is exactly why this probe cannot go
-        // through `expand()` and must call the per-goal body underneath it.
-        assert!(
-            matches!(
-                expand(&[goal.clone()], &state, &registry, BotId(1)),
-                Err(PlannerError::BotsNotInterchangeable { item, .. }) if item == "iron-plate"
-            ),
-            "this probe is only meaningful while the guard still refuses the \
-             scenario it bypasses"
-        );
-
-        let mut ctx = ExpansionCtx::new(state.fork(), BotId(1));
-        let mut net = ActionNetwork::new();
-        expand_goal(&goal, &mut ctx, &mut net, &registry)
-            .expect("an asymmetric roster expands once the guard is bypassed");
-        net.infer_edges();
-        net.validate().expect("the inferred network is internally consistent");
-
-        let plan = schedule(&net, &state, &bots)
-            .expect("an asymmetric roster schedules once the guard is bypassed");
+        let net =
+            expand(&[goal], &state, &registry, BotId(1)).expect("an asymmetric roster expands");
+        let plan = schedule(&net, &state, &bots).expect("an asymmetric roster schedules");
         assert!(plan.makespan > 0, "a real plan takes real time");
 
         // A real assertion about the plan's shape, not just that scheduling
-        // returned `Ok`: the roster's spare capacity actually gets used rather
-        // than every share landing on bot 1 regardless of its head start.
+        // returned `Ok`: the roster's spare capacity actually gets used
+        // rather than every share landing on bot 1 regardless of its head
+        // start.
         let participating = bots
             .iter()
             .filter(|b| !plan.steps_for(**b).is_empty())
@@ -1557,76 +1458,6 @@ mod tests {
              one bot, got steps: {:?}",
             plan.steps
         );
-    }
-
-    #[test]
-    fn expansion_rejects_bots_that_differ_in_the_goals_own_item() {
-        let bots = [BotId(1), BotId(2)];
-        let mut state = PlanState::from_world(Arc::new(fixture_world()), &bots);
-        state.gain(BotId(1), "coal", 12);
-        let reg = MethodRegistry::new().with(Box::new(Nothing));
-        let goal = Goal::Have {
-            item: "coal".into(),
-            count: 1,
-            whose: Holder::Anyone,
-        };
-        assert!(matches!(
-            expand(&[goal], &state, &reg, BotId(1)),
-            Err(PlannerError::BotsNotInterchangeable { item, .. }) if item == "coal"
-        ));
-    }
-
-    /// Regression test for a live crash: a four-bot run asked
-    /// `goal.have("iron-ore", 20)` and was refused because bot 1 alone held
-    /// starting iron *plates* -- an item that goal never reads. The guard
-    /// must compare only the item(s) a top-level `Holder::Anyone` goal
-    /// actually names, not a bot's whole inventory, or any two bots that
-    /// differ in *anything* (which freeplay's starting inventory guarantees
-    /// from tick zero) block every multi-bot run.
-    #[test]
-    fn bots_differing_only_in_an_item_the_goal_does_not_touch_may_still_expand() {
-        let bots = [BotId(1), BotId(2)];
-        let mut state = PlanState::from_world(Arc::new(fixture_world()), &bots);
-        state.gain(BotId(1), "iron-plate", 12);
-        let reg = MethodRegistry::new().with(Box::new(Nothing));
-        let goal = Goal::Have {
-            item: "coal".into(),
-            count: 1,
-            whose: Holder::Anyone,
-        };
-        assert!(
-            expand(&[goal], &state, &reg, BotId(1)).is_ok(),
-            "the goal never reads iron-plate, so bots disagreeing on it must not block expansion"
-        );
-    }
-
-    /// A top-level `Goal::All` bundles independent goals, each individually
-    /// eligible for `SplitAcrossBots` (see `scattered_items`'s doc comment).
-    /// Agreeing on the first item named must not excuse disagreeing on the
-    /// second -- that would silently readmit the mis-sized-share bug for
-    /// whichever goal happened to be checked last.
-    #[test]
-    fn expansion_checks_every_item_a_top_level_all_names() {
-        let bots = [BotId(1), BotId(2)];
-        let mut state = PlanState::from_world(Arc::new(fixture_world()), &bots);
-        state.gain(BotId(1), "stone", 8);
-        let reg = MethodRegistry::new().with(Box::new(Nothing));
-        let goal = Goal::All(vec![
-            Goal::Have {
-                item: "coal".into(),
-                count: 1,
-                whose: Holder::Anyone,
-            },
-            Goal::Have {
-                item: "stone".into(),
-                count: 1,
-                whose: Holder::Anyone,
-            },
-        ]);
-        assert!(matches!(
-            expand(&[goal], &state, &reg, BotId(1)),
-            Err(PlannerError::BotsNotInterchangeable { item, .. }) if item == "stone"
-        ));
     }
 
     /// A `Holder::Share` states that the holding has to end up in one
@@ -1899,34 +1730,5 @@ mod tests {
         fn expand(&self, _g: &Goal, _c: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
             Ok(vec![])
         }
-    }
-
-    #[test]
-    fn identical_bots_are_accepted() {
-        let bots = [BotId(1), BotId(2)];
-        let mut state = PlanState::from_world(Arc::new(fixture_world()), &bots);
-        for b in bots {
-            state.gain(b, "stone-furnace", 2);
-        }
-        let reg = MethodRegistry::new().with(Box::new(Nothing));
-        let goal = Goal::Have {
-            item: "coal".into(),
-            count: 1,
-            whose: Holder::Anyone,
-        };
-        assert!(expand(&[goal], &state, &reg, BotId(1)).is_ok());
-    }
-
-    #[test]
-    fn a_single_bot_is_trivially_interchangeable() {
-        let mut state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
-        state.gain(BotId(1), "iron-plate", 12);
-        let reg = MethodRegistry::new().with(Box::new(Nothing));
-        let goal = Goal::Have {
-            item: "coal".into(),
-            count: 1,
-            whose: Holder::Anyone,
-        };
-        assert!(expand(&[goal], &state, &reg, BotId(1)).is_ok());
     }
 }

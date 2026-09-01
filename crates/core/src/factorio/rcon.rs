@@ -392,6 +392,17 @@ impl std::error::Error for ActionFailure {}
 pub struct FactorioRcon {
     pool: Option<bb8::Pool<ConnectionManager>>,
     silent: Arc<RwLock<bool>>,
+    /// The tick stamped on the most recent reply that carried one.
+    ///
+    /// Every `remote_call_timed` reply arrives stamped with `game.tick` from
+    /// inside the game, so the game tells us what time it is on every command
+    /// we send. Keeping the last one costs nothing and spares us a mod
+    /// function whose only job would be to ask a question we are already
+    /// being answered.
+    ///
+    /// `0` means "no stamped reply yet", which is why the accessor returns an
+    /// `Option` rather than handing out a tick that never happened.
+    last_tick: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[cfg_attr(test, mockall::automock)]
@@ -404,6 +415,7 @@ impl FactorioRcon {
         );
         let manager = ConnectionManager::new(&address, &settings.pass);
         Ok(FactorioRcon {
+            last_tick: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pool: Some(
                 bb8::Pool::builder()
                     .max_size(15)
@@ -422,6 +434,7 @@ impl FactorioRcon {
     /// change to an option. It used to *panic* rather than fail — see `send`.
     pub fn new_empty() -> Self {
         FactorioRcon {
+            last_tick: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pool: None,
             silent: Arc::new(RwLock::new(true)),
         }
@@ -485,9 +498,26 @@ impl FactorioRcon {
         function_name: &str,
         args: Vec<String>,
     ) -> Result<(Option<Vec<String>>, Option<u64>)> {
-        Ok(take_tick_stamp(
-            self.remote_call(function_name, args).await?,
-        ))
+        let (lines, tick) = take_tick_stamp(self.remote_call(function_name, args).await?);
+        if let Some(tick) = tick {
+            self.last_tick
+                .store(tick, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok((lines, tick))
+    }
+
+    /// The game tick stamped on the most recent reply that carried one.
+    ///
+    /// This is *observed*, not queried: it is as current as the last command
+    /// sent, and `None` before any stamped reply has arrived. A caller that
+    /// needs the tick to be exactly now must send something first -- which is
+    /// the honest shape, because no value here can be fresher than our last
+    /// word from the game.
+    pub fn last_tick(&self) -> Option<u64> {
+        match self.last_tick.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => None,
+            tick => Some(tick),
+        }
     }
 
     /// Calls a BotBridge function whose reply must be one *complete* JSON

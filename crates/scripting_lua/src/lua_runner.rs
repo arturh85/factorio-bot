@@ -1,6 +1,7 @@
 use crate::globals::create_lua_globals;
 use crate::globals::goal::create_lua_goal;
 use crate::globals::rcon::create_lua_rcon;
+use crate::globals::record::create_lua_record;
 use crate::globals::world::create_lua_world;
 use factorio_bot_core::mlua::LuaSerdeExt;
 use factorio_bot_core::mlua::prelude::*;
@@ -187,6 +188,10 @@ pub async fn run_lua(
                     rcon.clone(),
                     all_bots.clone(),
                 )?;
+                // Cloned before `create_lua_globals` consumes them: recording
+                // needs the same roster and the same scripts root.
+                let record_bots = all_bots.clone();
+                let record_scripts_root = scripts_root.clone();
                 create_lua_globals(
                     &lua,
                     all_bots,
@@ -202,6 +207,16 @@ pub async fn run_lua(
                 globals.set("world", world)?;
                 globals.set("goal", goal)?;
                 if let Some(rcon) = rcon.as_ref() {
+                    // `record` is installed only alongside `rcon`, and that is
+                    // the honest dependency rather than an omission: every
+                    // event is stamped with a tick the game supplies, and
+                    // frame capture is started through the same connection.
+                    // With no game there is no clock and nothing to capture,
+                    // so a `record` table here would be one whose events all
+                    // claimed tick 0.
+                    let record =
+                        create_lua_record(&lua, rcon.clone(), record_scripts_root, record_bots)?;
+                    globals.set("record", record)?;
                     let rcon = create_lua_rcon(&lua, rcon.clone(), real_world.clone())?;
                     globals.set("rcon", rcon)?;
                 }

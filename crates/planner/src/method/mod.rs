@@ -1481,6 +1481,84 @@ mod tests {
         assert_eq!(ctx.depth, 0, "the depth must survive an error");
     }
 
+    /// The regression the interchangeable-bots guard exists to stand in for.
+    ///
+    /// The guard's stated fear (`docs/superpowers/specs/2026-09-01-per-bot-share-sizing-design.md`
+    /// §4, quoting `docs/superpowers/plans/2026-08-30-planner-hardening.md` Task 5)
+    /// is that an asymmetric roster makes `expand` succeed and `schedule` fail
+    /// "forty actions later" — a defect `expand`'s own success can never catch,
+    /// because it would only show up once a real bot roster tries to run the
+    /// plan. `check_bots_interchangeable` refuses this exact roster before
+    /// `SplitAcrossBots` ever runs, so `expand()` cannot be used to find out
+    /// whether the fear is still justified now that shares are sized against
+    /// each bot's own `available` stock (see `have.rs`'s `SplitAcrossBots`).
+    ///
+    /// So this test calls `expand_goal` directly — the same per-goal body
+    /// `expand()` calls in its loop — skipping only the guard, and then feeds
+    /// the resulting network to `schedule()`, exactly as `expand()`'s callers
+    /// do. If a mis-sized share were going to surface as an unschedulable
+    /// network, this is where it would show up.
+    ///
+    /// Bots differ in the goal's own item (`iron-plate`), which is exactly
+    /// the shape the guard exists to refuse: bot 1 starts with a freeplay-like
+    /// head start (8 plates, a furnace, a drill, a wood) and bots 2-4 start
+    /// with nothing extra.
+    #[test]
+    fn an_asymmetric_roster_expands_and_schedules_bypassing_the_guard() {
+        use crate::schedule::schedule;
+
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let mut state = PlanState::from_world(Arc::new(fixture_world()), &bots);
+        state.gain(BotId(1), "iron-plate", 8);
+        state.gain(BotId(1), "stone-furnace", 1);
+        state.gain(BotId(1), "burner-mining-drill", 1);
+        state.gain(BotId(1), "wood", 1);
+
+        let goal = Goal::Have {
+            item: "iron-plate".into(),
+            count: 40,
+            whose: Holder::Anyone,
+        };
+        let registry = have::registry_for(&bots);
+
+        // The guarded path a caller actually takes: `check_bots_interchangeable`
+        // refuses this roster today, which is exactly why this probe cannot go
+        // through `expand()` and must call the per-goal body underneath it.
+        assert!(
+            matches!(
+                expand(&[goal.clone()], &state, &registry, BotId(1)),
+                Err(PlannerError::BotsNotInterchangeable { item, .. }) if item == "iron-plate"
+            ),
+            "this probe is only meaningful while the guard still refuses the \
+             scenario it bypasses"
+        );
+
+        let mut ctx = ExpansionCtx::new(state.fork(), BotId(1));
+        let mut net = ActionNetwork::new();
+        expand_goal(&goal, &mut ctx, &mut net, &registry)
+            .expect("an asymmetric roster expands once the guard is bypassed");
+        net.infer_edges();
+        net.validate().expect("the inferred network is internally consistent");
+
+        let plan = schedule(&net, &state, &bots)
+            .expect("an asymmetric roster schedules once the guard is bypassed");
+        assert!(plan.makespan > 0, "a real plan takes real time");
+
+        // A real assertion about the plan's shape, not just that scheduling
+        // returned `Ok`: the roster's spare capacity actually gets used rather
+        // than every share landing on bot 1 regardless of its head start.
+        let participating = bots
+            .iter()
+            .filter(|b| !plan.steps_for(**b).is_empty())
+            .count();
+        assert!(
+            participating > 1,
+            "an asymmetric roster's plan should spread work across more than \
+             one bot, got steps: {:?}",
+            plan.steps
+        );
+    }
+
     #[test]
     fn expansion_rejects_bots_that_differ_in_the_goals_own_item() {
         let bots = [BotId(1), BotId(2)];

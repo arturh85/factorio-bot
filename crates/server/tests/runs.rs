@@ -197,6 +197,43 @@ async fn a_runs_archived_samples_are_served() {
 }
 
 #[tokio::test]
+async fn a_run_with_no_map_file_reports_an_empty_list_rather_than_404() {
+    // A run recorded before this feature existed, or one that placed nothing.
+    let ws = workspace("nomap");
+    seed_run(&ws, "planning", MILESTONES, None, None);
+    let (status, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/planning/map").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a run recorded before the map existed is not an error"
+    );
+    assert_eq!(body["map"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn a_runs_archived_map_is_served() {
+    let ws = workspace("map");
+    seed_run(&ws, "alpha", MILESTONES, Some(MANIFEST), None);
+    std::fs::write(
+        ws.join("runs").join("alpha").join("map.jsonl"),
+        concat!(
+            r#"{"tick":310,"kind":"placed","bot":1,"#,
+            r#""intent":{"name":"stone-furnace","position":{"x":-12.0,"y":8.0},"direction":0},"#,
+            r#""actual":{"name":"stone-furnace","position":{"x":-12.0,"y":8.0},"direction":0},"#,
+            r#""drift":null}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    let (status, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/alpha/map").await;
+    assert_eq!(status, StatusCode::OK);
+    let map = body["map"].as_array().unwrap();
+    assert_eq!(map.len(), 1);
+    assert_eq!(map[0]["tick"], 310);
+    assert_eq!(map[0]["kind"], "placed");
+}
+
+#[tokio::test]
 async fn an_unfinished_run_sorts_by_the_time_in_its_id_not_to_the_bottom() {
     // A crashed run is usually the newest and the most interesting; sorting
     // every manifest-less run last buries exactly the ones worth opening.

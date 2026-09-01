@@ -26,6 +26,7 @@ import {
     RunDetail,
     RunFramesResponse,
     RunLanesResponse,
+    RunMapResponse,
     RunSamplesResponse,
     RunsResponse,
     ScriptContent,
@@ -188,4 +189,14 @@ export function getRunLanes(id: string): Promise<RunLanesResponse> {
  */
 export function getRunSamples(id: string): Promise<RunSamplesResponse> {
     return request<RunSamplesResponse>(`/api/v1/runs/${encodeURIComponent(id)}/samples`);
+}
+
+/**
+ * A run's entity map: what got built, and whether the game agreed.
+ *
+ * Empty for a run recorded before this feature existed, or one that placed
+ * nothing -- not an error.
+ */
+export function getRunMap(id: string): Promise<RunMapResponse> {
+    return request<RunMapResponse>(`/api/v1/runs/${encodeURIComponent(id)}/map`);
 }

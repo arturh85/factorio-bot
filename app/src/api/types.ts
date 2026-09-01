@@ -456,3 +456,78 @@ export type Sample = SampleKind & {
 export interface RunSamplesResponse {
     samples: Sample[];
 }
+
+/** What one bot built or removed, or what a keyframe observed. */
+export interface EntitySnapshot {
+    name: string;
+    /** Unrounded. A resource sits at a tile centre and stays there. */
+    position: Position;
+    /**
+     * Factorio 2.0 uses 16 values. For an inserter this is the side it PICKS
+     * UP from, not the side it drops into -- never invert or normalise it.
+     */
+    direction: number;
+}
+
+export interface Bounds {
+    left: number;
+    top: number;
+    right: number;
+    bottom: number;
+}
+
+/** An entity present on exactly one side of a keyframe comparison. */
+export interface Divergence {
+    entity: EntitySnapshot;
+    /** Which side has it: `"game"` or `"model"`. */
+    only_in: string;
+}
+
+/**
+ * The payload half of one `map.jsonl` line, tagged by `kind`.
+ *
+ * Mirrors `factorio_bot_core::record::map::MapKind`, an internally tagged
+ * Rust enum -- the server publishes it as an OpenAPI `oneOf`, one member per
+ * variant, each carrying its own literal `kind`.
+ */
+export type MapKind =
+    | {
+          kind: 'placed';
+          bot: number;
+          /** What the executor asked for. */
+          intent: EntitySnapshot;
+          /** What the game reports it created. */
+          actual: EntitySnapshot;
+          /** Field names that differ, or null when they agree. */
+          drift: string[] | null;
+      }
+    | {kind: 'removed'; bot: number; entity: EntitySnapshot}
+    | {
+          kind: 'keyframe';
+          bounds: Bounds;
+          /** What the game reports inside `bounds`. */
+          game: EntitySnapshot[];
+          /** What our `EntityGraph` believes is inside `bounds`. */
+          model: EntitySnapshot[];
+          /** Entities present in exactly one of them. */
+          divergence: Divergence[];
+      }
+    /** A kind this build does not know. The server never emits it, but a
+     *  future variant decodes to this rather than failing to parse. */
+    | {kind: 'unknown'};
+
+/**
+ * One line of `map.jsonl`.
+ *
+ * Mirrors `factorio_bot_core::record::map::MapRecord`: the `#[serde(flatten)]`
+ * of `MapKind` into `MapRecord` is why the server publishes this as an
+ * `allOf` of `MapKind` and `{tick}` rather than a single flat object.
+ */
+export type MapRecord = MapKind & {
+    tick: number;
+};
+
+/** `GET /api/v1/runs/{id}/map` response. */
+export interface RunMapResponse {
+    map: MapRecord[];
+}

@@ -50,8 +50,11 @@ import type {AppSettings, GuiSettings} from '@/models/settings';
 import type {FactorioSettings, RestApiSettings, ScriptTreeNode} from '@/api/types';
 import type {
     ArchivedFrame,
+    Bounds,
     BotSample,
     ClientRun,
+    Divergence,
+    EntitySnapshot,
     ExecuteAccepted,
     ExecuteRequest,
     ExistsResponse,
@@ -62,12 +65,15 @@ import type {
     JobStatus,
     RunDetail,
     Lane,
+    MapKind,
+    MapRecord,
     Position,
     PowerSample,
     ProductionSample,
     ResearchSample,
     RunFramesResponse,
     RunLanesResponse,
+    RunMapResponse,
     RunSamplesResponse,
     RunSummary,
     RunsResponse,
@@ -187,6 +193,13 @@ const OPERATIONS: readonly OperationContract[] = [
         caller: 'getRunSamples',
         pathParams: ['id'],
         response: {status: '200', schema: 'RunSamplesResponse'}
+    },
+    {
+        path: '/api/v1/runs/{id}/map',
+        method: 'get',
+        caller: 'getRunMap',
+        pathParams: ['id'],
+        response: {status: '200', schema: 'RunMapResponse'}
     },
     {
         path: '/api/v1/settings',
@@ -615,6 +628,57 @@ const SCHEMAS: Record<string, SchemaContract> = {
         tick: {required: false, type: 'integer', nullable: true},
         camera: {required: false, type: 'string', nullable: true},
         file: {required: true, type: 'string'}
+    }),
+
+    // -- entity map (crates/core/src/record/map.rs) -----------------------
+    RunMapResponse: objectContract<RunMapResponse>({
+        map: {required: true, arrayOf: 'MapRecord'}
+    }),
+    // `MapKind` flattened into `MapRecord`, the same shape `Sample` takes over
+    // `SampleKind`: utoipa cannot fold a `#[serde(flatten)]` back into one
+    // flat object, so it publishes `allOf: [{$ref: MapKind}, {tick}]`.
+    MapRecord: mergeContract<MapRecord>('MapKind', {
+        tick: {required: true, type: 'integer'}
+    }),
+    // An internally tagged enum (`#[serde(tag = "kind")]`): one inline object
+    // per variant, so `taggedUnionContract`, not `objectContract`.
+    MapKind: taggedUnionContract<MapKind>({
+        placed: {
+            bot: {required: true, type: 'integer'},
+            intent: {required: true, ref: 'EntitySnapshot'},
+            actual: {required: true, ref: 'EntitySnapshot'},
+            // Null when intent and actual agree -- null and empty would mean
+            // the same thing, so only one of them is ever written.
+            drift: {required: false, type: 'array', nullable: true}
+        },
+        removed: {
+            bot: {required: true, type: 'integer'},
+            entity: {required: true, ref: 'EntitySnapshot'}
+        },
+        keyframe: {
+            bounds: {required: true, ref: 'Bounds'},
+            game: {required: true, arrayOf: 'EntitySnapshot'},
+            model: {required: true, arrayOf: 'EntitySnapshot'},
+            divergence: {required: true, arrayOf: 'Divergence'}
+        },
+        // A kind this build does not know. The server never emits it, but a
+        // future variant must still decode rather than fail to parse.
+        unknown: {}
+    }),
+    EntitySnapshot: objectContract<EntitySnapshot>({
+        name: {required: true, type: 'string'},
+        position: {required: true, ref: 'Position'},
+        direction: {required: true, type: 'integer'}
+    }),
+    Bounds: objectContract<Bounds>({
+        left: {required: true, type: 'number'},
+        top: {required: true, type: 'number'},
+        right: {required: true, type: 'number'},
+        bottom: {required: true, type: 'number'}
+    }),
+    Divergence: objectContract<Divergence>({
+        entity: {required: true, ref: 'EntitySnapshot'},
+        only_in: {required: true, type: 'string'}
     }),
 
     // -- world-state samples (crates/core/src/record/samples.rs) ----------

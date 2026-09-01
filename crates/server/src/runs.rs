@@ -17,6 +17,7 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use factorio_bot_core::record::map::{MapRecord, read_map};
 use factorio_bot_core::record::{
     ArchivedFrame, Event, Lane, Manifest, Sample, Split, derive_lanes, derive_splits, read_events,
     read_samples,
@@ -121,6 +122,12 @@ pub struct RunFramesResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct RunSamplesResponse {
     pub samples: Vec<Sample>,
+}
+
+/// `GET /api/v1/runs/{id}/map` response.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct RunMapResponse {
+    pub map: Vec<MapRecord>,
 }
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
@@ -367,6 +374,34 @@ pub async fn get_run_samples(
     }))
 }
 
+/// A run's entity map: what got built, and whether the game agreed.
+#[utoipa::path(
+    get,
+    path = "/api/v1/runs/{id}/map",
+    tag = "Runs",
+    params(("id" = String, Path, description = "the run id")),
+    responses(
+        (status = 200, body = RunMapResponse),
+        (status = 400, body = crate::error::ErrorResponse),
+        (status = 404, body = crate::error::ErrorResponse),
+    )
+)]
+pub async fn get_run_map(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<RunMapResponse>, ErrorResponse> {
+    let dir = run_dir(&runs_root(&state).await?, &id)?;
+    let path = dir.join("map.jsonl");
+    // A run recorded before this feature existed -- or one that never placed
+    // anything -- is not an error; it just has no map.
+    if !path.exists() {
+        return Ok(Json(RunMapResponse { map: Vec::new() }));
+    }
+    let read = read_map(&path)
+        .map_err(|err| ErrorResponse::internal(format!("failed to read map: {err}")))?;
+    Ok(Json(RunMapResponse { map: read.records }))
+}
+
 /// One archived frame's bytes.
 #[utoipa::path(
     get,
@@ -424,4 +459,5 @@ pub fn router() -> utoipa_axum::router::OpenApiRouter<AppState> {
         .routes(routes!(get_run_lanes))
         .routes(routes!(get_run_frame))
         .routes(routes!(get_run_samples))
+        .routes(routes!(get_run_map))
 }

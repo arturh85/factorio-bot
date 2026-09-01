@@ -111,6 +111,33 @@
         ],
         "type": "object"
       },
+      "Bounds": {
+        "properties": {
+          "bottom": {
+            "format": "double",
+            "type": "number"
+          },
+          "left": {
+            "format": "double",
+            "type": "number"
+          },
+          "right": {
+            "format": "double",
+            "type": "number"
+          },
+          "top": {
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "left",
+          "top",
+          "right",
+          "bottom"
+        ],
+        "type": "object"
+      },
       "CheatItemBody": {
         "properties": {
           "count": {
@@ -163,6 +190,45 @@
         "required": [
           "client",
           "run"
+        ],
+        "type": "object"
+      },
+      "Divergence": {
+        "properties": {
+          "entity": {
+            "$ref": "#/components/schemas/EntitySnapshot"
+          },
+          "only_in": {
+            "description": "Which side has it: `\"game\"` or `\"model\"`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entity",
+          "only_in"
+        ],
+        "type": "object"
+      },
+      "EntitySnapshot": {
+        "properties": {
+          "direction": {
+            "description": "Factorio 2.0 uses 16 values. For an inserter this is the side it PICKS\nUP from, not the side it drops into.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "position": {
+            "$ref": "#/components/schemas/Position",
+            "description": "Unrounded. A resource sits at a tile centre and stays there."
+          }
+        },
+        "required": [
+          "name",
+          "position",
+          "direction"
         ],
         "type": "object"
       },
@@ -1390,6 +1456,152 @@
         ],
         "type": "object"
       },
+      "MapKind": {
+        "oneOf": [
+          {
+            "properties": {
+              "actual": {
+                "$ref": "#/components/schemas/EntitySnapshot",
+                "description": "What the game reports it created."
+              },
+              "bot": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "drift": {
+                "description": "Field names that differ, or null when they agree. Null and empty\nwould mean the same thing; only one of them is written.",
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "intent": {
+                "$ref": "#/components/schemas/EntitySnapshot",
+                "description": "What the executor asked for."
+              },
+              "kind": {
+                "enum": [
+                  "placed"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "bot",
+              "intent",
+              "actual",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "bot": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "entity": {
+                "$ref": "#/components/schemas/EntitySnapshot"
+              },
+              "kind": {
+                "enum": [
+                  "removed"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "bot",
+              "entity",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "bounds": {
+                "$ref": "#/components/schemas/Bounds"
+              },
+              "divergence": {
+                "description": "Entities present in exactly one of them.",
+                "items": {
+                  "$ref": "#/components/schemas/Divergence"
+                },
+                "type": "array"
+              },
+              "game": {
+                "description": "What the game reports inside `bounds`.",
+                "items": {
+                  "$ref": "#/components/schemas/EntitySnapshot"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "enum": [
+                  "keyframe"
+                ],
+                "type": "string"
+              },
+              "model": {
+                "description": "What our `EntityGraph` believes is inside `bounds`.",
+                "items": {
+                  "$ref": "#/components/schemas/EntitySnapshot"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "bounds",
+              "game",
+              "model",
+              "divergence",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A kind this build does not know. Readers skip it; writers never emit it.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "MapRecord": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/MapKind"
+          },
+          {
+            "properties": {
+              "tick": {
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "tick"
+            ],
+            "type": "object"
+          }
+        ],
+        "description": "One line of `map.jsonl`."
+      },
       "MovePlayerBody": {
         "properties": {
           "goal": {
@@ -1688,6 +1900,21 @@
         },
         "required": [
           "lanes"
+        ],
+        "type": "object"
+      },
+      "RunMapResponse": {
+        "description": "`GET /api/v1/runs/{id}/map` response.",
+        "properties": {
+          "map": {
+            "items": {
+              "$ref": "#/components/schemas/MapRecord"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "map"
         ],
         "type": "object"
       },
@@ -3506,6 +3733,58 @@
           }
         },
         "summary": "What each bot did, derived from the run's event log.",
+        "tags": [
+          "Runs"
+        ]
+      }
+    },
+    "/api/v1/runs/{id}/map": {
+      "get": {
+        "operationId": "get_run_map",
+        "parameters": [
+          {
+            "description": "the run id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunMapResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "A run's entity map: what got built, and whether the game agreed.",
         "tags": [
           "Runs"
         ]

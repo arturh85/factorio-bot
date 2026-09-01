@@ -130,6 +130,7 @@ const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[
     ("get", "/api/v1/runs/{id}/lanes"),
     ("get", "/api/v1/runs/{id}/frames/{bot}/{name}"),
     ("get", "/api/v1/runs/{id}/samples"),
+    ("get", "/api/v1/runs/{id}/map"),
 ];
 // `/api/v1/frames/{client}/{name}` is registered unconditionally by `manage::router`
 // (it does not need an interpreter), so it is templated in both builds --
@@ -143,6 +144,7 @@ const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[
     ("get", "/api/v1/runs/{id}/lanes"),
     ("get", "/api/v1/runs/{id}/frames/{bot}/{name}"),
     ("get", "/api/v1/runs/{id}/samples"),
+    ("get", "/api/v1/runs/{id}/map"),
 ];
 
 /// The published response set for `POST /api/v1/instance/start` has to match

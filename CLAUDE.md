@@ -157,6 +157,35 @@ declaration in `app/src/api/types.ts` via `objectContract<T>`. Adding a field
 in Rust fails the Rust snapshot test until regenerated, then fails the
 TypeScript contract test until mirrored. Neither half can drift quietly.
 
+### Logging: two systems, on purpose
+
+**Narration is `paris`, on stdout. Diagnostics are `tracing`, on stderr.**
+
+A line the user reads *while the tool runs* is narration: progress, the
+spinner, the address it bound, "press Ctrl-C to stop". A line that explains
+something to whoever debugs it *later* is a diagnostic. `paris` was kept for
+narration deliberately -- it has zero dependencies and does colour, glyphs and
+timestamps unaided, so replacing it would add `console` plus a time crate
+rather than remove anything.
+
+Two traps here, both of which have already been paid for:
+
+- **A `tracing` event goes nowhere unless a subscriber is installed**, and
+  silently -- the macro still compiles and runs. Every `tracing::` call in this
+  workspace emitted nothing until `74269106`, including two error paths, which
+  went unnoticed because a `paris` line one statement away said something
+  similar. The subscriber lives in `app/src-tauri/src/context.rs`.
+- **`crates/core/src/lib.rs` has `#[macro_use] pub extern crate paris`**, so
+  `info!`/`warn!`/`error!` resolve with no import anywhere in that crate --
+  ~148 call sites name no logging system at all. Import `tracing` explicitly at
+  each converted site; never grant `tracing` the same global, or a
+  half-converted file compiles cleanly with no way to tell which macro a line
+  called. `lib.rs` says so in place.
+
+Colour markup (`<bright-blue>{}</>`) is `paris` syntax and renders only through
+`paris`. A string moved to `tracing` must have its tags stripped or they print
+literally.
+
 ### Communication Flow
 
 1. User scripts written in Lua via Monaco editor

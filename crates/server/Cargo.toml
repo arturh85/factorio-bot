@@ -15,7 +15,7 @@ factorio-bot-scripting = { path = "../scripting" }
 factorio-bot-scripting-lua = { path = "../scripting_lua", optional = true }
 axum = { version = "0.8.9", features = ["json", "tokio", "http1"] }
 tower = "0.5.3"
-tower-http = { version = "0.6.11", features = ["fs", "trace", "catch-panic"] }
+tower-http = { version = "0.7", features = ["fs", "trace", "catch-panic"] }
 utoipa = { version = "5.5.0", features = ["axum_extras", "preserve_order"] }
 utoipa-axum = "0.2.0"
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum", "vendored"] }

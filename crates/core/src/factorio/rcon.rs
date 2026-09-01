@@ -747,10 +747,30 @@ impl FactorioRcon {
         &self,
         technology_name: &str,
     ) -> Result<ActionTicks, ActionFailure> {
-        let (_lines, tick) = self
+        let (lines, tick) = self
             .remote_call_timed("add_research", vec![str_to_lua(technology_name)])
             .await?;
-        Ok(ActionTicks::at(tick))
+        let ran_at = ActionTicks::at(tick);
+        // Any surviving line is the game refusing. Factorio writes
+        // "Cannot execute command. Error: ..." into the reply body when the mod
+        // raises, and the mod writes its own refusal there for the cases that
+        // do not raise at all.
+        //
+        // This was `_lines` until 2026-09-01, discarded by name, so *every*
+        // call reported success -- including researching a technology that does
+        // not exist. A run spent 61345 ticks re-planning `research electronics`
+        // five times, was told success five times, and the supervisor halted it
+        // as `stuck_silent`: no progress while everything claimed to work.
+        if let Some(lines) = lines {
+            return Err(ActionFailure::refused(
+                RconUnexpectedOutput {
+                    output: lines.join("\n"),
+                }
+                .into(),
+                ran_at,
+            ));
+        }
+        Ok(ran_at)
     }
 
     /// Cheats in an Item in given quantity to given player

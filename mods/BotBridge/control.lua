@@ -2086,9 +2086,41 @@ function rcon_world_snapshot()
 	}))
 end
 
+-- Queue a technology for research, and say so when the game will not.
+--
+-- Two silent failures used to live here. An unknown name raised inside the
+-- remote call, which Factorio reports in the reply body -- fine, except the
+-- client discarded that body. And `LuaForce.add_research` returns a boolean
+-- saying whether the technology actually entered the queue; throwing it away
+-- reported success for the cases that never raise at all, such as a technology
+-- that is already researched.
+--
+-- Checking the name here as well as the boolean is deliberate: `technologies`
+-- is the force's own index, so this answers "no such technology" specifically,
+-- rather than leaving every refusal to arrive as one undifferentiated raise.
 function rcon_add_research(technology_name)
 	local force = game.forces["player"]
-	force.add_research(technology_name)
+	if force.technologies[technology_name] == nil then
+		rcon.print("Error: no such technology: " .. tostring(technology_name))
+		return
+	end
+	if not force.add_research(technology_name) then
+		-- Say which of the several reasons it was. "Refused" alone sends the
+		-- caller guessing, and the guesses are all plausible.
+		local tech = force.technologies[technology_name]
+		local unmet = {}
+		for name, prereq in pairs(tech.prerequisites) do
+			if not prereq.researched then
+				table.insert(unmet, name)
+			end
+		end
+		rcon.print("Error: cannot research " .. tostring(technology_name) ..
+			": researched=" .. tostring(tech.researched) ..
+			" enabled=" .. tostring(tech.enabled) ..
+			" trigger=" .. tostring(tech.prototype.research_trigger ~= nil) ..
+			" unmet_prerequisites=[" .. table.concat(unmet, ",") .. "]")
+		return
+	end
 	stamp_tick()
 end
 

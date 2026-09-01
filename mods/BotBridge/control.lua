@@ -1299,13 +1299,85 @@ local function power_totals(force)
 	}
 end
 
+-- Telemetry must never be able to end a live game. A sampler is not part of
+-- what keeps the game running -- unlike an on_tick handler moving a bot --
+-- so there is never a case where propagating an error here beats skipping
+-- this one sample. This is not a hypothetical: reading
+-- `LuaEntity.mining_target` off a character (see `character_mining_name`
+-- below for the fix) raised inside `sample_bots`, which raised into
+-- Factorio's own tick loop, which the game treats as fatal -- ending a live
+-- six-minute multi-bot run and every RCON connection with it, mid-packet.
+-- Do not remove these pcalls to "simplify" the samplers; they are the only
+-- thing standing between a future bad attribute read and another dead
+-- server.
+--
+-- Failures are both counted (`storage.telemetry_failures`, a lifetime total
+-- readable over RCON) and, once per failing streak, written where the Rust
+-- side can see them (`writeout`, parsed by `output_parser.rs`) -- silence on
+-- failure is this codebase's recurring defect, so a persistently broken
+-- sampler must show up as failed samples rather than as nothing at all.
+-- "Once per streak" (edge-triggered on `storage.telemetry_failing`, cleared
+-- on the next success) rather than on every attempt: `sample_bots` runs
+-- once a second, so logging every failure would spam a line every 60 ticks
+-- for as long as the underlying bug lives -- itself a way to make a log
+-- unreadable.
+local function record_sample_failure(kind, tick, err)
+	storage.telemetry_failures = storage.telemetry_failures or { bots = 0, force = 0 }
+	storage.telemetry_failing = storage.telemetry_failing or { bots = false, force = false }
+	storage.telemetry_failures[kind] = (storage.telemetry_failures[kind] or 0) + 1
+	if not storage.telemetry_failing[kind] then
+		storage.telemetry_failing[kind] = true
+		writeout(tick, "sample_error", kind .. " sampler failed (#"
+			.. storage.telemetry_failures[kind] .. "): " .. tostring(err))
+	end
+end
+
+local function record_sample_success(kind)
+	storage.telemetry_failing = storage.telemetry_failing or { bots = false, force = false }
+	storage.telemetry_failing[kind] = false
+end
+
+-- What a mining character is actually mining, without touching
+-- `LuaEntity.mining_target` -- that attribute belongs to mining drills, not
+-- characters, and reading it off a character is exactly the crash this file
+-- was patched for. Confirmed against
+-- `workspace/factorio-api-docs/runtime-api.json`: `LuaEntity.mining_target`
+-- exists ("The mining target, if any" -- mining drills), `LuaControl
+-- .mining_state` exists and returns `{mining: bool, position: MapPosition}`,
+-- and there is no `mining_target` anywhere on `LuaControl`.
+--
+-- `mining_state` gives a position, not a name, so the name is recovered with
+-- `LuaSurface.find_entities_filtered{position=...}` (same file: "returns the
+-- entities colliding with that position") -- an ordinary query that answers
+-- with an empty array rather than raising when nothing, or something
+-- surprising, is there. The character itself is excluded because the mining
+-- position can coincide with the miner's own tile; the first remaining match
+-- is reported as a best-effort label for telemetry, not a claim that only
+-- one entity could ever occupy that spot.
+local function character_mining_name(character)
+	if character == nil then
+		return nil
+	end
+	local state = character.mining_state
+	if not state.mining or state.position == nil then
+		return nil
+	end
+	local entities = character.surface.find_entities_filtered({ position = state.position })
+	for _, entity in ipairs(entities) do
+		if entity.valid and entity.type ~= "character" then
+			return entity.name
+		end
+	end
+	return nil
+end
+
 -- Bot inventories and positions, on a 1 s beat -- fast enough to see a bot
 -- move or mine, slow enough not to compete with the 300-tick frame cadence.
 --
 -- Gated on an active capture run (F5): a run started without one produces no
 -- samples at all, matching frame capture's own all-or-nothing behaviour, and
 -- this avoids writing a stream nobody asked to correlate with anything.
-local function sample_bots(tick)
+local function sample_bots_body(tick)
 	local capture = storage.frame_capture
 	if capture == nil then
 		return
@@ -1322,8 +1394,7 @@ local function sample_bots(tick)
 				character.get_inventory(defines.inventory.character_main)
 			) or {},
 			crafting_queue = player.crafting_queue_size or 0,
-			mining = character and character.mining_state.mining
-				and character.mining_target and character.mining_target.name or nil,
+			mining = character_mining_name(character),
 		}
 	end
 	write_sample({
@@ -1335,6 +1406,18 @@ local function sample_bots(tick)
 		run = capture.run,
 		bots = bots,
 	})
+end
+
+-- The only entry point anything outside this section should call: `pcall`
+-- around `sample_bots_body` so nothing it does can reach the caller as a
+-- raise. See the comment above `record_sample_failure` for why this exists.
+local function sample_bots(tick)
+	local ok, err = pcall(sample_bots_body, tick)
+	if ok then
+		record_sample_success("bots")
+	else
+		record_sample_failure("bots", tick, err)
+	end
 end
 
 -- The only registration site for the bot-sample cadence. A distinct tick (60,
@@ -1351,7 +1434,7 @@ end)
 -- its own registration, for the same reason `sample_bots` above got tick 60
 -- instead of 300: a second `on_nth_tick(300, ...)` would replace frame
 -- capture's handler, not add to it.
-local function sample_force(tick)
+local function sample_force_body(tick)
 	local capture = storage.frame_capture
 	if capture == nil then
 		return
@@ -1387,6 +1470,22 @@ local function sample_force(tick)
 		production = { made = made, consumed = consumed },
 		power = power_totals(force),
 	})
+end
+
+-- The only entry point anything outside this section should call: `pcall`
+-- around `sample_force_body`, for the same reason `sample_bots` wraps
+-- `sample_bots_body` -- see the comment above `record_sample_failure`. This
+-- also covers the one call site below, inside `on_frame_capture_tick`: that
+-- handler already runs `frame_capture_take` per camera before reaching this
+-- call, and a raise here must not be able to take any of that -- or the
+-- surrounding game -- down with it.
+local function sample_force(tick)
+	local ok, err = pcall(sample_force_body, tick)
+	if ok then
+		record_sample_success("force")
+	else
+		record_sample_failure("force", tick, err)
+	end
 end
 
 -- Registered with `script.on_nth_tick` rather than as a modulus inside

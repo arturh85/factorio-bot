@@ -112,6 +112,7 @@
             "type": "object"
           },
           "mining": {
+            "description": "Name of whatever the bot's character is mining, or `None` when it\nisn't. Resolved mod-side from `LuaControl.mining_state.position` via\n`LuaSurface.find_entities_filtered` -- *not* from\n`LuaEntity.mining_target`, which belongs to mining drills, not\ncharacters, and raises when read off one (see `sample_bots` in\n`mods/BotBridge/control.lua`).",
             "type": [
               "string",
               "null"

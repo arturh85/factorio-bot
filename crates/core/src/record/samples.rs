@@ -83,6 +83,12 @@ pub struct BotSample {
     /// Queue *length*, not its contents: the contents are large, change every
     /// tick, and answer no question we have.
     pub crafting_queue: u32,
+    /// Name of whatever the bot's character is mining, or `None` when it
+    /// isn't. Resolved mod-side from `LuaControl.mining_state.position` via
+    /// `LuaSurface.find_entities_filtered` -- *not* from
+    /// `LuaEntity.mining_target`, which belongs to mining drills, not
+    /// characters, and raises when read off one (see `sample_bots` in
+    /// `mods/BotBridge/control.lua`).
     pub mining: Option<String>,
 }
 

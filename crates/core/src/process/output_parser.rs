@@ -384,6 +384,17 @@ impl OutputParser {
             "tick" => {
                 // info!("tick!");
             }
+            // A sampler in `mods/BotBridge/control.lua` (`sample_bots` or
+            // `sample_force`) caught an error via `pcall` rather than letting
+            // it raise into Factorio's tick loop -- see `record_sample_failure`
+            // there. That pcall exists so a broken sampler degrades to a
+            // missed sample instead of killing the game, but a silently
+            // dropped failure would just trade one invisible bug for another,
+            // so it is surfaced here instead of being logged as an
+            // "unexpected action".
+            "sample_error" => {
+                error!("<red>BotBridge sampler failure</>: {}", rest);
+            }
             _ => {
                 error!("<red>unexpected action</>: <bright-blue>{}</>", action);
             }

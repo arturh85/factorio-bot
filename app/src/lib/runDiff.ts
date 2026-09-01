@@ -7,6 +7,14 @@
  * that no plan ever mentioned. Every function here is pure, for the same
  * reason `runTimeline.ts` and `runSamples.ts` are: this is the part of the
  * analysis view that can be wrong in a way you would not notice by looking.
+ *
+ * **Action ids are not unique across a run.** They restart at zero with
+ * every `plan_created` -- a real recorded run shows `[0,1,2,3, 0,1,2,3,
+ * 0,1,2,3, 0,1,2,3, 0,1,2,3]` for five planning rounds over four milestones.
+ * An id only means anything *within* the plan that assigned it, which is why
+ * `joinPlanToOutcome` stays scoped to one plan and one slice of the event
+ * log, and a whole-run join goes through `planEpochs` first to find the
+ * right slice for each id before joining it.
  */
 import {
     ActionFailure,
@@ -25,6 +33,14 @@ type Settled = Extract<Event, {kind: 'action_settled'}>;
 /** One row of the overrun table: a planned step joined to its outcome. */
 export interface OutcomeRow {
     id: number;
+    /**
+     * Which milestone's plan this row's `id` was scoped to, or `null` for a
+     * settle recorded before any `plan_created` -- a recovery action, or a
+     * run recorded before `plan_created` existed. Carried through so two
+     * rows that happen to share an id and an action name (routine, since ids
+     * restart every plan) are still distinguishable on the page.
+     */
+    milestoneIndex: number | null;
     bot: number;
     action: string;
     plannedDuration: number | null;
@@ -37,6 +53,15 @@ export interface OutcomeRow {
 
 /**
  * A full outer join of a plan against a run's settle events, keyed on `id`.
+ *
+ * **Only correct within a single plan epoch.** `id` is unique within the
+ * `plan` and `events` passed in, never across a whole run -- see the module
+ * doc comment. Calling this with the plan and event log of more than one
+ * `plan_created` mixed together *will* pair a row with the wrong plan or the
+ * wrong settle, silently, because two unrelated actions sharing an id is the
+ * common case, not an edge case. Use `joinRunOutcome` for a whole run; this
+ * function's job is to be correct on the one slice it is given, not to find
+ * that slice itself.
  *
  * **Every planned step and every settle appears exactly once.** A planned
  * step with no matching settle keeps a `null actualDuration` and status
@@ -51,8 +76,16 @@ export interface OutcomeRow {
  * `action_dispatched` events are not joined on directly -- an id dispatched
  * but never settled contributes no row of its own -- but are consulted for
  * the action's label when a settle has no planned step to name it.
+ *
+ * `milestoneIndex` is stamped onto every row this call produces; pass the
+ * epoch's own index (or `null` for the pre-plan epoch) so the caller does
+ * not have to re-attach it afterward.
  */
-export function joinPlanToOutcome(plan: PlannedStep[], events: Event[]): OutcomeRow[] {
+export function joinPlanToOutcome(
+    plan: PlannedStep[],
+    events: Event[],
+    milestoneIndex: number | null = null
+): OutcomeRow[] {
     const dispatchedById = new Map<number, Dispatched>();
     const settledById = new Map<number, Settled>();
     for (const event of events) {
@@ -76,6 +109,7 @@ export function joinPlanToOutcome(plan: PlannedStep[], events: Event[]): Outcome
         // is no third source of `bot` to fall back to.
         return {
             id,
+            milestoneIndex,
             bot: planned !== null ? planned.bot : settle!.bot,
             action: planned?.action ?? dispatch?.action ?? '(unrecorded)',
             plannedDuration,
@@ -86,14 +120,84 @@ export function joinPlanToOutcome(plan: PlannedStep[], events: Event[]): Outcome
         };
     });
 
-    // Worst overrun first; a step that never ran has no delta at all and
-    // must not sort as if it were exactly on time.
-    return rows.sort((a, b) => {
+    return sortByDelta(rows);
+}
+
+/**
+ * Worst overrun first; a step that never ran has no delta at all and must
+ * not sort as if it were exactly on time.
+ */
+function sortByDelta(rows: OutcomeRow[]): OutcomeRow[] {
+    return [...rows].sort((a, b) => {
         if (a.delta === null && b.delta === null) return 0;
         if (a.delta === null) return 1;
         if (b.delta === null) return -1;
         return b.delta - a.delta;
     });
+}
+
+/**
+ * One stretch of the event log belonging to a single plan -- or, for
+ * `milestoneIndex: null`, the stretch before any plan existed.
+ */
+export interface PlanEpoch {
+    /** The `plan_created` that opened this epoch's `milestone_index`, or `null` for the pre-plan epoch. */
+    milestoneIndex: number | null;
+    /** The plan that `plan_created` carried, or `[]` for the pre-plan epoch. */
+    plan: PlannedStep[];
+    /** Every event at or after this epoch's `plan_created` and before the next one (or before the first one, for the pre-plan epoch). */
+    events: Event[];
+}
+
+/**
+ * Splits a run's event log into plan epochs, in log order.
+ *
+ * `events.jsonl` is append-only and the route serves it in file order, so a
+ * settle belongs to the most recent `plan_created` that precedes it in the
+ * log -- there is no other signal linking a settle to a plan, since ids
+ * restart at zero with every `plan_created`. Each `plan_created` closes the
+ * previous epoch and opens a new one; every other event kind is carried
+ * along inside whichever epoch it falls in, unfiltered, because it is
+ * `joinPlanToOutcome` that decides which kinds it cares about, not this
+ * function.
+ *
+ * The first epoch is always emitted, even when it is empty: a settle
+ * recorded before any `plan_created` -- a recovery action, or *every* run on
+ * disk before `plan_created` existed -- must still surface somewhere, with
+ * `milestoneIndex: null` rather than being silently dropped for lack of a
+ * plan to belong to.
+ */
+export function planEpochs(events: Event[]): PlanEpoch[] {
+    const epochs: PlanEpoch[] = [];
+    let current: PlanEpoch = {milestoneIndex: null, plan: [], events: []};
+    for (const event of events) {
+        if (event.kind === 'plan_created') {
+            epochs.push(current);
+            current = {milestoneIndex: event.milestone_index, plan: event.plan, events: []};
+        } else {
+            current.events.push(event);
+        }
+    }
+    epochs.push(current);
+    return epochs;
+}
+
+/**
+ * The overrun table for a whole run: every plan epoch joined on its own
+ * terms, concatenated, and re-sorted by overrun.
+ *
+ * This is the function a page should call for "the run's outcome" --
+ * `joinPlanToOutcome` on its own is only correct for one epoch, and a run
+ * routinely has several. Re-sorting after concatenating is required, not
+ * cosmetic: each epoch's rows arrive already sorted internally, but
+ * concatenating several individually-sorted lists does not produce one
+ * sorted list.
+ */
+export function joinRunOutcome(events: Event[]): OutcomeRow[] {
+    const rows = planEpochs(events).flatMap((epoch) =>
+        joinPlanToOutcome(epoch.plan, epoch.events, epoch.milestoneIndex)
+    );
+    return sortByDelta(rows);
 }
 
 /** One keyframe's divergence, with the tick it was observed at. */
@@ -132,6 +236,13 @@ export interface MilestoneRow {
      */
     plan: PlannedStep[];
     /**
+     * What actually ran under `plan` -- joined within that plan's own epoch,
+     * never against the whole run's events, because an id from a different
+     * plan (this milestone's own earlier attempt, or any other milestone's)
+     * routinely repeats this one's and must not be mistaken for it.
+     */
+    ran: OutcomeRow[];
+    /**
      * Why the milestone needed no work, or `null` while it is still open or
      * it closed with `milestone_stuck` instead. Present specifically to
      * distinguish "already true" from "the planner returned nothing", which
@@ -144,12 +255,19 @@ export interface MilestoneRow {
 }
 
 /**
- * One row per milestone, its plan and its closing reason, index-ascending.
+ * One row per milestone, its plan, what ran under it, and its closing
+ * reason, index-ascending.
  *
  * A `plan_created` or `milestone_satisfied` event naming a milestone index
  * with no matching `milestone_started` is skipped rather than fabricating a
  * row for it -- that combination has never been observed and inventing a
  * goal string for it would be a guess dressed up as data.
+ *
+ * A milestone replanned after getting stuck produces more than one
+ * `plan_created` for the same index; `planEpochs` yields one epoch per
+ * attempt, in order, and the last one -- the one that actually closed the
+ * milestone -- wins here, the same "last plan replaces the previous one"
+ * rule `plan` alone has always followed.
  */
 export function milestonesOf(events: Event[]): MilestoneRow[] {
     const rows = new Map<number, MilestoneRow>();
@@ -159,18 +277,24 @@ export function milestonesOf(events: Event[]): MilestoneRow[] {
                 index: event.index,
                 goal: event.goal,
                 plan: [],
+                ran: [],
                 satisfiedReason: null,
                 iterations: null
             });
-        } else if (event.kind === 'plan_created') {
-            const row = rows.get(event.milestone_index);
-            if (row) row.plan = event.plan;
         } else if (event.kind === 'milestone_satisfied') {
             const row = rows.get(event.index);
             if (row) {
                 row.satisfiedReason = event.reason;
                 row.iterations = event.iterations;
             }
+        }
+    }
+    for (const epoch of planEpochs(events)) {
+        if (epoch.milestoneIndex === null) continue;
+        const row = rows.get(epoch.milestoneIndex);
+        if (row) {
+            row.plan = epoch.plan;
+            row.ran = joinPlanToOutcome(epoch.plan, epoch.events, epoch.milestoneIndex);
         }
     }
     return [...rows.values()].sort((a, b) => a.index - b.index);

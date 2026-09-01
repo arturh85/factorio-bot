@@ -13,7 +13,7 @@
 import {computed, onMounted, ref} from 'vue';
 import {useRoute} from 'vue-router';
 import {getRun, getRunEvents, getRunMap, getRunSamples} from '@/api/client';
-import {Event, MapRecord, PlannedStep, RunDetail, Sample} from '@/api/types';
+import {Event, MapRecord, RunDetail, Sample} from '@/api/types';
 import {
     DivergenceRow,
     FailureInventory,
@@ -21,7 +21,7 @@ import {
     OutcomeRow,
     divergencesOf,
     inventoryAtFailure,
-    joinPlanToOutcome,
+    joinRunOutcome,
     milestonesOf
 } from '@/lib/runDiff';
 import {boundsAt, entitiesAt} from '@/lib/runMap';
@@ -64,28 +64,21 @@ async function load() {
     }
 }
 
-/** Every step any `plan_created` event produced, across every milestone. */
-const plan = computed<PlannedStep[]>(() =>
-    events.value.flatMap((event) => (event.kind === 'plan_created' ? event.plan : []))
-);
-
-/** The overrun table: the whole run's plan joined to its outcomes. */
-const outcomes = computed<OutcomeRow[]>(() => joinPlanToOutcome(plan.value, events.value));
+/**
+ * The overrun table: every plan epoch of the run joined to its own outcomes
+ * and concatenated -- never one join across the whole event log, because
+ * action ids restart at zero with every `plan_created` and a whole-run join
+ * would pair a row with whichever other plan happens to share its id. See
+ * `@/lib/runDiff`'s module doc comment.
+ */
+const outcomes = computed<OutcomeRow[]>(() => joinRunOutcome(events.value));
 
 const divergences = computed<DivergenceRow[]>(() => divergencesOf(map.value));
 
+/** Per milestone: its plan, what ran under it (already epoch-scoped), and how it closed. */
 const milestones = computed<MilestoneRow[]>(() => milestonesOf(events.value));
 
 const failures = computed<FailureInventory[]>(() => inventoryAtFailure(events.value, samples.value));
-
-/**
- * What ran for one milestone's own plan, using the same join the overrun
- * table uses -- a milestone's DAG and its outcomes are the same question
- * asked over a narrower plan, not a separate calculation.
- */
-function ranFor(milestone: MilestoneRow): OutcomeRow[] {
-    return joinPlanToOutcome(milestone.plan, events.value);
-}
 
 function seekMap(tick: number) {
     cursor.value = tick;
@@ -120,16 +113,20 @@ function formatDelta(delta: number | null): string {
                 <table v-else class="analysis__table">
                     <thead>
                         <tr>
-                            <th>id</th><th>bot</th><th>action</th><th>planned</th>
+                            <th>milestone</th><th>id</th><th>bot</th><th>action</th><th>planned</th>
                             <th>actual</th><th>delta</th><th>status</th><th>failure</th>
                         </tr>
                     </thead>
                     <tbody>
                         <tr
-                            v-for="row in outcomes"
-                            :key="row.id"
+                            v-for="(row, i) in outcomes"
+                            :key="`${row.milestoneIndex}-${row.id}-${i}`"
                             :class="{'is-never-ran': row.actualDuration === null}"
                         >
+                            <!-- Ids restart at zero with every plan, so two rows can
+                                 share both an id and an action name; the milestone
+                                 they came from is what actually tells them apart. -->
+                            <td class="num">{{ row.milestoneIndex ?? '—' }}</td>
                             <td class="num">{{ row.id }}</td>
                             <td class="num">{{ row.bot }}</td>
                             <td>{{ row.action }}</td>
@@ -205,8 +202,8 @@ function formatDelta(delta: number | null): string {
                         </div>
                         <div>
                             <h5>Ran</h5>
-                            <ul v-if="ranFor(milestone).length > 0" class="milestone__list">
-                                <li v-for="row in ranFor(milestone)" :key="row.id">
+                            <ul v-if="milestone.ran.length > 0" class="milestone__list">
+                                <li v-for="row in milestone.ran" :key="row.id">
                                     {{ row.id }}: {{ row.action }} — {{ row.status }}
                                 </li>
                             </ul>

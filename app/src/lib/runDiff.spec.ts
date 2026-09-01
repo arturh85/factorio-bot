@@ -1,9 +1,22 @@
 import {describe, expect, it} from 'vitest';
 import {Event, PlannedStep, Sample} from '@/api/types';
-import {divergencesOf, inventoryAtFailure, joinPlanToOutcome, milestonesOf} from './runDiff';
+import {divergencesOf, inventoryAtFailure, joinPlanToOutcome, joinRunOutcome, milestonesOf, planEpochs} from './runDiff';
 
 function step(id: number, bot: number, action: string, plannedDuration: number, deps: number[] = []): PlannedStep {
     return {id, bot, action, deps, planned_start: 0, planned_duration: plannedDuration};
+}
+
+function planCreated(milestoneIndex: number, plan: PlannedStep[], tick = 0): Event {
+    return {
+        kind: 'plan_created',
+        milestone_index: milestoneIndex,
+        steps: plan.length,
+        makespan: 0,
+        bots: [],
+        plan,
+        tick,
+        wall_ms: 0
+    };
 }
 
 function dispatched(id: number, bot: number, tick: number): Event {
@@ -118,6 +131,81 @@ describe('joinPlanToOutcome', () => {
             [{kind: 'run_finished', outcome: 'success', elapsed_ticks: 1000, tick: 1000, wall_ms: 0}]
         );
         expect(rows[0].status).toBe('never dispatched');
+    });
+});
+
+describe('joinRunOutcome / planEpochs', () => {
+    it('does not cross-join two plan epochs that both number their steps from zero', () => {
+        const events: Event[] = [
+            planCreated(0, [step(0, 1, 'mine ore', 100)]),
+            settled(0, 1, 'success', 150),
+            planCreated(1, [step(0, 1, 'smelt plates', 300)]),
+            settled(0, 1, 'success', 362)
+        ];
+        const rows = joinRunOutcome(events);
+        expect(rows).toHaveLength(2);
+        const byMilestone = new Map(rows.map((r) => [r.milestoneIndex, r]));
+        expect(byMilestone.get(0)).toMatchObject({plannedDuration: 100, actualDuration: 150, delta: 50});
+        expect(byMilestone.get(1)).toMatchObject({plannedDuration: 300, actualDuration: 362, delta: 62});
+    });
+
+    it('keeps five planning rounds that each restart ids at zero fully separate (real run shape)', () => {
+        // A real recorded run's action_dispatched ids: [0,1,2,3, 0,1,2,3,
+        // 0,1,2,3, 0,1,2,3, 0,1,2,3] -- five planning rounds, each numbering
+        // from zero. Built here with a distinct planned/actual duration per
+        // round so a cross-epoch join would show up as a wrong delta.
+        const events: Event[] = [];
+        for (let round = 0; round < 5; round++) {
+            const plan = [0, 1, 2, 3].map((id) => step(id, 1, `round ${round} step ${id}`, 100 + round));
+            events.push(planCreated(round, plan, round * 1000));
+            for (const id of [0, 1, 2, 3]) {
+                events.push(settled(id, 1, 'success', 100 + round + id));
+            }
+        }
+        const rows = joinRunOutcome(events);
+        expect(rows).toHaveLength(20);
+        // actualDuration - plannedDuration = (100 + round + id) - (100 + round) = id,
+        // regardless of round -- true only if every row joined within its own epoch.
+        for (const row of rows) {
+            expect(row.delta).toBe(row.id);
+        }
+    });
+
+    it('keeps a settle recorded before any plan_created, with a null planned duration', () => {
+        const rows = joinRunOutcome([settled(9, 1, 'success', 50)]);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({plannedDuration: null, actualDuration: 50, milestoneIndex: null});
+    });
+
+    it('keeps both planning rounds of a replanned milestone as separate epochs', () => {
+        const events: Event[] = [
+            planCreated(2, [step(0, 1, 'attempt 1', 10)]),
+            settled(0, 1, 'stuck', 10),
+            planCreated(2, [step(0, 1, 'attempt 2', 20)], 100),
+            settled(0, 1, 'success', 25)
+        ];
+        const epochs = planEpochs(events).filter((e) => e.milestoneIndex === 2);
+        expect(epochs).toHaveLength(2);
+
+        const rows = joinRunOutcome(events);
+        expect(rows.filter((r) => r.milestoneIndex === 2)).toHaveLength(2);
+    });
+
+    it('re-sorts after concatenating epochs, worst overrun first across the whole run', () => {
+        const events: Event[] = [
+            planCreated(0, [step(0, 1, 'a', 100)]),
+            settled(0, 1, 'success', 110),
+            planCreated(1, [step(0, 2, 'b', 100)]),
+            settled(0, 2, 'success', 400)
+        ];
+        const rows = joinRunOutcome(events);
+        expect(rows.map((r) => r.milestoneIndex)).toEqual([1, 0]);
+    });
+
+    it('always emits the pre-plan epoch, even when it is empty', () => {
+        const epochs = planEpochs([planCreated(0, [step(0, 1, 'a', 10)])]);
+        expect(epochs[0]).toMatchObject({milestoneIndex: null, plan: [], events: []});
+        expect(epochs[1].milestoneIndex).toBe(0);
     });
 });
 

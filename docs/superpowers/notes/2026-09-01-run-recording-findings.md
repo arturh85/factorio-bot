@@ -21,10 +21,51 @@ another run.
 Specs: `2026-08-31-supervisor-loop-design.md`,
 `2026-09-01-run-recording-and-replay-design.md`.
 
-## The open finding
+## The finding that matters: `stuck_silent` fired, and it was right
+
+A four-milestone run (`workspace/scripts/showcase.lua`) gathered ore, smelted
+plates, then spent 61345 ticks on `goal.researched("automation")` before the
+supervisor halted it as **`stuck_silent`** — no progress, and *every run
+reported success*.
+
+That state exists precisely to catch "success reported for work that did not
+happen". It fired on its first long run, and the log says what was happening:
+
+    plans:  63 steps -> 26 -> 4 -> 4 -> 4   (stall 0, 0, 0, 1, 2)
+    every run: failed=0
+
+    dispatched, all reporting success:
+       7x  mine 5 stone
+       7x  craft 1 stone-furnace
+       6x  mine 1 coal
+       5x  research electronics
+       5x  research steam-power
+
+**`electronics` and `steam-power` are `research_trigger` technologies** — this
+codebase names both of them in `crates/core/src/types.rs`, and they do not
+consume science packs at all; they complete when their trigger is satisfied.
+The run dispatched `research electronics` five times, was told success five
+times, and the technology never became researched, so the planner planned it
+again.
+
+*Hypothesis, not verified:* a `Research` action cannot complete a
+trigger-unlocked technology, so issuing one succeeds at the RCON level and
+changes nothing in the world. The planner does model triggers — it has
+`UnsupportedResearchTrigger` and states that only `craft-item` triggers can be
+planned — so the gap is likely between planning the trigger and *performing*
+it, not in recognising it. Someone should confirm before fixing.
+
+Archive: `workspace/runs/run-1788225725-75943/` — 190 events, 666 frames,
+4 splits, and the whole loop visible in the task lanes.
+
+## A second finding, seen once and not reproduced
+
+
 
 **`goal.plan` can raise `PreconditionUnsatisfied` on a large goal after earlier
-milestones have run.** Reproduced live: a four-milestone run gathered iron ore,
+milestones have run.** Seen on one run and *not* on the re-run, which reached
+milestone 4 and planned 63 steps — so it is world-state dependent and may be a
+symptom of the same research loop rather than a separate defect. Reproduced live: a four-milestone run gathered iron ore,
 gathered copper ore and smelted iron plates, then raised
 
     precondition has 50 iron-plate of action ActionId(10) does not hold for bot 1

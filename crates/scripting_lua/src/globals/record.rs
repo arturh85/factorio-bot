@@ -121,11 +121,24 @@ end
                         ));
                     }
                     let run_id = mint_run_id();
+
+                    // Frame capture first, and its reply is where the opening
+                    // tick comes from. Recording `run_started` before any
+                    // command has been sent would stamp it with a tick nobody
+                    // has observed -- the first live run opened at tick 0 while
+                    // every later event was near 59000, which is a fabricated
+                    // number that looks like data.
+                    let opened_at = rcon
+                        .as_ref()
+                        .frame_capture_start(Some(run_id.clone()))
+                        .await
+                        .map_err(rcon_error)?;
+
                     let mut recorder =
                         RunRecorder::start(&runs_root, run_id.clone()).map_err(record_error)?;
                     recorder
                         .record(
-                            tick_of(&rcon),
+                            opened_at.unwrap_or_else(|| tick_of(&rcon)),
                             EventKind::RunStarted {
                                 run_id: run_id.clone(),
                                 bots,
@@ -136,12 +149,6 @@ end
                         )
                         .map_err(record_error)?;
                     *slot.lock() = Some(recorder);
-
-                    // Same id to the mod, so the sidecar it writes names this run.
-                    rcon.as_ref()
-                        .frame_capture_start(Some(run_id.clone()))
-                        .await
-                        .map_err(rcon_error)?;
                     Ok(run_id)
                 }
             })?,
@@ -195,14 +202,7 @@ end
             lua.create_function(move |_lua, (index, iterations): (u32, u32)| {
                 let tick = tick_of(&rcon);
                 with_recorder(&slot, |recorder| {
-                    recorder.record(
-                        tick,
-                        EventKind::MilestoneSatisfied {
-                            index,
-                            iterations,
-                            elapsed_ticks: 0,
-                        },
-                    )
+                    recorder.record(tick, EventKind::MilestoneSatisfied { index, iterations })
                 })
             })?,
         )?;

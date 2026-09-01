@@ -136,7 +136,8 @@ function Sup:step()
             self:_close("satisfied")
             self.state = "acquiring"
             return { action = "satisfied", state = "acquiring",
-                     milestone_index = self.index, steps = 0 }
+                     milestone_index = self.index, steps = 0,
+                     iteration = self.iterations }
         end
 
         self.plan = plan

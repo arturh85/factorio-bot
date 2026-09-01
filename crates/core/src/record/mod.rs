@@ -43,10 +43,16 @@ pub enum EventKind {
         index: u32,
         goal: String,
     },
+    /// A milestone was reached.
+    ///
+    /// Carries no duration on purpose: the event says *when*, and
+    /// [`splits`] derives *how long* from the started/satisfied tick pair.
+    /// It briefly carried an `elapsed_ticks` the caller could not compute, so
+    /// every live run recorded a confident zero beside a split that had the
+    /// real number.
     MilestoneSatisfied {
         index: u32,
         iterations: u32,
-        elapsed_ticks: u64,
     },
     MilestoneStuck {
         index: u32,
@@ -131,6 +137,9 @@ pub struct RunRecorder {
     events: File,
     started: Instant,
     started_unix: u64,
+    /// The game tick of the first event recorded, so a duration can be a
+    /// duration. Absent until something has been recorded.
+    start_tick: Option<u64>,
 }
 
 impl RunRecorder {
@@ -149,6 +158,7 @@ impl RunRecorder {
             run_id,
             events,
             started: Instant::now(),
+            start_tick: None,
             started_unix: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -175,6 +185,9 @@ impl RunRecorder {
             wall_ms: self.started.elapsed().as_millis() as u64,
             kind,
         };
+        if self.start_tick.is_none() {
+            self.start_tick = Some(tick);
+        }
         let mut line = serde_json::to_string(&event).map_err(io::Error::other)?;
         line.push('\n');
         self.events.write_all(line.as_bytes())?;
@@ -195,6 +208,16 @@ impl RunRecorder {
     /// `workspace` is where `client<N>` directories live; pass `None` for a
     /// planning-only run that captured no frames. That is a valid run, not a
     /// degenerate one.
+    /// How long the run has lasted, in ticks.
+    ///
+    /// A duration, never the absolute tick it happened at. The first live run
+    /// reported `elapsed_ticks: 60246` for a run that took 871 ticks, because
+    /// the tick a thing happened at looks exactly like a duration when you are
+    /// reading a number out of JSON.
+    fn elapsed_at(&self, tick: u64) -> u64 {
+        tick.saturating_sub(self.start_tick.unwrap_or(tick))
+    }
+
     pub fn finish(
         &mut self,
         tick: u64,
@@ -205,7 +228,7 @@ impl RunRecorder {
             tick,
             EventKind::RunFinished {
                 outcome: outcome.to_string(),
-                elapsed_ticks: tick,
+                elapsed_ticks: self.elapsed_at(tick),
             },
         )?;
 
@@ -231,7 +254,7 @@ impl RunRecorder {
                     .unwrap_or_default(),
             ),
             outcome: Some(outcome.to_string()),
-            elapsed_ticks: Some(tick),
+            elapsed_ticks: Some(self.elapsed_at(tick)),
             events: read.events.len(),
             frames,
             splits: splits.len(),
@@ -299,7 +322,6 @@ mod tests {
             EventKind::MilestoneSatisfied {
                 index: 0,
                 iterations: 3,
-                elapsed_ticks: 24587,
             },
             EventKind::MilestoneStuck {
                 index: 1,
@@ -466,14 +488,14 @@ mod finish_tests {
             EventKind::MilestoneSatisfied {
                 index: 0,
                 iterations: 2,
-                elapsed_ticks: 300,
             },
         )
         .unwrap();
 
         let manifest = rec.finish(400, "done", None).unwrap();
         assert_eq!(manifest.outcome.as_deref(), Some("done"));
-        assert_eq!(manifest.elapsed_ticks, Some(400));
+        // 400 is where the run ended; it began at tick 10, so it lasted 390.
+        assert_eq!(manifest.elapsed_ticks, Some(390));
         assert_eq!(manifest.splits, 1);
         assert_eq!(manifest.frames, 0, "a planning-only run is a valid run");
         assert_eq!(manifest.events, 3, "the finishing event counts");
@@ -504,6 +526,40 @@ mod finish_tests {
             ),
             "the verdict must survive a failure in the steps after it"
         );
+    }
+
+    #[test]
+    fn elapsed_ticks_is_a_duration_not_the_tick_it_happened_at() {
+        // A run recorded live reported 60246 for a run that lasted 871 ticks:
+        // the absolute tick and a duration are both just a number in JSON, and
+        // only one of them is right.
+        let root = tmpdir("duration");
+        let mut rec = RunRecorder::start(&root, "r5").unwrap();
+        rec.record(
+            59_375,
+            EventKind::MilestoneStarted {
+                index: 1,
+                goal: "g".into(),
+            },
+        )
+        .unwrap();
+        let manifest = rec.finish(60_246, "done", None).unwrap();
+        assert_eq!(
+            manifest.elapsed_ticks,
+            Some(871),
+            "elapsed must be measured from the run's first observed tick"
+        );
+
+        let read = read_events(&rec.dir().join("events.jsonl")).unwrap();
+        match read.events.last().map(|e| &e.kind) {
+            Some(EventKind::RunFinished { elapsed_ticks, .. }) => {
+                assert_eq!(
+                    *elapsed_ticks, 871,
+                    "the event must agree with the manifest"
+                );
+            }
+            other => panic!("expected run_finished, got {other:?}"),
+        }
     }
 
     #[test]

@@ -112,7 +112,6 @@ mod tests {
             EventKind::MilestoneSatisfied {
                 index,
                 iterations: 1,
-                elapsed_ticks: 0,
             },
         )
     }

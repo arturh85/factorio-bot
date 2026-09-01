@@ -250,12 +250,8 @@
             "type": "object"
           },
           {
+            "description": "A milestone was reached.\n\nCarries no duration on purpose: the event says *when*, and\n[`splits`] derives *how long* from the started/satisfied tick pair.\nIt briefly carried an `elapsed_ticks` the caller could not compute, so\nevery live run recorded a confident zero beside a split that had the\nreal number.",
             "properties": {
-              "elapsed_ticks": {
-                "format": "int64",
-                "minimum": 0,
-                "type": "integer"
-              },
               "index": {
                 "format": "int32",
                 "minimum": 0,
@@ -276,7 +272,6 @@
             "required": [
               "index",
               "iterations",
-              "elapsed_ticks",
               "kind"
             ],
             "type": "object"

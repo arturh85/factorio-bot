@@ -68,27 +68,26 @@ describe('loadRuns', () => {
 });
 
 describe('openRun', () => {
-    it('opens on the first frame rather than an empty panel', async () => {
-        // The axis starts at the first milestone (59375), which is before the
-        // first frame (59400). Opening at the axis start is correct and shows
-        // nothing, which reads as "no frames" rather than "not yet".
+    it('opens on the first frame, which is where the axis now starts', async () => {
+        // Milestone 1 opened at 59375, 25 ticks before the first frame. The
+        // axis trims that away, so the cursor and the axis start agree and
+        // the panel has something in it on load.
         vi.mocked(client.getRun).mockResolvedValue(DETAIL);
         vi.mocked(client.getRunFrames).mockResolvedValue({frames: FRAMES});
         const store = useRunsStore();
         await store.openRun('run-1');
         expect(store.cursor).toBe(59400);
-        expect(store.bounds?.from).toBe(59375);
+        expect(store.bounds?.from).toBe(59400);
+        expect(store.leadIn).toBe(25);
     });
 
-    it('parks the cursor at the start of the axis and picks a bot and camera', async () => {
+    it('parks the cursor at the start of the axis, which is the first frame', async () => {
         vi.mocked(client.getRun).mockResolvedValue(DETAIL);
         vi.mocked(client.getRunFrames).mockResolvedValue({frames: FRAMES});
         const store = useRunsStore();
         await store.openRun('run-1');
 
-        // The axis starts at the first milestone (59375), which is before the
-        // first frame (59400) -- so the bound must come from the splits.
-        expect(store.bounds).toEqual({from: 59375, to: 60246});
+        expect(store.bounds).toEqual({from: 59400, to: 60246});
         expect(store.bot).toBe(1);
         expect(store.camera).toBe('front');
     });
@@ -113,8 +112,10 @@ describe('openRun', () => {
         await store.openRun('run-1');
         expect(store.bot).toBeNull();
         expect(store.camera).toBeNull();
-        // Splits still place the axis: a planning-only run is still viewable.
+        // Splits still place the axis: a planning-only run is still viewable,
+        // and with nothing drawn there is no lead-in to trim.
         expect(store.bounds).toEqual({from: 59375, to: 60246});
+        expect(store.leadIn).toBe(0);
     });
 });
 
@@ -180,7 +181,7 @@ describe('selectView', () => {
 
     it('moves the cursor forward when the view starts later than it', () => {
         const store = useRunsStore();
-        store.seek(59375);
+        store.seek(59400);
         store.selectView({bot: 2, camera: 'area', count: 1, from: 59700});
         expect(store.cursor).toBe(59700);
     });
@@ -203,7 +204,7 @@ describe('seek and playback', () => {
     it('clamps the cursor to the axis', () => {
         const store = useRunsStore();
         store.seek(0);
-        expect(store.cursor).toBe(59375);
+        expect(store.cursor).toBe(59400);
         store.seek(999999);
         expect(store.cursor).toBe(60246);
     });
@@ -231,7 +232,7 @@ describe('seek and playback', () => {
         store.seek(60246);
         store.togglePlay();
         expect(store.playing).toBe(true);
-        expect(store.cursor).toBe(59375);
+        expect(store.cursor).toBe(59400);
     });
 
     it('does nothing on a run with no axis', () => {

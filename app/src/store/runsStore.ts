@@ -1,7 +1,14 @@
 import {defineStore} from 'pinia';
 import {getRun, getRunFrames, getRunLanes, listRuns} from '@/api/client';
 import {ArchivedFrame, Lane, RunDetail, RunSummary} from '@/api/types';
-import {FrameView, PlacedFrame, placeable, tickBounds, viewsOf} from '@/lib/runTimeline';
+import {
+    FrameView,
+    PlacedFrame,
+    leadInTicks,
+    placeable,
+    tickBounds,
+    viewsOf
+} from '@/lib/runTimeline';
 
 /**
  * Archived runs, and one cursor over the run being viewed.
@@ -45,6 +52,10 @@ export const useRunsStore = defineStore('runs', {
          */
         bounds(): {from: number; to: number} | null {
             return tickBounds(this.detail?.splits ?? [], this.placedFrames, this.lanes);
+        },
+        /** Ticks the axis skips at the front, 0 when it starts at the run. */
+        leadIn(): number {
+            return leadInTicks(this.detail?.splits ?? [], this.placedFrames, this.lanes);
         },
         /** The (bot, camera) pairs this run actually captured. */
         views(): FrameView[] {

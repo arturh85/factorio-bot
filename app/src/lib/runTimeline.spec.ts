@@ -1,6 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import {
     botsOf,
+    leadInTicks,
     formatAgo,
     formatWhen,
     startedUnixOf,
@@ -116,6 +117,39 @@ describe('tickBounds', () => {
     it('ignores an unfinished milestone had no end', () => {
         const bounds = tickBounds([split(1, 'a', 100, null)], []);
         expect(bounds).toEqual({from: 100, to: 100});
+    });
+
+    it('starts at the first frame, not at the milestone that opened before it', () => {
+        // The run began, the planner thought, and capture produced nothing for
+        // 200 ticks. Spanning that spends axis width on a stretch with no
+        // frame and no lane bar.
+        const bounds = tickBounds(
+            [split(1, 'a', 100, 2000)],
+            placeable([frame(1, 300, 'front'), frame(1, 2000, 'front')])
+        );
+        expect(bounds).toEqual({from: 300, to: 2000});
+        expect(leadInTicks([split(1, 'a', 100, 2000)], placeable([frame(1, 300, 'front'), frame(1, 2000, 'front')]))).toBe(200);
+    });
+
+    it('starts at the first lane bar when the bots moved before capture did', () => {
+        const bounds = tickBounds(
+            [split(1, 'a', 100, 2000)],
+            placeable([frame(1, 400, 'front'), frame(1, 2000, 'front')]),
+            [{bot: 1, id: 0, action: 'mine', from_tick: 250, to_tick: 900, status: 'success', error: null}]
+        );
+        expect(bounds?.from).toBe(250);
+    });
+
+    it('refuses a trim that would cut more than it keeps', () => {
+        // The one frame landed at the very end. Trimming to it would throw
+        // away the extent the splits carry and collapse the axis.
+        const bounds = tickBounds([split(1, 'a', 100, 400)], placeable([frame(1, 900, 'front')]));
+        expect(bounds).toEqual({from: 100, to: 900});
+        expect(leadInTicks([split(1, 'a', 100, 400)], placeable([frame(1, 900, 'front')]))).toBe(0);
+    });
+
+    it('reports no lead-in for a run with nothing drawn at all', () => {
+        expect(leadInTicks([split(1, 'a', 100, 400)], [])).toBe(0);
     });
 
     it('is null when there is nothing to place at all', () => {

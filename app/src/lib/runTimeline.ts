@@ -78,23 +78,84 @@ export function frameAt(
  * milestones. The caller shows an empty timeline rather than one spanning
  * zero to zero, which would look like a run that took no time.
  */
+function tickSources(
+    splits: Split[],
+    frames: PlacedFrame[],
+    lanes: Lane[]
+): {all: number[]; drawn: number[]} {
+    const all: number[] = [];
+    // Ticks at which something is actually *drawn*. A split contributes a span
+    // whose bar can be clipped; a frame or a lane bar cannot appear before its
+    // own first tick, so these are what decide when the axis has content.
+    const drawn: number[] = [];
+    for (const split of splits) {
+        all.push(split.started_tick);
+        if (split.ended_tick !== null) all.push(split.ended_tick);
+    }
+    for (const frame of frames) {
+        all.push(frame.tick);
+        drawn.push(frame.tick);
+    }
+    for (const lane of lanes) {
+        all.push(lane.from_tick);
+        drawn.push(lane.from_tick);
+        if (lane.to_tick !== null) all.push(lane.to_tick);
+    }
+    return {all, drawn};
+}
+
 export function tickBounds(
     splits: Split[],
     frames: PlacedFrame[],
     lanes: Lane[] = []
 ): {from: number; to: number} | null {
-    const ticks: number[] = [];
-    for (const split of splits) {
-        ticks.push(split.started_tick);
-        if (split.ended_tick !== null) ticks.push(split.ended_tick);
-    }
-    for (const frame of frames) ticks.push(frame.tick);
-    for (const lane of lanes) {
-        ticks.push(lane.from_tick);
-        if (lane.to_tick !== null) ticks.push(lane.to_tick);
-    }
-    if (ticks.length === 0) return null;
-    return {from: Math.min(...ticks), to: Math.max(...ticks)};
+    const {all, drawn} = tickSources(splits, frames, lanes);
+    if (all.length === 0) return null;
+    // Start where there is something to see.
+    //
+    // A run's first milestone opens before capture or any bot has produced
+    // anything -- 231 ticks before, in the run that prompted this, while the
+    // planner was still thinking. Spanning that gap spends axis width on a
+    // stretch with no frame and no lane bar, so scrubbing into it answers
+    // "nothing happened" when what happened simply is not drawn.
+    //
+    // `drawn` is a subset of `all`, so this can only move the start forward,
+    // and never past `to`. The clipped milestone keeps its true `started_tick`
+    // in the splits table; only its bar is cut.
+    return {from: axisFrom(all, drawn), to: Math.max(...all)};
+}
+
+/**
+ * Where the axis begins: the first drawn tick, unless that cuts more than it
+ * keeps.
+ *
+ * **Never cut more than you keep.** Trimming is meant to shave a small dead
+ * margin off the front, not to reframe the run. A run whose only capture
+ * landed at the very end would otherwise collapse to a zero-width axis --
+ * splits carry the whole extent, and dropping everything before the one frame
+ * throws that extent away. So the trim applies only while the remaining span
+ * is the larger half.
+ */
+function axisFrom(all: number[], drawn: number[]): number {
+    const start = Math.min(...all);
+    if (drawn.length === 0) return start;
+    const first = Math.min(...drawn);
+    const cut = first - start;
+    return cut * 2 < Math.max(...all) - start ? first : start;
+}
+
+/**
+ * Ticks cut from the front of the axis by `tickBounds` -- the run had started
+ * but nothing was being drawn yet.
+ *
+ * Reported rather than swallowed: the axis no longer begins where the run
+ * does, and a viewer comparing it against the splits table deserves to be
+ * told that instead of discovering it.
+ */
+export function leadInTicks(splits: Split[], frames: PlacedFrame[], lanes: Lane[] = []): number {
+    const {all, drawn} = tickSources(splits, frames, lanes);
+    if (all.length === 0) return 0;
+    return axisFrom(all, drawn) - Math.min(...all);
 }
 
 /** Where `tick` falls across the axis, as a 0..1 fraction. */

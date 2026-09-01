@@ -229,6 +229,13 @@ function markerLeft(tick: number): string {
             </table>
 
             <div v-if="store.bounds" class="timeline">
+                <!-- The axis starts at the first frame or lane bar, not at the
+                     run. Say so, rather than let the clipped first milestone
+                     look like a disagreement with the splits table. -->
+                <p v-if="store.leadIn > 0" class="timeline__leadin num">
+                    axis starts at the first capture · {{ formatTicks(store.leadIn) }} of planning
+                    before it, not shown
+                </p>
                 <div class="timeline__track">
                     <span
                         v-for="split in store.detail.splits"
@@ -426,6 +433,12 @@ function markerLeft(tick: number): string {
 .timeline {
     margin-bottom: 1rem;
 }
+.timeline__leadin {
+    margin: 0 0 0.35rem;
+    font-size: 0.75rem;
+    color: var(--muted, #8b8b8b);
+}
+
 .timeline__track {
     position: relative;
     height: 6px;

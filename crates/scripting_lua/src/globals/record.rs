@@ -361,7 +361,12 @@ end
                     .ok_or_else(|| record_error("no recording is running"))?;
                 let tick = recorder.not_before(rcon.last_tick().unwrap_or(0));
                 recorder
-                    .finish(tick, &outcome, Some(&workspace))
+                    .finish(
+                        tick,
+                        &outcome,
+                        Some(&workspace),
+                        factorio_bot_core::record::DEFAULT_KEEP,
+                    )
                     .map_err(record_error)?;
                 Ok(recorder.run_id().to_string())
             })?,

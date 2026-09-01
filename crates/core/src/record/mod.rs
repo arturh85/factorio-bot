@@ -18,9 +18,11 @@ use crate::types::Position;
 
 pub mod frames;
 pub mod lanes;
+pub mod retention;
 pub mod splits;
 pub use frames::{ArchivedFrame, archive_frames, parse_frame_name};
 pub use lanes::{Lane, derive_lanes};
+pub use retention::{DEFAULT_KEEP, KEEP_MARKER, Reaped, reap};
 pub use splits::{Split, derive_splits};
 
 /// What happened. Internally tagged as `kind`, so a line is one flat object.
@@ -252,7 +254,8 @@ impl RunRecorder {
         tick: u64,
         outcome: &str,
         workspace: Option<&Path>,
-    ) -> io::Result<Manifest> {
+        keep: usize,
+    ) -> io::Result<(Manifest, retention::Reaped)> {
         self.record(
             tick,
             EventKind::RunFinished {
@@ -292,7 +295,20 @@ impl RunRecorder {
             self.dir.join("manifest.json"),
             serde_json::to_vec_pretty(&manifest).map_err(io::Error::other)?,
         )?;
-        Ok(manifest)
+
+        // Reaped *after* this run's manifest exists, so it sorts as the newest
+        // and cannot delete itself. Returned rather than logged: a caller must
+        // not be able to miss that data went away.
+        let reaped = self
+            .dir
+            .parent()
+            .map(|runs_root| retention::reap(runs_root, keep))
+            .transpose()?
+            .unwrap_or(retention::Reaped {
+                deleted: Vec::new(),
+                protected: Vec::new(),
+            });
+        Ok((manifest, reaped))
     }
 }
 
@@ -521,7 +537,7 @@ mod finish_tests {
         )
         .unwrap();
 
-        let manifest = rec.finish(400, "done", None).unwrap();
+        let (manifest, _) = rec.finish(400, "done", None, DEFAULT_KEEP).unwrap();
         assert_eq!(manifest.outcome.as_deref(), Some("done"));
         // 400 is where the run ended; it began at tick 10, so it lasted 390.
         assert_eq!(manifest.elapsed_ticks, Some(390));
@@ -545,7 +561,7 @@ mod finish_tests {
         let root = tmpdir("orderfail");
         let mut rec = RunRecorder::start(&root, "r2").unwrap();
         let missing = root.join("no-such-workspace");
-        let _ = rec.finish(99, "stuck", Some(&missing));
+        let _ = rec.finish(99, "stuck", Some(&missing), DEFAULT_KEEP);
 
         let read = read_events(&rec.dir().join("events.jsonl")).unwrap();
         assert!(
@@ -639,7 +655,7 @@ mod finish_tests {
             },
         )
         .unwrap();
-        let manifest = rec.finish(60_246, "done", None).unwrap();
+        let (manifest, _) = rec.finish(60_246, "done", None, DEFAULT_KEEP).unwrap();
         assert_eq!(
             manifest.elapsed_ticks,
             Some(871),
@@ -656,6 +672,30 @@ mod finish_tests {
             }
             other => panic!("expected run_finished, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn finishing_reaps_older_runs_and_says_which() {
+        let root = tmpdir("reapatfinish");
+        // Two older runs already archived.
+        for id in ["run-1000-1", "run-2000-1"] {
+            let dir = root.join(id);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("events.jsonl"), b"{}\n").unwrap();
+        }
+        let mut rec = RunRecorder::start(&root, "run-9000-1").unwrap();
+        let (_, reaped) = rec.finish(10, "done", None, 1).unwrap();
+
+        assert_eq!(
+            reaped.deleted,
+            vec!["run-1000-1", "run-2000-1"],
+            "the caller is told exactly what went away"
+        );
+        assert!(
+            rec.dir().exists(),
+            "a run must never reap itself -- it is the newest, and its manifest \
+             is written before the reap so it sorts that way"
+        );
     }
 
     #[test]

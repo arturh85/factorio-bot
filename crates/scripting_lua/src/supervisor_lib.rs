@@ -352,6 +352,56 @@ mod tests {
     }
 
     #[test]
+    fn a_genuine_keyframe_failure_is_surfaced_through_print_err_not_swallowed() {
+        // `record.keyframe()` answers "no recording"/"nothing placed yet"
+        // with `false`, never an error -- so anything that DOES raise here is
+        // a real failure (the game unreachable, a bug in the glue), and
+        // `pcall` alone would make that failure look byte-for-byte identical
+        // to the ordinary "nothing to do" case: silence, zero keyframes,
+        // nothing saying why. The loop must still finish (a keyframe is a
+        // nicety, not core control flow), but it must not go quiet about it.
+        let lua = sandboxed();
+        lua.load(
+            r#"
+            goal = {}
+            goal.plan = function(_g, _opts) return { steps = {} } end
+            goal.run = function(_plan) return { done = true } end
+            record = {}
+            record.keyframe = function() error("rcon: connection reset") end
+            __print_err_calls = {}
+            print_err = function(...)
+                local args = {...}
+                table.insert(__print_err_calls, table.concat(args, " "))
+            end
+        "#,
+        )
+        .exec()
+        .expect("stub installs");
+        lua.load(SUPERVISOR_LUA).exec().expect("supervisor loads");
+        lua.load(
+            "local sup = supervisor.new(supervisor.list {'a'}, {})
+             repeat sup:step() until sup:finished()
+             __state = sup.state",
+        )
+        .exec()
+        .expect("a keyframe failure must not kill the run");
+        assert_eq!(lua.globals().get::<String>("__state").unwrap(), "done");
+
+        let calls: Vec<String> = lua
+            .load("return __print_err_calls")
+            .eval::<mlua::Table>()
+            .unwrap()
+            .sequence_values::<String>()
+            .collect::<mlua::Result<_>>()
+            .unwrap();
+        assert_eq!(calls.len(), 1, "exactly one milestone was closed");
+        assert!(
+            calls[0].contains("rcon: connection reset"),
+            "the original error must survive into what gets reported, got: {calls:?}"
+        );
+    }
+
+    #[test]
     fn a_bad_source_is_refused_at_construction() {
         let lua = harness("{}", "{}");
         let err = lua

@@ -99,16 +99,31 @@ function Sup:_close(outcome)
     })
     -- A keyframe at the boundary of every milestone -- the only place
     -- `map.jsonl` gets one; there is deliberately no tick timer driving it.
-    -- Guarded on both counts, because this loop must keep working for every
-    -- caller that does not record: `record` is a global installed only
-    -- alongside a live game connection, and even then only a script that
-    -- called `record.start()` has one running, which this loop does not do
-    -- on its own (see the comment on `actions`/`steps` in `:step()` below --
-    -- recording what happened is the caller's job, not this one's). `pcall`
-    -- turns "no recording is running" into a silent no-op rather than a
-    -- failure of the supervisor loop over a diagnostic nobody asked for here.
+    -- Guarded because this loop must keep working for every caller that does
+    -- not record: `record` is a global installed only alongside a live game
+    -- connection, and even then only a script that called `record.start()`
+    -- has one running, which this loop does not do on its own (see the
+    -- comment on `actions`/`steps` in `:step()` below -- recording what
+    -- happened is the caller's job, not this one's). `record.keyframe()`
+    -- itself already answers "no recording is running" and "nothing has been
+    -- placed yet" with `false`, not an error -- both are unremarkable here.
+    --
+    -- `pcall` is for what is left after that: a real failure, the game being
+    -- unreachable or a bug in the glue. That must not kill the run either --
+    -- a keyframe is a nicety, not core control flow -- but going completely
+    -- silent about it is its own failure mode: a run that is actively
+    -- recording but whose keyframe raises on *every* call would look
+    -- identical to one that never asked for keyframes at all, and nothing
+    -- would ever say why. `print_err` is the sandbox's own error-reporting
+    -- output (`globals.lua`), which reaches the script job's SSE stream on
+    -- the stderr side -- not `writeout`, which belongs to a different
+    -- interpreter (the BotBridge mod's).
     if record ~= nil then
-        pcall(record.keyframe)
+        local ok, err = pcall(record.keyframe)
+        if not ok and type(print_err) == "function" then
+            print_err("record.keyframe() failed at milestone " .. tostring(self.index)
+                .. ": " .. tostring(err))
+        end
     end
 end
 

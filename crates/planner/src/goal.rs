@@ -50,9 +50,15 @@ pub enum Holder {
     /// Naming a bot here is also how the driver keeps each share's simulated
     /// inventory separate. That the *sizing* is trustworthy no longer rests on
     /// bots starting interchangeable — binding the owner makes it true by
-    /// construction — though `ExpansionCtx`'s own interchangeability
-    /// assumption, for simulating chain *j* against bot *j* while expanding,
-    /// is a separate matter and still stands.
+    /// construction, for a share and its whole subtree alike. What is left is
+    /// narrower than an assumption: `expand`'s own `chain_actor` argument is
+    /// the bot a goal naming none — including `Researched`'s own top-level
+    /// shortfall check, before it descends into `Share(chain_actor)`
+    /// subgoals — is simulated against, and that choice is no longer inert
+    /// either, since it feeds straight into the binding above. See the
+    /// `ExpansionCtx` doc (`crates/planner/src/method/mod.rs`) and
+    /// `crates/executor/src/recover.rs`'s tier 2 for why callers pin it
+    /// deterministically rather than treat it as arbitrary.
     Share(BotId),
 }
 

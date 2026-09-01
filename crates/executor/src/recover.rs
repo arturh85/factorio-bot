@@ -298,16 +298,24 @@ pub fn recover(
 
     // Tier 2 — the same goal, planned again from the method layer.
     //
-    // `expand` wants a `chain_actor`: the bot whose simulated inventory the
-    // outermost expansion is sized against. The goal being re-expanded is a
-    // caller's goal, not bot-specific, and `expand` rejects a state whose bots
-    // are not interchangeable, so *which* bot is chosen cannot change the
-    // expansion — only whether it is deterministic. The lowest id in the
-    // roster is therefore the choice: anchored to the roster we are about to
-    // schedule against (so a bot the state has never heard of is caught as
-    // `UnknownBot` rather than planned for), and stable no matter what order
-    // the caller listed its bots in. An empty roster has no such bot, and
-    // `schedule` would refuse it anyway, so tier 2 is skipped entirely.
+    // `expand` wants a `chain_actor`: the bot whose simulated inventory is
+    // used for any goal in the re-expansion that names no holder of its own.
+    // The goal being re-expanded is a caller's goal, not bot-specific, so some
+    // bot has to be picked — and nothing rejects an unequal roster to make
+    // that pick moot; the interchangeability guard this comment used to lean
+    // on is gone (`crates/planner/src/method/mod.rs`). Nor is the pick inert:
+    // `Researched` states its trigger's and its packs' bills as
+    // `Holder::Share(chain_actor)`, and since a `Share` chain is bound to the
+    // bot it was sized against, the bot chosen here is also the bot that
+    // subtree runs on (`crates/planner/src/goal.rs`, `Holder::Share`) — a
+    // different pick sizes and executes a research goal against a different
+    // bot's real stock. So the lowest id in the roster is not "any bot will
+    // do" but "pick one and hold it fixed", for determinism alone: anchored
+    // to the roster we are about to schedule against (so a bot the state has
+    // never heard of is caught as `UnknownBot` rather than planned for), and
+    // stable no matter what order the caller listed its bots in. An empty
+    // roster has no such bot, and `schedule` would refuse it anyway, so tier 2
+    // is skipped entirely.
     if let Some(chain_actor) = bots.iter().copied().min()
         && let Ok(fresh) = expand(
             std::slice::from_ref(goal),

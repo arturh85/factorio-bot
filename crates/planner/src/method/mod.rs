@@ -34,11 +34,24 @@ pub enum Step {
 /// emitted action: methods emit `Actor::Role` with `pinned: None`, and the
 /// scheduler decides who actually runs each action.
 ///
-/// This rests on bots being interchangeable at the start of planning — chain
-/// *j* is simulated against bot *j* on the assumption that any bot would
-/// experience the same thing. That holds while `PlanState::from_world` gives
-/// unknown bots identical defaults. **If bots ever start with materially
-/// different inventories, this driver must be revisited.**
+/// This no longer rests on bots being interchangeable. A goal that names a
+/// bot (`Holder::Bot` or `Holder::Share`) rebinds `chain_actor` to that bot
+/// before anything under it is simulated (`expand_goal`), and — since
+/// 2026-09-02 — the chain such a goal opens is also *owned* by that same bot
+/// (see the owner-binding comment in `expand_goal_body`). So a share's
+/// sizing and who ends up running it are pinned to one real inventory by
+/// construction, not by an assumption that any bot would experience the same
+/// thing.
+///
+/// What is still a real choice, not a formality, is the `chain_actor` `expand`
+/// is *called* with: it is what a goal naming no bot — including
+/// `Researched`'s own trigger and pack bills, stated as
+/// `Holder::Share(chain_actor)` — is simulated and (through the binding
+/// above) run against. Picking a different bot here now sizes and executes
+/// those subtrees against a different bot's actual stock, so callers must
+/// pick it deterministically rather than arbitrarily. See
+/// `crates/executor/src/recover.rs`'s tier 2 for where that choice is made
+/// and why.
 ///
 /// `chain` is the other half of the same story, and the half that outlives
 /// expansion: every action emitted inside a chained subtree is stamped with it

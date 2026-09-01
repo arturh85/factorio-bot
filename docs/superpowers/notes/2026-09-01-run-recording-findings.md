@@ -87,6 +87,27 @@ down here rather than guessed at.
 judged, a trigger technology refuses immediately and says why, instead of
 looping for 61345 ticks while reporting success.
 
+### Ghosts and the entity graph: checked, not a defect
+
+`EntityGraph` filters `FlyingText` and `Fish` by `entity_type` but not
+`entity-ghost`, which looked like it would let a ghost furnace be reasoned
+about as a real one. **It does not.** Probed live: place two furnace ghosts,
+then ask the graph what is there and try to build on them.
+
+    placed 2 ghost(s); first at -1.0,24.0
+    graph sees NOTHING at the ghost position
+    building a real furnace on the ghost -> ACCEPTED
+
+Both halves are right: ghosts never reach the graph, and they do not block a
+real build -- which matches the game, where a ghost is buildable-over.
+
+Worth recording how nearly this went the other way. The live world snapshot
+contains five `entity-ghost` records, which looks like proof that ghosts do
+reach the world. They are **entity prototypes** -- `entity-ghost`,
+`entity-unknown`, `tile-proxy`, all with zero-size bounding boxes -- not placed
+entities. Concluding from them would have produced a confident answer about
+placed ghosts from data that contains none.
+
 ### What was ruled out
 
 `rcon_add_research` discards the return value of `LuaForce.add_research`, which

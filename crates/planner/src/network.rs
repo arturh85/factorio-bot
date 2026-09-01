@@ -24,10 +24,12 @@ pub struct ActionNetwork {
     /// Which chain each action belongs to, where it belongs to one at all.
     /// A `BTreeMap` because everything that can reach the output is ordered.
     chains: BTreeMap<ActionId, ChainId>,
-    /// Chains a caller pinned to a bot by naming it in a `Holder::Bot` goal.
-    /// Distinct from `chains`: that says which actions travel together, this
-    /// says a caller demanded a particular runner. Still no `BotId` on any
-    /// action — the constraint belongs to the chain.
+    /// Chains bound to a bot: a caller named one in a `Holder::Bot` goal, or a
+    /// `Holder::Share` goal was sized against one (since 2026-09-02 — see
+    /// `Holder::Share`'s own doc for why sizing without binding was a defect,
+    /// not a feature). Distinct from `chains`: that says which actions travel
+    /// together, this says a specific bot must be the runner. Still no
+    /// `BotId` on any action — the constraint belongs to the chain.
     chain_owner: BTreeMap<ChainId, BotId>,
 }
 
@@ -56,8 +58,9 @@ impl ActionNetwork {
     /// Record that `action` belongs to `chain`.
     ///
     /// The driver stamps every action it emits inside a chained subtree — one
-    /// a caller named a bot for, or one whose method `converges` — and the
-    /// scheduler reads it back to bind the whole chain to one bot.
+    /// a caller named a bot for, one a goal was sized against a bot for
+    /// (`Holder::Share`), or one whose method `converges` — and the scheduler
+    /// reads it back to bind the whole chain to one bot.
     pub fn set_chain(&mut self, action: ActionId, chain: ChainId) {
         self.chains.insert(action, chain);
     }
@@ -67,12 +70,14 @@ impl ActionNetwork {
         self.chains.get(&action).copied()
     }
 
-    /// Record that a caller's instruction pins `chain` to `bot`.
+    /// Record that `chain` must run on `bot` — a caller's instruction
+    /// (`Holder::Bot`), or the bot a `Holder::Share` goal was sized against.
     pub fn set_chain_owner(&mut self, chain: ChainId, bot: BotId) {
         self.chain_owner.insert(chain, bot);
     }
 
-    /// The bot a caller pinned `chain` to, or `None` if nobody did.
+    /// The bot `chain` is bound to, or `None` if the scheduler is free to
+    /// choose.
     pub fn owner_of(&self, chain: ChainId) -> Option<BotId> {
         self.chain_owner.get(&chain).copied()
     }

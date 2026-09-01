@@ -171,6 +171,85 @@ the question into a failing test in about a minute.
 
 ---
 
+## Update: option 1 implemented
+
+**A `Holder::Share(b)` chain now runs on `b`.** `method::expand_goal_body`
+(`crates/planner/src/method/mod.rs`) binds a chain's owner whenever its
+stated holder is `Holder::Bot(bot)` *or* `Holder::Share(bot)` — previously
+only the former set an owner. The test that reproduces the finding above,
+`a_cheaper_bot_does_not_steal_a_share_chain_sized_for_another`
+(`crates/planner/src/method/have.rs`), is the two-line repro turned into a
+regression: it fails on `main` with `PreconditionUnsatisfied { bot: BotId(4),
+condition: "has 50 iron-ore" }` and passes once the owner binds to bot 2, the
+bot the bill was actually sized against.
+
+**Why option 1 and not 2 or 3.** Option 2 (size against the roster minimum)
+keeps shares freely assignable but directly undoes the per-bot sizing that
+landed the same night this defect was found (`6fcbba5c`, `7d614681`) and
+over-produces on every run, not just the unequal-roster ones. Option 3 (a
+real multi-bot decomposition for `Researched`) is the only one of the three
+that removes the tension rather than choosing a side — a trigger's bill
+would stop being any one bot's problem — but it is a larger change than a
+one-night fix, and reliability came first: a correct plan that runs slower
+beats a fast one that crashes. **Option 3 remains the fix that actually
+belongs here** if `Researched` is ever revisited; option 1 is a deliberate,
+recorded trade, not a replacement for it.
+
+**The cost, with the number.** In the recorded run, the trigger subtree
+(`insert 50 iron-ore`, the smelt that produces it) and the pack subtree ran
+concurrently on bots 2 and 3 for 22,072 ticks. Both now name `chain_actor` as
+their `Holder::Share` bot, so both bind to the same owner and serialise onto
+one bot instead. This is commented at the binding site in
+`method/mod.rs::expand_goal_body`, with the same figure, specifically so a
+future change does not "restore parallelism" by loosening the owner tier
+without re-solving the sizing problem it exists to close.
+
+**`ChainOwnerInfeasible`'s message was fixed.** It read `"{bot} owns chain
+{chain:?} because a caller named it, ..."`, which is now untrue for a chain
+owned via `Holder::Share` — the planner names that bot itself, mid-expansion,
+not a caller. It now reads `"{bot} owns chain {chain:?} because its bill was
+sized against it, ..."`, which is accurate for both `Holder::Bot` and
+`Holder::Share`: both are checked against the same per-bot shortfall ledger
+(`PlanState::available`), so "sized against it" is true of a caller-named bot
+too.
+
+**Existing tests that moved, and why each one moved.** All were *behaviour*
+changes, not incorrect old expectations — the old expectations were correct
+descriptions of the old (defective) behaviour:
+
+- `method::mod::tests::a_share_welds_its_whole_subtree_to_one_chain` and
+  `method::have::tests::a_single_unit_goal_becomes_one_action_not_a_split`
+  asserted `owner_of(chain) == None` for a share's chain. That was the exact
+  claim this change reverses; both now assert the owner equals the bot the
+  share was sized against.
+- `schedule::tests::an_owner_that_cannot_run_its_chain_blames_the_caller_not_the_world`
+  pinned the old `ChainOwnerInfeasible` message text verbatim; updated to the
+  new wording (message text, not behaviour).
+- `crates/planner/tests/seeded_roster.rs`'s
+  `a_plan_split_over_a_roster_is_not_schedulable_on_a_subset_of_it` is the one
+  genuine surprise. It expands a goal for a 2- or 4-bot roster (opening owned
+  chains for bots 2, 3 and/or 4) and then schedules the result against a
+  *narrower* roster containing only bot 1. Before this change a share's
+  chain had no owner, so the narrower roster's only bot picked up every chain
+  in turn and eventually failed on a `PreconditionUnsatisfied` for
+  `stone-furnace`. Now the chain opened for, say, bot 2 is *owned* by bot 2,
+  and bot 2 does not exist in the narrower roster at all, so scheduling fails
+  immediately with `PlannerError::UnknownBot` instead — before ever reaching
+  the furnace shortage. Judged as a strictly more honest failure (it names
+  the actual mistake — scheduling on a roster that does not contain a bot the
+  plan was built for — rather than an incidental resource exhaustion three
+  chains later), so the test was updated to assert `UnknownBot` rather than
+  loosened or removed.
+
+Verification: `cargo fmt` clean, `cargo clippy --workspace --all-features
+--all-targets -- --deny warnings` clean, `cargo test --workspace` green (every
+crate, 0 failed). One test added
+(`a_cheaper_bot_does_not_steal_a_share_chain_sized_for_another`), confirmed to
+fail on the pre-fix tree with the exact `PreconditionUnsatisfied` the live run
+hit, naming bot 4 as the note predicted.
+
+---
+
 ## The aside: were the retries doing useful work?
 
 **Yes — and the `too far too mine` rejections are not what cost the

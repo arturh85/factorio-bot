@@ -39,11 +39,12 @@ pub enum PlannerError {
     /// world at all — re-planning would produce the same contradiction forever.
     ///
     /// `bound_to` is whichever committed the chain to a bot: its **owner**, if
-    /// a caller named one, and otherwise the bot the scheduler bound it to when
-    /// the chain opened. Ownership is checked first because it is the harder
-    /// constraint — a caller's instruction, stated before scheduling begins,
-    /// with no fallback tier — and because a chain with an owner is only ever
-    /// bound to that owner, so the owner is the original cause.
+    /// the goal named one (`Holder::Bot`, or — since 2026-09-02 — the bot a
+    /// `Holder::Share` was sized against), and otherwise the bot the scheduler
+    /// bound it to when the chain opened. Ownership is checked first because
+    /// it is the harder constraint — stated before scheduling begins, with no
+    /// fallback tier — and because a chain with an owner is only ever bound to
+    /// that owner, so the owner is the original cause.
     #[error(
         "action {action:?} is pinned to {pinned_to}, but its chain {chain:?} already belongs to {bound_to}"
     )]
@@ -59,8 +60,14 @@ pub enum PlannerError {
     #[diagnostic(code(planner::no_bots))]
     NoBots,
 
+    /// Deliberately does not say "because a caller named it": since
+    /// 2026-09-02 a chain is also owned when a `Holder::Share` goal was sized
+    /// against `bot`, which the planner binds itself rather than a caller
+    /// asking for it. Saying "a caller named it" there would blame the wrong
+    /// party for a bill the planner itself decided to size and to run on the
+    /// same bot.
     #[error(
-        "{bot} owns chain {chain:?} because a caller named it, but {condition} does not hold there"
+        "{bot} owns chain {chain:?} because its bill was sized against it, but {condition} does not hold there"
     )]
     #[diagnostic(code(planner::chain_owner_infeasible))]
     ChainOwnerInfeasible {

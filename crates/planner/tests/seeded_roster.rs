@@ -76,15 +76,27 @@ fn a_roster_seeded_like_the_game_plans_and_schedules_the_smoke_goal() {
 /// A network is only schedulable on the roster it was expanded for.
 /// `SplitAcrossBots` sizes each share against the holdings of the bot it names,
 /// so a four-way split spends four bots' starting furnaces. Assigning the whole
-/// of it to one bot asks that bot for four furnaces it never had, and the plan
-/// dies on whichever `Place` was left for last — reported against the *first*
-/// action of the network, because ids say nothing about scheduling order.
+/// of it to one bot asks that bot for four furnaces it never had.
 ///
 /// This is what `goal.schedule(plan, bot_count)` used to do when a script
 /// scheduled over fewer bots than the run had, and the reason it now expands
 /// the goal again for the bots that will actually run it. Asserted here rather
 /// than merely described: if a future change lets a narrower roster schedule
 /// after all, this test fails and the re-expansion can go.
+///
+/// **The failure mode changed on 2026-09-02, genuinely rather than by
+/// accident.** Before that date a share opened a chain with no owner, so the
+/// plan dying here always dies of a `PreconditionUnsatisfied` on
+/// `stone-furnace` — the one bot in `alone` runs every chain in turn and
+/// eventually runs out. Since a `Holder::Share(b)` chain now runs on `b` (see
+/// `docs/superpowers/notes/2026-09-02-rung-3-4-findings.md`), a share sized
+/// against bot 2, 3 or 4's own furnace is bound to that bot specifically —
+/// and a roster of `[BotId(1)]` alone does not contain bot 2 at all. The
+/// scheduler now says so immediately, as `PlannerError::UnknownBot`, rather
+/// than discovering the mismatch several furnaces later. This is not a worse
+/// answer than the old one: "you asked to run a chain on a bot that is not in
+/// your roster" names the actual mistake more directly than "ran out of
+/// furnace" ever did.
 #[test]
 fn a_plan_split_over_a_roster_is_not_schedulable_on_a_subset_of_it() {
     for n in [2u8, 4] {
@@ -99,16 +111,16 @@ fn a_plan_split_over_a_roster_is_not_schedulable_on_a_subset_of_it() {
 
         let alone = roster(1);
         let err = schedule(&split, &seeded_world(&alone), &alone)
-            .expect_err("one bot cannot spend the whole roster's furnaces");
+            .expect_err("one bot cannot run chains owned by bots outside its roster");
         match err {
-            PlannerError::PreconditionUnsatisfied { bot, condition, .. } => {
-                assert_eq!(bot, BotId(1), "{n} bots: the one bot asked to run it");
-                assert!(
-                    condition.contains("stone-furnace"),
-                    "{n} bots: the furnace is what runs out, not something else: {condition}"
+            PlannerError::UnknownBot(bot) => {
+                assert_ne!(
+                    bot,
+                    BotId(1),
+                    "{n} bots: the missing bot must be one the split named, not the one bot present"
                 );
             }
-            other => panic!("{n} bots: expected a precondition failure, got {other}"),
+            other => panic!("{n} bots: expected an unknown-bot failure, got {other}"),
         }
     }
 }

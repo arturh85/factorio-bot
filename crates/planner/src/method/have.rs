@@ -9,8 +9,12 @@
 //! things open a chain, and only these three: a caller naming a bot
 //! (`Holder::Bot`), which additionally records that bot as the chain's owner;
 //! a `Holder::Share`, which states that the holding ends up in one inventory
-//! and leaves who runs it to the scheduler; and a method whose decomposition
-//! makes several *produced* items meet in one inventory (`Method::converges`).
+//! sized against a named bot's starting inventory, and — since 2026-09-02,
+//! for the same reason `Holder::Bot` does — also records that bot as the
+//! chain's owner, because the sizing is only true if that bot is the one who
+//! runs it; and a method whose decomposition makes several *produced* items
+//! meet in one inventory (`Method::converges`), which gets no owner, since
+//! nothing named a bot for it.
 //!
 //! `HasItem` preconditions alone are not enough, for two different reasons.
 //! They keep a *linear* chain together, since only the bot holding the items
@@ -950,9 +954,10 @@ impl Method for Researched {
             // without crafting anything, and the second furnace a science pack
             // chain needs is then placed by a bot that has already spent its
             // own. `Share` sizes against the chain actor — the same bot the
-            // driver simulates every effect in this subtree against — and
-            // commits nobody to running the work, which stays the scheduler's
-            // decision.
+            // driver simulates every effect in this subtree against — and,
+            // since 2026-09-02, also runs the chain: the sizing is only true
+            // for the bot it was done against (see the owner-binding comment
+            // in `method/mod.rs::expand_goal_body`).
             steps.push(Step::Subgoal(Goal::Have {
                 item: item.clone(),
                 count: *count,
@@ -1013,11 +1018,13 @@ pub fn default_registry() -> MethodRegistry {
 /// Split a shared goal into one independent chain per bot.
 ///
 /// The chains never coordinate: each mines, smelts and crafts its own share.
-/// They are emitted as `Holder::Share(_)` subgoals so the other methods handle
-/// them without recursing back into this one — and so that the driver opens a
-/// chain per share, which is what keeps each share's steps in one inventory.
-/// A `Share` rather than a `Bot` because a share sizes against a bot without
-/// instructing anyone to run it; the chain it opens therefore has no owner.
+/// They are emitted as `Holder::Share(_)` subgoals, not `Holder::Bot(_)`, so
+/// that the other methods handle them without recursing back into this one —
+/// `Holder::Bot` is a caller's instruction and never produced by expansion
+/// itself, see `Holder::Share`'s own doc. A `Share` still opens a chain per
+/// share, which is what keeps each share's steps in one inventory, and —
+/// since 2026-09-02 — still binds that chain's ownership to the bot it was
+/// sized against, exactly as a `Bot` would.
 ///
 /// A share of one is still worth emitting: it produces a single chain rather
 /// than a split, and that chain is the whole point. Without it a top-level goal
@@ -2870,13 +2877,19 @@ mod tests {
         .unwrap();
         assert_eq!(net.len(), 1, "a shortfall of one is one share, not several");
         // A share states that the holding ends up in one inventory, so it is
-        // chained however trivial its subtree — but it names nobody, so the
-        // chain has no owner and the scheduler still picks the runner.
+        // chained however trivial its subtree — and, since 2026-09-02, also
+        // owned by the bot it names: both bots hold nothing, so the tie
+        // between them breaks on `BotId` ascending and bot 1 is the one the
+        // share was sized against.
         let only = net.actions().next().expect("one action");
         let chain = net
             .chain_of(only.id)
             .expect("a share is welded to one runner");
-        assert_eq!(net.owner_of(chain), None, "a share commits nobody");
+        assert_eq!(
+            net.owner_of(chain),
+            Some(BotId(1)),
+            "a share now commits the bot it was sized against to run it"
+        );
     }
 
     #[test]
@@ -3960,6 +3973,92 @@ mod tests {
         assert!(net.chain_of(insert.id).is_some(), "and to a real chain");
 
         schedule(&net, &s, &bots).expect("and the plan schedules on the roster it was made for");
+    }
+
+    /// **The finding left in `2026-09-02-rung-3-4-findings.md`, turned into a
+    /// test.** Welding the trigger's insert to the mine that feeds it (the
+    /// test above) stops the crash for the recorded run's geometry, but the
+    /// chain it welds them into is still ownerless: the scheduler is free to
+    /// bind it to whichever bot is cheapest, and the bill was sized against
+    /// bot 2's eight iron-ore specifically.
+    ///
+    /// One line reproduces it: put bot 4 — the four-ore bot — on the iron
+    /// patch (`fixture_world`'s ore sits at `(-40, 40)`, a 10x10 tile
+    /// region). Bot 4 is then nearest when the chain opens, takes it, mines
+    /// the 42 sized against bot 2's eight, ends with 4 + 42 = 46, and the
+    /// `insert 50 iron-ore` precondition fails for the bot actually holding
+    /// the ore — naming bot 4, exactly as the live run named bot 2 and then
+    /// bot 3. **Before the owner-binding fix this test fails** with
+    /// `PreconditionUnsatisfied` naming bot 4; after it, the chain is bound to
+    /// bot 2 regardless of anyone else's position, so bot 2 mines its own
+    /// shortfall and the plan schedules.
+    #[test]
+    fn a_cheaper_bot_does_not_steal_a_share_chain_sized_for_another() {
+        let bots = [BotId(2), BotId(3), BotId(4)];
+        let mut s = PlanState::from_world(
+            Arc::new(crate::test_world::world_with_trigger_prerequisite()),
+            &bots,
+        );
+        for bot in bots {
+            s.gain(bot, "wood", 1);
+            s.gain(bot, "stone-furnace", 1);
+            s.gain(bot, "burner-mining-drill", 1);
+            s.gain(bot, "iron-plate", 8);
+        }
+        s.gain(BotId(2), "iron-ore", 8);
+        s.gain(BotId(3), "iron-ore", 8);
+        s.gain(BotId(4), "iron-ore", 4);
+        s.gain(BotId(2), "copper-ore", 2);
+        s.gain(BotId(3), "copper-ore", 5);
+        s.gain(BotId(4), "copper-ore", 13);
+        // The one addition over the test above: bot 4 — the 4-ore bot — is on
+        // the iron patch, and so is cheapest for the chain that opens there.
+        s.set_position(BotId(4), Position::new(-38., 36.));
+
+        let net = expand(
+            &[Goal::Researched("automation".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(2),
+        )
+        .expect("the goal expands");
+
+        let insert = net
+            .actions()
+            .find(|a| a.label == "insert 50 iron-ore")
+            .expect("the trigger's fifty plates are smelted");
+        let mine = net
+            .actions()
+            .find(|a| a.label == "mine 42 iron-ore")
+            .expect("sized against bot 2's eight, same as the test above");
+        let chain = net
+            .chain_of(insert.id)
+            .expect("welded, same as the test above");
+        assert_eq!(net.chain_of(mine.id), Some(chain));
+
+        // The claim this test exists for: the chain is bound to the bot its
+        // bill was sized against, not to whoever is nearest.
+        assert_eq!(
+            net.owner_of(chain),
+            Some(BotId(2)),
+            "a Share(b) chain must be owned by b, or the scheduler is free \
+             to hand a bill sized for b's inventory to a bot holding less"
+        );
+
+        let plan = schedule(&net, &s, &bots).expect(
+            "the chain runs on the bot it was sized for, however cheap a \
+             different bot looks",
+        );
+        assert!(
+            plan.steps.iter().all(|s| {
+                let StepKind::Act { action, .. } = s.what else {
+                    return true;
+                };
+                action != insert.id && action != mine.id || s.bot == BotId(2)
+            }),
+            "the whole chain must run on bot 2, got {:?}",
+            plan.steps
+        );
     }
 
     #[test]

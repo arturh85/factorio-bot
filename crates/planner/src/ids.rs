@@ -51,14 +51,16 @@ impl ActionIdGen {
 ///
 /// A chain is the expansion of one subtree whose steps hand items to each
 /// other through a single inventory, so splitting it across bots leaves the
-/// consumer empty-handed. The driver opens one in exactly two situations: a
-/// caller names a bot (`Goal::Have { whose: Holder::Bot(_) }`, which also gives
-/// the chain an owner — see `ActionNetwork::owner_of`), or a method reports
-/// that its decomposition converges, meaning several produced items must meet
-/// in one inventory (`Method::converges`). The scheduler
-/// still chooses *which* bot — it just chooses once per chain instead of once
-/// per action. Chain identity is a property of the network's structure, so it
-/// lives in `ActionNetwork`, not on `Action`.
+/// consumer empty-handed. The driver opens one in exactly three situations: a
+/// caller names a bot (`Holder::Bot`), a goal is sized against one bot's
+/// inventory without naming it as a caller instruction (`Holder::Share`), or a
+/// method reports that its decomposition converges, meaning several produced
+/// items must meet in one inventory (`Method::converges`). The first two also
+/// give the chain an **owner** — see `ActionNetwork::owner_of` — because both
+/// name a specific bot the chain's sizing depends on; the scheduler still
+/// chooses which bot for a converging chain, since nothing named one. Chain
+/// identity is a property of the network's structure, so it lives in
+/// `ActionNetwork`, not on `Action`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ChainId(pub u32);
 

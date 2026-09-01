@@ -49,6 +49,12 @@ pub enum Step {
 /// `converges` — see `expand_goal_body`. It is `None` outside such a subtree,
 /// which leaves an action freely assignable.
 ///
+/// The first two also give the chain an **owner** — the named bot, in both
+/// cases — so the scheduler runs it there rather than merely keeping it
+/// together on whoever is cheapest. See the owner-binding comment in
+/// `expand_goal_body` for why a `Holder::Share` earns this too, and at what
+/// cost.
+///
 /// `top_level` records whether the goal being expanded is one the *caller*
 /// asked for rather than one a method asked for. See `GoalSite`.
 pub struct ExpansionCtx {
@@ -337,22 +343,35 @@ fn expand_goal_body(
     // * **A caller naming a bot** (`Holder::Bot`), which additionally records
     //   that bot as the chain's owner.
     // * **A `Holder::Share`**, which states that the holding has to end up in
-    //   *one* inventory. It names a bot only to size the shortfall and to pick
-    //   the inventory the driver simulates against, and commits nobody to
-    //   running the work, so the chain gets no owner. Both places that emit
-    //   one say as much: `SplitAcrossBots` hands a bot a share to mine, smelt
-    //   and craft on its own, and `Researched` asks for packs by share
-    //   "because the research is one action reading one bot's inventory".
-    //   Neither claim was enforced before: a share opened no chain, so its
-    //   producers stayed freely assignable and a smelt's three roots — ore,
-    //   coal and the furnace — scattered across the roster. The `HasItem` on
-    //   each of the smelt's own actions is then checked against a bot holding
-    //   a fraction of what expansion put in one place, and the plan dies on a
-    //   precondition it should have got right (`has 5 stone ... does not hold
-    //   for bot 3`). It cannot show up at one bot, which is why it survived
-    //   until multi-bot plans grew long enough to have two smelts in flight.
+    //   *one* inventory, sized against that bot's starting inventory. It
+    //   *also* records that bot as the chain's owner, for the same reason a
+    //   `Holder::Bot` does: `SplitAcrossBots` hands a bot a share to mine,
+    //   smelt and craft on its own, and `Researched` asks for packs — and a
+    //   trigger's whole production bill — by share "because the research is
+    //   one action reading one bot's inventory". Both claims are true only if
+    //   the bot the bill was sized against is the bot that runs it. Before
+    //   2026-09-02 the chain got no owner here, on the theory that bots are
+    //   interchangeable so it does not matter who runs a chain sized against
+    //   one of them; that theory broke on a live four-bot run once gathering
+    //   milestones had left the roster unequal (8 / 8 / 4 iron-ore) — the
+    //   scheduler bound a share's chain to whichever bot was cheapest, not
+    //   the one its bill was sized against, mined the shortfall onto that
+    //   bot, and a downstream action needing the full count failed for a
+    //   *different* bot, naming first bot 2 then bot 3 across two crashes of
+    //   the same run. See `docs/superpowers/notes/2026-09-02-rung-3-4-findings.md`,
+    //   "The rest of the story", for the three options weighed and why this
+    //   one (option 1) was chosen: it makes the sizing true by construction
+    //   rather than true by assumption, at a real, measured cost — the
+    //   recorded run's trigger subtree and pack subtree ran concurrently on
+    //   two different bots for 22,072 ticks; binding both to their shared
+    //   `chain_actor` serialises them onto one. A slower correct run beats a
+    //   faster crashing one, so that cost is accepted, not incidental — do
+    //   not "restore parallelism" here without also re-solving the sizing
+    //   problem it removes.
     // * **A method that `converges`**, whose decomposition makes several
-    //   produced items meet in one inventory.
+    //   produced items meet in one inventory. This gets no owner: nothing
+    //   named a bot for it, only the shape of the decomposition, so who runs
+    //   it stays the scheduler's decision.
     //
     // Nothing else. A goal that merely sits inside a chain needs no second
     // one, and welding what nobody has to gather serialises work that could
@@ -364,7 +383,7 @@ fn expand_goal_body(
     // whoever, out of ore mined by someone else — see `stated_holder`.
     if ctx.chain.is_none() {
         let owner = match stated_holder(goal) {
-            Some(Holder::Bot(bot)) => Some(*bot),
+            Some(Holder::Bot(bot) | Holder::Share(bot)) => Some(*bot),
             _ => None,
         };
         let one_inventory = matches!(stated_holder(goal), Some(Holder::Bot(_) | Holder::Share(_)));
@@ -1577,7 +1596,8 @@ mod tests {
 
     /// A `Holder::Share` states that the holding has to end up in one
     /// inventory, and the driver makes that true by opening a chain over its
-    /// subtree.
+    /// subtree — and, since 2026-09-02, by binding that chain's ownership to
+    /// the bot the share was sized against.
     ///
     /// Written with hand-made methods and invented items so the rule is the
     /// driver's and not any recipe's: a widget is made from a cog and a spring
@@ -1614,9 +1634,9 @@ mod tests {
             .expect("just asserted");
         assert_eq!(
             shared.owner_of(chain),
-            None,
-            "a share sizes against a bot but commits nobody to running it, so the \
-             chain has no owner and the scheduler still picks"
+            Some(BotId(1)),
+            "a share sizes against a bot, and since 2026-09-02 also runs on \
+             it -- see the owner-binding comment in expand_goal_body"
         );
 
         // The contrast: `Holder::Anyone` says the roster may hold it between

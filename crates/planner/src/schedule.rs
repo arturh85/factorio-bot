@@ -102,10 +102,9 @@ impl Candidate {
 struct Rejected {
     candidate: Candidate,
     condition: String,
-    /// Set when the rejected candidate was the sole candidate of a
-    /// caller-owned chain, so the final error can name the caller's
-    /// instruction as the cause instead of reporting a bare precondition
-    /// failure.
+    /// Set when the rejected candidate was the sole candidate of an owned
+    /// chain, so the final error can name the owner-binding as the cause
+    /// instead of reporting a bare precondition failure.
     owned_chain: Option<ChainId>,
 }
 
@@ -212,13 +211,13 @@ pub fn schedule(
                 // sets `pinned` today, so this is defensive.
                 //
                 // A chain *owner* is checked first and on the same footing. An
-                // owner is the same class of thing as a pin — a caller's
-                // instruction — and the harder of the two: it is stated before
-                // scheduling begins and gets no fallback tier. Letting a pin
-                // quietly win over it would run the action on a bot the caller
-                // did not name while the rest of the chain went where the
-                // caller asked, which is precisely the silent override this
-                // arm exists to prevent.
+                // owner is the same class of thing as a pin — a bot named
+                // before scheduling begins, either by a caller (`Holder::Bot`)
+                // or by the goal's own sizing (`Holder::Share`, since
+                // 2026-09-02) — and the harder of the two: it gets no fallback
+                // tier. Letting a pin quietly win over it would run the action
+                // on a different bot than the rest of the chain, which is
+                // precisely the silent override this arm exists to prevent.
                 Some(pinned) => {
                     if let (Some(chain), Some(owner)) = (chain, owner)
                         && owner != pinned
@@ -244,10 +243,10 @@ pub fn schedule(
                     // second tier to fall back to.
                     vec![vec![pinned]]
                 }
-                // A chain owner is a caller's instruction, so it is a hard
-                // constraint: no tier falls back past it. The spread
-                // preference below is a preference precisely because nobody
-                // asked for it.
+                // A chain owner names a specific bot before scheduling begins,
+                // so it is a hard constraint: no tier falls back past it. The
+                // spread preference below is a preference precisely because
+                // nothing named a bot for it.
                 None if owner.is_some() => vec![vec![owner.expect("just checked")]],
                 // An action already in a running chain follows it. Also not a
                 // preference — the items are in that bot's inventory and
@@ -360,9 +359,8 @@ pub fn schedule(
                                     // `owner` names this action's chain owner
                                     // when it has one; pair it with `chain`
                                     // (guaranteed `Some` whenever `owner` is)
-                                    // so a caller's instruction is what the
-                                    // final error blames, not a bare
-                                    // precondition.
+                                    // so the owner-binding is what the final
+                                    // error blames, not a bare precondition.
                                     owned_chain: owner.and(chain),
                                     candidate,
                                 });
@@ -379,9 +377,9 @@ pub fn schedule(
             None => {
                 let rejected = best_rejected.expect("ready and bots are both non-empty");
                 return Err(match rejected.owned_chain {
-                    // A caller named this bot, so a precondition that fails
-                    // for it is not "the world was not as planned" — it is
-                    // the caller's own instruction that cannot be met.
+                    // This bot is the chain's owner, so a precondition that
+                    // fails for it is not "the world was not as planned" — it
+                    // is the binding itself that cannot be met.
                     Some(chain) => PlannerError::ChainOwnerInfeasible {
                         chain,
                         action: rejected.candidate.action,
@@ -1087,7 +1085,7 @@ mod tests {
         let err = schedule(&net, &state(&bots), &bots).expect_err("nobody holds uranium ore");
         assert_eq!(
             err.to_string(),
-            "bot 2 owns chain ChainId(0) because a caller named it, \
+            "bot 2 owns chain ChainId(0) because its bill was sized against it, \
              but has 1 uranium-ore does not hold there"
         );
         match err {

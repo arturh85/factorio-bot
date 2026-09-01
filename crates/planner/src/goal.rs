@@ -16,10 +16,27 @@ pub enum Holder {
     /// One share of a split, and — the part that is easy to miss — a claim
     /// that the holding ends up in **one** inventory.
     ///
-    /// Sized against this bot's starting inventory, but carrying no commitment
-    /// about *who* runs it: the driver opens a chain over a share's subtree,
-    /// so its actions are welded to a single runner, and gives that chain no
-    /// owner, so which bot that is stays the scheduler's decision.
+    /// Sized against this bot's starting inventory, and — since 2026-09-02 —
+    /// also committing that bot to run it: the driver opens a chain over a
+    /// share's subtree, welding its actions to a single runner, and gives
+    /// that chain **this bot as its owner**, exactly as a `Holder::Bot` would.
+    ///
+    /// It did not always. Before 2026-09-02 a share named a bot only to size
+    /// itself and left who ran it to the scheduler, on the theory that bots
+    /// are interchangeable so it does not matter. That theory holds only
+    /// while it holds: a live four-bot run left the roster unequal after two
+    /// gathering milestones (8 / 8 / 4 iron-ore), the scheduler bound a
+    /// share's chain to whichever bot was cheapest rather than the one its
+    /// bill was sized against, and a downstream action needing the full count
+    /// failed for a bot that never held it — naming a different bot on each
+    /// of two crashes of the same run. See
+    /// `docs/superpowers/notes/2026-09-02-rung-3-4-findings.md` for the full
+    /// diagnosis and the alternatives weighed. The cost of binding is real
+    /// and was measured on that same run: two subtrees that ran concurrently
+    /// on two bots for 22,072 ticks now serialise onto one. Accepted anyway —
+    /// a slower correct plan beats a faster crashing one — and the fix that
+    /// would remove the trade-off rather than choose a side (a real
+    /// multi-bot decomposition for `Researched`) remains undone.
     ///
     /// The welding is not decoration. A share is what `SplitAcrossBots` hands
     /// a bot to mine, smelt and craft on its own, and what `Researched` asks
@@ -31,9 +48,11 @@ pub enum Holder {
     /// one bot and loads the furnace from another.
     ///
     /// Naming a bot here is also how the driver keeps each share's simulated
-    /// inventory separate. That it *works* rests on bots starting
-    /// interchangeable — the assumption `ExpansionCtx` documents, made visible
-    /// in the type rather than left in prose.
+    /// inventory separate. That the *sizing* is trustworthy no longer rests on
+    /// bots starting interchangeable — binding the owner makes it true by
+    /// construction — though `ExpansionCtx`'s own interchangeability
+    /// assumption, for simulating chain *j* against bot *j* while expanding,
+    /// is a separate matter and still stands.
     Share(BotId),
 }
 

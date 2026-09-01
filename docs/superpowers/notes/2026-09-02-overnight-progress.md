@@ -138,3 +138,57 @@ whole reason the walk fix mattered.
 Also deferred by that change, honestly: `needs_destroy_to_reach` is now carried
 to the caller and warned about, but not acted on. A leg the pathfinder flagged
 as blocked is still walked.
+
+## Rung status at ~02:15
+
+| rung | state |
+|---|---|
+| 1 gather iron ore x20 | **satisfied**, 2 iterations (was 4 before the walk fix) |
+| 2 gather copper ore x20 | **satisfied**, 4 iterations |
+| 3 smelt iron plates x10 | **satisfied** — genuinely, `already_satisfied`; freeplay hands each bot 8 plates and the goal asks possession of 10 across the roster |
+| 4 research automation | **crashes** — `Share(b)` sizing vs. free assignment; fix in flight |
+| 5-7 power, belts, oil | not reached |
+
+Run 5 (`run-1788303085-75848`): 0 failed, 0 lost across the whole run, 273 KB of
+samples. The cleanest run of the night, and the first where every satisfied
+milestone reports **why** it was satisfied.
+
+## Defects found and fixed tonight, in the order they bit
+
+1. **The sampler killed the game.** `character.mining_target` — that attribute
+   belongs to `LuaEntity`, not a character. Fired the first tick a bot really
+   mined, so every planning-only test passed. Fixed, and both samplers are now
+   wrapped so telemetry can never raise into the main loop again.
+2. **The guard compared whole inventories**, refusing to plan `iron-ore` over a
+   difference in `iron-plate`. Scoped, then retired entirely behind a test that
+   reaches `schedule()` — which the guard never did.
+3. **Shares were sized in the wrong ledger** — `inventory_count` where the
+   shortfall was taken against `available`, so four *identical* bots mined 24
+   ore for a bill of 16.
+4. **Bots did not walk.** The "stuck" check measured leg duration, so every leg
+   over ~9.2 tiles was teleported by an unbounded jump; a sibling branch
+   reported the walk successful while leaving the bot walking forever.
+5. **Satisfaction was inferred, not checked.** Now `planner::holds` answers it,
+   three-valued, and the supervisor raises when a goal demonstrably does not
+   hold.
+6. **A mine action reported success at half its count.** `on_mined_entity`
+   completed *any* bot's task matching the entity, never checking
+   `event.player_index`, so two bots on one tile decremented each other.
+
+## Two corrections to things I said earlier tonight
+
+- I called rung 3 a false success. It was not: the samples show the goal
+  genuinely held. The milestone is *named* "smelt" while the goal asks
+  possession.
+- I approved retiring the interchangeable-bots guard on the stated ground that
+  nothing still assumed interchangeability. `Researched` does. Neither I nor the
+  step-4 reviewer caught it; the rung-3/4 diagnosis did.
+
+## Still open
+
+- `EventKind::Teleport` has no writer — teleports are loud in `tracing`, absent
+  from `events.jsonl`.
+- `needs_destroy_to_reach` is carried and warned about, not acted on.
+- Option 3 for `Researched` — a real multi-bot decomposition — remains the fix
+  that removes the tension rather than choosing a side. Option 1 (bind a share
+  to its bot) is being implemented instead, trading parallelism for correctness.

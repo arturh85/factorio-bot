@@ -30,9 +30,34 @@ pub struct Context {
 impl Context {
   pub fn new(overrides: &SettingsOverrides) -> Result<Self> {
     color_eyre::install().expect("failed to colorize panics");
+    // A `tracing` event goes nowhere unless a subscriber is installed, and
+    // silently: the macro still compiles and still runs. Until this existed
+    // the only installer was `console_subscriber` behind the non-default
+    // `tokio-console` feature, so in every ordinary build all seven
+    // `tracing::` call sites in `crates/server` -- including two error paths
+    // and the "listening on" line that names the bind address -- printed
+    // nothing at all. `serve.rs` prints its own "serving http://..." through
+    // `paris`, which is how the silence stayed invisible.
+    //
+    // stderr, not stdout: `paris` writes the user-facing narration to stdout
+    // and two tests capture it, so diagnostics go to the other stream rather
+    // than interleaving with output someone is parsing.
+    //
+    // `try_init` rather than `init` because a second call must not abort the
+    // process -- only one global subscriber can be set, and a test harness
+    // that builds two `Context`s is not an error.
     #[cfg(feature = "tokio-console")]
     {
       console_subscriber::init();
+    }
+    #[cfg(not(feature = "tokio-console"))]
+    {
+      use tracing_subscriber::EnvFilter;
+      let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+      let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
     }
 
     create_dir_all(paths::data_local_dir()).into_diagnostic()?;

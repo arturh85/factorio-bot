@@ -2,10 +2,11 @@ use crate::actuator::{ActionTicks, Actuator, ActuatorError, ActuatorFailure};
 use async_trait::async_trait;
 use factorio_bot_core::factorio::rcon::{ActionFailure, Dispatch, FactorioRcon, approach_radius};
 use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::record::map::{EntitySnapshot, Placement, drift_between};
 use factorio_bot_core::types::{PlayerId, Position};
 use factorio_bot_planner::{BotId, InventorySlot};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// The game's own `defines.inventory` table, read once at construction.
 ///
@@ -124,6 +125,18 @@ pub struct RconActuator {
     /// the game fails as `UnknownBot` rather than being silently renumbered
     /// onto whoever happens to be present.
     connected: BTreeSet<PlayerId>,
+    /// The placement each bot most recently made, waiting to be claimed.
+    ///
+    /// `Actuator::place` carries no `ActionId` — that belongs to the
+    /// scheduler, not to this trait, and giving the trait one now would touch
+    /// every implementation of it, including the mocks in `run.rs` and
+    /// `recover.rs`'s tests, for a value nothing calls yet. Keyed by bot
+    /// rather than a single slot so two bots placing concurrently cannot
+    /// clobber each other's fact; [`RconActuator::take_placement`] removes the
+    /// entry it returns, so a later task wiring this into `Attempt::placed`
+    /// claims each placement exactly once rather than replaying a stale one
+    /// onto a different attempt.
+    placements: Mutex<BTreeMap<PlayerId, Placement>>,
 }
 
 impl RconActuator {
@@ -159,7 +172,21 @@ impl RconActuator {
             world,
             defines,
             connected,
+            placements: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    /// Claims the placement `bot` most recently made, if one is waiting.
+    ///
+    /// Removes it: a placement is a fact about one attempt, and leaving it in
+    /// place would let a second, unrelated attempt read the same fact. See the
+    /// `placements` field doc for why this exists ahead of anything calling
+    /// it.
+    pub fn take_placement(&self, bot: PlayerId) -> Option<Placement> {
+        self.placements
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&bot)
     }
 
     /// The Factorio player a `BotId` names: itself.
@@ -301,15 +328,40 @@ impl Actuator for RconActuator {
         direction: u8,
     ) -> Result<ActionTicks, ActuatorFailure> {
         let p = self.player(bot)?;
-        // `place_entity` returns the created FactorioEntity; the executor does
-        // not need it, because the plan already knows what it placed and the
-        // world snapshot is refreshed by the event stream, not by this reply.
-        // The ticks it also returns are the point of the `_timed` variant.
-        self.rcon
+        // `place_entity` returns the FactorioEntity the game actually created,
+        // which is the truth half of a placement; `item`/`at`/`direction` are
+        // the intent half, captured before `at` is moved into the call below.
+        // Recording both, and their drift, is why this call site exists: see
+        // `Attempt::placed` (crates/executor/src/log.rs) and
+        // `factorio_bot_core::record::map`.
+        let intent = EntitySnapshot {
+            name: item.to_string(),
+            position: at.clone(),
+            direction,
+        };
+        let (entity, ticks) = self
+            .rcon
             .place_entity_timed(p, item.to_string(), at, direction, &self.world)
             .await
-            .map(|(_entity, ticks)| ticks)
-            .map_err(classify)
+            .map_err(classify)?;
+        let actual = EntitySnapshot {
+            name: entity.name,
+            position: entity.position,
+            direction: entity.direction,
+        };
+        let drift = drift_between(&intent, &actual);
+        self.placements
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                p,
+                Placement {
+                    intent,
+                    actual,
+                    drift,
+                },
+            );
+        Ok(ticks)
     }
 
     async fn insert(
@@ -606,6 +658,7 @@ mod tests {
             world: Arc::new(FactorioWorld::new()),
             defines: InventoryDefines::default(),
             connected: [1u8].into_iter().collect(),
+            placements: Mutex::new(BTreeMap::new()),
         };
         let f = tokio::runtime::Builder::new_current_thread()
             .enable_all()

@@ -166,7 +166,9 @@ pub enum Status {
 /// (no verdict was ever given). Such an attempt has no `planned_end_tick`
 /// either, because it never finished — so `planned_duration()` is `None` for
 /// it, exactly as it is for one still in flight.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// `Eq` dropped when `placed` was added: `Placement` carries a `Position`,
+// which carries `f64`, and `f64` has no total ordering to derive `Eq` from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Attempt {
     pub status: Status,
     /// Which attempt this is, counting from 1. Greater than 1 means the action
@@ -188,6 +190,15 @@ pub struct Attempt {
     /// `None` if the game never said — see the type docs.
     pub replied_tick: Option<Ticks>,
     pub error: Option<String>,
+    /// What this attempt placed, when it placed anything.
+    ///
+    /// Set only for a `Place` action, and only once the game has answered —
+    /// see `RconActuator::place` (`crates/executor/src/rcon_actuator.rs`),
+    /// which is the only place with both halves of it: the arguments are the
+    /// intent, the entity the game hands back is the truth. Nothing in this
+    /// crate reads the field yet; it exists so a later task can carry it out
+    /// to `map.jsonl` alongside the rest of the run record.
+    pub placed: Option<factorio_bot_core::record::map::Placement>,
 }
 
 /// One walk step, as the run observed it.
@@ -376,6 +387,7 @@ impl ExecutionLog {
                 dispatched_tick: None,
                 replied_tick: None,
                 error: None,
+                placed: None,
             },
         );
     }
@@ -447,6 +459,7 @@ impl ExecutionLog {
             dispatched_tick: None,
             replied_tick: None,
             error: None,
+            placed: None,
         });
         a.status = Status::Success;
         a.planned_end_tick = Some(tick);
@@ -466,6 +479,7 @@ impl ExecutionLog {
             dispatched_tick: None,
             replied_tick: None,
             error: None,
+            placed: None,
         });
         a.status = Status::Failed;
         a.planned_end_tick = Some(tick);

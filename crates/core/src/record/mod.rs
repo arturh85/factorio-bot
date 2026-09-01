@@ -18,6 +18,7 @@ use crate::types::Position;
 
 pub mod frames;
 pub mod lanes;
+pub mod map;
 pub mod retention;
 pub mod samples;
 pub mod splits;

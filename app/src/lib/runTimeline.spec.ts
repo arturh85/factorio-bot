@@ -1,6 +1,9 @@
 import {describe, expect, it} from 'vitest';
 import {
     botsOf,
+    formatAgo,
+    formatWhen,
+    startedUnixOf,
     laneAt,
     laneBots,
     camerasOf,
@@ -222,5 +225,42 @@ describe('lanes', () => {
     it('extends the axis to cover lanes', () => {
         const bounds = tickBounds([], [], [lane(1, 0, 'mine', 50, 800)]);
         expect(bounds).toEqual({from: 50, to: 800});
+    });
+});
+
+describe('run timestamps', () => {
+    it('prefers the manifest start time', () => {
+        expect(startedUnixOf({run_id: 'run-1000-5', started_unix: 4242})).toBe(4242);
+    });
+
+    it('falls back to the id for a run that never finished', () => {
+        // The server reports `started_unix: null` on purpose there -- it does
+        // not know -- but the list still has to show *when*, and the id
+        // carries it. Same fallback the server orders by.
+        expect(startedUnixOf({run_id: 'run-1788277287-11819', started_unix: null})).toBe(1788277287);
+    });
+
+    it('is null for an id that carries no timestamp', () => {
+        expect(startedUnixOf({run_id: 'handwritten', started_unix: null})).toBeNull();
+    });
+
+    it('renders an em dash rather than an epoch date for an unknown time', () => {
+        expect(formatWhen(null)).toBe('—');
+    });
+
+    it('renders distinct times distinctly', () => {
+        const a = formatWhen(1788277287);
+        const b = formatWhen(1788277287 + 86400 * 3);
+        expect(a).not.toBe('');
+        expect(a).not.toBe(b);
+    });
+
+    it('describes recency coarsely', () => {
+        const now = 1788277287;
+        expect(formatAgo(now - 10, now)).toBe('just now');
+        expect(formatAgo(now - 720, now)).toBe('12 min ago');
+        expect(formatAgo(now - 7200, now)).toBe('2 h ago');
+        expect(formatAgo(now - 86400 * 2, now)).toBe('2 d ago');
+        expect(formatAgo(null, now)).toBe('');
     });
 });

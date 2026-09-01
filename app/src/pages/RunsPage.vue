@@ -13,12 +13,15 @@ import {runFrameUrl} from '@/api/client';
 import {
     botsOf,
     camerasOf,
+    formatAgo,
     formatTicks,
+    formatWhen,
     fractionOf,
     frameAt,
     laneAt,
     laneBots,
     splitAt,
+    startedUnixOf,
     compareSplits
 } from '@/lib/runTimeline';
 
@@ -26,8 +29,19 @@ const store = useRunsStore();
 const selected = ref<string | null>(null);
 let timer: number | null = null;
 
-onMounted(() => store.loadRuns());
-onBeforeUnmount(() => stopTimer());
+// Refreshed every half minute so a page left open does not keep insisting a
+// run happened "just now" an hour later.
+const nowUnix = ref(Math.floor(Date.now() / 1000));
+let clock: number | null = null;
+
+onMounted(() => {
+    store.loadRuns();
+    clock = window.setInterval(() => (nowUnix.value = Math.floor(Date.now() / 1000)), 30_000);
+});
+onBeforeUnmount(() => {
+    stopTimer();
+    if (clock !== null) window.clearInterval(clock);
+});
 
 function stopTimer() {
     if (timer !== null) {
@@ -133,6 +147,10 @@ function markerLeft(tick: number): string {
                         :class="{'is-active': selected === run.run_id}"
                         @click="open(run.run_id)"
                     >
+                        <span class="runs__when">
+                            {{ formatWhen(startedUnixOf(run)) }}
+                            <em>{{ formatAgo(startedUnixOf(run), nowUnix) }}</em>
+                        </span>
                         <span class="runs__id">{{ run.run_id }}</span>
                         <span class="runs__meta">
                             <!-- `finished: false` means crashed OR still going; the
@@ -149,6 +167,9 @@ function markerLeft(tick: number): string {
         <section v-if="store.detail" class="runs__viewer">
             <header class="runs__header">
                 <h2>{{ store.detail.summary.run_id }}</h2>
+                <span class="runs__when">
+                    {{ formatWhen(startedUnixOf(store.detail.summary)) }}
+                </span>
                 <span v-if="currentSplit" class="runs__now">{{ currentSplit.goal }}</span>
             </header>
 
@@ -310,9 +331,21 @@ function markerLeft(tick: number): string {
 .runs__list button.is-active {
     border-color: #3b82f6;
 }
+.runs__when {
+    display: block;
+    font-weight: 600;
+}
+.runs__when em {
+    font-weight: 400;
+    font-style: normal;
+    opacity: 0.6;
+    margin-left: 0.4rem;
+}
 .runs__id {
     display: block;
     font-family: monospace;
+    font-size: 0.75rem;
+    opacity: 0.55;
 }
 .runs__meta {
     display: block;

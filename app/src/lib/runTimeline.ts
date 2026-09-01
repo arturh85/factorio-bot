@@ -7,7 +7,7 @@
  * in a way you would not notice by looking.
  */
 
-import {ArchivedFrame, Lane, Split} from '@/api/types';
+import {ArchivedFrame, Lane, RunSummary, Split} from '@/api/types';
 
 /** A frame that can be placed on the axis: one whose filename parsed. */
 export interface PlacedFrame extends ArchivedFrame {
@@ -182,4 +182,50 @@ export function laneAt(lanes: Lane[], bot: number, tick: number): Lane | null {
         return lane;
     }
     return null;
+}
+
+/**
+ * When a run began, in unix seconds, for *display*.
+ *
+ * Prefers the manifest's `started_unix`. A run that never finished has none --
+ * the server reports it as null on purpose, because it genuinely does not know
+ * -- so this falls back to the timestamp in the run id, which this project
+ * mints as `run-<unix seconds>-<sub-second>`. The same fallback the server uses
+ * to order the list.
+ *
+ * `null` only when neither is available, which means an id from somewhere else
+ * entirely.
+ */
+export function startedUnixOf(run: Pick<RunSummary, 'run_id' | 'started_unix'>): number | null {
+    if (run.started_unix !== null) return run.started_unix;
+    const match = /^run-(\d+)-/.exec(run.run_id);
+    return match ? Number(match[1]) : null;
+}
+
+/**
+ * A run's start as local date and time.
+ *
+ * Local rather than UTC: this answers "when did I run this", which is a
+ * question about the reader's day.
+ */
+export function formatWhen(unix: number | null): string {
+    if (unix === null) return '—';
+    return new Date(unix * 1000).toLocaleString(undefined, {
+        day: 'numeric',
+        month: 'short',
+        hour: '2-digit',
+        minute: '2-digit'
+    });
+}
+
+/** How long ago, coarsely: "just now", "12 min ago", "3 h ago", "2 d ago". */
+export function formatAgo(unix: number | null, nowUnix: number): string {
+    if (unix === null) return '';
+    const seconds = Math.max(0, nowUnix - unix);
+    if (seconds < 90) return 'just now';
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `${minutes} min ago`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 36) return `${hours} h ago`;
+    return `${Math.round(hours / 24)} d ago`;
 }

@@ -3205,6 +3205,75 @@ mod tests {
         );
     }
 
+    /// T7 -- the documented trap (design §3): `Holder::Anyone` is satisfied by
+    /// the *sum* across the roster, so a goal the roster already meets between
+    /// them plans nothing at all, however surprising that looks from outside.
+    /// Per-bot sizing does not and should not change this -- see §3 for why
+    /// redefining `Anyone` would be the wrong fix -- but it is a live trap
+    /// worth pinning: `scripts/goal_smoke.lua`'s own goal hits exactly this
+    /// shape on a freeplay roster.
+    #[test]
+    fn a_roster_holding_the_count_between_them_plans_nothing() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let mut s = state(&bots);
+        for b in bots {
+            s.gain(b, "iron-plate", 3);
+            s.gain(b, "stone-furnace", 2);
+        }
+
+        let met = expand(
+            &[Goal::Have {
+                item: "iron-plate".into(),
+                count: 12,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .unwrap();
+        assert_eq!(
+            met.len(),
+            0,
+            "12 held between four bots already meets a roster-wide goal of 12"
+        );
+
+        let short_by_one = expand(
+            &[Goal::Have {
+                item: "iron-plate".into(),
+                count: 13,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .unwrap();
+        // Six actions, from scratch: mine ore, mine coal, place a furnace
+        // (none of the roster's held furnaces count until placed), insert
+        // both, and take the one plate out. Not a hardcoded magic number --
+        // this is what "a roster short by one now plans a real minimal
+        // production" looks like, and pins design doc \u{a7}3's own figure.
+        assert_eq!(
+            short_by_one.len(),
+            6,
+            "one more than the roster holds must plan the minimal production \
+             of exactly one plate, got: {:?}",
+            short_by_one.actions().map(|a| &a.kind).collect::<Vec<_>>()
+        );
+        let plates_produced: u32 = short_by_one
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Remove { item, count, .. } if item == "iron-plate" => Some(*count),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(
+            plates_produced, 1,
+            "exactly one plate, not the whole shortfall re-derived"
+        );
+    }
+
     #[test]
     fn hand_crafting_converges_only_when_two_ingredients_need_producing() {
         let mut s = state(&[BotId(1)]);

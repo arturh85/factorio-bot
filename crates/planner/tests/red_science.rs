@@ -131,6 +131,28 @@ fn more_bots_finish_sooner() {
     //
     // The floor stays 2x rather than the measured 3.186x, so ordinary
     // makespan movement does not trip it.
+    //
+    // Re-measured at `3e08f8af` (the per-bot share-sizing design doc's
+    // baseline, before any of that work landed): one = 7075, many = 2100. The
+    // `one = 6691` above was already stale by then; nothing here had touched
+    // `one`, so this is the same drift ordinary movement always produces, not
+    // evidence of a bug -- but it went unrecorded until now, so record it.
+    //
+    // Re-measured again at the tip of that work -- per-bot share sizing
+    // (`6fcbba5c`, `8cc73153`, `7d614681`), the interchangeable-bots guard's
+    // deletion (`56870959`, `f3a22e29`), and binding a `Holder::Share` chain's
+    // ownership to the bot it was sized against (`c470388b`): one = 7075
+    // (unchanged -- a solo bot's plan has no share to size differently, so a
+    // rule about sizing shares cannot move it), many = 2063 (2100 -> 2063, an
+    // *improvement* of 37 ticks, not a regression). The share-binding commit's
+    // own cost -- serialising a `Researched` chain's trigger and pack
+    // subtrees onto one bot, recorded in `crates/planner/src/goal.rs`'s
+    // `Holder::Share` doc as 22,072 ticks on a live four-bot run -- does not
+    // show up here: this goal is `automation-science-pack`, which this
+    // fixture's recipes reach with no unlocking technology, so no `Researched`
+    // goal and no share-bound trigger/pack subtree ever enters this plan. This
+    // test does not exercise that cost; it is not evidence the cost is absent
+    // elsewhere.
     assert!(
         many.saturating_mul(2) < one,
         "four bots ({} ticks) must beat one ({} ticks) by more than 2x",
@@ -138,12 +160,12 @@ fn more_bots_finish_sooner() {
         one
     );
     // Absolute ceiling: catches a regression even if `one` also moves in a
-    // way that keeps the 2x ratio satisfied. 2350 sits 250 ticks (12%) above
-    // the measured 2100 — room for ordinary movement, but tight enough that a
-    // repeat of task 2's 194-tick regression fails here instead of passing
-    // silently. Retighten it whenever the measured figure drops again: a
-    // ceiling with 74% headroom, which 3200 became, guards nothing.
-    assert!(many < 2350, "four bots regressed past 2350 ticks: {}", many);
+    // way that keeps the 2x ratio satisfied. Retightened from 2350 to 2310
+    // now that the measured figure dropped to 2063 -- 2310 sits 247 ticks
+    // (12%) above it, the same margin the previous ceiling kept above 2100.
+    // Retighten it whenever the measured figure drops again: a ceiling with
+    // 74% headroom, which 3200 became, guards nothing.
+    assert!(many < 2310, "four bots regressed past 2310 ticks: {}", many);
 }
 
 #[test]

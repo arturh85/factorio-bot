@@ -192,9 +192,16 @@ function Sup:step()
     -- actually did: the plan knows which bot owns an action and what it is
     -- called, the observation knows when the game ran it and how it ended, and
     -- neither half carries both.
+    -- The full tally, not just `failed`. A run that dispatched everything and
+    -- learned nothing back and a run that dispatched nothing at all both report
+    -- `failed = 0`, and they are completely different events -- the first is
+    -- alarming, the second is usually a plan whose actions were all walks.
+    -- `pending` is what separates them, so a caller should not have to guess.
     return { action = "ran", state = "planning", milestone_index = self.index,
              failed = failed, first_error = obs.first_error,
              iteration = self.iterations,
+             done = obs.done, pending = obs.pending, running = obs.running,
+             success = obs.success, lost = obs.lost,
              steps = steps, actions = obs.actions }
 end
 

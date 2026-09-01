@@ -58,6 +58,8 @@ mod tests {
                 __run_calls = __run_calls + 1
                 local o = __run_obs[__run_calls] or {}
                 return { failed = o.failed or 0, lost = o.lost or 0,
+                         pending = o.pending or 0, success = o.success or 0,
+                         running = 0, done = true,
                          first_error = o.first_error }
             end
         "#
@@ -246,6 +248,38 @@ mod tests {
         )
         .exec()
         .unwrap();
+    }
+
+    #[test]
+    fn a_run_reports_its_whole_tally_not_just_failures() {
+        // A run that dispatched everything and learned nothing back and a run
+        // that dispatched nothing at all both report `failed = 0`. They are
+        // completely different events, and `pending` is what separates them --
+        // so a caller must not have to guess from the one number.
+        let lua = harness("{5, 0}", "{{failed=0, pending=5, success=0}}");
+        lua.load(
+            "local sup = supervisor.new(supervisor.list {'a'}, {})
+             local seen
+             repeat
+                 local t = sup:step()
+                 if t.action == 'ran' then seen = t end
+             until sup:finished()
+             __pending, __success, __failed = seen.pending, seen.success, seen.failed",
+        )
+        .exec()
+        .unwrap();
+        let g = lua.globals();
+        assert_eq!(
+            g.get::<i64>("__pending").unwrap(),
+            5,
+            "nothing was dispatched"
+        );
+        assert_eq!(g.get::<i64>("__success").unwrap(), 0);
+        assert_eq!(
+            g.get::<i64>("__failed").unwrap(),
+            0,
+            "and `failed` alone would have called that a clean run"
+        );
     }
 
     #[test]

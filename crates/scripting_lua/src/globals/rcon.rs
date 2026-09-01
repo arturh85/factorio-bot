@@ -116,6 +116,41 @@ end
     )?;
     let rcon = _rcon.clone();
     map_table.set(
+        "__doc_entry_last_tick",
+        String::from(
+            r#"
+--- the game tick stamped on the most recent reply
+-- Sends nothing: every timed `rcon.*` call already comes back stamped with
+-- `game.tick` from inside the game, and this reports the last one seen.
+--
+-- So it is as current as your last *timed* call, and `nil` before there has
+-- been one.
+--
+-- **Only the timed calls advance it**, which is not the same as all of them.
+-- The query calls -- `inventory_contents_at`, `find_entities_in_radius`,
+-- `player_info` -- consume the reply body as their return value and never take
+-- a tick stamp off it, so polling with one of those leaves this frozen at
+-- whatever the last action reported. A measurement loop built on it reads a
+-- constant and looks like an instantaneous result.
+--
+-- The calls that do advance it are the ones that act: `mine`, `craft`,
+-- `place_entity`, `insert_to_inventory`, `remove_from_inventory`, `move`,
+-- `add_research`, `frame_capture_start`.
+-- @treturn number|nil the tick, or nil if the game has not answered yet
+function rcon.last_tick()
+end
+    "#,
+        ),
+    )?;
+    {
+        let rcon = _rcon.clone();
+        map_table.set(
+            "last_tick",
+            lua.create_function(move |_lua, ()| Ok(rcon.as_ref().last_tick()))?,
+        )?;
+    }
+
+    map_table.set(
         "__doc_entry_frame_capture_start",
         String::from(
             r#"

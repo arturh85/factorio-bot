@@ -503,7 +503,23 @@ impl Method for Smelt {
         // actually acting, so the speed is read for *that* entity rather than
         // assumed — see `machine_crafting_speed` for why this is written now
         // even though it changes nothing while the furnace is always stone.
-        let smelt_lag = smelting_ticks(&ctx.state, &recipe, &furnace_entity).saturating_mul(runs);
+        // One craft cycle of headroom, because this lag is a *schedule
+        // constraint* and not a report. A removal placed at exactly the
+        // predicted completion is right half the time by construction, and
+        // being early costs an entire replan cycle while being late costs
+        // scheduled slack the bot spends on other work anyway.
+        //
+        // The mechanism the headroom covers: the furnace cannot begin before
+        // the ore lands, and the insert action's reply tick is when the *mod*
+        // returned, not when the furnace next looked at its input slot. A start
+        // that misses the current craft boundary loses up to one cycle.
+        //
+        // Observed before this: a removal at insert+1924 against a modelled
+        // 1920 came back with nine plates out of ten, and the run spent the
+        // rest of its iteration budget replanning around the one that was
+        // missing.
+        let per_run = smelting_ticks(&ctx.state, &recipe, &furnace_entity);
+        let smelt_lag = per_run.saturating_mul(runs).saturating_add(per_run);
         for id in insert_ids {
             let lag = if id == fuel_id { 0 } else { smelt_lag };
             steps.push(Step::Link {
@@ -1971,11 +1987,12 @@ mod tests {
                 .1
         };
 
-        // iron-plate is 3.2 s each, so two plates lag 2 * 192 = 384 ticks.
+        // iron-plate is 3.2 s each, so two plates are 2 * 192, plus one cycle
+        // of headroom for the furnace's start: 3 * 192 = 576.
         assert_eq!(
             lag_from("iron-ore"),
-            384,
-            "the ore insert carries the smelting time"
+            576,
+            "the ore insert carries the smelting time plus its start headroom"
         );
         // Fuel must be in before the removal, but does not itself take smelting time.
         assert_eq!(lag_from("coal"), 0, "the fuel insert carries no lag");
@@ -2453,6 +2470,22 @@ mod tests {
     }
 
     #[test]
+    fn the_lag_carries_one_cycle_of_headroom_over_the_smelting_time() {
+        // A removal placed at exactly the predicted completion is right half
+        // the time by construction. Live, one at insert+1924 against a
+        // modelled 1920 came back with nine plates of ten, and the run spent
+        // its remaining iteration budget replanning around the missing one.
+        let s = state_with_furnace_speed(1.0);
+        let bare = 10 * 192;
+        assert!(
+            smelt_lag_for(&s, "iron-plate", 10) > bare,
+            "the lag is a schedule constraint, so it must be an upper bound \
+             rather than a point estimate"
+        );
+        assert_eq!(smelt_lag_for(&s, "iron-plate", 10) - bare, 192);
+    }
+
+    #[test]
     fn the_furnace_lag_divides_by_the_furnaces_crafting_speed() {
         // Ten iron plates at 3.2 s each is 192 ticks per run in a stone
         // furnace (speed 1) and 96 in a steel or electric one (speed 2).
@@ -2462,13 +2495,16 @@ mod tests {
         // reach the second row. It is asserted through the method rather than
         // through `smelting_ticks` alone so that the day someone teaches
         // `Smelt` to use a better furnace, the wiring is already proved.
+        // Eleven cycles, not ten: the lag carries one cycle of headroom for a
+        // start that misses the current craft boundary. The speed divisor is
+        // what this test is about, and it still halves both figures.
         assert_eq!(
             smelt_lag_for(&state_with_furnace_speed(1.0), "iron-plate", 10),
-            1920
+            11 * 192
         );
         assert_eq!(
             smelt_lag_for(&state_with_furnace_speed(2.0), "iron-plate", 10),
-            960,
+            11 * 96,
             "a furnace at speed 2 smelts the same ten plates in half the time"
         );
     }

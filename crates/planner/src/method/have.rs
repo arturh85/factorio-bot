@@ -1028,12 +1028,22 @@ impl Method for SplitAcrossBots {
             // handed to a bot already holding five is a goal that is already
             // met — and the share evaporates. Ask for what the bot has *plus*
             // its share, so the shortfall the other methods see is the share.
-            // Shares sum to the shortfall, so the roster ends up with at least
-            // `count` between them however the holdings started.
-            let held = ctx.state.inventory_count(*bot, item);
+            //
+            // The subgoal below is claimed a frame later by whichever method
+            // satisfies `Have { count, whose: Share(bot) }`, and that method
+            // computes its own shortfall against `available`, not the raw
+            // holding — see `shortfall`/`demand` above. So the target here
+            // must be stated in the same ledger `available` reads, or the
+            // subgoal's shortfall comes out as `share + reserved` instead of
+            // `share`: a second top-level split of the same item, sized
+            // against the raw holding, would not see the first split's
+            // reservation and would re-ask for it. Reading `inventory_count`
+            // here is exactly that bug — it produced 24 ore for two splits of
+            // 8 across four identical bots, instead of 16.
+            let spare = ctx.state.available(&Holder::Share(*bot), item);
             steps.push(Step::Subgoal(Goal::Have {
                 item: item.clone(),
-                count: held.saturating_add(share),
+                count: spare.saturating_add(share),
                 whose: Holder::Share(*bot),
             }));
         }
@@ -2347,6 +2357,44 @@ mod tests {
         )
         .unwrap();
         assert_eq!(net.len(), 2, "two chains for two units");
+    }
+
+    /// Two top-level splits of the same item, over four *identical* bots, must
+    /// not double-count what the first split already promised. Each `Have`
+    /// asks for 8, so the roster shortfall is 16 — but the second split's
+    /// per-bot target used to read `inventory_count`, which does not see the
+    /// first split's reservations, so it re-asked for `share + reserved`
+    /// instead of `share` and the roster mined 24.
+    #[test]
+    fn two_top_level_splits_do_not_double_count_what_the_first_produced() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let s = state(&bots);
+        let net = expand(
+            &[Goal::All(vec![
+                Goal::Have {
+                    item: "iron-ore".into(),
+                    count: 8,
+                    whose: Holder::Anyone,
+                },
+                Goal::Have {
+                    item: "iron-ore".into(),
+                    count: 8,
+                    whose: Holder::Anyone,
+                },
+            ])],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .unwrap();
+        let mined: u32 = net
+            .actions()
+            .map(|a| match &a.kind {
+                ActionKind::Mine { count, .. } => *count,
+                other => panic!("expected mines, got {:?}", other),
+            })
+            .sum();
+        assert_eq!(mined, 16, "two shortfalls of 8 sum to 16, not 24");
     }
 
     /// A smelting recipe the fixture does not ship: steel plate, 16 s a run

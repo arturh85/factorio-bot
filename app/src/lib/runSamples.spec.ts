@@ -121,28 +121,19 @@ describe('productionSeries', () => {
 });
 
 describe('itemsFromGoals', () => {
-    it('reads the item out of a have goal', () => {
-        expect(itemsFromGoals(['have 4 iron-plate (anyone)'])).toEqual(['iron-plate']);
+    it('reads the item out of a have goal, the shape render_goal actually emits', () => {
+        expect(itemsFromGoals(['have 4 iron-plate'])).toEqual(['iron-plate']);
     });
 
-    it('reads the item out of a produce goal', () => {
-        expect(itemsFromGoals(['produce 50 iron-plate'])).toEqual(['iron-plate']);
-    });
-
-    it('reads the item out of a produce-to-unlock goal', () => {
-        expect(itemsFromGoals(['produce 50 iron-plate to unlock automation'])).toEqual(['iron-plate']);
-    });
-
-    it('strips the rate suffix off a producing goal', () => {
-        expect(itemsFromGoals(['produce 5.5 iron-plate/min'])).toEqual(['iron-plate']);
-    });
-
-    it('ignores goals that name no item', () => {
-        expect(itemsFromGoals(['research automation', 'all of 3 goals'])).toEqual([]);
+    it('ignores freeform goal text that names no parseable item', () => {
+        // `Split.goal` is caller-supplied free text, not a rendering of the
+        // planner's `Goal` -- these are all real strings seen elsewhere in
+        // this repo, and none of them match the one known shape.
+        expect(itemsFromGoals(['iron', 'researched(automation)', 'smelt iron plates x20'])).toEqual([]);
     });
 
     it('dedupes while keeping first-seen order', () => {
-        expect(itemsFromGoals(['have 4 iron-plate (anyone)', 'produce 50 iron-plate', 'produce 5 copper-plate']))
+        expect(itemsFromGoals(['have 4 iron-plate', 'have 4 iron-plate', 'have 5 copper-plate']))
             .toEqual(['iron-plate', 'copper-plate']);
     });
 });
@@ -161,11 +152,11 @@ describe('producedItems', () => {
 describe('trackedItems', () => {
     it('prefers items named by the goals', () => {
         const s = [forceSample(61500, {'copper-plate': 1})];
-        expect(trackedItems(['produce 50 iron-plate'], s)).toEqual(['iron-plate']);
+        expect(trackedItems(['have 50 iron-plate'], s)).toEqual(['iron-plate']);
     });
 
-    it('falls back to produced items when no goal parses', () => {
+    it('falls back to produced items when no goal parses -- the common case, since most goal text is freeform', () => {
         const s = [forceSample(61500, {'copper-plate': 1})];
-        expect(trackedItems(['research automation'], s)).toEqual(['copper-plate']);
+        expect(trackedItems(['researched(automation)'], s)).toEqual(['copper-plate']);
     });
 });

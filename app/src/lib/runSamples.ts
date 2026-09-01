@@ -67,21 +67,29 @@ export function productionSeries(samples: Sample[], items: string[]): Production
 }
 
 /**
- * The item a milestone goal's display string names, or null for a goal that
- * does not name one (`research foo`, `all of N goals`).
+ * The item a milestone goal string names, or null for a goal that does not
+ * name one.
  *
- * Goal strings come from `Goal`'s `Display` impl in `crates/planner`
- * (`have <n> <item> (<holder>)`, `produce <n> <item>`,
- * `produce <n> <item> to unlock <tech>`, `produce <rate> <item>/min`) and are
- * not a machine format -- this is a best-effort read of a string meant for a
- * human, not a contract the planner owes the frontend.
+ * `Split.goal` is **not** a rendering of the planner's `Goal` -- it is
+ * whatever string a script passed to `record.milestone_started(index, goal)`,
+ * documented there as "a human-readable description of what is being
+ * pursued" (`crates/scripting_lua/src/globals/record.rs`). Most callers are
+ * expected to pass `tostring(goal)` on a `goal.*` value, and the one function
+ * that renders those, `render_goal` in
+ * `crates/scripting_lua/src/globals/goal/value.rs`, has a fixed shape for
+ * `goal.have`: `"have {count} {item}"` (there is no `produce` form -- the
+ * planner's `Goal::Produced` has no Lua constructor to render). But nothing
+ * enforces that a script calls `tostring` at all: `"iron"`,
+ * `"researched(automation)"` and `"smelt iron plates x20"` all appear as real
+ * goal strings elsewhere in this repo, and none of them name a parseable
+ * item. So this matches the one shape known to occur and otherwise returns
+ * null -- it is a best-effort read of free text, not a parser with a
+ * guaranteed input, which is exactly why `trackedItems` below falls back to
+ * `producedItems` when nothing here matches.
  */
 function itemFromGoal(goal: string): string | null {
-    let match = /^have \d+ (\S+) /.exec(goal);
-    if (match) return match[1];
-    match = /^produce \d+(?:\.\d+)? (\S+)/.exec(goal);
-    if (match) return match[1].split('/')[0];
-    return null;
+    const match = /^have \d+ (\S+)$/.exec(goal);
+    return match ? match[1] : null;
 }
 
 /**

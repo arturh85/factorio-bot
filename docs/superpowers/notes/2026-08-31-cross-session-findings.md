@@ -289,6 +289,32 @@ disk: 0 before the fix, 1 after. Nothing needed reproducing. Past logs answer
 questions nobody asked when they were written, and re-reading them is cheaper
 than every other diagnostic available.
 
+**Confirmed as a pattern, not an incident.** Two sessions hit this shape three
+times in one day, on unrelated subsystems, and neither found it by reading code:
+
+- **A `tracing` subscriber that was never installed**, masked by a `paris` line
+  one statement away in the same startup sequence saying nearly the same thing.
+  Seven call sites silent for months, two of them error paths.
+- **`get_contents()` changed format in Factorio 2.0**, adapted on the Rust side
+  and not the Lua side. The adapted half went on reporting correct numbers
+  while the mod could not build anything at all.
+- **`add_research` discarded the boolean that said "no"**, so a refused action
+  reported success. It cost 61,345 game ticks of watching a loop that a judged
+  reply would have named immediately.
+
+The common structure: **a broken component and a working one produce the same
+observable, so the observable stops being evidence for either.** The working
+half is not incidental to the bug -- it is what makes the bug survive review,
+because nobody has to overlook a missing signal. The signal is present.
+
+None of the three is visible to a compiler or a passing test suite, and none
+was found by reasoning about the code. All three were found by **running the
+same operation against a known-good reference**: a real serve log against the
+absent line, the mod's actual wire payload against the Rust struct, a judged
+RCON reply against an assumed one. That check is what the day is worth
+remembering for -- a test asserts what you already believed, and every one of
+these lived precisely in the gap between belief and output.
+
 Related: this would have been *created* rather than discovered by the migration
 it was found in front of. Converting 207 working `paris` calls into `tracing`
 would have silenced the application, with a green suite and a clean release

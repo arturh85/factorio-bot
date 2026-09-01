@@ -233,6 +233,28 @@ pub fn expand(
     Ok(net)
 }
 
+/// Whose inventory a goal is stated against, if it names one.
+///
+/// [`Goal::Have`] and [`Goal::Produced`] carry the *same* `whose` with the
+/// *same* meaning — `Produced`'s own doc says so — and every place the driver
+/// reads it has to treat them alike. Reading it off `Have` alone is how a
+/// trigger technology's production came to be planned for one bot's inventory
+/// and welded to nobody's: `Researched` asks for a trigger's item as
+/// `Produced { whose: Holder::Share(chain_actor) }` "for the same reason the
+/// pack bill uses it: one action reading one bot's inventory", and that claim
+/// was simply not enforced. The smelt's `insert 50 iron-ore` stayed freely
+/// assignable while the `Have { iron-ore, 50, Share }` under it opened a chain
+/// of its own, so the scheduler could — and on a four-bot run did — mine onto
+/// one bot and ask another to load the furnace.
+///
+/// One function so the three reads below cannot drift apart.
+fn stated_holder(goal: &Goal) -> Option<&Holder> {
+    match goal {
+        Goal::Have { whose, .. } | Goal::Produced { whose, .. } => Some(whose),
+        _ => None,
+    }
+}
+
 fn expand_goal(
     goal: &Goal,
     ctx: &mut ExpansionCtx,
@@ -254,11 +276,7 @@ fn expand_goal(
     let previous_actor = ctx.chain_actor;
     let previous_chain = ctx.chain;
     let previous_top_level = ctx.top_level;
-    if let Goal::Have {
-        whose: Holder::Bot(bot) | Holder::Share(bot),
-        ..
-    } = goal
-    {
+    if let Some(Holder::Bot(bot) | Holder::Share(bot)) = stated_holder(goal) {
         // The same reconciliation `expand` does for `chain_actor`, applied to
         // the roster a method decomposes with: `SplitAcrossBots` addresses the
         // bots the registry was built with, and nothing has checked those
@@ -339,21 +357,17 @@ fn expand_goal_body(
     // Nothing else. A goal that merely sits inside a chain needs no second
     // one, and welding what nobody has to gather serialises work that could
     // have run in parallel.
+    //
+    // The holder is read through `stated_holder`, so a `Goal::Produced` says
+    // all this exactly as a `Goal::Have` does. Reading it off `Have` alone is
+    // how a trigger technology's fifty iron plates came to be smelted by
+    // whoever, out of ore mined by someone else — see `stated_holder`.
     if ctx.chain.is_none() {
-        let owner = match goal {
-            Goal::Have {
-                whose: Holder::Bot(bot),
-                ..
-            } => Some(*bot),
+        let owner = match stated_holder(goal) {
+            Some(Holder::Bot(bot)) => Some(*bot),
             _ => None,
         };
-        let one_inventory = matches!(
-            goal,
-            Goal::Have {
-                whose: Holder::Bot(_) | Holder::Share(_),
-                ..
-            }
-        );
+        let one_inventory = matches!(stated_holder(goal), Some(Holder::Bot(_) | Holder::Share(_)));
         if one_inventory || method.converges(goal, &ctx.state) {
             let chain = ctx.chains.next();
             ctx.chain = Some(chain);
@@ -1173,6 +1187,51 @@ mod tests {
         );
     }
 
+    /// The same, for the goal kind the driver used to read `whose` off nothing
+    /// but `Have`. A trigger technology's work is a `Produced`, and it carries
+    /// the identical `whose` with the identical meaning.
+    #[test]
+    fn a_production_goal_rebinds_the_chain_actor_too() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        struct Record(Rc<RefCell<Vec<BotId>>>);
+        impl Method for Record {
+            fn name(&self) -> &'static str {
+                "record"
+            }
+            fn applicable(&self, goal: &Goal, _s: &PlanState) -> bool {
+                matches!(goal, Goal::Produced { .. })
+            }
+            fn expand(&self, _g: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+                self.0.borrow_mut().push(ctx.chain_actor);
+                Ok(vec![])
+            }
+        }
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let reg = MethodRegistry::new().with(Box::new(Record(seen.clone())));
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1), BotId(2)]);
+        let goals = vec![
+            Goal::Produced {
+                item: "coal".into(),
+                count: 1,
+                whose: Holder::Share(BotId(2)),
+                unlocks: None,
+            },
+            Goal::Produced {
+                item: "stone".into(),
+                count: 1,
+                whose: Holder::Anyone,
+                unlocks: None,
+            },
+        ];
+        expand(&goals, &state, &reg, BotId(1)).unwrap();
+        assert_eq!(
+            *seen.borrow(),
+            vec![BotId(2), BotId(1)],
+            "a Share-addressed production rebinds, and the binding is restored"
+        );
+    }
+
     /// Expands a `Have` into one action per unit, so a subtree has more than
     /// one action to compare chains across.
     struct ProduceEach;
@@ -1181,10 +1240,10 @@ mod tests {
             "produce-each"
         }
         fn applicable(&self, goal: &Goal, _s: &PlanState) -> bool {
-            matches!(goal, Goal::Have { .. })
+            matches!(goal, Goal::Have { .. } | Goal::Produced { .. })
         }
         fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
-            let Goal::Have { item, count, .. } = goal else {
+            let (Goal::Have { item, count, .. } | Goal::Produced { item, count, .. }) = goal else {
                 unreachable!()
             };
             Ok((0..*count)
@@ -1210,6 +1269,62 @@ mod tests {
             chains.iter().all(|c| *c == chains[0]),
             "one chain for the whole subtree, got {:?}",
             chains
+        );
+    }
+
+    /// **The live-run defect, at the level it was introduced.**
+    ///
+    /// `Researched` asks for a `craft-item` trigger's work as
+    /// `Produced { whose: Holder::Share(chain_actor) }`, saying in its own
+    /// comment that it does so "for the same reason the pack bill uses it: one
+    /// action reading one bot's inventory". The driver read `whose` off
+    /// `Goal::Have` alone, so that claim bought nothing: the production's
+    /// actions were left freely assignable while the `Have` subgoals beneath
+    /// them opened chains of their own. On a four-bot run the scheduler duly
+    /// mined 42 iron ore onto one bot and offered `insert 50 iron-ore` to
+    /// another, and the plan died on `precondition has 50 iron-ore ... does not
+    /// hold for bot 2`.
+    #[test]
+    fn a_share_addressed_production_goals_actions_all_share_one_chain() {
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1), BotId(2)]);
+        let reg = MethodRegistry::new().with(Box::new(ProduceEach));
+        let goal = Goal::Produced {
+            item: "coal".into(),
+            count: 3,
+            whose: Holder::Share(BotId(2)),
+            unlocks: None,
+        };
+        let net = expand(&[goal], &state, &reg, BotId(1)).unwrap();
+        assert_eq!(net.len(), 3);
+        let chains: Vec<Option<_>> = net.actions().map(|a| net.chain_of(a.id)).collect();
+        assert!(
+            chains[0].is_some(),
+            "a production stated against one inventory opens a chain"
+        );
+        assert!(
+            chains.iter().all(|c| *c == chains[0]),
+            "one chain for the whole subtree, got {:?}",
+            chains
+        );
+    }
+
+    /// The control for the test above: `Holder::Anyone` states nothing about
+    /// whose inventory, so it must still weld nothing. Without this, welding
+    /// every `Produced` would pass the test above just as happily.
+    #[test]
+    fn a_production_anyone_can_satisfy_opens_no_chain() {
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1), BotId(2)]);
+        let reg = MethodRegistry::new().with(Box::new(ProduceEach));
+        let goal = Goal::Produced {
+            item: "coal".into(),
+            count: 3,
+            whose: Holder::Anyone,
+            unlocks: None,
+        };
+        let net = expand(&[goal], &state, &reg, BotId(1)).unwrap();
+        assert!(
+            net.actions().all(|a| net.chain_of(a.id).is_none()),
+            "nothing has to gather, so nothing is welded"
         );
     }
 

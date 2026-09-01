@@ -3705,6 +3705,75 @@ mod tests {
             subgoals(&steps)
         );
     }
+    /// **The four-bot run of 2026-09-02, reduced to a test.**
+    ///
+    /// `run-1788300756-94802` gathered ore for two milestones and then raised
+    /// `precondition has 50 iron-ore of action ActionId(8) does not hold for
+    /// bot 2` on `goal.researched("automation")`. Everything here is taken
+    /// from that run's `samples.jsonl` at the tick it died: three bots, the
+    /// freeplay starting inventory, and the ore each had actually mined —
+    /// **unequal**, which is the condition no fixture had until now and which
+    /// the whole defect needed. The same goal planned fine against bots
+    /// holding nothing, which is why every existing test passed.
+    ///
+    /// `automation` sits above `steam-power`, a `craft-item` trigger for fifty
+    /// iron plates, so the plan carries a production subtree and a
+    /// science-pack subtree at once. Before the driver read `whose` off
+    /// `Produced` as well as `Have`, the production's `insert 50 iron-ore` was
+    /// welded to nothing while the mining under it opened a chain of its own,
+    /// and the two landed on different bots.
+    #[test]
+    fn the_live_four_bot_research_run_plans_and_schedules() {
+        let bots = [BotId(2), BotId(3), BotId(4)];
+        let mut s = PlanState::from_world(
+            Arc::new(crate::test_world::world_with_trigger_prerequisite()),
+            &bots,
+        );
+        for bot in bots {
+            // `initiate_missing_players_with_default_inventory`, plus the eight
+            // iron plates freeplay really starts a player with.
+            s.gain(bot, "wood", 1);
+            s.gain(bot, "stone-furnace", 1);
+            s.gain(bot, "burner-mining-drill", 1);
+            s.gain(bot, "iron-plate", 8);
+        }
+        // Milestones 1 and 2 of the run, as the samples recorded them.
+        s.gain(BotId(2), "iron-ore", 8);
+        s.gain(BotId(3), "iron-ore", 8);
+        s.gain(BotId(4), "iron-ore", 4);
+        s.gain(BotId(2), "copper-ore", 2);
+        s.gain(BotId(3), "copper-ore", 5);
+        s.gain(BotId(4), "copper-ore", 13);
+
+        let net = expand(
+            &[Goal::Researched("automation".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(2),
+        )
+        .expect("the goal expands");
+
+        // The claim under the fix, stated on the network rather than inferred
+        // from the schedule: the furnace load and the mining that supplies it
+        // are one chain, so no assignment can separate them.
+        let insert = net
+            .actions()
+            .find(|a| a.label == "insert 50 iron-ore")
+            .expect("the trigger's fifty plates are smelted");
+        let mine = net
+            .actions()
+            .find(|a| a.label == "mine 42 iron-ore")
+            .expect("and the ore for them is mined");
+        assert_eq!(
+            net.chain_of(insert.id),
+            net.chain_of(mine.id),
+            "the ore and the furnace it goes into must be welded to one runner"
+        );
+        assert!(net.chain_of(insert.id).is_some(), "and to a real chain");
+
+        schedule(&net, &s, &bots).expect("and the plan schedules on the roster it was made for");
+    }
+
     #[test]
     fn an_absent_trigger_count_means_one_not_none() {
         let s = trigger_state(

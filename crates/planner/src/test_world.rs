@@ -444,6 +444,70 @@ pub(crate) fn world_with_trigger(
     world
 }
 
+/// A `craft-item` trigger technology sitting as the **prerequisite** of an
+/// ordinary pack-costed one — the shape the live game presents and no other
+/// fixture here does.
+///
+/// `world_with_trigger` builds a trigger technology with no prerequisites, so
+/// a plan for it contains exactly one subtree and the scheduler has nothing to
+/// choose between. Vanilla 2.0 puts `steam-power` ("craft 50 iron plates")
+/// *under* `automation`, so planning `automation` produces a trigger's
+/// production subtree **and** a science-pack subtree competing for the same
+/// roster. That competition is what exposed the defect: the pack bill is a
+/// `Have { .. Share }` and welds into one chain, the trigger's production was
+/// a `Produced { .. Share }` and welded into none, so the scheduler mined the
+/// ore onto one bot and asked another to load the furnace.
+///
+/// The numbers are the real ones for both technologies.
+pub(crate) fn world_with_trigger_prerequisite() -> FactorioWorld {
+    let json = r#"
+    {
+      "name": "player",
+      "force_id": 1,
+      "current_research": null,
+      "research_progress": null,
+      "technologies": {
+        "steam-power": {
+          "name": "steam-power",
+          "enabled": true,
+          "upgrade": false,
+          "researched": false,
+          "prerequisites": [],
+          "research_unit_ingredients": [],
+          "research_unit_count": 0,
+          "research_unit_energy": 0.0,
+          "order": "a-0",
+          "level": 1,
+          "valid": true,
+          "research_trigger": { "type": "craft-item", "item": "iron-plate", "count": 50 }
+        },
+        "automation": {
+          "name": "automation",
+          "enabled": true,
+          "upgrade": false,
+          "researched": false,
+          "prerequisites": ["steam-power"],
+          "research_unit_ingredients": [
+            { "name": "automation-science-pack", "ingredient_type": "item", "amount": 1 }
+          ],
+          "research_unit_count": 10,
+          "research_unit_energy": 600.0,
+          "order": "a-a",
+          "level": 1,
+          "valid": true
+        }
+      }
+    }
+    "#;
+    let world = fixture_world();
+    let force: FactorioForce =
+        serde_json::from_str(json).expect("the trigger-prerequisite force must parse");
+    world
+        .update_force(force)
+        .expect("update_force cannot fail for a well-formed force");
+    world
+}
+
 /// `fixture_world()` plus the force above. Nothing else differs.
 pub(crate) fn world_with_technologies() -> FactorioWorld {
     let world = fixture_world();

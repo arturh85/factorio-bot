@@ -1,7 +1,7 @@
 import {defineStore} from 'pinia';
 import {getRun, getRunFrames, getRunLanes, listRuns} from '@/api/client';
 import {ArchivedFrame, Lane, RunDetail, RunSummary} from '@/api/types';
-import {PlacedFrame, placeable, tickBounds} from '@/lib/runTimeline';
+import {FrameView, PlacedFrame, placeable, tickBounds, viewsOf} from '@/lib/runTimeline';
 
 /**
  * Archived runs, and one cursor over the run being viewed.
@@ -45,6 +45,10 @@ export const useRunsStore = defineStore('runs', {
          */
         bounds(): {from: number; to: number} | null {
             return tickBounds(this.detail?.splits ?? [], this.placedFrames, this.lanes);
+        },
+        /** The (bot, camera) pairs this run actually captured. */
+        views(): FrameView[] {
+            return viewsOf(this.placedFrames);
         }
     },
 
@@ -121,6 +125,22 @@ export const useRunsStore = defineStore('runs', {
             } catch {
                 this.reference = null;
             }
+        },
+
+        /**
+         * Selects a capture view by its (bot, camera) pair.
+         *
+         * Both together, never one at a time: only specific pairs exist, so
+         * changing one and leaving the other produces a combination the run
+         * never captured, and the panel goes blank for a reason that looks
+         * like a bug rather than a choice.
+         */
+        selectView(view: FrameView) {
+            this.bot = view.bot;
+            this.camera = view.camera;
+            // Nothing for this view before its first frame, so do not sit
+            // somewhere it cannot show anything.
+            if (this.cursor < view.from) this.seek(view.from);
         },
 
         /** Moves the cursor, clamped to the axis. */

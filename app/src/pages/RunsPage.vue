@@ -11,8 +11,6 @@ import {computed, onBeforeUnmount, onMounted, ref, watch} from 'vue';
 import {useRunsStore} from '@/store/runsStore';
 import {runFrameUrl} from '@/api/client';
 import {
-    botsOf,
-    camerasOf,
     formatAgo,
     formatTicks,
     formatWhen,
@@ -65,8 +63,19 @@ async function open(id: string) {
     await store.openRun(id);
 }
 
-const bots = computed(() => botsOf(store.placedFrames));
-const cameras = computed(() => camerasOf(store.placedFrames));
+/** `"<bot>|<camera>"`, so one <select> can carry a pair. */
+function viewKey(v: {bot: number; camera: string}): string {
+    return `${v.bot}|${v.camera}`;
+}
+const currentViewKey = computed(() =>
+    store.bot === null || store.camera === null
+        ? ''
+        : viewKey({bot: store.bot, camera: store.camera})
+);
+function pickView(key: string) {
+    const view = store.views.find((v) => viewKey(v) === key);
+    if (view) store.selectView(view);
+}
 
 const current = computed(() =>
     store.bot === null || store.camera === null
@@ -288,15 +297,19 @@ function markerLeft(tick: number): string {
             <div class="frame">
                 <div class="frame__picker">
                     <label>
-                        bot
-                        <select :value="store.bot ?? ''" @change="store.bot = Number(($event.target as HTMLSelectElement).value)">
-                            <option v-for="b in bots" :key="b" :value="b">{{ b }}</option>
-                        </select>
-                    </label>
-                    <label>
-                        camera
-                        <select :value="store.camera ?? ''" @change="store.camera = ($event.target as HTMLSelectElement).value">
-                            <option v-for="c in cameras" :key="c" :value="c">{{ c }}</option>
+                        view
+                        <!-- One list of the pairs that exist. Two selectors
+                             would offer combinations this run never captured,
+                             which is most of them: the mod writes each camera
+                             into whichever player rendered it, so the client
+                             folder says nothing about who is on screen. -->
+                        <select
+                            :value="currentViewKey"
+                            @change="pickView(($event.target as HTMLSelectElement).value)"
+                        >
+                            <option v-for="v in store.views" :key="viewKey(v)" :value="viewKey(v)">
+                                {{ v.camera }} — client {{ v.bot }} ({{ v.count }} frames)
+                            </option>
                         </select>
                     </label>
                 </div>

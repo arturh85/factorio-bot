@@ -229,3 +229,45 @@ export function formatAgo(unix: number | null, nowUnix: number): string {
     if (hours < 36) return `${hours} h ago`;
     return `${Math.round(hours / 24)} d ago`;
 }
+
+/** One selectable view: a camera, and the client directory it was written to. */
+export interface FrameView {
+    bot: number;
+    camera: string;
+    /** How many frames this view has. */
+    count: number;
+    /** First tick it captured, for seeking straight to it. */
+    from: number;
+}
+
+/**
+ * The (bot, camera) pairs a run actually captured.
+ *
+ * Offered as pairs rather than as two independent dropdowns because only
+ * *specific* combinations exist. The mod renders each camera through some
+ * player and the screenshot lands in that player's `script-output`, so the
+ * directory a frame came from has no relation to who it is looking at: one run
+ * put camera `bot-3` in client 1's folder and `area`, `bot-1` and `follow` all
+ * in client 2's. Two free selectors let a reader pick a pair that never
+ * existed, which is most of them, and the panel goes blank for a reason that
+ * looks like a bug.
+ *
+ * Sorted by camera name so the ordering is about what you are watching, which
+ * is the question a reader actually has.
+ */
+export function viewsOf(frames: PlacedFrame[]): FrameView[] {
+    const byPair = new Map<string, FrameView>();
+    for (const frame of frames) {
+        const key = `${frame.bot}\u0000${frame.camera}`;
+        const seen = byPair.get(key);
+        if (seen === undefined) {
+            byPair.set(key, {bot: frame.bot, camera: frame.camera, count: 1, from: frame.tick});
+        } else {
+            seen.count += 1;
+            seen.from = Math.min(seen.from, frame.tick);
+        }
+    }
+    return [...byPair.values()].sort(
+        (a, b) => a.camera.localeCompare(b.camera) || a.bot - b.bot
+    );
+}

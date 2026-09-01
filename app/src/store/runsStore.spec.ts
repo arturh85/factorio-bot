@@ -155,6 +155,44 @@ describe('setReference', () => {
     });
 });
 
+describe('selectView', () => {
+    beforeEach(async () => {
+        vi.mocked(client.getRun).mockResolvedValue(DETAIL);
+        vi.mocked(client.getRunFrames).mockResolvedValue({frames: FRAMES});
+        await useRunsStore().openRun('run-1');
+    });
+
+    it('offers only pairs the run captured', () => {
+        const store = useRunsStore();
+        // The fixture has front@1 twice and area@2 once -- three frames, two
+        // pairs. A cross product would offer four.
+        expect(store.views.map((v) => `${v.camera}@${v.bot}`)).toEqual(['area@2', 'front@1']);
+    });
+
+    it('sets bot and camera together', () => {
+        // Never one at a time: only specific pairs exist, so changing one and
+        // leaving the other names a combination that captured nothing.
+        const store = useRunsStore();
+        store.selectView({bot: 2, camera: 'area', count: 1, from: 59700});
+        expect(store.bot).toBe(2);
+        expect(store.camera).toBe('area');
+    });
+
+    it('moves the cursor forward when the view starts later than it', () => {
+        const store = useRunsStore();
+        store.seek(59375);
+        store.selectView({bot: 2, camera: 'area', count: 1, from: 59700});
+        expect(store.cursor).toBe(59700);
+    });
+
+    it('leaves the cursor alone when the view already covers it', () => {
+        const store = useRunsStore();
+        store.seek(60000);
+        store.selectView({bot: 1, camera: 'front', count: 2, from: 59400});
+        expect(store.cursor).toBe(60000);
+    });
+});
+
 describe('seek and playback', () => {
     beforeEach(async () => {
         vi.mocked(client.getRun).mockResolvedValue(DETAIL);

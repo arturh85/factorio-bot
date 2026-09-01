@@ -4,6 +4,7 @@ import {
     formatAgo,
     formatWhen,
     startedUnixOf,
+    viewsOf,
     laneAt,
     laneBots,
     camerasOf,
@@ -262,5 +263,32 @@ describe('run timestamps', () => {
         expect(formatAgo(now - 7200, now)).toBe('2 h ago');
         expect(formatAgo(now - 86400 * 2, now)).toBe('2 d ago');
         expect(formatAgo(null, now)).toBe('');
+    });
+});
+
+describe('viewsOf', () => {
+    it('offers only the pairs that exist, never the cross product', () => {
+        // The real shape: camera bot-3 lives in client 1's folder, and area /
+        // bot-1 both live in client 2's. Two free dropdowns would offer bot 1 +
+        // area, which captured nothing and never could.
+        const views = viewsOf(
+            placeable([
+                frame(1, 300, 'bot-3'),
+                frame(1, 600, 'bot-3'),
+                frame(2, 300, 'area'),
+                frame(2, 300, 'bot-1')
+            ])
+        );
+        expect(views.map((v) => `${v.camera}@${v.bot}`)).toEqual([
+            'area@2',
+            'bot-1@2',
+            'bot-3@1'
+        ]);
+        expect(views.find((v) => v.camera === 'bot-3')?.count).toBe(2);
+        expect(views.find((v) => v.camera === 'bot-3')?.from).toBe(300);
+    });
+
+    it('is empty for a run that captured nothing', () => {
+        expect(viewsOf([])).toEqual([]);
     });
 });

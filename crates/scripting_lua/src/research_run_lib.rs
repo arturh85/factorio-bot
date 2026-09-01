@@ -67,6 +67,10 @@ mod tests {
             rcon.inventory_contents_at = function() return {} end
 
             goal = {}
+            -- See `supervisor_lib::tests::harness`: the supervisor asks this
+            -- before it reports a zero-step plan satisfied.
+            __holds = true
+            goal.holds = function(_g, _opts) return __holds end
             goal.have = function(item, count) return { kind = "have", item = item, count = count } end
             goal.researched = function(tech) return { kind = "researched", tech = tech } end
             goal.plan = function(_g, _opts)
@@ -131,8 +135,11 @@ mod tests {
             let call: mlua::Table = satisfied.get(i).unwrap();
             assert_eq!(
                 call.get::<String>("reason").unwrap(),
-                "plan_empty",
-                "milestone {i}'s reason must reach record.milestone_satisfied"
+                "already_satisfied",
+                "milestone {i}'s reason must reach record.milestone_satisfied -- \
+                 the stub's `goal.holds` says the goal holds, so the record must \
+                 say so too rather than the weaker `plan_empty` this used to \
+                 report for every zero-step plan alike"
             );
         }
         let finish: mlua::Table = g.get("__finish_calls").unwrap();

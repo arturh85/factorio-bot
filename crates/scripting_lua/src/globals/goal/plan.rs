@@ -314,8 +314,9 @@ impl PlanValue {
     }
 }
 
-/// The roster `goal.plan` expands and schedules against: `opts.bots` if given,
-/// otherwise `default_roster` (the run's whole roster).
+/// The roster `goal.plan` expands and schedules against -- and `goal.holds`
+/// reads inventories for: `opts.bots` if given, otherwise `default_roster`
+/// (the run's whole roster).
 ///
 /// Deliberately a list of bot ids, never a count: a count could only mean
 /// "some N of them", which is exactly the ambiguity `goal.plan` exists to
@@ -325,7 +326,10 @@ impl PlanValue {
 /// ever sees it -- `schedule` itself also refuses an empty slice
 /// (`PlannerError::NoBots`), but that error does not mention "bot" at all, and
 /// this call's own empty-roster test asserts on that word.
-fn resolve_roster(opts: Option<&LuaTable>, default_roster: &[BotId]) -> LuaResult<Vec<BotId>> {
+pub(super) fn resolve_roster(
+    opts: Option<&LuaTable>,
+    default_roster: &[BotId],
+) -> LuaResult<Vec<BotId>> {
     let bots_value: LuaValue = match opts {
         Some(opts) => opts.get("bots")?,
         None => LuaValue::Nil,

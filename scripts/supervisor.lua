@@ -1,7 +1,8 @@
 --- Short-horizon replanning loop.
 --
 -- Holds long intent across plans: asks a source for the next milestone, plans
--- it, runs it, replans, and moves on when the plan comes back empty. See
+-- it, runs it, replans, and moves on when the plan comes back empty **and the
+-- goal is confirmed to hold**. See
 -- docs/superpowers/specs/2026-08-31-supervisor-loop-design.md.
 --
 -- `include` returns nothing, so this file defines the global `supervisor`,
@@ -204,38 +205,48 @@ function Sup:step()
         local plan_for_recording = plan_for_record(plan_steps)
 
         if steps == 0 then
+            -- An empty plan is not satisfaction. It was the only signal this
+            -- loop had, so it stood in for one, and this branch used to carry
+            -- a paragraph explaining that the substitution was an assumption
+            -- it could not check: within `crates/planner`'s registry
+            -- `AlreadySatisfied` claims a met goal before any other method is
+            -- consulted and every other method refuses a goal with no
+            -- shortfall, so an empty plan did mean the goal held -- but that
+            -- is an internal invariant of that crate, not a contract the
+            -- `goal.*` surface exposed, and reporting satisfaction on it was
+            -- a guess.
+            --
+            -- `goal.holds` is that contract. It reads the same world snapshot
+            -- `goal.plan` reads, for the same roster, and answers the question
+            -- directly. The planner pins the agreement between the two
+            -- (`an_empty_expansion_and_a_held_goal_agree`), so this is a check
+            -- that should never fire -- which is exactly what makes it worth
+            -- making, because the run it would have caught reported `done` for
+            -- a milestone nothing was done for.
+            --
+            -- Three answers. `true` is satisfaction, and now says so. `nil` is
+            -- "possession cannot settle this goal" -- a production is an event,
+            -- not a state -- which is still `plan_empty`, the one fact
+            -- actually observed. `false` is a contradiction between the
+            -- planner and the world, and there is nothing sensible to do with
+            -- it but stop: it is a defect in the planner, not a condition of
+            -- the world, so it raises for the same reason `goal.plan`'s own
+            -- construction errors are left unwrapped above. Retrying it would
+            -- burn the iteration cap and then report "stuck", which would
+            -- blame the world for a bug.
+            local held = goal.holds(self.milestone, { bots = self.bots })
+            if held == false then
+                error("supervisor: the planner returned no steps for milestone "
+                    .. tostring(self.index) .. " (" .. tostring(self.milestone)
+                    .. "), but the goal does not hold; refusing to report it satisfied")
+            end
             self:_close("satisfied")
             self.state = "acquiring"
             return { action = "satisfied", state = "acquiring",
                      milestone_index = self.index, steps = 0,
                      iteration = self.iterations,
                      plan = plan_for_recording,
-                     -- Always "plan_empty", never "already_satisfied" --
-                     -- and not a coin flip, a real investigation with a real
-                     -- answer. `crates/planner`'s method registry claims a
-                     -- `Have`/`Researched` goal as already met
-                     -- (`AlreadySatisfied`) before any other method is even
-                     -- consulted, and every other method refuses to apply at
-                     -- all unless there is a real shortfall -- so *within
-                     -- that registry*, today, an empty plan only ever means
-                     -- the goal already held. But that is an internal
-                     -- invariant of the planner crate, not a contract this
-                     -- `goal.*` surface exposes: there is no binding that
-                     -- answers "does this goal already hold" independently of
-                     -- planning it, so this loop has no way to check the
-                     -- invariant, only to assume it -- and asserting
-                     -- "already_satisfied" on an assumption it cannot verify
-                     -- is exactly the guess `SatisfiedReason` exists to rule
-                     -- out. So this reports the one fact it actually
-                     -- observed: the plan came back with nothing in it.
-                     -- Distinguishing the two for real needs a `goal`
-                     -- binding that checks satisfaction without planning
-                     -- (nothing in `crates/scripting_lua/src/globals/goal/`
-                     -- offers one today), or a way to tell "no applicable
-                     -- method but the caller's goal is a vacuous `all{}`"
-                     -- apart from "AlreadySatisfied fired for everything" --
-                     -- either is a planner-side change, not a Lua-side one.
-                     reason = "plan_empty" }
+                     reason = held == true and "already_satisfied" or "plan_empty" }
         end
 
         self.plan = plan

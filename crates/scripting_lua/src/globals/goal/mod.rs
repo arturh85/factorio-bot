@@ -24,7 +24,7 @@ use factorio_bot_core::factorio::rcon::FactorioRcon;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_executor::{Actuator, RconActuator};
-use factorio_bot_planner::{ActionNetwork, BotId, Goal, PlanState, expand, registry_for};
+use factorio_bot_planner::{ActionNetwork, BotId, Goal, PlanState, expand, holds, registry_for};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -240,6 +240,44 @@ end
     )?;
     plan::install_goal_plan(lua, &map_table, plan_world.clone(), roster.clone())?;
 
+    // `goal.holds`
+    map_table.set(
+        "__doc_entry_holds",
+        String::from(
+            r#"
+--- answers whether a goal already holds, without planning it
+-- The question satisfaction really is. A loop that runs a goal to completion
+-- has to decide when it is done, and until this existed the only signal was
+-- "the plan came back empty" -- which is a fact about the planner, not about
+-- the goal. The two agree today, and `goal.plan` is still what you call to
+-- find out *how* to get there; this is how you find out whether you already
+-- are.
+--
+-- Reads the same world snapshot `goal.plan` does, for the same roster, so a
+-- `have` goal with no `bot` is satisfied by the sum across the roster and one
+-- with a `bot` is satisfied only by that bot's own inventory.
+--
+-- Three answers, not two. `nil` means the goal names something possession
+-- cannot settle -- a production, which is an event and not a state -- so a
+-- caller must not read it as "no": treating `nil` as unfinished re-runs work
+-- that may be done, and treating it as finished is the lie this call exists
+-- to prevent. No constructor on this table builds such a goal today, so today
+-- every answer is a boolean; the third case is what a caller must not have
+-- assumed away by the time one does.
+-- @tparam table goal a goal value
+-- @tparam[opt] table opts `{ bots = { ... } }` -- bot ids, not a count;
+--   defaults to every bot in this run
+-- @treturn boolean|nil true, false, or nil when the goal cannot be answered
+--   by looking at the world
+-- @raise if any bot in `opts.bots` is not a connected player, or if
+--   `opts.bots` is empty
+function goal.holds(goal, opts)
+end
+"#,
+        ),
+    )?;
+    install_goal_holds(lua, &map_table, plan_world.clone(), roster.clone())?;
+
     // `goal.start` / `goal.run`
     map_table.set(
         "__doc_entry_start",
@@ -369,6 +407,43 @@ fn refuse_unknown_bots(state: &PlanState) -> LuaResult<()> {
         "bot(s) {names} are not connected players in this world; refusing to plan \
          against a fabricated inventory and guessed reach distances"
     )))
+}
+
+/// Installs `goal.holds` on `table`.
+///
+/// The one call on this surface that answers a question *about the world*
+/// rather than producing a plan, and it exists because nothing else could.
+/// `scripts/supervisor.lua` treats an empty plan as satisfaction and says so in
+/// a paragraph explaining that it has no way to check: within today's method
+/// registry an empty plan really does mean the goal held, but that is an
+/// internal invariant of `crates/planner`, not a contract this surface
+/// exposed, and asserting satisfaction on it was a guess. It is now checkable —
+/// and the planner pins the agreement itself (`an_empty_expansion_and_a_held_
+/// goal_agree`), so the Lua side may rely on it rather than assume it.
+///
+/// No scheduling and no expansion: this is a read of the same world snapshot
+/// `goal.plan` reads, through the same roster resolution and the same refusal
+/// of bots the world has never heard of.
+fn install_goal_holds(
+    lua: &Lua,
+    table: &LuaTable,
+    world: Arc<FactorioWorld>,
+    default_roster: Vec<BotId>,
+) -> LuaResult<()> {
+    table.set(
+        "holds",
+        lua.create_function(move |_lua, (g, opts): (LuaTable, Option<LuaTable>)| {
+            let goal = value::goal_from_lua(&g)?;
+            let roster = plan::resolve_roster(opts.as_ref(), &default_roster)?;
+            let state = PlanState::from_world(world.clone(), &roster);
+            refuse_unknown_bots(&state)?;
+            // `Option<bool>` reaches Lua as a boolean or `nil` -- the three
+            // answers the planner gives, unflattened. Collapsing the third
+            // into `false` here would put the guess back one layer down.
+            Ok(holds(&goal, &state))
+        })?,
+    )?;
+    Ok(())
 }
 
 /// Expands one goal against a roster.
@@ -1037,7 +1112,7 @@ mod tests {
         lua.load(
             r#"
             local expected = { have=true, researched=true, all=true,
-                               plan=true, run=true, start=true }
+                               plan=true, run=true, start=true, holds=true }
             local actual = {}
             for k, v in pairs(goal) do
                 -- the __doc__ keys are strings consumed by the doc generator
@@ -1058,6 +1133,71 @@ mod tests {
         )
         .exec()
         .expect("script");
+    }
+
+    /// `goal.holds` answers about the world, and answers per holder.
+    ///
+    /// `lua_with_goal`'s roster is bots 1 and 2, each seeded the way a run
+    /// seeds them: one furnace, one drill, one wood. So two furnaces exist
+    /// between them and one exists on each -- the case that makes "whose"
+    /// load-bearing rather than decorative, and the same shape as the live
+    /// milestone that closed satisfied on a starting inventory nobody had
+    /// smelted.
+    #[test]
+    fn holds_answers_satisfaction_without_planning() {
+        let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never)));
+        lua.load(
+            r#"
+            assert(goal.holds(goal.have("stone-furnace", 2)) == true,
+                   "two furnaces exist across the roster")
+            assert(goal.holds(goal.have("stone-furnace", 3)) == false,
+                   "a third does not")
+            assert(goal.holds(goal.have("stone-furnace", 2, { bot = 1 })) == false,
+                   "and bot 1 holds only one of them, which is the whole point")
+            assert(goal.holds(goal.have("stone-furnace", 1, { bot = 1 })) == true)
+            assert(goal.holds(goal.all { goal.have("wood", 2),
+                                         goal.have("stone-furnace", 3) }) == false,
+                   "a bundle holds only when every member does")
+            assert(goal.holds(goal.have("stone-furnace", 2), { bots = { 1 } }) == false,
+                   "and the roster asked about is the roster answered for")
+        "#,
+        )
+        .exec()
+        .expect("script");
+    }
+
+    /// The agreement `supervisor.lua` used to assume: where the plan is empty,
+    /// `goal.holds` says the goal is met, and where it is not, it does not.
+    /// Pinned through the bindings as well as inside the planner, because it
+    /// is the Lua side that acts on it.
+    #[test]
+    fn an_empty_plan_and_a_held_goal_agree_through_the_bindings() {
+        let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never)));
+        lua.load(
+            r#"
+            for _, n in ipairs{1, 2, 3, 8} do
+                local g = goal.have("stone-furnace", n)
+                local empty = #goal.plan(g).steps == 0
+                assert(empty == (goal.holds(g) == true),
+                       "plan emptiness and satisfaction disagree at " .. n)
+            end
+        "#,
+        )
+        .exec()
+        .expect("script");
+    }
+
+    #[test]
+    fn holds_refuses_a_roster_the_world_does_not_have() {
+        let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never)));
+        let err = lua
+            .load(r#"goal.holds(goal.have("wood", 1), { bots = { 9 } })"#)
+            .exec()
+            .expect_err("bot 9 is not a connected player");
+        assert!(
+            err.to_string().contains("not connected players"),
+            "the refusal must name the cause, got {err}"
+        );
     }
 
     /// The whole surface, composed, through the table a script really gets.

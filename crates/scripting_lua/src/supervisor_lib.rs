@@ -62,6 +62,17 @@ mod tests {
                 __keyframe_calls = __keyframe_calls + 1
             end
             goal = {}
+            -- What `goal.holds` answers. `true` by default, because the
+            -- ordinary reason a plan comes back empty is that the goal is
+            -- already met; a test that wants the other two answers sets this
+            -- to `false` (the planner contradicting the world) or `nil` (a
+            -- goal possession cannot settle).
+            __holds = true
+            __holds_calls = 0
+            goal.holds = function(_g, _opts)
+                __holds_calls = __holds_calls + 1
+                return __holds
+            end
             goal.plan = function(_g, _opts)
                 __plan_calls = __plan_calls + 1
                 local n = __plan_steps[__plan_calls]
@@ -348,6 +359,17 @@ mod tests {
         lua.load(
             r#"
             goal = {}
+            -- What `goal.holds` answers. `true` by default, because the
+            -- ordinary reason a plan comes back empty is that the goal is
+            -- already met; a test that wants the other two answers sets this
+            -- to `false` (the planner contradicting the world) or `nil` (a
+            -- goal possession cannot settle).
+            __holds = true
+            __holds_calls = 0
+            goal.holds = function(_g, _opts)
+                __holds_calls = __holds_calls + 1
+                return __holds
+            end
             goal.plan = function(_g, _opts) return { steps = {} } end
             goal.run = function(_plan) return { done = true } end
         "#,
@@ -378,6 +400,17 @@ mod tests {
         lua.load(
             r#"
             goal = {}
+            -- What `goal.holds` answers. `true` by default, because the
+            -- ordinary reason a plan comes back empty is that the goal is
+            -- already met; a test that wants the other two answers sets this
+            -- to `false` (the planner contradicting the world) or `nil` (a
+            -- goal possession cannot settle).
+            __holds = true
+            __holds_calls = 0
+            goal.holds = function(_g, _opts)
+                __holds_calls = __holds_calls + 1
+                return __holds
+            end
             goal.plan = function(_g, _opts) return { steps = {} } end
             goal.run = function(_plan) return { done = true } end
             record = {}
@@ -417,17 +450,17 @@ mod tests {
 
     // ---- Layer 3: what `t` exposes for a driver's `record.*` calls -------
 
-    #[test]
-    fn a_milestone_satisfied_by_an_empty_plan_records_the_reason() {
-        // The supervisor treats an empty plan as satisfaction. It must say
-        // so: "already done" and "the planner gave up" must not collapse
-        // into the same recorded line. `Sup:step()` itself never calls
-        // `record.*` (see the module comment on `supervisor.lua`) -- it
-        // returns `t.reason`, and this test plays the driver's part of
-        // forwarding it, exactly as `scripts/research_run.lua` does.
+    /// Drives one milestone whose plan is empty, forwarding `t.reason` the way
+    /// `scripts/research_run.lua` does, and hands back what was recorded.
+    ///
+    /// `Sup:step()` itself never calls `record.*` (see the module comment on
+    /// `supervisor.lua`), so playing the driver's part is the only way to see
+    /// the reason a run's log would actually carry.
+    fn reason_for_an_empty_plan(holds: &str) -> String {
         let lua = harness("{0}", "{}");
         lua.load(
             r#"
+            __holds = HOLDS
             __satisfied = {}
             record.milestone_satisfied = function(index, iterations, reason)
                 table.insert(__satisfied, { index = index, iterations = iterations, reason = reason })
@@ -439,15 +472,89 @@ mod tests {
                     record.milestone_satisfied(t.milestone_index, t.iteration or 0, t.reason)
                 end
             until sup:finished()
+            "#
+            .replace("HOLDS", holds),
+        )
+        .exec()
+        .expect("driver runs");
+        lua.load("return __satisfied[1].reason")
+            .eval()
+            .expect("reason recorded")
+    }
+
+    /// "Already done" and "the planner produced nothing and cannot say why"
+    /// must not collapse into the same recorded line -- that is the whole of
+    /// `SatisfiedReason`. The supervisor used to report `plan_empty` for both
+    /// because it could not tell them apart; `goal.holds` is what tells them
+    /// apart, and each of its three answers has to reach the record as itself.
+    #[test]
+    fn a_milestone_satisfied_by_an_empty_plan_records_which_it_was() {
+        assert_eq!(
+            reason_for_an_empty_plan("true"),
+            "already_satisfied",
+            "the goal was checked and holds; saying only `plan_empty` here \
+             would throw away the fact the check established"
+        );
+        assert_eq!(
+            reason_for_an_empty_plan("nil"),
+            "plan_empty",
+            "a goal possession cannot settle leaves the one observed fact: \
+             the plan came back with nothing in it"
+        );
+    }
+
+    /// The failure this whole check exists for: a plan with no steps for a
+    /// goal that does not hold. The supervisor must refuse to call that
+    /// satisfied -- a run reporting `done` for work it never did is the worst
+    /// thing this loop can do.
+    ///
+    /// It raises rather than halting, because it is a contradiction between
+    /// the planner and the world rather than a condition of the world, and
+    /// there is nothing a retry could change. `research_run.lua` catches it,
+    /// records the milestone as `plan_error` with this text, and closes the
+    /// recording -- the same path a `goal.plan` construction error takes.
+    #[test]
+    fn an_empty_plan_for_an_unheld_goal_is_refused_rather_than_reported_satisfied() {
+        let lua = harness("{0}", "{}");
+        let err = lua
+            .load(
+                r#"
+                __holds = false
+                local sup = supervisor.new(supervisor.list {"a"}, {})
+                repeat sup:step() until sup:finished()
+                "#,
+            )
+            .exec()
+            .expect_err("the supervisor must not report this satisfied");
+        let text = err.to_string();
+        assert!(
+            text.contains("does not hold"),
+            "the refusal must say what is wrong, got {text}"
+        );
+        assert!(
+            !text.contains("stuck"),
+            "and must not blame the world for a planner defect, got {text}"
+        );
+    }
+
+    /// The check is asked once per empty plan, not once per goal kind or once
+    /// per run: a milestone that plans real work must not pay for it.
+    #[test]
+    fn a_milestone_with_work_to_do_is_never_asked_whether_it_already_holds() {
+        let lua = harness("{3, 0}", "{}");
+        lua.load(
+            r#"
+            local sup = supervisor.new(supervisor.list {"a"}, {})
+            repeat sup:step() until sup:finished()
             "#,
         )
         .exec()
         .expect("driver runs");
-        let reason: String = lua
-            .load("return __satisfied[1].reason")
-            .eval()
-            .expect("reason recorded");
-        assert_eq!(reason, "plan_empty");
+        assert_eq!(
+            lua.globals().get::<i64>("__holds_calls").unwrap(),
+            1,
+            "only the empty re-plan asks"
+        );
     }
 
     #[test]

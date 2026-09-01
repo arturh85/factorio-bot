@@ -72,11 +72,6 @@ fn shortfall(state: &PlanState, item: &str, count: u32, whose: &Holder) -> u32 {
     count.saturating_sub(state.available(whose, item))
 }
 
-/// The goal is already met. Emits nothing.
-///
-/// Registered first everywhere, so "we already have this" is decided in exactly
-/// one place rather than re-tested inside every method that could otherwise
-/// have satisfied the goal.
 /// What a producing method has to make, for either goal kind.
 ///
 /// [`Goal::Have`] asks for a *shortfall* against what a bot already holds.
@@ -152,6 +147,73 @@ fn attach_unlock(steps: &mut [Step], item: &ItemId, unlocks: Option<&str>) {
     );
 }
 
+/// Does `goal` already hold, in this state, right now?
+///
+/// **The question satisfaction is, as opposed to the one it was inferred
+/// from.** A caller that runs a goal to completion has to decide when it is
+/// done, and until this existed the only signal available was "the planner
+/// returned an empty network". Those coincide *today* — `AlreadySatisfied` is
+/// registered ahead of every other method and every other method refuses a
+/// goal with no shortfall — but that is an internal invariant of this
+/// registry, not a fact about goals, and a caller asserting satisfaction from
+/// it is asserting something it cannot check. `scripts/supervisor.lua` said so
+/// in place, and reported `plan_empty` rather than `already_satisfied` because
+/// it could only observe the plan. Now it can ask.
+///
+/// Three-valued, and the third value is the point:
+///
+/// * `Some(true)` / `Some(false)` — the goal names a *state*, and the state
+///   either holds or does not.
+/// * `None` — the goal names an **event**, or something this planner does not
+///   model, so possession cannot answer it. [`Goal::Produced`] is the first
+///   kind: a bot carrying six labs has not crafted one, so no inventory read
+///   ever settles it. [`Goal::Producing`] is the second: no method satisfies a
+///   throughput yet, so nothing here can say whether one is met.
+///
+/// Collapsing `None` into `false` would report unfinished work for a goal that
+/// may well be done, and into `true` would be the very lie this exists to stop.
+///
+/// A [`Goal::All`] is the conjunction, with `false` beating `None`: one member
+/// definitely unmet settles the bundle whatever the rest are.
+pub fn holds(goal: &Goal, state: &PlanState) -> Option<bool> {
+    match goal {
+        Goal::Have { item, count, whose } => Some(shortfall(state, item, *count, whose) == 0),
+        // `PlanState::is_researched` answers over two sources: the
+        // technologies this plan has already scheduled research for (its own
+        // overlay) and the ones the world reports as researched (reality).
+        // Either alone is a wrong answer here — skipping the overlay would
+        // plan the same research twice for two goals that share a
+        // prerequisite, and skipping the world would re-research what the
+        // force already has.
+        //
+        // They cannot contradict each other, which is why "which wins" has no
+        // bite: research is monotone. Nothing in the game or in this planner
+        // ever un-researches a technology, so the overlay can only ever add to
+        // what the world reports, and the union is the whole truth. If a
+        // future Factorio grew a way to lose a technology, the overlay would
+        // have to learn to subtract and this comment would be wrong — that is
+        // the assumption to check first.
+        Goal::Researched(tech) => Some(state.is_researched(tech)),
+        Goal::Produced { .. } | Goal::Producing { .. } => None,
+        Goal::All(goals) => {
+            let mut answer = Some(true);
+            for g in goals {
+                match holds(g, state) {
+                    Some(true) => {}
+                    Some(false) => return Some(false),
+                    None => answer = None,
+                }
+            }
+            answer
+        }
+    }
+}
+
+/// The goal is already met. Emits nothing.
+///
+/// Registered first everywhere, so "we already have this" is decided in
+/// exactly one place — [`holds`] — rather than re-tested inside every method
+/// that could otherwise have satisfied the goal.
 pub struct AlreadySatisfied;
 
 impl Method for AlreadySatisfied {
@@ -160,25 +222,14 @@ impl Method for AlreadySatisfied {
     }
 
     fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
+        // A `Goal::All` is the driver's business, not a method's: it never
+        // reaches `registry.find`, returning from `expand_goal_body` above the
+        // lookup. `holds` answers for one anyway, because a *caller* asking
+        // "is my bundle done" deserves an answer; claiming one here would be
+        // dead code that looked meaningful.
         match goal {
-            Goal::Have { item, count, whose } => shortfall(state, item, *count, whose) == 0,
-            // `PlanState::is_researched` answers over two sources: the
-            // technologies this plan has already scheduled research for (its
-            // own overlay) and the ones the world reports as researched
-            // (reality). Either alone is a wrong answer here — skipping the
-            // overlay would plan the same research twice for two goals that
-            // share a prerequisite, and skipping the world would re-research
-            // what the force already has.
-            //
-            // They cannot contradict each other, which is why "which wins" has
-            // no bite: research is monotone. Nothing in the game or in this
-            // planner ever un-researches a technology, so the overlay can only
-            // ever add to what the world reports, and the union is the whole
-            // truth. If a future Factorio grew a way to lose a technology, the
-            // overlay would have to learn to subtract and this comment would be
-            // wrong — that is the assumption to check first.
-            Goal::Researched(tech) => state.is_researched(tech),
-            _ => false,
+            Goal::All(_) => false,
+            other => holds(other, state) == Some(true),
         }
     }
 
@@ -1542,6 +1593,143 @@ mod tests {
         .expect("a stocked roster must not make the research unplannable");
         assert_eq!(research_actions(&net).len(), 1);
         schedule(&net, &s, &bots).expect("and it must still schedule");
+    }
+
+    // ---- `holds`: satisfaction asked directly ------------------------------
+
+    /// The live-run milestone that made this necessary.
+    ///
+    /// `run-1788300756-94802`'s third milestone was `goal.have("iron-plate",
+    /// 10)`, and it closed in zero ticks with zero iterations because the plan
+    /// came back empty. It was *named* "smelt iron plates x10", and nothing was
+    /// smelted — but the goal as stated genuinely held: freeplay starts every
+    /// player with eight iron plates, and three bots hold twenty-four between
+    /// them. The empty plan was right. What was missing was any way for the
+    /// caller to establish that rather than infer it.
+    #[test]
+    fn a_roster_holding_the_count_between_them_satisfies_a_shared_goal() {
+        let bots = [BotId(2), BotId(3), BotId(4)];
+        let mut s = state(&bots);
+        for bot in bots {
+            s.gain(bot, "iron-plate", 8);
+        }
+        let goal = Goal::Have {
+            item: "iron-plate".into(),
+            count: 10,
+            whose: Holder::Anyone,
+        };
+        assert_eq!(holds(&goal, &s), Some(true), "24 between them covers 10");
+
+        let per_bot = Goal::Have {
+            item: "iron-plate".into(),
+            count: 10,
+            whose: Holder::Share(BotId(2)),
+        };
+        assert_eq!(
+            holds(&per_bot, &s),
+            Some(false),
+            "but no single bot holds ten, and the holder is what decides"
+        );
+    }
+
+    /// The third value, and why it is not `false`. A production is an event:
+    /// no inventory read settles whether it happened, so the honest answer is
+    /// that this question cannot be answered by looking.
+    #[test]
+    fn a_production_goal_has_no_answer_from_possession() {
+        let bots = [BotId(1)];
+        let mut s = state(&bots);
+        s.gain(BotId(1), "iron-plate", 50);
+        assert_eq!(
+            holds(
+                &Goal::Produced {
+                    item: "iron-plate".into(),
+                    count: 50,
+                    whose: Holder::Share(BotId(1)),
+                    unlocks: None,
+                },
+                &s
+            ),
+            None,
+            "fifty in hand says nothing about fifty having been made"
+        );
+        assert_eq!(
+            holds(
+                &Goal::Producing {
+                    item: "iron-plate".into(),
+                    rate: 30.0,
+                },
+                &s
+            ),
+            None,
+            "and nothing here models a throughput at all"
+        );
+    }
+
+    #[test]
+    fn a_bundle_holds_only_when_every_member_does() {
+        let bots = [BotId(1)];
+        let mut s = state(&bots);
+        s.gain(BotId(1), "iron-plate", 8);
+        let met = Goal::Have {
+            item: "iron-plate".into(),
+            count: 4,
+            whose: Holder::Anyone,
+        };
+        let unmet = Goal::Have {
+            item: "iron-plate".into(),
+            count: 40,
+            whose: Holder::Anyone,
+        };
+        let unanswerable = Goal::Producing {
+            item: "iron-plate".into(),
+            rate: 30.0,
+        };
+        assert_eq!(holds(&Goal::All(vec![met.clone()]), &s), Some(true));
+        assert_eq!(
+            holds(&Goal::All(vec![met.clone(), unmet.clone()]), &s),
+            Some(false)
+        );
+        assert_eq!(
+            holds(&Goal::All(vec![met.clone(), unanswerable.clone()]), &s),
+            None,
+            "one unanswerable member leaves the bundle unanswerable"
+        );
+        assert_eq!(
+            holds(&Goal::All(vec![unanswerable, unmet]), &s),
+            Some(false),
+            "but a member that definitely does not hold settles it anyway"
+        );
+    }
+
+    /// `holds` and the empty plan must agree wherever `holds` has an opinion.
+    /// This is the invariant `supervisor.lua` was assuming and could not
+    /// check; it is checked here instead, so the Lua side may rely on it.
+    #[test]
+    fn an_empty_expansion_and_a_held_goal_agree() {
+        let bots = [BotId(1), BotId(2)];
+        let mut s = state(&bots);
+        s.gain(BotId(1), "iron-plate", 8);
+        s.gain(BotId(2), "iron-plate", 8);
+        for count in [1u32, 10, 16, 17, 40] {
+            let goal = Goal::Have {
+                item: "iron-plate".into(),
+                count,
+                whose: Holder::Anyone,
+            };
+            let net = expand(
+                std::slice::from_ref(&goal),
+                &s,
+                &registry_for(&bots),
+                BotId(1),
+            )
+            .expect("iron plate is reachable in the fixture world");
+            assert_eq!(
+                net.is_empty(),
+                holds(&goal, &s) == Some(true),
+                "an empty plan and a held goal must be the same thing for {count}"
+            );
+        }
     }
 
     /// D1, end to end. Two forces disagree about `automation`: `alpha`, which

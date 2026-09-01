@@ -5,7 +5,7 @@
  * is: this is the part that can be wrong in a way you would not notice by
  * looking at the screen.
  */
-import {EntitySnapshot, MapRecord} from '@/api/types';
+import {Bounds, EntitySnapshot, MapRecord} from '@/api/types';
 
 /**
  * Whether two snapshots name the same entity for removal purposes.
@@ -68,4 +68,26 @@ export function entitiesAt(records: MapRecord[], tick: number): EntitySnapshot[]
         // superseded and contributes nothing further. 'unknown' is skipped.
     }
     return entities;
+}
+
+/**
+ * The bounds of the latest `keyframe` at or before `tick`, or `null` before
+ * the first one.
+ *
+ * `entitiesAt` reports "nothing built yet" the same way it reports "nothing
+ * built in an area we never looked at" -- an empty array either way. A map
+ * panel sizing a canvas to the world needs to tell those apart, because a
+ * canvas drawn to bounds that do not exist yet is indistinguishable on
+ * screen from an empty one that does.
+ */
+export function boundsAt(records: MapRecord[], tick: number): Bounds | null {
+    let keyframeTick = -Infinity;
+    let bounds: Bounds | null = null;
+    for (const record of records) {
+        if (record.kind === 'keyframe' && record.tick <= tick && record.tick > keyframeTick) {
+            keyframeTick = record.tick;
+            bounds = record.bounds;
+        }
+    }
+    return bounds;
 }

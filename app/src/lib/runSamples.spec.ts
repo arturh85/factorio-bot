@@ -6,7 +6,9 @@ import {
     itemsFromGoals,
     producedItems,
     productionSeries,
-    trackedItems
+    trackedItems,
+    trailsAt,
+    TRAIL_WINDOW_TICKS
 } from './runSamples';
 import {BotSample, Sample} from '@/api/types';
 
@@ -174,6 +176,46 @@ describe('producedItems', () => {
 
     it('ignores bot samples', () => {
         expect(producedItems([botSample(61500)])).toEqual([]);
+    });
+});
+
+describe('trailsAt', () => {
+    it('collects one bot\'s positions across samples, oldest first', () => {
+        const s = [
+            botSample(61500, [bot(1, {position: {x: 0, y: 0}})]),
+            botSample(61560, [bot(1, {position: {x: 1, y: 0}})]),
+            botSample(61620, [bot(1, {position: {x: 2, y: 0}})])
+        ];
+        expect(trailsAt(s, 61620)).toEqual({1: [{x: 0, y: 0}, {x: 1, y: 0}, {x: 2, y: 0}]});
+    });
+
+    it('keeps each bot\'s trail separate', () => {
+        const s = [botSample(61500, [bot(1, {position: {x: 0, y: 0}}), bot(2, {position: {x: 5, y: 5}})])];
+        expect(trailsAt(s, 61500)).toEqual({1: [{x: 0, y: 0}], 2: [{x: 5, y: 5}]});
+    });
+
+    it('drops samples older than the window, and never rounds a position', () => {
+        const s = [
+            botSample(61500 - TRAIL_WINDOW_TICKS, [bot(1, {position: {x: -40.5, y: -48.5}})]),
+            botSample(61500, [bot(1, {position: {x: -1, y: 0}})])
+        ];
+        // The sample exactly at the window's edge (tick - WINDOW) is
+        // excluded: the window is the ticks strictly after `tick - WINDOW`.
+        expect(trailsAt(s, 61500)).toEqual({1: [{x: -1, y: 0}]});
+    });
+
+    it('excludes a sample after the cursor', () => {
+        const s = [botSample(61500), botSample(61800)];
+        expect(trailsAt(s, 61500)).toEqual({1: [{x: 0, y: 0}]});
+    });
+
+    it('ignores force samples', () => {
+        const s = [botSample(61500), forceSample(61560, {'iron-plate': 1})];
+        expect(trailsAt(s, 61600)).toEqual({1: [{x: 0, y: 0}]});
+    });
+
+    it('is empty given no samples', () => {
+        expect(trailsAt([], 61500)).toEqual({});
     });
 });
 

@@ -2,7 +2,7 @@ import {beforeEach, describe, expect, it, vi} from 'vitest';
 import {createPinia, setActivePinia} from 'pinia';
 import {useRunsStore} from './runsStore';
 import * as client from '@/api/client';
-import {ArchivedFrame, RunDetail, RunSummary, Sample, Split} from '@/api/types';
+import {ArchivedFrame, EntitySnapshot, MapRecord, RunDetail, RunSummary, Sample, Split} from '@/api/types';
 
 vi.mock('@/api/client');
 
@@ -50,6 +50,8 @@ beforeEach(() => {
     vi.mocked(client.getRunLanes).mockResolvedValue({lanes: []});
     vi.mocked(client.getRunSamples).mockReset();
     vi.mocked(client.getRunSamples).mockResolvedValue({samples: []});
+    vi.mocked(client.getRunMap).mockReset();
+    vi.mocked(client.getRunMap).mockResolvedValue({map: []});
 });
 
 describe('loadRuns', () => {
@@ -350,5 +352,108 @@ describe('samples', () => {
         vi.mocked(client.getRun).mockRejectedValue(new Error('gone'));
         await store.openRun('run-2');
         expect(store.samples).toEqual([]);
+    });
+});
+
+describe('map', () => {
+    const snap = (name: string, x: number, y: number): EntitySnapshot => ({
+        name,
+        position: {x, y},
+        direction: 0
+    });
+
+    const placed = (tick: number, name: string, x: number, y: number): MapRecord => {
+        const entity = snap(name, x, y);
+        return {kind: 'placed', tick, bot: 1, intent: entity, actual: entity, drift: null};
+    };
+
+    const keyframe = (tick: number, bounds = {left: -8, top: -8, right: 8, bottom: 8}): MapRecord => ({
+        kind: 'keyframe',
+        tick,
+        bounds,
+        game: [],
+        model: [],
+        divergence: []
+    });
+
+    const bots = (tick: number, entries: Array<{id: number; position: {x: number; y: number}}>): Sample => ({
+        kind: 'bots',
+        bots: entries.map((e) => ({
+            id: e.id,
+            position: e.position,
+            inventory: {},
+            crafting_queue: 0,
+            mining: null
+        })),
+        tick,
+        run: 'run-1'
+    });
+
+    beforeEach(() => {
+        vi.mocked(client.getRun).mockResolvedValue(DETAIL);
+        vi.mocked(client.getRunFrames).mockResolvedValue({frames: FRAMES});
+    });
+
+    it('reconstructs the entities at the cursor from the archived map', async () => {
+        vi.mocked(client.getRunMap).mockResolvedValue({
+            map: [placed(59380, 'stone-furnace', -12, 8)]
+        });
+        const store = useRunsStore();
+        await store.openRun('run-1'); // cursor lands on 59400, the first frame
+        expect(store.entities).toEqual([snap('stone-furnace', -12, 8)]);
+    });
+
+    it('reports the latest keyframe bounds at the cursor, or null before one exists', async () => {
+        vi.mocked(client.getRunMap).mockResolvedValue({map: []});
+        const store = useRunsStore();
+        await store.openRun('run-1');
+        expect(store.mapBounds).toBeNull();
+
+        vi.mocked(client.getRunMap).mockResolvedValue({map: [keyframe(59380)]});
+        await store.openRun('run-1');
+        expect(store.mapBounds).toEqual({left: -8, top: -8, right: 8, bottom: 8});
+    });
+
+    it('reports every bot from the latest bots sample at the cursor', async () => {
+        vi.mocked(client.getRunSamples).mockResolvedValue({
+            samples: [bots(59380, [{id: 1, position: {x: 0, y: 0}}, {id: 2, position: {x: 5, y: 5}}])]
+        });
+        const store = useRunsStore();
+        await store.openRun('run-1');
+        expect(store.mapBots.map((b) => b.id)).toEqual([1, 2]);
+    });
+
+    it('is empty before the first bots sample', async () => {
+        vi.mocked(client.getRunSamples).mockResolvedValue({
+            samples: [bots(60000, [{id: 1, position: {x: 0, y: 0}}])]
+        });
+        const store = useRunsStore();
+        await store.openRun('run-1');
+        expect(store.mapBots).toEqual([]);
+    });
+
+    it('builds a trail of one bot\'s positions over the last 1,800 ticks up to the cursor', async () => {
+        vi.mocked(client.getRunSamples).mockResolvedValue({
+            samples: [
+                bots(59380, [{id: 1, position: {x: 0, y: 0}}]),
+                bots(59700, [{id: 1, position: {x: 1, y: 0}}])
+            ]
+        });
+        const store = useRunsStore();
+        await store.openRun('run-1'); // cursor = 59400
+        expect(store.trail).toEqual({1: [{x: 0, y: 0}]});
+        store.seek(59700);
+        // Both samples are well within 1,800 ticks of 59700, so both appear.
+        expect(store.trail).toEqual({1: [{x: 0, y: 0}, {x: 1, y: 0}]});
+    });
+
+    it('clears the map when a run fails to load', async () => {
+        vi.mocked(client.getRunMap).mockResolvedValue({map: [placed(59380, 'stone-furnace', -12, 8)]});
+        const store = useRunsStore();
+        await store.openRun('run-1');
+        vi.mocked(client.getRun).mockRejectedValue(new Error('gone'));
+        await store.openRun('run-2');
+        expect(store.entities).toEqual([]);
+        expect(store.mapBounds).toBeNull();
     });
 });

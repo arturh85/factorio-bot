@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {entitiesAt} from './runMap';
+import {boundsAt, entitiesAt} from './runMap';
 import {EntitySnapshot, MapRecord} from '@/api/types';
 
 function snap(name: string, x: number, y: number, direction = 0): EntitySnapshot {
@@ -15,11 +15,15 @@ function removed(tick: number, name: string, x: number, y: number): MapRecord {
     return {kind: 'removed', tick, bot: 1, entity: snap(name, x, y)};
 }
 
-function keyframe(tick: number, game: EntitySnapshot[]): MapRecord {
+function keyframe(
+    tick: number,
+    game: EntitySnapshot[],
+    bounds = {left: 0, top: 0, right: 0, bottom: 0}
+): MapRecord {
     return {
         kind: 'keyframe',
         tick,
-        bounds: {left: 0, top: 0, right: 0, bottom: 0},
+        bounds,
         game,
         model: [],
         divergence: []
@@ -90,5 +94,25 @@ describe('entitiesAt', () => {
         ];
         const at = entitiesAt(r, 300);
         expect(at.map((e) => e.name)).toEqual(['steel-furnace']);
+    });
+});
+
+describe('boundsAt', () => {
+    it('is null before the first keyframe', () => {
+        expect(boundsAt([placed(100, 'stone-furnace', -12, 8)], 50)).toBeNull();
+    });
+
+    it('reports the latest keyframe at or before the tick', () => {
+        const early = {left: -8, top: -8, right: 8, bottom: 8};
+        const late = {left: -64, top: -64, right: 64, bottom: 64};
+        const r = [keyframe(100, [], early), keyframe(300, [], late)];
+        expect(boundsAt(r, 150)).toEqual(early);
+        expect(boundsAt(r, 350)).toEqual(late);
+    });
+
+    it('is unaffected by placed/removed records, which carry no bounds', () => {
+        const bounds = {left: -8, top: -8, right: 8, bottom: 8};
+        const r = [keyframe(100, [], bounds), placed(200, 'stone-furnace', -1, -1)];
+        expect(boundsAt(r, 250)).toEqual(bounds);
     });
 });

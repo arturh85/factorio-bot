@@ -10,6 +10,7 @@
 import {computed, onBeforeUnmount, onMounted, ref, watch} from 'vue';
 import {useRunsStore} from '@/store/runsStore';
 import {runFrameUrl} from '@/api/client';
+import MapPanel from '@/components/MapPanel.vue';
 import {
     formatAgo,
     formatTicks,
@@ -346,6 +347,16 @@ function researchPct(progress: number): string {
                 </p>
             </div>
 
+            <div class="map">
+                <h3>Map</h3>
+                <MapPanel
+                    :entities="store.entities"
+                    :bots="store.mapBots"
+                    :trail="store.trail"
+                    :bounds="store.mapBounds"
+                />
+            </div>
+
             <div class="worldstate">
                 <div class="panel">
                     <h3>Research</h3>
@@ -546,6 +557,15 @@ function researchPct(progress: number): string {
 .frame__none {
     font-size: 0.85rem;
     opacity: 0.7;
+}
+.map {
+    margin-bottom: 1rem;
+}
+.map h3 {
+    margin: 0 0 0.4rem;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    opacity: 0.6;
 }
 .num {
     font-family: monospace;

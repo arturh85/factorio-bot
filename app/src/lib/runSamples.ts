@@ -5,7 +5,7 @@
  * is: this is the part that can be wrong in a way you would not notice by
  * looking at the screen.
  */
-import {BotSample, Sample} from '@/api/types';
+import {BotSample, Position, Sample} from '@/api/types';
 
 export interface ProductionPoint {
     tick: number;
@@ -41,6 +41,32 @@ export function forceSampleAt(samples: Sample[], tick: number): Sample | null {
 export function inventoryOf(sample: Sample | null, bot: number): BotSample | null {
     if (sample === null || sample.kind !== 'bots') return null;
     return sample.bots.find((b) => b.id === bot) ?? null;
+}
+
+/** 30 seconds at 60 UPS -- the map panel's fixed trail lookback window. */
+export const TRAIL_WINDOW_TICKS = 1800;
+
+/**
+ * Per bot, its positions from every `bots` sample in the last
+ * `TRAIL_WINDOW_TICKS` up to and including `tick`, oldest first.
+ *
+ * A bot absent from every sample in the window is simply absent from the
+ * result, not present with an empty array -- a map panel drawing a polyline
+ * per key would otherwise iterate zero-length arrays for every bot that has
+ * ever appeared in the run.
+ */
+export function trailsAt(samples: Sample[], tick: number): Record<number, Position[]> {
+    const from = tick - TRAIL_WINDOW_TICKS;
+    const inWindow = samples
+        .filter((s): s is Extract<Sample, {kind: 'bots'}> => s.kind === 'bots' && s.tick > from && s.tick <= tick)
+        .sort((a, b) => a.tick - b.tick);
+    const trails: Record<number, Position[]> = {};
+    for (const sample of inWindow) {
+        for (const bot of sample.bots) {
+            (trails[bot.id] ??= []).push(bot.position);
+        }
+    }
+    return trails;
 }
 
 /**

@@ -1,6 +1,17 @@
 import {defineStore} from 'pinia';
-import {getRun, getRunFrames, getRunLanes, getRunSamples, listRuns} from '@/api/client';
-import {ArchivedFrame, BotSample, Lane, RunDetail, RunSummary, Sample} from '@/api/types';
+import {getRun, getRunFrames, getRunLanes, getRunMap, getRunSamples, listRuns} from '@/api/client';
+import {
+    ArchivedFrame,
+    BotSample,
+    Bounds,
+    EntitySnapshot,
+    Lane,
+    MapRecord,
+    Position,
+    RunDetail,
+    RunSummary,
+    Sample
+} from '@/api/types';
 import {
     FrameView,
     PlacedFrame,
@@ -9,7 +20,8 @@ import {
     tickBounds,
     viewsOf
 } from '@/lib/runTimeline';
-import {botSampleAt, forceSampleAt, inventoryOf, productionSeries, trackedItems} from '@/lib/runSamples';
+import {botSampleAt, forceSampleAt, inventoryOf, productionSeries, trackedItems, trailsAt} from '@/lib/runSamples';
+import {boundsAt, entitiesAt} from '@/lib/runMap';
 
 /** The `force`-kind half of `Sample`, narrowed for `forceState`. */
 type ForceSample = Extract<Sample, {kind: 'force'}>;
@@ -31,6 +43,8 @@ export const useRunsStore = defineStore('runs', {
         lanes: [] as Lane[],
         /** The run's archived world-state samples, `bots` and `force` lines mixed. */
         samples: [] as Sample[],
+        /** The run's archived entity map, `placed`/`removed`/`keyframe` lines mixed. */
+        map: [] as MapRecord[],
         /**
          * Another run's splits, to diff against. Only the splits are fetched:
          * comparing runs does not need the other run's whole log or frames.
@@ -96,6 +110,30 @@ export const useRunsStore = defineStore('runs', {
                 const made = upToCursor.length > 0 ? upToCursor[upToCursor.length - 1].made : 0;
                 return {item: series.item, made};
             });
+        },
+        /** The entities on the map at the cursor, reconstructed from `map.jsonl`. */
+        entities(): EntitySnapshot[] {
+            return entitiesAt(this.map, this.cursor);
+        },
+        /**
+         * The bounds of the latest keyframe at or before the cursor, or null
+         * before the first one -- distinct from "no entities in bounds",
+         * which is what an empty `entities` array means instead.
+         */
+        mapBounds(): Bounds | null {
+            return boundsAt(this.map, this.cursor);
+        },
+        /** Every bot's position as of the cursor's latest `bots` sample. */
+        mapBots(): BotSample[] {
+            const sample = botSampleAt(this.samples, this.cursor);
+            return sample !== null && sample.kind === 'bots' ? sample.bots : [];
+        },
+        /**
+         * Per bot, its positions over the last 30 seconds (1,800 ticks) of
+         * game time up to the cursor -- the map panel's trail.
+         */
+        trail(): Record<number, Position[]> {
+            return trailsAt(this.samples, this.cursor);
         }
     },
 
@@ -124,16 +162,18 @@ export const useRunsStore = defineStore('runs', {
             this.error = null;
             this.playing = false;
             try {
-                const [detail, frames, lanes, samples] = await Promise.all([
+                const [detail, frames, lanes, samples, map] = await Promise.all([
                     getRun(id),
                     getRunFrames(id),
                     getRunLanes(id),
-                    getRunSamples(id)
+                    getRunSamples(id),
+                    getRunMap(id)
                 ]);
                 this.detail = detail;
                 this.frames = frames.frames;
                 this.lanes = lanes.lanes;
                 this.samples = samples.samples;
+                this.map = map.map;
                 // A comparison against the previously open run is almost never
                 // what is wanted, and would be read as belonging to this one.
                 this.reference = null;
@@ -154,6 +194,7 @@ export const useRunsStore = defineStore('runs', {
                 this.frames = [];
                 this.lanes = [];
                 this.samples = [];
+                this.map = [];
             } finally {
                 this.loading = false;
             }

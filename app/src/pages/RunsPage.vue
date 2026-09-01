@@ -18,7 +18,8 @@ import {
     frameAt,
     laneAt,
     laneBots,
-    splitAt
+    splitAt,
+    compareSplits
 } from '@/lib/runTimeline';
 
 const store = useRunsStore();
@@ -65,6 +66,27 @@ const frameSrc = computed(() =>
     current.value && selected.value
         ? runFrameUrl(selected.value, current.value.bot, current.value.file)
         : null
+);
+
+/**
+ * Splits with a delta column when a reference run is chosen.
+ *
+ * Matched by goal name, so a run that skipped or reordered a milestone does
+ * not line up against whatever happened to sit at the same index.
+ */
+const deltas = computed(() =>
+    store.reference === null
+        ? null
+        : new Map(
+              compareSplits(store.detail?.splits ?? [], store.reference.splits).map((row) => [
+                  row.goal,
+                  row
+              ])
+          )
+);
+
+const otherRuns = computed(() =>
+    store.runs.filter((r) => r.run_id !== store.detail?.summary.run_id)
 );
 
 const lanesByBot = computed(() =>
@@ -132,7 +154,10 @@ function markerLeft(tick: number): string {
 
             <table class="splits">
                 <thead>
-                    <tr><th>#</th><th>milestone</th><th>at</th><th>took</th><th></th></tr>
+                    <tr>
+                        <th>#</th><th>milestone</th><th>at</th><th>took</th>
+                        <th v-if="deltas">vs ref</th><th></th>
+                    </tr>
                 </thead>
                 <tbody>
                     <tr
@@ -144,6 +169,19 @@ function markerLeft(tick: number): string {
                         <td>{{ split.goal }}</td>
                         <td class="num">{{ split.started_tick }}</td>
                         <td class="num">{{ formatTicks(split.elapsed_ticks) }}</td>
+                        <td v-if="deltas" class="num">
+                            <!-- An em dash, not a zero: no delta exists when
+                                 either side never finished, and zero would read
+                                 as "exactly the same". -->
+                            <span
+                                v-if="deltas.get(split.goal)?.delta != null"
+                                :class="(deltas.get(split.goal)!.delta as number) < 0 ? 'faster' : 'slower'"
+                            >
+                                {{ (deltas.get(split.goal)!.delta as number) > 0 ? '+' : ''
+                                }}{{ formatTicks(deltas.get(split.goal)!.delta) }}
+                            </span>
+                            <span v-else>—</span>
+                        </td>
                         <td :class="['outcome', `outcome--${split.outcome}`]">
                             {{ split.outcome }}
                         </td>
@@ -183,6 +221,19 @@ function markerLeft(tick: number): string {
                     </label>
                 </div>
             </div>
+
+            <label v-if="otherRuns.length > 0" class="compare">
+                compare with
+                <select
+                    :value="store.reference?.summary.run_id ?? ''"
+                    @change="store.setReference(($event.target as HTMLSelectElement).value || null)"
+                >
+                    <option value="">— none —</option>
+                    <option v-for="r in otherRuns" :key="r.run_id" :value="r.run_id">
+                        {{ r.run_id }}
+                    </option>
+                </select>
+            </label>
 
             <div v-if="lanesByBot.length > 0 && store.bounds" class="lanes">
                 <div v-for="row in lanesByBot" :key="row.bot" class="lanes__row">
@@ -346,6 +397,17 @@ function markerLeft(tick: number): string {
 }
 .num {
     font-family: monospace;
+}
+.compare {
+    display: inline-block;
+    margin-bottom: 1rem;
+    font-size: 0.85rem;
+}
+.faster {
+    color: #15803d;
+}
+.slower {
+    color: #b91c1c;
 }
 .lanes {
     margin-bottom: 1rem;

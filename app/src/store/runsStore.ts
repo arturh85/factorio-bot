@@ -18,6 +18,11 @@ export const useRunsStore = defineStore('runs', {
         detail: null as RunDetail | null,
         frames: [] as ArchivedFrame[],
         lanes: [] as Lane[],
+        /**
+         * Another run's splits, to diff against. Only the splits are fetched:
+         * comparing runs does not need the other run's whole log or frames.
+         */
+        reference: null as RunDetail | null,
         /** The tick every panel renders at. */
         cursor: 0,
         playing: false,
@@ -76,6 +81,9 @@ export const useRunsStore = defineStore('runs', {
                 this.detail = detail;
                 this.frames = frames.frames;
                 this.lanes = lanes.lanes;
+                // A comparison against the previously open run is almost never
+                // what is wanted, and would be read as belonging to this one.
+                this.reference = null;
                 const placed = this.placedFrames;
                 this.bot = placed.length > 0 ? placed[0].bot : null;
                 this.camera = placed.length > 0 ? placed[0].camera : null;
@@ -87,6 +95,24 @@ export const useRunsStore = defineStore('runs', {
                 this.lanes = [];
             } finally {
                 this.loading = false;
+            }
+        },
+
+        /**
+         * Loads another run to compare against, or clears the comparison.
+         *
+         * A failure clears the reference rather than leaving the previous one
+         * in place, where its deltas would silently describe the wrong run.
+         */
+        async setReference(id: string | null) {
+            if (id === null) {
+                this.reference = null;
+                return;
+            }
+            try {
+                this.reference = await getRun(id);
+            } catch {
+                this.reference = null;
             }
         },
 

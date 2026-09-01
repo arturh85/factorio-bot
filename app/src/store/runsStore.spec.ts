@@ -107,6 +107,43 @@ describe('openRun', () => {
     });
 });
 
+describe('setReference', () => {
+    it('loads another run to diff against', async () => {
+        vi.mocked(client.getRun).mockResolvedValue(DETAIL);
+        const store = useRunsStore();
+        await store.setReference('run-2');
+        expect(store.reference?.summary.run_id).toBe('run-1');
+    });
+
+    it('clears rather than keeping a stale reference when loading fails', async () => {
+        // A previous reference left in place would keep rendering deltas that
+        // silently describe the wrong run.
+        vi.mocked(client.getRun).mockResolvedValue(DETAIL);
+        const store = useRunsStore();
+        await store.setReference('run-2');
+        vi.mocked(client.getRun).mockRejectedValue(new Error('gone'));
+        await store.setReference('run-3');
+        expect(store.reference).toBeNull();
+    });
+
+    it('clears on null', async () => {
+        vi.mocked(client.getRun).mockResolvedValue(DETAIL);
+        const store = useRunsStore();
+        await store.setReference('run-2');
+        await store.setReference(null);
+        expect(store.reference).toBeNull();
+    });
+
+    it('drops the comparison when a different run is opened', async () => {
+        vi.mocked(client.getRun).mockResolvedValue(DETAIL);
+        vi.mocked(client.getRunFrames).mockResolvedValue({frames: FRAMES});
+        const store = useRunsStore();
+        await store.setReference('run-2');
+        await store.openRun('run-9');
+        expect(store.reference).toBeNull();
+    });
+});
+
 describe('seek and playback', () => {
     beforeEach(async () => {
         vi.mocked(client.getRun).mockResolvedValue(DETAIL);

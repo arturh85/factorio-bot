@@ -1017,12 +1017,26 @@ impl Method for SplitAcrossBots {
             });
         };
         let need = shortfall(&ctx.state, item, *count, whose);
-        let chains = (self.bots.len() as u32).min(need);
+        // `registry_for` copies the caller's slice verbatim, so a caller can
+        // list the same `BotId` twice. Without deduping, that used to open
+        // two chains for one bot, the second sized after the first had
+        // already reserved its share against the *same* raw holding, so it
+        // over-asked. Computing `chains`/`base`/`remainder` from the distinct
+        // bots first makes the split independent of how many times a bot's
+        // id appears in the slice, only whether it appears at all.
+        let mut seen = BTreeSet::new();
+        let distinct: Vec<BotId> = self
+            .bots
+            .iter()
+            .copied()
+            .filter(|b| seen.insert(*b))
+            .collect();
+        let chains = (distinct.len() as u32).min(need);
         let base = need / chains;
         let remainder = need % chains;
 
         let mut steps = Vec::new();
-        for (index, bot) in self.bots.iter().take(chains as usize).enumerate() {
+        for (index, bot) in distinct.iter().take(chains as usize).enumerate() {
             let share = base + if (index as u32) < remainder { 1 } else { 0 };
             // A `Have` goal states a holding, not a delivery, so a share of one
             // handed to a bot already holding five is a goal that is already
@@ -2773,6 +2787,42 @@ mod tests {
                 other => panic!("expected only subgoals, got {:?}", other),
             }
         }
+    }
+
+    #[test]
+    fn a_roster_listing_a_bot_twice_still_splits_the_whole_shortfall() {
+        // `registry_for` copies the caller's slice verbatim, so a caller can
+        // hand the same bot twice. Sizing chains against the slice's length
+        // rather than the distinct bots would open two chains for bot 1, the
+        // second sized after the first had already reserved its share, and
+        // over-ask the roster. The participant set must be deduped before
+        // `chains`/`base`/`remainder` are computed from it.
+        let bots = [BotId(1), BotId(2)];
+        let s = state(&bots);
+        let split = SplitAcrossBots {
+            bots: vec![BotId(1), BotId(1), BotId(2)],
+        };
+        let mut ctx = ExpansionCtx::new(s, BotId(1));
+        let goal = Goal::Have {
+            item: "iron-ore".into(),
+            count: 4,
+            whose: Holder::Anyone,
+        };
+        let steps = split.expand(&goal, &mut ctx).unwrap();
+        assert_eq!(steps.len(), 2, "one subgoal per distinct bot, not per slot");
+        let mut total = 0u32;
+        let mut seen = BTreeSet::new();
+        for step in steps {
+            let Step::Subgoal(Goal::Have { count, whose, .. }) = step else {
+                panic!("expected only subgoals");
+            };
+            let Holder::Share(bot) = whose else {
+                panic!("expected a share, got {:?}", whose);
+            };
+            assert!(seen.insert(bot), "bot {} named twice", bot);
+            total += count;
+        }
+        assert_eq!(total, 4, "the shares still sum to the whole shortfall");
     }
 
     #[test]

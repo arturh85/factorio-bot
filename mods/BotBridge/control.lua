@@ -2245,16 +2245,34 @@ function rcon_revive_ghost(player_id, name, x, y)
 	end
 end
 
+-- Give a player items, and say so when it could not give them all.
+--
+-- `LuaControl.insert` returns how many items actually went in. A full or
+-- filtered inventory takes fewer -- possibly none -- and discarding the count
+-- reported success for a bot that was never stocked, which every later step
+-- then assumed. `get_player` already reports an absent player, and that
+-- refusal now reaches the caller too.
 function rcon_cheat_item(player_id, item, count)
 	local player = get_player(player_id)
 	if player == nil then
 		return
 	end
-	player.insert{name=item, count=count}
+	local inserted = player.insert{name=item, count=count}
+	if inserted ~= count then
+		rcon.print("Error: inserted " .. tostring(inserted) .. " of " ..
+			tostring(count) .. " " .. tostring(item) .. " for player " ..
+			tostring(player_id) .. " (inventory full or filtered)")
+	end
 end
 
 function rcon_cheat_technology(tech)
 	local force = game.forces["player"]
+	-- Name the problem. Without this an unknown technology arrives as
+	-- "attempt to index field '?' (a nil value)", which is true and useless.
+	if force.technologies[tech] == nil then
+		rcon.print("Error: no such technology: " .. tostring(tech))
+		return
+	end
 	force.technologies[tech].researched=true
 end
 

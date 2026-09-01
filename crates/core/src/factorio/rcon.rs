@@ -92,6 +92,27 @@ fn frame_capture_verdict(reply: (Option<Vec<String>>, Option<u64>)) -> Result<Op
     Ok(tick)
 }
 
+/// Judges a reply that should carry nothing.
+///
+/// Factorio writes `Cannot execute command. Error: ...` into the reply body
+/// when the mod raises, and the mod writes its own refusals there with
+/// `rcon.print`. A caller that drops the body therefore reports success for
+/// every call it ever makes -- which is how `add_research` came to accept a
+/// technology that does not exist, and how a run spent 61345 ticks re-issuing
+/// an action that did nothing while everything claimed to work.
+///
+/// This is [`frame_capture_verdict`] without the tick: the same rule, for the
+/// calls that have no payload to return.
+fn expect_silence(lines: Option<Vec<String>>) -> Result<()> {
+    if let Some(lines) = lines {
+        return Err(RconUnexpectedOutput {
+            output: lines.join("\n"),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 fn remote_call_command(function_name: &str, args: &[String]) -> String {
     let mut arg_string: String = args.join(", ");
     if !arg_string.is_empty() {
@@ -678,8 +699,7 @@ impl FactorioRcon {
 
     /// Starts initial discovery process for "server"
     pub async fn whoami(&self, name: &str) -> Result<()> {
-        self.remote_call("whoami", vec![str_to_lua(name)]).await?;
-        Ok(())
+        expect_silence(self.remote_call("whoami", vec![str_to_lua(name)]).await?)
     }
 
     /// The mod's `players` reply as one JSON string, or `None` when nobody is
@@ -780,27 +800,28 @@ impl FactorioRcon {
         item_name: &str,
         item_count: u32,
     ) -> Result<()> {
-        self.remote_call(
-            "cheat_item",
-            vec![
-                player_id.to_string(),
-                str_to_lua(item_name),
-                item_count.to_string(),
-            ],
+        expect_silence(
+            self.remote_call(
+                "cheat_item",
+                vec![
+                    player_id.to_string(),
+                    str_to_lua(item_name),
+                    item_count.to_string(),
+                ],
+            )
+            .await?,
         )
-        .await?;
-        Ok(())
     }
 
     pub async fn cheat_technology(&self, technology_name: &str) -> Result<()> {
-        self.remote_call("cheat_technology", vec![str_to_lua(technology_name)])
-            .await?;
-        Ok(())
+        expect_silence(
+            self.remote_call("cheat_technology", vec![str_to_lua(technology_name)])
+                .await?,
+        )
     }
 
     pub async fn cheat_all_technologies(&self) -> Result<()> {
-        self.remote_call("cheat_all_technologies", vec![]).await?;
-        Ok(())
+        expect_silence(self.remote_call("cheat_all_technologies", vec![]).await?)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -965,12 +986,13 @@ impl FactorioRcon {
     }
 
     pub async fn store_map_data(&self, key: &str, value: Value) -> Result<()> {
-        self.remote_call(
-            "store_map_data",
-            vec![str_to_lua(key), value_to_lua(&value)],
+        expect_silence(
+            self.remote_call(
+                "store_map_data",
+                vec![str_to_lua(key), value_to_lua(&value)],
+            )
+            .await?,
         )
-        .await?;
-        Ok(())
     }
 
     pub async fn retrieve_map_data(&self, key: &str) -> Result<Option<Value>> {

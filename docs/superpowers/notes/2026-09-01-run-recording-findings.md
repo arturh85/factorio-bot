@@ -116,6 +116,53 @@ which is its own question.
 So: the research critical path is now blocked on *estimation*, not on a silent
 lie. That is a much better place to be stuck, and a different piece of work.
 
+### Multi-bot runs are capped at one iteration
+
+The sharpest finding from trying to produce a four-bot run, and it is a real
+planner limitation rather than a bug:
+
+    planned 8 steps
+    ran: success=4 failed=0 pending=0     <- four bots working in parallel
+    RAISED: bot 1 and bot 2 hold different amounts of iron-ore;
+            expansion sizes each share against one bot's inventory and
+            assumes any bot would do
+
+The first plan is fine. The *replan* is refused, because four bots mining pick
+up different amounts and are no longer interchangeable. **Doing the work is
+what breaks the precondition for planning the next work**, so any multi-bot run
+stops after one iteration.
+
+The guard itself is correct: a share sized against a bot carrying forty plates
+is wrong for a bot carrying none. What is missing is sizing shares *per bot*
+rather than assuming any bot would do. That is planner work of the same shape
+as `Goal::Produced` -- a change to how expansion reasons, not a patch.
+
+`workspace/scripts/multibot.lua` levels the roster between iterations to get a
+demonstration run. That is **scaffolding and should not be mistaken for a
+fix**: it cheats items in to paper over a divergence the planner ought to
+handle, and it would be wrong in any run whose point was the inventory.
+
+### Three ways a roster can lie about itself
+
+Getting four bots to the starting line took three separate fixes, and each one
+was invisible before today:
+
+- **`world.player(id)` answers from the cached world**, which holds a bot for
+  every id the run was started with, connected or not. Waiting on it reports
+  "roster ready: 4 bots" instantly while the game has three. `rcon.players()`
+  (new) asks the game, and reports only players with a character -- one that
+  has not finished spawning cannot act, so counting it plans work for a bot
+  that cannot do it.
+- **The startup wait gives up after 90 seconds and proceeds anyway**, logging
+  `Timeout waiting for clients to connect (expected 4)` through `error!` --
+  which went nowhere at all until the tracing subscriber landed this morning.
+- **`cheat_item` reported success for a player that does not exist.** The
+  game's own answer, `valid players: [1, 2, 3]`, only became visible once
+  `expect_silence` stopped discarding the reply body.
+
+Two of the three were fixed earlier today for unrelated reasons, and both were
+load-bearing for diagnosing the third.
+
 ### The furnace lag, and why it was the only one of its kind
 
 `tried to remove 10 copper-plate but removed 9` was not a rate error. Measured

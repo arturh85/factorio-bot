@@ -116,6 +116,44 @@ end
     )?;
     let rcon = _rcon.clone();
     map_table.set(
+        "__doc_entry_players",
+        String::from(
+            r#"
+--- the players the game says are connected
+-- Sends /silent-command remote.call('players')
+--
+-- **Asks the game, not the cached world.** `world.player(id)` answers from the
+-- planner's view, which contains a bot for every id the run was started with
+-- whether or not that client ever connected -- so it is the wrong thing to
+-- wait on. A client that is still loading is simply absent from this list.
+--
+-- Only players with a character are reported: a connection that has not
+-- finished spawning cannot act, so counting it would mean planning work for a
+-- bot that cannot do it.
+-- @treturn {number,...} connected player ids, ascending
+function rcon.players()
+end
+    "#,
+        ),
+    )?;
+    {
+        let rcon = _rcon.clone();
+        map_table.set(
+            "players",
+            lua.create_async_function(move |_lua, ()| {
+                let rcon = rcon.clone();
+                async move {
+                    let players = rcon.as_ref().connected_players().await.map_err(rcon_error)?;
+                    let mut ids: Vec<u32> =
+                        players.iter().map(|p| u32::from(p.player_id)).collect();
+                    ids.sort_unstable();
+                    Ok(ids)
+                }
+            })?,
+        )?;
+    }
+
+    map_table.set(
         "__doc_entry_last_tick",
         String::from(
             r#"

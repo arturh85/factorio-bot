@@ -44,6 +44,15 @@ mod tests {
             __run_obs = RUN_OBS
             __plan_calls = 0
             __run_calls = 0
+            __keyframe_calls = 0
+            -- Present in every test here, the way `record` is only installed
+            -- alongside a live game connection in production: proves the
+            -- milestone-boundary call happens when recording is available,
+            -- without needing a second harness just for that.
+            record = {}
+            record.keyframe = function()
+                __keyframe_calls = __keyframe_calls + 1
+            end
             goal = {}
             goal.plan = function(_g, _opts)
                 __plan_calls = __plan_calls + 1
@@ -280,6 +289,66 @@ mod tests {
             0,
             "and `failed` alone would have called that a clean run"
         );
+    }
+
+    #[test]
+    fn a_keyframe_is_written_once_per_closed_milestone_when_recording() {
+        // 10 -> 6 -> 0: one milestone, satisfied on the third plan. `_close`
+        // runs exactly once, so exactly one keyframe -- not one per iteration,
+        // not one per run, and not zero because there is deliberately no tick
+        // timer driving this.
+        let lua = harness("{10, 6, 0}", "{}");
+        let (state, _plans, _runs) = drive(&lua, "{}");
+        assert_eq!(state, "done");
+        assert_eq!(
+            lua.globals().get::<i64>("__keyframe_calls").unwrap(),
+            1,
+            "one milestone was closed, so exactly one keyframe"
+        );
+    }
+
+    #[test]
+    fn two_closed_milestones_write_two_keyframes() {
+        let lua = harness("{0, 0}", "{}");
+        lua.load(
+            "local sup = supervisor.new(supervisor.list {'a', 'b'}, {})
+             repeat sup:step() until sup:finished()
+             __state = sup.state",
+        )
+        .exec()
+        .unwrap();
+        assert_eq!(lua.globals().get::<String>("__state").unwrap(), "done");
+        assert_eq!(lua.globals().get::<i64>("__keyframe_calls").unwrap(), 2);
+    }
+
+    #[test]
+    fn the_loop_works_when_no_recording_is_installed_at_all() {
+        // Every other test in this file installs a `record` stub; this one
+        // deliberately does not, because that is the common case in
+        // production too -- `record` exists only alongside a live game
+        // connection, and most callers of `supervisor` (every planning-only
+        // script, most of the harness above until the stub was added) have
+        // no such connection. The milestone-boundary keyframe call must be
+        // inert then, not a hard failure of the whole loop.
+        let lua = sandboxed();
+        lua.load(
+            r#"
+            goal = {}
+            goal.plan = function(_g, _opts) return { steps = {} } end
+            goal.run = function(_plan) return { done = true } end
+        "#,
+        )
+        .exec()
+        .expect("stub installs");
+        lua.load(SUPERVISOR_LUA).exec().expect("supervisor loads");
+        lua.load(
+            "local sup = supervisor.new(supervisor.list {'a'}, {})
+             repeat sup:step() until sup:finished()
+             __state = sup.state",
+        )
+        .exec()
+        .expect("the loop must not fail just because nothing is recording");
+        assert_eq!(lua.globals().get::<String>("__state").unwrap(), "done");
     }
 
     #[test]

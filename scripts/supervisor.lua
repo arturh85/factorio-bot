@@ -97,6 +97,19 @@ function Sup:_close(outcome)
         any_failures = self.any_failures,
         first_error = self.first_error,
     })
+    -- A keyframe at the boundary of every milestone -- the only place
+    -- `map.jsonl` gets one; there is deliberately no tick timer driving it.
+    -- Guarded on both counts, because this loop must keep working for every
+    -- caller that does not record: `record` is a global installed only
+    -- alongside a live game connection, and even then only a script that
+    -- called `record.start()` has one running, which this loop does not do
+    -- on its own (see the comment on `actions`/`steps` in `:step()` below --
+    -- recording what happened is the caller's job, not this one's). `pcall`
+    -- turns "no recording is running" into a silent no-op rather than a
+    -- failure of the supervisor loop over a diagnostic nobody asked for here.
+    if record ~= nil then
+        pcall(record.keyframe)
+    end
 end
 
 --- Perform exactly one action and return a transition record.

@@ -3,6 +3,7 @@ use crate::factorio::util::{
     add_to_rect, bounding_box, format_dotgraph, move_position, rect_fields, rect_floor,
 };
 use crate::num_traits::FromPrimitive;
+use crate::record::map::{EntitySnapshot, resource_position_from_pos};
 use crate::types::{
     Direction, EntityName, EntityType, FactorioEntity, FactorioEntityPrototype, FactorioRecipe,
     FactorioTile, Pos, Position, Rect, ResourcePatch,
@@ -135,6 +136,38 @@ impl EntityGraph {
             entities.push(entity.clone())
         }
         entities
+    }
+
+    /// Everything this graph believes lies within `bounds`: the entities the
+    /// entity tree tracks (see `add`), plus resources.
+    ///
+    /// Resources are read out of `resource_tree` rather than `entity_tree`
+    /// (they never enter it -- see `add`), and their position is recovered
+    /// through [`resource_position_from_pos`]: the box each one was inserted
+    /// under has its origin at the *floored* tile, same convention as the
+    /// `resources` map itself, and a caller reading that origin back out
+    /// without restoring the half tile would put every resource 0.5 off from
+    /// where the game actually has it.
+    pub fn snapshot_within(&self, bounds: &Rect) -> Vec<EntitySnapshot> {
+        let mut out = Vec::new();
+        let entity_query: QuadTreeRect = bounds.clone().into();
+        for (entity, _rect, _id) in self.entity_tree.read().query(entity_query) {
+            out.push(EntitySnapshot {
+                name: entity.name.clone(),
+                position: entity.position.clone(),
+                direction: entity.direction,
+            });
+        }
+        let resource_query: QuadTreeRect = bounds.clone().into();
+        for (name, rect, _id) in self.resource_tree.read().query(resource_query) {
+            let pos = Pos(rect.origin.x as i32, rect.origin.y as i32);
+            out.push(EntitySnapshot {
+                name: name.clone(),
+                position: resource_position_from_pos(pos),
+                direction: 0,
+            });
+        }
+        out
     }
 
     pub fn resource_patches(&self, resource_name: &str) -> Vec<ResourcePatch> {
@@ -1510,5 +1543,56 @@ mod tests {
 }
 "#,
         );
+    }
+
+    /// The exact scenario `resource_position_from_pos`'s own doc comment
+    /// warns about: `resources` (and the tree behind it) key a resource by
+    /// its floored `Pos`, so a resource at a genuine tile centre --
+    /// `(-40.5, -48.5)`, never `(-41, -49)` -- must come back out of
+    /// `snapshot_within` at that same centre, not at the floored corner.
+    /// Getting this wrong once made every ore on every map unmineable while
+    /// every test passed, because the test fixture used integer positions,
+    /// the one input the lossy round trip does not corrupt.
+    #[test]
+    fn snapshot_within_restores_a_resources_tile_centre() {
+        use crate::record::map::divergence_between;
+
+        let graph = entity_graph_from(vec![FactorioEntity::new_resource(
+            &Position::new(-40.5, -48.5),
+            Direction::North,
+            &EntityName::IronOre.to_string(),
+        )])
+        .unwrap();
+
+        let bounds = Rect::new(&Position::new(-50., -58.), &Position::new(-30., -38.));
+        let model = graph.snapshot_within(&bounds);
+
+        let iron = model
+            .iter()
+            .find(|e| e.name == EntityName::IronOre.to_string())
+            .expect("the resource must be found within its own bounds");
+        assert_eq!(iron.position, Position::new(-40.5, -48.5));
+
+        // The game agrees exactly: no divergence.
+        let game = vec![iron.clone()];
+        assert!(divergence_between(&game, &model).is_empty());
+    }
+
+    #[test]
+    fn snapshot_within_finds_a_tracked_entity_by_bounds() {
+        let graph = entity_graph_from(vec![FactorioEntity::new_transport_belt(
+            &Position::new(0.5, 0.5),
+            Direction::South,
+        )])
+        .unwrap();
+
+        let bounds = Rect::new(&Position::new(-1., -1.), &Position::new(2., 2.));
+        let model = graph.snapshot_within(&bounds);
+        assert_eq!(model.len(), 1);
+        assert_eq!(model[0].name, "transport-belt");
+        assert_eq!(model[0].position, Position::new(0.5, 0.5));
+
+        let empty_bounds = Rect::new(&Position::new(50., 50.), &Position::new(60., 60.));
+        assert!(graph.snapshot_within(&empty_bounds).is_empty());
     }
 }

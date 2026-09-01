@@ -16,11 +16,35 @@ use super::plan::{Dispatch, PlanOrigin, PlanValue, RunSlot, position_to_lua};
 use super::{ActuatorFactory, goal_error, lock};
 use crate::lua_runner::{PendingWork, ReplaySink};
 use factorio_bot_core::mlua::prelude::*;
+use factorio_bot_core::record::map::{EntitySnapshot, Placement};
 use factorio_bot_core::tokio::sync::watch;
 use factorio_bot_executor::{Actuator, ExecutionLog, Replay, Status, run_into};
 use factorio_bot_planner::{ActionNetwork, Schedule};
 use factorio_bot_scripting::OutputSink;
 use std::sync::{Arc, Mutex};
+
+/// `Placement::intent`/`::actual` as a Lua table, in the same shape
+/// `map.jsonl`'s `EntitySnapshot` uses.
+fn entity_snapshot_to_lua(lua: &Lua, snapshot: &EntitySnapshot) -> LuaResult<LuaTable> {
+    let t = lua.create_table()?;
+    t.set("name", snapshot.name.clone())?;
+    t.set("position", position_to_lua(lua, &snapshot.position)?)?;
+    t.set("direction", snapshot.direction)?;
+    Ok(t)
+}
+
+/// `Attempt::placed` as a Lua table -- built field by field rather than with
+/// `lua.to_value`, whose serde bridge maps `Option::None` to a light-userdata
+/// sentinel that reads as truthy in Lua rather than to a real `nil`. `drift`
+/// is `None` on a placement the game honoured exactly, and `t.set` with an
+/// `Option` sets a genuine `nil` for that case.
+fn placement_to_lua(lua: &Lua, placement: &Placement) -> LuaResult<LuaTable> {
+    let t = lua.create_table()?;
+    t.set("intent", entity_snapshot_to_lua(lua, &placement.intent)?)?;
+    t.set("actual", entity_snapshot_to_lua(lua, &placement.actual)?)?;
+    t.set("drift", placement.drift.clone())?;
+    Ok(t)
+}
 
 /// One failed action, exactly as `goal.run`/`:wait()` last observed it.
 ///
@@ -157,6 +181,13 @@ fn build_observation(
         t.set("replied_tick", replied_tick)?;
         if let Some(error) = &error {
             t.set("error", error.clone())?;
+        }
+        // `Attempt::placed` travels the same way `dispatched_tick` does: a
+        // real value when the actuator drained one at settle, `nil` (never a
+        // placeholder table) otherwise. `record.actions` reads this to write
+        // `map.jsonl`'s `placed` lines.
+        if let Some(placed) = attempt.and_then(|a| a.placed.as_ref()) {
+            t.set("placed", placement_to_lua(lua, placed)?)?;
         }
         actions.set(id.0, t)?;
 
@@ -653,6 +684,92 @@ mod tests {
     /// hold the table [`build_observation`] writes into.
     fn observing_lua() -> Lua {
         crate::sandbox::new_sandboxed_lua().expect("sandbox")
+    }
+
+    /// `Attempt::placed` must reach the action's Lua table the same way
+    /// `dispatched_tick` already does: a real table when the actuator
+    /// drained one, `nil` -- not an empty table -- otherwise. This is the
+    /// thread `record.actions` (`crates/scripting_lua/src/globals/record.rs`)
+    /// reads to write `map.jsonl`'s `placed` lines, and it is driven directly
+    /// against [`build_observation`] rather than through `goal.run`, exactly
+    /// like the counting tests above: `StubActuator` never places anything,
+    /// so a hand-built log is what proves the wiring rather than the stub.
+    #[test]
+    fn a_placement_on_the_attempt_reaches_the_actions_table() {
+        use factorio_bot_core::factorio::ticks::ActionTicks;
+        use factorio_bot_core::types::FactorioEntity;
+
+        let placed_id = ActionId(1);
+        let unplaced_id = ActionId(2);
+        let mut net = ActionNetwork::new();
+        for id in [placed_id, unplaced_id] {
+            net.add(Action {
+                id,
+                kind: ActionKind::Place {
+                    entity: Box::new(FactorioEntity {
+                        name: "stone-furnace".to_string(),
+                        position: Position::new(-12.0, 8.0),
+                        direction: 0,
+                        ..Default::default()
+                    }),
+                },
+                pre: vec![],
+                eff: vec![],
+                duration: 30,
+                pinned: None,
+                label: "place stone-furnace".into(),
+            });
+        }
+        let net = Arc::new(net);
+
+        let placement = Placement {
+            intent: EntitySnapshot {
+                name: "stone-furnace".to_string(),
+                position: Position::new(-12.0, 8.0),
+                direction: 0,
+            },
+            actual: EntitySnapshot {
+                name: "stone-furnace".to_string(),
+                position: Position::new(-12.0, 8.5),
+                direction: 0,
+            },
+            drift: Some(vec!["position".to_string()]),
+        };
+
+        let mut log = ExecutionLog::default();
+        for id in [placed_id, unplaced_id] {
+            log.start(id, Ticks::try_from(90u64).unwrap());
+            log.observe(id, ActionTicks::new(Some(100), Some(120)));
+            log.succeed(id, Ticks::try_from(120u64).unwrap());
+        }
+        log.record_placement(placed_id, placement.clone());
+
+        let lua = observing_lua();
+        let obs = build_observation(&lua, &net, &log, true, None).expect("observation");
+        let actions: LuaTable = obs.get("actions").expect("actions");
+
+        let a: LuaTable = actions.get(placed_id.0).expect("action entry");
+        let placed: LuaTable = a.get("placed").expect("placed field");
+        let actual: LuaTable = placed.get("actual").expect("actual");
+        let name: String = actual.get("name").expect("name");
+        assert_eq!(name, "stone-furnace");
+        let position: LuaTable = actual.get("position").expect("position");
+        let y: f64 = position.get("y").expect("y");
+        assert_eq!(
+            y, 8.5,
+            "the actual position the game reported, not the intent"
+        );
+        let direction: u8 = actual.get("direction").expect("direction");
+        assert_eq!(direction, 0);
+        let drift: Vec<String> = placed.get("drift").expect("drift");
+        assert_eq!(drift, vec!["position".to_string()]);
+
+        let b: LuaTable = actions.get(unplaced_id.0).expect("action entry");
+        let nothing: LuaValue = b.get("placed").expect("placed field");
+        assert!(
+            nothing.is_nil(),
+            "an action that placed nothing must carry no `placed` key at all, got {nothing:?}"
+        );
     }
 
     #[tokio::test]

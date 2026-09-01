@@ -51,7 +51,13 @@ pub(crate) fn binding_tables(
         None,
         vec![],
     )?;
-    let record_table = create_lua_record(lua, rcon.clone(), cwd.clone(), vec![])?;
+    let record_table = create_lua_record(
+        lua,
+        rcon.clone(),
+        planner.real_world.clone(),
+        cwd.clone(),
+        vec![],
+    )?;
     let rcon_table = create_lua_rcon(lua, rcon, planner.real_world)?;
     let code_by_path: HashMap<String, String> = HashMap::new();
     let code_by_path: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(code_by_path));

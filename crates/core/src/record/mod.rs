@@ -147,6 +147,11 @@ pub struct Manifest {
     /// whether to fetch the stream cares how many records it will get.
     #[serde(default)]
     pub samples: usize,
+    /// How many lines are in `map.jsonl`. `#[serde(default)]` for the same
+    /// reason `samples` has it: a run recorded before this field existed has
+    /// no map at all, and that is zero, not a parse failure.
+    #[serde(default)]
+    pub map: usize,
 }
 
 /// Writes a run's event log.
@@ -154,6 +159,11 @@ pub struct RunRecorder {
     dir: PathBuf,
     run_id: String,
     events: File,
+    /// `map.jsonl`: what got built, and whether the game agreed. Written
+    /// straight into the run directory as it happens, exactly like `events`
+    /// -- there is no ingestion step, because nothing produces this file but
+    /// this recorder.
+    map: File,
     started: Instant,
     started_unix: u64,
     /// The game tick of the first event recorded, so a duration can be a
@@ -161,6 +171,17 @@ pub struct RunRecorder {
     start_tick: Option<u64>,
     /// The highest tick recorded so far. See [`RunRecorder::not_before`].
     high_tick: u64,
+    /// How many lines have been written to `map.jsonl`. Counted here rather
+    /// than by rereading the file at `finish`, the way `events` is: `map`
+    /// lines are written far less often, and a run-side counter cannot
+    /// disagree with what this recorder itself just wrote.
+    map_count: usize,
+    /// The bounding box of every entity `record_map` has seen placed so far
+    /// this run, before any margin. `None` until the first placement, and a
+    /// run that never places anything keeps it `None` forever -- that is
+    /// exactly the signal [`RunRecorder::placed_bounds`] uses to write no
+    /// keyframe at all rather than one over a zero-area box.
+    placed_bounds: Option<map::Bounds>,
 }
 
 impl RunRecorder {
@@ -174,13 +195,17 @@ impl RunRecorder {
         let dir = runs_root.join(&run_id);
         fs::create_dir_all(&dir)?;
         let events = File::create(dir.join("events.jsonl"))?;
+        let map = File::create(dir.join("map.jsonl"))?;
         Ok(Self {
             dir,
             run_id,
             events,
+            map,
             started: Instant::now(),
             start_tick: None,
             high_tick: 0,
+            map_count: 0,
+            placed_bounds: None,
             started_unix: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -215,6 +240,54 @@ impl RunRecorder {
         line.push('\n');
         self.events.write_all(line.as_bytes())?;
         self.events.flush()
+    }
+
+    /// Appends one line to `map.jsonl` and flushes it, for the same reason
+    /// `record` flushes `events.jsonl` per line: a crashed run must leave a
+    /// readable map, not just a readable event log.
+    ///
+    /// A [`map::MapKind::Placed`] line also folds its actual position into
+    /// [`RunRecorder::placed_bounds`] -- the only bookkeeping this recorder
+    /// does beyond writing the line, and the reason a keyframe can be asked
+    /// for without the caller tracking placements itself.
+    pub fn record_map(&mut self, record: map::MapRecord) -> io::Result<()> {
+        if let map::MapKind::Placed { actual, .. } = &record.kind {
+            self.placed_bounds = Some(match self.placed_bounds.take() {
+                None => map::Bounds {
+                    left: actual.position.x(),
+                    top: actual.position.y(),
+                    right: actual.position.x(),
+                    bottom: actual.position.y(),
+                },
+                Some(b) => map::Bounds {
+                    left: b.left.min(actual.position.x()),
+                    top: b.top.min(actual.position.y()),
+                    right: b.right.max(actual.position.x()),
+                    bottom: b.bottom.max(actual.position.y()),
+                },
+            });
+        }
+        let mut line = serde_json::to_string(&record).map_err(io::Error::other)?;
+        line.push('\n');
+        self.map.write_all(line.as_bytes())?;
+        self.map_count += 1;
+        self.map.flush()
+    }
+
+    /// The bounding box of everything placed so far this run, expanded by
+    /// `margin` tiles on every side, or `None` when nothing has been placed
+    /// yet.
+    ///
+    /// `None` propagates rather than becoming a zero-area box: a keyframe over
+    /// a box nothing has ever occupied is not a fact about the run, it is an
+    /// artifact of calling this before anything happened.
+    pub fn placed_bounds(&self, margin: f64) -> Option<map::Bounds> {
+        self.placed_bounds.as_ref().map(|b| map::Bounds {
+            left: b.left - margin,
+            top: b.top - margin,
+            right: b.right + margin,
+            bottom: b.bottom + margin,
+        })
     }
 }
 
@@ -315,6 +388,7 @@ impl RunRecorder {
             frames,
             splits: splits.len(),
             samples,
+            map: self.map_count,
         };
         fs::write(
             self.dir.join("manifest.json"),
@@ -780,5 +854,105 @@ mod finish_tests {
         );
         let read = read_events(&rec.dir().join("events.jsonl")).unwrap();
         assert_eq!(read.events.len(), 1, "its events are still readable");
+    }
+}
+
+#[cfg(test)]
+mod map_tests {
+    use super::*;
+    use crate::record::map::{Bounds, EntitySnapshot, MapKind, MapRecord};
+    use crate::types::Position;
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("fb-record-map-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn snap(name: &str, x: f64, y: f64) -> EntitySnapshot {
+        EntitySnapshot {
+            name: name.to_string(),
+            position: Position::new(x, y),
+            direction: 0,
+        }
+    }
+
+    fn placed_record(tick: u64, bot: u32, at: (f64, f64)) -> MapRecord {
+        let snapshot = snap("stone-furnace", at.0, at.1);
+        MapRecord {
+            tick,
+            kind: MapKind::Placed {
+                bot,
+                intent: snapshot.clone(),
+                actual: snapshot,
+                drift: None,
+            },
+        }
+    }
+
+    fn read_map(path: &Path) -> Vec<MapRecord> {
+        fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn record_map_appends_a_line_and_counts_it_in_the_manifest() {
+        let root = tmpdir("append");
+        let mut rec = RunRecorder::start(&root, "r1").unwrap();
+        rec.record_map(placed_record(100, 3, (-12.0, 8.0))).unwrap();
+        rec.record_map(placed_record(200, 3, (-10.0, 8.0))).unwrap();
+
+        let lines = read_map(&rec.dir().join("map.jsonl"));
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].tick, 100);
+        match &lines[0].kind {
+            MapKind::Placed {
+                bot, actual, drift, ..
+            } => {
+                assert_eq!(*bot, 3);
+                assert_eq!(actual.position, Position::new(-12.0, 8.0));
+                assert_eq!(*drift, None);
+            }
+            other => panic!("expected placed, got {other:?}"),
+        }
+
+        let (manifest, _) = rec.finish(300, "done", None, DEFAULT_KEEP).unwrap();
+        assert_eq!(
+            manifest.map, 2,
+            "the manifest counts the lines actually written"
+        );
+    }
+
+    #[test]
+    fn placed_bounds_is_none_before_anything_is_placed() {
+        let root = tmpdir("empty");
+        let rec = RunRecorder::start(&root, "r2").unwrap();
+        assert_eq!(
+            rec.placed_bounds(16.0),
+            None,
+            "a run that placed nothing must not synthesise a zero-area box"
+        );
+    }
+
+    #[test]
+    fn placed_bounds_covers_every_placement_plus_the_margin() {
+        let root = tmpdir("bounds");
+        let mut rec = RunRecorder::start(&root, "r3").unwrap();
+        rec.record_map(placed_record(100, 1, (-12.0, 8.0))).unwrap();
+        rec.record_map(placed_record(200, 1, (10.0, 20.0))).unwrap();
+
+        assert_eq!(
+            rec.placed_bounds(16.0),
+            Some(Bounds {
+                left: -12.0 - 16.0,
+                top: 8.0 - 16.0,
+                right: 10.0 + 16.0,
+                bottom: 20.0 + 16.0,
+            })
+        );
     }
 }

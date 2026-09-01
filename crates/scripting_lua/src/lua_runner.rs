@@ -214,8 +214,13 @@ pub async fn run_lua(
                     // With no game there is no clock and nothing to capture,
                     // so a `record` table here would be one whose events all
                     // claimed tick 0.
-                    let record =
-                        create_lua_record(&lua, rcon.clone(), record_scripts_root, record_bots)?;
+                    let record = create_lua_record(
+                        &lua,
+                        rcon.clone(),
+                        real_world.clone(),
+                        record_scripts_root,
+                        record_bots,
+                    )?;
                     globals.set("record", record)?;
                     let rcon = create_lua_rcon(&lua, rcon.clone(), real_world.clone())?;
                     globals.set("rcon", rcon)?;

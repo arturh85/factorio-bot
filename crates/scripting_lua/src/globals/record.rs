@@ -13,10 +13,14 @@
 //! recent reply the game sent us, which is as current as the last command
 //! issued and honestly `null` before there has been one.
 
+use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::parking_lot::Mutex;
+use factorio_bot_core::record::map::{
+    EntitySnapshot, MapKind, MapRecord, Placement, divergence_between,
+};
 use factorio_bot_core::record::{EventKind, RunRecorder};
-use factorio_bot_core::types::PlayerId;
+use factorio_bot_core::types::{AreaFilter, PlayerId, Position, Rect};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -28,6 +32,35 @@ fn record_error(err: impl std::fmt::Display) -> LuaError {
 
 fn rcon_error(err: impl std::fmt::Display) -> LuaError {
     LuaError::RuntimeError(format!("rcon: {err}"))
+}
+
+/// The reverse of `run.rs`'s `entity_snapshot_to_lua`: reads the same shape
+/// back off a Lua table. Built field by field, not through a JSON bridge, so
+/// there is no `Option::None`-as-truthy trap to guard against on this side
+/// either.
+fn entity_snapshot_from_lua(t: &LuaTable) -> LuaResult<EntitySnapshot> {
+    let name: String = t.get("name")?;
+    let position: LuaTable = t.get("position")?;
+    let x: f64 = position.get("x")?;
+    let y: f64 = position.get("y")?;
+    let direction: u8 = t.get("direction")?;
+    Ok(EntitySnapshot {
+        name,
+        position: Position::new(x, y),
+        direction,
+    })
+}
+
+/// The reverse of `run.rs`'s `placement_to_lua`.
+fn placement_from_lua(t: &LuaTable) -> LuaResult<Placement> {
+    let intent: LuaTable = t.get("intent")?;
+    let actual: LuaTable = t.get("actual")?;
+    let drift: Option<Vec<String>> = t.get("drift")?;
+    Ok(Placement {
+        intent: entity_snapshot_from_lua(&intent)?,
+        actual: entity_snapshot_from_lua(&actual)?,
+        drift,
+    })
 }
 
 /// Records a *live* event: stamped with the game's clock, never earlier than
@@ -48,6 +81,7 @@ fn record_live(
 pub fn create_lua_record(
     lua: &Lua,
     rcon: Arc<factorio_bot_core::factorio::rcon::FactorioRcon>,
+    world: Arc<FactorioWorld>,
     scripts_root: PathBuf,
     all_bots: Vec<PlayerId>,
 ) -> LuaResult<LuaTable> {
@@ -293,6 +327,7 @@ end
                     let dispatched: Option<u64> = observed.get("dispatched_tick")?;
                     let replied: Option<u64> = observed.get("replied_tick")?;
                     let error: Option<String> = observed.get("error")?;
+                    let placed: Option<LuaTable> = observed.get("placed")?;
 
                     if let Some(dispatched) = dispatched {
                         recorder
@@ -322,9 +357,115 @@ end
                             )
                             .map_err(record_error)?;
                         written += 1;
+
+                        // `placed` rides on the same settle tick as the
+                        // `ActionSettled` line above: a placement is only
+                        // known once the actuator has drained it at settle
+                        // (see `Attempt::placed`), so there is no earlier
+                        // real tick to stamp it with.
+                        if let Some(placed) = placed {
+                            let placement = placement_from_lua(&placed)?;
+                            recorder
+                                .record_map(MapRecord {
+                                    tick: replied,
+                                    kind: MapKind::Placed {
+                                        bot,
+                                        intent: placement.intent,
+                                        actual: placement.actual,
+                                        drift: placement.drift,
+                                    },
+                                })
+                                .map_err(record_error)?;
+                        }
                     }
                 }
                 Ok(written)
+            })?,
+        )?;
+    }
+
+    map_table.set(
+        "__doc_entry_keyframe",
+        String::from(
+            r#"
+--- writes a keyframe: what the game and our belief about it agree on
+-- Bounds the box at the bounding box of every entity placed so far this run,
+-- plus a 16-tile margin, then asks the live game and the world model for
+-- everything inside it and records where they diverge. Call this at
+-- milestone boundaries -- there is deliberately no tick timer driving it.
+-- Writes nothing, and returns `false`, for a run that has placed nothing yet:
+-- a keyframe over a box nothing has ever occupied is not a fact worth
+-- recording.
+-- @treturn boolean whether a keyframe was written
+-- @raise if no recording is running
+function record.keyframe()
+end
+    "#,
+        ),
+    )?;
+    {
+        let slot = slot.clone();
+        let rcon = rcon.clone();
+        let world = world.clone();
+        map_table.set(
+            "keyframe",
+            lua.create_async_function(move |_lua, ()| {
+                let slot = slot.clone();
+                let rcon = rcon.clone();
+                let world = world.clone();
+                async move {
+                    // The bounds are read and released before the `.await`
+                    // below: nothing here needs the lock held across it, and
+                    // an `await` under a `parking_lot::Mutex` guard is a
+                    // deadlock waiting for a yield.
+                    let bounds = {
+                        let guard = slot.lock();
+                        let recorder = guard.as_ref().ok_or_else(|| {
+                            record_error("no recording is running -- call record.start() first")
+                        })?;
+                        recorder.placed_bounds(16.0)
+                    };
+                    let Some(bounds) = bounds else {
+                        return Ok(false);
+                    };
+
+                    let rect = Rect::new(
+                        &Position::new(bounds.left, bounds.top),
+                        &Position::new(bounds.right, bounds.bottom),
+                    );
+                    let game_entities = rcon
+                        .find_entities_filtered(&AreaFilter::Rect(rect.clone()), None, None)
+                        .await
+                        .map_err(rcon_error)?;
+                    let game: Vec<EntitySnapshot> = game_entities
+                        .into_iter()
+                        .map(|e| EntitySnapshot {
+                            name: e.name,
+                            position: e.position,
+                            direction: e.direction,
+                        })
+                        .collect();
+                    let model = world.entity_graph.snapshot_within(&rect);
+                    let divergence = divergence_between(&game, &model);
+
+                    let mut guard = slot.lock();
+                    let recorder = guard
+                        .as_mut()
+                        .ok_or_else(|| record_error("no recording is running"))?;
+                    let tick = recorder.not_before(rcon.last_tick().unwrap_or(0));
+                    recorder
+                        .record_map(MapRecord {
+                            tick,
+                            kind: MapKind::Keyframe {
+                                bounds,
+                                game,
+                                model,
+                                divergence,
+                            },
+                        })
+                        .map_err(record_error)?;
+                    Ok(true)
+                }
             })?,
         )?;
     }

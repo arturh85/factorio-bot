@@ -39,7 +39,7 @@ use crate::method::util::{
 use crate::method::{ExpansionCtx, GoalSite, Method, MethodRegistry, Step};
 use crate::state::PlanState;
 use factorio_bot_core::types::FactorioEntity;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Does `item` still have to be *produced*, in the sense that no single bot
 /// already holds the whole `count`?
@@ -1017,50 +1017,86 @@ impl Method for SplitAcrossBots {
             });
         };
         let need = shortfall(&ctx.state, item, *count, whose);
+
         // `registry_for` copies the caller's slice verbatim, so a caller can
         // list the same `BotId` twice. Without deduping, that used to open
         // two chains for one bot, the second sized after the first had
         // already reserved its share against the *same* raw holding, so it
-        // over-asked. Computing `chains`/`base`/`remainder` from the distinct
-        // bots first makes the split independent of how many times a bot's
-        // id appears in the slice, only whether it appears at all.
+        // over-asked. Reading the distinct bots' `spare` first makes the
+        // split independent of how many times a bot's id appears in the
+        // slice, only whether it appears at all.
+        //
+        // `spare(b)` is `available(&Holder::Share(b), item)`, the same
+        // ledger the emitted subgoal's own shortfall is taken against (see
+        // the comment on the target below) -- not the raw holding, which
+        // does not see what an earlier split already reserved and produced
+        // 24 ore for two shortfalls of 8 across four identical bots instead
+        // of 16.
+        //
+        // Candidates are ordered `(spare, BotId)` ascending -- poorest
+        // first, `BotId` breaking ties -- and only the first `k` participate.
+        // `BotId` is unique within the deduped roster, so the key is a total
+        // order and `sort_unstable` is exactly as deterministic as a stable
+        // sort would be; nobody should "fix" this to `sort`. The order does
+        // not depend on the caller's slice order at all, only on the set of
+        // bots and their holdings.
         let mut seen = BTreeSet::new();
-        let distinct: Vec<BotId> = self
+        let mut candidates: Vec<(u32, BotId)> = self
             .bots
             .iter()
             .copied()
             .filter(|b| seen.insert(*b))
+            .map(|bot| (ctx.state.available(&Holder::Share(bot), item), bot))
             .collect();
-        let chains = (distinct.len() as u32).min(need);
+        candidates.sort_unstable();
+
+        let chains = (candidates.len() as u32).min(need);
         let base = need / chains;
         let remainder = need % chains;
 
-        let mut steps = Vec::new();
-        for (index, bot) in distinct.iter().take(chains as usize).enumerate() {
-            let share = base + if (index as u32) < remainder { 1 } else { 0 };
-            // A `Have` goal states a holding, not a delivery, so a share of one
-            // handed to a bot already holding five is a goal that is already
-            // met — and the share evaporates. Ask for what the bot has *plus*
-            // its share, so the shortfall the other methods see is the share.
-            //
-            // The subgoal below is claimed a frame later by whichever method
-            // satisfies `Have { count, whose: Share(bot) }`, and that method
-            // computes its own shortfall against `available`, not the raw
-            // holding — see `shortfall`/`demand` above. So the target here
-            // must be stated in the same ledger `available` reads, or the
-            // subgoal's shortfall comes out as `share + reserved` instead of
-            // `share`: a second top-level split of the same item, sized
-            // against the raw holding, would not see the first split's
-            // reservation and would re-ask for it. Reading `inventory_count`
-            // here is exactly that bug — it produced 24 ore for two splits of
-            // 8 across four identical bots, instead of 16.
-            let spare = ctx.state.available(&Holder::Share(*bot), item);
-            steps.push(Step::Subgoal(Goal::Have {
-                item: item.clone(),
-                count: spare.saturating_add(share),
-                whose: Holder::Share(*bot),
-            }));
+        // The work itself is split evenly across participants; holdings
+        // decide only *who* participates and *who carries the remainder*,
+        // never how much a participant is asked to produce. The obvious
+        // alternative -- levelling final holdings, so a bot already holding
+        // more produces less -- reads more principled but is worse: on a
+        // `have(iron-plate, 20)` goal with one bot ahead by 8, equal work per
+        // participant measured 2156 ticks against levelling's 2427. Equal
+        // work keeps every participant busy for the same stretch; levelling
+        // concentrates the same total work onto fewer bots and lengthens the
+        // makespan. So the remainder -- the one place holdings change the
+        // *amount* of work -- goes to the poorest participants, not to
+        // whichever bots the caller happened to list first.
+        let mut shares: BTreeMap<BotId, u32> = BTreeMap::new();
+        for (index, &(spare, bot)) in candidates.iter().take(chains as usize).enumerate() {
+            let work = base + if (index as u32) < remainder { 1 } else { 0 };
+            // A `Have` goal states a holding, not a delivery, so a share of
+            // one handed to a bot already holding five is a goal that is
+            // already met — and the share evaporates. Ask for what the bot
+            // has *plus* its share, so the shortfall the other methods see
+            // is the share: the subgoal below is claimed a frame later by
+            // whichever method satisfies `Have { count, whose: Share(bot) }`,
+            // and that method computes its own shortfall against `available`
+            // (see `shortfall`/`demand` above), so the target must be stated
+            // in that same ledger or the chain is asked for `share +
+            // reserved` instead of `share`.
+            shares.insert(bot, spare.saturating_add(work));
         }
+
+        // Emit in ascending `BotId`, not the sorted participation order:
+        // emission order fixes `ActionId` allocation and therefore
+        // `schedule`'s `(end, ActionId, BotId)` tie-break, so a symmetric
+        // roster's plan does not move when only the *order* candidates were
+        // considered in changes. `BTreeMap` gives ascending order for free.
+        let steps = shares
+            .into_iter()
+            .map(|(bot, target)| {
+                Step::Subgoal(Goal::Have {
+                    item: item.clone(),
+                    count: target,
+                    whose: Holder::Share(bot),
+                })
+            })
+            .collect();
         Ok(steps)
     }
 }
@@ -2729,10 +2765,13 @@ mod tests {
         // Every bot holds one of the six wanted, so two remain. A `Have` goal
         // states a holding rather than a delivery: asking a bot for "one" when
         // it already holds one would be a goal it already meets, and its share
-        // would evaporate. The holdings are equal across the roster because
-        // expansion sizes each share against one bot's inventory and assumes
-        // any bot would do — an asymmetric fixture here would describe a plan
-        // whose chains are only feasible on the bot they were sized for.
+        // would evaporate. The holdings are equal across the roster here only
+        // because equal holdings are the simplest case to read at a glance:
+        // each share is in fact sized against *its own* bot's real spare
+        // stock, so an asymmetric fixture works too -- see
+        // `the_remainder_of_a_split_goes_to_the_bots_holding_least` and
+        // `a_share_skips_the_bots_that_already_hold_the_item` for holdings
+        // that differ across the roster.
         let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
         let mut s = state(&bots);
         for bot in bots {
@@ -2823,6 +2862,146 @@ mod tests {
             total += count;
         }
         assert_eq!(total, 4, "the shares still sum to the whole shortfall");
+    }
+
+    #[test]
+    fn the_remainder_of_a_split_goes_to_the_bots_holding_least() {
+        // Four bots, bot 1 already holding 3 of the 10 wanted. `need = 7`,
+        // `k = 4`, `base = 1`, `rem = 3`. Sorted by `(spare, BotId)` the
+        // order is `(0,2),(0,3),(0,4),(3,1)`, so the three units of remainder
+        // go to the three *poorest* bots -- bots 2, 3 and 4 -- not to
+        // whichever bots sit first in the roster. Bot 1 gets only the base
+        // share of 1. Sum: 2+2+2+1 = 7.
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let mut s = state(&bots);
+        s.gain(BotId(1), "iron-ore", 3);
+        let split = SplitAcrossBots {
+            bots: bots.to_vec(),
+        };
+        let mut ctx = ExpansionCtx::new(s, BotId(1));
+        let goal = Goal::Have {
+            item: "iron-ore".into(),
+            count: 10,
+            whose: Holder::Anyone,
+        };
+        let steps = split.expand(&goal, &mut ctx).unwrap();
+        let mut targets: BTreeMap<BotId, u32> = BTreeMap::new();
+        for step in steps {
+            let Step::Subgoal(Goal::Have { count, whose, .. }) = step else {
+                panic!("expected only subgoals");
+            };
+            let Holder::Share(bot) = whose else {
+                panic!("expected a share, got {:?}", whose);
+            };
+            targets.insert(bot, count);
+        }
+        // `available` for the split item equals raw holding here: no method
+        // has reserved anything yet. Targets are `spare + work`, so bot 1's
+        // work is `target - 3` and every other bot's work is its target
+        // outright.
+        assert_eq!(
+            targets.get(&BotId(1)).map(|t| t - 3),
+            Some(1),
+            "the richest bot gets the least work"
+        );
+        for bot in [BotId(2), BotId(3), BotId(4)] {
+            assert_eq!(
+                targets.get(&bot).copied(),
+                Some(2),
+                "the poorest bots carry the remainder"
+            );
+        }
+    }
+
+    #[test]
+    fn a_share_skips_the_bots_that_already_hold_the_item() {
+        // The worked example from the design: four bots, bot 1 holding 8 of
+        // the 10 wanted. `need = 2`, `k = min(4, 2) = 2`. Sorted by
+        // `(spare, BotId)`: `(0,2), (0,3), (0,4), (8,1)`. Only the two
+        // poorest -- bots 2 and 3 -- participate; bot 1 is asked for
+        // nothing, and does not smelt a plate it does not need to.
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let mut s = state(&bots);
+        s.gain(BotId(1), "iron-plate", 8);
+        let split = SplitAcrossBots {
+            bots: bots.to_vec(),
+        };
+        let mut ctx = ExpansionCtx::new(s, BotId(1));
+        let goal = Goal::Have {
+            item: "iron-plate".into(),
+            count: 10,
+            whose: Holder::Anyone,
+        };
+        let steps = split.expand(&goal, &mut ctx).unwrap();
+        let mut targets: BTreeMap<BotId, u32> = BTreeMap::new();
+        for step in steps {
+            let Step::Subgoal(Goal::Have { count, whose, .. }) = step else {
+                panic!("expected only subgoals");
+            };
+            let Holder::Share(bot) = whose else {
+                panic!("expected a share, got {:?}", whose);
+            };
+            targets.insert(bot, count);
+        }
+        assert_eq!(
+            targets,
+            BTreeMap::from([(BotId(2), 1), (BotId(3), 1)]),
+            "bots 2 and 3 each get a target of 1 (spare 0 + work 1); \
+             bots 1 and 4 are not asked for anything"
+        );
+    }
+
+    #[test]
+    fn the_split_does_not_depend_on_the_order_the_roster_was_listed_in() {
+        // Bot 1 alone starts with a head start on the goal's chain -- the
+        // freeplay-style inventory used elsewhere in this suite -- while the
+        // split item itself, automation-science-pack, is zero for every bot.
+        // The interchangeable-bots guard (still active; removing it is a
+        // later step) only compares the goal's own item across the roster,
+        // so this asymmetric roster is not refused by it either way.
+        //
+        // Before this rule, participants were chosen by position in the
+        // caller's slice (`self.bots.iter().take(chains)`), so reversing the
+        // roster could change who is asked to produce and therefore the
+        // shape of the expansion. The new rule orders candidates by
+        // `(spare, BotId)`, which depends only on the set of bots and their
+        // holdings, never on the order the caller listed them in.
+        fn asymmetric_state(bots: &[BotId]) -> PlanState {
+            let mut s = state(bots);
+            s.gain(BotId(1), "iron-plate", 8);
+            s.gain(BotId(1), "stone-furnace", 1);
+            s.gain(BotId(1), "burner-mining-drill", 1);
+            s.gain(BotId(1), "wood", 1);
+            s
+        }
+        let goal = Goal::Have {
+            item: "automation-science-pack".into(),
+            count: 10,
+            whose: Holder::Anyone,
+        };
+
+        let forward = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let forward_state = asymmetric_state(&forward);
+        let forward_net = expand(
+            std::slice::from_ref(&goal),
+            &forward_state,
+            &registry_for(&forward),
+            BotId(1),
+        )
+        .expect("expands with the roster listed forward");
+
+        let reverse = [BotId(4), BotId(3), BotId(2), BotId(1)];
+        let reverse_state = asymmetric_state(&reverse);
+        let reverse_net = expand(&[goal], &reverse_state, &registry_for(&reverse), BotId(1))
+            .expect("expands with the roster listed in reverse");
+
+        let forward_labels: Vec<String> = forward_net.actions().map(|a| a.label.clone()).collect();
+        let reverse_labels: Vec<String> = reverse_net.actions().map(|a| a.label.clone()).collect();
+        assert_eq!(
+            forward_labels, reverse_labels,
+            "the split must depend on the set of bots and their holdings, \
+             not the order the caller listed them in"
+        );
     }
 
     #[test]

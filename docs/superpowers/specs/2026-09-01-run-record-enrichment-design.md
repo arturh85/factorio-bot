@@ -109,16 +109,19 @@ game.write_file("players_connected.txt", "server\n", true, 0) -- only on server
 The fourth argument restricts the write. Sample writes pass it, so samples land
 once, in the server instance's `script-output`.
 
-Two registrations:
+**`on_nth_tick(n, f)` replaces the handler registered for `n`**, a trap the
+frame code already documents in place. Frame capture owns 300. So there is
+exactly **one new registration**, and one edit to an existing handler:
 
-- `script.on_nth_tick(SAMPLE_BOT_INTERVAL, …)` — **60 ticks**. Writes one
-  `bots` line.
-- `script.on_nth_tick(SAMPLE_FORCE_INTERVAL, …)` — **300 ticks**. Writes one
-  `force` line.
+- `script.on_nth_tick(60, …)` — new. Writes one `bots` line.
+- The **existing 300-tick frame handler** additionally writes one `force` line.
+  Registering a second handler on 300 would silently unregister frame capture
+  and the run would produce no frames at all, with nothing to say why.
 
-`on_nth_tick(n, f)` *replaces* the handler registered for `n`, a trap the frame
-code already documents. 60 and 300 are not otherwise registered; if that ever
-changes, the handlers must be merged rather than both registered.
+Folding the force sample into the frame handler is not merely a workaround: it
+guarantees a force sample and a frame share a tick exactly, which is what lets
+the production curve and the screenshot be read against each other without
+interpolation.
 
 Both append to `script-output/botbridge/samples.jsonl`. One file, two line
 kinds, discriminated by a `kind` field — the same internally-tagged shape
@@ -192,6 +195,11 @@ action settles with a non-success status.
 
 Only on failure. Sampling on every settle would roughly double the bot stream
 for information the periodic beat already carries when nothing went wrong.
+
+This is a deliberate exception to "the mod pushes, Rust does not poll": it is
+one RCON call, on a path that is already failing, and it buys the single most
+useful row in the analysis view. The rule it breaks exists to keep sampling off
+the hot path, and a failed action is not the hot path.
 
 ---
 

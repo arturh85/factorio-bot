@@ -36,8 +36,13 @@ pub fn build_router(state: AppState, web_root: Option<&str>) -> Router {
         // not a frontend is deployed.
         .route("/api/v1/{*rest}", axum::routing::any(api_not_found));
 
-    match crate::spa::service(web_root) {
-        Some(spa) => router.fallback_service(spa),
+    match crate::spa::services(web_root) {
+        // `/assets` is mounted ahead of the fallback and has none of its own,
+        // so a missing hashed bundle 404s instead of being answered with the
+        // index. See `spa::services` for why that prefix, and only that one.
+        Some(spa) => router
+            .nest_service("/assets", spa.assets)
+            .fallback_service(spa.fallback),
         // Without a frontend `/` has nothing to serve, so point it at the docs.
         None => router.route("/", get(|| async { Redirect::temporary("/swagger-ui/") })),
     }

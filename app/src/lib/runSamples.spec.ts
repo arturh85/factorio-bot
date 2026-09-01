@@ -128,13 +128,41 @@ describe('itemsFromGoals', () => {
     it('ignores freeform goal text that names no parseable item', () => {
         // `Split.goal` is caller-supplied free text, not a rendering of the
         // planner's `Goal` -- these are all real strings seen elsewhere in
-        // this repo, and none of them match the one known shape.
+        // this repo, and none of them match the shapes render_goal emits.
         expect(itemsFromGoals(['iron', 'researched(automation)', 'smelt iron plates x20'])).toEqual([]);
     });
 
     it('dedupes while keeping first-seen order', () => {
         expect(itemsFromGoals(['have 4 iron-plate', 'have 4 iron-plate', 'have 5 copper-plate']))
             .toEqual(['iron-plate', 'copper-plate']);
+    });
+
+    it('reads every item out of a flat composite goal', () => {
+        // render_goal's `all` branch: `all { <part>, <part> }`.
+        expect(itemsFromGoals(['all { have 40 iron-ore, have 20 stone }']))
+            .toEqual(['iron-ore', 'stone']);
+    });
+
+    it('recurses into a nested composite goal', () => {
+        expect(itemsFromGoals(['all { all { have 1 a } }'])).toEqual(['a']);
+    });
+
+    it('keeps only the item out of a composite mixing an item and a technology', () => {
+        // `researched automation` names no item -- a technology is not one.
+        expect(itemsFromGoals(['all { have 40 iron-ore, researched automation }']))
+            .toEqual(['iron-ore']);
+    });
+
+    it('does not mistake a nested group\'s separator for the outer list\'s', () => {
+        // A naive `.split(', ')` on the outer content would cut the nested
+        // group's two items apart as if they were two more top-level parts.
+        // Both fragments would then fail to match anything (their braces no
+        // longer balance), so the failure mode this guards is a dropped
+        // item, not a wrong one -- but this is the case the depth-aware
+        // split exists for.
+        expect(
+            itemsFromGoals(['all { have 1 first, all { have 2 second, have 3 third } }'])
+        ).toEqual(['first', 'second', 'third']);
     });
 });
 

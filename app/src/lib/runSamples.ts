@@ -67,8 +67,8 @@ export function productionSeries(samples: Sample[], items: string[]): Production
 }
 
 /**
- * The item a milestone goal string names, or null for a goal that does not
- * name one.
+ * The items a milestone goal string names, in the order it names them --
+ * possibly more than one, for a composite goal.
  *
  * `Split.goal` is **not** a rendering of the planner's `Goal` -- it is
  * whatever string a script passed to `record.milestone_started(index, goal)`,
@@ -76,31 +76,82 @@ export function productionSeries(samples: Sample[], items: string[]): Production
  * pursued" (`crates/scripting_lua/src/globals/record.rs`). Most callers are
  * expected to pass `tostring(goal)` on a `goal.*` value, and the one function
  * that renders those, `render_goal` in
- * `crates/scripting_lua/src/globals/goal/value.rs`, has a fixed shape for
- * `goal.have`: `"have {count} {item}"` (there is no `produce` form -- the
- * planner's `Goal::Produced` has no Lua constructor to render). But nothing
- * enforces that a script calls `tostring` at all: `"iron"`,
+ * `crates/scripting_lua/src/globals/goal/value.rs`, has three fixed shapes:
+ * `"have {count} {item}"`, `"researched {tech}"` (no item), and
+ * `"all { <part>, <part>, ... }"` where each part is again one of these three
+ * -- a milestone can genuinely be `goal.all { ... }` over several items, and
+ * that `all` can nest. This function recurses into `all` the same way
+ * `render_goal` and `goal_from_lua` do (`crates/scripting_lua/src/globals/goal/value.rs`),
+ * for the same reason they do: an `all` that decomposes into its parts and
+ * hands each part back to this same function cannot disagree with the shape
+ * those two produce and consume, and a nested `all` is handled for free
+ * rather than by a second special case.
+ *
+ * But nothing enforces that a script calls `tostring` at all: `"iron"`,
  * `"researched(automation)"` and `"smelt iron plates x20"` all appear as real
  * goal strings elsewhere in this repo, and none of them name a parseable
- * item. So this matches the one shape known to occur and otherwise returns
- * null -- it is a best-effort read of free text, not a parser with a
+ * item. So this matches the shapes known to occur and otherwise names
+ * nothing -- it is a best-effort read of free text, not a parser with a
  * guaranteed input, which is exactly why `trackedItems` below falls back to
  * `producedItems` when nothing here matches.
  */
-function itemFromGoal(goal: string): string | null {
-    const match = /^have \d+ (\S+)$/.exec(goal);
-    return match ? match[1] : null;
+function itemsFromGoal(goal: string): string[] {
+    const have = /^have \d+ (\S+)$/.exec(goal);
+    if (have) return [have[1]];
+
+    const all = /^all \{ (.*) \}$/.exec(goal);
+    if (all) return splitTopLevel(all[1]).flatMap(itemsFromGoal);
+
+    // `researched <tech>` names a technology, not an item; anything else is
+    // free text this format does not cover.
+    return [];
+}
+
+/**
+ * Splits `all { ... }`'s inner text on its own top-level ", " separators,
+ * skipping any that sit inside a nested `all { ... }`.
+ *
+ * A plain `.split(', ')` is not safe here: `render_goal` reuses the same
+ * `", "` separator at every nesting depth, so it would cut a nested group's
+ * items apart at their own separator, mistaking them for siblings of the
+ * outer list. That could only ever *drop* items, never rename one --
+ * `itemsFromGoal`'s patterns are anchored at both ends, so a fragment that
+ * gets the wrong boundary fails to match anything rather than matching the
+ * wrong item -- but dropping items a run genuinely tracked defeats the point
+ * of curating by goal, so this tracks brace depth instead of taking that risk.
+ */
+function splitTopLevel(text: string): string[] {
+    const parts: string[] = [];
+    let depth = 0;
+    let start = 0;
+    for (let i = 0; i < text.length; i++) {
+        const c = text[i];
+        if (c === '{') depth++;
+        else if (c === '}') depth--;
+        else if (c === ',' && depth === 0) {
+            parts.push(text.slice(start, i));
+            start = i + 1;
+        }
+    }
+    parts.push(text.slice(start));
+    return parts.map((p) => p.trim());
 }
 
 /**
  * The distinct items named by a run's milestone goals, in the order they were
  * first mentioned.
+ *
+ * Deduplicated: a goal naming the same item twice -- directly, or once each
+ * in two different milestones -- contributes it once. This feeds a panel
+ * listing which items to show, not a count of how many goals mention one, so
+ * collapsing the duplicate loses nothing this caller needs.
  */
 export function itemsFromGoals(goals: string[]): string[] {
     const items: string[] = [];
     for (const goal of goals) {
-        const item = itemFromGoal(goal);
-        if (item !== null && !items.includes(item)) items.push(item);
+        for (const item of itemsFromGoal(goal)) {
+            if (!items.includes(item)) items.push(item);
+        }
     }
     return items;
 }

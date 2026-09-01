@@ -87,3 +87,31 @@ rewriting it: two agents are mid-edit in `crates/planner/`, and disturbing
 **Rule going forward, with concurrent agents in one checkout: use the pathspec
 form `git commit -- <paths>`, never `git add <paths>` followed by a bare
 `git commit`.** The second form is only safe when nobody else is staging.
+
+## Status at ~01:00
+
+**Per-bot share sizing is complete** (spec `3e08f8af`, steps 1-4 in `6fcbba5c`,
+`8cc73153`, `7d614681`, `56870959`, `f3a22e29`), each step reviewed clean.
+The interchangeable-bots guard is retired behind a regression test that reaches
+`schedule()` — which the guard never did. As the reviewer put it, the guard
+could only refuse loudly; it never verified a scheduled outcome, so the property
+is better protected now than it was before. Steps 5 (prose) and 6 (re-measure
+`more_bots_finish_sooner`, whose ledger comment is stale at 6691 against a
+measured 7075) remain open and are cosmetic by comparison.
+
+**The sampler crash is fixed** and live-verified: run 4 reached
+`success=2 failed=1 lost=0` — real actions completing, server surviving. That is
+the first time any action has succeeded in a recorded run tonight.
+
+**The API audit found why runs are slow and why timings cannot be trusted.**
+Bots largely do not walk: the "stuck" check measures leg duration rather than
+being stuck, so every path leg over ~9.2 tiles is teleported by an unbounded
+distance, and a sibling branch reports the walk successful while leaving the bot
+walking in a straight line forever. Fix in flight, with observability required
+in the same change — every walk duration in every existing record may be
+fiction, and the record must be able to say so.
+
+**Not acted on, for Arturh to decide:** the Factorio Learning Environment drops
+graphical clients entirely for server-side `character` entities, retiring the
+26s load and 90s connect wait. It would also retire the screenshot pipeline,
+which is the watchability half of this project. That trade is not mine to make.

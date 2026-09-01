@@ -29,6 +29,7 @@ pub use serde;
 pub use serde_json;
 pub use thiserror;
 pub use tokio;
+pub use tracing;
 
 pub mod aabb_quadtree;
 pub mod app_settings;

@@ -10,7 +10,6 @@ use dashmap::DashMap;
 use euclid::{Point2D, Size2D};
 use miette::Result;
 use num_traits::ToPrimitive;
-use paris::{error, warn};
 use parking_lot::{RwLock, RwLockReadGuard};
 use petgraph::dot::{Config, Dot};
 use petgraph::graph::NodeIndex;
@@ -20,6 +19,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
+use tracing::{error, warn};
 
 pub struct FlowGraph {
     entity_graph: Arc<EntityGraph>,

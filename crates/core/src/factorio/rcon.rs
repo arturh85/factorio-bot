@@ -17,7 +17,6 @@ use crate::types::{
     InventoryResponse, PlayerId, Pos, Position, Rect, RequestEntity,
 };
 use miette::{Context, IntoDiagnostic, Report, Result, miette};
-use paris::info;
 use parking_lot::RwLock;
 use rcon::Connection;
 use serde_json::Value;
@@ -27,6 +26,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::time::sleep;
+use tracing::{info, warn};
 use unicode_segmentation::UnicodeSegmentation;
 
 const RCON_INTERFACE: &str = "botbridge";
@@ -129,7 +129,7 @@ fn split_reply(result: &str, silent: bool) -> Option<Vec<String>> {
     }
     let body = &result[0..result.len() - 1];
     if !silent {
-        info!("<cyan>rcon</>  ⮞ <green>{}</>", body);
+        info!("rcon ⮞ {}", body);
     }
     Some(body.split('\n').map(|str| str.to_owned()).collect())
 }
@@ -475,7 +475,7 @@ impl FactorioRcon {
     pub async fn send(&self, command: &str) -> Result<Option<Vec<String>>> {
         let silent = *self.silent.read();
         if !silent {
-            info!("<cyan>rcon</>  ⮜ <green>{}</>", command);
+            info!("rcon ⮜ {}", command);
         }
         // let started = Instant::now();
         // Every rcon call funnels through here, including the `rcon.*` Lua
@@ -568,7 +568,7 @@ impl FactorioRcon {
         let silent = *self.silent.read();
         let command = remote_call_command(function_name, &args);
         if !silent {
-            info!("<cyan>rcon</>  ⮜ <green>{}</>", command);
+            info!("rcon ⮜ {}", command);
         }
         let pool = self
             .pool

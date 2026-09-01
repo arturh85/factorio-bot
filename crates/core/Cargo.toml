@@ -20,6 +20,10 @@ config = "0.15.19"
 pathfinding = "4.14"
 parking_lot = "0.12"
 paris = { version = "1.5", features = ["timestamps", "macros"] }
+# Diagnostics. Unlike `paris` this is NOT `#[macro_use]`d: a call site must
+# name where it logs, because for months this crate had two logging systems
+# and the macros looked identical at the point of use.
+tracing = "0.1"
 color-eyre = "0.6"
 petgraph = { version = "0.8", features = ["serde-1", "stable_graph"] }
 indicatif = "0.18.3"

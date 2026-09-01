@@ -11,7 +11,6 @@ use dashmap::DashMap;
 use euclid::{Point2D, Rect as EuclidRect, Size2D};
 use factorio_blueprint::{BlueprintCodec, Container};
 use miette::Result;
-use paris::error;
 use parking_lot::{RwLock, RwLockReadGuard};
 use petgraph::dot::{Config, Dot};
 use petgraph::graph::{EdgeIndex, NodeIndex};
@@ -26,6 +25,7 @@ use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
+use tracing::{error, warn};
 
 pub struct EntityGraph {
     entity_graph: RwLock<EntityGraphInner>,

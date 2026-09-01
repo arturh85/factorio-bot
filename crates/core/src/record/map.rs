@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::Position;
+use crate::types::{Pos, Position};
 
 /// One line of `map.jsonl`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -100,6 +100,45 @@ pub fn drift_between(intent: &EntitySnapshot, actual: &EntitySnapshot) -> Option
     (!fields.is_empty()).then_some(fields)
 }
 
+/// The position a resource actually occupies, given the floored key
+/// `EntityGraph` stores it under.
+///
+/// Every real resource entity sits at a tile centre -- `(-40.5, -48.5)`, never
+/// `(-41, -49)` -- and the mod's `surface.find_entity(name, position)` matches
+/// exactly. `Pos(i32, i32)` floors, so reading one back out of the graph must
+/// add back the half tile the key threw away, or every resource in `model`
+/// ends up 0.5 off every resource in `game` and the divergence list becomes
+/// noise instead of a signal.
+pub fn resource_position_from_pos(pos: Pos) -> Position {
+    Position::new(f64::from(pos.0) + 0.5, f64::from(pos.1) + 0.5)
+}
+
+/// Entities present on exactly one side.
+///
+/// Order is `game`-only first, then `model`-only, each preserving the order
+/// given, so the list is stable across runs and a diff of two runs' output is
+/// readable rather than shuffled.
+pub fn divergence_between(game: &[EntitySnapshot], model: &[EntitySnapshot]) -> Vec<Divergence> {
+    let mut out = Vec::new();
+    for entity in game {
+        if !model.contains(entity) {
+            out.push(Divergence {
+                entity: entity.clone(),
+                only_in: "game".to_string(),
+            });
+        }
+    }
+    for entity in model {
+        if !game.contains(entity) {
+            out.push(Divergence {
+                entity: entity.clone(),
+                only_in: "model".to_string(),
+            });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +194,61 @@ mod tests {
         let json = serde_json::to_string(&record).unwrap();
         assert!(json.contains(r#""kind":"placed""#));
         assert_eq!(serde_json::from_str::<MapRecord>(&json).unwrap(), record);
+    }
+
+    #[test]
+    fn identical_sides_do_not_diverge() {
+        let e = vec![snap("stone-furnace", -12.0, 8.0, 0)];
+        assert!(divergence_between(&e, &e).is_empty());
+    }
+
+    #[test]
+    fn an_entity_only_the_game_has_is_reported_as_such() {
+        let game = vec![snap("stone-furnace", -12.0, 8.0, 0)];
+        assert_eq!(
+            divergence_between(&game, &[]),
+            vec![Divergence {
+                entity: game[0].clone(),
+                only_in: "game".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn an_entity_only_the_model_has_is_reported_as_such() {
+        let model = vec![snap("stone-furnace", -12.0, 8.0, 0)];
+        assert_eq!(
+            divergence_between(&[], &model),
+            vec![Divergence {
+                entity: model[0].clone(),
+                only_in: "model".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_resource_read_out_of_the_graph_keeps_its_tile_centre() {
+        // EntityGraph keys resources by Pos(i32, i32), which FLOORS. Reading
+        // one back without restoring the half tile puts every resource 0.5
+        // off, and the divergence list becomes pure noise instead of a
+        // signal.
+        //
+        // This exact round trip once made mining fail with "no entity to
+        // mine" for every ore on every map, while every test passed -- the
+        // test fixture built ore at integer positions, the one input for
+        // which the lossy round trip is lossless.
+        let pos = Pos(-41, -49);
+        assert_eq!(
+            resource_position_from_pos(pos.clone()),
+            Position::new(-40.5, -48.5)
+        );
+
+        let game = vec![snap("iron-ore", -40.5, -48.5, 0)];
+        let model = vec![EntitySnapshot {
+            name: "iron-ore".to_string(),
+            position: resource_position_from_pos(pos),
+            direction: 0,
+        }];
+        assert!(divergence_between(&game, &model).is_empty());
     }
 }

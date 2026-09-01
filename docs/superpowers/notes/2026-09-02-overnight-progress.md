@@ -192,3 +192,26 @@ milestone reports **why** it was satisfied.
 - Option 3 for `Researched` — a real multi-bot decomposition — remains the fix
   that removes the tension rather than choosing a side. Option 1 (bind a share
   to its bot) is being implemented instead, trading parallelism for correctness.
+
+## Run 6 — the best of the night (~02:45)
+
+`run-1788304631-16800`, with every fix in: walk, per-bot sizing, satisfaction by
+checking, the `stated_holder` weld, mine completion, and share binding.
+
+- **Rungs 1-3 satisfied in 2,160 ticks.** They took 25,599 in run 5. A **12x
+  speedup** from correcting one event handler — `on_mined_entity` was completing
+  *any* bot's task matching the entity, so two bots on one tile decremented each
+  other and the planner re-planned the difference, four times per milestone.
+- **Rung 4 plans for the first time**: a **95-step plan** for
+  `research automation`, where every earlier attempt died during expansion. The
+  share binding did what it was for.
+- **The failure moved from the planner to the transport.**
+  `expected value at line 1 column 1` is serde's message for input that is not
+  JSON at all, plus an earlier `Unexpected Response: nil`. A research plan
+  exercises crafting, machine insertion and lab placement — paths the ore
+  milestones never touched.
+
+Asked for one generalisation with the fix, since this is the third reply-shaped
+failure tonight: **an unparseable RCON reply must report what it received**,
+truncated, not merely that parsing failed. `expected value at line 1 column 1`
+is a message that says nothing about its own cause.

@@ -72,11 +72,16 @@ pub enum EventKind {
         action: String,
         target: Option<Position>,
     },
+    /// An action reached a verdict.
+    ///
+    /// `elapsed_ticks` is null when the game never reported a dispatch tick to
+    /// subtract from -- a duration nobody measured, which is not the same as a
+    /// duration of zero.
     ActionSettled {
         id: u32,
         bot: u32,
         status: String,
-        elapsed_ticks: u64,
+        elapsed_ticks: Option<u64>,
         error: Option<String>,
     },
     Frame {
@@ -140,6 +145,8 @@ pub struct RunRecorder {
     /// The game tick of the first event recorded, so a duration can be a
     /// duration. Absent until something has been recorded.
     start_tick: Option<u64>,
+    /// The highest tick recorded so far. See [`RunRecorder::not_before`].
+    high_tick: u64,
 }
 
 impl RunRecorder {
@@ -159,6 +166,7 @@ impl RunRecorder {
             events,
             started: Instant::now(),
             start_tick: None,
+            high_tick: 0,
             started_unix: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -188,6 +196,7 @@ impl RunRecorder {
         if self.start_tick.is_none() {
             self.start_tick = Some(tick);
         }
+        self.high_tick = self.high_tick.max(tick);
         let mut line = serde_json::to_string(&event).map_err(io::Error::other)?;
         line.push('\n');
         self.events.write_all(line.as_bytes())?;
@@ -208,6 +217,24 @@ impl RunRecorder {
     /// `workspace` is where `client<N>` directories live; pass `None` for a
     /// planning-only run that captured no frames. That is a valid run, not a
     /// degenerate one.
+    /// A clock reading raised to the latest tick already recorded.
+    ///
+    /// For events recorded *as they happen*, whose only clock is the tick on
+    /// the last RCON reply -- which lags, because an action's completion
+    /// reaches us through the mod's stdout rather than through a reply, and
+    /// nothing about that path touches `last_tick`. Without this a milestone
+    /// was stamped 59755 while the action it was waiting for settled at 60238:
+    /// finished before its own work did, and the split read 381 ticks for a
+    /// span of 864.
+    ///
+    /// **Only for live events.** Events recorded after the fact -- action
+    /// dispatch and settle, replayed from an observation -- carry their own
+    /// real ticks and must keep them; clamping those forward would flatten the
+    /// timeline onto the moment they were written.
+    pub fn not_before(&self, tick: u64) -> u64 {
+        tick.max(self.high_tick)
+    }
+
     /// How long the run has lasted, in ticks.
     ///
     /// A duration, never the absolute tick it happened at. The first live run
@@ -345,7 +372,7 @@ mod tests {
                 id: 17,
                 bot: 2,
                 status: "success".into(),
-                elapsed_ticks: 120,
+                elapsed_ticks: Some(120),
                 error: None,
             },
             EventKind::Frame {
@@ -429,7 +456,7 @@ mod tests {
                 id: 1,
                 bot: 1,
                 status: "success".into(),
-                elapsed_ticks: 5,
+                elapsed_ticks: Some(5),
                 error: None,
             },
         )
@@ -525,6 +552,73 @@ mod finish_tests {
                 Some(EventKind::RunFinished { outcome, .. }) if outcome == "stuck"
             ),
             "the verdict must survive a failure in the steps after it"
+        );
+    }
+
+    #[test]
+    fn a_live_event_is_never_stamped_before_something_already_recorded() {
+        // The lagging-clock case: an action settled at 60238 is recorded from
+        // the observation, then the milestone that was waiting for it is
+        // recorded live with a stale reading of 59755. Left alone the
+        // milestone finishes before its own work does.
+        let root = tmpdir("highwater");
+        let mut rec = RunRecorder::start(&root, "r6").unwrap();
+        rec.record(
+            59_374,
+            EventKind::MilestoneStarted {
+                index: 1,
+                goal: "g".into(),
+            },
+        )
+        .unwrap();
+        rec.record(
+            60_238,
+            EventKind::ActionSettled {
+                id: 0,
+                bot: 1,
+                status: "success".into(),
+                elapsed_ticks: Some(483),
+                error: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(rec.not_before(59_755), 60_238, "a stale reading is raised");
+        assert_eq!(
+            rec.not_before(60_500),
+            60_500,
+            "a reading ahead of the log is left alone"
+        );
+    }
+
+    #[test]
+    fn a_historical_event_keeps_its_own_tick() {
+        // Action events are replayed from an observation and carry real ticks
+        // from the past. Clamping those forward would flatten the timeline
+        // onto the moment they happened to be written.
+        let root = tmpdir("historical");
+        let mut rec = RunRecorder::start(&root, "r7").unwrap();
+        rec.record(
+            60_000,
+            EventKind::MilestoneStarted {
+                index: 1,
+                goal: "g".into(),
+            },
+        )
+        .unwrap();
+        rec.record(
+            59_000,
+            EventKind::ActionDispatched {
+                id: 0,
+                bot: 1,
+                action: "mine".into(),
+                target: None,
+            },
+        )
+        .unwrap();
+        let read = read_events(&rec.dir().join("events.jsonl")).unwrap();
+        assert_eq!(
+            read.events[1].tick, 59_000,
+            "record() must not clamp; only not_before() raises a reading"
         );
     }
 

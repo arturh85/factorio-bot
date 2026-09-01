@@ -176,6 +176,9 @@ function Sup:step()
     -- running: one plan execution. Blocks; one step is one run.
     local plan = self.plan
     self.plan = nil
+    -- Captured before the run, because a consumed plan is not a thing to go
+    -- reading fields off afterwards.
+    local steps = plan.steps
     local obs = goal.run(plan)
     local failed = (obs.failed or 0) + (obs.lost or 0)
     if failed > 0 then
@@ -185,9 +188,14 @@ function Sup:step()
         end
     end
     self.state = "planning"
+    -- `steps` and `actions` ride along so a caller can record what each bot
+    -- actually did: the plan knows which bot owns an action and what it is
+    -- called, the observation knows when the game ran it and how it ended, and
+    -- neither half carries both.
     return { action = "ran", state = "planning", milestone_index = self.index,
              failed = failed, first_error = obs.first_error,
-             iteration = self.iterations }
+             iteration = self.iterations,
+             steps = steps, actions = obs.actions }
 end
 
 --- Human-readable summary of everything closed so far.

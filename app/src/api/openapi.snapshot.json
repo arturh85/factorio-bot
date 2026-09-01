@@ -396,6 +396,7 @@
             "type": "object"
           },
           {
+            "description": "An action reached a verdict.\n\n`elapsed_ticks` is null when the game never reported a dispatch tick to\nsubtract from -- a duration nobody measured, which is not the same as a\nduration of zero.",
             "properties": {
               "bot": {
                 "format": "int32",
@@ -405,7 +406,10 @@
               "elapsed_ticks": {
                 "format": "int64",
                 "minimum": 0,
-                "type": "integer"
+                "type": [
+                  "integer",
+                  "null"
+                ]
               },
               "error": {
                 "type": [
@@ -432,7 +436,6 @@
               "id",
               "bot",
               "status",
-              "elapsed_ticks",
               "kind"
             ],
             "type": "object"

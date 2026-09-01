@@ -30,20 +30,19 @@ fn rcon_error(err: impl std::fmt::Display) -> LuaError {
     LuaError::RuntimeError(format!("rcon: {err}"))
 }
 
-/// Stamps an event with the game's own clock, as last observed.
-fn tick_of(rcon: &factorio_bot_core::factorio::rcon::FactorioRcon) -> u64 {
-    rcon.last_tick().unwrap_or(0)
-}
-
-fn with_recorder<T>(
+/// Records a *live* event: stamped with the game's clock, never earlier than
+/// something already in the log. See [`RunRecorder::not_before`].
+fn record_live(
     slot: &Slot,
-    f: impl FnOnce(&mut RunRecorder) -> std::io::Result<T>,
-) -> LuaResult<T> {
+    rcon: &factorio_bot_core::factorio::rcon::FactorioRcon,
+    kind: EventKind,
+) -> LuaResult<()> {
     let mut guard = slot.lock();
     let recorder = guard
         .as_mut()
         .ok_or_else(|| record_error("no recording is running -- call record.start() first"))?;
-    f(recorder).map_err(record_error)
+    let tick = recorder.not_before(rcon.last_tick().unwrap_or(0));
+    recorder.record(tick, kind).map_err(record_error)
 }
 
 pub fn create_lua_record(
@@ -138,7 +137,7 @@ end
                         RunRecorder::start(&runs_root, run_id.clone()).map_err(record_error)?;
                     recorder
                         .record(
-                            opened_at.unwrap_or_else(|| tick_of(&rcon)),
+                            opened_at.unwrap_or_else(|| rcon.last_tick().unwrap_or(0)),
                             EventKind::RunStarted {
                                 run_id: run_id.clone(),
                                 bots,
@@ -174,9 +173,7 @@ end
         map_table.set(
             "milestone_started",
             lua.create_function(move |_lua, (index, goal): (u32, String)| {
-                with_recorder(&slot, |recorder| {
-                    recorder.record(tick_of(&rcon), EventKind::MilestoneStarted { index, goal })
-                })
+                record_live(&slot, &rcon, EventKind::MilestoneStarted { index, goal })
             })?,
         )?;
     }
@@ -200,10 +197,11 @@ end
         map_table.set(
             "milestone_satisfied",
             lua.create_function(move |_lua, (index, iterations): (u32, u32)| {
-                let tick = tick_of(&rcon);
-                with_recorder(&slot, |recorder| {
-                    recorder.record(tick, EventKind::MilestoneSatisfied { index, iterations })
-                })
+                record_live(
+                    &slot,
+                    &rcon,
+                    EventKind::MilestoneSatisfied { index, iterations },
+                )
             })?,
         )?;
     }
@@ -231,18 +229,102 @@ end
         map_table.set(
             "milestone_stuck",
             lua.create_function(move |_lua, (index, outcome): (u32, String)| {
-                let tick = tick_of(&rcon);
-                with_recorder(&slot, |recorder| {
-                    recorder.record(
-                        tick,
-                        EventKind::MilestoneStuck {
-                            index,
-                            outcome: outcome.clone(),
-                            best_steps: None,
-                            last_error: None,
-                        },
-                    )
-                })
+                record_live(
+                    &slot,
+                    &rcon,
+                    EventKind::MilestoneStuck {
+                        index,
+                        outcome,
+                        best_steps: None,
+                        last_error: None,
+                    },
+                )
+            })?,
+        )?;
+    }
+
+    map_table.set(
+        "__doc_entry_actions",
+        String::from(
+            r#"
+--- records what each bot did during one executed plan
+-- Takes `plan.steps` and `observation.actions` and joins them by action id:
+-- the plan knows which bot an action belongs to and what it is called, the
+-- observation knows when the game dispatched it and what verdict it reached.
+-- Neither half carries both.
+--
+-- Ticks come from the game, so an action the game never reported a dispatch
+-- for is not recorded -- it cannot be placed in time, and placing it anywhere
+-- would be an invention. An action that *was* dispatched and never settled is
+-- recorded as the dispatch alone, which is a real state and one worth seeing.
+-- @tparam table steps `plan.steps`
+-- @tparam table actions `observation.actions`
+-- @treturn number how many events were written
+-- @raise if no recording is running
+function record.actions(steps, actions)
+end
+    "#,
+        ),
+    )?;
+    {
+        let slot = slot.clone();
+        map_table.set(
+            "actions",
+            lua.create_function(move |_lua, (steps, actions): (LuaTable, LuaTable)| {
+                let mut written = 0u32;
+                let mut guard = slot.lock();
+                let recorder = guard.as_mut().ok_or_else(|| {
+                    record_error("no recording is running -- call record.start() first")
+                })?;
+
+                for step in steps.sequence_values::<LuaTable>() {
+                    let step = step?;
+                    let Some(id) = step.get::<Option<u32>>("id")? else {
+                        continue; // a walk: no action id, no lane entry here
+                    };
+                    let bot: u32 = step.get("bot")?;
+                    let label: String = step.get::<Option<String>>("label")?.unwrap_or_default();
+                    let Some(observed) = actions.get::<Option<LuaTable>>(id)? else {
+                        continue;
+                    };
+                    let status: String = observed
+                        .get::<Option<String>>("status")?
+                        .unwrap_or_else(|| "unknown".into());
+                    let dispatched: Option<u64> = observed.get("dispatched_tick")?;
+                    let replied: Option<u64> = observed.get("replied_tick")?;
+                    let error: Option<String> = observed.get("error")?;
+
+                    if let Some(dispatched) = dispatched {
+                        recorder
+                            .record(
+                                dispatched,
+                                EventKind::ActionDispatched {
+                                    id,
+                                    bot,
+                                    action: label,
+                                    target: None,
+                                },
+                            )
+                            .map_err(record_error)?;
+                        written += 1;
+                    }
+                    if let Some(replied) = replied {
+                        recorder
+                            .record(
+                                replied,
+                                EventKind::ActionSettled {
+                                    id,
+                                    bot,
+                                    status,
+                                    elapsed_ticks: dispatched.map(|d| replied.saturating_sub(d)),
+                                    error,
+                                },
+                            )
+                            .map_err(record_error)?;
+                        written += 1;
+                    }
+                }
+                Ok(written)
             })?,
         )?;
     }
@@ -273,11 +355,11 @@ end
         map_table.set(
             "finish",
             lua.create_function(move |_lua, outcome: String| {
-                let tick = tick_of(&rcon);
                 let mut guard = slot.lock();
                 let mut recorder = guard
                     .take()
                     .ok_or_else(|| record_error("no recording is running"))?;
+                let tick = recorder.not_before(rcon.last_tick().unwrap_or(0));
                 recorder
                     .finish(tick, &outcome, Some(&workspace))
                     .map_err(record_error)?;

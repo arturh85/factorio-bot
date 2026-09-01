@@ -215,3 +215,37 @@ Asked for one generalisation with the fix, since this is the third reply-shaped
 failure tonight: **an unparseable RCON reply must report what it received**,
 truncated, not merely that parsing failed. `expected value at line 1 column 1`
 is a message that says nothing about its own cause.
+
+## Hazard: `git reset --hard` in a shared checkout (~03:15)
+
+An agent reported its in-flight edits vanishing mid-task; the reflog shows
+`reset: moving to HEAD`. **No committed work was lost** — every commit of the
+night is reachable — but one agent's uncommitted working tree was destroyed by
+another's reset.
+
+With several agents in one checkout, `git reset --hard` is not a local
+operation. Dispatches now say so explicitly. The pathspec commit form
+(`git commit -m "…" -- <paths>`) protects the index; nothing protects the
+working tree except not running that command.
+
+## What run 6's failure actually was
+
+Both malformed replies are explained, and neither was a transport bug in the
+end:
+
+- `Unexpected Response: nil` — `action_failed(tick, action_id)` called with no
+  reason, so `tostring(nil)` travelled as the game's entire verdict.
+- `expected value at line 1 column 1` — the mod writes plain-text pathfinder
+  verdicts ("Error: failed to path find") into the same slot a success fills
+  with JSON, and Rust fed them to serde. A real verdict became a syntax error
+  and was discarded.
+
+That also explains an anomaly I had noticed and not chased: milestone 4 had a
+95-step plan, an error, and **zero `action_dispatched` lines**, because
+`rcon_place_entity` did not stamp the tick on its refusal exits.
+
+**The blocker underneath is in the planner, not the transport.** `AtPosition`'s
+reach radius is a disc, so a bot already standing on the target satisfies it
+with `travel == 0`, no `Walk` is emitted, and the placement is refused because
+the bot is inside the new entity's own footprint — bot 1 at `(38.30, 16.48)`
+placing a furnace at `[38, 16]`. Being fixed as an annulus.

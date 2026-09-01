@@ -25,6 +25,7 @@
 //! is welded because it sits under a share, not because it converges — see
 //! `smelting_never_converges`, which is still true and says why.
 
+use crate::ItemId;
 use crate::action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot};
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
@@ -76,6 +77,81 @@ fn shortfall(state: &PlanState, item: &str, count: u32, whose: &Holder) -> u32 {
 /// Registered first everywhere, so "we already have this" is decided in exactly
 /// one place rather than re-tested inside every method that could otherwise
 /// have satisfied the goal.
+/// What a producing method has to make, for either goal kind.
+///
+/// [`Goal::Have`] asks for a *shortfall* against what a bot already holds.
+/// [`Goal::Produced`] asks for the whole count regardless, because possession
+/// is not production: a bot carrying six labs has not crafted one, and a
+/// `craft-item` trigger fires on the act of producing.
+///
+/// One helper for both, so `applicable` and `expand` cannot answer differently
+/// -- which is how a method comes to claim a goal it then refuses.
+struct Demand<'a> {
+    item: &'a ItemId,
+    need: u32,
+    whose: &'a Holder,
+    /// A technology this production unlocks. Always `None` for `Have`.
+    unlocks: Option<&'a str>,
+}
+
+fn demand<'a>(goal: &'a Goal, state: &PlanState) -> Option<Demand<'a>> {
+    match goal {
+        Goal::Have { item, count, whose } => Some(Demand {
+            item,
+            need: shortfall(state, item, *count, whose),
+            whose,
+            unlocks: None,
+        }),
+        Goal::Produced {
+            item,
+            count,
+            whose,
+            unlocks,
+        } => Some(Demand {
+            item,
+            need: *count,
+            whose,
+            unlocks: unlocks.as_deref(),
+        }),
+        _ => None,
+    }
+}
+
+/// Hangs a trigger's `Effect::Researched` on whichever action produces `item`.
+///
+/// Found by what the action *does* -- it carries `Effect::GainItem` for the
+/// goal's item -- rather than by where it was written, because the three
+/// producing methods express that gain three different ways: an inline `eff:`
+/// on an action literal, an element of a `vec![]`, and a `push`.
+///
+/// The effect has to live on the producing action and nowhere else: it is what
+/// `infer_edges` turns into the ordering edge that keeps anything needing the
+/// technology after the production, and a method cannot attach it to a
+/// subgoal's action because it never sees their ids.
+fn attach_unlock(steps: &mut [Step], item: &ItemId, unlocks: Option<&str>) {
+    let Some(tech) = unlocks else {
+        return;
+    };
+    for step in steps.iter_mut() {
+        if let Step::Act(action) = step
+            && action
+                .eff
+                .iter()
+                .any(|e| matches!(e, Effect::GainItem { item: got, .. } if got == item))
+        {
+            action.eff.push(Effect::Researched(tech.to_string()));
+            return;
+        }
+    }
+    // A method that claimed a `Produced` goal and emitted nothing producing it
+    // would drop the unlock silently, and the plan would look complete while
+    // the technology never arrived.
+    debug_assert!(
+        false,
+        "no action produces {item}, so {tech} has nowhere to go"
+    );
+}
+
 pub struct AlreadySatisfied;
 
 impl Method for AlreadySatisfied {
@@ -153,10 +229,10 @@ impl Method for Smelt {
     }
 
     fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
-        let Goal::Have { item, count, whose } = goal else {
+        let Some(Demand { item, need, .. }) = demand(goal, state) else {
             return false;
         };
-        if shortfall(state, item, *count, whose) == 0 {
+        if need == 0 {
             return false;
         }
         let Some(recipe) = recipe_for(state, item) else {
@@ -167,12 +243,17 @@ impl Method for Smelt {
     }
 
     fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
-        let Goal::Have { item, count, whose } = goal else {
+        let Some(Demand {
+            item,
+            need,
+            whose,
+            unlocks,
+        }) = demand(goal, &ctx.state)
+        else {
             return Err(PlannerError::NoApplicableMethod {
                 goal: goal.to_string(),
             });
         };
-        let need = shortfall(&ctx.state, item, *count, whose);
         let recipe =
             recipe_for(&ctx.state, item).ok_or_else(|| PlannerError::NoApplicableMethod {
                 goal: goal.to_string(),
@@ -432,6 +513,7 @@ impl Method for Smelt {
             });
         }
 
+        attach_unlock(&mut steps, item, unlocks);
         Ok(steps)
     }
 }
@@ -445,10 +527,9 @@ impl Method for Mine {
     }
 
     fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
-        let Goal::Have { item, count, whose } = goal else {
+        let Some(Demand { item, need, .. }) = demand(goal, state) else {
             return false;
         };
-        let need = shortfall(state, item, *count, whose);
         if need == 0 {
             return false;
         }
@@ -461,12 +542,17 @@ impl Method for Mine {
     }
 
     fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
-        let Goal::Have { item, count, whose } = goal else {
+        let Some(Demand {
+            item,
+            need,
+            unlocks,
+            ..
+        }) = demand(goal, &ctx.state)
+        else {
             return Err(PlannerError::NoApplicableMethod {
                 goal: goal.to_string(),
             });
         };
-        let need = shortfall(&ctx.state, item, *count, whose);
         let bot = ctx.state.bot(ctx.chain_actor);
         let from = bot.map(|b| b.position.clone()).unwrap_or_default();
         let reach = bot.map(|b| b.resource_reach_distance).unwrap_or(3.0);
@@ -516,6 +602,7 @@ impl Method for Mine {
             };
             steps.push(Step::Act(Box::new(action)));
         }
+        attach_unlock(&mut steps, item, unlocks);
         Ok(steps)
     }
 }
@@ -529,10 +616,13 @@ impl Method for HandCraft {
     }
 
     fn converges(&self, goal: &Goal, state: &PlanState) -> bool {
-        let Goal::Have { item, count, whose } = goal else {
+        let Some(Demand {
+            item, need, whose, ..
+        }) = demand(goal, state)
+        else {
             return false;
         };
-        if shortfall(state, item, *count, whose) == 0 {
+        if need == 0 {
             return false;
         }
         let Some(recipe) = recipe_for(state, item) else {
@@ -549,10 +639,10 @@ impl Method for HandCraft {
     }
 
     fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
-        let Goal::Have { item, count, whose } = goal else {
+        let Some(Demand { item, need, .. }) = demand(goal, state) else {
             return false;
         };
-        if shortfall(state, item, *count, whose) == 0 {
+        if need == 0 {
             return false;
         }
         let Some(recipe) = recipe_for(state, item) else {
@@ -563,12 +653,17 @@ impl Method for HandCraft {
     }
 
     fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
-        let Goal::Have { item, count, whose } = goal else {
+        let Some(Demand {
+            item,
+            need,
+            whose,
+            unlocks,
+        }) = demand(goal, &ctx.state)
+        else {
             return Err(PlannerError::NoApplicableMethod {
                 goal: goal.to_string(),
             });
         };
-        let need = shortfall(&ctx.state, item, *count, whose);
         let recipe =
             recipe_for(&ctx.state, item).ok_or_else(|| PlannerError::NoApplicableMethod {
                 goal: goal.to_string(),
@@ -630,6 +725,7 @@ impl Method for HandCraft {
             label: format!("craft {} {}", runs, item),
         })));
 
+        attach_unlock(&mut steps, item, unlocks);
         Ok(steps)
     }
 }
@@ -755,14 +851,27 @@ impl Method for Researched {
         for prerequisite in &prerequisites {
             steps.push(Step::Subgoal(Goal::Researched(prerequisite.clone())));
         }
-        // `Holder::Share` for the same reason the pack bill uses it: the
-        // research is one action reading one bot's inventory.
+        // A `craft-item` trigger fires on the **act of producing**, and the
+        // game researches the technology itself. So the trigger path emits one
+        // subgoal and **no research action at all**: there is nothing to issue,
+        // and `add_research` refuses a trigger technology outright.
+        //
+        // `Produced`, not `Have`: `Have` is satisfied by possession, so a bot
+        // already carrying the item would produce nothing and the trigger would
+        // never fire. `Produced` carries the technology it unlocks so that
+        // whichever method makes the item -- craft, smelt or mine -- can hang
+        // `Effect::Researched` on the action that does it.
+        //
+        // `Holder::Share` for the same reason the pack bill uses it: one action
+        // reading one bot's inventory.
         if let Some((item, count)) = &trigger {
-            steps.push(Step::Subgoal(Goal::Have {
+            steps.push(Step::Subgoal(Goal::Produced {
                 item: item.clone(),
                 count: *count,
                 whose: Holder::Share(ctx.chain_actor),
+                unlocks: Some(name.clone()),
             }));
+            return Ok(steps);
         }
         for (item, count) in &ingredients {
             // `Holder::Share`, not `Holder::Anyone`. The research is one action
@@ -801,18 +910,9 @@ impl Method for Researched {
                 count: *count,
             });
         }
-        // A trigger's items are required but **not** spent. The game watches
-        // the crafting; it does not take the result away, so debiting them
-        // here would make a later step re-produce items the bot still holds.
-        // This is the one place the trigger path and the pack path differ in
-        // kind rather than in numbers.
-        if let Some((item, count)) = &trigger {
-            pre.push(Condition::HasItem {
-                who: Actor::Role,
-                item: item.clone(),
-                count: *count,
-            });
-        }
+        // No trigger handling here: the trigger path returned above. Anything
+        // reaching this point is unlocked by science packs, which is what the
+        // bill and the research action below have always assumed.
         eff.push(Effect::Researched(name.clone()));
 
         // No explicit `Link` steps: every edge this action needs is stated as a
@@ -3161,6 +3261,83 @@ mod tests {
     /// The fix. `steam-power` is really "craft 50 iron plates", and that work
     /// has to appear in the plan as a subgoal — the step list must *grow*.
     #[test]
+    fn produced_ignores_what_a_bot_already_holds() {
+        // The whole difference between the two goals. A bot carrying ten has
+        // not *made* one, and a craft-item trigger fires on the making.
+        let bots = [BotId(1)];
+        let mut s = state(&bots);
+        s.gain(BotId(1), "iron-plate", 10);
+
+        let held = Goal::Have {
+            item: "iron-plate".into(),
+            count: 10,
+            whose: Holder::Share(BotId(1)),
+        };
+        let made = Goal::Produced {
+            item: "iron-plate".into(),
+            count: 10,
+            whose: Holder::Share(BotId(1)),
+            unlocks: None,
+        };
+
+        assert!(
+            AlreadySatisfied.applicable(&held, &s),
+            "ten in hand satisfies `Have`"
+        );
+        assert!(
+            !AlreadySatisfied.applicable(&made, &s),
+            "ten in hand must NOT satisfy `Produced` -- that is the bug this \
+             goal exists to prevent, and `AlreadySatisfied` is registered ahead \
+             of every producing method"
+        );
+        assert!(
+            Smelt.applicable(&made, &s),
+            "a producing method must still claim it"
+        );
+    }
+
+    #[test]
+    fn the_unlock_lands_on_the_action_that_produces_the_item() {
+        let bots = [BotId(1)];
+        let s = state(&bots);
+        let reg = registry_for(&bots);
+        let net = expand(
+            &[Goal::Produced {
+                item: "iron-plate".into(),
+                count: 1,
+                whose: Holder::Share(BotId(1)),
+                unlocks: Some("steam-power".into()),
+            }],
+            &s,
+            &reg,
+            BotId(1),
+        )
+        .expect("a smelted trigger item must plan");
+
+        // The case the inlined-hand-craft attempt broke: iron-plate is smelted,
+        // so only a goal that any producing method can claim reaches it.
+        let carriers: Vec<&Action> = net
+            .actions()
+            .filter(|a| a.eff.contains(&Effect::Researched("steam-power".into())))
+            .collect();
+        assert_eq!(
+            carriers.len(),
+            1,
+            "exactly one action carries the unlock, got {:?}",
+            net.actions().map(|a| &a.label).collect::<Vec<_>>()
+        );
+        assert!(
+            carriers[0].eff.iter().any(|e| matches!(
+                e,
+                Effect::GainItem { item, .. } if item == "iron-plate"
+            )),
+            "the unlock must ride on the action that produces the item, not a \
+             separate marker, got {:?}",
+            carriers[0]
+        );
+    }
+
+    #[test]
     fn a_craft_item_trigger_becomes_the_subgoal_it_names() {
         let s = trigger_state(
             "steam-power",
@@ -3171,12 +3348,15 @@ mod tests {
         let steps = research_steps(&s, "steam-power");
         assert_eq!(
             subgoals(&steps),
-            vec![Goal::Have {
+            vec![Goal::Produced {
                 item: "iron-plate".into(),
                 count: 50,
                 whose: Holder::Share(BotId(1)),
+                unlocks: Some("steam-power".into()),
             }],
-            "the trigger's own work must be planned"
+            "the trigger's own work must be planned, and as a production -- \
+             `Have` is satisfied by possession, so a bot already carrying fifty \
+             would produce nothing and the trigger would never fire"
         );
     }
 
@@ -3184,7 +3364,12 @@ mod tests {
     /// requires the items to exist and must *not* debit them, unlike the pack
     /// path which spends what it consumes.
     #[test]
-    fn a_trigger_requires_its_items_but_does_not_spend_them() {
+    fn a_trigger_emits_no_research_action() {
+        // The trigger firing *is* the research: the game does it. Issuing one
+        // as well does nothing -- `add_research` refuses a trigger technology
+        // outright -- and a run that did so planned `research electronics` five
+        // times, was told success five times, and looped until the supervisor
+        // called it `stuck_silent`.
         let s = trigger_state(
             "steam-power",
             r#"{"type": "craft-item", "item": "iron-plate", "count": 50}"#,
@@ -3192,37 +3377,21 @@ mod tests {
             None,
         );
         let steps = research_steps(&s, "steam-power");
-        let Some(Step::Act(action)) = steps.last() else {
-            panic!("the last step must be the research action, got {steps:?}");
-        };
         assert!(
-            action.pre.contains(&Condition::HasItem {
-                who: Actor::Role,
-                item: "iron-plate".into(),
-                count: 50,
-            }),
-            "the trigger's items must be required, got {:?}",
-            action.pre
+            !steps.iter().any(|step| matches!(
+                step,
+                Step::Act(action) if matches!(action.kind, ActionKind::Research { .. })
+            )),
+            "a trigger technology must issue no research, got {steps:?}"
         );
         assert!(
-            !action
-                .eff
-                .iter()
-                .any(|e| matches!(e, Effect::LoseItem { .. })),
-            "a trigger consumes nothing, got {:?}",
-            action.eff
-        );
-        assert!(
-            action
-                .eff
-                .contains(&Effect::Researched("steam-power".into()))
+            subgoals(&steps).iter().any(
+                |g| matches!(g, Goal::Produced { unlocks: Some(t), .. } if t == "steam-power")
+            ),
+            "the unlock must ride on the production goal, got {:?}",
+            subgoals(&steps)
         );
     }
-
-    /// `count` is absent in the shipped prototype for a single-item trigger
-    /// (`automation-science-pack` is `{type = "craft-item", item = "lab"}`), and
-    /// an absent count means one. Defaulting it to zero would put the
-    /// under-costing straight back.
     #[test]
     fn an_absent_trigger_count_means_one_not_none() {
         let s = trigger_state(
@@ -3234,10 +3403,11 @@ mod tests {
         let steps = research_steps(&s, "automation-science-pack");
         assert_eq!(
             subgoals(&steps),
-            vec![Goal::Have {
+            vec![Goal::Produced {
                 item: "iron-plate".into(),
                 count: 1,
                 whose: Holder::Share(BotId(1)),
+                unlocks: Some("automation-science-pack".into()),
             }]
         );
     }
@@ -3321,10 +3491,11 @@ mod tests {
         let steps = research_steps(&s, "automation-science-pack");
         assert_eq!(
             subgoals(&steps),
-            vec![Goal::Have {
+            vec![Goal::Produced {
                 item: "automation-science-pack".into(),
                 count: 1,
                 whose: Holder::Share(BotId(1)),
+                unlocks: Some("automation-science-pack".into()),
             }],
             "another technology unlocks it, so this trigger is reachable"
         );

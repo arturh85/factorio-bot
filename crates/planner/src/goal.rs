@@ -55,6 +55,28 @@ pub enum Goal {
         whose: Holder,
     },
     Researched(String),
+    /// Cause `count` of `item` to come into existence.
+    ///
+    /// Distinct from [`Goal::Have`], which is satisfied by what a bot already
+    /// holds. `Produced` never subtracts the current inventory: a bot carrying
+    /// six labs has not *crafted* one, and a Factorio 2.0 `craft-item` trigger
+    /// fires on the act of production, not on possession.
+    ///
+    /// `unlocks` names a technology this production triggers, if any. It rides
+    /// on the goal because the resulting `Effect::Researched` has to land on
+    /// whichever action ends up producing the item -- craft, smelt or mine --
+    /// and only the producing method knows which action that is. A method
+    /// cannot reach into its subgoals' actions to attach it afterwards; it
+    /// never sees their ids, by design.
+    Produced {
+        item: ItemId,
+        count: u32,
+        /// Whose inventory the ingredients are sized against -- the same
+        /// meaning as [`Goal::Have`]'s, so one helper can serve both and the
+        /// two cannot drift apart.
+        whose: Holder,
+        unlocks: Option<String>,
+    },
     /// The functorio bridge: `BusLane item rate` transcribed into Rust. No
     /// method satisfies this yet; blueprint generation is a later increment.
     Producing {
@@ -69,6 +91,15 @@ impl std::fmt::Display for Goal {
         match self {
             Goal::Have { item, count, whose } => write!(f, "have {} {} ({})", count, item, whose),
             Goal::Researched(tech) => write!(f, "research {}", tech),
+            Goal::Produced {
+                item,
+                count,
+                unlocks,
+                ..
+            } => match unlocks {
+                Some(tech) => write!(f, "produce {} {} to unlock {}", count, item, tech),
+                None => write!(f, "produce {} {}", count, item),
+            },
             Goal::Producing { item, rate } => write!(f, "produce {} {}/min", rate, item),
             Goal::All(goals) => write!(f, "all of {} goals", goals.len()),
         }

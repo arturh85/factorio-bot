@@ -993,6 +993,24 @@ local FRAME_CAPTURE_AREA_MIN_ZOOM = 0.05
 -- only ever be as old as the frames beside it.
 local FRAME_CAPTURE_RUN_FILE = FRAME_CAPTURE_DIR .. "/run.json"
 
+-- Sample schema. Bumped deliberately on every field change, because
+-- info.json has read 0.0.1 since the project began and cannot tell a stale
+-- workspace/mods from a current one. Rust refuses a schema it does not know.
+local SAMPLE_SCHEMA = 1
+local SAMPLE_DIR = "botbridge"
+local SAMPLE_FILE = SAMPLE_DIR .. "/samples.jsonl"
+local SAMPLE_BOT_INTERVAL = 60 -- 1 s at 60 UPS
+
+-- Appends one JSON line, on the server only.
+--
+-- The fourth argument is what restricts the write. `on_nth_tick` runs on every
+-- peer, which is why each client writes its own frames -- but force statistics
+-- are identical on every peer and bot inventories are readable from any of
+-- them, so four copies would be four identical files to reconcile for nothing.
+local function write_sample(line)
+	helpers.write_file(SAMPLE_FILE, helpers.table_to_json(line) .. "\n", true, 0)
+end
+
 -- Camera ids must be filename-safe. Interior hyphens are allowed; leading,
 -- trailing and doubled ones are not.
 --
@@ -1187,6 +1205,160 @@ function frame_capture_take(camera, tick)
 	end
 end
 
+-- Generation and demand across every electric network the force owns.
+--
+-- Reported in kW to match the numbers a player sees. `satisfaction` is
+-- consumed over demanded, or 1.0 when nothing demands anything -- a network
+-- with no load is fully satisfied, not divided by zero.
+--
+-- NOT sourced from `LuaEntity.electric_network_statistics` (a
+-- `LuaFlowStatistics`, the same class `sample_force` below uses for item
+-- production). Two things rule it out, both confirmed against this Factorio
+-- install's `runtime-api.json` rather than assumed:
+--
+--   1. `input_counts`/`output_counts` on that class are cumulative totals
+--      since the network's statistics object existed -- the same
+--      "since game start" accumulation `production` below deliberately
+--      keeps. An ever-growing joule total labelled `generated_kw` would look
+--      plausible and be wrong by orders of magnitude within minutes.
+--   2. For electric networks specifically, the class's own docs invert the
+--      usual reading: "the electric network GUI shows 'power consumption' on
+--      the left side, so in this case `input` describes the power
+--      consumption numbers" -- i.e. `input_counts` is demand, not
+--      generation, the opposite of the item-production convention (where
+--      `input` is what was made) that this file otherwise follows just
+--      below. Porting that pattern here would silently swap the two.
+--
+-- `LuaElectricNetwork.flow_last_tick` is what the docs describe as "energy
+-- amounts ... related to latest electric network update": one tick's actual
+-- production, demand and delivered energy, named for what they are
+-- (`maximum_production`, `maximum_consumption`, `total_transfer`) rather than
+-- by GUI position. Its values are joules for that one tick; ticks run at
+-- 60 UPS, so `* 60` converts to watts and `/ 1000` to the kW a player sees.
+--
+-- Unverified against a live game -- this task is static-only by design (see
+-- the task brief) -- but read directly from `runtime-api.json`, not guessed.
+local function power_totals(force)
+	local generated, consumed, demanded = 0.0, 0.0, 0.0
+	local seen_networks = {}
+	for _, surface in pairs(game.surfaces) do
+		for _, pole in pairs(surface.find_entities_filtered({
+			type = "electric-pole", force = force,
+		})) do
+			-- A network has many poles; `electric_network_id` dedups so a
+			-- network with N of the force's poles is not counted N times.
+			local network_id = pole.electric_network_id
+			if network_id and not seen_networks[network_id] then
+				seen_networks[network_id] = true
+				local network = pole.electric_network
+				if network and network.valid then
+					local flow = network.flow_last_tick
+					generated = generated + flow.maximum_production * 60 / 1000
+					consumed = consumed + flow.total_transfer * 60 / 1000
+					demanded = demanded + flow.maximum_consumption * 60 / 1000
+				end
+			end
+		end
+	end
+	local satisfaction = 1.0
+	if demanded > 0 then satisfaction = math.min(1.0, consumed / demanded) end
+	return {
+		generated_kw = generated,
+		consumed_kw = consumed,
+		satisfaction = satisfaction,
+	}
+end
+
+-- Bot inventories and positions, on a 1 s beat -- fast enough to see a bot
+-- move or mine, slow enough not to compete with the 300-tick frame cadence.
+--
+-- Gated on an active capture run (F5): a run started without one produces no
+-- samples at all, matching frame capture's own all-or-nothing behaviour, and
+-- this avoids writing a stream nobody asked to correlate with anything.
+local function sample_bots(tick)
+	local capture = storage.frame_capture
+	if capture == nil then
+		return
+	end
+	local bots = {}
+	for _, player in pairs(game.connected_players) do
+		local character = player.character
+		bots[#bots + 1] = {
+			id = player.index,
+			position = player.position,
+			-- `inventory_counts` handles Factorio 2.0's get_contents(),
+			-- which returns an array of {name, count, quality}, not a dict.
+			inventory = character and inventory_counts(
+				character.get_inventory(defines.inventory.character_main)
+			) or {},
+			crafting_queue = player.crafting_queue_size or 0,
+			mining = character and character.mining_state.mining
+				and character.mining_target and character.mining_target.name or nil,
+		}
+	end
+	write_sample({
+		kind = "bots",
+		schema = SAMPLE_SCHEMA,
+		tick = tick,
+		-- F2: every line carries the run id (nil when the run was started
+		-- untagged), so Rust can filter on it instead of on tick range alone.
+		run = capture.run,
+		bots = bots,
+	})
+end
+
+-- The only registration site for the bot-sample cadence. A distinct tick (60,
+-- not 300) on purpose: `script.on_nth_tick(n, f)` replaces the handler
+-- already registered for `n`, and frame capture owns 300 (see the comment
+-- below), so a second registration there would silently disable it instead of
+-- adding to it.
+script.on_nth_tick(SAMPLE_BOT_INTERVAL, function(event)
+	sample_bots(event.tick)
+end)
+
+-- Force-wide research, production and power. Folded into the existing
+-- 300-tick frame handler (`on_frame_capture_tick` below) rather than given
+-- its own registration, for the same reason `sample_bots` above got tick 60
+-- instead of 300: a second `on_nth_tick(300, ...)` would replace frame
+-- capture's handler, not add to it.
+local function sample_force(tick)
+	local capture = storage.frame_capture
+	if capture == nil then
+		return
+	end
+	local force = game.forces["player"]
+	local research = nil
+	if force.current_research then
+		local tech = force.current_research
+		research = {
+			name = tech.name,
+			progress = force.research_progress,
+			eta_ticks = nil,
+		}
+	end
+	local unlocked = 0
+	for _, tech in pairs(force.technologies) do
+		if tech.researched then unlocked = unlocked + 1 end
+	end
+	-- Cumulative since game start, not per-interval -- Rust reads these as
+	-- running totals, same as the production statistics GUI does.
+	local made, consumed = {}, {}
+	local stats = force.get_item_production_statistics(game.surfaces[1])
+	for name, count in pairs(stats.input_counts) do made[name] = count end
+	for name, count in pairs(stats.output_counts) do consumed[name] = count end
+
+	write_sample({
+		kind = "force",
+		schema = SAMPLE_SCHEMA,
+		tick = tick,
+		run = capture.run,
+		research = research,
+		techs_unlocked = unlocked,
+		production = { made = made, consumed = consumed },
+		power = power_totals(force),
+	})
+end
+
 -- Registered with `script.on_nth_tick` rather than as a modulus inside
 -- `on_tick`: `on_tick` already runs real per-tick work for every client, and a
 -- counter or a remainder in there would both add to that and reintroduce the
@@ -1231,6 +1403,7 @@ function on_frame_capture_tick(event)
 	for _, camera in ipairs(capture.cameras) do
 		frame_capture_take(camera, tick)
 	end
+	sample_force(tick)
 end
 
 -- The camera that follows one bot. A per-bot camera has no `kind` of its own
@@ -1317,6 +1490,11 @@ function rcon_frame_capture_start(run_id)
 	-- This takes `run.json` with it, and must: the wipe and the sidecar have
 	-- to move together or the id can outlive the frames it names.
 	helpers.remove_path(FRAME_CAPTURE_DIR)
+	-- Samples get the same fresh start as frames (F5): server-only, since
+	-- only the server's copy exists to begin with, and `append = false`
+	-- truncates the file rather than appending to whatever a previous run
+	-- left in it.
+	helpers.write_file(SAMPLE_FILE, "", false, 0)
 	-- Three vantage points, `2 + one per bot` cameras in total:
 	--
 	--   `follow`  one bot, player 1, the original camera and unchanged.
@@ -1353,7 +1531,11 @@ function rcon_frame_capture_start(run_id)
 	-- reads better in a directory listing.
 	table.insert(cameras, { id = "area", kind = "area" })
 	frame_capture_validate_cameras(cameras)
-	storage.frame_capture = { cameras = cameras }
+	-- `run` is set only from the argument -- nil when the caller passed none,
+	-- exactly like `run.json` below. No fallback, no `run_id or
+	-- storage.something`: an untagged run's samples carry `"run":null` and
+	-- Rust falls back to tick-range filtering for them instead.
+	storage.frame_capture = { cameras = cameras, run = run_id }
 	-- After the wipe, and only when asked for. The ordering is what keeps the
 	-- id honest: the directory is emptied first and the sidecar written
 	-- second, so `run.json` is always newer than the wipe that preceded it.
@@ -1376,6 +1558,20 @@ end
 function rcon_frame_capture_stop()
 	storage.frame_capture = nil
 	stamp_tick()
+end
+
+-- Samples bots on demand, called by the executor immediately after an action
+-- settles with a non-success status.
+--
+-- Only on failure: the 60-tick beat already carries what a bot held when
+-- nothing went wrong, and sampling every settle would roughly double the
+-- stream for that. The tick that matters for diagnosis is the tick something
+-- failed, and by the next beat the bot has moved or handed off.
+--
+-- Gated the same as the beat itself, via `sample_bots` (F5): a settle failure
+-- outside an active capture run writes nothing.
+function rcon_sample_bots()
+	sample_bots(game.tick)
 end
 
 function writeout_tiles(tick, surface, area) -- SLOW! beastie can do ~2.8 per tick

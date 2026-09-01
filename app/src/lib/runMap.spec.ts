@@ -68,4 +68,27 @@ describe('entitiesAt', () => {
         expect(() => entitiesAt(r, 200)).not.toThrow();
         expect(entitiesAt(r, 200)).toHaveLength(1);
     });
+
+    it('applies deltas in tick order even when the array is not tick-sorted', () => {
+        // The producer (record.actions) writes one line per plan step in
+        // plan/topological order, not tick order, and RunRecorder::record
+        // never reorders or clamps a tick to enforce monotonicity -- so a
+        // `removed` can appear in the array before the `placed` it removes.
+        // Applying the array in position order would run this removal
+        // against an empty set and leave the entity standing.
+        const r = [removed(200, 'stone-furnace', -12, 8), placed(100, 'stone-furnace', -12, 8)];
+        expect(entitiesAt(r, 250)).toHaveLength(0);
+    });
+
+    it('skips a placement at the same tick as the chosen keyframe', () => {
+        // Deltas apply strictly after the keyframe's tick, not at or after
+        // it -- a placement recorded at the exact keyframe tick is already
+        // reflected (or deliberately not) in the keyframe's own `game` array.
+        const r = [
+            keyframe(300, [{name: 'steel-furnace', position: {x: -12, y: 8}, direction: 0}]),
+            placed(300, 'stone-furnace', -8, 8)
+        ];
+        const at = entitiesAt(r, 300);
+        expect(at.map((e) => e.name)).toEqual(['steel-furnace']);
+    });
 });

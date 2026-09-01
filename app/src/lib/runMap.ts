@@ -29,9 +29,15 @@ function samePlace(a: EntitySnapshot, b: EntitySnapshot): boolean {
  * correct, so the restart is load-bearing, not an optimisation.
  *
  * Every `placed` and `removed` record strictly after that keyframe and at or
- * before `tick` is then applied in order. A `MapKind` this build does not
- * know (`kind: 'unknown'`) is skipped rather than throwing, matching the
- * record format's forward-compatibility rule.
+ * before `tick` is then applied **in tick order**, not array order: the
+ * producer (`record.actions` in `crates/scripting_lua/src/globals/record.rs`)
+ * writes each plan step's line at whatever tick that step's own observation
+ * carries, in plan/topological order, and `RunRecorder::record` deliberately
+ * never reorders or clamps a tick to enforce monotonicity -- concurrent
+ * multi-bot execution is this project's flagship case, and its records land
+ * out of order routinely. A `MapKind` this build does not know
+ * (`kind: 'unknown'`) is skipped rather than throwing, matching the record
+ * format's forward-compatibility rule.
  */
 export function entitiesAt(records: MapRecord[], tick: number): EntitySnapshot[] {
     let keyframeTick = -Infinity;
@@ -43,7 +49,10 @@ export function entitiesAt(records: MapRecord[], tick: number): EntitySnapshot[]
         }
     }
 
-    for (const record of records) {
+    // A copy, sorted stably by tick: mutating the caller's array would be a
+    // surprise, and the store holds these records.
+    const ordered = [...records].sort((a, b) => a.tick - b.tick);
+    for (const record of ordered) {
         if (record.tick <= keyframeTick || record.tick > tick) continue;
         if (record.kind === 'placed') {
             entities = [...entities, record.actual];

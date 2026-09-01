@@ -208,6 +208,22 @@ function products_to_dict(products) -- input: array of products, output: dict["i
 	return result
 end
 
+-- Like products_to_dict, but for a real `LuaInventory` -- `on_player_mined_entity`'s
+-- `buffer` -- rather than a prototype's `mineable_properties.products`. The
+-- prototype lists what mining *usually* yields; the buffer is what THIS
+-- mining action actually put there, including any productivity/quality bonus
+-- the prototype knows nothing about. `get_contents()` already aggregates by
+-- item name (across qualities), matching products_to_dict's own shape.
+function inventory_to_dict(inventory) -- input: LuaInventory, output: dict["item"] = amount
+	if inventory == nil then return nil end
+
+	local result = {}
+	for _, stack in ipairs(inventory.get_contents()) do
+		result[stack.name] = (result[stack.name] or 0) + stack.count
+	end
+	return result
+end
+
 function on_init()
 	print("on_init!")
 	storage.resources = {}
@@ -872,33 +888,53 @@ function on_tick(event)
 	last_tick = event.tick
 end
 
+-- `event.player_index` is who mined it, definitively -- the game hands it to
+-- us. This used to loop over EVERY connected bot and complete the mining task
+-- of any bot whose `mining.entity` happened to `==` the entity in THIS event,
+-- not just the bot that actually did the mining.
+--
+-- `nearest_resource_tile`/`resource_tiles_for` (crates/planner) pick tiles
+-- per bot from the *modeled* remaining amount, with no reservation between
+-- bots planned in the same pass -- two bots gathering the same item from the
+-- same patch can legitimately be assigned the same tile, each taking a share
+-- of it. Concurrent mining of one entity by two different players is normal
+-- multiplayer behaviour: the game gives each of them their own
+-- `on_player_mined_entity` event, with its own `player_index`, for their own
+-- swings. But every one of those events also satisfied `mining.entity ==
+-- event.entity` for BOTH bots' stored mining tasks, so bot A's swings
+-- decremented bot B's `left` too (and vice versa) -- whichever bot needed
+-- fewer swings hit zero first, on a mix of its own and the other bot's
+-- progress, and reported success having personally mined only part of its
+-- count. Scoping to `event.player_index` makes each bot's completion depend
+-- only on its own swings, which is what "requested count has actually been
+-- delivered" requires.
 function on_mined_entity(event)
-	for idx, player in pairs(game.players) do
-		-- if storage.p[idx].walking and player.connected then
-		if storage.p[idx] and player.connected and player.character then -- TODO FIXME
-			local mining = storage.p[idx].mining
-			if mining then
-				if mining.entity == event.entity then
---					complain("on_mined_entity mined the desired entity")
-					--write_file("complete: mining "..idx.."\n")
---					complain("mined " .. mining.prototype.name)
-					
-					local proto = mining.prototype
-					local mining_results = products_to_dict(proto.mineable_properties.products)
-					local tmp_recent_item_addition = {}
-					tmp_recent_item_addition.tick = event.tick
-					tmp_recent_item_addition.action_id = mining.action_id
-					tmp_recent_item_addition.itemlist = mining_results
-					if recent_item_additions[idx] == nil then recent_item_additions[idx] = {} end
-					table.insert(recent_item_additions[idx], tmp_recent_item_addition)
---					dump_dict(mining_results)
-					print("mining: " .. helpers.table_to_json(mining))
-					mining.left = mining.left - 1
-					if mining.left <= 0 then
-						action_completed(event.tick, mining.action_id)
-						storage.p[idx].mining = nil
-					end
-				end
+	local idx = event.player_index
+	local player = game.players[idx]
+	if storage.p[idx] and player and player.connected and player.character then
+		local mining = storage.p[idx].mining
+		if mining and mining.entity == event.entity then
+			-- The buffer is what this swing actually produced -- not
+			-- `mining.prototype.mineable_properties.products`, which is what
+			-- mining *usually* yields and says nothing about a productivity
+			-- or quality bonus this particular swing got. Counting the
+			-- prototype's expected amount instead of the buffer is the
+			-- sibling of the player-scoping bug above: it under/over-counts
+			-- "left" by the same kind of gap between "asked for" and
+			-- "actually happened".
+			local mined = inventory_to_dict(event.buffer)
+			local tmp_recent_item_addition = {}
+			tmp_recent_item_addition.tick = event.tick
+			tmp_recent_item_addition.action_id = mining.action_id
+			tmp_recent_item_addition.itemlist = mined
+			if recent_item_additions[idx] == nil then recent_item_additions[idx] = {} end
+			table.insert(recent_item_additions[idx], tmp_recent_item_addition)
+			print("mining: " .. helpers.table_to_json(mining))
+			local delivered = (mined and mined[mining.prototype.name]) or 0
+			mining.left = mining.left - delivered
+			if mining.left <= 0 then
+				action_completed(event.tick, mining.action_id)
+				storage.p[idx].mining = nil
 			end
 		end
 	end

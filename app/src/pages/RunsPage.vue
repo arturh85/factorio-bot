@@ -195,6 +195,9 @@ function researchPct(progress: number): string {
                     {{ formatWhen(startedUnixOf(store.detail.summary)) }}
                 </span>
                 <span v-if="currentSplit" class="runs__now">{{ currentSplit.goal }}</span>
+                <router-link :to="`/runs/${store.detail.summary.run_id}/analysis`" class="linkish">
+                    analysis
+                </router-link>
             </header>
 
             <table class="splits">

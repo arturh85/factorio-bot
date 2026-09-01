@@ -460,12 +460,16 @@ impl RunRecorder {
         workspace: Option<&Path>,
         keep: usize,
     ) -> io::Result<(Manifest, retention::Reaped)> {
-        // Captured before the finishing event's own tick can raise the
-        // high-water mark: `record()` below folds `tick` -- the run's closing
-        // reading -- into `high_tick`, and an un-attributed sample recorded
-        // partway through the run must not be excluded by a cutoff drawn from
-        // the run's own final moment.
-        let sample_cutoff = self.not_before(0);
+        // The lower bound for an un-attributed sample (one written before the
+        // `run` field existed) must be the run's *start*, not its end: such a
+        // sample has no other way to prove it belongs to this run, and a
+        // cutoff drawn from the run's last moment would discard essentially
+        // every sample recorded while the run was actually in progress.
+        // `high_tick` -- the latest tick recorded so far -- is exactly the
+        // wrong value here; `start_tick` is the first tick this recorder ever
+        // saw, defaulting to 0 for a recorder that logged nothing before
+        // finishing.
+        let sample_cutoff = self.start_tick.unwrap_or(0);
 
         self.record(
             tick,
@@ -1019,7 +1023,7 @@ mod finish_tests {
         fs::create_dir_all(&out).unwrap();
         fs::write(
             out.join("samples.jsonl"),
-            "{\"kind\":\"bots\",\"schema\":1,\"tick\":900,\"bots\":[]}\n",
+            "{\"kind\":\"bots\",\"schema\":1,\"tick\":850,\"bots\":[]}\n",
         )
         .unwrap();
 
@@ -1032,9 +1036,24 @@ mod finish_tests {
             },
         )
         .unwrap();
+        // A later event before `finish` is what distinguishes the recorder's
+        // start tick (800) from its high-water mark (950) -- without this,
+        // an ordinary mid-run sample would pass under either cutoff and the
+        // test would not catch a regression to the run's last moment.
+        rec.record(
+            950,
+            EventKind::MilestoneStarted {
+                index: 2,
+                goal: "g2".into(),
+            },
+        )
+        .unwrap();
         let (manifest, _) = rec.finish(1000, "done", Some(&workspace), 5).unwrap();
 
-        assert_eq!(manifest.samples, 1);
+        assert_eq!(
+            manifest.samples, 1,
+            "an ordinary mid-run sample (tick 850) must survive: the cutoff is the run's start tick (800), not its high-water mark (950)"
+        );
     }
 
     #[test]

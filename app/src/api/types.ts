@@ -399,6 +399,11 @@ export interface ResearchSample {
     name: string;
     /** 0.0 to 1.0. */
     progress: number;
+    /**
+     * Always `null` today: no writer, mod-side or Rust-side, computes an
+     * estimate yet. `null` means "not computed", not "the game reported
+     * none".
+     */
     eta_ticks: number | null;
 }
 
@@ -444,6 +449,13 @@ export type SampleKind =
  * `allOf` of `SampleKind` and `{tick, run}` rather than a single flat object.
  */
 export type Sample = SampleKind & {
+    /**
+     * The schema this line was written under. Kept as a real field -- not
+     * just probed and discarded on read -- so an archived line still carries
+     * its stamp and a future schema bump can refuse an old archive loudly
+     * instead of silently losing data.
+     */
+    schema: number;
     tick: number;
     /**
      * The run id the mod stamped on this line, or `null` for a line written
@@ -455,6 +467,12 @@ export type Sample = SampleKind & {
 /** `GET /api/v1/runs/{id}/samples` response. */
 export interface RunSamplesResponse {
     samples: Sample[];
+    /**
+     * Lines that did not parse -- in practice `bots = {}` serialising to
+     * `"{}"` rather than `"[]"` when no player is connected. Reported rather
+     * than swallowed, matching `EventsResponse.skipped`.
+     */
+    skipped: number;
 }
 
 /** What one bot built or removed, or what a keyframe observed. */
@@ -501,6 +519,9 @@ export type MapKind =
           /** Field names that differ, or null when they agree. */
           drift: string[] | null;
       }
+    // Reserved, not yet produced: there is no `take_removal` seam in the
+    // codebase, so nothing ever writes this variant today. Decodable from
+    // day one so a future writer needs no client-side change.
     | {kind: 'removed'; bot: number; entity: EntitySnapshot}
     | {
           kind: 'keyframe';
@@ -530,6 +551,9 @@ export type MapRecord = MapKind & {
 /** `GET /api/v1/runs/{id}/map` response. */
 export interface RunMapResponse {
     map: MapRecord[];
+    /** Lines that did not parse. Reported rather than swallowed, matching
+     *  `EventsResponse.skipped`. */
+    skipped: number;
 }
 
 /**

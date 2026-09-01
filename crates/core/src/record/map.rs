@@ -33,10 +33,16 @@ pub enum MapKind {
         /// would mean the same thing; only one of them is written.
         drift: Option<Vec<String>>,
     },
-    Removed {
-        bot: u32,
-        entity: EntitySnapshot,
-    },
+    /// Reserved, not yet produced: there is no `take_removal` seam anywhere
+    /// in this codebase, so nothing ever constructs this variant today. It is
+    /// declared, published in the OpenAPI schema and mirrored in
+    /// `app/src/api/types.ts` because a reader must be able to decode it the
+    /// day a writer exists, but until then this is a promise about the shape,
+    /// not a fact about what `map.jsonl` contains. Producing it for real
+    /// would need the executor (or whatever notices an entity gone) to call
+    /// a `record.removed(...)` binding that does not exist yet, mirroring
+    /// `Placed`'s `record.actions(...)` seam.
+    Removed { bot: u32, entity: EntitySnapshot },
     Keyframe {
         bounds: Bounds,
         /// What the game reports inside `bounds`.

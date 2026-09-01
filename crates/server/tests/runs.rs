@@ -194,6 +194,34 @@ async fn a_runs_archived_samples_are_served() {
     let samples = body["samples"].as_array().unwrap();
     assert_eq!(samples.len(), 1);
     assert_eq!(samples[0]["tick"], 310);
+    assert_eq!(body["skipped"], 0);
+}
+
+#[tokio::test]
+async fn a_run_with_an_unparseable_sample_line_reports_its_skipped_count() {
+    // Concrete case this guards: the mod writes `bots = {}` when no player is
+    // connected, and `helpers.table_to_json({})` yields `"{}"` rather than
+    // `"[]"`, so that line fails to deserialise as a `Sample` -- it must be
+    // counted, not vanish silently.
+    let ws = workspace("samples-skipped");
+    seed_run(&ws, "alpha", MILESTONES, Some(MANIFEST), None);
+    std::fs::write(
+        ws.join("runs").join("alpha").join("samples.jsonl"),
+        concat!(
+            r#"{"kind":"bots","schema":1,"tick":310,"run":"alpha","bots":[]}"#,
+            "\n",
+            r#"{"kind":"bots","schema":1,"tick":320,"run":"alpha","bots":{}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    let (status, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/alpha/samples").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["samples"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        body["skipped"], 1,
+        "the unparseable line is reported, not hidden"
+    );
 }
 
 #[tokio::test]
@@ -231,6 +259,33 @@ async fn a_runs_archived_map_is_served() {
     assert_eq!(map.len(), 1);
     assert_eq!(map[0]["tick"], 310);
     assert_eq!(map[0]["kind"], "placed");
+    assert_eq!(body["skipped"], 0);
+}
+
+#[tokio::test]
+async fn a_run_with_a_truncated_map_line_reports_its_skipped_count() {
+    let ws = workspace("map-skipped");
+    seed_run(&ws, "alpha", MILESTONES, Some(MANIFEST), None);
+    std::fs::write(
+        ws.join("runs").join("alpha").join("map.jsonl"),
+        concat!(
+            r#"{"tick":310,"kind":"placed","bot":1,"#,
+            r#""intent":{"name":"stone-furnace","position":{"x":-12.0,"y":8.0},"direction":0},"#,
+            r#""actual":{"name":"stone-furnace","position":{"x":-12.0,"y":8.0},"direction":0},"#,
+            r#""drift":null}"#,
+            "\n",
+            r#"{"tick":320,"kind":"placed","bot":1,"intent":{"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    let (status, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/alpha/map").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["map"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        body["skipped"], 1,
+        "the truncated line is reported, not hidden"
+    );
 }
 
 #[tokio::test]

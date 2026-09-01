@@ -22,9 +22,10 @@ use factorio_bot_core::record::map::{
 use factorio_bot_core::record::{
     ActionFailure, EventKind, FailureKind, PlannedStep, RunRecorder, SatisfiedReason,
 };
-use factorio_bot_core::types::{AreaFilter, PlayerId, Position, Rect};
+use factorio_bot_core::types::{AreaFilter, EntityType, PlayerId, Position, Rect};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
 type Slot = Arc<Mutex<Option<RunRecorder>>>;
@@ -35,6 +36,48 @@ fn record_error(err: impl std::fmt::Display) -> LuaError {
 
 fn rcon_error(err: impl std::fmt::Display) -> LuaError {
     LuaError::RuntimeError(format!("rcon: {err}"))
+}
+
+/// Whether an entity the live game reports belongs in a keyframe's `game`
+/// array.
+///
+/// The keyframe compares what the game has against `EntityGraph::snapshot_within`
+/// -- the "model" side -- and a divergence list is only a useful signal when
+/// both sides describe the same population. `find_entities_filtered` with no
+/// type filter returns *everything* in the box: trees, small rocks, ore,
+/// characters, items on the ground. None of those are things a bot places or
+/// something `EntityGraph` tracks, so left in, they would dominate every
+/// keyframe's `game` array with terrain nobody placed and swamp the actual
+/// divergences underneath.
+///
+/// This mirrors `EntityGraph::add` (`crates/core/src/graph/entity_graph.rs`)
+/// exactly: the entity types it inserts into `entity_tree`, the two named
+/// rocks it also blocks on, and `Resource` (read back out of `resource_tree`
+/// by `snapshot_within`, so ore patches are legitimately part of the model
+/// side too). Keep the two lists in sync -- a type `add` starts tracking
+/// without a matching arm here would show up as a permanent, spurious
+/// divergence for every run that touches it.
+fn keyframe_relevant(entity_type: &str, name: &str) -> bool {
+    matches!(
+        EntityType::from_str(entity_type),
+        Ok(EntityType::Furnace)
+            | Ok(EntityType::Inserter)
+            | Ok(EntityType::Boiler)
+            | Ok(EntityType::Lab)
+            | Ok(EntityType::OffshorePump)
+            | Ok(EntityType::MiningDrill)
+            | Ok(EntityType::StorageTank)
+            | Ok(EntityType::Container)
+            | Ok(EntityType::Splitter)
+            | Ok(EntityType::TransportBelt)
+            | Ok(EntityType::UndergroundBelt)
+            | Ok(EntityType::Pipe)
+            | Ok(EntityType::PipeToGround)
+            | Ok(EntityType::LogisticContainer)
+            | Ok(EntityType::AssemblingMachine)
+            | Ok(EntityType::Resource)
+    ) || name == "rock-big"
+        || name == "rock-huge"
 }
 
 /// The reverse of `run.rs`'s `entity_snapshot_to_lua`: reads the same shape
@@ -652,8 +695,14 @@ end
                         .find_entities_filtered(&AreaFilter::Rect(rect.clone()), None, None)
                         .await
                         .map_err(rcon_error)?;
+                    // Restricted to what `EntityGraph` models -- see
+                    // `keyframe_relevant` -- so `game` and `model` are
+                    // comparable populations rather than the unfiltered box
+                    // (trees, rocks, ore, characters, dropped items) against
+                    // the curated one.
                     let game: Vec<EntitySnapshot> = game_entities
                         .into_iter()
+                        .filter(|e| keyframe_relevant(&e.entity_type, &e.name))
                         .map(|e| EntitySnapshot {
                             name: e.name,
                             position: e.position,
@@ -1159,5 +1208,45 @@ mod tests {
             read_map(&run_dir).is_empty(),
             "an action that placed nothing must not appear in map.jsonl"
         );
+    }
+
+    #[test]
+    fn keyframe_relevant_admits_only_what_the_entity_graph_models() {
+        // Built structures the bots actually place, one per `entity_tree`
+        // arm in `EntityGraph::add`.
+        for entity_type in [
+            "furnace",
+            "inserter",
+            "boiler",
+            "lab",
+            "offshore-pump",
+            "mining-drill",
+            "storage-tank",
+            "container",
+            "splitter",
+            "transport-belt",
+            "underground-belt",
+            "pipe",
+            "pipe-to-ground",
+            "logistic-container",
+            "assembling-machine",
+        ] {
+            assert!(
+                keyframe_relevant(entity_type, "some-entity"),
+                "{entity_type} is one of EntityGraph::add's tracked types"
+            );
+        }
+        // Ore, tracked via `resource_tree` and surfaced by `snapshot_within`.
+        assert!(keyframe_relevant("resource", "iron-ore"));
+        // The two named rocks `add` also blocks on, regardless of type.
+        assert!(keyframe_relevant("simple-entity", "rock-big"));
+        assert!(keyframe_relevant("simple-entity", "rock-huge"));
+
+        // Terrain nobody placed and nothing in EntityGraph tracks: trees,
+        // small rocks, the player character, items dropped on the ground.
+        assert!(!keyframe_relevant("tree", "tree-01"));
+        assert!(!keyframe_relevant("simple-entity", "rock-small"));
+        assert!(!keyframe_relevant("character", "character"));
+        assert!(!keyframe_relevant("item-entity", "item-on-ground"));
     }
 }

@@ -24,6 +24,7 @@ const bot = (id: number, over: Partial<BotSample> = {}): BotSample => ({
 const botSample = (tick: number, bots: BotSample[] = [bot(1)]): Sample => ({
     kind: 'bots',
     bots,
+    schema: 1,
     tick,
     run: 'run-1'
 });
@@ -34,6 +35,7 @@ const forceSample = (tick: number, made: Record<string, number> = {}): Sample =>
     techs_unlocked: 0,
     production: {made, consumed: {}},
     power: {generated_kw: 0, consumed_kw: 0, satisfaction: 1},
+    schema: 1,
     tick,
     run: 'run-1'
 });

@@ -151,19 +151,38 @@ mod tests {
     }
 
     #[test]
-    fn every_planning_attempt_reaches_record_plan_created() {
-        // Milestone 1 plans twice (2 steps, then 0 -- satisfied) before the
-        // other three each plan once at 0 steps: five planning attempts in
-        // total, and `record.plan_created` must be reachable for every one of
-        // them, not just the non-empty ones.
-        let lua = harness("{2, 0, 0, 0, 0}", "{1}");
+    fn only_a_planning_attempt_with_steps_reaches_record_plan_created() {
+        // Milestone 1 plans three times -- 2 steps, then 3, then 0 (the
+        // empty re-plan that signals satisfaction) -- before the other three
+        // milestones are each satisfied on their first (already-empty)
+        // attempt. Six planning attempts in total, but `record.plan_created`
+        // must be reached only for the two that returned real steps: the
+        // empty re-plan that merely confirms satisfaction must never reach
+        // it, because a consumer taking the LAST `plan_created` per
+        // milestone would otherwise see an empty DAG for a milestone that
+        // actually ran 3 steps.
+        let lua = harness("{2, 3, 0, 0, 0, 0}", "{1}");
         lua.load(RESEARCH_RUN_LUA)
             .exec()
             .expect("research_run.lua runs to completion");
         let calls: mlua::Table = lua.globals().get("__plan_created_calls").unwrap();
-        assert_eq!(calls.raw_len(), 5, "one per planning attempt");
-        let first: mlua::Table = calls.get(1).unwrap();
-        let plan: mlua::Table = first.get("plan").unwrap();
-        assert_eq!(plan.raw_len(), 2, "the first attempt's two scheduled steps");
+        assert_eq!(
+            calls.raw_len(),
+            2,
+            "only the two non-empty planning attempts reach record.plan_created"
+        );
+        let last: mlua::Table = calls.get(2).unwrap();
+        assert_eq!(
+            last.get::<u32>("index").unwrap(),
+            1,
+            "milestone 1 is the only one that ever plans a non-empty step"
+        );
+        let plan: mlua::Table = last.get("plan").unwrap();
+        assert_eq!(
+            plan.raw_len(),
+            3,
+            "the LAST plan_created for a satisfied milestone must be its real DAG, \
+             not the empty re-plan that closed it"
+        );
     }
 }

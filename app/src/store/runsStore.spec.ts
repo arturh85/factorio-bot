@@ -49,9 +49,9 @@ beforeEach(() => {
     vi.mocked(client.getRunLanes).mockReset();
     vi.mocked(client.getRunLanes).mockResolvedValue({lanes: []});
     vi.mocked(client.getRunSamples).mockReset();
-    vi.mocked(client.getRunSamples).mockResolvedValue({samples: []});
+    vi.mocked(client.getRunSamples).mockResolvedValue({samples: [], skipped: 0});
     vi.mocked(client.getRunMap).mockReset();
-    vi.mocked(client.getRunMap).mockResolvedValue({map: []});
+    vi.mocked(client.getRunMap).mockResolvedValue({map: [], skipped: 0});
 });
 
 describe('loadRuns', () => {
@@ -261,6 +261,7 @@ describe('samples', () => {
             crafting_queue: 0,
             mining: null
         })),
+        schema: 1,
         tick,
         run: 'run-1'
     });
@@ -275,6 +276,7 @@ describe('samples', () => {
         techs_unlocked: 0,
         production: {made, consumed: {}},
         power: {generated_kw: 0, consumed_kw: 0, satisfaction: 1},
+        schema: 1,
         tick,
         run: 'run-1'
     });
@@ -286,15 +288,14 @@ describe('samples', () => {
 
     it('reads the selected bot state at the cursor', async () => {
         vi.mocked(client.getRunSamples).mockResolvedValue({
-            samples: [bots(59380, [{id: 1, inventory: {'iron-plate': 2}}, {id: 2}])]
-        });
+            samples: [bots(59380, [{id: 1, inventory: {'iron-plate': 2}}, {id: 2}])], skipped: 0});
         const store = useRunsStore();
         await store.openRun('run-1'); // cursor lands on 59400, the first frame
         expect(store.botState?.inventory).toEqual({'iron-plate': 2});
     });
 
     it('is null before the first bots sample', async () => {
-        vi.mocked(client.getRunSamples).mockResolvedValue({samples: [bots(60000, [{id: 1}])]});
+        vi.mocked(client.getRunSamples).mockResolvedValue({samples: [bots(60000, [{id: 1}])], skipped: 0});
         const store = useRunsStore();
         await store.openRun('run-1');
         expect(store.botState).toBeNull();
@@ -302,7 +303,7 @@ describe('samples', () => {
 
     it('is null when no view is selected', async () => {
         vi.mocked(client.getRunFrames).mockResolvedValue({frames: []});
-        vi.mocked(client.getRunSamples).mockResolvedValue({samples: [bots(59380, [{id: 1}])]});
+        vi.mocked(client.getRunSamples).mockResolvedValue({samples: [bots(59380, [{id: 1}])], skipped: 0});
         const store = useRunsStore();
         await store.openRun('run-1');
         expect(store.bot).toBeNull();
@@ -311,21 +312,20 @@ describe('samples', () => {
 
     it('reports queued research', async () => {
         vi.mocked(client.getRunSamples).mockResolvedValue({
-            samples: [force(59380, {}, {name: 'automation', progress: 0.5, eta_ticks: 100})]
-        });
+            samples: [force(59380, {}, {name: 'automation', progress: 0.5, eta_ticks: 100})], skipped: 0});
         const store = useRunsStore();
         await store.openRun('run-1');
         expect(store.forceState?.research?.name).toBe('automation');
     });
 
     it('distinguishes no research queued from no sample yet', async () => {
-        vi.mocked(client.getRunSamples).mockResolvedValue({samples: [force(59380, {}, null)]});
+        vi.mocked(client.getRunSamples).mockResolvedValue({samples: [force(59380, {}, null)], skipped: 0});
         const store = useRunsStore();
         await store.openRun('run-1');
         expect(store.forceState).not.toBeNull();
         expect(store.forceState?.research).toBeNull();
 
-        vi.mocked(client.getRunSamples).mockResolvedValue({samples: [force(60000, {}, null)]});
+        vi.mocked(client.getRunSamples).mockResolvedValue({samples: [force(60000, {}, null)], skipped: 0});
         await store.openRun('run-1');
         expect(store.forceState).toBeNull();
     });
@@ -334,8 +334,7 @@ describe('samples', () => {
         // DETAIL's goals are 'iron' and 'copper', neither of which parses as
         // a have/produce goal, so the fallback to produced items applies.
         vi.mocked(client.getRunSamples).mockResolvedValue({
-            samples: [force(59380, {'iron-plate': 4}), force(59700, {'iron-plate': 9})]
-        });
+            samples: [force(59380, {'iron-plate': 4}), force(59700, {'iron-plate': 9})], skipped: 0});
         const store = useRunsStore();
         await store.openRun('run-1'); // cursor = 59400
         expect(store.production).toEqual([{item: 'iron-plate', made: 4}]);
@@ -345,8 +344,7 @@ describe('samples', () => {
 
     it('clears samples when a run fails to load', async () => {
         vi.mocked(client.getRunSamples).mockResolvedValue({
-            samples: [force(59380, {'iron-plate': 4})]
-        });
+            samples: [force(59380, {'iron-plate': 4})], skipped: 0});
         const store = useRunsStore();
         await store.openRun('run-1');
         vi.mocked(client.getRun).mockRejectedValue(new Error('gone'));
@@ -385,6 +383,7 @@ describe('map', () => {
             crafting_queue: 0,
             mining: null
         })),
+        schema: 1,
         tick,
         run: 'run-1'
     });
@@ -396,28 +395,26 @@ describe('map', () => {
 
     it('reconstructs the entities at the cursor from the archived map', async () => {
         vi.mocked(client.getRunMap).mockResolvedValue({
-            map: [placed(59380, 'stone-furnace', -12, 8)]
-        });
+            map: [placed(59380, 'stone-furnace', -12, 8)], skipped: 0});
         const store = useRunsStore();
         await store.openRun('run-1'); // cursor lands on 59400, the first frame
         expect(store.entities).toEqual([snap('stone-furnace', -12, 8)]);
     });
 
     it('reports the latest keyframe bounds at the cursor, or null before one exists', async () => {
-        vi.mocked(client.getRunMap).mockResolvedValue({map: []});
+        vi.mocked(client.getRunMap).mockResolvedValue({map: [], skipped: 0});
         const store = useRunsStore();
         await store.openRun('run-1');
         expect(store.mapBounds).toBeNull();
 
-        vi.mocked(client.getRunMap).mockResolvedValue({map: [keyframe(59380)]});
+        vi.mocked(client.getRunMap).mockResolvedValue({map: [keyframe(59380)], skipped: 0});
         await store.openRun('run-1');
         expect(store.mapBounds).toEqual({left: -8, top: -8, right: 8, bottom: 8});
     });
 
     it('reports every bot from the latest bots sample at the cursor', async () => {
         vi.mocked(client.getRunSamples).mockResolvedValue({
-            samples: [bots(59380, [{id: 1, position: {x: 0, y: 0}}, {id: 2, position: {x: 5, y: 5}}])]
-        });
+            samples: [bots(59380, [{id: 1, position: {x: 0, y: 0}}, {id: 2, position: {x: 5, y: 5}}])], skipped: 0});
         const store = useRunsStore();
         await store.openRun('run-1');
         expect(store.mapBots.map((b) => b.id)).toEqual([1, 2]);
@@ -425,8 +422,7 @@ describe('map', () => {
 
     it('is empty before the first bots sample', async () => {
         vi.mocked(client.getRunSamples).mockResolvedValue({
-            samples: [bots(60000, [{id: 1, position: {x: 0, y: 0}}])]
-        });
+            samples: [bots(60000, [{id: 1, position: {x: 0, y: 0}}])], skipped: 0});
         const store = useRunsStore();
         await store.openRun('run-1');
         expect(store.mapBots).toEqual([]);
@@ -437,8 +433,7 @@ describe('map', () => {
             samples: [
                 bots(59380, [{id: 1, position: {x: 0, y: 0}}]),
                 bots(59700, [{id: 1, position: {x: 1, y: 0}}])
-            ]
-        });
+            ], skipped: 0});
         const store = useRunsStore();
         await store.openRun('run-1'); // cursor = 59400
         expect(store.trail).toEqual({1: [{x: 0, y: 0}]});
@@ -448,7 +443,7 @@ describe('map', () => {
     });
 
     it('clears the map when a run fails to load', async () => {
-        vi.mocked(client.getRunMap).mockResolvedValue({map: [placed(59380, 'stone-furnace', -12, 8)]});
+        vi.mocked(client.getRunMap).mockResolvedValue({map: [placed(59380, 'stone-furnace', -12, 8)], skipped: 0});
         const store = useRunsStore();
         await store.openRun('run-1');
         vi.mocked(client.getRun).mockRejectedValue(new Error('gone'));

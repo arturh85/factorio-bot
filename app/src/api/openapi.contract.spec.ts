@@ -647,7 +647,8 @@ const SCHEMAS: Record<string, SchemaContract> = {
 
     // -- entity map (crates/core/src/record/map.rs) -----------------------
     RunMapResponse: objectContract<RunMapResponse>({
-        map: {required: true, arrayOf: 'MapRecord'}
+        map: {required: true, arrayOf: 'MapRecord'},
+        skipped: {required: true, type: 'integer'}
     }),
     // `MapKind` flattened into `MapRecord`, the same shape `Sample` takes over
     // `SampleKind`: utoipa cannot fold a `#[serde(flatten)]` back into one
@@ -805,14 +806,18 @@ const SCHEMAS: Record<string, SchemaContract> = {
 
     // -- world-state samples (crates/core/src/record/samples.rs) ----------
     RunSamplesResponse: objectContract<RunSamplesResponse>({
-        samples: {required: true, arrayOf: 'Sample'}
+        samples: {required: true, arrayOf: 'Sample'},
+        skipped: {required: true, type: 'integer'}
     }),
     // `SampleKind` flattened into `Sample`: utoipa cannot fold a
     // `#[serde(flatten)]` back into one flat object, so it publishes
-    // `allOf: [{$ref: SampleKind}, {tick, run}]` instead of a single object
-    // schema. `mergeContract` is exhaustive only over what `Sample` adds
-    // beyond `SampleKind` -- `tick` and `run`.
+    // `allOf: [{$ref: SampleKind}, {schema, tick, run}]` instead of a single
+    // object schema. `mergeContract` is exhaustive only over what `Sample`
+    // adds beyond `SampleKind` -- `schema`, `tick` and `run`.
     Sample: mergeContract<Sample>('SampleKind', {
+        // A real field, not just probed-and-discarded on read: an archived
+        // line must still carry its schema stamp.
+        schema: {required: true, type: 'integer'},
         tick: {required: true, type: 'integer'},
         // `None` for a line written before this field existed. Always
         // serialised (never omitted), so present-and-null, not absent --

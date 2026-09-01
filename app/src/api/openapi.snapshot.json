@@ -1553,6 +1553,7 @@
             "type": "object"
           },
           {
+            "description": "Reserved, not yet produced: there is no `take_removal` seam anywhere\nin this codebase, so nothing ever constructs this variant today. It is\ndeclared, published in the OpenAPI schema and mirrored in\n`app/src/api/types.ts` because a reader must be able to decode it the\nday a writer exists, but until then this is a promise about the shape,\nnot a fact about what `map.jsonl` contains. Producing it for real\nwould need the executor (or whatever notices an entity gone) to call\na `record.removed(...)` binding that does not exist yet, mirroring\n`Placed`'s `record.actions(...)` seam.",
             "properties": {
               "bot": {
                 "format": "int32",
@@ -1913,6 +1914,7 @@
       "ResearchSample": {
         "properties": {
           "eta_ticks": {
+            "description": "Always `null` today: `mods/BotBridge/control.lua`'s `sample_force`\nhard-codes `eta_ticks = nil` because no writer computes an estimate\nyet. So a `null` here means \"not computed\", not \"the game reported\nnone\" -- there is no code path, mod-side or Rust-side, that has ever\nasked Factorio for this and gotten a real answer.",
             "format": "int64",
             "minimum": 0,
             "type": [
@@ -2013,10 +2015,16 @@
               "$ref": "#/components/schemas/MapRecord"
             },
             "type": "array"
+          },
+          "skipped": {
+            "description": "Lines that did not parse. Reported rather than swallowed, matching\n`EventsResponse.skipped`.",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
-          "map"
+          "map",
+          "skipped"
         ],
         "type": "object"
       },
@@ -2028,10 +2036,16 @@
               "$ref": "#/components/schemas/Sample"
             },
             "type": "array"
+          },
+          "skipped": {
+            "description": "Lines that did not parse -- in practice `bots = {}` serialising to\n`\"{}\"` rather than `\"[]\"` when no player is connected. Reported rather\nthan swallowed, matching `EventsResponse.skipped`.",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
-          "samples"
+          "samples",
+          "skipped"
         ],
         "type": "object"
       },
@@ -2133,6 +2147,12 @@
                   "null"
                 ]
               },
+              "schema": {
+                "description": "The schema this line was written under. [`read_samples`] has already\nchecked this against [`SAMPLE_SCHEMA`] via `SchemaProbe` by the time a\nline reaches this struct, but the field must still be a *real* member\nhere -- not just probed and discarded -- or re-serialising an archived\nsample drops the stamp. A file this product produces would then be\nunable to trip its own schema guard on a later read: a future\n`SAMPLE_SCHEMA` bump would silently lose data on an old archive instead\nof failing loudly.",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
               "tick": {
                 "format": "int64",
                 "minimum": 0,
@@ -2140,6 +2160,7 @@
               }
             },
             "required": [
+              "schema",
               "tick"
             ],
             "type": "object"

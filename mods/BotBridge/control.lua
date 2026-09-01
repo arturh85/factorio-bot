@@ -1272,7 +1272,13 @@ local function power_totals(force)
 				if network and network.valid then
 					-- Mark every sub-network under this parent seen, not just
 					-- `sub` itself, so the parent is summed once even though
-					-- several sub-networks may lead to it.
+					-- several sub-networks may lead to it. `sub.id` is marked
+					-- explicitly too, rather than assumed to be among
+					-- `network.sub_networks`'s own members: if a parent ever
+					-- did not list itself there, `sub` would never be marked
+					-- seen and every pole touching it would sum this parent
+					-- again, silently multiplying the power numbers.
+					seen_subnetworks[sub.id] = true
 					for _, sibling in pairs(network.sub_networks) do
 						seen_subnetworks[sibling.id] = true
 					end
@@ -1587,19 +1593,14 @@ function rcon_frame_capture_stop()
 	stamp_tick()
 end
 
--- Samples bots on demand, called by the executor immediately after an action
--- settles with a non-success status.
---
--- Only on failure: the 60-tick beat already carries what a bot held when
--- nothing went wrong, and sampling every settle would roughly double the
--- stream for that. The tick that matters for diagnosis is the tick something
--- failed, and by the next beat the bot has moved or handed off.
---
--- Gated the same as the beat itself, via `sample_bots` (F5): a settle failure
--- outside an active capture run writes nothing.
-function rcon_sample_bots()
-	sample_bots(game.tick)
-end
+-- There is deliberately no settle-triggered sample here (an earlier
+-- `rcon_sample_bots()` called `sample_bots(game.tick)` on demand, but nothing
+-- ever called it -- it was not even reachable via the `botbridge` remote
+-- interface -- so it was removed rather than kept as unreachable shape). The
+-- 60-tick beat (`sample_bots` above, `on_nth_tick(60)`) already bounds
+-- staleness at a failure to one second of game time, which is the beat the
+-- bots themselves move on, so a failure-triggered sample would not learn
+-- anything the next beat does not already carry.
 
 function writeout_tiles(tick, surface, area) -- SLOW! beastie can do ~2.8 per tick
 	--if my_client_id ~= 1 then return end

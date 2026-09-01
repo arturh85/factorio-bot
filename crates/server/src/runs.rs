@@ -122,12 +122,19 @@ pub struct RunFramesResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct RunSamplesResponse {
     pub samples: Vec<Sample>,
+    /// Lines that did not parse -- in practice `bots = {}` serialising to
+    /// `"{}"` rather than `"[]"` when no player is connected. Reported rather
+    /// than swallowed, matching `EventsResponse.skipped`.
+    pub skipped: usize,
 }
 
 /// `GET /api/v1/runs/{id}/map` response.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct RunMapResponse {
     pub map: Vec<MapRecord>,
+    /// Lines that did not parse. Reported rather than swallowed, matching
+    /// `EventsResponse.skipped`.
+    pub skipped: usize,
 }
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
@@ -365,12 +372,14 @@ pub async fn get_run_samples(
     if !path.exists() {
         return Ok(Json(RunSamplesResponse {
             samples: Vec::new(),
+            skipped: 0,
         }));
     }
     let read = read_samples(&path)
         .map_err(|err| ErrorResponse::internal(format!("failed to read samples: {err}")))?;
     Ok(Json(RunSamplesResponse {
         samples: read.samples,
+        skipped: read.skipped,
     }))
 }
 
@@ -395,11 +404,17 @@ pub async fn get_run_map(
     // A run recorded before this feature existed -- or one that never placed
     // anything -- is not an error; it just has no map.
     if !path.exists() {
-        return Ok(Json(RunMapResponse { map: Vec::new() }));
+        return Ok(Json(RunMapResponse {
+            map: Vec::new(),
+            skipped: 0,
+        }));
     }
     let read = read_map(&path)
         .map_err(|err| ErrorResponse::internal(format!("failed to read map: {err}")))?;
-    Ok(Json(RunMapResponse { map: read.records }))
+    Ok(Json(RunMapResponse {
+        map: read.records,
+        skipped: read.skipped,
+    }))
 }
 
 /// One archived frame's bytes.

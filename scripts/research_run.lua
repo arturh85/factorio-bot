@@ -72,8 +72,13 @@ repeat
     local t = sup:step()
     -- `t.plan` rides on both the "planned" and "satisfied" transitions (see
     -- `supervisor.lua`'s `Sup:step()`): the planner returned in both cases,
-    -- and recording that is this driver's job, not the loop's own.
-    if type(t.plan) == "table" then
+    -- and recording that is this driver's job, not the loop's own. But only
+    -- "planned" is recorded: the "satisfied" transition's `t.plan` is always
+    -- the empty table from the re-plan that discovered there was nothing
+    -- left to do, and a consumer taking the LAST `plan_created` per
+    -- milestone must see that milestone's real DAG, not have it shadowed by
+    -- this empty closing re-plan.
+    if t.action == "planned" and type(t.plan) == "table" then
         record.plan_created(t.milestone_index, t.plan)
     end
     if t.action == "acquired" then

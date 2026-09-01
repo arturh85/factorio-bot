@@ -25,6 +25,15 @@ pub const SAMPLE_SCHEMA: u32 = 1;
 /// One line of `samples.jsonl`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Sample {
+    /// The schema this line was written under. [`read_samples`] has already
+    /// checked this against [`SAMPLE_SCHEMA`] via `SchemaProbe` by the time a
+    /// line reaches this struct, but the field must still be a *real* member
+    /// here -- not just probed and discarded -- or re-serialising an archived
+    /// sample drops the stamp. A file this product produces would then be
+    /// unable to trip its own schema guard on a later read: a future
+    /// `SAMPLE_SCHEMA` bump would silently lose data on an old archive instead
+    /// of failing loudly.
+    pub schema: u32,
     pub tick: u64,
     /// The run id the mod stamped on this line, or `None` for a line written
     /// before this field existed. Absence must be distinguishable from a
@@ -82,6 +91,11 @@ pub struct ResearchSample {
     pub name: String,
     /// 0.0 to 1.0.
     pub progress: f64,
+    /// Always `null` today: `mods/BotBridge/control.lua`'s `sample_force`
+    /// hard-codes `eta_ticks = nil` because no writer computes an estimate
+    /// yet. So a `null` here means "not computed", not "the game reported
+    /// none" -- there is no code path, mod-side or Rust-side, that has ever
+    /// asked Factorio for this and gotten a real answer.
     pub eta_ticks: Option<u64>,
 }
 
@@ -180,6 +194,18 @@ pub fn ingest_samples(
         return Ok(0);
     }
     let read = read_samples(&source)?;
+    if read.skipped > 0 {
+        // Counted rather than swallowed in `read_samples`, and it must not be
+        // thrown away again here. Concrete case: the mod writes `bots = {}`
+        // when no player is connected, and `helpers.table_to_json({})` yields
+        // `"{}"` rather than `"[]"`, so that line fails to deserialise as a
+        // `Sample` and would otherwise vanish with nothing to show for it.
+        tracing::warn!(
+            skipped = read.skipped,
+            source = %source.display(),
+            "some sample lines did not parse and were skipped"
+        );
+    }
     let mut out = File::create(run_dir.join("samples.jsonl"))?;
     let mut count = 0usize;
     for sample in read.samples.iter().filter(|s| match &s.run {
@@ -355,6 +381,35 @@ mod tests {
         assert_eq!(
             count, 1,
             "a line naming this run is kept regardless of tick"
+        );
+    }
+
+    #[test]
+    fn ingestion_preserves_the_schema_stamp() {
+        // `Sample` is deserialised and then re-serialised on its way into the
+        // run's archive. If `schema` were probed-and-discarded rather than a
+        // real field, the archived line would come out without it, and a
+        // later `SchemaProbe` reading that archive back would silently accept
+        // whatever it found instead of refusing an unknown shape.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let out = workspace.join("server/script-output/botbridge");
+        std::fs::create_dir_all(&out).unwrap();
+        write(
+            &out,
+            &[r#"{"kind":"bots","schema":1,"tick":100,"run":"ours","bots":[]}"#],
+        );
+        let run_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+
+        let count = ingest_samples(&workspace, &run_dir, "ours", 0).unwrap();
+        assert_eq!(count, 1);
+
+        let archived = read_samples(&run_dir.join("samples.jsonl")).unwrap();
+        assert_eq!(archived.samples.len(), 1);
+        assert_eq!(
+            archived.samples[0].schema, SAMPLE_SCHEMA,
+            "the archived line must still carry the schema stamp after a round trip"
         );
     }
 }

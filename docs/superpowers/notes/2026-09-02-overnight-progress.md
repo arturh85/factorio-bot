@@ -115,3 +115,26 @@ fiction, and the record must be able to say so.
 graphical clients entirely for server-side `character` entities, retiring the
 26s load and 90s connect wait. It would also retire the screenshot pipeline,
 which is the watchability half of this project. That trade is not mine to make.
+
+## Open gap: EventKind::Teleport has no writer (~01:30)
+
+`c64a995b` fixed the walk defect and added `EventKind::Teleport`, contract-tested
+through the OpenAPI seam. **Nothing writes it.** `grep -rn EventKind::Teleport
+crates/` returns one hit, and it is a comment.
+
+A teleport is now loud in `tracing` diagnostics and still absent from
+`events.jsonl` — so it is visible to whoever tails stderr and invisible to the
+artefact runs are compared with. That is the declared-and-never-written shape
+this branch was built to eliminate, recreated inside the change meant to close
+it. Not the implementer's fault: the writer lives in `crates/scripting_lua`,
+which `crates/core`'s `OutputParser` cannot depend on, and that was outside its
+stated file list.
+
+**Next action when `crates/scripting_lua` is free:** wire a writer so a teleport
+reaches the record, then rebuild, re-seed `workspace/mods`, and rerun. Until
+then, any walk duration in a recorded run still cannot be trusted — which is the
+whole reason the walk fix mattered.
+
+Also deferred by that change, honestly: `needs_destroy_to_reach` is now carried
+to the caller and warned about, but not acted on. A leg the pathfinder flagged
+as blocked is still walked.

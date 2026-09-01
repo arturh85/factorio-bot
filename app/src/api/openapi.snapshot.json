@@ -1,6 +1,25 @@
 {
   "components": {
     "schemas": {
+      "ActionFailure": {
+        "description": "A structured failure, carried *beside* [`EventKind::ActionSettled`]'s\n`error` string rather than instead of it: the string is what a person\nreads when they open the log, `kind` is what a query groups by, and\nreplacing one with the other loses whichever audience it was serving.",
+        "properties": {
+          "detail": {
+            "description": "Free-text detail, e.g. the item name for [`FailureKind::MissingItem`].",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/components/schemas/FailureKind"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
       "AddResearchBody": {
         "properties": {
           "tech": {
@@ -377,6 +396,10 @@
                   "milestone_satisfied"
                 ],
                 "type": "string"
+              },
+              "reason": {
+                "$ref": "#/components/schemas/SatisfiedReason",
+                "description": "Why no further work was needed. `run-1788277287-11819` closed a\nmilestone at the tick it started, with zero iterations, and the\nrecord could not say whether the world already had it or the\nplanner gave up empty-handed -- this field exists to answer that.\nDefaulted for every event recorded before it existed, via\n[`SatisfiedReason::unknown`] rather than the ordinary derived\ndefault, so an old record reads as \"we don't know\" and not as a\nguess at either real answer."
               }
             },
             "required": [
@@ -450,6 +473,13 @@
                 "minimum": 0,
                 "type": "integer"
               },
+              "plan": {
+                "description": "The steps the planner actually produced, in enough detail to draw\nthe DAG: who runs each one, what it waits on, and when the\nplanner expected it to start and finish. `#[serde(default)]` so a\nrun recorded before this field existed keeps opening -- it just\nhas nothing to draw here.",
+                "items": {
+                  "$ref": "#/components/schemas/PlannedStep"
+                },
+                "type": "array"
+              },
               "steps": {
                 "format": "int32",
                 "minimum": 0,
@@ -522,9 +552,21 @@
                 ]
               },
               "error": {
+                "description": "The human-readable verdict, as the game or the executor reported\nit. Kept *beside* `failure`, never replaced by it: this is what a\nperson reads, `failure` is what a query groups by, and one is not\na substitute for the other.",
                 "type": [
                   "string",
                   "null"
+                ]
+              },
+              "failure": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ActionFailure",
+                    "description": "The same failure, classified. `None` on success, and also on a\nfailure recorded before this field existed -- `#[serde(default)]`\nmakes that an absence rather than a parse error."
+                  }
                 ]
               },
               "id": {
@@ -1094,6 +1136,18 @@
           "position"
         ],
         "type": "object"
+      },
+      "FailureKind": {
+        "description": "How an [`ActionFailure`] failed, coarse enough to group by in a query and\nspecific enough to be worth grouping by.",
+        "enum": [
+          "missing_item",
+          "unreachable",
+          "blocked",
+          "rejected",
+          "timeout",
+          "other"
+        ],
+        "type": "string"
       },
       "FrameEntry": {
         "description": "One frame file exactly as it exists on disk. One entry per file found\nunder a client's frames directory -- nothing is computed, nothing is\ninferred about files that are not there.",
@@ -1675,6 +1729,54 @@
         ],
         "type": "object"
       },
+      "PlannedStep": {
+        "description": "One scheduled step, as the planner intended it -- carried on\n[`EventKind::PlanCreated`] so a run's record shows what was planned, not\nonly what happened.",
+        "properties": {
+          "action": {
+            "description": "What the plan called it, e.g. `mine 10 iron-ore` -- the same label a\n[`Lane`](lanes::Lane) carries, so the two can be read side by side.",
+            "type": "string"
+          },
+          "bot": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "deps": {
+            "description": "Ids this step waits on.",
+            "items": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "id": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "planned_duration": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "planned_start": {
+            "description": "Ticks from the plan's *start*, not an absolute `game.tick`: a plan is\ncomputed before it is dispatched and does not know its own origin.\nThe viewer converts planned ticks to observed ticks in exactly one\nplace (`observedOrigin()`); a field that already carried an absolute\ntick would make that conversion ambiguous about which ticks were\nalready absolute.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "bot",
+          "action",
+          "deps",
+          "planned_start",
+          "planned_duration"
+        ],
+        "type": "object"
+      },
       "Position": {
         "properties": {
           "x": {
@@ -2123,6 +2225,15 @@
             "type": "object"
           }
         ]
+      },
+      "SatisfiedReason": {
+        "description": "Why a milestone needed no work -- carried on\n[`EventKind::MilestoneSatisfied`].\n\nA milestone can close after zero iterations for two entirely different\nreasons, and until this field existed the record could not tell them\napart: `run-1788277287-11819` closed milestone 4 at the tick it started,\nand there was no way to know whether the bots already had what it asked\nfor or the planner returned an empty plan that the supervisor's \"an empty\nplan means satisfied\" rule then reported as success.",
+        "enum": [
+          "already_satisfied",
+          "plan_empty",
+          "unknown"
+        ],
+        "type": "string"
       },
       "ScriptContent": {
         "properties": {

@@ -17,6 +17,7 @@ import {buildUrl, request} from './http';
 import {AppSettings} from '@/models/settings';
 import {ScriptTreeNode} from '@/api/types';
 import {
+    EventsResponse,
     ExecuteAccepted,
     ExecuteRequest,
     ExistsResponse,
@@ -174,6 +175,18 @@ export function runFrameUrl(id: string, bot: number, file: string): string {
     return buildUrl(
         `/api/v1/runs/${encodeURIComponent(id)}/frames/${bot}/` + encodeURIComponent(name)
     );
+}
+
+/**
+ * A run's raw event log, optionally narrowed to one `kind` (e.g.
+ * `"milestone_satisfied"`) -- the same filter `derive_lanes`/`derive_splits`
+ * apply server-side, exposed here for a caller that wants the events
+ * themselves rather than a derived view.
+ */
+export function getRunEvents(id: string, kind?: string): Promise<EventsResponse> {
+    return request<EventsResponse>(`/api/v1/runs/${encodeURIComponent(id)}/events`, {
+        query: {kind}
+    });
 }
 
 /** What each bot did, derived from the run's event log. */

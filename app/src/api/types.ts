@@ -531,3 +531,141 @@ export type MapRecord = MapKind & {
 export interface RunMapResponse {
     map: MapRecord[];
 }
+
+/**
+ * One scheduled step, as the planner intended it -- carried on
+ * `EventKind`'s `plan_created` variant so a run's record shows what was
+ * planned, not only what happened.
+ */
+export interface PlannedStep {
+    id: number;
+    bot: number;
+    /** What the plan called it, e.g. `mine 10 iron-ore` -- the same label a `Lane` carries. */
+    action: string;
+    /** Ids this step waits on. */
+    deps: number[];
+    /**
+     * Ticks from the plan's *start*, not an absolute `game.tick`: a plan is
+     * computed before it is dispatched and does not know its own origin. The
+     * viewer converts planned ticks to observed ticks in exactly one place --
+     * `observedOrigin()`.
+     */
+    planned_start: number;
+    planned_duration: number;
+}
+
+/**
+ * Why a milestone needed no work -- carried on `EventKind`'s
+ * `milestone_satisfied` variant.
+ *
+ * A milestone can close after zero iterations for two entirely different
+ * reasons: the world already met the goal, or the planner returned an empty
+ * plan that the supervisor's "an empty plan means satisfied" rule then
+ * reported as success. `unknown` is a run recorded before this field
+ * existed, and must never be read as either of the other two -- that would
+ * be guessing exactly what this field exists to stop guessing.
+ */
+export type SatisfiedReason = 'already_satisfied' | 'plan_empty' | 'unknown';
+
+/** How an `ActionFailure` failed, coarse enough to group by in a query. */
+export type FailureKind = 'missing_item' | 'unreachable' | 'blocked' | 'rejected' | 'timeout' | 'other';
+
+/**
+ * A structured failure, carried *beside* `EventKind`'s `action_settled.error`
+ * string rather than instead of it: the string is what a person reads, `kind`
+ * is what a query groups by.
+ */
+export interface ActionFailure {
+    kind: FailureKind;
+    detail: string | null;
+}
+
+/**
+ * What happened, tagged by `kind`.
+ *
+ * Mirrors `factorio_bot_core::record::EventKind`, an internally tagged Rust
+ * enum -- the server publishes it as an OpenAPI `oneOf`, one member per
+ * variant, each carrying its own literal `kind`.
+ *
+ * `plan`, `reason` and `failure` are declared present (not `?`) rather than
+ * optional: the server always serialises them for anything it writes today.
+ * They publish as `required: false` only because `#[serde(default)]` lets an
+ * *old* record on disk -- written before the field existed -- still
+ * deserialise, which is a fact about reading old files, not about what a
+ * live server sends.
+ */
+export type EventKind =
+    | {
+          kind: 'run_started';
+          run_id: string;
+          bots: number[];
+          /** Present-and-null when unknown, never absent. */
+          seed: number | null;
+          factorio: string | null;
+          git: string | null;
+      }
+    | {kind: 'milestone_started'; index: number; goal: string}
+    | {
+          kind: 'milestone_satisfied';
+          index: number;
+          iterations: number;
+          reason: SatisfiedReason;
+      }
+    | {
+          kind: 'milestone_stuck';
+          index: number;
+          outcome: string;
+          best_steps: number | null;
+          last_error: string | null;
+      }
+    | {
+          kind: 'plan_created';
+          milestone_index: number;
+          steps: number;
+          makespan: number;
+          bots: number[];
+          /** The steps the planner actually produced, in enough detail to draw the DAG. */
+          plan: PlannedStep[];
+      }
+    | {
+          kind: 'action_dispatched';
+          id: number;
+          bot: number;
+          action: string;
+          target: Position | null;
+      }
+    | {
+          kind: 'action_settled';
+          id: number;
+          bot: number;
+          status: string;
+          /** `null` when the game never reported a dispatch tick to subtract from. */
+          elapsed_ticks: number | null;
+          error: string | null;
+          /** The same failure, classified. `null` on success. */
+          failure: ActionFailure | null;
+      }
+    | {kind: 'frame'; bot: number; camera: string; file: string}
+    | {kind: 'run_finished'; outcome: string; elapsed_ticks: number}
+    /** A kind this build does not know. The server never emits it, but a
+     *  future variant decodes to this rather than failing to parse. */
+    | {kind: 'unknown'};
+
+/**
+ * One line of `events.jsonl`.
+ *
+ * Mirrors `factorio_bot_core::record::Event`: the `#[serde(flatten)]` of
+ * `EventKind` into `Event` is why the server publishes this as an `allOf` of
+ * `EventKind` and `{tick, wall_ms}` rather than a single flat object.
+ */
+export type Event = EventKind & {
+    tick: number;
+    wall_ms: number;
+};
+
+/** `GET /api/v1/runs/{id}/events` response. */
+export interface EventsResponse {
+    events: Event[];
+    /** Lines that did not parse -- in practice the truncated last line of a crashed run. */
+    skipped: number;
+}

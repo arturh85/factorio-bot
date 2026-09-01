@@ -19,7 +19,7 @@ use factorio_bot_core::parking_lot::Mutex;
 use factorio_bot_core::record::map::{
     EntitySnapshot, MapKind, MapRecord, Placement, divergence_between,
 };
-use factorio_bot_core::record::{EventKind, RunRecorder};
+use factorio_bot_core::record::{EventKind, RunRecorder, SatisfiedReason};
 use factorio_bot_core::types::{AreaFilter, PlayerId, Position, Rect};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -258,7 +258,17 @@ end
                 record_live(
                     &slot,
                     &rcon,
-                    EventKind::MilestoneSatisfied { index, iterations },
+                    EventKind::MilestoneSatisfied {
+                        index,
+                        iterations,
+                        // The supervisor does not yet tell this binding
+                        // *why* -- that is `record.milestone_satisfied`'s
+                        // third argument, added once the caller in
+                        // `supervisor.lua` has the answer. Until then this
+                        // is the honest value: not a guess at either real
+                        // reason.
+                        reason: SatisfiedReason::Unknown,
+                    },
                 )
             })?,
         )?;
@@ -377,6 +387,12 @@ end
                                     status,
                                     elapsed_ticks: dispatched.map(|d| replied.saturating_sub(d)),
                                     error,
+                                    // The observation this joins against
+                                    // carries only a status string and an
+                                    // error string today -- no classified
+                                    // kind yet, so there is nothing honest to
+                                    // put here but `None`.
+                                    failure: None,
                                 },
                             )
                             .map_err(record_error)?;

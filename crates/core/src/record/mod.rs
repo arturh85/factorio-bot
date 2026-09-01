@@ -63,6 +63,16 @@ pub enum EventKind {
     MilestoneSatisfied {
         index: u32,
         iterations: u32,
+        /// Why no further work was needed. `run-1788277287-11819` closed a
+        /// milestone at the tick it started, with zero iterations, and the
+        /// record could not say whether the world already had it or the
+        /// planner gave up empty-handed -- this field exists to answer that.
+        /// Defaulted for every event recorded before it existed, via
+        /// [`SatisfiedReason::unknown`] rather than the ordinary derived
+        /// default, so an old record reads as "we don't know" and not as a
+        /// guess at either real answer.
+        #[serde(default = "SatisfiedReason::unknown")]
+        reason: SatisfiedReason,
     },
     MilestoneStuck {
         index: u32,
@@ -75,6 +85,13 @@ pub enum EventKind {
         steps: u32,
         makespan: u64,
         bots: Vec<u32>,
+        /// The steps the planner actually produced, in enough detail to draw
+        /// the DAG: who runs each one, what it waits on, and when the
+        /// planner expected it to start and finish. `#[serde(default)]` so a
+        /// run recorded before this field existed keeps opening -- it just
+        /// has nothing to draw here.
+        #[serde(default)]
+        plan: Vec<PlannedStep>,
     },
     ActionDispatched {
         id: u32,
@@ -92,7 +109,16 @@ pub enum EventKind {
         bot: u32,
         status: String,
         elapsed_ticks: Option<u64>,
+        /// The human-readable verdict, as the game or the executor reported
+        /// it. Kept *beside* `failure`, never replaced by it: this is what a
+        /// person reads, `failure` is what a query groups by, and one is not
+        /// a substitute for the other.
         error: Option<String>,
+        /// The same failure, classified. `None` on success, and also on a
+        /// failure recorded before this field existed -- `#[serde(default)]`
+        /// makes that an absence rather than a parse error.
+        #[serde(default)]
+        failure: Option<ActionFailure>,
     },
     Frame {
         bot: u32,
@@ -106,6 +132,90 @@ pub enum EventKind {
     /// A kind this build does not know. Readers skip it; writers never emit it.
     #[serde(other)]
     Unknown,
+}
+
+/// One scheduled step, as the planner intended it -- carried on
+/// [`EventKind::PlanCreated`] so a run's record shows what was planned, not
+/// only what happened.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct PlannedStep {
+    pub id: u32,
+    pub bot: u32,
+    /// What the plan called it, e.g. `mine 10 iron-ore` -- the same label a
+    /// [`Lane`](lanes::Lane) carries, so the two can be read side by side.
+    pub action: String,
+    /// Ids this step waits on.
+    pub deps: Vec<u32>,
+    /// Ticks from the plan's *start*, not an absolute `game.tick`: a plan is
+    /// computed before it is dispatched and does not know its own origin.
+    /// The viewer converts planned ticks to observed ticks in exactly one
+    /// place (`observedOrigin()`); a field that already carried an absolute
+    /// tick would make that conversion ambiguous about which ticks were
+    /// already absolute.
+    pub planned_start: u64,
+    pub planned_duration: u64,
+}
+
+/// Why a milestone needed no work -- carried on
+/// [`EventKind::MilestoneSatisfied`].
+///
+/// A milestone can close after zero iterations for two entirely different
+/// reasons, and until this field existed the record could not tell them
+/// apart: `run-1788277287-11819` closed milestone 4 at the tick it started,
+/// and there was no way to know whether the bots already had what it asked
+/// for or the planner returned an empty plan that the supervisor's "an empty
+/// plan means satisfied" rule then reported as success.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SatisfiedReason {
+    /// The world already met the goal before planning was ever attempted.
+    AlreadySatisfied,
+    /// The planner produced no steps. Indistinguishable from
+    /// [`SatisfiedReason::AlreadySatisfied`] in a record with only
+    /// `iterations: 0` to go on, and not the same thing at all.
+    PlanEmpty,
+    /// Recorded before this field existed. Readers must not treat this as
+    /// either of the other two variants -- defaulting an old run to
+    /// [`SatisfiedReason::AlreadySatisfied`] would be guessing precisely the
+    /// thing this type exists to stop guessing.
+    #[serde(other)]
+    Unknown,
+}
+
+impl SatisfiedReason {
+    /// The `#[serde(default = "...")]` for [`EventKind::MilestoneSatisfied`]'s
+    /// `reason` field. A named function rather than deriving `Default`,
+    /// because `Unknown` is a fact about *when the event was recorded*, not
+    /// a default anyone should reach for when writing a new one.
+    fn unknown() -> Self {
+        SatisfiedReason::Unknown
+    }
+}
+
+/// How an [`ActionFailure`] failed, coarse enough to group by in a query and
+/// specific enough to be worth grouping by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureKind {
+    MissingItem,
+    Unreachable,
+    Blocked,
+    Rejected,
+    Timeout,
+    /// A kind this build does not know, or one not worth a variant yet.
+    #[serde(other)]
+    Other,
+}
+
+/// A structured failure, carried *beside* [`EventKind::ActionSettled`]'s
+/// `error` string rather than instead of it: the string is what a person
+/// reads when they open the log, `kind` is what a query groups by, and
+/// replacing one with the other loses whichever audience it was serving.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ActionFailure {
+    pub kind: FailureKind,
+    /// Free-text detail, e.g. the item name for [`FailureKind::MissingItem`].
+    pub detail: Option<String>,
 }
 
 /// One line of `events.jsonl`.
@@ -466,6 +576,7 @@ mod tests {
             EventKind::MilestoneSatisfied {
                 index: 0,
                 iterations: 3,
+                reason: SatisfiedReason::AlreadySatisfied,
             },
             EventKind::MilestoneStuck {
                 index: 1,
@@ -478,6 +589,14 @@ mod tests {
                 steps: 105,
                 makespan: 24587,
                 bots: vec![1, 2, 3, 4],
+                plan: vec![PlannedStep {
+                    id: 0,
+                    bot: 1,
+                    action: "mine 10 iron-ore".into(),
+                    deps: vec![],
+                    planned_start: 0,
+                    planned_duration: 300,
+                }],
             },
             EventKind::ActionDispatched {
                 id: 17,
@@ -488,9 +607,13 @@ mod tests {
             EventKind::ActionSettled {
                 id: 17,
                 bot: 2,
-                status: "success".into(),
+                status: "failed".into(),
                 elapsed_ticks: Some(120),
-                error: None,
+                error: Some("not enough iron-plate in inventory".into()),
+                failure: Some(ActionFailure {
+                    kind: FailureKind::MissingItem,
+                    detail: Some("iron-plate".into()),
+                }),
             },
             EventKind::Frame {
                 bot: 1,
@@ -514,6 +637,83 @@ mod tests {
             assert_eq!(&got.kind, want, "kind {i} did not survive the round trip");
             assert_eq!(got.tick, i as u64);
         }
+    }
+
+    #[test]
+    fn a_milestone_satisfied_without_doing_anything_says_which_kind() {
+        // run-1788277287-11819 closed milestone 4 in zero ticks and filed the run
+        // as done. Either the bots already had the plates or the planner returned
+        // an empty plan, and the record could not tell you which.
+        let json = serde_json::to_string(&EventKind::MilestoneSatisfied {
+            index: 4,
+            iterations: 0,
+            reason: SatisfiedReason::PlanEmpty,
+        })
+        .unwrap();
+        assert!(json.contains(r#""reason":"plan_empty""#));
+    }
+
+    #[test]
+    fn an_old_event_without_a_reason_still_reads() {
+        // Every run recorded before this field existed must stay openable.
+        let old = r#"{"kind":"milestone_satisfied","index":4,"iterations":0}"#;
+        let kind: EventKind = serde_json::from_str(old).unwrap();
+        let EventKind::MilestoneSatisfied { reason, .. } = kind else {
+            panic!("expected milestone_satisfied");
+        };
+        assert_eq!(reason, SatisfiedReason::Unknown);
+    }
+
+    #[test]
+    fn a_plan_carries_its_steps_and_their_dependencies() {
+        let kind = EventKind::PlanCreated {
+            milestone_index: 1,
+            steps: 2,
+            makespan: 400,
+            bots: vec![1, 2],
+            plan: vec![
+                PlannedStep {
+                    id: 0,
+                    bot: 1,
+                    action: "mine 10 iron-ore".into(),
+                    deps: vec![],
+                    planned_start: 0,
+                    planned_duration: 300,
+                },
+                PlannedStep {
+                    id: 1,
+                    bot: 2,
+                    action: "craft iron-gear-wheel".into(),
+                    deps: vec![0],
+                    planned_start: 300,
+                    planned_duration: 100,
+                },
+            ],
+        };
+        let round: EventKind =
+            serde_json::from_str(&serde_json::to_string(&kind).unwrap()).unwrap();
+        assert_eq!(round, kind);
+    }
+
+    #[test]
+    fn a_failure_keeps_its_string_beside_its_kind() {
+        // The string is what a person reads; the kind is what a query groups by.
+        // Replacing one with the other loses an audience.
+        let failure = ActionFailure {
+            kind: FailureKind::MissingItem,
+            detail: Some("iron-plate".into()),
+        };
+        let settled = EventKind::ActionSettled {
+            id: 3,
+            bot: 1,
+            status: "failed".into(),
+            elapsed_ticks: Some(120),
+            error: Some("not enough iron-plate in inventory".into()),
+            failure: Some(failure),
+        };
+        let json = serde_json::to_string(&settled).unwrap();
+        assert!(json.contains("not enough iron-plate"));
+        assert!(json.contains(r#""kind":"missing_item""#));
     }
 
     #[test]
@@ -575,6 +775,7 @@ mod tests {
                 status: "success".into(),
                 elapsed_ticks: Some(5),
                 error: None,
+                failure: None,
             },
         )
         .unwrap();
@@ -632,6 +833,7 @@ mod finish_tests {
             EventKind::MilestoneSatisfied {
                 index: 0,
                 iterations: 2,
+                reason: SatisfiedReason::AlreadySatisfied,
             },
         )
         .unwrap();
@@ -696,6 +898,7 @@ mod finish_tests {
                 status: "success".into(),
                 elapsed_ticks: Some(483),
                 error: None,
+                failure: None,
             },
         )
         .unwrap();

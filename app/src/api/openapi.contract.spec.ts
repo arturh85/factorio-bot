@@ -49,15 +49,20 @@ import snapshot from './openapi.snapshot.json';
 import type {AppSettings, GuiSettings} from '@/models/settings';
 import type {FactorioSettings, RestApiSettings, ScriptTreeNode} from '@/api/types';
 import type {
+    ActionFailure,
     ArchivedFrame,
     Bounds,
     BotSample,
     ClientRun,
     Divergence,
     EntitySnapshot,
+    Event,
+    EventKind,
+    EventsResponse,
     ExecuteAccepted,
     ExecuteRequest,
     ExistsResponse,
+    FailureKind,
     FrameEntry,
     FramesManifest,
     InstanceStatus,
@@ -67,6 +72,7 @@ import type {
     Lane,
     MapKind,
     MapRecord,
+    PlannedStep,
     Position,
     PowerSample,
     ProductionSample,
@@ -79,6 +85,7 @@ import type {
     RunsResponse,
     Sample,
     SampleKind,
+    SatisfiedReason,
     ScriptContent,
     Split,
     StartAccepted
@@ -179,6 +186,14 @@ const OPERATIONS: readonly OperationContract[] = [
         caller: 'getRunFrames',
         pathParams: ['id'],
         response: {status: '200', schema: 'RunFramesResponse'}
+    },
+    {
+        path: '/api/v1/runs/{id}/events',
+        method: 'get',
+        caller: 'getRunEvents',
+        pathParams: ['id'],
+        query: [['kind', false]],
+        response: {status: '200', schema: 'EventsResponse'}
     },
     {
         path: '/api/v1/runs/{id}/lanes',
@@ -679,6 +694,113 @@ const SCHEMAS: Record<string, SchemaContract> = {
     Divergence: objectContract<Divergence>({
         entity: {required: true, ref: 'EntitySnapshot'},
         only_in: {required: true, type: 'string'}
+    }),
+
+    // -- run event log (crates/core/src/record/mod.rs) ---------------------
+    EventsResponse: objectContract<EventsResponse>({
+        events: {required: true, arrayOf: 'Event'},
+        skipped: {required: true, type: 'integer'}
+    }),
+    // `EventKind` flattened into `Event`, the same shape `Sample` takes over
+    // `SampleKind`: utoipa cannot fold a `#[serde(flatten)]` back into one
+    // flat object, so it publishes `allOf: [{$ref: EventKind}, {tick, wall_ms}]`.
+    Event: mergeContract<Event>('EventKind', {
+        tick: {required: true, type: 'integer'},
+        wall_ms: {required: true, type: 'integer'}
+    }),
+    // An internally tagged enum (`#[serde(tag = "kind")]`): one inline object
+    // per variant, so `taggedUnionContract`, not `objectContract`.
+    //
+    // `plan`, `reason` and `failure` publish `required: false` purely because
+    // `#[serde(default)]` lets an *old* record on disk deserialise without
+    // them -- a live server always serialises all three, so `types.ts`
+    // declares them present rather than optional. `PropertyContractFor` ties
+    // `nullable` to the TypeScript type, not to this `required` flag, which
+    // is why these three carry no `nullable` key despite being `required:
+    // false`: the field is never actually absent from a real response, only
+    // from a historical file this API never reads for you.
+    EventKind: taggedUnionContract<EventKind>({
+        run_started: {
+            run_id: {required: true, type: 'string'},
+            bots: {required: true, type: 'array'},
+            // Present-and-null when unknown, never absent.
+            seed: {required: false, type: 'integer', nullable: true},
+            factorio: {required: false, type: 'string', nullable: true},
+            git: {required: false, type: 'string', nullable: true}
+        },
+        milestone_started: {
+            index: {required: true, type: 'integer'},
+            goal: {required: true, type: 'string'}
+        },
+        milestone_satisfied: {
+            index: {required: true, type: 'integer'},
+            iterations: {required: true, type: 'integer'},
+            reason: {required: false, ref: 'SatisfiedReason'}
+        },
+        milestone_stuck: {
+            index: {required: true, type: 'integer'},
+            outcome: {required: true, type: 'string'},
+            best_steps: {required: false, type: 'integer', nullable: true},
+            last_error: {required: false, type: 'string', nullable: true}
+        },
+        plan_created: {
+            milestone_index: {required: true, type: 'integer'},
+            steps: {required: true, type: 'integer'},
+            makespan: {required: true, type: 'integer'},
+            bots: {required: true, type: 'array'},
+            plan: {required: false, arrayOf: 'PlannedStep'}
+        },
+        action_dispatched: {
+            id: {required: true, type: 'integer'},
+            bot: {required: true, type: 'integer'},
+            action: {required: true, type: 'string'},
+            target: {required: false, ref: 'Position', nullable: true}
+        },
+        action_settled: {
+            id: {required: true, type: 'integer'},
+            bot: {required: true, type: 'integer'},
+            status: {required: true, type: 'string'},
+            elapsed_ticks: {required: false, type: 'integer', nullable: true},
+            error: {required: false, type: 'string', nullable: true},
+            failure: {required: false, ref: 'ActionFailure', nullable: true}
+        },
+        frame: {
+            bot: {required: true, type: 'integer'},
+            camera: {required: true, type: 'string'},
+            file: {required: true, type: 'string'}
+        },
+        run_finished: {
+            outcome: {required: true, type: 'string'},
+            elapsed_ticks: {required: true, type: 'integer'}
+        },
+        // A kind this build does not know. The server never emits it, but a
+        // future variant must still decode rather than fail to parse.
+        unknown: {}
+    }),
+    PlannedStep: objectContract<PlannedStep>({
+        id: {required: true, type: 'integer'},
+        bot: {required: true, type: 'integer'},
+        action: {required: true, type: 'string'},
+        deps: {required: true, type: 'array'},
+        planned_start: {required: true, type: 'integer'},
+        planned_duration: {required: true, type: 'integer'}
+    }),
+    SatisfiedReason: enumContract<SatisfiedReason>({
+        already_satisfied: true,
+        plan_empty: true,
+        unknown: true
+    }),
+    FailureKind: enumContract<FailureKind>({
+        missing_item: true,
+        unreachable: true,
+        blocked: true,
+        rejected: true,
+        timeout: true,
+        other: true
+    }),
+    ActionFailure: objectContract<ActionFailure>({
+        kind: {required: true, ref: 'FailureKind'},
+        detail: {required: false, type: 'string', nullable: true}
     }),
 
     // -- world-state samples (crates/core/src/record/samples.rs) ----------

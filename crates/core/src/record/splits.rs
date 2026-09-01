@@ -86,6 +86,7 @@ fn close(splits: &mut [Split], index: u32, tick: u64, outcome: &str) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::SatisfiedReason;
     use super::*;
 
     fn ev(tick: u64, kind: EventKind) -> Event {
@@ -112,6 +113,7 @@ mod tests {
             EventKind::MilestoneSatisfied {
                 index,
                 iterations: 1,
+                reason: SatisfiedReason::AlreadySatisfied,
             },
         )
     }

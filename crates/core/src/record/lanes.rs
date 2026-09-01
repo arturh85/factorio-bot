@@ -106,6 +106,7 @@ mod tests {
                 status: status.into(),
                 elapsed_ticks: None,
                 error: None,
+                failure: None,
             },
         )
     }
@@ -179,6 +180,7 @@ mod tests {
                     status: "failed".into(),
                     elapsed_ticks: Some(100),
                     error: Some("no entity to mine".into()),
+                    failure: None,
                 },
             ),
         ]);

@@ -19,6 +19,7 @@ use crate::types::Position;
 pub mod frames;
 pub mod lanes;
 pub mod retention;
+pub mod samples;
 pub mod splits;
 pub use frames::{ArchivedFrame, archive_frames, parse_frame_name};
 pub use lanes::{Lane, derive_lanes};

@@ -67,3 +67,23 @@ rather than merely un-disproven.
 - 3-of-4 client connection;
 - guard runs before method resolution, so it can refuse a goal `AlreadySatisfied`
   would have settled without any split — moot once the guard goes.
+
+## A process defect I caused (2026-09-02, ~00:40)
+
+`75a098a8` is titled as a docs commit but also contains the sampler crash fix:
+`mods/BotBridge/control.lua`, `crates/core/src/record/samples.rs`,
+`crates/core/src/process/output_parser.rs` and the OpenAPI snapshot.
+
+Cause: I ran `git add <two .md paths>` and then a bare `git commit`. The
+explicit-paths discipline protected the **add**, not the **commit** — a bare
+commit takes the whole index, including files a concurrently running agent had
+already staged. The agent then found its own working tree clean, correctly
+concluded its fix was already committed, and reported "already shipped".
+
+The code is correct and tested; only the history is misleading. I am not
+rewriting it: two agents are mid-edit in `crates/planner/`, and disturbing
+`master` under them risks more than a wrong commit message costs.
+
+**Rule going forward, with concurrent agents in one checkout: use the pathspec
+form `git commit -- <paths>`, never `git add <paths>` followed by a bare
+`git commit`.** The second form is only safe when nobody else is staging.

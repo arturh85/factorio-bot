@@ -36,6 +36,11 @@ const routes = [
         component: () => import('./pages/TasksPage.vue')
     },
     {
+        path: '/runs',
+        name: 'runs',
+        component: () => import('./pages/RunsPage.vue')
+    },
+    {
         path: '/map',
         name: 'map',
         component: () => import('./pages/MapPage.vue')

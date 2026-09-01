@@ -5,8 +5,8 @@ import router from './router';
 const paths = () => router.getRoutes().map(route => route.path).sort();
 
 describe('router', () => {
-    it('exposes exactly the six routes the menu links to', () => {
-        expect(paths()).toEqual(['/', '/map', '/rcon', '/script', '/settings', '/tasks']);
+    it('exposes exactly the seven routes the menu links to', () => {
+        expect(paths()).toEqual(['/', '/map', '/rcon', '/runs', '/script', '/settings', '/tasks']);
     });
 
     it('does not resolve the deleted placeholder routes', () => {

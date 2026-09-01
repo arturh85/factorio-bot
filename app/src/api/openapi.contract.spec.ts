@@ -49,16 +49,22 @@ import snapshot from './openapi.snapshot.json';
 import type {AppSettings, GuiSettings} from '@/models/settings';
 import type {FactorioSettings, RestApiSettings, ScriptTreeNode} from '@/api/types';
 import type {
+    ArchivedFrame,
+    ClientRun,
     ExecuteAccepted,
     ExecuteRequest,
     ExistsResponse,
-    ClientRun,
     FrameEntry,
     FramesManifest,
     InstanceStatus,
     Job,
     JobStatus,
+    RunDetail,
+    RunFramesResponse,
+    RunSummary,
+    RunsResponse,
     ScriptContent,
+    Split,
     StartAccepted
 } from './types';
 
@@ -127,6 +133,26 @@ interface OperationContract {
  * belong to a future `app/src/api/game.ts`.
  */
 const OPERATIONS: readonly OperationContract[] = [
+    {
+        path: '/api/v1/runs',
+        method: 'get',
+        caller: 'listRuns',
+        response: {status: '200', schema: 'RunsResponse'}
+    },
+    {
+        path: '/api/v1/runs/{id}',
+        method: 'get',
+        caller: 'getRun',
+        pathParams: ['id'],
+        response: {status: '200', schema: 'RunDetail'}
+    },
+    {
+        path: '/api/v1/runs/{id}/frames',
+        method: 'get',
+        caller: 'getRunFrames',
+        pathParams: ['id'],
+        response: {status: '200', schema: 'RunFramesResponse'}
+    },
     {
         path: '/api/v1/settings',
         method: 'get',
@@ -440,6 +466,51 @@ const SCHEMAS: Record<string, SchemaContract> = {
         run: {required: true, type: 'string', nullable: true},
         client_runs: {required: true, arrayOf: 'ClientRun'}
     }),
+    // -- run archives (crates/server/src/runs.rs) -------------------------
+    RunsResponse: objectContract<RunsResponse>({
+        runs: {required: true, arrayOf: 'RunSummary'}
+    }),
+    RunSummary: objectContract<RunSummary>({
+        run_id: {required: true, type: 'string'},
+        finished: {required: true, type: 'boolean'},
+        // Everything below is present-and-null for a run that never finished,
+        // so a caller can tell "never finished" from "not reported by this
+        // build". Same rule the frames manifest follows for `run`.
+        started_unix: {required: false, type: 'integer', nullable: true},
+        finished_unix: {required: false, type: 'integer', nullable: true},
+        outcome: {required: false, type: 'string', nullable: true},
+        elapsed_ticks: {required: false, type: 'integer', nullable: true},
+        events: {required: false, type: 'integer', nullable: true},
+        frames: {required: false, type: 'integer', nullable: true},
+        splits: {required: false, type: 'integer', nullable: true}
+    }),
+    RunDetail: objectContract<RunDetail>({
+        summary: {required: true, ref: 'RunSummary'},
+        splits: {required: true, arrayOf: 'Split'}
+    }),
+    Split: objectContract<Split>({
+        index: {required: true, type: 'integer'},
+        goal: {required: true, type: 'string'},
+        started_tick: {required: true, type: 'integer'},
+        // Null while the milestone is still open. `elapsed_ticks` is
+        // materialised rather than left to the client to subtract: a null
+        // minus a number is a zero, and zero looks like a fast milestone.
+        ended_tick: {required: false, type: 'integer', nullable: true},
+        outcome: {required: true, type: 'string'},
+        elapsed_ticks: {required: false, type: 'integer', nullable: true}
+    }),
+    RunFramesResponse: objectContract<RunFramesResponse>({
+        frames: {required: true, arrayOf: 'ArchivedFrame'}
+    }),
+    ArchivedFrame: objectContract<ArchivedFrame>({
+        bot: {required: true, type: 'integer'},
+        // Null together when the filename does not parse -- the file is still
+        // archived and still listed, which is the honest report.
+        tick: {required: false, type: 'integer', nullable: true},
+        camera: {required: false, type: 'string', nullable: true},
+        file: {required: true, type: 'string'}
+    }),
+
     ClientRun: objectContract<ClientRun>({
         client: {required: true, type: 'integer'},
         run: {required: true, type: 'string', nullable: true}

@@ -23,6 +23,9 @@ import {
     FramesManifest,
     InstanceStatus,
     Job,
+    RunDetail,
+    RunFramesResponse,
+    RunsResponse,
     ScriptContent,
     StartAccepted
 } from './types';
@@ -138,4 +141,34 @@ export function frames(): Promise<FramesManifest> {
  */
 export function frameUrl(client: number, name: string): string {
     return buildUrl(`/api/v1/frames/${client}/` + encodeURIComponent(name));
+}
+
+/** Archived runs, newest first. */
+export function listRuns(): Promise<RunsResponse> {
+    return request<RunsResponse>('/api/v1/runs');
+}
+
+/** One run's summary and splits. */
+export function getRun(id: string): Promise<RunDetail> {
+    return request<RunDetail>(`/api/v1/runs/${encodeURIComponent(id)}`);
+}
+
+/** A run's frame index. */
+export function getRunFrames(id: string): Promise<RunFramesResponse> {
+    return request<RunFramesResponse>(`/api/v1/runs/${encodeURIComponent(id)}/frames`);
+}
+
+/**
+ * The URL of one archived frame.
+ *
+ * `file` from `ArchivedFrame` is run-relative (`frames/<bot>/<name>`); only
+ * the trailing filename goes in the path, because the bot segment is already
+ * a parameter and the server refuses anything that would leave that
+ * directory.
+ */
+export function runFrameUrl(id: string, bot: number, file: string): string {
+    const name = file.slice(file.lastIndexOf('/') + 1);
+    return buildUrl(
+        `/api/v1/runs/${encodeURIComponent(id)}/frames/${bot}/` + encodeURIComponent(name)
+    );
 }

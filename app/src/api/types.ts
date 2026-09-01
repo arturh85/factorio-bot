@@ -270,3 +270,84 @@ export interface ClientRun {
     /** That directory's own run id; `null` is **unknown**, never *no match*. */
     run: string | null;
 }
+
+/**
+ * One archived run, as it appears in a listing.
+ *
+ * Everything except `run_id` and `finished` is nullable because an unfinished
+ * run genuinely lacks it. Present-and-null, never omitted: a caller must be
+ * able to tell "this run never finished" from "this build does not report
+ * outcomes".
+ */
+export interface RunSummary {
+    run_id: string;
+    /**
+     * Whether the run reached `finish`. `false` means crashed *or* still
+     * going -- the server cannot tell those apart and does not pretend to.
+     */
+    finished: boolean;
+    /** Unix seconds. For "when was this", never for comparing two runs. */
+    started_unix: number | null;
+    finished_unix: number | null;
+    outcome: string | null;
+    /** A duration in game ticks, not the tick the run ended at. */
+    elapsed_ticks: number | null;
+    events: number | null;
+    frames: number | null;
+    splits: number | null;
+}
+
+/** `GET /api/v1/runs` response. */
+export interface RunsResponse {
+    runs: RunSummary[];
+}
+
+/**
+ * One milestone's timing -- the speedrun split.
+ *
+ * Measured in ticks, because two runs are compared on the game's clock and
+ * never on wall time: a headless server and a graphical client with three
+ * cameras do not run at the same speed, so wall time compares hardware.
+ */
+export interface Split {
+    index: number;
+    goal: string;
+    started_tick: number;
+    /** `null` when the run ended without closing this milestone. */
+    ended_tick: number | null;
+    /** `satisfied`, `stuck`, `stuck_silent`, `exhausted`, or `unfinished`. */
+    outcome: string;
+    /**
+     * `ended_tick - started_tick`, or `null` while unfinished.
+     *
+     * Never subtract these yourself: a null minus a number is a plausible
+     * zero, and zero looks exactly like a fast milestone.
+     */
+    elapsed_ticks: number | null;
+}
+
+/** `GET /api/v1/runs/{id}` response. */
+export interface RunDetail {
+    summary: RunSummary;
+    /**
+     * From `splits.json` when the run finished, otherwise derived from its
+     * events -- so a crashed run still shows the milestones it got through.
+     */
+    splits: Split[];
+}
+
+/** One frame copied into a run archive. */
+export interface ArchivedFrame {
+    /** The bot that captured it. Bots and clients are 1:1. */
+    bot: number;
+    /** `game.tick` at capture, or `null` when the filename does not parse. */
+    tick: number | null;
+    camera: string | null;
+    /** Path relative to the run directory. */
+    file: string;
+}
+
+/** `GET /api/v1/runs/{id}/frames` response. */
+export interface RunFramesResponse {
+    frames: ArchivedFrame[];
+}

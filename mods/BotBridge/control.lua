@@ -1236,22 +1236,46 @@ end
 -- by GUI position. Its values are joules for that one tick; ticks run at
 -- 60 UPS, so `* 60` converts to watts and `/ 1000` to the kW a player sees.
 --
--- Unverified against a live game -- this task is static-only by design (see
--- the task brief) -- but read directly from `runtime-api.json`, not guessed.
+-- `flow_last_tick` lives on `LuaElectricNetwork`, not on what `pole
+-- .electric_network` returns: that attribute's `read_type` is
+-- `LuaElectricSubNetwork` (a copper-wire-connected cluster), whose complete
+-- attribute list is `{id, neighbours, object_name, parent_network, valid}` --
+-- no `flow_last_tick`. Indexing a nonexistent attribute on Factorio userdata
+-- is a hard runtime error, not nil, so getting this wrong throws inside
+-- `sample_force` on the first 300-tick beat after any pole exists and never
+-- writes a force sample again. The parent `LuaElectricNetwork` -- reached via
+-- `.parent_network` -- is what actually carries `flow_last_tick`.
+--
+-- Several sub-networks can share one parent (joined by a closed power
+-- switch, for instance), so dedup happens at the parent, not the
+-- sub-network: encountering an unseen sub-network marks every sibling listed
+-- in its parent's `sub_networks` as seen before summing, so a shared parent
+-- is added once no matter how many of its sub-networks a force's poles touch.
+-- `LuaElectricNetwork` itself has no `id` attribute to key a seen-set on
+-- directly (confirmed absent from `runtime-api.json`, not assumed) -- hence
+-- keying the seen-set on sub-network ids instead, all marked together.
+--
+-- Verified against `runtime-api.json` for both classes actually touched here
+-- (`LuaElectricSubNetwork` and `LuaElectricNetwork`), not just the one that
+-- owns `flow_last_tick` -- unverified against a live game, since this task is
+-- static-only by design (see the task brief).
 local function power_totals(force)
 	local generated, consumed, demanded = 0.0, 0.0, 0.0
-	local seen_networks = {}
+	local seen_subnetworks = {}
 	for _, surface in pairs(game.surfaces) do
 		for _, pole in pairs(surface.find_entities_filtered({
 			type = "electric-pole", force = force,
 		})) do
-			-- A network has many poles; `electric_network_id` dedups so a
-			-- network with N of the force's poles is not counted N times.
-			local network_id = pole.electric_network_id
-			if network_id and not seen_networks[network_id] then
-				seen_networks[network_id] = true
-				local network = pole.electric_network
+			local sub = pole.electric_network
+			if sub and sub.valid and not seen_subnetworks[sub.id] then
+				local network = sub.parent_network
 				if network and network.valid then
+					-- Mark every sub-network under this parent seen, not just
+					-- `sub` itself, so the parent is summed once even though
+					-- several sub-networks may lead to it.
+					for _, sibling in pairs(network.sub_networks) do
+						seen_subnetworks[sibling.id] = true
+					end
 					local flow = network.flow_last_tick
 					generated = generated + flow.maximum_production * 60 / 1000
 					consumed = consumed + flow.total_transfer * 60 / 1000
@@ -1533,8 +1557,11 @@ function rcon_frame_capture_start(run_id)
 	frame_capture_validate_cameras(cameras)
 	-- `run` is set only from the argument -- nil when the caller passed none,
 	-- exactly like `run.json` below. No fallback, no `run_id or
-	-- storage.something`: an untagged run's samples carry `"run":null` and
-	-- Rust falls back to tick-range filtering for them instead.
+	-- storage.something`: `run = capture.run` with a nil value omits the key
+	-- entirely from the JSON line rather than writing it as null, so an
+	-- untagged run's samples have no `run` key at all, and Rust falls back to
+	-- tick-range filtering for them (`#[serde(default)]` treats an absent key
+	-- the same as an explicit null).
 	storage.frame_capture = { cameras = cameras, run = run_id }
 	-- After the wipe, and only when asked for. The ordering is what keeps the
 	-- id honest: the directory is emptied first and the sidecar written

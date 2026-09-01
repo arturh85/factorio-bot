@@ -55,6 +55,38 @@ changes nothing in the world. The planner does model triggers — it has
 planned — so the gap is likely between planning the trigger and *performing*
 it, not in recognising it. Someone should confirm before fixing.
 
+### The planner fix needs a concept that does not exist yet
+
+Attempted and **reverted**. For a `craft-item` trigger the planner does two
+things, and both are wrong:
+
+* it subgoals `Goal::Have { trigger_item }`, which is satisfied by
+  **possession** -- a bot already carrying a lab crafts nothing, so the trigger
+  never fires;
+* it then emits an `ActionKind::Research`, which does nothing at all, because
+  once the trigger fires the game researches the technology itself. That action
+  is what looped: five dispatches, five reported successes, no research.
+
+Replacing it with "emit the craft, carrying `Effect::Researched`" fixes both --
+and breaks a third case. A trigger item can be produced by **smelting**, and a
+hand-craft action for it cannot run. Guarding on `CRAFTING_CATEGORY` then
+refuses trigger technologies the old model planned fine. Both models are wrong,
+in opposite directions.
+
+What it actually needs is a goal that demands **production** rather than
+possession -- something like `Goal::Produced { item, count }` that every
+production method (craft, smelt, mine) can satisfy, with the `Researched`
+effect riding on whichever action ends up producing it. A method cannot attach
+that effect to a subgoal's action after the fact: it never sees their ids, by
+design (`have.rs`, "No explicit `Link` steps").
+
+That is a spec-level change touching every production method, so it is written
+down here rather than guessed at.
+
+**The good news is that this no longer fails silently.** With the reply now
+judged, a trigger technology refuses immediately and says why, instead of
+looping for 61345 ticks while reporting success.
+
 ### What was ruled out
 
 `rcon_add_research` discards the return value of `LuaForce.add_research`, which

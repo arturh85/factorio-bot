@@ -76,6 +76,15 @@ const current = computed(() =>
 
 const currentSplit = computed(() => splitAt(store.detail?.splits ?? [], store.cursor));
 
+/** The earliest frame for the current bot and camera, for the empty state. */
+const firstForSelection = computed(() => {
+    if (store.bot === null || store.camera === null) return null;
+    const mine = store.placedFrames.filter(
+        (f) => f.bot === store.bot && f.camera === store.camera
+    );
+    return mine.length > 0 ? mine[0].tick : null;
+});
+
 const frameSrc = computed(() =>
     current.value && selected.value
         ? runFrameUrl(selected.value, current.value.bot, current.value.file)
@@ -294,7 +303,19 @@ function markerLeft(tick: number): string {
                 <img v-if="frameSrc" :src="frameSrc" :alt="`frame at tick ${current?.tick}`" />
                 <!-- Before the first frame is a real state: the run had begun
                      and capture had not yet produced anything. -->
-                <p v-else class="frame__none">No frame at or before this tick.</p>
+                <!-- Say where the frames start rather than leaving a dead end:
+                     "none here" and "none at all" are different answers. -->
+                <p v-else class="frame__none">
+                    <template v-if="firstForSelection !== null">
+                        No frame yet at tick {{ store.cursor }} — this camera starts at
+                        <button type="button" class="linkish" @click="store.seek(firstForSelection)">
+                            tick {{ firstForSelection }}
+                        </button>.
+                    </template>
+                    <template v-else>
+                        This bot and camera captured no frames in this run.
+                    </template>
+                </p>
                 <p v-if="current" class="frame__caption num">
                     frame tick {{ current.tick }} · {{ current.camera }}
                 </p>
@@ -422,6 +443,15 @@ function markerLeft(tick: number): string {
     display: flex;
     gap: 1rem;
     margin-bottom: 0.5rem;
+}
+.linkish {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: #3b82f6;
+    cursor: pointer;
+    text-decoration: underline;
 }
 .frame__caption,
 .frame__none {

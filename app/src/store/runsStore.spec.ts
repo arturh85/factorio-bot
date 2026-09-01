@@ -68,6 +68,18 @@ describe('loadRuns', () => {
 });
 
 describe('openRun', () => {
+    it('opens on the first frame rather than an empty panel', async () => {
+        // The axis starts at the first milestone (59375), which is before the
+        // first frame (59400). Opening at the axis start is correct and shows
+        // nothing, which reads as "no frames" rather than "not yet".
+        vi.mocked(client.getRun).mockResolvedValue(DETAIL);
+        vi.mocked(client.getRunFrames).mockResolvedValue({frames: FRAMES});
+        const store = useRunsStore();
+        await store.openRun('run-1');
+        expect(store.cursor).toBe(59400);
+        expect(store.bounds?.from).toBe(59375);
+    });
+
     it('parks the cursor at the start of the axis and picks a bot and camera', async () => {
         vi.mocked(client.getRun).mockResolvedValue(DETAIL);
         vi.mocked(client.getRunFrames).mockResolvedValue({frames: FRAMES});
@@ -77,7 +89,6 @@ describe('openRun', () => {
         // The axis starts at the first milestone (59375), which is before the
         // first frame (59400) -- so the bound must come from the splits.
         expect(store.bounds).toEqual({from: 59375, to: 60246});
-        expect(store.cursor).toBe(59375);
         expect(store.bot).toBe(1);
         expect(store.camera).toBe('front');
     });
@@ -163,7 +174,8 @@ describe('seek and playback', () => {
         const store = useRunsStore();
         store.rate = 300;
         store.advance();
-        expect(store.cursor).toBe(59675);
+        // From the first frame (59400), not the axis start.
+        expect(store.cursor).toBe(59700);
     });
 
     it('stops at the end instead of wrapping', () => {

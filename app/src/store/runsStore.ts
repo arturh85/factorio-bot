@@ -87,7 +87,14 @@ export const useRunsStore = defineStore('runs', {
                 const placed = this.placedFrames;
                 this.bot = placed.length > 0 ? placed[0].bot : null;
                 this.camera = placed.length > 0 ? placed[0].camera : null;
-                this.cursor = this.bounds?.from ?? 0;
+                // Open on the first frame, not the start of the axis.
+                //
+                // The axis spans splits *and* frames, and a run's first
+                // milestone usually starts before capture produces anything --
+                // 231 ticks before, in the run that prompted this. Opening at
+                // the axis start is correct and shows an empty panel, which
+                // reads as "this run has no frames" rather than "not yet".
+                this.cursor = placed.length > 0 ? placed[0].tick : (this.bounds?.from ?? 0);
             } catch (err) {
                 this.error = err instanceof Error ? err.message : String(err);
                 this.detail = null;

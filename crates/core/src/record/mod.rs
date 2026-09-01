@@ -125,6 +125,34 @@ pub enum EventKind {
         camera: String,
         file: String,
     },
+    /// A bot was moved by `player.teleport` rather than by walking.
+    ///
+    /// Before this variant existed, none of the mod's three teleport sites
+    /// were observable to Rust at all: `on_player_changed_position` fires
+    /// identically whether the position changed by walking or by teleport, so
+    /// a run whose bots teleported repeatedly recorded ordinary-looking walk
+    /// durations with nothing to say otherwise. Every walk duration in a
+    /// record from before this variant was ever emitted may be fiction for
+    /// that reason, and there is no way to tell after the fact -- this event
+    /// only exists going forward.
+    Teleport {
+        bot: u32,
+        /// Why the mod teleported the bot rather than moving it normally --
+        /// e.g. `walk_stuck` (the leg timed out), `revive_ghost_blocked` or
+        /// `place_blueprint_blocked` (the bot stood inside the entity's
+        /// bounding box). Free text rather than an enum: the set of reasons
+        /// is small and mod-defined, and a reader filtering on it can match
+        /// substrings without this crate publishing a closed list the mod
+        /// must stay in lockstep with.
+        reason: String,
+        from: Position,
+        to: Position,
+        distance: f64,
+        /// The walk action this teleport happened during, when there is one.
+        /// `None` for the two blueprint/ghost-revive sites, which are
+        /// synchronous RCON calls with no dispatched action to attach to.
+        action_id: Option<u32>,
+    },
     RunFinished {
         outcome: String,
         elapsed_ticks: u64,

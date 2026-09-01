@@ -247,6 +247,49 @@ function distance(a,b)
 	return math.sqrt((x1-x2)*(x1-x2) + (y1-y2)*(y1-y2))
 end
 
+-- How long the "stuck" check should wait before deciding a leg is not
+-- progressing, sized to the leg being walked rather than a flat constant.
+--
+-- `LuaControl.character_running_speed` is "the current movement speed of
+-- this character, including effects from exoskeletons, tiles, stickers and
+-- shooting" -- tiles/tick, the same unit the planner's offline
+-- `WALK_TILES_PER_TICK` constant (crates/planner/src/schedule.rs) has to
+-- guess at. Reading it live here means the mod never hardcodes a speed.
+--
+-- The margin is generous on purpose: a real walk turns corners, decelerates
+-- approaching a waypoint, and can be slowed by other entities in the way --
+-- none of which this straight-line estimate models. 3x the straight-line
+-- time, floored at 60 ticks (one second, matching the previous flat
+-- constant, for very short legs), is chosen so an ordinary walk essentially
+-- never times out while a genuinely stuck bot is still bounded.
+function walk_leg_timeout_ticks(player, from_pos, to_pos)
+	local speed = player.character_running_speed
+	if speed == nil or speed <= 0 then
+		-- Should not happen for a connected player with a character (the
+		-- only case this is ever called for), but a walk must never divide
+		-- by zero or a negative number over a fallback that never triggers.
+		speed = 0.15
+	end
+	local leg_length = distance(from_pos, to_pos)
+	return math.max(60, math.ceil((leg_length / speed) * 3))
+end
+
+-- Emits a machine-readable record of a `player.teleport` call, since none of
+-- the three call sites are otherwise distinguishable from ordinary walking
+-- to the Rust side: `on_player_changed_position` fires identically for a
+-- teleport and a walked step. `action_id` is nil for the two blueprint/ghost
+-- sites, which are synchronous RCON calls with no action to attach to.
+function teleport_writeout(tick, player_id, reason, from, to, action_id)
+	writeout(tick, "teleport", helpers.table_to_json({
+		player_id = player_id,
+		reason = reason,
+		from = from,
+		to = to,
+		distance = distance(from, to),
+		action_id = action_id,
+	}))
+end
+
 function writeout_initial_stuff()
 	writeout_pictures()
 	writeout_entity_prototypes()
@@ -620,7 +663,32 @@ function on_tick(event)
 				local dest = w.waypoints[w.idx]
 
 				if dest == nil then
-					action_completed(event.tick, w.action_id)
+					-- Two different roads lead here, and they are NOT the same
+					-- outcome:
+					--
+					-- 1. A walk dispatched with zero waypoints (the caller
+					--    already stood within arrival tolerance, so the path
+					--    request came back empty) -- this is `dest == nil` on
+					--    the very first tick, w.idx == 1, and it is a genuine
+					--    no-op success.
+					-- 2. The stuck-abort below, which nils the *last*
+					--    remaining waypoint rather than advancing idx past it
+					--    (compare the `w.idx > #w.waypoints` branch below,
+					--    which is how a walk that actually arrives exits).
+					--    That sets `w.stuck`, and this walk did NOT arrive.
+					--
+					-- Both must clear `walking` and `walking_state` -- before
+					-- this fix NEITHER case did, so a zero-waypoint dispatch
+					-- re-reported "ok" every tick forever, and a stuck-abort
+					-- left the character walking in a straight line forever
+					-- while reporting "ok" every tick forever too.
+					player.walking_state = {walking=false}
+					storage.p[idx].walking = nil
+					if w.stuck then
+						action_failed(event.tick, w.action_id, "ERROR: stuck while walking, aborted before reaching last waypoint")
+					else
+						action_completed(event.tick, w.action_id)
+					end
 				else
 					local dx = dest.x - pos.x
 					local dy = dest.y - pos.y
@@ -638,6 +706,10 @@ function on_tick(event)
 							dest = w.waypoints[w.idx]
 							dx = dest.x - pos.x
 							dy = dest.y - pos.y
+							-- New leg: size its own timeout instead of
+							-- inheriting the one the previous, differently
+							-- sized leg computed.
+							w.leg_timeout = walk_leg_timeout_ticks(player, pos, dest)
 						end
 					end
 
@@ -671,13 +743,24 @@ function on_tick(event)
 					end
 
 --					print("waypoint "..w.idx.." of "..#w.waypoints..", pos = "..coord(pos)..", dest = "..coord(dest).. ", dx/dy="..dx.."/"..dy..", dir="..direction)
-					if w.idx_tick ~= nil and event.tick - w.idx_tick > 60 then
+					if w.idx_tick ~= nil and event.tick - w.idx_tick > (w.leg_timeout or 60) then
 						if w.idx > #w.waypoints - 1 then -- if last waypoint just abort
 							print("Player is stuck while moving to last waypoint, just stop moving")
+							w.stuck = true
 							w.waypoints[w.idx] = nil
 						else
-							print("Player is stuck while moving, teleporting to next waypoint")
+							teleport_writeout(event.tick, idx, "walk_stuck", pos, w.waypoints[w.idx], w.action_id)
 							player.teleport(w.waypoints[w.idx])
+							-- The arrival check above normally re-stamps
+							-- idx_tick/leg_timeout on the very next tick once
+							-- it sees the character standing on the
+							-- destination, but stamp it here too rather than
+							-- rely on that: this is the site the teleport
+							-- actually happens, and a leg's timer must never
+							-- be left counting against where the walk used to
+							-- be.
+							w.idx_tick = event.tick
+							w.leg_timeout = walk_leg_timeout_ticks(player, w.waypoints[w.idx], w.waypoints[w.idx])
 						end
 					end
 
@@ -1997,7 +2080,19 @@ function on_script_path_request_finished(event)
 	if event.path ~= nil then
 		local positions = {}
 		for k,v in pairs(event.path) do
-			table.insert(positions, v.position)
+			-- `needs_destroy_to_reach` -- "true if the path from the previous
+			-- waypoint to this one goes through an entity that must be
+			-- destroyed" -- used to be dropped here, so the Rust side never
+			-- learned a leg was blocked and the bot walked into the
+			-- obstruction until the stuck-teleport fired. Flattened onto the
+			-- position rather than sent as a separate structure: the field
+			-- is additive over the previous `{x=.., y=..}` shape, so an
+			-- older Rust build parsing this as a plain position still works.
+			table.insert(positions, {
+				x = v.position.x,
+				y = v.position.y,
+				needs_destroy_to_reach = v.needs_destroy_to_reach or false,
+			})
 		end
 		result = helpers.table_to_json(positions)
 	elseif event.try_again_later then
@@ -2136,7 +2231,23 @@ function rcon_action_start_walk_waypoints(action_id, player_id, waypoints) -- e.
 		tmp[i] = {x=waypoints[i][1], y=waypoints[i][2]}
 	end
 	--	game.print("waypoints: " .. table_to_string(storage.p[player_id]))
-	storage.p[player_id].walking = {idx=1, waypoints=tmp, action_id=action_id }
+	-- `idx_tick` used to be left nil until the first waypoint was reached, so
+	-- the stuck check below measured "ticks since the *previous* waypoint"
+	-- rather than "ticks since this leg started" -- and for the first leg
+	-- specifically, it measured nothing at all until arrival, exempting it
+	-- from the check entirely. Stamping it here, with a timeout sized to this
+	-- leg's own length, covers leg 1 the same way every later leg is covered.
+	local leg_timeout = 60
+	if tmp[1] ~= nil then
+		leg_timeout = walk_leg_timeout_ticks(player, player.character.position, tmp[1])
+	end
+	storage.p[player_id].walking = {
+		idx = 1,
+		waypoints = tmp,
+		action_id = action_id,
+		idx_tick = game.tick,
+		leg_timeout = leg_timeout,
+	}
 	stamp_tick()
 end
 
@@ -2553,8 +2664,9 @@ function rcon_revive_ghost(player_id, name, x, y)
 		local bb = add_to_bounding_box(expand_rect_floor_ceil(prototype.collision_box), {x = ghost.position.x, y = ghost.position.y})
 		--				print("ghost bb: " .. helpers.table_to_json(bb))
 		if position_in_rect(player.position, bb) then
-			print("Player is standing inside entity ghost, teleporting player away!")
-			player.teleport({x = bb.right_bottom.x + 1, y = bb.right_bottom.y + 1})
+			local dest = {x = bb.right_bottom.x + 1, y = bb.right_bottom.y + 1}
+			teleport_writeout(game.tick, player_id, "revive_ghost_blocked", player.position, dest, nil)
+			player.teleport(dest)
 			local success, entity = ghost.revive()
 			if entity ~= nil then
 				main_inventory.remove({name=name, count=1})
@@ -2696,8 +2808,9 @@ function rcon_place_blueprint(player_id, blueprint, pos_x, pos_y, direction, for
 				local bb = add_to_bounding_box(expand_rect_floor_ceil(prototype.collision_box), {x = ghost.position.x, y = ghost.position.y})
 --				print("ghost bb: " .. helpers.table_to_json(bb))
 				if position_in_rect(player.position, bb) then
-					print("Player is standing inside entity ghost, teleporting player away!")
-					player.teleport({x = bb.right_bottom.x + 1, y = bb.right_bottom.y + 1})
+					local dest = {x = bb.right_bottom.x + 1, y = bb.right_bottom.y + 1}
+					teleport_writeout(game.tick, player_id, "place_blueprint_blocked", player.position, dest, nil)
+					player.teleport(dest)
 					local success, entity = ghost.revive()
 					if entity ~= nil then
 						if charge_item_to(item_source_player_id, item) then

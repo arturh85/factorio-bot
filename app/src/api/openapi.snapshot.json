@@ -622,6 +622,54 @@
             "type": "object"
           },
           {
+            "description": "A bot was moved by `player.teleport` rather than by walking.\n\nBefore this variant existed, none of the mod's three teleport sites\nwere observable to Rust at all: `on_player_changed_position` fires\nidentically whether the position changed by walking or by teleport, so\na run whose bots teleported repeatedly recorded ordinary-looking walk\ndurations with nothing to say otherwise. Every walk duration in a\nrecord from before this variant was ever emitted may be fiction for\nthat reason, and there is no way to tell after the fact -- this event\nonly exists going forward.",
+            "properties": {
+              "action_id": {
+                "description": "The walk action this teleport happened during, when there is one.\n`None` for the two blueprint/ghost-revive sites, which are\nsynchronous RCON calls with no dispatched action to attach to.",
+                "format": "int32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "bot": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "distance": {
+                "format": "double",
+                "type": "number"
+              },
+              "from": {
+                "$ref": "#/components/schemas/Position"
+              },
+              "kind": {
+                "enum": [
+                  "teleport"
+                ],
+                "type": "string"
+              },
+              "reason": {
+                "description": "Why the mod teleported the bot rather than moving it normally --\ne.g. `walk_stuck` (the leg timed out), `revive_ghost_blocked` or\n`place_blueprint_blocked` (the bot stood inside the entity's\nbounding box). Free text rather than an enum: the set of reasons\nis small and mod-defined, and a reader filtering on it can match\nsubstrings without this crate publishing a closed list the mod\nmust stay in lockstep with.",
+                "type": "string"
+              },
+              "to": {
+                "$ref": "#/components/schemas/Position"
+              }
+            },
+            "required": [
+              "bot",
+              "reason",
+              "from",
+              "to",
+              "distance",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "elapsed_ticks": {
                 "format": "int64",

@@ -770,6 +770,14 @@ const SCHEMAS: Record<string, SchemaContract> = {
             camera: {required: true, type: 'string'},
             file: {required: true, type: 'string'}
         },
+        teleport: {
+            bot: {required: true, type: 'integer'},
+            reason: {required: true, type: 'string'},
+            from: {required: true, ref: 'Position'},
+            to: {required: true, ref: 'Position'},
+            distance: {required: true, type: 'number'},
+            action_id: {required: false, type: 'integer', nullable: true}
+        },
         run_finished: {
             outcome: {required: true, type: 'string'},
             elapsed_ticks: {required: true, type: 'integer'}

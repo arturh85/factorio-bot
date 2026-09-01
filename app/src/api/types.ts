@@ -670,6 +670,25 @@ export type EventKind =
           failure: ActionFailure | null;
       }
     | {kind: 'frame'; bot: number; camera: string; file: string}
+    | {
+          /**
+           * A bot was moved by `player.teleport` rather than by walking.
+           * `on_player_changed_position` fires identically for a teleport and
+           * a walked step, so this is the only signal that distinguishes
+           * them -- a walk duration recorded before this variant existed may
+           * include one or more silent teleports.
+           */
+          kind: 'teleport';
+          bot: number;
+          /** e.g. `walk_stuck`, `revive_ghost_blocked`, `place_blueprint_blocked`. */
+          reason: string;
+          from: Position;
+          to: Position;
+          distance: number;
+          /** The walk action this happened during. `null` for the two
+           *  blueprint/ghost-revive sites, which have no dispatched action. */
+          action_id: number | null;
+      }
     | {kind: 'run_finished'; outcome: string; elapsed_ticks: number}
     /** A kind this build does not know. The server never emits it, but a
      *  future variant decodes to this rather than failing to parse. */

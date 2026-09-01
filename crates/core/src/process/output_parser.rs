@@ -7,11 +7,29 @@ use crate::factorio::world::FactorioWorld;
 //     PlayerDistanceChangedMessage, PlayerLeftMessage, ResearchCompletedMessage,
 // };
 use crate::types::{
-    ChunkPosition, FactorioEntity, FactorioEntityPrototype, FactorioForce, FactorioGraphic,
-    FactorioItemPrototype, FactorioRecipe, FactorioTile, PlayerChangedDistanceEvent,
-    PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent, PlayerId, Pos, Position, Rect,
+    ActionId, ChunkPosition, FactorioEntity, FactorioEntityPrototype, FactorioForce,
+    FactorioGraphic, FactorioItemPrototype, FactorioRecipe, FactorioTile,
+    PlayerChangedDistanceEvent, PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent,
+    PlayerId, Pos, Position, Rect,
 };
 use miette::{IntoDiagnostic, Result};
+use serde::Deserialize;
+
+/// The payload of a `"teleport"` writeout, emitted by all three of
+/// `control.lua`'s `player.teleport` call sites (see `teleport_writeout`
+/// there). `action_id` is only ever present for the stuck-walk site; the two
+/// blueprint/ghost-revive sites are synchronous RCON calls with no dispatched
+/// action to attach to.
+#[derive(Debug, Deserialize)]
+struct TeleportEvent {
+    player_id: PlayerId,
+    reason: String,
+    from: Position,
+    to: Position,
+    distance: f64,
+    #[serde(default)]
+    action_id: Option<ActionId>,
+}
 
 pub struct OutputParser {
     world: Arc<FactorioWorld>,
@@ -395,6 +413,38 @@ impl OutputParser {
             "sample_error" => {
                 error!("<red>BotBridge sampler failure</>: {}", rest);
             }
+            // One of `control.lua`'s three `player.teleport` sites fired.
+            // Before this arm existed none of them were observable at all:
+            // `on_player_changed_position` fires identically for a teleport
+            // and a walked step, so a run whose bots teleported repeatedly
+            // recorded ordinary-looking walk durations with nothing to say
+            // otherwise. This does not yet feed a run's `events.jsonl`
+            // (`crates/core/src/record::EventKind::Teleport` exists for a
+            // caller to record with, but nothing calls `record_live` with it
+            // yet) -- logging loudly is the minimum that makes a teleport
+            // findable in a live run's diagnostics rather than invisible.
+            "teleport" => match serde_json::from_str::<TeleportEvent>(rest) {
+                Ok(event) => {
+                    warn!(
+                        "<yellow>teleport</>: bot {} {} from {} to {} ({:.1} tiles){}",
+                        event.player_id,
+                        event.reason,
+                        event.from,
+                        event.to,
+                        event.distance,
+                        event
+                            .action_id
+                            .map(|id| format!(", action {id}"))
+                            .unwrap_or_default(),
+                    );
+                }
+                Err(err) => {
+                    error!(
+                        "<red>failed to deserialize teleport</>: {:?} '{}'",
+                        err, rest
+                    );
+                }
+            },
             _ => {
                 error!("<red>unexpected action</>: <bright-blue>{}</>", action);
             }

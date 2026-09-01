@@ -19,6 +19,7 @@ use crate::types::{
 use miette::{Context, IntoDiagnostic, Report, Result, miette};
 use parking_lot::RwLock;
 use rcon::Connection;
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::ops::Add;
@@ -234,6 +235,54 @@ fn walk_arrives(goal: &Position, radius: Option<f64>, end: &Position) -> bool {
 /// The tolerance [`walk_arrives`] applies, exposed so a failure can report it.
 fn arrival_tolerance(radius: Option<f64>) -> f64 {
     radius.unwrap_or(DEFAULT_PATH_RADIUS) + PATH_ENDPOINT_SLACK
+}
+
+/// One entry of a `LuaSurface.request_path` result, as the mod's
+/// `on_script_path_request_finished` now serialises it
+/// (`mods/BotBridge/control.lua`).
+///
+/// `PathfinderWaypoint.needs_destroy_to_reach` — "`true` if the path from the
+/// previous waypoint to this one goes through an entity that must be
+/// destroyed" — used to be read by the mod and dropped before it ever reached
+/// Rust, which is the direct upstream cause of the stuck-teleport bug: the
+/// bot walked into the obstruction the pathfinder had already flagged, made
+/// no progress, and the game had already said why. `#[serde(flatten)]` keeps
+/// the wire shape exactly `{"x":.., "y":.., "needs_destroy_to_reach":..}`, so
+/// this is additive over the previous `{"x":.., "y":..}` shape; `default`
+/// means a reply from before the mod sent the field — including the
+/// `path_request_reply_wakes_the_waiter` regression test's literal JSON —
+/// still parses, reading as "no obstruction reported" rather than failing.
+#[derive(Debug, Clone, Deserialize)]
+struct PathWaypoint {
+    #[serde(flatten)]
+    position: Position,
+    #[serde(default)]
+    needs_destroy_to_reach: bool,
+}
+
+/// Extracts the positions from a pathfinder result, logging once if any leg
+/// requires destroying something to pass.
+///
+/// This is the one place `needs_destroy_to_reach` is read on the Rust side.
+/// Nothing here refuses or reroutes around a blocked leg yet — the walk is
+/// still dispatched — so this changes what the caller *knows*, not what it
+/// *does*: previously the mod discarded the flag before it ever crossed the
+/// wire, and a leg that the pathfinder had already flagged as blocked looked
+/// identical to a clear one all the way down to the stuck-teleport it caused.
+fn waypoint_positions(waypoints: Vec<PathWaypoint>, context: &str) -> Vec<Position> {
+    let blocked = waypoints
+        .iter()
+        .filter(|w| w.needs_destroy_to_reach)
+        .count();
+    if blocked > 0 {
+        warn!(
+            "{}: {} of {} waypoints require destroying something to reach",
+            context,
+            blocked,
+            waypoints.len()
+        );
+    }
+    waypoints.into_iter().map(|w| w.position).collect()
 }
 
 /// Whether a player at `player` may mine a resource at `target`.
@@ -1079,7 +1128,7 @@ impl FactorioRcon {
         &self,
         world: &Arc<FactorioWorld>,
         request_id: u32,
-    ) -> Result<Vec<Position>> {
+    ) -> Result<Vec<PathWaypoint>> {
         let wait_start = Instant::now();
         loop {
             sleep(Duration::from_millis(50)).await;
@@ -1916,11 +1965,12 @@ impl FactorioRcon {
         goal: &Position,
         radius: Option<f64>,
     ) -> Result<Vec<Position>> {
+        let context = format!("player_path for #{player_id}");
         let id = self
             .async_request_player_path(player_id, goal, radius)
             .await?;
         match self.sleep_for_path_request_result(world, id).await {
-            Ok(path) => Ok(path),
+            Ok(path) => Ok(waypoint_positions(path, &context)),
             Err(err) => {
                 warn!(
                     "failed to find player_path() for #{} to {}/{}: {:?}",
@@ -1942,7 +1992,7 @@ impl FactorioRcon {
                         .async_request_player_path(player_id, &new_goal, radius)
                         .await?;
                     if let Ok(result) = self.sleep_for_path_request_result(world, id).await {
-                        return Ok(result);
+                        return Ok(waypoint_positions(result, &context));
                     }
                     direction = direction.rotate_clockwise();
                 }
@@ -1958,9 +2008,10 @@ impl FactorioRcon {
         goal: &Position,
         radius: Option<f64>,
     ) -> Result<Vec<Position>> {
+        let context = format!("path from {}/{}", start.x(), start.y());
         let id = self.async_request_path(start, goal, radius).await?;
         match self.sleep_for_path_request_result(world, id).await {
-            Ok(path) => Ok(path),
+            Ok(path) => Ok(waypoint_positions(path, &context)),
             Err(err) => {
                 warn!(
                     "failed to find path() from {}/{} to {}/{}: {:?}",
@@ -1979,7 +2030,7 @@ impl FactorioRcon {
 
                     let id = self.async_request_path(start, &new_goal, radius).await?;
                     if let Ok(result) = self.sleep_for_path_request_result(world, id).await {
-                        return Ok(result);
+                        return Ok(waypoint_positions(result, &context));
                     }
                     direction = direction.rotate_clockwise();
                 }

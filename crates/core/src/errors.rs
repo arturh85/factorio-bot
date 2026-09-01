@@ -140,6 +140,64 @@ pub struct RconError {
     pub message: String,
 }
 
+/// A reply that had to be JSON, **and what arrived instead**.
+///
+/// The message serde_json gives for a reply that is not JSON at all is
+/// `expected value at line 1 column 1`. It names the parser and nothing else:
+/// not the call, not the payload, not even whether anything arrived. A live run
+/// on 2026-09-02 halted on exactly that string, and finding which of the eight
+/// callers that parse a reply the same way had produced it cost an hour --
+/// every one of them failed identically.
+///
+/// So the offending text is carried here, truncated to
+/// [`crate::factorio::rcon::REPLY_SNIPPET_LIMIT`] characters: enough to
+/// recognise `Cannot execute command. Error: ...` or a mod complaint at a
+/// glance, short enough that a truncated 744 kB `world_snapshot` does not land
+/// in a log line. `parser` is serde's own message, kept because for a *typed*
+/// mismatch -- a missing field halfway through a valid document -- it is the
+/// useful half and the snippet is not.
+#[derive(Error, Debug, Diagnostic)]
+#[error(
+    "the {call} reply is not the JSON it should be ({byte_count} bytes; the parser said {parser}). It begins: {snippet}"
+)]
+#[diagnostic(
+    code(factorio::rcon::reply_not_json),
+    help(
+        "the quoted text is what the game actually sent. `Cannot execute command. Error: ...` means the mod raised; anything else means BotBridge and this client disagree about the reply's shape."
+    )
+)]
+pub struct RconReplyNotJson {
+    /// The BotBridge function whose reply this is.
+    pub call: String,
+    /// How long the whole reply was, before truncation.
+    pub byte_count: usize,
+    /// The head of the reply, quoted, and elided when it was longer.
+    pub snippet: String,
+    /// serde_json's own message.
+    pub parser: String,
+}
+
+/// The game's pathfinder answered, and the answer was not a path.
+///
+/// `on_script_path_request_finished` (`mods/BotBridge/control.lua`) writes a
+/// plain-text `Error: failed to path find` or `Error: try again later!` into
+/// the same slot a successful request fills with a JSON array. Those are the
+/// mod saying something specific; handing them to `serde_json` -- which is what
+/// used to happen -- turned a pathfinder verdict into `expected value at line 1
+/// column 1` and threw the verdict away.
+#[derive(Error, Debug, Diagnostic)]
+#[error("the game's pathfinder returned no path: {reason}")]
+#[diagnostic(
+    code(factorio::rcon::path_request_failed),
+    help(
+        "`try again later` means the pathfinder queue was full and the request is worth repeating; `failed to path find` means it searched and found nothing."
+    )
+)]
+pub struct RconPathRequestFailed {
+    /// The mod's own words, verbatim.
+    pub reason: String,
+}
+
 #[derive(Error, Debug, Diagnostic)]
 #[error("no action result received in time")]
 #[diagnostic(code(factorio::workspace::not_found), help("read logs"))]

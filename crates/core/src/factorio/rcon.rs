@@ -1,7 +1,8 @@
 use crate::errors::{
-    RconError, RconNoWaterFound, RconOutOfResourceReach, RconPlayerBlockesAllPlacement,
-    RconPlayerBlockesPlacement, RconPlayerNotFound, RconRadiusLimitReached, RconTimeout,
-    RconUnexpectedEmptyResponse, RconUnexpectedOutput, RconWalkFallsShort,
+    RconError, RconNoWaterFound, RconOutOfResourceReach, RconPathRequestFailed,
+    RconPlayerBlockesAllPlacement, RconPlayerBlockesPlacement, RconPlayerNotFound,
+    RconRadiusLimitReached, RconReplyNotJson, RconTimeout, RconUnexpectedEmptyResponse,
+    RconUnexpectedOutput, RconWalkFallsShort,
 };
 use crate::factorio::snapshot::WorldSnapshot;
 use crate::factorio::ticks::{ActionTicks, take_tick_stamp};
@@ -28,7 +29,6 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::time::sleep;
 use tracing::{info, warn};
-use unicode_segmentation::UnicodeSegmentation;
 
 const RCON_INTERFACE: &str = "botbridge";
 
@@ -133,6 +133,49 @@ fn split_reply(result: &str, silent: bool) -> Option<Vec<String>> {
         info!("rcon ⮞ {}", body);
     }
     Some(body.split('\n').map(|str| str.to_owned()).collect())
+}
+
+/// How much of an unparseable reply to quote back in the error.
+///
+/// Long enough for `Cannot execute command. Error: <lua traceback head>` and
+/// for a mod complaint to be recognisable; short enough that a truncated 744 kB
+/// `world_snapshot` does not arrive in a log line.
+pub const REPLY_SNIPPET_LIMIT: usize = 200;
+
+/// The head of `text`, quoted, elided when it was longer, and with the
+/// whitespace that would break a one-line message escaped.
+///
+/// Truncation is on a `char` boundary rather than a byte one: a reply is a
+/// game's own text and may well be multi-byte, and slicing it mid-codepoint
+/// would panic on the very path whose job is to report a fault.
+fn reply_snippet(text: &str) -> String {
+    let head: String = text.chars().take(REPLY_SNIPPET_LIMIT).collect();
+    let elided = head.chars().count() < text.chars().count();
+    let escaped = head.replace('\\', "\\\\").replace('\n', "\\n");
+    if elided {
+        format!("\"{escaped}\"...")
+    } else {
+        format!("\"{escaped}\"")
+    }
+}
+
+/// Deserialises one RCON reply, and says **what arrived** when it cannot.
+///
+/// Every `serde_json::from_str` on a reply goes through here. The bare
+/// `.into_diagnostic()` it replaces produced `expected value at line 1
+/// column 1` — serde's message for input that is not JSON at all — from six
+/// different call sites, which is a message that identifies neither the call
+/// nor the payload. See [`RconReplyNotJson`].
+fn parse_reply<T: serde::de::DeserializeOwned>(call: &str, text: &str) -> Result<T> {
+    serde_json::from_str(text).map_err(|err| {
+        RconReplyNotJson {
+            call: call.to_string(),
+            byte_count: text.len(),
+            snippet: reply_snippet(text),
+            parser: err.to_string(),
+        }
+        .into()
+    })
 }
 
 /// Judges the reply to an `insert_to_inventory` / `remove_from_inventory` RPC.
@@ -953,8 +996,8 @@ impl FactorioRcon {
         if json == "{}" {
             json = String::from("[]");
         }
-        if &json[0..1] == "[" {
-            Ok(serde_json::from_str(json.as_str()).into_diagnostic()?)
+        if json.starts_with('[') {
+            Ok(parse_reply("place_blueprint", &json)?)
         } else {
             Err(RconError { message: json }.into())
         }
@@ -995,8 +1038,8 @@ impl FactorioRcon {
             return Err(RconUnexpectedEmptyResponse {}.into());
         }
         let json = lines.unwrap().pop().unwrap();
-        if &json[0..1] == "{" {
-            Ok(serde_json::from_str(json.as_str()).into_diagnostic()?)
+        if json.starts_with('{') {
+            Ok(parse_reply("revive_ghost", &json)?)
         } else {
             Err(RconError { message: json }.into())
         }
@@ -1031,7 +1074,7 @@ impl FactorioRcon {
         if json == "{}" {
             json = String::from("[]");
         }
-        serde_json::from_str(json.as_str()).into_diagnostic()
+        parse_reply("cheat_blueprint", &json)
     }
 
     pub async fn store_map_data(&self, key: &str, value: Value) -> Result<()> {
@@ -1056,7 +1099,7 @@ impl FactorioRcon {
         if json == "{}" {
             json = String::from("[]");
         }
-        Ok(Some(serde_json::from_str(json.as_str()).into_diagnostic()?))
+        Ok(Some(parse_reply("retrieve_map_data", &json)?))
     }
 
     /// Waits for the game's verdict on a dispatched action and returns the
@@ -1137,7 +1180,20 @@ impl FactorioRcon {
                 if result == "{}" {
                     result = String::from("[]");
                 }
-                return serde_json::from_str(result.as_str()).into_diagnostic();
+                // The mod fills this slot with *either* a JSON array of
+                // waypoints or one of its own plain-text verdicts —
+                // `Error: failed to path find`, `Error: try again later!`
+                // (`on_script_path_request_finished`, control.lua). Both used
+                // to go straight to `serde_json`, so a pathfinder that had
+                // answered clearly came back as `expected value at line 1
+                // column 1` and the answer was thrown away. That string is
+                // what halted the 2026-09-02 research run, reported against a
+                // `place` whose blocked-placement recovery walks the bot out
+                // of its own build site.
+                if !result.starts_with('[') {
+                    return Err(RconPathRequestFailed { reason: result }.into());
+                }
+                return parse_reply("async_request_path", &result);
             }
             if wait_start.elapsed() > Duration::from_secs(60) {
                 return Err(RconTimeout {}.into());
@@ -1398,7 +1454,7 @@ impl FactorioRcon {
         if json == "{}" {
             json = String::from("[]");
         }
-        serde_json::from_str(json.as_str()).into_diagnostic()
+        parse_reply("inventory_contents_at", &json)
     }
 
     /// The bulk static world data — prototypes, recipes and the player force —
@@ -1446,7 +1502,7 @@ impl FactorioRcon {
             return Err(RconUnexpectedEmptyResponse {}.into());
         }
         let json = lines.unwrap().pop().unwrap();
-        serde_json::from_str(json.as_str()).into_diagnostic()
+        parse_reply("player_force", &json)
     }
 
     pub async fn place_entity(
@@ -1522,10 +1578,17 @@ impl FactorioRcon {
                 ))
             } else {
                 let line = &lines[0];
-                let chars =
-                    UnicodeSegmentation::graphemes(line.as_str(), true).collect::<Vec<&str>>();
-                if chars[0] == "{" {
-                    Ok((serde_json::from_str(line).unwrap(), ActionTicks::at(tick)))
+                // `starts_with`, not a grapheme index. The old form built a
+                // grapheme vector and read `chars[0]`, which panics on the
+                // empty line an empty reply body splits into -- a panic inside
+                // a run's dispatch task, on the failure path, where a returned
+                // error is what the executor is waiting for.
+                if line.starts_with('{') {
+                    Ok((
+                        parse_reply("place_entity", line)
+                            .map_err(|e| ActionFailure::refused(e, refused_at))?,
+                        ActionTicks::at(tick),
+                    ))
                 } else if &line[..] == "§player_blocks_placement§" {
                     // The eight compass points. This was `0..8u8` on the
                     // Factorio 1.x scale, where those were all eight
@@ -1571,10 +1634,12 @@ impl FactorioRcon {
                                     ));
                                 }
                                 let line = &lines[0];
-                                let chars = UnicodeSegmentation::graphemes(line.as_str(), true)
-                                    .collect::<Vec<&str>>();
-                                if chars[0] == "{" {
-                                    Ok((serde_json::from_str(line).unwrap(), ActionTicks::at(tick)))
+                                if line.starts_with('{') {
+                                    Ok((
+                                        parse_reply("place_entity", line)
+                                            .map_err(|e| ActionFailure::refused(e, refused_at))?,
+                                        ActionTicks::at(tick),
+                                    ))
                                 } else if &line[..] == "§player_blocks_placement§" {
                                     Err(ActionFailure::refused(
                                         RconPlayerBlockesPlacement {}.into(),
@@ -1834,7 +1899,7 @@ impl FactorioRcon {
         if json == "{}" {
             json = String::from("[]");
         }
-        serde_json::from_str(json.as_str()).into_diagnostic()
+        parse_reply("find_entities_filtered", &json)
     }
 
     pub async fn parse_map_exchange_string(
@@ -1890,7 +1955,7 @@ impl FactorioRcon {
         if json == "{}" {
             json = String::from("[]");
         }
-        serde_json::from_str(json.as_str()).into_diagnostic()
+        parse_reply("find_tiles_filtered", &json)
     }
 
     async fn async_request_player_path(
@@ -2420,6 +2485,64 @@ mod wait_for_reply_tests {
         );
     }
 
+    /// The failure this whole change exists for.
+    ///
+    /// `on_script_path_request_finished` writes plain text into the same slot a
+    /// successful request fills with JSON. Feeding that to `serde_json` gave
+    /// `expected value at line 1 column 1`, which names neither the pathfinder
+    /// nor its verdict, and is what the 2026-09-02 research run halted on.
+    #[test]
+    fn a_pathfinder_refusal_is_reported_as_one_and_not_as_a_json_syntax_error() {
+        for reason in ["Error: failed to path find", "Error: try again later!"] {
+            let world = Arc::new(FactorioWorld::new());
+            let waiter_world = world.clone();
+            let waited = start(move || {
+                block_on(quiet_rcon().sleep_for_path_request_result(&waiter_world, 3))
+            });
+            std::thread::sleep(Duration::from_millis(200));
+            world.path_requests.insert(3, reason.to_string());
+
+            let err = waited
+                .recv_timeout(DEADLINE)
+                .expect("the waiter never returned")
+                .expect_err("a pathfinder refusal is not a path");
+            let text = err.to_string();
+            assert!(
+                text.contains(reason),
+                "the mod's own words must survive; got {text:?}"
+            );
+            assert!(
+                !text.contains("expected value at line 1"),
+                "a pathfinder verdict must not be reported as a JSON syntax error; got {text:?}"
+            );
+        }
+    }
+
+    /// And a reply that really is malformed JSON says what arrived.
+    #[test]
+    fn a_malformed_path_reply_quotes_what_it_received() {
+        let world = Arc::new(FactorioWorld::new());
+        let waiter_world = world.clone();
+        let waited =
+            start(move || block_on(quiet_rcon().sleep_for_path_request_result(&waiter_world, 4)));
+        std::thread::sleep(Duration::from_millis(200));
+        world.path_requests.insert(4, "[{\"x\":0.0,".to_string());
+
+        let err = waited
+            .recv_timeout(DEADLINE)
+            .expect("the waiter never returned")
+            .expect_err("a truncated document is not a path");
+        let text = err.to_string();
+        assert!(
+            text.contains("async_request_path"),
+            "the call has to name itself; got {text:?}"
+        );
+        assert!(
+            text.contains("x\":0.0,"),
+            "the offending text has to be quoted back; got {text:?}"
+        );
+    }
+
     #[test]
     fn action_result_reply_wakes_the_waiter() {
         let world = Arc::new(FactorioWorld::new());
@@ -2931,6 +3054,55 @@ mod positioning_tests {
 /// embedded snapshot). The bytes below and the directory that check compares
 /// against both come from `repo_mods_path!`, so the guard and the run-time
 /// report cannot end up talking about different files.
+/// What an unparseable reply says about itself.
+#[cfg(test)]
+mod reply_snippet_tests {
+    use super::*;
+
+    #[test]
+    fn a_short_reply_is_quoted_whole() {
+        assert_eq!(
+            reply_snippet("Cannot execute command. Error: boom"),
+            "\"Cannot execute command. Error: boom\""
+        );
+    }
+
+    #[test]
+    fn a_long_reply_is_elided_rather_than_logged_whole() {
+        let huge = "x".repeat(REPLY_SNIPPET_LIMIT * 10);
+        let snippet = reply_snippet(&huge);
+        assert!(snippet.ends_with("\"..."), "{snippet}");
+        assert!(
+            snippet.chars().count() < REPLY_SNIPPET_LIMIT + 10,
+            "a snippet is a snippet: {} chars",
+            snippet.chars().count()
+        );
+    }
+
+    /// Truncation is by `char`, not by byte: a game's text may be multi-byte,
+    /// and slicing mid-codepoint would panic on the reporting path itself.
+    #[test]
+    fn a_multibyte_reply_does_not_panic_on_truncation() {
+        let huge = "§".repeat(REPLY_SNIPPET_LIMIT * 2);
+        let snippet = reply_snippet(&huge);
+        assert!(snippet.starts_with("\"§"), "{snippet}");
+    }
+
+    /// The whole point: the message names the call and quotes the payload.
+    #[test]
+    fn an_unparseable_reply_names_its_call_and_quotes_what_arrived() {
+        let err = parse_reply::<Vec<Position>>("find_entities_filtered", "Error: no such function")
+            .expect_err("plain text is not JSON");
+        let text = err.to_string();
+        assert!(text.contains("find_entities_filtered"), "{text}");
+        assert!(text.contains("Error: no such function"), "{text}");
+        assert!(
+            text.contains("expected value at line 1 column 1"),
+            "serde's own message stays, it is just no longer all there is: {text}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod transfer_guarantee_tests {
     use super::*;
@@ -3015,7 +3187,9 @@ mod transfer_guarantee_tests {
     ///
     /// `held` is what the bot carries, `moves` is what the target inventory
     /// really accepts or yields, and `asked` is the count in the command.
-    fn transfer(call: &str, held: i64, moves: i64) -> (Result<ActionTicks, ActionFailure>, String) {
+    /// Loads `stub`, then the repo's own `types.lua` and `control.lua`, runs
+    /// `call`, and hands back the RCON reply body the mod printed.
+    fn run_handler(stub: String, call: &str) -> Vec<String> {
         // The workspace forbids building an interpreter outside
         // `scripting_lua::sandbox`, and rightly: that one runs *user* scripts.
         // This one runs a single file from this repository, `control.lua`, with
@@ -3033,7 +3207,7 @@ mod transfer_guarantee_tests {
             LuaOptions::default(),
         )
         .expect("test interpreter");
-        lua.load(stub_game(held, moves))
+        lua.load(stub)
             .set_name("stub_game")
             .exec()
             .expect("stub game");
@@ -3050,23 +3224,131 @@ mod transfer_guarantee_tests {
             .exec()
             .expect("handler call");
 
-        let printed: Vec<String> = lua
-            .globals()
+        lua.globals()
             .get::<mlua::Table>("_rcon_lines")
             .expect("_rcon_lines")
             .sequence_values::<String>()
             .map(|v| v.expect("rcon line"))
-            .collect();
+            .collect()
+    }
 
-        // The RCON server hands back exactly this: the printed lines, plus the
-        // trailing newline `split_reply` is written to strip.
-        let body = if printed.is_empty() {
+    /// The reply body an RCON server would hand back for `printed`: the lines
+    /// plus the trailing newline `split_reply` is written to strip.
+    fn reply_body(printed: &[String]) -> String {
+        if printed.is_empty() {
             String::new()
         } else {
             printed.join("\n") + "\n"
-        };
+        }
+    }
+
+    fn transfer(call: &str, held: i64, moves: i64) -> (Result<ActionTicks, ActionFailure>, String) {
+        let printed = run_handler(stub_game(held, moves), call);
+        let body = reply_body(&printed);
         let (lines, tick) = take_tick_stamp(split_reply(&body, true));
         (judge_transfer_reply(lines, tick), printed.join("\n"))
+    }
+
+    /// Enough of the API for `rcon_place_entity` to reach its refusal branches.
+    /// `can_place` decides which one: `false` with the player inside the
+    /// footprint is the `§player_blocks_placement§` case, and `held` at zero is
+    /// the "does not have any" case.
+    fn stub_place(can_place: bool, held: i64) -> String {
+        format!(
+            r#"
+            local function auto()
+                local t = {{}}
+                setmetatable(t, {{ __index = function(tbl, k)
+                    local v = auto(); rawset(tbl, k, v); return v
+                end }})
+                return t
+            end
+            defines = auto()
+            local function noop() end
+            local function nooptable()
+                return setmetatable({{}}, {{ __index = function() return noop end }})
+            end
+            script = nooptable()
+            remote = nooptable()
+            commands = nooptable()
+            helpers = nooptable()
+            require = function() return {{}} end
+            print = noop
+
+            _rcon_lines = {{}}
+            rcon = {{ print = function(s) _rcon_lines[#_rcon_lines + 1] = tostring(s) end }}
+
+            local surface = {{
+                can_place_entity = function(args) return {can_place} end,
+                create_entity = function(args) return nil end,
+                find_entity = function(name, pos) return nil end,
+            }}
+            local player = {{
+                name = "bot1",
+                -- Standing dead centre of the tile it is about to build on:
+                -- the live 2026-09-02 case.
+                position = {{ x = 38.3046875, y = 16.4765625 }},
+                force = "player",
+                surface = surface,
+                get_item_count = function(name) return {held} end,
+                remove_item = function(items) return items.count end,
+            }}
+            prototypes = {{ item = {{
+                ["stone-furnace"] = {{ place_result = {{
+                    name = "stone-furnace",
+                    collision_box = {{
+                        left_top = {{ x = -0.9, y = -0.9 }},
+                        right_bottom = {{ x = 0.9, y = 0.9 }},
+                    }},
+                }} }},
+            }} }}
+            game = {{
+                tick = {tick},
+                players = {{ player }},
+                forces = {{ player = {{ print = noop }} }},
+            }}
+        "#,
+            can_place = if can_place { "true" } else { "false" },
+            held = held,
+            tick = STUB_TICK,
+        )
+    }
+
+    const PLACE_FURNACE: &str = r#"rcon_place_entity(1, "stone-furnace", {38, 16}, 0)"#;
+
+    /// A refused placement is still a placement the game *judged*, so it has to
+    /// carry the tick it judged it at.
+    ///
+    /// Without the stamp the executor records the failure with no ticks at all,
+    /// and `record.actions` writes no `action_dispatched` and no
+    /// `action_settled` for it -- which is why the 2026-09-02 run's stuck
+    /// milestone has a 95-step plan, an error, and not one event naming the
+    /// step that produced it.
+    #[test]
+    fn a_refused_placement_still_stamps_the_tick_it_was_refused_at() {
+        for (can_place, held, expected) in [
+            (false, 1, "§player_blocks_placement§"),
+            (true, 0, "does not have any"),
+        ] {
+            let printed = run_handler(stub_place(can_place, held), PLACE_FURNACE);
+            let body = reply_body(&printed);
+            let (lines, tick) = take_tick_stamp(split_reply(&body, true));
+            assert_eq!(
+                tick,
+                Some(STUB_TICK),
+                "a refusal the game reached must carry its tick; it printed {printed:?}"
+            );
+            let lines = lines.expect("the refusal itself must survive the stamp being taken off");
+            assert_eq!(
+                lines.len(),
+                1,
+                "`place_entity_timed` reads a one-line reply; got {lines:?}"
+            );
+            assert!(
+                lines[0].contains(expected),
+                "expected {expected:?} in {lines:?}"
+            );
+        }
     }
 
     const REMOVE_TEN: &str = r#"rcon_remove_from_inventory(
@@ -3146,6 +3428,35 @@ mod transfer_guarantee_tests {
             let ticks = verdict.expect("a complete transfer must succeed");
             assert_eq!(ticks, ActionTicks::at(Some(STUB_TICK)));
         }
+    }
+
+    /// An action the mod fails must say something. `tostring(nil)` is "nil",
+    /// and "nil" is what the executor renders as the game's whole verdict --
+    /// `game rejected the command: Unexpected Response: nil`, which is what a
+    /// 2026-09-02 run reported for a mine two bots raced for.
+    ///
+    /// `print` is redirected into the same buffer the RCON stub uses, because
+    /// `writeout` -- the stdout channel `action_failed` writes on -- is `print`.
+    #[test]
+    fn a_failed_action_always_carries_words() {
+        let printed = run_handler(
+            stub_place(true, 1),
+            r#"
+            print = function(s) _rcon_lines[#_rcon_lines + 1] = tostring(s) end
+            action_failed(64738, 7)
+            action_failed(64738, 8, "ERROR: too far too mine")
+            "#,
+        );
+        assert_eq!(printed.len(), 2, "got {printed:?}");
+        assert!(
+            !printed[0].ends_with(" nil"),
+            "a missing reason must not reach the executor as the word \"nil\"; got {printed:?}"
+        );
+        assert!(printed[0].contains("without saying why"), "got {printed:?}");
+        assert!(
+            printed[1].ends_with("fail 8 ERROR: too far too mine"),
+            "a real reason must survive unchanged; got {printed:?}"
+        );
     }
 
     /// A run id is opaque by contract, so the quoting has to survive a value

@@ -833,7 +833,15 @@ function on_tick(event)
 					-- the entity to be mined has been deleted, but p[idx].mining is still true.
 					-- this means that on_mined_entity() has *not* been called, indicating that something
 					-- else has "stolen" what we actually wanted to mine :(
-					action_failed(event.tick, storage.p[idx].mining.action_id)
+					--
+					-- The reason is not optional. Called without one, `action_failed`
+					-- writes `tostring(nil)`, and the executor reads the whole verdict
+					-- as the literal string "nil" -- which is exactly what the
+					-- 2026-09-02 run reported for a copper-ore mine two bots raced
+					-- for: `game rejected the command: Unexpected Response: nil`.
+					action_failed(event.tick, storage.p[idx].mining.action_id,
+						"ERROR: the target " .. storage.p[idx].mining.prototype.name ..
+						" was gone before mining finished -- something else mined it first")
 					complain("failed to mine " .. storage.p[idx].mining.prototype.name)
 					storage.p[idx].mining = nil
 				end
@@ -1989,7 +1997,16 @@ function action_completed(tick, action_id)
 	writeout(tick, "action_completed", "ok "..action_id)
 end
 
+-- The executor reads `reason` as the whole verdict for the action, so a call
+-- that omits one used to send it the literal string "nil": a 2026-09-02 run
+-- reported `game rejected the command: Unexpected Response: nil` for a mine two
+-- bots raced for, and the word said nothing about what had happened. Every call
+-- site now passes a reason; this default is what keeps the next one that forgets
+-- from being indistinguishable from a real message.
 function action_failed(tick, action_id, reason)
+	if reason == nil then
+		reason = "ERROR: the mod failed this action without saying why"
+	end
 	writeout(tick, "action_completed", "fail "..action_id .. " " .. tostring(reason))
 end
 
@@ -2316,19 +2333,28 @@ function rcon_place_entity(player_id, item_name, entity_position, direction)
 	local player = game.players[player_id]
 	local surface = game.players[player_id].surface
 
+	-- Every exit below stamps the tick, including the refusals.
+	--
+	-- They used to return bare, so a placement the game had *judged* -- it ran
+	-- `can_place_entity` and said no -- came back with no tick on it. The
+	-- executor then recorded the failure with `dispatched_tick = nil`, and
+	-- `record.actions` writes nothing at all for an action with no ticks: the
+	-- 2026-09-02 research run has a 95-step plan, a failure, and not one
+	-- `action_dispatched` line explaining which step it was. `take_tick_stamp`
+	-- (crates/core/src/factorio/ticks.rs) lifts the stamp out of the reply
+	-- wherever it sits, so the callers that judge this reply by shape are
+	-- unaffected.
 	if entproto == nil then
 		complain("cannot place item '"..item_name.."' because place_result is nil")
+		stamp_tick()
 		return
 	end
 
 	if player.get_item_count(item_name) <= 0 then
 		complain("cannot place item '"..item_name.."' because the player '"..player.name.."' does not have any")
+		stamp_tick()
 		return
 	end
-
-	print("player position " .. helpers.table_to_json(player.position))
-	print("entproto.collision_box " .. helpers.table_to_json(entproto.collision_box))
-	print("entity_position " .. helpers.table_to_json(entity_position))
 
 	if not surface.can_place_entity{name=entproto.name, position=entity_position, direction=direction, force=player.force, build_check_type=defines.build_check_type.manual} then
 		local bb = add_to_bounding_box(expand_rect_floor_ceil(entproto.collision_box), {x = entity_position[1], y = entity_position[2]})
@@ -2337,6 +2363,7 @@ function rcon_place_entity(player_id, item_name, entity_position, direction)
 		else
 			rcon.print("cannot place item '"..item_name.."' because surface.can_place_entity said 'no'")
 		end
+		stamp_tick()
 		return
 	end
 

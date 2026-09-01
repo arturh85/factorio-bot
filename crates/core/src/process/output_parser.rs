@@ -12,7 +12,7 @@ use crate::types::{
     PlayerChangedDistanceEvent, PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent,
     PlayerId, Pos, Position, Rect,
 };
-use miette::{IntoDiagnostic, Result};
+use miette::{IntoDiagnostic, Result, miette};
 use serde::Deserialize;
 
 /// The payload of a `"teleport"` writeout, emitted by all three of
@@ -303,9 +303,18 @@ impl OutputParser {
                 }
             }
             "on_script_path_request_finished" => {
-                let parts: Vec<&str> = rest.split('#').collect();
-                let id: u32 = parts[0].parse().into_diagnostic()?;
-                self.world.path_requests.insert(id, String::from(parts[1]));
+                // `split_once`, not `split('#').collect()` then `parts[1]`:
+                // that indexing panics on a line with no `#` at all, taking
+                // the whole output parser down with it, and it truncated a
+                // payload that contained a second `#`. The result half is
+                // stored verbatim -- it is JSON on success and one of the
+                // mod's plain-text verdicts on failure, and it is
+                // `sleep_for_path_request_result`'s job to tell those apart.
+                let (id, result) = rest.split_once('#').ok_or_else(|| {
+                    miette!("on_script_path_request_finished without a '#': {rest}")
+                })?;
+                let id: u32 = id.parse().into_diagnostic()?;
+                self.world.path_requests.insert(id, String::from(result));
             }
             "STATIC_DATA_END" => {
                 // handled by OutputReader
@@ -468,5 +477,54 @@ impl OutputParser {
 
     pub fn world(&self) -> Arc<FactorioWorld> {
         self.world.clone()
+    }
+}
+
+#[cfg(test)]
+mod path_request_tests {
+    use super::*;
+
+    /// The result half is stored verbatim, `#` and all. It used to be
+    /// `split('#').collect()` with `parts[1]` read out, which kept only up to
+    /// the next `#` and panicked outright on a line that had none -- inside the
+    /// parser task, taking every later line down with it.
+    #[test]
+    fn a_result_containing_a_hash_is_stored_whole() {
+        let mut parser = OutputParser::new();
+        parser
+            .parse(1, "on_script_path_request_finished", "7#a#b")
+            .expect("a well-formed line parses");
+        assert_eq!(
+            parser.world().path_requests.get(&7).map(|v| v.clone()),
+            Some("a#b".to_string())
+        );
+    }
+
+    /// The mod's plain-text verdicts travel this way too, and reach
+    /// `sleep_for_path_request_result` unaltered -- it is that function's job
+    /// to tell them from JSON, not this one's.
+    #[test]
+    fn a_pathfinder_refusal_is_stored_as_the_mod_wrote_it() {
+        let mut parser = OutputParser::new();
+        parser
+            .parse(
+                1,
+                "on_script_path_request_finished",
+                "9#Error: try again later!",
+            )
+            .expect("a refusal parses");
+        assert_eq!(
+            parser.world().path_requests.get(&9).map(|v| v.clone()),
+            Some("Error: try again later!".to_string())
+        );
+    }
+
+    #[test]
+    fn a_line_with_no_separator_is_an_error_rather_than_a_panic() {
+        let mut parser = OutputParser::new();
+        let err = parser
+            .parse(1, "on_script_path_request_finished", "7")
+            .expect_err("a line with no '#' cannot be read");
+        assert!(err.to_string().contains("without a '#'"), "{err}");
     }
 }

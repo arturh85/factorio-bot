@@ -174,10 +174,21 @@ pub enum SatisfiedReason {
     /// [`SatisfiedReason::AlreadySatisfied`] in a record with only
     /// `iterations: 0` to go on, and not the same thing at all.
     PlanEmpty,
-    /// Recorded before this field existed. Readers must not treat this as
-    /// either of the other two variants -- defaulting an old run to
-    /// [`SatisfiedReason::AlreadySatisfied`] would be guessing precisely the
-    /// thing this type exists to stop guessing.
+    /// Recorded before this field existed. No live writer ever emits this --
+    /// it is only what an old file on disk deserialises to, via
+    /// [`SatisfiedReason::unknown`]'s `#[serde(default)]`. Readers must not
+    /// treat it as either of the other two variants -- defaulting an old run
+    /// to [`SatisfiedReason::AlreadySatisfied`] would be guessing precisely
+    /// the thing this type exists to stop guessing, and a live call site
+    /// guessing its way to `Unknown` would be the same mistake from the other
+    /// direction. `record.milestone_satisfied`'s Lua binding
+    /// (`crates/scripting_lua/src/globals/record.rs`) refuses any reason
+    /// string it does not recognise rather than falling back here, and
+    /// `scripts/supervisor.lua` never has this string to pass in the first
+    /// place -- the planner exposes no way for a script to check whether a
+    /// goal already holds independently of planning it, so an empty plan is
+    /// always reported as [`SatisfiedReason::PlanEmpty`], never guessed at as
+    /// [`SatisfiedReason::AlreadySatisfied`].
     #[serde(other)]
     Unknown,
 }

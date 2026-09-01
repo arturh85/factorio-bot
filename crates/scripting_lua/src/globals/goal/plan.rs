@@ -479,6 +479,19 @@ fn step_to_lua(lua: &Lua, net: &ActionNetwork, step: &ScheduledStep) -> LuaResul
             })?;
             t.set("id", action_id.0)?;
             t.set("label", label.clone())?;
+            // Predecessor ids, ascending -- what `record.plan_created` needs
+            // to draw the DAG rather than just a list of steps. Only actions
+            // have ids to depend on or to be depended on, so a walk (handled
+            // above, before this arm) carries no `deps` key at all rather
+            // than an empty one: the two would otherwise be indistinguishable
+            // to a reader, and only one of them is "this step waits on
+            // nothing".
+            let deps: Vec<u32> = net
+                .preds(action_id)
+                .into_iter()
+                .map(|(id, _)| id.0)
+                .collect();
+            t.set("deps", deps)?;
             match &act.kind {
                 ActionKind::Mine { pos, item, count } => {
                     t.set("kind", "mine")?;
@@ -1063,6 +1076,33 @@ mod tests {
             local ok, err = pcall(goal.plan, goal.have("iron-plate", 1), { bots = { 99 } })
             assert(not ok, "bot 99 is not a connected player")
             assert(tostring(err):find("99"), "the error names the bot: " .. tostring(err))
+        "#,
+        )
+        .exec()
+        .expect("script");
+    }
+
+    #[test]
+    fn every_action_step_carries_its_predecessor_ids() {
+        // `record.plan_created` needs the DAG, not just a step list: an
+        // action step's `deps` is the network's own `preds`, and a smelt
+        // chain (mine ore -> place furnace -> insert -> remove) has real
+        // edges to report. A walk carries no `deps` key at all -- it has no
+        // action id to be a predecessor of, or to depend on one.
+        let lua = lua_with_world(&[1, 2, 3, 4]);
+        lua.load(
+            r#"
+            local p = goal.plan(goal.have("iron-plate", 8))
+            local any_deps = false
+            for _, s in ipairs(p.steps) do
+                if s.kind == "walk" then
+                    assert(s.deps == nil, "a walk has no deps key")
+                else
+                    assert(type(s.deps) == "table", s.kind .. " must carry a deps table")
+                    if #s.deps > 0 then any_deps = true end
+                end
+            end
+            assert(any_deps, "a smelt chain has at least one real dependency edge")
         "#,
         )
         .exec()

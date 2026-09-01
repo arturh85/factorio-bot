@@ -52,6 +52,42 @@ function supervisor.list(goals)
     end
 end
 
+--- Shapes `plan.steps` (a `PlanValue`'s own field, or the stand-in a test
+-- stub hands back) into the array `record.plan_created` expects: `id`,
+-- `bot`, `action`, `deps`, `planned_start`, `planned_duration`.
+--
+-- Takes the steps array itself, not the plan, so a caller who already read
+-- `plan.steps` for its length (`#plan.steps`, below) does not pay for a
+-- second one: `PlanValue.steps` is a Lua field getter, and each read rebuilds
+-- the whole array from the schedule.
+--
+-- A step lacking `id` is skipped, not erroring -- a walk has no action id to
+-- report (see `record.actions`'s own comment on the same point), and a test
+-- stub's placeholder step is not a table at all. `deps` is read by type, not
+-- by truthiness: `Option::None` reaches Lua as mlua's null sentinel, which is
+-- light userdata and therefore truthy, so `s.deps or {}` would not substitute
+-- the empty table for a step whose `deps` came from such a bridge.
+local function plan_for_record(step_list)
+    local out = {}
+    for _, s in ipairs(step_list) do
+        if type(s) == "table" and s.id ~= nil then
+            local deps = {}
+            if type(s.deps) == "table" then
+                for _, d in ipairs(s.deps) do deps[#deps + 1] = d end
+            end
+            out[#out + 1] = {
+                id = s.id,
+                bot = s.bot,
+                action = s.label,
+                deps = deps,
+                planned_start = s.start,
+                planned_duration = (s.finish or s.start) - (s.start or 0),
+            }
+        end
+    end
+    return out
+end
+
 local Sup = {}
 Sup.__index = Sup
 
@@ -158,14 +194,48 @@ function Sup:step()
         -- propagates, costs no iteration, and is not retried -- retrying a typo
         -- burns the cap and then reports "stuck", which actively misleads.
         local plan = goal.plan(self.milestone, { bots = self.bots })
-        local steps = #plan.steps
+        local plan_steps = plan.steps
+        local steps = #plan_steps
+        -- Shaped once and carried on `t.plan` for either outcome below, so a
+        -- driver can call `record.plan_created(t.milestone_index, t.plan)`
+        -- whenever the field is present -- this loop never calls `record.*`
+        -- itself (see the module comment), so it hands over the data rather
+        -- than the call.
+        local plan_for_recording = plan_for_record(plan_steps)
 
         if steps == 0 then
             self:_close("satisfied")
             self.state = "acquiring"
             return { action = "satisfied", state = "acquiring",
                      milestone_index = self.index, steps = 0,
-                     iteration = self.iterations }
+                     iteration = self.iterations,
+                     plan = plan_for_recording,
+                     -- Always "plan_empty", never "already_satisfied" --
+                     -- and not a coin flip, a real investigation with a real
+                     -- answer. `crates/planner`'s method registry claims a
+                     -- `Have`/`Researched` goal as already met
+                     -- (`AlreadySatisfied`) before any other method is even
+                     -- consulted, and every other method refuses to apply at
+                     -- all unless there is a real shortfall -- so *within
+                     -- that registry*, today, an empty plan only ever means
+                     -- the goal already held. But that is an internal
+                     -- invariant of the planner crate, not a contract this
+                     -- `goal.*` surface exposes: there is no binding that
+                     -- answers "does this goal already hold" independently of
+                     -- planning it, so this loop has no way to check the
+                     -- invariant, only to assume it -- and asserting
+                     -- "already_satisfied" on an assumption it cannot verify
+                     -- is exactly the guess `SatisfiedReason` exists to rule
+                     -- out. So this reports the one fact it actually
+                     -- observed: the plan came back with nothing in it.
+                     -- Distinguishing the two for real needs a `goal`
+                     -- binding that checks satisfaction without planning
+                     -- (nothing in `crates/scripting_lua/src/globals/goal/`
+                     -- offers one today), or a way to tell "no applicable
+                     -- method but the caller's goal is a vacuous `all{}`"
+                     -- apart from "AlreadySatisfied fired for everything" --
+                     -- either is a planner-side change, not a Lua-side one.
+                     reason = "plan_empty" }
         end
 
         self.plan = plan
@@ -177,6 +247,7 @@ function Sup:step()
             action = "planned", milestone_index = self.index, steps = steps,
             best = self.tracker.best, stall = self.tracker.stall,
             iteration = self.iterations,
+            plan = plan_for_recording,
         }
 
         -- The stall and the cap mean opposite things and must not share a

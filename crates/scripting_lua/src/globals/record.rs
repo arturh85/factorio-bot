@@ -19,8 +19,11 @@ use factorio_bot_core::parking_lot::Mutex;
 use factorio_bot_core::record::map::{
     EntitySnapshot, MapKind, MapRecord, Placement, divergence_between,
 };
-use factorio_bot_core::record::{EventKind, RunRecorder, SatisfiedReason};
+use factorio_bot_core::record::{
+    ActionFailure, EventKind, FailureKind, PlannedStep, RunRecorder, SatisfiedReason,
+};
 use factorio_bot_core::types::{AreaFilter, PlayerId, Position, Rect};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -61,6 +64,103 @@ fn placement_from_lua(t: &LuaTable) -> LuaResult<Placement> {
         actual: entity_snapshot_from_lua(&actual)?,
         drift,
     })
+}
+
+/// Reads one [`PlannedStep`] off a Lua table shaped by `plan_for_record` in
+/// `scripts/supervisor.lua` -- `id`, `bot`, `action`, `deps`, `planned_start`,
+/// `planned_duration`.
+///
+/// `deps` is read by type, not by truthiness. A step this crate's own
+/// `step_to_lua` (`goal/plan.rs`) never gave a `deps` key at all (a walk) is a
+/// real absent key here and reads as an ordinary Lua `nil` -- but the same
+/// field on a table built by round-tripping an `Option<Vec<u32>>` through a
+/// Rust `serde` bridge elsewhere in this workspace would instead be mlua's
+/// null sentinel, light userdata that is truthy. `local x = t.deps or {}`
+/// would not substitute the default in that case, so the type is checked
+/// explicitly instead of relying on `or`.
+fn planned_step_from_lua(t: &LuaTable) -> LuaResult<PlannedStep> {
+    let id: u32 = t.get("id")?;
+    let bot: u32 = t.get("bot")?;
+    let action: String = t.get("action")?;
+    let deps: Vec<u32> = match t.get::<LuaValue>("deps")? {
+        LuaValue::Table(deps) => deps
+            .sequence_values::<u32>()
+            .collect::<LuaResult<Vec<_>>>()?,
+        _ => Vec::new(),
+    };
+    let planned_start: u64 = t.get("planned_start")?;
+    let planned_duration: u64 = t.get("planned_duration")?;
+    Ok(PlannedStep {
+        id,
+        bot,
+        action,
+        deps,
+        planned_start,
+        planned_duration,
+    })
+}
+
+/// Parses `record.milestone_satisfied`'s third argument.
+///
+/// Never produces [`SatisfiedReason::Unknown`]: that variant means "recorded
+/// before this field existed", a fact about an old file on disk, and is not
+/// something a live call can mean to say. A caller passing anything else is
+/// refused by name instead of being folded into `Unknown` -- doing that would
+/// make every future reader unable to trust that the value ever meant what it
+/// says.
+fn parse_satisfied_reason(reason: &str) -> LuaResult<SatisfiedReason> {
+    match reason {
+        "already_satisfied" => Ok(SatisfiedReason::AlreadySatisfied),
+        "plan_empty" => Ok(SatisfiedReason::PlanEmpty),
+        other => Err(record_error(format!(
+            "milestone_satisfied: unknown reason \"{other}\"; expected \"already_satisfied\" or \"plan_empty\""
+        ))),
+    }
+}
+
+/// Classifies a settled action's error text into a coarse [`FailureKind`].
+///
+/// Matched against the outer `ActuatorError` wording
+/// (`crates/executor/src/actuator.rs`) and the inner mod/rcon text it wraps
+/// (`crates/core/src/errors.rs`) -- as plain substrings, deliberately, rather
+/// than a dependency on either crate's error types: this classifier only
+/// needs to read text that already crossed the Lua boundary as a `String`,
+/// and a substring match degrades to [`FailureKind::Other`] instead of
+/// failing outright when the wording moves. Only the four outer
+/// `ActuatorError` formats are pinned by a test on the producing side
+/// (`crates/executor/src/actuator.rs`); the inner text is not, so a wording
+/// change there is the first thing to check if a failure starts landing in
+/// `Other` that used to classify correctly.
+fn classify_failure(error: &str) -> ActionFailure {
+    let kind = if error.contains("no action result received in time") {
+        FailureKind::Timeout
+    } else if error.contains("no path to")
+        || error.contains("tile arrival tolerance")
+        || error.contains("tile resource reach")
+    {
+        FailureKind::Unreachable
+    } else if error.contains("player still blocks placement")
+        || error.contains("player blocks placement in all directions")
+    {
+        FailureKind::Blocked
+    } else if error.contains("does not have any") {
+        FailureKind::MissingItem
+    } else if error.contains("game rejected the command") {
+        FailureKind::Rejected
+    } else {
+        FailureKind::Other
+    };
+    // The item name, for `MissingItem` only -- the mod's own wording is
+    // `cannot place item '<item>' because the player '<name>' does not have
+    // any`, so the text between the first pair of single quotes is the item.
+    // Anything else is left with no detail rather than a guess: `error`
+    // beside this field already carries the whole message for a person to
+    // read.
+    let detail = (kind == FailureKind::MissingItem)
+        .then(|| error.split('\'').nth(1))
+        .flatten()
+        .map(str::to_string);
+    ActionFailure { kind, detail }
 }
 
 /// Records a *live* event: stamped with the game's clock, never earlier than
@@ -243,8 +343,11 @@ end
 --- records that a milestone was reached
 -- @number index the milestone's position in the run, from 1
 -- @number iterations how many plan/run cycles it took
--- @raise if no recording is running
-function record.milestone_satisfied(index, iterations)
+-- @string reason why no further work was needed: `"already_satisfied"` (the
+--   world already met the goal before planning was attempted) or
+--   `"plan_empty"` (the planner produced no steps)
+-- @raise if no recording is running, or `reason` is not one of the above
+function record.milestone_satisfied(index, iterations, reason)
 end
     "#,
         ),
@@ -254,20 +357,73 @@ end
         let rcon = rcon.clone();
         map_table.set(
             "milestone_satisfied",
-            lua.create_function(move |_lua, (index, iterations): (u32, u32)| {
+            lua.create_function(
+                move |_lua, (index, iterations, reason): (u32, u32, String)| {
+                    let reason = parse_satisfied_reason(&reason)?;
+                    record_live(
+                        &slot,
+                        &rcon,
+                        EventKind::MilestoneSatisfied {
+                            index,
+                            iterations,
+                            reason,
+                        },
+                    )
+                },
+            )?,
+        )?;
+    }
+
+    map_table.set(
+        "__doc_entry_plan_created",
+        String::from(
+            r#"
+--- records the plan the scheduler produced for a milestone
+-- Takes an array of step tables -- `id`, `bot`, `action`, `deps` (an array of
+-- step ids this one waits on), `planned_start`, `planned_duration` -- so a
+-- run's record shows what was planned, not only what happened. `steps`,
+-- `makespan` and `bots` are derived from `plan` itself rather than taken as
+-- separate arguments, so nothing here can disagree with what was actually
+-- recorded: `steps` is `plan`'s length, `makespan` the latest
+-- `planned_start + planned_duration` across every entry (0 for an empty
+-- plan), and `bots` the distinct bot ids it names, ascending.
+-- @number index the milestone's position in the run, from 1
+-- @tparam table plan an array of step tables
+-- @raise if no recording is running
+function record.plan_created(index, plan)
+end
+    "#,
+        ),
+    )?;
+    {
+        let slot = slot.clone();
+        let rcon = rcon.clone();
+        map_table.set(
+            "plan_created",
+            lua.create_function(move |_lua, (index, plan): (u32, LuaTable)| {
+                let mut steps: Vec<PlannedStep> = Vec::new();
+                let mut bots: BTreeSet<u32> = BTreeSet::new();
+                let mut makespan: u64 = 0;
+                for step in plan.sequence_values::<LuaTable>() {
+                    let planned = planned_step_from_lua(&step?)?;
+                    bots.insert(planned.bot);
+                    makespan = makespan.max(
+                        planned
+                            .planned_start
+                            .saturating_add(planned.planned_duration),
+                    );
+                    steps.push(planned);
+                }
+                let step_count = u32::try_from(steps.len()).unwrap_or(u32::MAX);
                 record_live(
                     &slot,
                     &rcon,
-                    EventKind::MilestoneSatisfied {
-                        index,
-                        iterations,
-                        // The supervisor does not yet tell this binding
-                        // *why* -- that is `record.milestone_satisfied`'s
-                        // third argument, added once the caller in
-                        // `supervisor.lua` has the answer. Until then this
-                        // is the honest value: not a guess at either real
-                        // reason.
-                        reason: SatisfiedReason::Unknown,
+                    EventKind::PlanCreated {
+                        milestone_index: index,
+                        steps: step_count,
+                        makespan,
+                        bots: bots.into_iter().collect(),
+                        plan: steps,
                     },
                 )
             })?,
@@ -378,6 +534,14 @@ end
                         written += 1;
                     }
                     if let Some(replied) = replied {
+                        // `None` only on a genuine success: a settle this
+                        // codebase does not spell `"success"` is a failure of
+                        // some kind, even one the classifier cannot name yet,
+                        // and `FailureKind::Other` says so instead of leaving
+                        // `failure` permanently unwritten the way it was
+                        // before this classifier existed.
+                        let failure = (status != "success")
+                            .then(|| classify_failure(error.as_deref().unwrap_or("")));
                         recorder
                             .record(
                                 replied,
@@ -387,12 +551,7 @@ end
                                     status,
                                     elapsed_ticks: dispatched.map(|d| replied.saturating_sub(d)),
                                     error,
-                                    // The observation this joins against
-                                    // carries only a status string and an
-                                    // error string today -- no classified
-                                    // kind yet, so there is nothing honest to
-                                    // put here but `None`.
-                                    failure: None,
+                                    failure,
                                 },
                             )
                             .map_err(record_error)?;
@@ -633,6 +792,258 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    fn read_events(dir: &std::path::Path) -> Vec<EventKind> {
+        factorio_bot_core::record::read_events(&dir.join("events.jsonl"))
+            .expect("events.jsonl readable")
+            .events
+            .into_iter()
+            .map(|event| event.kind)
+            .collect()
+    }
+
+    // ------------------------------------------------------------- plan_created
+
+    #[test]
+    fn plan_created_derives_steps_makespan_and_bots_from_the_plan_itself() {
+        let (lua, _tmp, run_dir) = recording_lua();
+        lua.load(
+            r#"
+            record.plan_created(1, {
+                { id = 1, bot = 2, action = "mine 10 iron-ore", deps = {},
+                  planned_start = 0, planned_duration = 300 },
+                { id = 2, bot = 1, action = "smelt 10 iron-plate", deps = { 1 },
+                  planned_start = 300, planned_duration = 600 },
+            })
+            "#,
+        )
+        .exec()
+        .expect("plan_created runs");
+
+        let events = read_events(&run_dir);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            EventKind::PlanCreated {
+                milestone_index,
+                steps,
+                makespan,
+                bots,
+                plan,
+            } => {
+                assert_eq!(*milestone_index, 1);
+                assert_eq!(*steps, 2);
+                assert_eq!(
+                    *makespan, 900,
+                    "the latest planned_start + planned_duration"
+                );
+                assert_eq!(*bots, vec![1, 2], "distinct bots, ascending");
+                assert_eq!(plan[0].id, 1);
+                assert_eq!(plan[0].deps, Vec::<u32>::new());
+                assert_eq!(plan[1].deps, vec![1]);
+                assert_eq!(plan[1].action, "smelt 10 iron-plate");
+            }
+            other => panic!("expected plan_created, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_created_treats_a_step_with_no_deps_key_as_an_empty_list() {
+        // `deps` is read by type, not by truthiness -- a step that never had
+        // the key set at all (a plain Lua table missing a key, not a
+        // Rust->Lua `Option::None`) must not raise, and must not silently
+        // become truthy either.
+        let (lua, _tmp, run_dir) = recording_lua();
+        lua.load(
+            r#"
+            record.plan_created(1, {
+                { id = 1, bot = 1, action = "walk", planned_start = 0, planned_duration = 10 },
+            })
+            "#,
+        )
+        .exec()
+        .expect("plan_created runs without a deps key");
+
+        let events = read_events(&run_dir);
+        match &events[0] {
+            EventKind::PlanCreated { plan, .. } => assert_eq!(plan[0].deps, Vec::<u32>::new()),
+            other => panic!("expected plan_created, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_created_of_an_empty_plan_is_zero_steps_and_zero_makespan() {
+        let (lua, _tmp, run_dir) = recording_lua();
+        lua.load("record.plan_created(3, {})")
+            .exec()
+            .expect("plan_created runs");
+        let events = read_events(&run_dir);
+        match &events[0] {
+            EventKind::PlanCreated {
+                milestone_index,
+                steps,
+                makespan,
+                bots,
+                plan,
+            } => {
+                assert_eq!(*milestone_index, 3);
+                assert_eq!(*steps, 0);
+                assert_eq!(*makespan, 0);
+                assert!(bots.is_empty());
+                assert!(plan.is_empty());
+            }
+            other => panic!("expected plan_created, got {other:?}"),
+        }
+    }
+
+    // ------------------------------------------------------- milestone_satisfied
+
+    #[test]
+    fn milestone_satisfied_accepts_both_documented_reasons() {
+        let (lua, _tmp, run_dir) = recording_lua();
+        lua.load(
+            r#"
+            record.milestone_satisfied(1, 0, "already_satisfied")
+            record.milestone_satisfied(2, 3, "plan_empty")
+            "#,
+        )
+        .exec()
+        .expect("both reasons are accepted");
+
+        let events = read_events(&run_dir);
+        let reasons: Vec<SatisfiedReason> = events
+            .iter()
+            .map(|e| match e {
+                EventKind::MilestoneSatisfied { reason, .. } => *reason,
+                other => panic!("expected milestone_satisfied, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            reasons,
+            vec![
+                SatisfiedReason::AlreadySatisfied,
+                SatisfiedReason::PlanEmpty,
+            ]
+        );
+    }
+
+    #[test]
+    fn milestone_satisfied_refuses_an_unrecognised_reason_rather_than_guessing_unknown() {
+        // `SatisfiedReason::Unknown` means "recorded before this field
+        // existed" -- a live caller passing garbage must be told so, not
+        // quietly folded into that meaning.
+        let (lua, _tmp, _run_dir) = recording_lua();
+        let err = lua
+            .load(r#"record.milestone_satisfied(1, 0, "who_knows")"#)
+            .exec()
+            .expect_err("an unrecognised reason must raise");
+        let message = err.to_string();
+        assert!(message.contains("who_knows"), "{message}");
+    }
+
+    // -------------------------------------------------------- failure classification
+
+    /// `record.actions`' shared step script, parameterised on `status` and
+    /// `error` so each classification case is one call rather than a fresh
+    /// literal.
+    fn settled_step_script(status: &str, error_lua: &str) -> String {
+        format!(
+            r#"
+            local steps = {{ {{ id = 1, bot = 1, label = "act" }} }}
+            local actions = {{
+                [1] = {{ status = "{status}", dispatched_tick = 10, replied_tick = 20,
+                         error = {error_lua} }},
+            }}
+            record.actions(steps, actions)
+            "#
+        )
+    }
+
+    fn recorded_failure(status: &str, error_lua: &str) -> Option<ActionFailure> {
+        let (lua, _tmp, run_dir) = recording_lua();
+        lua.load(settled_step_script(status, error_lua))
+            .exec()
+            .expect("record.actions runs");
+        let events = read_events(&run_dir);
+        // events[0] is the dispatch; the settle -- and its `failure` -- is
+        // the second line `record.actions` writes for one action with both
+        // ticks present.
+        match &events[1] {
+            EventKind::ActionSettled { failure, .. } => failure.clone(),
+            other => panic!("expected action_settled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_successful_settle_carries_no_failure() {
+        assert_eq!(recorded_failure("success", "nil"), None);
+    }
+
+    #[test]
+    fn an_unclassified_failure_falls_back_to_other_rather_than_none() {
+        assert_eq!(
+            recorded_failure("failed", r#""something nobody has seen before""#),
+            Some(ActionFailure {
+                kind: FailureKind::Other,
+                detail: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_timeout_is_classified_from_the_no_verdict_wording() {
+        assert_eq!(
+            recorded_failure(
+                "failed",
+                r#""the game reported no readable outcome: no action result received in time""#
+            ),
+            Some(ActionFailure {
+                kind: FailureKind::Timeout,
+                detail: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_blocked_placement_is_classified_from_the_mods_own_wording() {
+        assert_eq!(
+            recorded_failure(
+                "failed",
+                r#""game rejected the command: player still blocks placement""#
+            ),
+            Some(ActionFailure {
+                kind: FailureKind::Blocked,
+                detail: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_missing_item_is_classified_and_names_the_item_in_detail() {
+        assert_eq!(
+            recorded_failure(
+                "failed",
+                r#""cannot place item 'iron-plate' because the player 'bot1' does not have any""#
+            ),
+            Some(ActionFailure {
+                kind: FailureKind::MissingItem,
+                detail: Some("iron-plate".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn an_otherwise_unclassified_rejection_is_still_rejected() {
+        assert_eq!(
+            recorded_failure(
+                "failed",
+                r#""game rejected the command: cannot insert to inventory of nonexisting entity""#
+            ),
+            Some(ActionFailure {
+                kind: FailureKind::Rejected,
+                detail: None,
+            })
+        );
     }
 
     /// The shape `goal.run`'s `build_observation` produces for one action,

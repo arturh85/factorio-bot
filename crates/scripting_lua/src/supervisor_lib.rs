@@ -37,6 +37,14 @@ mod tests {
     ///
     /// `plan_steps` entries are step counts; the string `"raise"` makes
     /// `goal.plan` raise, standing in for an unknown item or technology.
+    ///
+    /// Each scheduled step is a real table -- `id`, `bot`, `label`, `start`,
+    /// `finish` -- in the shape `PlanValue.steps` (`goal/plan.rs`) actually
+    /// hands back, chained `id = i - 1` depends on `id = i - 2` so `deps` has
+    /// something to carry, not bare integers: `Sup:step()` now reads these
+    /// fields to build `t.plan` for `record.plan_created`, and a stub that
+    /// stayed at "steps are just their own index" would pass while the real
+    /// field-by-field read it exercises stayed untested.
     fn harness(plan_steps: &str, run_obs: &str) -> Lua {
         let lua = sandboxed();
         let stub = r#"
@@ -60,7 +68,13 @@ mod tests {
                 if n == nil then error("stub: no scripted plan #" .. __plan_calls) end
                 if n == "raise" then error("stub: unknown item") end
                 local steps = {}
-                for i = 1, n do steps[i] = i end
+                for i = 1, n do
+                    steps[i] = {
+                        id = i, bot = 1, label = "step " .. i,
+                        start = (i - 1) * 10, finish = i * 10,
+                        deps = (i > 1) and { i - 1 } or {},
+                    }
+                end
                 return { steps = steps }
             end
             goal.run = function(_plan)
@@ -398,6 +412,102 @@ mod tests {
         assert!(
             calls[0].contains("rcon: connection reset"),
             "the original error must survive into what gets reported, got: {calls:?}"
+        );
+    }
+
+    // ---- Layer 3: what `t` exposes for a driver's `record.*` calls -------
+
+    #[test]
+    fn a_milestone_satisfied_by_an_empty_plan_records_the_reason() {
+        // The supervisor treats an empty plan as satisfaction. It must say
+        // so: "already done" and "the planner gave up" must not collapse
+        // into the same recorded line. `Sup:step()` itself never calls
+        // `record.*` (see the module comment on `supervisor.lua`) -- it
+        // returns `t.reason`, and this test plays the driver's part of
+        // forwarding it, exactly as `scripts/research_run.lua` does.
+        let lua = harness("{0}", "{}");
+        lua.load(
+            r#"
+            __satisfied = {}
+            record.milestone_satisfied = function(index, iterations, reason)
+                table.insert(__satisfied, { index = index, iterations = iterations, reason = reason })
+            end
+            local sup = supervisor.new(supervisor.list {"a"}, {})
+            repeat
+                local t = sup:step()
+                if t.action == "satisfied" then
+                    record.milestone_satisfied(t.milestone_index, t.iteration or 0, t.reason)
+                end
+            until sup:finished()
+            "#,
+        )
+        .exec()
+        .expect("driver runs");
+        let reason: String = lua
+            .load("return __satisfied[1].reason")
+            .eval()
+            .expect("reason recorded");
+        assert_eq!(reason, "plan_empty");
+    }
+
+    #[test]
+    fn a_satisfied_transition_still_carries_a_plan_table_even_though_it_is_empty() {
+        // `record.plan_created` should still be reachable for the zero-step
+        // case -- "the planner ran and returned nothing" is itself worth
+        // recording, not only the non-empty case.
+        let lua = harness("{0}", "{}");
+        lua.load(
+            r#"
+            local sup = supervisor.new(supervisor.list {"a"}, {})
+            local t = sup:step() -- acquired
+            t = sup:step() -- satisfied: the planner returned nothing
+            __action = t.action
+            __plan_type = type(t.plan)
+            __plan_len = #t.plan
+            "#,
+        )
+        .exec()
+        .expect("driver runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__action").unwrap(), "satisfied");
+        assert_eq!(g.get::<String>("__plan_type").unwrap(), "table");
+        assert_eq!(g.get::<i64>("__plan_len").unwrap(), 0);
+    }
+
+    #[test]
+    fn a_planned_transition_exposes_steps_shaped_for_record_plan_created() {
+        let lua = harness("{2, 0}", "{}");
+        lua.load(
+            r#"
+            local sup = supervisor.new(supervisor.list {"a"}, {})
+            local t = sup:step() -- acquired
+            t = sup:step() -- planned
+            __action = t.action
+            __plan = t.plan
+            "#,
+        )
+        .exec()
+        .expect("driver runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__action").unwrap(), "planned");
+        let plan: mlua::Table = g.get("__plan").unwrap();
+        assert_eq!(plan.raw_len(), 2, "two scheduled steps");
+        let first: mlua::Table = plan.get(1).unwrap();
+        assert_eq!(first.get::<u32>("id").unwrap(), 1);
+        assert_eq!(first.get::<u32>("bot").unwrap(), 1);
+        assert_eq!(first.get::<String>("action").unwrap(), "step 1");
+        assert_eq!(first.get::<u64>("planned_start").unwrap(), 0);
+        assert_eq!(first.get::<u64>("planned_duration").unwrap(), 10);
+        let first_deps: mlua::Table = first.get("deps").unwrap();
+        assert_eq!(first_deps.raw_len(), 0, "the first step waits on nothing");
+
+        let second: mlua::Table = plan.get(2).unwrap();
+        let second_deps: mlua::Table = second.get("deps").unwrap();
+        assert_eq!(second_deps.raw_len(), 1);
+        assert_eq!(
+            second_deps.get::<u32>(1).unwrap(),
+            1,
+            "step 2 waits on step 1"
         );
     }
 

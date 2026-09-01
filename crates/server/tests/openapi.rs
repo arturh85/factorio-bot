@@ -127,6 +127,7 @@ const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[
     ("get", "/api/v1/runs/{id}"),
     ("get", "/api/v1/runs/{id}/events"),
     ("get", "/api/v1/runs/{id}/frames"),
+    ("get", "/api/v1/runs/{id}/lanes"),
     ("get", "/api/v1/runs/{id}/frames/{bot}/{name}"),
 ];
 // `/api/v1/frames/{client}/{name}` is registered unconditionally by `manage::router`
@@ -138,6 +139,7 @@ const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[
     ("get", "/api/v1/runs/{id}"),
     ("get", "/api/v1/runs/{id}/events"),
     ("get", "/api/v1/runs/{id}/frames"),
+    ("get", "/api/v1/runs/{id}/lanes"),
     ("get", "/api/v1/runs/{id}/frames/{bot}/{name}"),
 ];
 
@@ -194,6 +196,7 @@ async fn openapi_json_lists_every_route() {
         "/api/v1/runs/{id}",
         "/api/v1/runs/{id}/events",
         "/api/v1/runs/{id}/frames",
+        "/api/v1/runs/{id}/lanes",
         "/api/v1/runs/{id}/frames/{bot}/{name}",
         // Management
         "/api/v1/settings",

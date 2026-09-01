@@ -7,7 +7,7 @@
  * in a way you would not notice by looking.
  */
 
-import {ArchivedFrame, Split} from '@/api/types';
+import {ArchivedFrame, Lane, Split} from '@/api/types';
 
 /** A frame that can be placed on the axis: one whose filename parsed. */
 export interface PlacedFrame extends ArchivedFrame {
@@ -80,7 +80,8 @@ export function frameAt(
  */
 export function tickBounds(
     splits: Split[],
-    frames: PlacedFrame[]
+    frames: PlacedFrame[],
+    lanes: Lane[] = []
 ): {from: number; to: number} | null {
     const ticks: number[] = [];
     for (const split of splits) {
@@ -88,6 +89,10 @@ export function tickBounds(
         if (split.ended_tick !== null) ticks.push(split.ended_tick);
     }
     for (const frame of frames) ticks.push(frame.tick);
+    for (const lane of lanes) {
+        ticks.push(lane.from_tick);
+        if (lane.to_tick !== null) ticks.push(lane.to_tick);
+    }
     if (ticks.length === 0) return null;
     return {from: Math.min(...ticks), to: Math.max(...ticks)};
 }
@@ -154,4 +159,27 @@ export function formatTicks(ticks: number | null): string {
     return minutes > 0
         ? `${minutes}m ${seconds.toFixed(1)}s`
         : `${seconds.toFixed(1)}s`;
+}
+
+/** The bots that have lane entries, ascending. */
+export function laneBots(lanes: Lane[]): number[] {
+    return [...new Set(lanes.map((l) => l.bot))].sort((a, b) => a - b);
+}
+
+/**
+ * What a bot was doing at `tick`, or `null` when it was between actions.
+ *
+ * An unterminated span (dispatched, never settled) covers everything from its
+ * start onward: as far as the record goes, the bot never stopped doing it.
+ * Treating it as instantaneous would show the bot idle during exactly the
+ * stretch something went wrong.
+ */
+export function laneAt(lanes: Lane[], bot: number, tick: number): Lane | null {
+    for (const lane of lanes) {
+        if (lane.bot !== bot) continue;
+        if (lane.from_tick > tick) continue;
+        if (lane.to_tick !== null && tick > lane.to_tick) continue;
+        return lane;
+    }
+    return null;
 }

@@ -1,6 +1,8 @@
 import {describe, expect, it} from 'vitest';
 import {
     botsOf,
+    laneAt,
+    laneBots,
     camerasOf,
     compareSplits,
     formatTicks,
@@ -184,5 +186,41 @@ describe('formatTicks', () => {
 
     it('shows an em dash rather than a zero for an unknown duration', () => {
         expect(formatTicks(null)).toBe('—');
+    });
+});
+
+describe('lanes', () => {
+    const lane = (
+        bot: number,
+        id: number,
+        action: string,
+        from: number,
+        to: number | null,
+        status: string | null = 'success'
+    ) => ({bot, id, action, from_tick: from, to_tick: to, status, error: null});
+
+    it('lists the bots that did something', () => {
+        expect(laneBots([lane(2, 0, 'a', 0, 1), lane(1, 0, 'b', 0, 1)])).toEqual([1, 2]);
+    });
+
+    it('finds what a bot was doing at a tick', () => {
+        const lanes = [lane(1, 0, 'mine', 100, 500), lane(1, 1, 'craft', 500, 900)];
+        expect(laneAt(lanes, 1, 200)?.action).toBe('mine');
+        expect(laneAt(lanes, 1, 700)?.action).toBe('craft');
+    });
+
+    it('is null when the bot was between actions', () => {
+        expect(laneAt([lane(1, 0, 'mine', 100, 200)], 1, 900)).toBeNull();
+    });
+
+    it('treats an unterminated span as still running', () => {
+        // Showing the bot idle for exactly the stretch something went wrong
+        // would hide the failure rather than reveal it.
+        expect(laneAt([lane(1, 0, 'mine', 100, null, null)], 1, 99999)?.action).toBe('mine');
+    });
+
+    it('extends the axis to cover lanes', () => {
+        const bounds = tickBounds([], [], [lane(1, 0, 'mine', 50, 800)]);
+        expect(bounds).toEqual({from: 50, to: 800});
     });
 });

@@ -46,6 +46,8 @@ beforeEach(() => {
     vi.mocked(client.listRuns).mockReset();
     vi.mocked(client.getRun).mockReset();
     vi.mocked(client.getRunFrames).mockReset();
+    vi.mocked(client.getRunLanes).mockReset();
+    vi.mocked(client.getRunLanes).mockResolvedValue({lanes: []});
 });
 
 describe('loadRuns', () => {

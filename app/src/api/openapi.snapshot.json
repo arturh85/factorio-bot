@@ -1292,6 +1292,60 @@
         ],
         "type": "string"
       },
+      "Lane": {
+        "description": "One thing a bot did, placed on the tick axis.",
+        "properties": {
+          "action": {
+            "description": "What the plan called it, e.g. `mine 4 iron-ore`.",
+            "type": "string"
+          },
+          "bot": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "from_tick": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "description": "The action id. Not unique across a run: ids restart per plan, so this\nidentifies an entry only together with `bot` and `from_tick`.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "description": "`null` while unterminated, otherwise the verdict the game gave.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to_tick": {
+            "description": "`null` for an action that was dispatched and never settled.\n\nDrawn unterminated rather than dropped: the bot really did start it and\nnothing ever came back, which is a state worth seeing. Dropping it would\nmake a lost action look like one that never happened.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "bot",
+          "id",
+          "action",
+          "from_tick"
+        ],
+        "type": "object"
+      },
       "MovePlayerBody": {
         "properties": {
           "goal": {
@@ -1494,6 +1548,22 @@
         },
         "required": [
           "frames"
+        ],
+        "type": "object"
+      },
+      "RunLanesResponse": {
+        "description": "`GET /api/v1/runs/{id}/lanes` response.",
+        "properties": {
+          "lanes": {
+            "description": "What each bot did, in dispatch order.",
+            "items": {
+              "$ref": "#/components/schemas/Lane"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "lanes"
         ],
         "type": "object"
       },
@@ -3138,6 +3208,58 @@
           }
         },
         "summary": "One archived frame's bytes.",
+        "tags": [
+          "Runs"
+        ]
+      }
+    },
+    "/api/v1/runs/{id}/lanes": {
+      "get": {
+        "operationId": "get_run_lanes",
+        "parameters": [
+          {
+            "description": "the run id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunLanesResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "What each bot did, derived from the run's event log.",
         "tags": [
           "Runs"
         ]

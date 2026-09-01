@@ -351,3 +351,33 @@ export interface ArchivedFrame {
 export interface RunFramesResponse {
     frames: ArchivedFrame[];
 }
+
+/** One thing a bot did, placed on the tick axis. */
+export interface Lane {
+    bot: number;
+    /**
+     * The action id. **Not unique across a run** -- ids restart with every
+     * plan, so this identifies an entry only together with `bot` and
+     * `from_tick`.
+     */
+    id: number;
+    /** What the plan called it, e.g. `mine 4 iron-ore`. */
+    action: string;
+    from_tick: number;
+    /**
+     * `null` for an action dispatched and never settled.
+     *
+     * Drawn unterminated rather than dropped: the bot really did start it and
+     * nothing came back. Dropping it would make a lost action look like one
+     * that never happened.
+     */
+    to_tick: number | null;
+    /** `null` while unterminated, otherwise the verdict the game gave. */
+    status: string | null;
+    error: string | null;
+}
+
+/** `GET /api/v1/runs/{id}/lanes` response. */
+export interface RunLanesResponse {
+    lanes: Lane[];
+}

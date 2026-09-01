@@ -60,7 +60,9 @@ import type {
     Job,
     JobStatus,
     RunDetail,
+    Lane,
     RunFramesResponse,
+    RunLanesResponse,
     RunSummary,
     RunsResponse,
     ScriptContent,
@@ -152,6 +154,13 @@ const OPERATIONS: readonly OperationContract[] = [
         caller: 'getRunFrames',
         pathParams: ['id'],
         response: {status: '200', schema: 'RunFramesResponse'}
+    },
+    {
+        path: '/api/v1/runs/{id}/lanes',
+        method: 'get',
+        caller: 'getRunLanes',
+        pathParams: ['id'],
+        response: {status: '200', schema: 'RunLanesResponse'}
     },
     {
         path: '/api/v1/settings',
@@ -498,6 +507,20 @@ const SCHEMAS: Record<string, SchemaContract> = {
         ended_tick: {required: false, type: 'integer', nullable: true},
         outcome: {required: true, type: 'string'},
         elapsed_ticks: {required: false, type: 'integer', nullable: true}
+    }),
+    RunLanesResponse: objectContract<RunLanesResponse>({
+        lanes: {required: true, arrayOf: 'Lane'}
+    }),
+    Lane: objectContract<Lane>({
+        bot: {required: true, type: 'integer'},
+        id: {required: true, type: 'integer'},
+        action: {required: true, type: 'string'},
+        from_tick: {required: true, type: 'integer'},
+        // Null for an action dispatched and never settled -- an unterminated
+        // span, which is a state rather than a gap in the data.
+        to_tick: {required: false, type: 'integer', nullable: true},
+        status: {required: false, type: 'string', nullable: true},
+        error: {required: false, type: 'string', nullable: true}
     }),
     RunFramesResponse: objectContract<RunFramesResponse>({
         frames: {required: true, arrayOf: 'ArchivedFrame'}

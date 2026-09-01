@@ -25,6 +25,7 @@ import {
     Job,
     RunDetail,
     RunFramesResponse,
+    RunLanesResponse,
     RunsResponse,
     ScriptContent,
     StartAccepted
@@ -171,4 +172,9 @@ export function runFrameUrl(id: string, bot: number, file: string): string {
     return buildUrl(
         `/api/v1/runs/${encodeURIComponent(id)}/frames/${bot}/` + encodeURIComponent(name)
     );
+}
+
+/** What each bot did, derived from the run's event log. */
+export function getRunLanes(id: string): Promise<RunLanesResponse> {
+    return request<RunLanesResponse>(`/api/v1/runs/${encodeURIComponent(id)}/lanes`);
 }

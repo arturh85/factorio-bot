@@ -17,8 +17,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use crate::types::Position;
 
 pub mod frames;
+pub mod lanes;
 pub mod splits;
 pub use frames::{ArchivedFrame, archive_frames, parse_frame_name};
+pub use lanes::{Lane, derive_lanes};
 pub use splits::{Split, derive_splits};
 
 /// What happened. Internally tagged as `kind`, so a line is one flat object.

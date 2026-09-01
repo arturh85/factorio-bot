@@ -10,7 +10,16 @@
 import {computed, onBeforeUnmount, onMounted, ref, watch} from 'vue';
 import {useRunsStore} from '@/store/runsStore';
 import {runFrameUrl} from '@/api/client';
-import {botsOf, camerasOf, formatTicks, fractionOf, frameAt, splitAt} from '@/lib/runTimeline';
+import {
+    botsOf,
+    camerasOf,
+    formatTicks,
+    fractionOf,
+    frameAt,
+    laneAt,
+    laneBots,
+    splitAt
+} from '@/lib/runTimeline';
 
 const store = useRunsStore();
 const selected = ref<string | null>(null);
@@ -57,6 +66,29 @@ const frameSrc = computed(() =>
         ? runFrameUrl(selected.value, current.value.bot, current.value.file)
         : null
 );
+
+const lanesByBot = computed(() =>
+    laneBots(store.lanes).map((bot) => ({
+        bot,
+        entries: store.lanes.filter((l) => l.bot === bot),
+        now: laneAt(store.lanes, bot, store.cursor)
+    }))
+);
+
+/**
+ * A lane's span as left/width percentages.
+ *
+ * An unterminated span runs to the end of the axis, because as far as the
+ * record goes the bot never stopped -- drawing it as a sliver at its start
+ * would hide the very stretch that went wrong.
+ */
+function laneStyle(from: number, to: number | null) {
+    const bounds = store.bounds;
+    if (!bounds) return {left: '0%', width: '0%'};
+    const start = fractionOf(bounds, from);
+    const end = to === null ? 1 : fractionOf(bounds, to);
+    return {left: `${start * 100}%`, width: `${Math.max(0.5, (end - start) * 100)}%`};
+}
 
 function markerLeft(tick: number): string {
     const bounds = store.bounds;
@@ -149,6 +181,26 @@ function markerLeft(tick: number): string {
                             <option :value="1800">30s</option>
                         </select>
                     </label>
+                </div>
+            </div>
+
+            <div v-if="lanesByBot.length > 0 && store.bounds" class="lanes">
+                <div v-for="row in lanesByBot" :key="row.bot" class="lanes__row">
+                    <span class="lanes__label">bot {{ row.bot }}</span>
+                    <div class="lanes__track">
+                        <span
+                            v-for="(entry, i) in row.entries"
+                            :key="`${entry.id}-${entry.from_tick}-${i}`"
+                            :class="[
+                                'lanes__span',
+                                `lanes__span--${entry.status ?? 'running'}`,
+                                {'is-now': row.now === entry}
+                            ]"
+                            :style="laneStyle(entry.from_tick, entry.to_tick)"
+                            :title="`${entry.action} — ${entry.status ?? 'never settled'}`"
+                        />
+                    </div>
+                    <span class="lanes__now">{{ row.now?.action ?? '—' }}</span>
                 </div>
             </div>
 
@@ -294,5 +346,53 @@ function markerLeft(tick: number): string {
 }
 .num {
     font-family: monospace;
+}
+.lanes {
+    margin-bottom: 1rem;
+}
+.lanes__row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.25rem;
+}
+.lanes__label {
+    flex: 0 0 4rem;
+    font-size: 0.85rem;
+    opacity: 0.7;
+}
+.lanes__track {
+    position: relative;
+    flex: 1 1 auto;
+    height: 14px;
+    background: var(--surface-border, #eee);
+    border-radius: 3px;
+}
+.lanes__span {
+    position: absolute;
+    top: 0;
+    height: 14px;
+    border-radius: 3px;
+    background: #3b82f6;
+}
+.lanes__span--failed,
+.lanes__span--lost {
+    background: #b91c1c;
+}
+/* Never settled: no verdict ever arrived, so it is neither success nor
+   failure and must not be coloured as either. */
+.lanes__span--running {
+    background: repeating-linear-gradient(45deg, #9ca3af, #9ca3af 4px, #d1d5db 4px, #d1d5db 8px);
+}
+.lanes__span.is-now {
+    outline: 2px solid #1d4ed8;
+}
+.lanes__now {
+    flex: 0 0 12rem;
+    font-size: 0.8rem;
+    opacity: 0.8;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 </style>

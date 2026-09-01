@@ -18,7 +18,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use factorio_bot_core::record::{
-    ArchivedFrame, Event, Manifest, Split, derive_splits, read_events,
+    ArchivedFrame, Event, Lane, Manifest, Split, derive_lanes, derive_splits, read_events,
 };
 use factorio_bot_core::scripts::resolve_script_path;
 use serde::{Deserialize, Serialize};
@@ -101,6 +101,13 @@ pub struct EventsResponse {
     /// Lines that did not parse -- in practice the truncated last line of a
     /// crashed run. Reported rather than swallowed.
     pub skipped: usize,
+}
+
+/// `GET /api/v1/runs/{id}/lanes` response.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct RunLanesResponse {
+    /// What each bot did, in dispatch order.
+    pub lanes: Vec<Lane>,
 }
 
 /// `GET /api/v1/runs/{id}/frames` response.
@@ -249,6 +256,31 @@ pub async fn get_run_events(
     }))
 }
 
+/// What each bot did, derived from the run's event log.
+#[utoipa::path(
+    get,
+    path = "/api/v1/runs/{id}/lanes",
+    tag = "Runs",
+    params(("id" = String, Path, description = "the run id")),
+    responses(
+        (status = 200, body = RunLanesResponse),
+        (status = 400, body = crate::error::ErrorResponse),
+        (status = 404, body = crate::error::ErrorResponse),
+    )
+)]
+pub async fn get_run_lanes(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<RunLanesResponse>, ErrorResponse> {
+    let dir = run_dir(&runs_root(&state).await?, &id)?;
+    // A run with no action events -- planning only, or recorded before actions
+    // were captured -- has no lanes. Empty list, not an error.
+    let lanes = read_events(&dir.join("events.jsonl"))
+        .map(|read| derive_lanes(&read.events))
+        .unwrap_or_default();
+    Ok(Json(RunLanesResponse { lanes }))
+}
+
 /// A run's frame index.
 #[utoipa::path(
     get,
@@ -328,5 +360,6 @@ pub fn router() -> utoipa_axum::router::OpenApiRouter<AppState> {
         .routes(routes!(get_run))
         .routes(routes!(get_run_events))
         .routes(routes!(get_run_frames))
+        .routes(routes!(get_run_lanes))
         .routes(routes!(get_run_frame))
 }

@@ -1,6 +1,6 @@
 import {defineStore} from 'pinia';
-import {getRun, getRunFrames, listRuns} from '@/api/client';
-import {ArchivedFrame, RunDetail, RunSummary} from '@/api/types';
+import {getRun, getRunFrames, getRunLanes, listRuns} from '@/api/client';
+import {ArchivedFrame, Lane, RunDetail, RunSummary} from '@/api/types';
 import {PlacedFrame, placeable, tickBounds} from '@/lib/runTimeline';
 
 /**
@@ -17,6 +17,7 @@ export const useRunsStore = defineStore('runs', {
         runs: [] as RunSummary[],
         detail: null as RunDetail | null,
         frames: [] as ArchivedFrame[],
+        lanes: [] as Lane[],
         /** The tick every panel renders at. */
         cursor: 0,
         playing: false,
@@ -38,7 +39,7 @@ export const useRunsStore = defineStore('runs', {
          * nothing to place -- a planning-only run with no milestones.
          */
         bounds(): {from: number; to: number} | null {
-            return tickBounds(this.detail?.splits ?? [], this.placedFrames);
+            return tickBounds(this.detail?.splits ?? [], this.placedFrames, this.lanes);
         }
     },
 
@@ -67,9 +68,14 @@ export const useRunsStore = defineStore('runs', {
             this.error = null;
             this.playing = false;
             try {
-                const [detail, frames] = await Promise.all([getRun(id), getRunFrames(id)]);
+                const [detail, frames, lanes] = await Promise.all([
+                    getRun(id),
+                    getRunFrames(id),
+                    getRunLanes(id)
+                ]);
                 this.detail = detail;
                 this.frames = frames.frames;
+                this.lanes = lanes.lanes;
                 const placed = this.placedFrames;
                 this.bot = placed.length > 0 ? placed[0].bot : null;
                 this.camera = placed.length > 0 ? placed[0].camera : null;
@@ -78,6 +84,7 @@ export const useRunsStore = defineStore('runs', {
                 this.error = err instanceof Error ? err.message : String(err);
                 this.detail = null;
                 this.frames = [];
+                this.lanes = [];
             } finally {
                 this.loading = false;
             }

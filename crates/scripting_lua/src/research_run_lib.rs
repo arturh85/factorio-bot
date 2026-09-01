@@ -89,6 +89,7 @@ mod tests {
 
             __plan_created_calls = {}
             __milestone_satisfied_calls = {}
+            __milestone_stuck_calls = {}
             __finish_calls = {}
             record = {}
             record.start = function() return "run-test" end
@@ -101,7 +102,10 @@ mod tests {
                     { index = index, iterations = iterations, reason = reason })
             end
             record.actions = function(_steps, _actions) return 0 end
-            record.milestone_stuck = function(_index, _outcome) end
+            record.milestone_stuck = function(index, outcome, last_error, best_steps)
+                table.insert(__milestone_stuck_calls, { index = index, outcome = outcome,
+                    last_error = last_error, best_steps = best_steps })
+            end
             record.finish = function(outcome)
                 table.insert(__finish_calls, outcome)
                 return "run-test"
@@ -184,5 +188,40 @@ mod tests {
             "the LAST plan_created for a satisfied milestone must be its real DAG, \
              not the empty re-plan that closed it"
         );
+    }
+
+    #[test]
+    fn a_raise_during_planning_is_recorded_with_the_callers_error_text() {
+        // An empty scripted plan list means `goal.plan`'s very first call
+        // finds nothing to return and raises -- exactly the "construction
+        // error" `supervisor.lua` deliberately leaves unwrapped (see its own
+        // comment on `Sup:step`'s "planning" branch). `research_run.lua`'s
+        // outer `pcall` must catch it, pass the caught text through to
+        // `record.milestone_stuck` as `last_error`, and still close the
+        // recording -- a run that raises is the one most worth being able to
+        // read afterwards.
+        let lua = harness("{}", "{1}");
+        lua.load(RESEARCH_RUN_LUA)
+            .exec()
+            .expect("the raise must be caught, not propagate out of the script");
+
+        let stuck: mlua::Table = lua.globals().get("__milestone_stuck_calls").unwrap();
+        assert_eq!(stuck.raw_len(), 1, "exactly one stuck milestone recorded");
+        let call: mlua::Table = stuck.get(1).unwrap();
+        assert_eq!(call.get::<u32>("index").unwrap(), 1);
+        assert_eq!(call.get::<String>("outcome").unwrap(), "plan_error");
+        let last_error: String = call.get("last_error").unwrap();
+        assert!(
+            last_error.contains("no scripted plan"),
+            "the pcall's own caught text must reach the record verbatim: {last_error}"
+        );
+
+        let finish: mlua::Table = lua.globals().get("__finish_calls").unwrap();
+        assert_eq!(
+            finish.raw_len(),
+            1,
+            "record.finish is still called after a raise"
+        );
+        assert_eq!(finish.get::<String>(1).unwrap(), "crashed");
     }
 }

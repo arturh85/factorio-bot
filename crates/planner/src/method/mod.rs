@@ -9,7 +9,7 @@ use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::ids::{ActionId, ActionIdGen, BotId, ChainId, ChainIdGen, ItemId, Ticks};
 use crate::state::PlanState;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 /// One element of a method's expansion.
 #[derive(Clone, Debug)]
@@ -224,7 +224,7 @@ pub fn expand(
     if state.bot(chain_actor).is_none() {
         return Err(PlannerError::UnknownBot(chain_actor));
     }
-    check_bots_interchangeable(state)?;
+    check_bots_interchangeable(state, goals)?;
     let mut ctx = ExpansionCtx::new(state.fork(), chain_actor);
     let mut net = ActionNetwork::new();
     for goal in goals {
@@ -236,49 +236,80 @@ pub fn expand(
 }
 
 /// The driver sizes each bot's share of a goal against one bot's inventory and
-/// assumes any bot would do (see `ExpansionCtx` docs). Enforce that before
-/// forking the state: comparing inventories only, never positions, since
-/// travel cost is exactly what legitimately makes bots sit apart.
-fn check_bots_interchangeable(state: &PlanState) -> Result<(), PlannerError> {
+/// assumes any bot would do (see `ExpansionCtx` docs) -- but only for the one
+/// shape that actually does that sizing: `SplitAcrossBots` reads every bot's
+/// count of a top-level `Goal::Have { whose: Holder::Anyone, .. }`'s own
+/// `item` (see its `expand`, `ctx.state.inventory_count(*bot, item)`).
+/// Nothing else in this crate compares two bots' inventories against each
+/// other -- every other method sizes a shortfall against one `Holder` (a
+/// named bot, a share, or the roster's sum), which is well-defined whatever
+/// the distribution -- so comparing whole inventories over-scopes the guard.
+/// It refused a live `have(iron-ore, 20)` run because bot 1 alone held
+/// starting iron *plates*, an item that goal never reads.
+///
+/// Only the items `scattered_items` names are read across the roster, so
+/// only those are compared. Enforced before forking the state: comparing
+/// inventories only, never positions, since travel cost is exactly what
+/// legitimately makes bots sit apart.
+fn check_bots_interchangeable(state: &PlanState, goals: &[Goal]) -> Result<(), PlannerError> {
     let bot_ids = state.bot_ids();
     let Some((&first, rest)) = bot_ids.split_first() else {
         return Ok(());
     };
     // `bot_ids` come from a `BTreeMap`, so `first` is deterministic and the
-    // caller's `chain_actor` need not be it.
-    let first_inventory = &state
-        .bot(first)
-        .expect("bot_ids only returns ids present in the state")
-        .inventory;
-    for &other in rest {
-        let other_inventory = &state
-            .bot(other)
-            .expect("bot_ids only returns ids present in the state")
-            .inventory;
-        if let Some(item) = first_differing_item(first_inventory, other_inventory) {
-            return Err(PlannerError::BotsNotInterchangeable {
-                a: first,
-                b: other,
-                item,
-            });
+    // caller's `chain_actor` need not be it. `scattered_items` is a
+    // `BTreeSet`, so the item compared first (and thus named on a tie of
+    // several differences) is deterministic too.
+    for item in &scattered_items(goals) {
+        let first_count = state.inventory_count(first, item);
+        for &other in rest {
+            let other_count = state.inventory_count(other, item);
+            if first_count != other_count {
+                return Err(PlannerError::BotsNotInterchangeable {
+                    a: first,
+                    b: other,
+                    item: item.clone(),
+                });
+            }
         }
     }
     Ok(())
 }
 
-/// The lexicographically first item whose count differs between two
-/// inventories, or `None` if they agree on every item. Both maps are
-/// `BTreeMap`s, so walking their union in key order is deterministic.
-fn first_differing_item(a: &BTreeMap<ItemId, u32>, b: &BTreeMap<ItemId, u32>) -> Option<ItemId> {
-    let items: BTreeSet<&ItemId> = a.keys().chain(b.keys()).collect();
-    for item in items {
-        let in_a = a.get(item).copied().unwrap_or(0);
-        let in_b = b.get(item).copied().unwrap_or(0);
-        if in_a != in_b {
-            return Some(item.clone());
+/// The items a top-level `Goal::Have { whose: Holder::Anyone, .. }` names,
+/// flattened through `Goal::All`.
+///
+/// This mirrors exactly what makes a goal eligible for `SplitAcrossBots`:
+/// `claims` requires `site.top_level && !site.in_chain`, and every member of
+/// a top-level `Goal::All` keeps that site (see `expand_goal_body`), so each
+/// one is independently a candidate the method may scatter -- a run naming
+/// several such goals must have its guard cover every one of their items, not
+/// just the first, or a second `Have` sized against a bot's earlier share
+/// would silently reintroduce the mis-sized-share bug this guard exists to
+/// prevent. Anything else -- `Holder::Bot`/`Holder::Share` goals, and every
+/// subgoal a method (rather than the caller) asks for, which `expand_goal`
+/// always marks non-top-level -- reads at most one bot's inventory and needs
+/// no cross-bot agreement.
+fn scattered_items(goals: &[Goal]) -> BTreeSet<ItemId> {
+    let mut items = BTreeSet::new();
+    collect_scattered_items(goals, &mut items);
+    items
+}
+
+fn collect_scattered_items(goals: &[Goal], items: &mut BTreeSet<ItemId>) {
+    for goal in goals {
+        match goal {
+            Goal::Have {
+                item,
+                whose: Holder::Anyone,
+                ..
+            } => {
+                items.insert(item.clone());
+            }
+            Goal::All(inner) => collect_scattered_items(inner, items),
+            _ => {}
         }
     }
-    None
 }
 
 fn expand_goal(
@@ -1451,7 +1482,31 @@ mod tests {
     }
 
     #[test]
-    fn expansion_rejects_bots_that_are_not_interchangeable() {
+    fn expansion_rejects_bots_that_differ_in_the_goals_own_item() {
+        let bots = [BotId(1), BotId(2)];
+        let mut state = PlanState::from_world(Arc::new(fixture_world()), &bots);
+        state.gain(BotId(1), "coal", 12);
+        let reg = MethodRegistry::new().with(Box::new(Nothing));
+        let goal = Goal::Have {
+            item: "coal".into(),
+            count: 1,
+            whose: Holder::Anyone,
+        };
+        assert!(matches!(
+            expand(&[goal], &state, &reg, BotId(1)),
+            Err(PlannerError::BotsNotInterchangeable { item, .. }) if item == "coal"
+        ));
+    }
+
+    /// Regression test for a live crash: a four-bot run asked
+    /// `goal.have("iron-ore", 20)` and was refused because bot 1 alone held
+    /// starting iron *plates* -- an item that goal never reads. The guard
+    /// must compare only the item(s) a top-level `Holder::Anyone` goal
+    /// actually names, not a bot's whole inventory, or any two bots that
+    /// differ in *anything* (which freeplay's starting inventory guarantees
+    /// from tick zero) block every multi-bot run.
+    #[test]
+    fn bots_differing_only_in_an_item_the_goal_does_not_touch_may_still_expand() {
         let bots = [BotId(1), BotId(2)];
         let mut state = PlanState::from_world(Arc::new(fixture_world()), &bots);
         state.gain(BotId(1), "iron-plate", 12);
@@ -1461,9 +1516,38 @@ mod tests {
             count: 1,
             whose: Holder::Anyone,
         };
+        assert!(
+            expand(&[goal], &state, &reg, BotId(1)).is_ok(),
+            "the goal never reads iron-plate, so bots disagreeing on it must not block expansion"
+        );
+    }
+
+    /// A top-level `Goal::All` bundles independent goals, each individually
+    /// eligible for `SplitAcrossBots` (see `scattered_items`'s doc comment).
+    /// Agreeing on the first item named must not excuse disagreeing on the
+    /// second -- that would silently readmit the mis-sized-share bug for
+    /// whichever goal happened to be checked last.
+    #[test]
+    fn expansion_checks_every_item_a_top_level_all_names() {
+        let bots = [BotId(1), BotId(2)];
+        let mut state = PlanState::from_world(Arc::new(fixture_world()), &bots);
+        state.gain(BotId(1), "stone", 8);
+        let reg = MethodRegistry::new().with(Box::new(Nothing));
+        let goal = Goal::All(vec![
+            Goal::Have {
+                item: "coal".into(),
+                count: 1,
+                whose: Holder::Anyone,
+            },
+            Goal::Have {
+                item: "stone".into(),
+                count: 1,
+                whose: Holder::Anyone,
+            },
+        ]);
         assert!(matches!(
             expand(&[goal], &state, &reg, BotId(1)),
-            Err(PlannerError::BotsNotInterchangeable { .. })
+            Err(PlannerError::BotsNotInterchangeable { item, .. }) if item == "stone"
         ));
     }
 

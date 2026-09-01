@@ -482,10 +482,17 @@ end
 -- `stuck` (no progress, with failures), `stuck_silent` (no progress and every
 -- run reported success, so something is lying) or `exhausted` (the iteration
 -- cap tripped while progress was still being made).
+--
+-- `last_error` and `best_steps` are optional and default to `nil`, meaning
+-- "not known" rather than "nothing happened" -- pass whatever the caller
+-- actually has (e.g. the text a `pcall` around the driving loop caught) so a
+-- stuck milestone's record carries the reason, not just the verdict.
 -- @number index the milestone's position in the run, from 1
 -- @string outcome why it was abandoned
+-- @string[opt] last_error the most recent error text, if one is known
+-- @number[opt] best_steps the fewest steps any plan for this milestone reached
 -- @raise if no recording is running
-function record.milestone_stuck(index, outcome)
+function record.milestone_stuck(index, outcome, last_error, best_steps)
 end
     "#,
         ),
@@ -495,18 +502,26 @@ end
         let rcon = rcon.clone();
         map_table.set(
             "milestone_stuck",
-            lua.create_function(move |_lua, (index, outcome): (u32, String)| {
-                record_live(
-                    &slot,
-                    &rcon,
-                    EventKind::MilestoneStuck {
-                        index,
-                        outcome,
-                        best_steps: None,
-                        last_error: None,
-                    },
-                )
-            })?,
+            lua.create_function(
+                move |_lua,
+                      (index, outcome, last_error, best_steps): (
+                    u32,
+                    String,
+                    Option<String>,
+                    Option<u32>,
+                )| {
+                    record_live(
+                        &slot,
+                        &rcon,
+                        EventKind::MilestoneStuck {
+                            index,
+                            outcome,
+                            best_steps,
+                            last_error,
+                        },
+                    )
+                },
+            )?,
         )?;
     }
 
@@ -988,6 +1003,60 @@ mod tests {
             .expect_err("an unrecognised reason must raise");
         let message = err.to_string();
         assert!(message.contains("who_knows"), "{message}");
+    }
+
+    // ----------------------------------------------------------- milestone_stuck
+
+    #[test]
+    fn milestone_stuck_records_the_error_text_and_best_steps_it_was_given() {
+        let (lua, _tmp, run_dir) = recording_lua();
+        lua.load(r#"record.milestone_stuck(1, "stuck", "boom: something broke", 7)"#)
+            .exec()
+            .expect("milestone_stuck runs");
+
+        let events = read_events(&run_dir);
+        match &events[0] {
+            EventKind::MilestoneStuck {
+                index,
+                outcome,
+                last_error,
+                best_steps,
+            } => {
+                assert_eq!(*index, 1);
+                assert_eq!(outcome, "stuck");
+                assert_eq!(last_error.as_deref(), Some("boom: something broke"));
+                assert_eq!(*best_steps, Some(7));
+            }
+            other => panic!("expected milestone_stuck, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn milestone_stuck_with_nothing_passed_writes_nulls_not_a_guess() {
+        // A caller that does not know the error text or the best step count
+        // must still be able to say so -- and null must keep meaning "not
+        // known", not silently become "nothing happened" (`Some` of some
+        // default) or fail outright for omitting an optional argument.
+        let (lua, _tmp, run_dir) = recording_lua();
+        lua.load(r#"record.milestone_stuck(2, "exhausted")"#)
+            .exec()
+            .expect("milestone_stuck runs with only the required arguments");
+
+        let events = read_events(&run_dir);
+        match &events[0] {
+            EventKind::MilestoneStuck {
+                index,
+                outcome,
+                last_error,
+                best_steps,
+            } => {
+                assert_eq!(*index, 2);
+                assert_eq!(outcome, "exhausted");
+                assert_eq!(*last_error, None);
+                assert_eq!(*best_steps, None);
+            }
+            other => panic!("expected milestone_stuck, got {other:?}"),
+        }
     }
 
     // -------------------------------------------------------- failure classification

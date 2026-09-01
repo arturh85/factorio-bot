@@ -97,7 +97,13 @@ repeat
         record.milestone_satisfied(t.milestone_index, t.iteration or 0, t.reason)
         print("   SATISFIED (" .. tostring(t.reason) .. ")")
     elseif t.action == "halted" then
-        record.milestone_stuck(t.milestone_index, t.state)
+        -- `sup.first_error` is the first failed action's own text for this
+        -- milestone (set by the "ran" branch above, nil for `stuck_silent`,
+        -- where every run reported success and there is no error to give);
+        -- `t.best` is the fewest steps any plan for it reached. Both ride
+        -- along so a stuck milestone's record carries the reason it got
+        -- stuck, not just the verdict.
+        record.milestone_stuck(t.milestone_index, t.state, sup.first_error, t.best)
         print("   HALTED: " .. t.state)
     end
 until sup:finished()
@@ -106,8 +112,11 @@ end)
 if not ok then
     print("RAISED: " .. tostring(err))
     -- Recorded as a stuck milestone rather than silently: the run reached
-    -- this goal and could not plan it, which is a fact about the run.
-    record.milestone_stuck(sup.index, "plan_error")
+    -- this goal and could not plan it, which is a fact about the run. `err`
+    -- is the text a bare `pcall` around this whole loop caught -- previously
+    -- discarded, leaving `last_error: null` as the only trace of a crash the
+    -- record was supposed to explain.
+    record.milestone_stuck(sup.index, "plan_error", tostring(err), sup.tracker and sup.tracker.best)
 end
 
 local id = record.finish(ok and sup.state or "crashed")

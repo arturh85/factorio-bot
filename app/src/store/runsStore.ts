@@ -1,6 +1,6 @@
 import {defineStore} from 'pinia';
-import {getRun, getRunFrames, getRunLanes, listRuns} from '@/api/client';
-import {ArchivedFrame, Lane, RunDetail, RunSummary} from '@/api/types';
+import {getRun, getRunFrames, getRunLanes, getRunSamples, listRuns} from '@/api/client';
+import {ArchivedFrame, BotSample, Lane, RunDetail, RunSummary, Sample} from '@/api/types';
 import {
     FrameView,
     PlacedFrame,
@@ -9,6 +9,10 @@ import {
     tickBounds,
     viewsOf
 } from '@/lib/runTimeline';
+import {botSampleAt, forceSampleAt, inventoryOf, productionSeries, trackedItems} from '@/lib/runSamples';
+
+/** The `force`-kind half of `Sample`, narrowed for `forceState`. */
+type ForceSample = Extract<Sample, {kind: 'force'}>;
 
 /**
  * Archived runs, and one cursor over the run being viewed.
@@ -25,6 +29,8 @@ export const useRunsStore = defineStore('runs', {
         detail: null as RunDetail | null,
         frames: [] as ArchivedFrame[],
         lanes: [] as Lane[],
+        /** The run's archived world-state samples, `bots` and `force` lines mixed. */
+        samples: [] as Sample[],
         /**
          * Another run's splits, to diff against. Only the splits are fetched:
          * comparing runs does not need the other run's whole log or frames.
@@ -60,6 +66,36 @@ export const useRunsStore = defineStore('runs', {
         /** The (bot, camera) pairs this run actually captured. */
         views(): FrameView[] {
             return viewsOf(this.placedFrames);
+        },
+        /**
+         * The selected view's bot as of the cursor, or null when there is no
+         * view selected or no `bots` sample at or before it yet.
+         */
+        botState(): BotSample | null {
+            if (this.bot === null) return null;
+            return inventoryOf(botSampleAt(this.samples, this.cursor), this.bot);
+        },
+        /**
+         * The force's state as of the cursor, or null before the first
+         * `force` sample -- distinct from a present sample whose `research`
+         * is itself null because nothing is queued.
+         */
+        forceState(): ForceSample | null {
+            return forceSampleAt(this.samples, this.cursor) as ForceSample | null;
+        },
+        /**
+         * Cumulative totals at the cursor for the run's tracked items --
+         * those named by its milestone goals, or every item any sample
+         * recorded making when none of the goals name one.
+         */
+        production(): {item: string; made: number}[] {
+            const goals = (this.detail?.splits ?? []).map((s) => s.goal);
+            const items = trackedItems(goals, this.samples);
+            return productionSeries(this.samples, items).map((series) => {
+                const upToCursor = series.points.filter((p) => p.tick <= this.cursor);
+                const made = upToCursor.length > 0 ? upToCursor[upToCursor.length - 1].made : 0;
+                return {item: series.item, made};
+            });
         }
     },
 
@@ -88,14 +124,16 @@ export const useRunsStore = defineStore('runs', {
             this.error = null;
             this.playing = false;
             try {
-                const [detail, frames, lanes] = await Promise.all([
+                const [detail, frames, lanes, samples] = await Promise.all([
                     getRun(id),
                     getRunFrames(id),
-                    getRunLanes(id)
+                    getRunLanes(id),
+                    getRunSamples(id)
                 ]);
                 this.detail = detail;
                 this.frames = frames.frames;
                 this.lanes = lanes.lanes;
+                this.samples = samples.samples;
                 // A comparison against the previously open run is almost never
                 // what is wanted, and would be read as belonging to this one.
                 this.reference = null;
@@ -115,6 +153,7 @@ export const useRunsStore = defineStore('runs', {
                 this.detail = null;
                 this.frames = [];
                 this.lanes = [];
+                this.samples = [];
             } finally {
                 this.loading = false;
             }

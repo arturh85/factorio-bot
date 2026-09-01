@@ -148,6 +148,11 @@ function markerLeft(tick: number): string {
     const bounds = store.bounds;
     return bounds ? `${fractionOf(bounds, tick) * 100}%` : '0%';
 }
+
+/** Research progress as a whole-number percentage, e.g. "42%". */
+function researchPct(progress: number): string {
+    return `${Math.round(progress * 100)}%`;
+}
 </script>
 
 <template>
@@ -339,6 +344,64 @@ function markerLeft(tick: number): string {
                 <p v-if="current" class="frame__caption num">
                     frame tick {{ current.tick }} · {{ current.camera }}
                 </p>
+            </div>
+
+            <div class="worldstate">
+                <div class="panel">
+                    <h3>Research</h3>
+                    <!-- Three states, not two: no sample yet at this tick is
+                         different from a sample that says nothing is queued. -->
+                    <p v-if="!store.forceState" class="worldstate__empty">
+                        no world-state samples recorded for this run
+                    </p>
+                    <p v-else-if="!store.forceState.research" class="worldstate__empty">
+                        no research queued
+                    </p>
+                    <p v-else class="research__line">
+                        {{ store.forceState.research.name }}
+                        <span class="num">{{ researchPct(store.forceState.research.progress) }}</span>
+                    </p>
+                </div>
+
+                <div class="panel">
+                    <h3>Production</h3>
+                    <p v-if="store.production.length === 0" class="worldstate__empty">
+                        nothing tracked for this run
+                    </p>
+                    <ul v-else class="worldstate__list">
+                        <li v-for="row in store.production" :key="row.item">
+                            <span>{{ row.item }}</span>
+                            <span class="num">{{ row.made }}</span>
+                        </li>
+                    </ul>
+                </div>
+
+                <div class="panel">
+                    <h3>Inventory<template v-if="store.bot !== null"> — bot {{ store.bot }}</template></h3>
+                    <p v-if="!store.botState" class="worldstate__empty">
+                        {{
+                            store.bot === null
+                                ? 'select a view to see its bot'
+                                : 'no bot sample yet at this tick'
+                        }}
+                    </p>
+                    <template v-else>
+                        <ul
+                            v-if="Object.keys(store.botState.inventory).length > 0"
+                            class="worldstate__list"
+                        >
+                            <li v-for="(count, item) in store.botState.inventory" :key="item">
+                                <span>{{ item }}</span>
+                                <span class="num">{{ count }}</span>
+                            </li>
+                        </ul>
+                        <p v-else class="worldstate__empty">inventory empty</p>
+                        <p class="inventory__meta">
+                            mining {{ store.botState.mining ?? '—' }} · crafting queue
+                            {{ store.botState.crafting_queue }}
+                        </p>
+                    </template>
+                </div>
             </div>
         </section>
     </div>
@@ -545,5 +608,51 @@ function markerLeft(tick: number): string {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+.worldstate {
+    display: flex;
+    gap: 1rem;
+    margin-top: 1rem;
+    flex-wrap: wrap;
+}
+.worldstate .panel {
+    flex: 1 1 14rem;
+    min-width: 12rem;
+    border: 1px solid var(--surface-border, #ccc);
+    border-radius: 4px;
+    padding: 0.5rem 0.75rem;
+}
+.worldstate .panel h3 {
+    margin: 0 0 0.4rem;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    opacity: 0.6;
+}
+.worldstate__empty {
+    font-size: 0.85rem;
+    opacity: 0.6;
+    margin: 0;
+}
+.worldstate__list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    font-size: 0.85rem;
+}
+.worldstate__list li {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.1rem 0;
+}
+.research__line {
+    display: flex;
+    justify-content: space-between;
+    margin: 0;
+}
+.inventory__meta {
+    margin: 0.4rem 0 0;
+    font-size: 0.75rem;
+    opacity: 0.7;
 }
 </style>

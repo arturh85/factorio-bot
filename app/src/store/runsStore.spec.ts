@@ -2,7 +2,7 @@ import {beforeEach, describe, expect, it, vi} from 'vitest';
 import {createPinia, setActivePinia} from 'pinia';
 import {useRunsStore} from './runsStore';
 import * as client from '@/api/client';
-import {ArchivedFrame, RunDetail, RunSummary, Split} from '@/api/types';
+import {ArchivedFrame, RunDetail, RunSummary, Sample, Split} from '@/api/types';
 
 vi.mock('@/api/client');
 
@@ -48,6 +48,8 @@ beforeEach(() => {
     vi.mocked(client.getRunFrames).mockReset();
     vi.mocked(client.getRunLanes).mockReset();
     vi.mocked(client.getRunLanes).mockResolvedValue({lanes: []});
+    vi.mocked(client.getRunSamples).mockReset();
+    vi.mocked(client.getRunSamples).mockResolvedValue({samples: []});
 });
 
 describe('loadRuns', () => {
@@ -244,5 +246,109 @@ describe('seek and playback', () => {
         store.advance();
         store.togglePlay();
         expect(store.playing).toBe(false);
+    });
+});
+
+describe('samples', () => {
+    const bots = (tick: number, entries: Array<{id: number; inventory?: Record<string, number>}>): Sample => ({
+        kind: 'bots',
+        bots: entries.map((e) => ({
+            id: e.id,
+            position: {x: 0, y: 0},
+            inventory: e.inventory ?? {},
+            crafting_queue: 0,
+            mining: null
+        })),
+        tick,
+        run: 'run-1'
+    });
+
+    const force = (
+        tick: number,
+        made: Record<string, number>,
+        research: {name: string; progress: number; eta_ticks: number | null} | null = null
+    ): Sample => ({
+        kind: 'force',
+        research,
+        techs_unlocked: 0,
+        production: {made, consumed: {}},
+        power: {generated_kw: 0, consumed_kw: 0, satisfaction: 1},
+        tick,
+        run: 'run-1'
+    });
+
+    beforeEach(() => {
+        vi.mocked(client.getRun).mockResolvedValue(DETAIL);
+        vi.mocked(client.getRunFrames).mockResolvedValue({frames: FRAMES});
+    });
+
+    it('reads the selected bot state at the cursor', async () => {
+        vi.mocked(client.getRunSamples).mockResolvedValue({
+            samples: [bots(59380, [{id: 1, inventory: {'iron-plate': 2}}, {id: 2}])]
+        });
+        const store = useRunsStore();
+        await store.openRun('run-1'); // cursor lands on 59400, the first frame
+        expect(store.botState?.inventory).toEqual({'iron-plate': 2});
+    });
+
+    it('is null before the first bots sample', async () => {
+        vi.mocked(client.getRunSamples).mockResolvedValue({samples: [bots(60000, [{id: 1}])]});
+        const store = useRunsStore();
+        await store.openRun('run-1');
+        expect(store.botState).toBeNull();
+    });
+
+    it('is null when no view is selected', async () => {
+        vi.mocked(client.getRunFrames).mockResolvedValue({frames: []});
+        vi.mocked(client.getRunSamples).mockResolvedValue({samples: [bots(59380, [{id: 1}])]});
+        const store = useRunsStore();
+        await store.openRun('run-1');
+        expect(store.bot).toBeNull();
+        expect(store.botState).toBeNull();
+    });
+
+    it('reports queued research', async () => {
+        vi.mocked(client.getRunSamples).mockResolvedValue({
+            samples: [force(59380, {}, {name: 'automation', progress: 0.5, eta_ticks: 100})]
+        });
+        const store = useRunsStore();
+        await store.openRun('run-1');
+        expect(store.forceState?.research?.name).toBe('automation');
+    });
+
+    it('distinguishes no research queued from no sample yet', async () => {
+        vi.mocked(client.getRunSamples).mockResolvedValue({samples: [force(59380, {}, null)]});
+        const store = useRunsStore();
+        await store.openRun('run-1');
+        expect(store.forceState).not.toBeNull();
+        expect(store.forceState?.research).toBeNull();
+
+        vi.mocked(client.getRunSamples).mockResolvedValue({samples: [force(60000, {}, null)]});
+        await store.openRun('run-1');
+        expect(store.forceState).toBeNull();
+    });
+
+    it('reports cumulative production at the cursor, falling back to produced items when the goals name none', async () => {
+        // DETAIL's goals are 'iron' and 'copper', neither of which parses as
+        // a have/produce goal, so the fallback to produced items applies.
+        vi.mocked(client.getRunSamples).mockResolvedValue({
+            samples: [force(59380, {'iron-plate': 4}), force(59700, {'iron-plate': 9})]
+        });
+        const store = useRunsStore();
+        await store.openRun('run-1'); // cursor = 59400
+        expect(store.production).toEqual([{item: 'iron-plate', made: 4}]);
+        store.seek(59700);
+        expect(store.production).toEqual([{item: 'iron-plate', made: 9}]);
+    });
+
+    it('clears samples when a run fails to load', async () => {
+        vi.mocked(client.getRunSamples).mockResolvedValue({
+            samples: [force(59380, {'iron-plate': 4})]
+        });
+        const store = useRunsStore();
+        await store.openRun('run-1');
+        vi.mocked(client.getRun).mockRejectedValue(new Error('gone'));
+        await store.openRun('run-2');
+        expect(store.samples).toEqual([]);
     });
 });

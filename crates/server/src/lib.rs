@@ -4,6 +4,7 @@ pub mod game;
 pub mod jobs;
 pub mod manage;
 pub mod openapi;
+pub mod runs;
 pub mod settings;
 pub mod spa;
 pub mod state;

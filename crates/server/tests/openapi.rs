@@ -124,13 +124,22 @@ const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[
     ("get", "/api/v1/jobs/{id}"),
     ("get", "/api/v1/jobs/{id}/events"),
     ("get", "/api/v1/frames/{client}/{name}"),
+    ("get", "/api/v1/runs/{id}"),
+    ("get", "/api/v1/runs/{id}/events"),
+    ("get", "/api/v1/runs/{id}/frames"),
+    ("get", "/api/v1/runs/{id}/frames/{bot}/{name}"),
 ];
 // `/api/v1/frames/{client}/{name}` is registered unconditionally by `manage::router`
 // (it does not need an interpreter), so it is templated in both builds --
 // unlike the jobs routes above, which exist only behind `lua`.
 #[cfg(not(feature = "lua"))]
-const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] =
-    &[("get", "/api/v1/frames/{client}/{name}")];
+const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[
+    ("get", "/api/v1/frames/{client}/{name}"),
+    ("get", "/api/v1/runs/{id}"),
+    ("get", "/api/v1/runs/{id}/events"),
+    ("get", "/api/v1/runs/{id}/frames"),
+    ("get", "/api/v1/runs/{id}/frames/{bot}/{name}"),
+];
 
 /// The published response set for `POST /api/v1/instance/start` has to match
 /// what the handler actually answers.
@@ -181,6 +190,11 @@ async fn openapi_json_lists_every_route() {
         "/api/v1/game/remove-from-inventory",
         "/api/v1/game/server-save",
         "/api/v1/game/add-research",
+        "/api/v1/runs",
+        "/api/v1/runs/{id}",
+        "/api/v1/runs/{id}/events",
+        "/api/v1/runs/{id}/frames",
+        "/api/v1/runs/{id}/frames/{bot}/{name}",
         // Management
         "/api/v1/settings",
         "/api/v1/instance",

@@ -31,6 +31,42 @@
         ],
         "type": "object"
       },
+      "ArchivedFrame": {
+        "description": "One archived frame, as recorded in `frames/index.json`.",
+        "properties": {
+          "bot": {
+            "description": "The `client<N>` the frame came from. Bots and clients are 1:1.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "camera": {
+            "description": "The camera id, or `null` alongside `tick`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file": {
+            "description": "Path relative to the run directory.",
+            "type": "string"
+          },
+          "tick": {
+            "description": "`game.tick` at capture, or `null` when the name does not parse.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "bot",
+          "file"
+        ],
+        "type": "object"
+      },
       "CheatItemBody": {
         "properties": {
           "count": {
@@ -108,6 +144,391 @@
         "required": [
           "message",
           "code"
+        ],
+        "type": "object"
+      },
+      "Event": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EventKind"
+          },
+          {
+            "properties": {
+              "tick": {
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "wall_ms": {
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "tick",
+              "wall_ms"
+            ],
+            "type": "object"
+          }
+        ],
+        "description": "One line of `events.jsonl`.\n\n`tick` is *when this happened*; a duration is always `elapsed_ticks`. The\ntwo were briefly both called `ticks`, which reads fine until someone plots\nit."
+      },
+      "EventKind": {
+        "description": "What happened. Internally tagged as `kind`, so a line is one flat object.\n\n[`EventKind::Unknown`] is the `serde(other)` catch-all: a reader built\nbefore a kind existed must skip it rather than refuse the file, so an older\nviewer can still open a newer run.",
+        "oneOf": [
+          {
+            "properties": {
+              "bots": {
+                "items": {
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              "factorio": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "git": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "enum": [
+                  "run_started"
+                ],
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              },
+              "seed": {
+                "description": "Present-and-null when unknown, never absent: a key that is always\nthere says \"we looked\", where a missing key cannot be told apart\nfrom \"we never asked\".",
+                "format": "int64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "run_id",
+              "bots",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "goal": {
+                "type": "string"
+              },
+              "index": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "enum": [
+                  "milestone_started"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "index",
+              "goal",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "elapsed_ticks": {
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "index": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "iterations": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "enum": [
+                  "milestone_satisfied"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "index",
+              "iterations",
+              "elapsed_ticks",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "best_steps": {
+                "format": "int32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "index": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "enum": [
+                  "milestone_stuck"
+                ],
+                "type": "string"
+              },
+              "last_error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "index",
+              "outcome",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "bots": {
+                "items": {
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "enum": [
+                  "plan_created"
+                ],
+                "type": "string"
+              },
+              "makespan": {
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "milestone_index": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "steps": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "milestone_index",
+              "steps",
+              "makespan",
+              "bots",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "bot": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "id": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "enum": [
+                  "action_dispatched"
+                ],
+                "type": "string"
+              },
+              "target": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/Position"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "bot",
+              "action",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "bot": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "elapsed_ticks": {
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "enum": [
+                  "action_settled"
+                ],
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "bot",
+              "status",
+              "elapsed_ticks",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "bot": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "camera": {
+                "type": "string"
+              },
+              "file": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "frame"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "bot",
+              "camera",
+              "file",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "elapsed_ticks": {
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "enum": [
+                  "run_finished"
+                ],
+                "type": "string"
+              },
+              "outcome": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "elapsed_ticks",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A kind this build does not know. Readers skip it; writers never emit it.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "EventsResponse": {
+        "description": "`GET /api/v1/runs/{id}/events` response.",
+        "properties": {
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            },
+            "type": "array"
+          },
+          "skipped": {
+            "description": "Lines that did not parse -- in practice the truncated last line of a\ncrashed run. Reported rather than swallowed.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "events",
+          "skipped"
         ],
         "type": "object"
       },
@@ -1043,6 +1464,125 @@
         ],
         "type": "object"
       },
+      "RunDetail": {
+        "description": "`GET /api/v1/runs/{id}` response.",
+        "properties": {
+          "splits": {
+            "description": "From `splits.json` when the run finished, otherwise derived from the\nevents on the fly -- so a crashed run still shows the milestones it got\nthrough.",
+            "items": {
+              "$ref": "#/components/schemas/Split"
+            },
+            "type": "array"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/RunSummary"
+          }
+        },
+        "required": [
+          "summary",
+          "splits"
+        ],
+        "type": "object"
+      },
+      "RunFramesResponse": {
+        "description": "`GET /api/v1/runs/{id}/frames` response.",
+        "properties": {
+          "frames": {
+            "items": {
+              "$ref": "#/components/schemas/ArchivedFrame"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "frames"
+        ],
+        "type": "object"
+      },
+      "RunSummary": {
+        "description": "One run, as it appears in a listing.\n\nEvery field except `run_id` and `finished` is nullable, because an\nunfinished run genuinely does not have them. They are present-and-null\nrather than omitted: a caller must be able to tell \"this run never finished\"\nfrom \"this build of the API does not report outcomes\".",
+        "properties": {
+          "elapsed_ticks": {
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "events": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "finished": {
+            "description": "Whether the run reached `finish`. False means crashed or still going --\nthis endpoint cannot tell those apart, and does not pretend to.",
+            "type": "boolean"
+          },
+          "finished_unix": {
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "frames": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "outcome": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "splits": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "started_unix": {
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "run_id",
+          "finished"
+        ],
+        "type": "object"
+      },
+      "RunsResponse": {
+        "description": "`GET /api/v1/runs` response.",
+        "properties": {
+          "runs": {
+            "description": "Newest first, by start time; runs with no manifest sort last, since\nnothing on disk says when they began.",
+            "items": {
+              "$ref": "#/components/schemas/RunSummary"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "runs"
+        ],
+        "type": "object"
+      },
       "ScriptContent": {
         "properties": {
           "code": {
@@ -1077,6 +1617,53 @@
           "label",
           "leaf",
           "children"
+        ],
+        "type": "object"
+      },
+      "Split": {
+        "description": "One milestone's timing.",
+        "properties": {
+          "elapsed_ticks": {
+            "description": "`ended_tick - started_tick`, or `null` while unfinished. Materialised\nrather than left to every reader to subtract, because a reader that\nsubtracts a null gets zero and zero is a plausible-looking duration.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "ended_tick": {
+            "description": "The tick the milestone closed, or `null` when the run ended without\nclosing it. Present-and-null, never absent.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "goal": {
+            "type": "string"
+          },
+          "index": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "outcome": {
+            "description": "`satisfied`, `stuck`, `stuck_silent`, `exhausted`, or `unfinished` for a\nmilestone that was still open when the log ended.",
+            "type": "string"
+          },
+          "started_tick": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "index",
+          "goal",
+          "started_tick",
+          "outcome"
         ],
         "type": "object"
       },
@@ -2288,6 +2875,273 @@
         "summary": "Sends a raw RCON command to the running Factorio server",
         "tags": [
           "Admin"
+        ]
+      }
+    },
+    "/api/v1/runs": {
+      "get": {
+        "operationId": "list_runs",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunsResponse"
+                }
+              }
+            },
+            "description": "archived runs, newest first"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Lists archived runs.",
+        "tags": [
+          "Runs"
+        ]
+      }
+    },
+    "/api/v1/runs/{id}": {
+      "get": {
+        "operationId": "get_run",
+        "parameters": [
+          {
+            "description": "the run id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetail"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "One run's summary and splits.",
+        "tags": [
+          "Runs"
+        ]
+      }
+    },
+    "/api/v1/runs/{id}/events": {
+      "get": {
+        "operationId": "get_run_events",
+        "parameters": [
+          {
+            "description": "the run id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Return only events of this `kind`.",
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventsResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "A run's event log.",
+        "tags": [
+          "Runs"
+        ]
+      }
+    },
+    "/api/v1/runs/{id}/frames": {
+      "get": {
+        "operationId": "get_run_frames",
+        "parameters": [
+          {
+            "description": "the run id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunFramesResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "A run's frame index.",
+        "tags": [
+          "Runs"
+        ]
+      }
+    },
+    "/api/v1/runs/{id}/frames/{bot}/{name}": {
+      "get": {
+        "operationId": "get_run_frame",
+        "parameters": [
+          {
+            "description": "the run id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "the bot number, as reported by ArchivedFrame.bot",
+            "in": "path",
+            "name": "bot",
+            "required": true,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "the frame filename, as reported by GET /api/v1/runs/{id}/frames",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "image/jpeg": {}
+            },
+            "description": "the frame's JPEG bytes"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "One archived frame's bytes.",
+        "tags": [
+          "Runs"
         ]
       }
     },

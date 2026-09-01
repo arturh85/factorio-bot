@@ -240,7 +240,7 @@ fn sort_frame_entries(frames: &mut [FrameEntry]) {
 /// canonicalize it: "no workspace yet" is one of the three states
 /// `GET /api/v1/frames` must represent, not an error, and canonicalizing a
 /// missing path would fail.
-async fn workspace_root(state: &AppState) -> Result<PathBuf, ErrorResponse> {
+pub(crate) async fn workspace_root(state: &AppState) -> Result<PathBuf, ErrorResponse> {
     let workspace_path = state.settings.read().await.factorio.workspace_path.clone();
     factorio_bot_core::paths::resolve_workspace(workspace_path.as_ref())
         .map(|resolved| resolved.as_path().to_path_buf())

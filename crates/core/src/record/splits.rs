@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use super::{Event, EventKind};
 
 /// One milestone's timing.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Split {
     pub index: u32,
     pub goal: String,

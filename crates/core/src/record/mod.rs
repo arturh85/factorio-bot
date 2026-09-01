@@ -26,7 +26,7 @@ pub use splits::{Split, derive_splits};
 /// [`EventKind::Unknown`] is the `serde(other)` catch-all: a reader built
 /// before a kind existed must skip it rather than refuse the file, so an older
 /// viewer can still open a newer run.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EventKind {
     RunStarted {
@@ -92,7 +92,7 @@ pub enum EventKind {
 /// `tick` is *when this happened*; a duration is always `elapsed_ticks`. The
 /// two were briefly both called `ticks`, which reads fine until someone plots
 /// it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Event {
     pub tick: u64,
     pub wall_ms: u64,
@@ -106,7 +106,7 @@ pub struct Event {
 /// event log at finish*, not tracked alongside it, so the manifest cannot drift
 /// from the events it summarises. The listing endpoint reads this file; only a
 /// viewer opening one run reads the log itself.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Manifest {
     pub run_id: String,
     /// Unix seconds. For "when was this run", never for comparing two runs --

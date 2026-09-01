@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 const RUN_SIDECAR: &str = "run.json";
 
 /// One archived frame, as recorded in `frames/index.json`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ArchivedFrame {
     /// The `client<N>` the frame came from. Bots and clients are 1:1.
     pub bot: u8,

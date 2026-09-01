@@ -14,3 +14,7 @@ mods/*/
 /site/
 /.mcp.json
 .direnv/
+
+# Subagent-driven-development scratch: ledger, task briefs, agent reports
+# and generated review diffs. Regenerable, and ~9MB per plan.
+.superpowers/

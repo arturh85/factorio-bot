@@ -143,7 +143,11 @@ end
             lua.create_async_function(move |_lua, ()| {
                 let rcon = rcon.clone();
                 async move {
-                    let players = rcon.as_ref().connected_players().await.map_err(rcon_error)?;
+                    let players = rcon
+                        .as_ref()
+                        .connected_players()
+                        .await
+                        .map_err(rcon_error)?;
                     let mut ids: Vec<u32> =
                         players.iter().map(|p| u32::from(p.player_id)).collect();
                     ids.sort_unstable();

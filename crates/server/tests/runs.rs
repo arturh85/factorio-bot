@@ -73,6 +73,11 @@ const MILESTONES: &str = concat!(
 const MANIFEST: &str = r#"{"run_id":"alpha","started_unix":1000,"finished_unix":1100,
   "outcome":"done","elapsed_ticks":400,"events":3,"frames":0,"splits":1}"#;
 
+const MANIFEST_AT_1000: &str = r#"{"run_id":"run-1000-00001","started_unix":1000,
+  "finished_unix":1100,"outcome":"done","elapsed_ticks":400,"events":3,"frames":0,"splits":1}"#;
+const MANIFEST_AT_2000: &str = r#"{"run_id":"run-2000-00001","started_unix":2000,
+  "finished_unix":2100,"outcome":"done","elapsed_ticks":400,"events":3,"frames":0,"splits":1}"#;
+
 #[tokio::test]
 async fn a_workspace_that_never_recorded_a_run_lists_nothing_rather_than_404() {
     let ws = workspace("empty");
@@ -159,6 +164,45 @@ async fn a_run_with_no_frames_reports_an_empty_index_rather_than_404() {
         "a planning-only run is valid, not degenerate"
     );
     assert_eq!(body["frames"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn an_unfinished_run_sorts_by_the_time_in_its_id_not_to_the_bottom() {
+    // A crashed run is usually the newest and the most interesting; sorting
+    // every manifest-less run last buries exactly the ones worth opening.
+    let ws = workspace("ordering");
+    seed_run(
+        &ws,
+        "run-1000-00001",
+        MILESTONES,
+        Some(MANIFEST_AT_1000),
+        None,
+    );
+    seed_run(&ws, "run-3000-00001", MILESTONES, None, None); // newest, crashed
+    seed_run(
+        &ws,
+        "run-2000-00001",
+        MILESTONES,
+        Some(MANIFEST_AT_2000),
+        None,
+    );
+
+    let (status, body) = get_json(state_with_workspace(&ws), "/api/v1/runs").await;
+    assert_eq!(status, StatusCode::OK);
+    let ids: Vec<&str> = body["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["run_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["run-3000-00001", "run-2000-00001", "run-1000-00001"]
+    );
+    assert!(
+        body["runs"][0]["started_unix"].is_null(),
+        "ordering may use the id; the field must still say we do not know"
+    );
 }
 
 #[tokio::test]

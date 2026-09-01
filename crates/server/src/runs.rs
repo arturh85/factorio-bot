@@ -150,6 +150,28 @@ fn summary_for(dir: &std::path::Path, id: &str) -> RunSummary {
     )
 }
 
+/// When a run began, for *ordering only*.
+///
+/// A run with no manifest has no recorded start time, and `started_unix` stays
+/// null because that is the truth. But it still has to sort somewhere, and
+/// putting every unfinished run at the bottom buries exactly the ones worth
+/// opening -- a run that crashed is usually the newest and the most
+/// interesting.
+///
+/// Run ids are minted here as `run-<unix seconds>-<sub-second>`, so the prefix
+/// is a start time we produced ourselves. Parsing it is a coupling to our own
+/// id format, which is why it is confined to this function and why a failure
+/// to parse falls back to zero rather than guessing.
+fn sort_key(run: &RunSummary) -> u64 {
+    run.started_unix.unwrap_or_else(|| {
+        run.run_id
+            .strip_prefix("run-")
+            .and_then(|rest| rest.split('-').next())
+            .and_then(|secs| secs.parse().ok())
+            .unwrap_or(0)
+    })
+}
+
 /// Lists archived runs.
 #[utoipa::path(
     get,
@@ -178,9 +200,9 @@ pub async fn list_runs(State(state): State<AppState>) -> Result<Json<RunsRespons
         .collect();
 
     runs.sort_by(|a, b| {
-        b.started_unix
-            .cmp(&a.started_unix)
-            .then_with(|| a.run_id.cmp(&b.run_id))
+        sort_key(b)
+            .cmp(&sort_key(a))
+            .then_with(|| b.run_id.cmp(&a.run_id))
     });
     Ok(Json(RunsResponse { runs }))
 }

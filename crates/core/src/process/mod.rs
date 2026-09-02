@@ -1,5 +1,6 @@
 pub mod arrange_windows;
 pub mod asset_sync;
+pub mod connect_wait;
 pub mod instance_setup;
 pub mod io_utils;
 pub mod output_parser;

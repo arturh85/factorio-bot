@@ -3,10 +3,12 @@ use crate::errors::*;
 use crate::factorio::rcon::{FactorioRcon, RconSettings};
 use crate::factorio::world::FactorioWorld;
 use crate::process::arrange_windows::arrange_windows;
+use crate::process::connect_wait::{ConnectWait, ConnectWatcher, missing_clients};
 use crate::process::instance_setup::setup_factorio_instance;
 use crate::process::output_reader::read_output;
 use crate::process::{InteractiveProcess, io_utils};
 use crate::settings::FactorioSettings;
+use crate::types::PlayerId;
 use miette::{IntoDiagnostic, Result};
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -213,38 +215,66 @@ impl FactorioInstance {
             }
             let wait_started = Instant::now();
             let expected_players = params.client_count as usize;
+            // Give up on a *stall*, not on a clock: clients take 25-30 s to
+            // load sprites and arrive one after another, so an absolute budget
+            // abandons a run that is still assembling itself. See
+            // `connect_wait::CONNECT_STALL_TIMEOUT`.
+            let mut watcher = ConnectWatcher::new(expected_players, wait_started);
             loop {
-                // Poll connected player count
-                match rcon.connected_player_count().await {
+                let verdict = match rcon.connected_player_count().await {
                     Ok(count) => {
-                        if count >= expected_players {
-                            if !params.silent {
-                                success!(
-                                    "All {} client(s) connected in <yellow>{:?}</>",
-                                    params.client_count,
-                                    wait_started.elapsed()
-                                );
-                            }
-                            break;
-                        }
-                        // Show progress
-                        if !params.silent {
+                        let verdict = watcher.observe(count, Instant::now());
+                        if verdict == ConnectWait::Waiting && !params.silent {
                             info!("Clients: {}/{} connected", count, expected_players);
                         }
+                        verdict
                     }
                     Err(e) => {
                         if !params.silent {
                             warn!("Error checking player count: {:?}", e);
                         }
+                        // An unanswered poll is not evidence of a stall, but it
+                        // must not stop the clock either: re-ask the watcher
+                        // with what we already know.
+                        watcher.observe(0, Instant::now())
                     }
-                }
-                // Timeout after 90 seconds (clients take 25-30s to load sprites)
-                if wait_started.elapsed() > std::time::Duration::from_secs(90) {
-                    error!(
-                        "Timeout waiting for clients to connect (expected {})",
-                        expected_players
-                    );
-                    break;
+                };
+                match verdict {
+                    ConnectWait::Satisfied => {
+                        if !params.silent {
+                            success!(
+                                "All {} client(s) connected in <yellow>{:?}</>",
+                                params.client_count,
+                                wait_started.elapsed()
+                            );
+                        }
+                        break;
+                    }
+                    ConnectWait::Stalled => {
+                        // Best-effort naming: the poll above deliberately
+                        // counts without deserialising, so ask once more for
+                        // the ids. A failure here loses the names, not the
+                        // warning.
+                        let present: Vec<PlayerId> = match rcon.connected_players().await {
+                            Ok(players) => players.iter().map(|p| p.player_id).collect(),
+                            Err(e) => {
+                                warn!("could not list the players that did connect: {:?}", e);
+                                vec![]
+                            }
+                        };
+                        let missing = missing_clients(expected_players, &present);
+                        error!(
+                            "Gave up waiting for clients after {:?} with no further progress: \
+                             {}/{} have a character. Missing client(s): {:?}. \
+                             The run continues without them.",
+                            wait_started.elapsed(),
+                            watcher.best(),
+                            expected_players,
+                            missing
+                        );
+                        break;
+                    }
+                    ConnectWait::Waiting => {}
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
             }

@@ -35,10 +35,21 @@
  * every coordinate in the markup below is a game-world coordinate, unrounded
  * and unnegated. Factorio's `y` grows downward exactly as SVG's does; nothing
  * here flips it.
+ *
+ * What it is projecting is NOT the `bounds` prop. `bounds` is the keyframe's
+ * *entity* extent, so framing it directly let a bot walk out of the picture
+ * and left the viewer looking at a still frame while the run was at its
+ * busiest -- the map's whole job during a live run is to show that something
+ * is happening. `@/lib/mapCamera.ts` decides the frame instead, from the
+ * bots and their trails as well as the entities, and decides when it is
+ * allowed to move; this component only holds the previous frame and hands it
+ * back, which is what keeps the policy pure and asserted in numbers.
  */
-import {computed, ref} from 'vue';
+import {computed, ref, watch} from 'vue';
+import {Crosshair, Maximize} from '@lucide/vue';
 import {Bounds, EntitySnapshot, MapRecord, Position} from '@/api/types';
 import {BotDot, MapFeature, buildMapFeatures, legendFor} from '@/lib/mapFeatures';
+import {CameraFrame, CameraMode, cameraFrame} from '@/lib/mapCamera';
 import {project, projectionFor} from '@/lib/mapProjection';
 import MapLegend from '@/components/map/MapLegend.vue';
 
@@ -69,9 +80,54 @@ const props = withDefaults(
  */
 const VIEW_SIZE = 480;
 
-const projection = computed(() =>
-    projectionFor(props.bounds ?? {left: 0, top: 0, right: 1, bottom: 1}, VIEW_SIZE, VIEW_SIZE)
+/**
+ * Which question the camera is answering. The viewer's choice, not ours.
+ *
+ * "Where is everything?" and "what is that bot doing?" want different
+ * pictures and no single frame is both, so this panel offers both rather
+ * than inventing a compromise that is nobody's answer. `fit` is the default
+ * because it is the one that cannot hide anything.
+ */
+const mode = ref<CameraMode>('fit');
+
+/**
+ * The frame on screen.
+ *
+ * A `ref` updated by a watcher rather than a `computed`, because the policy
+ * is deliberately *stateful*: `cameraFrame` is told what is currently shown
+ * so it can decline to move. A computed cannot read its own last value
+ * without smuggling state in beside it, and the state is the feature.
+ */
+const frame = ref<CameraFrame | null>(null);
+
+watch(
+    () => [props.bounds, props.bots, props.trail, mode.value],
+    () => {
+        frame.value = cameraFrame({
+            mode: mode.value,
+            world: props.bounds,
+            bots: props.bots.map((bot) => bot.position),
+            trails: Object.values(props.trail),
+            previous: frame.value
+        });
+    },
+    {immediate: true}
 );
+
+function setMode(next: CameraMode): void {
+    mode.value = next;
+}
+
+/**
+ * The framed area in world coordinates -- what is on screen.
+ *
+ * Square, so `projectionFor` letterboxes nothing and this rectangle and the
+ * viewport are the same rectangle. The fallback is never rendered: the panel
+ * shows its empty state when there is no frame.
+ */
+const view = computed(() => frame.value?.bounds ?? {left: 0, top: 0, right: 1, bottom: 1});
+
+const projection = computed(() => projectionFor(view.value, VIEW_SIZE, VIEW_SIZE));
 
 /**
  * One viewport pixel, in world units.
@@ -180,9 +236,39 @@ const tooltipStyle = computed(() => {
 <template>
     <div class="map-panel">
         <!-- A blank canvas and "nothing was built yet" look identical on
-             screen, and one of them is a bug -- say which this is. -->
-        <p v-if="!bounds" class="map-panel__empty">Nothing placed yet</p>
+             screen, and one of them is a bug -- say which this is. Keyed on
+             the frame, not on `bounds`: a run that has sampled bots but not
+             yet written a keyframe has something to show. -->
+        <p v-if="!frame" class="map-panel__empty">Nothing placed yet</p>
         <template v-else>
+            <!-- Two toggle buttons, both always reachable by Tab. Deliberately
+                 not a `radiogroup`: that pattern owes the user arrow-key
+                 roving focus, and a two-item segmented control gets the same
+                 job done with plain buttons that every keyboard and screen
+                 reader already handles. -->
+            <div class="map-panel__camera" role="group" aria-label="Map camera">
+                <button
+                    type="button"
+                    class="map-panel__camera-button"
+                    :class="{'is-on': mode === 'fit'}"
+                    :aria-pressed="mode === 'fit'"
+                    data-testid="camera-fit"
+                    @click="setMode('fit')">
+                    <Maximize class="map-panel__camera-icon" aria-hidden="true" />
+                    <span>Fit</span>
+                </button>
+                <button
+                    type="button"
+                    class="map-panel__camera-button"
+                    :class="{'is-on': mode === 'follow'}"
+                    :aria-pressed="mode === 'follow'"
+                    data-testid="camera-follow"
+                    @click="setMode('follow')">
+                    <Crosshair class="map-panel__camera-icon" aria-hidden="true" />
+                    <span>Follow bots</span>
+                </button>
+            </div>
+
             <div class="map-panel__viewport" @keydown.esc="dismiss">
                 <svg
                     :viewBox="`0 0 ${VIEW_SIZE} ${VIEW_SIZE}`"
@@ -197,16 +283,16 @@ const tooltipStyle = computed(() => {
                              as "north-west of spawn" if spawn is on the map. -->
                         <g class="map-panel__origin" aria-hidden="true">
                             <line
-                                :x1="bounds.left"
-                                :x2="bounds.right"
+                                :x1="view.left"
+                                :x2="view.right"
                                 y1="0"
                                 y2="0"
                                 vector-effect="non-scaling-stroke" />
                             <line
                                 x1="0"
                                 x2="0"
-                                :y1="bounds.top"
-                                :y2="bounds.bottom"
+                                :y1="view.top"
+                                :y2="view.bottom"
                                 vector-effect="non-scaling-stroke" />
                         </g>
 
@@ -350,6 +436,14 @@ const tooltipStyle = computed(() => {
                 </div>
             </div>
 
+            <!-- Fit refuses to hide anything, which means a bot prospecting
+                 300 tiles out shrinks the base rather than leaving it. Say so
+                 and point at the other mode, instead of either pretending the
+                 picture is fine or silently switching modes on the viewer. -->
+            <p v-if="frame.strained && mode === 'fit'" class="map-panel__strain" data-testid="camera-strain">
+                A bot is a long way from the base, so everything is small. Follow bots frames them instead.
+            </p>
+
             <MapLegend :entries="legend" />
             <!-- The affordance is invisible otherwise: nothing about an SVG
                  polygon says it can be focused. -->
@@ -361,6 +455,45 @@ const tooltipStyle = computed(() => {
 </template>
 
 <style scoped>
+.map-panel__camera {
+    display: flex;
+    gap: 0.25rem;
+    margin-bottom: 0.35rem;
+}
+.map-panel__camera-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.2rem 0.55rem;
+    border: 1px solid var(--surface-border, #ccc);
+    border-radius: 3px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: 0.72rem;
+    cursor: pointer;
+}
+.map-panel__camera-button.is-on {
+    /* Not colour alone: the pressed state also changes the border weight, so
+       the choice is readable without distinguishing two greys. */
+    border-color: #7aa2f7;
+    box-shadow: inset 0 0 0 1px #7aa2f7;
+}
+.map-panel__camera-button:focus-visible {
+    outline: 2px solid #7aa2f7;
+    outline-offset: 2px;
+}
+.map-panel__camera-icon {
+    width: 0.85rem;
+    height: 0.85rem;
+}
+
+.map-panel__strain {
+    margin: 0.35rem 0 0;
+    font-size: 0.72rem;
+    opacity: 0.75;
+}
+
 .map-panel__viewport {
     position: relative;
     width: 100%;

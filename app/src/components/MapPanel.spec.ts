@@ -18,6 +18,43 @@ import MapPanel from './MapPanel.vue';
 
 const BOUNDS: Bounds = {left: 0, top: 0, right: 48, bottom: 48};
 
+/**
+ * The map's own SVG.
+ *
+ * Every shape lookup goes through this, because the camera control's icons
+ * are SVGs with `<path>`s of their own and a bare `find('path')` picks one of
+ * those up instead of an ore patch.
+ */
+const MAP = '[data-testid="map-svg"]';
+
+/**
+ * What the camera frames for `BOUNDS` with no bot outside it: 0..48 padded by
+ * the 32-tile lead is -32..80, a 112-tile square. Every projected number in
+ * this file is derived from that, not from `BOUNDS` -- the panel does not
+ * frame the keyframe's entity bounds any more, which is the bug that made a
+ * bot walking away disappear.
+ */
+const FRAME_SPAN = 112;
+const SCALE = 480 / FRAME_SPAN;
+
+/** The group transform the panel applied, parsed back into numbers. */
+function projectionOf(wrapper: ReturnType<typeof mountPanel>) {
+    const transform = wrapper.get(`${MAP} > g`).attributes('transform') ?? '';
+    const parsed = /translate\((-?[\d.]+) (-?[\d.]+)\) scale\(([\d.]+)\)/.exec(transform);
+    if (parsed === null) throw new Error(`unparsable transform: ${transform}`);
+    return {offsetX: Number(parsed[1]), offsetY: Number(parsed[2]), scale: Number(parsed[3])};
+}
+
+/** Where a world position actually lands in the 480x480 viewport. */
+function onScreen(wrapper: ReturnType<typeof mountPanel>, position: {x: number; y: number}) {
+    const {offsetX, offsetY, scale} = projectionOf(wrapper);
+    return {x: position.x * scale + offsetX, y: position.y * scale + offsetY};
+}
+
+function isVisible(point: {x: number; y: number}): boolean {
+    return point.x >= 0 && point.x <= 480 && point.y >= 0 && point.y <= 480;
+}
+
 function oreField(name: string, x0: number, y0: number, w: number, h: number): EntitySnapshot[] {
     const out: EntitySnapshot[] = [];
     for (let x = x0; x < x0 + w; x++) for (let y = y0; y < y0 + h; y++) {
@@ -48,7 +85,7 @@ function mountPanel(overrides: Partial<InstanceType<typeof MapPanel>['$props']> 
 describe('MapPanel', () => {
     it('draws 30 ore tiles as ONE outlined patch, not 30 cells', () => {
         const wrapper = mountPanel();
-        const paths = wrapper.findAll('path');
+        const paths = wrapper.findAll(`${MAP} path`);
         expect(paths).toHaveLength(1);
         // Tile centres 4.5..9.5 / 4.5..8.5 -> tile edges 4..10 / 4..9.
         expect(paths[0].attributes('d')).toBe('M4 4L10 4L10 9L4 9Z');
@@ -56,18 +93,23 @@ describe('MapPanel', () => {
 
     it('projects with a single group transform, so the shapes stay in world coordinates', () => {
         const wrapper = mountPanel();
-        // 48 world tiles into a 480 viewport: scale 10, no letterboxing.
-        expect(wrapper.find('svg > g').attributes('transform')).toBe('translate(0 0) scale(10)');
+        // The camera's 112-tile square into a 480 viewport, with world -32
+        // landing on viewport 0. Square frame, so no letterboxing.
+        expect(wrapper.get(`${MAP} > g`).attributes('transform')).toBe(
+            `translate(${32 * SCALE} ${32 * SCALE}) scale(${SCALE})`
+        );
     });
 
     it('draws a marker for each non-resource entity, centred on its reported position', () => {
         const wrapper = mountPanel();
         const rect = wrapper.get('[data-testid^="map-feature-entity-"]');
-        // A 7px marker at scale 10 is 0.7 tiles, floored to a whole tile so a
-        // sub-tile entity is still visible.
-        expect(Number(rect.attributes('x'))).toBeCloseTo(19.5);
-        expect(Number(rect.attributes('y'))).toBeCloseTo(29.5);
-        expect(Number(rect.attributes('width'))).toBeCloseTo(1);
+        // A 7px marker at this scale is 1.63 tiles: markers are sized in
+        // screen pixels, which is why pulling the camera out does not turn
+        // them into specks.
+        const side = 7 / SCALE;
+        expect(Number(rect.attributes('width'))).toBeCloseTo(side);
+        expect(Number(rect.attributes('x'))).toBeCloseTo(20 - side / 2);
+        expect(Number(rect.attributes('y'))).toBeCloseTo(30 - side / 2);
     });
 
     it('draws each bot as a dot at its own position', () => {
@@ -93,7 +135,7 @@ describe('MapPanel', () => {
         // Hit-tested regardless of paint -- an unpainted stroke is not
         // `visiblePainted` and would otherwise be untouchable.
         expect(hit.attributes('pointer-events')).toBe('stroke');
-        expect(Number(hit.attributes('stroke-width'))).toBeCloseTo(1.6); // 16px at scale 10
+        expect(Number(hit.attributes('stroke-width'))).toBeCloseTo(16 / SCALE); // 16 screen px
         expect(trail.get('.map-panel__trail-line').attributes('pointer-events')).toBe('none');
     });
 
@@ -118,16 +160,16 @@ describe('MapPanel', () => {
         // them is a bug.
         const wrapper = mount(MapPanel, {props: {entities: [], bots: [], trail: {}, bounds: null}});
         expect(wrapper.text()).toContain('Nothing placed yet');
-        expect(wrapper.find('svg').exists()).toBe(false);
+        expect(wrapper.find(MAP).exists()).toBe(false);
     });
 
     it('reacts to bounds arriving by swapping the text for the map', async () => {
         const wrapper = mount(MapPanel, {
             props: {entities: [FURNACE], bots: [], trail: {}, bounds: null as Bounds | null}
         });
-        expect(wrapper.find('svg').exists()).toBe(false);
+        expect(wrapper.find(MAP).exists()).toBe(false);
         await wrapper.setProps({bounds: BOUNDS});
-        expect(wrapper.find('svg').exists()).toBe(true);
+        expect(wrapper.find(MAP).exists()).toBe(true);
         expect(wrapper.text()).not.toContain('Nothing placed yet');
     });
 
@@ -138,7 +180,7 @@ describe('MapPanel', () => {
 
         it('names an ore patch and its tile count on hover', async () => {
             const wrapper = mountPanel();
-            await wrapper.get('path').trigger('pointerenter');
+            await wrapper.get(`${MAP} path`).trigger('pointerenter');
             const tooltip = wrapper.get('[data-testid="map-tooltip"]');
             expect(tooltip.text()).toContain('iron-ore patch');
             expect(tooltip.text()).toContain('30 tiles');
@@ -183,7 +225,7 @@ describe('MapPanel', () => {
 
         it('announces the tooltip rather than only displaying it', async () => {
             const wrapper = mountPanel();
-            await wrapper.get('path').trigger('pointerenter');
+            await wrapper.get(`${MAP} path`).trigger('pointerenter');
             expect(wrapper.get('[data-testid="map-tooltip"]').attributes('aria-live')).toBe('polite');
         });
 
@@ -198,7 +240,7 @@ describe('MapPanel', () => {
 
         it('closes a hover tooltip when the pointer leaves the map', async () => {
             const wrapper = mountPanel();
-            await wrapper.get('path').trigger('pointerenter');
+            await wrapper.get(`${MAP} path`).trigger('pointerenter');
             await wrapper.get('[data-testid="map-svg"]').trigger('pointerleave');
             expect(wrapper.find('[data-testid="map-tooltip"]').exists()).toBe(false);
         });
@@ -214,7 +256,7 @@ describe('MapPanel', () => {
         it('ignores a blur from a shape that is not the focused one', async () => {
             const wrapper = mountPanel();
             await wrapper.get('[data-testid="map-feature-bot-1"]').trigger('focus');
-            await wrapper.get('path').trigger('blur');
+            await wrapper.get(`${MAP} path`).trigger('blur');
             expect(wrapper.get('[data-testid="map-tooltip"]').text()).toContain('bot 1');
         });
 
@@ -242,16 +284,120 @@ describe('MapPanel', () => {
         });
 
         it('keeps the tooltip clear of the left and right edges', async () => {
+            // The bot has to be near the frame's edge for the clamp to do
+            // anything, and the camera keeps content 32 tiles clear of the
+            // edge whenever it re-frames -- so this is a bot that has walked
+            // to x = -24 inside a frame the camera decided not to move.
             const wrapper = mount(MapPanel, {
                 props: {
                     entities: [],
-                    bots: [{id: 1, position: {x: 0, y: 24}}],
+                    bots: [{id: 1, position: {x: 10, y: 24}}],
                     trail: {},
                     bounds: BOUNDS
                 }
             });
+            await wrapper.setProps({bots: [{id: 1, position: {x: -24, y: 24}}]});
             await wrapper.get('[data-testid="map-feature-bot-1"]').trigger('pointerenter');
             expect(wrapper.get('[data-testid="map-tooltip"]').attributes('style')).toContain('left: 15%');
+        });
+    });
+
+    describe('camera', () => {
+        it('keeps a bot in view after it walks outside the built area', () => {
+            // The complaint this exists for: the keyframe's bounds are 0..48,
+            // and framing them put this bot off the picture entirely, so the
+            // map looked frozen while the run was at its busiest.
+            const far = {x: 200, y: -20};
+            const wrapper = mount(MapPanel, {
+                props: {entities: [FURNACE], bots: [{id: 1, position: far}], trail: {}, bounds: BOUNDS}
+            });
+            expect(isVisible(onScreen(wrapper, far))).toBe(true);
+            // ...and fit mode still shows the base it walked away from.
+            expect(isVisible(onScreen(wrapper, {x: 20, y: 30}))).toBe(true);
+        });
+
+        it('keeps a trail that leads off the built area in view too', () => {
+            const wrapper = mount(MapPanel, {
+                props: {
+                    entities: [FURNACE],
+                    bots: [{id: 1, position: {x: 20, y: 30}}],
+                    trail: {1: [{x: -160, y: -40}, {x: 20, y: 30}]},
+                    bounds: BOUNDS
+                }
+            });
+            expect(isVisible(onScreen(wrapper, {x: -160, y: -40}))).toBe(true);
+        });
+
+        it('does not move the picture while a bot walks about inside the frame', async () => {
+            // Re-deriving a tight box every cursor tick is what makes a map
+            // twitch continuously while playing, which is worse than a still
+            // frame. Nothing left the frame here, so nothing moves.
+            const wrapper = mountPanel();
+            const before = projectionOf(wrapper);
+            await wrapper.setProps({bots: [{id: 1, position: {x: 40, y: 44}}]});
+            expect(projectionOf(wrapper)).toEqual(before);
+        });
+
+        it('re-frames once the bot reaches the edge', async () => {
+            const wrapper = mountPanel();
+            const before = projectionOf(wrapper);
+            const edge = {x: 76, y: 10};
+            await wrapper.setProps({bots: [{id: 1, position: edge}]});
+            expect(projectionOf(wrapper).scale).not.toBe(before.scale);
+            expect(isVisible(onScreen(wrapper, edge))).toBe(true);
+        });
+
+        it('offers both framings as buttons, each reachable by Tab', () => {
+            const wrapper = mountPanel();
+            const group = wrapper.get('[role="group"]');
+            expect(group.attributes('aria-label')).toBe('Map camera');
+            const fit = wrapper.get('[data-testid="camera-fit"]');
+            const follow = wrapper.get('[data-testid="camera-follow"]');
+            // Native buttons: focusable and activatable by Enter and Space
+            // without this component implementing a key handler at all.
+            expect(fit.element.tagName).toBe('BUTTON');
+            expect(follow.element.tagName).toBe('BUTTON');
+            expect(fit.attributes('aria-pressed')).toBe('true');
+            expect(follow.attributes('aria-pressed')).toBe('false');
+        });
+
+        it('zooms to the bots, dropping the base, when the viewer asks it to', async () => {
+            const far = {x: 400, y: 10};
+            const wrapper = mount(MapPanel, {
+                props: {entities: [FURNACE], bots: [{id: 1, position: far}], trail: {}, bounds: BOUNDS}
+            });
+            const fitted = projectionOf(wrapper).scale;
+            await wrapper.get('[data-testid="camera-follow"]').trigger('click');
+            expect(wrapper.get('[data-testid="camera-follow"]').attributes('aria-pressed')).toBe('true');
+            expect(wrapper.get('[data-testid="camera-fit"]').attributes('aria-pressed')).toBe('false');
+            expect(projectionOf(wrapper).scale).toBeGreaterThan(fitted);
+            expect(isVisible(onScreen(wrapper, far))).toBe(true);
+            // The base is genuinely out of shot now. That is the trade the
+            // viewer just chose, not a bug.
+            expect(isVisible(onScreen(wrapper, {x: 20, y: 30}))).toBe(false);
+        });
+
+        it('says when fit has been stretched too far, and offers the way out', async () => {
+            const wrapper = mount(MapPanel, {
+                props: {entities: [FURNACE], bots: [{id: 1, position: {x: 400, y: 10}}], trail: {}, bounds: BOUNDS}
+            });
+            expect(wrapper.get('[data-testid="camera-strain"]').text()).toContain('Follow bots');
+            await wrapper.get('[data-testid="camera-follow"]').trigger('click');
+            expect(wrapper.find('[data-testid="camera-strain"]').exists()).toBe(false);
+        });
+
+        it('does not nag about strain on an ordinary map', () => {
+            expect(mountPanel().find('[data-testid="camera-strain"]').exists()).toBe(false);
+        });
+
+        it('draws the bots before the first keyframe, rather than reporting an empty map', () => {
+            // `bounds` is null until a keyframe lands, but a sampled bot is
+            // something to show, and "no keyframe yet" is not "nothing here".
+            const wrapper = mount(MapPanel, {
+                props: {entities: [], bots: [{id: 1, position: {x: 12, y: 12}}], trail: {}, bounds: null}
+            });
+            expect(wrapper.find(MAP).exists()).toBe(true);
+            expect(wrapper.get('[data-testid="map-feature-bot-1"]').attributes('cx')).toBe('12');
         });
     });
 
@@ -269,7 +415,7 @@ describe('MapPanel', () => {
         it('paints each swatch in the colour of the shape it stands for', () => {
             const wrapper = mountPanel();
             const swatch = wrapper.get('[data-testid="legend-resource:iron-ore"] .legend__swatch');
-            const patchFill = wrapper.get('path').attributes('fill');
+            const patchFill = wrapper.get(`${MAP} path`).attributes('fill');
             expect(swatch.attributes('style')).toContain(patchFill);
         });
 

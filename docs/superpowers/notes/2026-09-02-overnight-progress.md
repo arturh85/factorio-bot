@@ -289,3 +289,26 @@ same failure would have read `expected value at line 1 column 1`.
 | 3 smelt iron plates | satisfied (`already_satisfied`) |
 | 4 research automation | 73 steps, stuck on resource-tile contention |
 | 5-7 power, belts, oil | not reached |
+
+## The viewer has not seen any of this (~04:10)
+
+Run 7 is the richest record the project has produced: **720 frames**, 156 KB of
+entity map, 544 KB of samples, 107 actions.
+
+The server running on :7492 answers `/api/v1/runs/{id}` and 404s on `/samples`
+and `/map` — it is an **old binary**, started before those endpoints existed.
+Every release build tonight used `--no-default-features --features cli,lua`,
+which is correct for running the game and excludes the server crate, so `serve`
+is not even a subcommand of the binary I have been building.
+
+Consequence, stated plainly: **the entire watchability half of this work has
+never been exercised against a real run.** The samples, the entity map, the
+teleport events, the analysis view's plan-to-outcome join — all of it is unit-
+and contract-tested, and none of it has rendered a genuine 107-action run.
+
+Next build must be `--all-features` (or add `server`), then restart the viewer
+and actually look at run 7. That is a first-order task for the morning, not a
+footnote: it is exactly the "every gate was green while the thing did not work"
+shape this night has been about, and I walked into it while chasing rung 4.
+
+Note there is a `factorio-bot serve` on :7492 that I did not start — left alone.

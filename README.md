@@ -54,7 +54,10 @@ Requires **Factorio 2.1** — see [Howto: Setup](https://arturh85.github.io/fact
   - [x] Flow connections with flow rate per belt side/resource
 - [x] Planning-only mode for fast iteration: `--clients 0 --bots N` (no graphical client, no connect wait)
 - [x] REPL mode for fast iteration (`cargo repl`)
-- [x] Seed rolling (`factorio-bot roll-seed --map ...`)
+- [ ] Seed rolling (`factorio-bot roll-seed`) -- **unimplemented**: the
+      subcommand refuses immediately. Its scoring depended on the task-graph
+      planner that was deleted; the clap surface is kept as the interface a
+      resurrection would implement.
 - [x] (Optional) HTTP API with an OpenAPI spec at `/openapi.json` and Swagger UI at `/swagger-ui`
 - [x] Builds and is CI-tested on Windows/macOS/Linux
 - [x] MIT licensed

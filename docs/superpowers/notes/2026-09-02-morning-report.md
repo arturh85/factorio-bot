@@ -325,3 +325,55 @@ it past what it supports.
 **Unmeasured, and load-bearing:** nobody has A/B'd what screenshot capture
 actually costs. The "~7 UPS from six cameras" figure is inference. Any argument
 for video that leans on it is leaning on an unrun experiment.
+
+## Update (~12:45): run 23 — four rungs faster, one rung spinning
+
+`run-1788344167-58471`, the first run with all five of today's fixes together
+(recipe ordering, tile retirement, roster, awaited research, teleport collision).
+Killed at 31 minutes rather than left to burn its 90-minute timeout, because the
+record showed it could not progress.
+
+**What got better, measurably:**
+
+| rung | before | after |
+|---|---|---|
+| smelt copper x20 | 3 iterations, 15 teleports | **2 iterations, 0 teleports** |
+| craft gears x20 | 2 iterations (3 then 4 actions) | **1 iteration, 12 actions** |
+
+The load-bearing unknown from the teleport fix is answered: Factorio's
+`find_non_colliding_position("character", ..)` **does** count other characters as
+obstacles. No two bots shared a tile at any point in this run. The stacking bug
+is dead.
+
+**What replaced it: a spin.**
+
+```
+1414 teleport events.  All bot 1.  All walk_stuck.
+All to the identical destination (-22.0, 19.0).
+From two alternating positions, every 61 ticks,
+tick 20385 -> 108151 = 87,766 ticks on one action.
+```
+
+Rung 6 iterations read `success=1 pending=35 (+353 teleports)`.
+
+The likely mechanism: the teleport now lands the bot at an *adjusted* position
+while arrival is still judged against the *original* waypoint. Before, the
+teleport put the character exactly on the waypoint and the next tick's arrival
+check advanced the leg. Now it lands 0.5 tiles off, arrival never fires, the leg
+times out again, `find_non_colliding_position` is deterministic and returns the
+same spot, forever.
+
+**Two defects, not one.** The adjusted-position mismatch is the trigger, but the
+reason it cost 87,766 ticks instead of one wasted attempt is that **nothing caps
+the retries**. The abort arm added with the fix covers "nothing free"; it does
+not cover "teleported and it did not help".
+
+**And the new diagnostic could not see it.** `obs.walks_failed` and the
+`first_error` fallback both key off a walk *failing*. This walk never failed — it
+never terminated. A spin is invisible to an instrument that only fires on
+failure, which is the same shape as `stuck_silent` reporting no error: the
+absence of a verdict read as the absence of a problem.
+
+**Honest ladder position: still 5 of 7.** Four fixes verified good, one fix
+traded a permanent brick for an unbounded loop. That is progress — a spin is
+recoverable and a brick is not — but it is not a rung.

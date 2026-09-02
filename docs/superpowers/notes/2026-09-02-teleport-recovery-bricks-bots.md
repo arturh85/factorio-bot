@@ -79,10 +79,15 @@ Three things wrong in two lines:
 ## A separate finding from the same plan
 
 The stuck plan puts **30 of its 33 steps on bot 1**, one each on bots 2, 3 and 4.
-That is the already-reported gap where `Researched` sizes its whole bill against a
-single bot, seen from the other end: it is not only slow, it concentrates every
-walk onto one character and so concentrates the exposure to this teleport bug.
-The two defects compound.
+It concentrates every walk onto one character and so concentrates the exposure to
+this teleport bug; the two defects compound.
+
+**Corrected later the same day.** I attributed this to the reported gap where
+`Researched` sizes its whole bill against a single bot. That is a true
+description of the code and a **false** account of the cause — see
+[2026-09-02-research-bill-spread.md]. The enclosing share's chain binds the
+subtree before `Researched` states anything, and hoisting the goal clear of the
+share was measured to move the distribution by **zero** actions.
 
 ## What this cost
 

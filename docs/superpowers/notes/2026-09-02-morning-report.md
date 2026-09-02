@@ -377,3 +377,45 @@ absence of a verdict read as the absence of a problem.
 **Honest ladder position: still 5 of 7.** Four fixes verified good, one fix
 traded a permanent brick for an unbounded loop. That is progress — a spin is
 recoverable and a brick is not — but it is not a rung.
+
+## Correction: why 30 of 33 steps land on one bot
+
+I have said twice today that this is the reported gap where `Researched` sizes
+its whole bill against a single bot. That is a true description of the code and a
+false account of the cause, and it was measured rather than argued.
+
+Counterfactuals on a four-bot fixture:
+
+| scenario | distribution | makespan |
+|---|---|---|
+| as-is, technology locked | 49 / 12 / 12 / 12 | 15922 |
+| technology already researched in the world | 12 / 12 / 12 / 12 | 2304 |
+| `Goal::Researched` hoisted to a top-level sibling | 49 / 12 / 12 / 12 | 16832 |
+
+Hoisting the goal clear of the share moves the distribution by **zero actions**
+and makes the makespan *worse*, because the hoisted chain stops sharing
+intermediates. Rewriting those `Holder::Share`s to `Anyone` would change nothing
+— no method claims them at that site.
+
+What actually binds it: the chain is opened by the first share to expand
+(`SplitAcrossBots` emits in ascending `BotId`, so bot 1), `HandCraft` meets
+`NeedsResearch` inside that chain, and nothing beneath a chain can re-own itself.
+The sizing is downstream of that, not the cause of it.
+
+**The real constraint is that a lab is one craft.** Its ~50 iron and ~16 copper
+plates must be in one inventory at one moment, and this planner has no way for
+one bot to hand an item to another. 86% of the fixture's makespan is the unlock;
+8280 of bot 1's 15922 ticks are mining, while bots 2-4 finish around tick 4400
+and idle for eleven thousand.
+
+Also corrected: I cited "option 3 in the share-sizing spec". It is not there —
+that spec explicitly puts research out of scope. The options are in
+`2026-09-02-rung-3-4-findings.md`, which already called option 3 "a larger change
+than a one-night fix". This work is the measurement that note asked for.
+
+**Not fixed, deliberately.** Two designs would work — a furnace-as-buffer split
+(supplier and taker need not be the same bot, since `Smelt`'s `Remove` carries no
+`HasItem`), or a bot-to-bot transfer primitive. Both are real changes, and this
+is a parallelism problem, not a reliability one. Reliability is the stated
+priority and the ladder is not blocked on this. It is a decision to put to the
+project owner, not a ruling to make at 13:00 while a run is in flight.

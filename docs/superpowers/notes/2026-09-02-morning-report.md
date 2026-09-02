@@ -1214,3 +1214,59 @@ tell the difference.
 rose, so any increase is machine-made by construction — is being built now. Run
 36 is the evidence for why: without it "the starter factory works" was one
 sentence away from being written, and it would have been false.
+
+## Run 37 — a factory produced, and it was witnessed
+
+`run-1788390446-74562`, 01:06. Two rungs: build the cell, then witness it.
+
+```
+milestone 1  an iron-plate cell producing 15/min   satisfied, 8 steps, 5 actions
+milestone 2  witness: the cell's furnace fills while every bot stands still
+
+WITNESSED: iron-plate in 1 watched machine(s) went 0 -> 1 (+1, wanted 1)
+           in 480 of 2400 ticks, 466 polls
+```
+
+**An iron plate appeared in the furnace's output inventory while every bot stood
+still.** The witness dispatches no actions, so a plate that appears can only have
+been smelted there. That is the first machine-made item in this project's
+history, and the first evidence of production rather than of placement.
+
+**480 ticks against a predicted 432** — drill 240 for the ore, furnace 192 for the
+plate. The planner's model and the running game agree to within 11%.
+
+### I called it a false pass first, and was wrong — fifth time tonight
+
+The force sampler's last line reads:
+
+```
+tick 9300: made = { coal: 37, iron-ore: 1 }
+```
+
+One ore, no plate — which looked like the witness passing on nothing. It is not.
+`samples.jsonl` writes every **300 ticks**; the witness polls roughly once per
+tick, and the run ended before the next sample. The plate landed in the gap.
+
+So the witness is the finer instrument, which is the point of it: a 300-tick
+sampler cannot see a 192-tick event reliably, and the thing being measured is
+exactly that fast.
+
+Worth stating plainly against the day's other direction: **five times tonight I
+suspected a false success and was wrong.** That is the safe way to be wrong, and
+this project has been burned by the opposite often enough to justify the bias —
+but a check that always fires is as uninformative as one that never does, and the
+ratio is now worth watching in me rather than in the code.
+
+### What this closes
+
+The recurring failure — a lab placed and never powered, coverage without
+generation, `only_ghosts` placing an overlapping blueprint, a factory reported
+producing at one tick old — was always the same confusion: **a machine that
+stands is not a machine that works.** Nothing in the planner could tell the
+difference, and now something outside it can.
+
+The narration says so in the run itself, unprompted by any failure:
+
+> 1 iron-plate cell(s) already stand and 15 a minute needs 1: nothing left to
+> build. They *stand*, which is not the same as producing — only a furnace's
+> output rising says that.

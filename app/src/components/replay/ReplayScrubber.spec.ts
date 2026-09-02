@@ -6,6 +6,16 @@ import {nextTick} from 'vue';
 import {FramesManifest} from '@/api/types';
 import {REALISTIC_REPLAY} from '@/api/replay.fixtures';
 import {EMPTY_MANIFEST, MULTI_CAMERA_MANIFEST, OVERLAPPING_MANIFEST, OVERLAPPING_MANIFEST_LATE_START, UNRELATED_RUN_MANIFEST} from '@/api/frames.fixtures';
+import {
+    CLEAN_MANIFEST,
+    CLEAN_TICKS,
+    NO_TICKS,
+    NO_VIDEO_MANIFEST,
+    SKEWED_MANIFEST,
+    STALLED_MANIFEST,
+    STALLED_TICKS,
+    UNSTOPPED_MANIFEST
+} from '@/api/video.fixtures';
 
 import '@/test/resizeObserverStub';
 
@@ -256,5 +266,104 @@ describe('stale client marking', () => {
 
         const options = wrapper.find('[data-testid="client-select"]').findAll('option');
         expect(options.map((o) => o.text())).toEqual(['client 1', 'client 2']);
+    });
+});
+
+
+/**
+ * The video half. `REALISTIC_REPLAY`'s observed ticks start at 100, so
+ * `observedOrigin()` is 100 and a shifted tick `t` on this axis is absolute
+ * `game.tick` `t + 100` -- which is the clock the recording's samples are in.
+ * `CLEAN_TICKS` spans absolute 100-250, i.e. shifted 0-150.
+ */
+describe('ReplayScrubber -- the video half', () => {
+    const video = {
+        videoManifest: CLEAN_MANIFEST,
+        videoTicks: CLEAN_TICKS,
+        videoSrc: '/api/v1/video/file?run=run-1'
+    };
+
+    it('renders nothing at all for a run that recorded no video', () => {
+        const wrapper = mount(ReplayScrubber, {
+            props: {replay: REALISTIC_REPLAY, manifest: EMPTY_MANIFEST, tick: 0,
+                videoManifest: NO_VIDEO_MANIFEST, videoTicks: NO_TICKS, videoSrc: null}
+        });
+        expect(wrapper.find('[data-testid="video-section"]').exists()).toBe(false);
+    });
+
+    it('renders the element with its source when the cursor is inside the recording', () => {
+        const wrapper = mount(ReplayScrubber, {
+            props: {replay: REALISTIC_REPLAY, manifest: EMPTY_MANIFEST, tick: 30, ...video}
+        });
+        const element = wrapper.find('[data-testid="video-element"]');
+        expect(element.exists()).toBe(true);
+        expect(element.attributes('src')).toBe('/api/v1/video/file?run=run-1');
+        expect(wrapper.find('[data-testid="video-out-of-range"]').exists()).toBe(false);
+        expect(wrapper.find('[data-testid="video-clock-unknown"]').exists()).toBe(false);
+    });
+
+    it('says the tick is outside the recording rather than showing second zero', () => {
+        // Shifted 200 is absolute 300, past the recording's last sample at 250.
+        // Clamping would park the element on a frame of a different moment.
+        const wrapper = mount(ReplayScrubber, {
+            props: {replay: REALISTIC_REPLAY, manifest: EMPTY_MANIFEST, tick: 200, ...video}
+        });
+        expect(wrapper.find('[data-testid="video-out-of-range"]').exists()).toBe(true);
+        expect(wrapper.find('[data-testid="video-element"]').exists()).toBe(false);
+    });
+
+    it('covers the picture -- not merely captions it -- when the cursor is in a stall', () => {
+        // The strongest requirement in the design. Shifted 45 is absolute 145,
+        // which falls between two samples separated by a gap line. The video
+        // does have a picture at the interpolated position; it is a picture of
+        // some other moment, and leaving it visible with a caption beside it is
+        // fabricated continuity.
+        const wrapper = mount(ReplayScrubber, {
+            props: {replay: REALISTIC_REPLAY, manifest: EMPTY_MANIFEST, tick: 45,
+                videoManifest: STALLED_MANIFEST, videoTicks: STALLED_TICKS,
+                videoSrc: '/api/v1/video/file'}
+        });
+        const cover = wrapper.find('[data-testid="video-clock-unknown"]');
+        expect(cover.exists()).toBe(true);
+        expect(cover.classes()).toContain('absolute');
+        expect(cover.classes()).toContain('inset-0');
+    });
+
+    it('marks the whole run unverified when the recording\'s rate did not check out', () => {
+        const wrapper = mount(ReplayScrubber, {
+            props: {replay: REALISTIC_REPLAY, manifest: EMPTY_MANIFEST, tick: 30,
+                videoManifest: SKEWED_MANIFEST, videoTicks: CLEAN_TICKS, videoSrc: '/v.mp4'}
+        });
+        expect(wrapper.find('[data-testid="video-clock-unverified"]').exists()).toBe(true);
+    });
+
+    it('reports a recorder that outlived its run as a defect', () => {
+        const wrapper = mount(ReplayScrubber, {
+            props: {replay: REALISTIC_REPLAY, manifest: EMPTY_MANIFEST, tick: 30,
+                videoManifest: UNSTOPPED_MANIFEST, videoTicks: CLEAN_TICKS, videoSrc: '/v.mp4'}
+        });
+        const kinds = wrapper.findAll('[data-testid="video-defect"]')
+            .map((node) => node.attributes('data-kind'));
+        expect(kinds).toContain('unstopped');
+    });
+
+    it('shows the video even when the frame join is refused', () => {
+        // A run can record video and no frames. Hiding the recording because
+        // there is nothing to judge the *frames* against would lose the only
+        // artefact it has.
+        const wrapper = mount(ReplayScrubber, {
+            props: {replay: REALISTIC_REPLAY, manifest: UNRELATED_RUN_MANIFEST, tick: 30, ...video}
+        });
+        expect(wrapper.find('[data-testid="frame-section"]').exists()).toBe(false);
+        expect(wrapper.find('[data-testid="video-element"]').exists()).toBe(true);
+    });
+
+    it('survives the cursor moving, which is what schedules a seek', async () => {
+        const wrapper = mount(ReplayScrubber, {
+            props: {replay: REALISTIC_REPLAY, manifest: EMPTY_MANIFEST, tick: 30, ...video}
+        });
+        await wrapper.setProps({tick: 60});
+        await nextTick();
+        expect(wrapper.find('[data-testid="video-element"]').exists()).toBe(true);
     });
 });

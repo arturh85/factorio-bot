@@ -17,12 +17,25 @@
 import {computed, onMounted, onUnmounted} from 'vue';
 import {useReplayStore} from '@/store/replayStore';
 import ReplayScrubber from './ReplayScrubber.vue';
+import {videoUrl} from '@/api/client';
 
 const replayStore = useReplayStore();
 const replay = computed(() => replayStore.getReplay);
 const parseError = computed(() => replayStore.getParseError);
 const manifest = computed(() => replayStore.getManifest);
 const jobId = computed(() => replayStore.getJobId);
+const videoManifest = computed(() => replayStore.getVideo);
+const videoTicks = computed(() => replayStore.getVideoTicks);
+// Cache-busted by the recording's own run id: the live recording is one file at
+// one URL that the next run overwrites, so without this a browser would replay
+// the previous run's video beside this run's timeline.
+// `== null` covers both halves on purpose: a store that has not fetched yet
+// answers null, and a test double that does not know about video answers
+// undefined. Neither is a recording.
+const videoSrc = computed(() => {
+    const manifest = videoManifest.value;
+    return manifest?.video == null ? null : videoUrl(manifest.run);
+});
 
 onMounted(() => {
   void replayStore.refresh();
@@ -38,5 +51,12 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <ReplayScrubber :replay="replay" :manifest="manifest" :parse-error="parseError" :job-id="jobId"/>
+  <ReplayScrubber
+    :replay="replay"
+    :manifest="manifest"
+    :parse-error="parseError"
+    :job-id="jobId"
+    :video-manifest="videoManifest"
+    :video-ticks="videoTicks"
+    :video-src="videoSrc"/>
 </template>

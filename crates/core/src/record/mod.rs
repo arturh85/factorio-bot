@@ -22,6 +22,7 @@ pub mod map;
 pub mod retention;
 pub mod samples;
 pub mod splits;
+pub mod video;
 pub use frames::{ArchivedFrame, archive_frames, parse_frame_name};
 pub use lanes::{Lane, derive_lanes};
 pub use retention::{DEFAULT_KEEP, KEEP_MARKER, Reaped, reap};
@@ -30,6 +31,10 @@ pub use samples::{
     SampleKind, ingest_samples_incremental, read_samples,
 };
 pub use splits::{Split, derive_splits};
+pub use video::{
+    TickSample, VideoManifest, VideoOptions, VideoRecord, VideoRecorder, VideoStatus,
+    archive_video, parse_tick_samples, read_video_dir,
+};
 
 /// What happened. Internally tagged as `kind`, so a line is one flat object.
 ///
@@ -515,6 +520,13 @@ pub struct RunRecorder {
     /// than reread from disk at `finish`: this recorder is the only writer of
     /// that file, so it cannot disagree with what it just wrote.
     samples_count: usize,
+    /// The run's video recorder, when one was asked for.
+    ///
+    /// Held here rather than beside the run in the caller so that the two
+    /// artefacts cannot disagree about which run they belong to -- the same
+    /// reason `record.start()` mints one id and hands it to frame capture.
+    /// `None` for every run that did not ask for video, which is the default.
+    video: Option<video::VideoRecorder>,
 }
 
 impl RunRecorder {
@@ -540,6 +552,7 @@ impl RunRecorder {
             placed_bounds: None,
             samples_offset: 0,
             samples_count: 0,
+            video: None,
             started_unix: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -549,6 +562,42 @@ impl RunRecorder {
 
     pub fn run_id(&self) -> &str {
         &self.run_id
+    }
+
+    /// Hands this run its video recorder.
+    ///
+    /// Opt-in by construction: nothing here starts one, and a run that never
+    /// calls this behaves exactly as it did before video existed. Frames stay
+    /// the default and the record; video is the second artefact, for the one
+    /// thing frames genuinely cannot do -- show what happened *between* two
+    /// captures five seconds apart.
+    pub fn attach_video(&mut self, recorder: video::VideoRecorder) {
+        self.video = Some(recorder);
+    }
+
+    /// What the video recorder has to say, if there is one.
+    pub fn video(&self) -> Option<&video::VideoRecorder> {
+        self.video.as_ref()
+    }
+
+    /// Stops the video recorder, if there is one, and returns its final record.
+    ///
+    /// **Call this before [`RunRecorder::finish`].** `finish` archives the
+    /// recording but cannot stop it (it is not async), and a recording that was
+    /// never stopped is archived with `status: "recording"` -- which the viewer
+    /// reports as a defect rather than showing the video as if it were
+    /// complete.
+    ///
+    /// `tick` is the run's closing tick, written as the clock's `stop` line so
+    /// the sidecar's span and the run's span agree.
+    pub async fn stop_video(
+        &mut self,
+        tick: Option<u64>,
+    ) -> io::Result<Option<video::VideoRecord>> {
+        match self.video.as_mut() {
+            Some(recorder) => recorder.stop(tick).await.map(Some),
+            None => Ok(None),
+        }
     }
 
     pub fn dir(&self) -> &Path {
@@ -733,6 +782,30 @@ impl RunRecorder {
             Some(workspace) => frames::archive_frames(workspace, &self.dir, &self.run_id)?.len(),
             None => 0,
         };
+
+        // Beside `archive_frames`, and obeying the same law: copy nothing
+        // unless `video/run.json` names this run. An orphaned recording left by
+        // an earlier run therefore cannot be archived into this one.
+        //
+        // A still-attached recorder is *not* stopped here -- `stop` is async
+        // and this is not. That is not a hole: the recording's own
+        // `video.json` still says `recording`, which the design makes proof
+        // that the run finished and nobody told the encoder. The warning below
+        // says so at the moment it happens rather than leaving it to be found
+        // in the archive.
+        if let Some(workspace) = workspace {
+            if self
+                .video
+                .as_ref()
+                .is_some_and(video::VideoRecorder::is_recording)
+            {
+                tracing::warn!(
+                    "the run is finishing with its video recorder still running; \
+                     call stop_video() first"
+                );
+            }
+            video::archive_video(workspace, &self.dir, &self.run_id)?;
+        }
 
         // Catches up on anything the mod wrote since the last milestone
         // boundary (or everything, if this run never reached one). Cheap

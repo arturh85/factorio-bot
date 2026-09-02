@@ -319,3 +319,52 @@ describe('error propagation', () => {
         });
     });
 });
+
+describe('video', () => {
+    afterEach(() => vi.unstubAllGlobals());
+
+    it('fetches the live manifest and clock', async () => {
+        let fetchMock = json(200, {run: null, video: null, bytes: null, samples: 0, skipped: 0, tick_range: null});
+        await client.video();
+        expect(urlOf(fetchMock)).toContain('/api/v1/video');
+
+        fetchMock = json(200, {samples: [], skipped: 0});
+        await client.videoTicks();
+        expect(urlOf(fetchMock)).toContain('/api/v1/video/ticks');
+    });
+
+    it('fetches an archived run\'s manifest and clock by id', async () => {
+        let fetchMock = json(200, {run: null, video: null, bytes: null, samples: 0, skipped: 0, tick_range: null});
+        await client.getRunVideo('run-1');
+        expect(urlOf(fetchMock)).toContain('/api/v1/runs/run-1/video');
+
+        fetchMock = json(200, {samples: [], skipped: 0});
+        await client.getRunVideoTicks('run-1');
+        expect(urlOf(fetchMock)).toContain('/api/v1/runs/run-1/video/ticks');
+    });
+
+    /**
+     * The live recording is one file at one URL that the *next run overwrites*.
+     * Without a cache key the browser would happily replay the previous run's
+     * video beside this run's timeline, and nothing would say so.
+     */
+    it('cache-busts the live recording by run id', () => {
+        expect(client.videoUrl('run-1')).toContain('run=run-1');
+        expect(client.videoUrl('run-1')).toContain('/api/v1/video/file');
+    });
+
+    it('still builds a usable URL when the run is unknown', () => {
+        const url = client.videoUrl(null);
+        expect(url).toContain('/api/v1/video/file');
+        expect(url).not.toContain('?');
+    });
+
+    /** An archived run is over, so its bytes never change and need no key. */
+    it('does not cache-bust an archived recording', () => {
+        expect(client.runVideoUrl('run-1')).toBe(
+            client.runVideoUrl('run-1')
+        );
+        expect(client.runVideoUrl('run 1')).toContain('run%201');
+        expect(client.runVideoUrl('run-1')).not.toContain('?');
+    });
+});

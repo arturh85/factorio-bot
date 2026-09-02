@@ -158,6 +158,28 @@
         ],
         "type": "object"
       },
+      "Calibration": {
+        "description": "One `(host clock, encoder clock)` observation.\n\nThe first pair fixes the video's zero -- ffmpeg's PTS starts when it\ncaptured its first frame, which is some unknown time after we spawned it\n(process start, X11 connection, window lookup, first grab), and guessing\nthat offset is the mistake that makes every seek wrong by a constant nobody\ncan see. The second pair, at stop, fixes the *rate*, which is a check rather\nthan a parameter.",
+        "properties": {
+          "host_wall_ms": {
+            "description": "Milliseconds since the recorder's epoch -- the same epoch\n[`TickSample::wall_ms`] counts from.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "out_time_ms": {
+            "description": "ffmpeg's own `out_time_us`, in milliseconds.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "host_wall_ms",
+          "out_time_ms"
+        ],
+        "type": "object"
+      },
       "CheatItemBody": {
         "properties": {
           "count": {
@@ -2442,6 +2464,262 @@
         ],
         "type": "object"
       },
+      "TickKind": {
+        "description": "What one `ticks.jsonl` line is.\n\nShort keys (`t`, `w`, `k`) because there are thousands of these lines and\nthis file's only job is to be a table.",
+        "enum": [
+          "sample",
+          "start",
+          "gap",
+          "stop"
+        ],
+        "type": "string"
+      },
+      "TickRange": {
+        "description": "The observed span of a recording's clock.",
+        "properties": {
+          "from": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "to": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ],
+        "type": "object"
+      },
+      "TickSample": {
+        "description": "One line of `ticks.jsonl`, and one element of `GET /api/v1/video/ticks`.\n\nDeliberately one type for both. The file *is* the wire format; a second\nstruct for the HTTP side is how two halves of a system come to disagree\nabout what a sample is.",
+        "properties": {
+          "k": {
+            "$ref": "#/components/schemas/TickKind",
+            "description": "Always on the wire, even for the ordinary [`TickKind::Sample`].\n\nThe design's example lines omit it, and dropping it would save ~11 bytes\na line -- 60 KB across a 45-minute run, against a recording measured in\nhundreds of megabytes. It is kept because this struct is also the HTTP\nwire shape, and a key that is sometimes absent has to be declared\noptional in `app/src/api/types.ts`, where \"absent\" and \"null\" then become\na distinction the client has to make and this format never intends. A\nline written *without* `k` still parses, via `default`, so every document\nthe design describes is still readable.\n\n`#[schema(required)]` because the **key is always on the wire**: there is\nno `skip_serializing_if`, so serde always emits it. Without this utoipa\nwould publish it as optional purely because `#[serde(default)]` lets a\n*reader* omit it, and a generated client would then have to handle an\nabsence this server never produces."
+          },
+          "reason": {
+            "description": "Why, for a gap. Absent otherwise.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "t": {
+            "description": "`game.tick` at the observation.\n\nAbsent on a [`TickKind::Gap`] line, and only there: a gap records that\nnothing was observed, which is not a tick with an unknown value but the\nabsence of an observation altogether.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "w": {
+            "description": "Milliseconds since the recorder's own epoch -- the same epoch\n`VideoRecord::calibration` measures the video's PTS against.\n\nStamped at the **midpoint of send and receive**, never at receipt. The\ntick is the value inside the game at the moment the command ran, which\nis somewhere between the two; receipt time carries a systematic late\nbias of one full round trip, while the midpoint bounds the error at\nhalf a round trip and centres it on zero.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "w",
+          "k"
+        ],
+        "type": "object"
+      },
+      "VideoManifest": {
+        "description": "Everything a caller needs to know about one video directory, derived from a\ndirectory listing every time it is asked for.\n\n**One type for the live directory and the archived one.** They hold the same\nfour files and answer the same questions; two shapes would be two chances to\ndisagree about what a recording is.",
+        "properties": {
+          "bytes": {
+            "description": "The recording's size on disk, `null` when there is no file. A caller can\ntell \"the encoder was started and produced nothing\" from \"no encoder was\nstarted\" by pairing this with `video`.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "run": {
+            "description": "The opaque run identifier from `video/run.json`, or `null` when the\ndirectory has no readable sidecar.\n\n`null` means *unknown*, never *no match* -- the same rule\n`FramesManifest::run` follows. A consumer compares it for equality and\ndoes nothing else with it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "samples": {
+            "description": "How many lines `ticks.jsonl` holds, gaps included.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "skipped": {
+            "description": "Lines of `ticks.jsonl` that did not parse -- in practice the torn last\nline of a killed recorder. Reported rather than swallowed.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tick_range": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TickRange",
+                "description": "The span of ticks the clock actually observed, `null` when it observed\nnone.\n\nPublished so the viewer can size its axis without fetching thousands of\nsamples: `runTimeline.ts` feeds this into the `drawn` set that decides\nwhere the axis starts, in the frames' place for a video-only run."
+              }
+            ]
+          },
+          "video": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VideoRecord",
+                "description": "`video.json`, or `null` when the recorder never wrote one (which for a\nlive directory means video was never asked for on this run)."
+              }
+            ]
+          }
+        },
+        "required": [
+          "run",
+          "video",
+          "bytes",
+          "samples",
+          "skipped",
+          "tick_range"
+        ],
+        "type": "object"
+      },
+      "VideoRecord": {
+        "description": "`video.json`: what the encoder was asked for, what it did, and how it ended.",
+        "properties": {
+          "calibration": {
+            "description": "The calibration pairs, in order. Zero on a failed start, one on a\nrecording that never reached a clean stop, two normally.",
+            "items": {
+              "$ref": "#/components/schemas/Calibration"
+            },
+            "type": "array"
+          },
+          "ffmpeg_exit": {
+            "description": "ffmpeg's exit code, `null` when it never ran or was killed by a signal.",
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "file": {
+            "description": "The recording's filename inside the video directory.",
+            "type": "string"
+          },
+          "fps": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "height": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rate_ok": {
+            "description": "Whether the two calibration pairs agree on the rate within\n[`RATE_TOLERANCE`]. `null` when there are not two pairs to compare --\n*unknown*, never \"fine\".",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "Why, for a `failed`, `died` or `stopped_low_disk` recording.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requested_height": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "requested_width": {
+            "description": "The geometry that was *asked for*. Kept beside the observed one rather\nthan instead of it: a tiling compositor ignores a size request unless\nthe window is floated, and a mismatch is a warning on the run, not a\nfailure -- the video is still usable and still joins on ticks.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "run": {
+            "description": "The run this recording belongs to.",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/VideoStatus"
+          },
+          "width": {
+            "description": "The geometry `xwininfo` **observed**, which is what was actually\ncaptured. Zero on a recording that never started.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "window_id": {
+            "description": "The X11 window that was filmed, `0x`-prefixed. `null` when none was\nresolved.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "run",
+          "file",
+          "width",
+          "height",
+          "requested_width",
+          "requested_height",
+          "fps",
+          "status",
+          "reason",
+          "ffmpeg_exit",
+          "calibration",
+          "rate_ok",
+          "window_id"
+        ],
+        "type": "object"
+      },
+      "VideoStatus": {
+        "description": "Where a recording got to.",
+        "enum": [
+          "recording",
+          "stopped",
+          "killed",
+          "died",
+          "failed",
+          "stopped_low_disk"
+        ],
+        "type": "string"
+      },
+      "VideoTicksResponse": {
+        "description": "`GET /api/v1/video/ticks` response.\n\nThe whole clock, in file order. The viewer interpolates between the two\nnearest samples and **refuses to interpolate across a gap** -- which is why\nthe gap lines are in this list rather than filtered out of it.",
+        "properties": {
+          "samples": {
+            "items": {
+              "$ref": "#/components/schemas/TickSample"
+            },
+            "type": "array"
+          },
+          "skipped": {
+            "description": "Lines that did not parse -- in practice the torn last line of a recorder\nthat was killed. Reported rather than swallowed, matching\n`EventsResponse.skipped`.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "samples",
+          "skipped"
+        ],
+        "type": "object"
+      },
       "u8": {
         "format": "int32",
         "minimum": 0,
@@ -4065,6 +4343,166 @@
         ]
       }
     },
+    "/api/v1/runs/{id}/video": {
+      "get": {
+        "description": "A run recorded before video existed -- or one that never asked for it, which\nis every run by default -- answers an empty manifest, not a 404. Video is\nopt-in, so \"there is none\" is the ordinary case and must be distinguishable\nfrom a route that is not there.",
+        "operationId": "get_run_video",
+        "parameters": [
+          {
+            "description": "the run id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoManifest"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "A run's archived video manifest.",
+        "tags": [
+          "Runs"
+        ]
+      }
+    },
+    "/api/v1/runs/{id}/video/file": {
+      "get": {
+        "description": "Cached `immutable`, unlike the live route: this run is over, so these bytes\nnever change. The live `<workspace>/video/video.mp4` is overwritten by the\nnext run at the same URL and must not be.",
+        "operationId": "get_run_video_file",
+        "parameters": [
+          {
+            "description": "the run id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "video/mp4": {}
+            },
+            "description": "the whole recording"
+          },
+          "206": {
+            "content": {
+              "video/mp4": {}
+            },
+            "description": "a byte range, for seeking"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "One archived recording's bytes, with range support.",
+        "tags": [
+          "Runs"
+        ]
+      }
+    },
+    "/api/v1/runs/{id}/video/ticks": {
+      "get": {
+        "operationId": "get_run_video_ticks",
+        "parameters": [
+          {
+            "description": "the run id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoTicksResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "A run's archived video clock.",
+        "tags": [
+          "Runs"
+        ]
+      }
+    },
     "/api/v1/scripts": {
       "get": {
         "operationId": "list_scripts",
@@ -4520,6 +4958,113 @@
           }
         },
         "summary": "Replaces the application settings and persists them",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/video": {
+      "get": {
+        "description": "Answers a manifest describing *nothing* rather than a 404 when no video was\nrecorded: \"this run had no video\" is the ordinary state -- video is opt-in\n-- and a 404 would make a caller unable to tell it from a broken route.",
+        "operationId": "get_video",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoManifest"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "The manifest of the current run's recording.",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/video/file": {
+      "get": {
+        "description": "**`Cache-Control: no-cache`, deliberately unlike a frame.** A frame is\nimmutable once written -- a tick never recurs -- but\n`<workspace>/video/video.mp4` is *overwritten by the next run*, at the same\nURL. Serving it `immutable` would show a browser the previous run's\nrecording beside this run's timeline, and nothing would say so. The archived\nroute (`/api/v1/runs/{id}/video/file`) is the one whose bytes never change,\nand it is cached accordingly.",
+        "operationId": "get_video_file",
+        "responses": {
+          "200": {
+            "content": {
+              "video/mp4": {}
+            },
+            "description": "the whole recording"
+          },
+          "206": {
+            "content": {
+              "video/mp4": {}
+            },
+            "description": "a byte range, for seeking"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Serves the recording's bytes, with range support.",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/video/ticks": {
+      "get": {
+        "operationId": "get_video_ticks",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoTicksResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "The clock: every `(tick, wall_ms)` pair the recorder sampled.",
         "tags": [
           "Admin"
         ]

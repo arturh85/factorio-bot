@@ -12,12 +12,16 @@
 
 use crate::error::ErrorResponse;
 use crate::manage::frames::workspace_root;
+use crate::manage::video::{CacheFor, VideoTicksResponse, serve_video_file};
 use crate::state::AppState;
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use factorio_bot_core::record::map::{MapRecord, read_map};
+use factorio_bot_core::record::video::{
+    TICKS_FILE, VIDEO_DIR, VideoManifest, clock::read_tick_samples, read_video_dir,
+};
 use factorio_bot_core::record::{
     ArchivedFrame, Event, Lane, Manifest, Sample, Split, derive_lanes, derive_splits, read_events,
     read_samples,
@@ -464,6 +468,86 @@ pub async fn get_run_frame(
         .into_response())
 }
 
+/// A run's archived video manifest.
+///
+/// A run recorded before video existed -- or one that never asked for it, which
+/// is every run by default -- answers an empty manifest, not a 404. Video is
+/// opt-in, so "there is none" is the ordinary case and must be distinguishable
+/// from a route that is not there.
+#[utoipa::path(
+    get,
+    path = "/api/v1/runs/{id}/video",
+    tag = "Runs",
+    params(("id" = String, Path, description = "the run id")),
+    responses(
+        (status = 200, body = VideoManifest),
+        (status = 400, body = crate::error::ErrorResponse),
+        (status = 404, body = crate::error::ErrorResponse),
+    )
+)]
+pub async fn get_run_video(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<VideoManifest>, ErrorResponse> {
+    let dir = run_dir(&runs_root(&state).await?, &id)?;
+    Ok(Json(read_video_dir(&dir.join(VIDEO_DIR))))
+}
+
+/// A run's archived video clock.
+#[utoipa::path(
+    get,
+    path = "/api/v1/runs/{id}/video/ticks",
+    tag = "Runs",
+    params(("id" = String, Path, description = "the run id")),
+    responses(
+        (status = 200, body = VideoTicksResponse),
+        (status = 400, body = crate::error::ErrorResponse),
+        (status = 404, body = crate::error::ErrorResponse),
+    )
+)]
+pub async fn get_run_video_ticks(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<VideoTicksResponse>, ErrorResponse> {
+    let dir = run_dir(&runs_root(&state).await?, &id)?;
+    let read = read_tick_samples(&dir.join(VIDEO_DIR).join(TICKS_FILE))
+        .map_err(|err| ErrorResponse::internal(format!("failed to read the video clock: {err}")))?;
+    Ok(Json(VideoTicksResponse {
+        samples: read.samples,
+        skipped: read.skipped,
+    }))
+}
+
+/// One archived recording's bytes, with range support.
+///
+/// Cached `immutable`, unlike the live route: this run is over, so these bytes
+/// never change. The live `<workspace>/video/video.mp4` is overwritten by the
+/// next run at the same URL and must not be.
+#[utoipa::path(
+    get,
+    path = "/api/v1/runs/{id}/video/file",
+    tag = "Runs",
+    params(("id" = String, Path, description = "the run id")),
+    responses(
+        (status = 200, content_type = "video/mp4", description = "the whole recording"),
+        (status = 206, content_type = "video/mp4", description = "a byte range, for seeking"),
+        (status = 400, body = crate::error::ErrorResponse),
+        (status = 404, body = crate::error::ErrorResponse),
+    )
+)]
+pub async fn get_run_video_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    request: Request,
+) -> Result<Response, ErrorResponse> {
+    let dir = run_dir(&runs_root(&state).await?, &id)?.join(VIDEO_DIR);
+    let name = read_video_dir(&dir)
+        .video
+        .map(|record| record.file)
+        .ok_or_else(|| ErrorResponse::not_found(format!("run {id} recorded no video")))?;
+    serve_video_file(&dir, &name, request, CacheFor::Ever).await
+}
+
 pub fn router() -> utoipa_axum::router::OpenApiRouter<AppState> {
     use utoipa_axum::routes;
     utoipa_axum::router::OpenApiRouter::new()
@@ -475,4 +559,7 @@ pub fn router() -> utoipa_axum::router::OpenApiRouter<AppState> {
         .routes(routes!(get_run_frame))
         .routes(routes!(get_run_samples))
         .routes(routes!(get_run_map))
+        .routes(routes!(get_run_video))
+        .routes(routes!(get_run_video_ticks))
+        .routes(routes!(get_run_video_file))
 }

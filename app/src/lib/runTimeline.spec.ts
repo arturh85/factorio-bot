@@ -159,6 +159,42 @@ describe('tickBounds', () => {
     });
 });
 
+/**
+ * The silent regression this pins. Frame ticks have always decided where the
+ * axis starts, and nothing errors or is marked when that contributor goes
+ * missing -- the axis is just different, computed from splits and lanes alone.
+ * A run that recorded video instead of frames has to land somewhere honest.
+ */
+describe('a run whose only capture is video', () => {
+    const splits = [split(1, 'a', 100, 2000)];
+
+    it('starts at the video clock when there are no frames at all', () => {
+        // Without the video range this answers {from: 100}, silently, because
+        // `drawn` would be empty and the axis would fall back to the splits.
+        expect(tickBounds(splits, [], [], {from: 300, to: 2000})).toEqual({from: 300, to: 2000});
+        expect(leadInTicks(splits, [], [], {from: 300, to: 2000})).toBe(200);
+    });
+
+    it('spans a recording that outlasted the last milestone', () => {
+        expect(tickBounds([split(1, 'a', 100, 400)], [], [], {from: 100, to: 900}))
+            .toEqual({from: 100, to: 900});
+    });
+
+    it('leaves the axis exactly where the frames put it when a run has both', () => {
+        // Video is the opt-in second artefact and must not move an axis that
+        // frames already decide -- two runs' axes have to keep lining up.
+        const frames = placeable([frame(1, 300, 'front'), frame(1, 2000, 'front')]);
+        const withoutVideo = tickBounds(splits, frames);
+        expect(tickBounds(splits, frames, [], {from: 120, to: 2400})).toEqual(withoutVideo);
+        expect(leadInTicks(splits, frames, [], {from: 120, to: 2400}))
+            .toBe(leadInTicks(splits, frames));
+    });
+
+    it('changes nothing for a run that recorded no video', () => {
+        expect(tickBounds(splits, [], [], null)).toEqual(tickBounds(splits, []));
+    });
+});
+
 describe('fractionOf', () => {
     it('maps a tick across the axis', () => {
         expect(fractionOf({from: 100, to: 200}, 150)).toBeCloseTo(0.5);

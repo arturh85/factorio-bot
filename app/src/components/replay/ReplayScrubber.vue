@@ -34,13 +34,36 @@
  *    `age` on requirement 3's mechanism -- there is no separate "gap" state,
  *    because inventing one would be exactly the fabricated continuity this
  *    requirement forbids.
+ *
+ * The video half has **three states of its own**, and they are not the frame
+ * states renamed. `frame-current` / `frame-stale` have no video analogue at
+ * all: a video has a picture at every timestamp, so "stale" is meaningless and
+ * its *absence* must not be allowed to read as "current".
+ *
+ * - `video-out-of-range` -- the tick is before the recording's first sample or
+ *   after its last. Not clamped to second 0, which shows a different moment.
+ * - `video-clock-unknown` -- the tick falls in a stall. **This covers the video
+ *   element rather than annotating it.** The frame underneath is a real frame of
+ *   a real moment, and that moment is not this tick; leaving it visible with a
+ *   caption is exactly the fabricated continuity requirement 4 forbids for
+ *   frames.
+ * - `video-clock-unverified` -- the recording's rate was never checked, or was
+ *   checked and failed. Shown for the whole run, because the offset may be right
+ *   at the start and wrong by the end and nothing can say where.
+ *
+ * The seek itself is coalesced: assigning `currentTime` on every slider `input`
+ * produces a seek storm, so assignments are deferred to an animation frame and
+ * skipped while the element is already seeking, with the *last* requested
+ * position applied once the seek completes.
  */
-import {computed, ref, watch} from 'vue';
-import {Ban, Image, ImageOff} from '@lucide/vue';
+import {computed, onBeforeUnmount, ref, watch} from 'vue';
+import {Ban, Image, ImageOff, VideoOff} from '@lucide/vue';
 import {Replay, observedOrigin, replayAxisCeiling} from '@/api/replay';
-import {FramesManifest} from '@/api/types';
+import {FramesManifest, VideoManifest, VideoTicksResponse} from '@/api/types';
 import {frameUrl} from '@/api/client';
 import {camerasForClient, combineRunMatchChecks, frameAtTick, framesForClient, runIdCheck, staleClients, tickOverlapCheck} from '@/api/frameJoin';
+import {clockTickRange, parseVideoClock, tickToVideoSeconds} from '@/api/videoClock';
+import {videoDefects} from '@/api/videoJoin';
 import Slider from '@/components/ui/Slider.vue';
 import ReplayView from './ReplayView.vue';
 
@@ -55,6 +78,14 @@ const props = defineProps<{
    * rather than a mismatch.
    */
   jobId?: string | null;
+  /** `null`: not fetched, or the request failed. A run with no video answers a manifest, not a null. */
+  videoManifest?: VideoManifest | null;
+  videoTicks?: VideoTicksResponse | null;
+  /**
+   * Where the recording's bytes live. The caller decides live or archived, so
+   * this component never has to know which run it is looking at.
+   */
+  videoSrc?: string | null;
 }>();
 
 const tick = defineModel<number>('tick', {default: 0});
@@ -167,6 +198,86 @@ const totalFrameCount = computed(() => props.manifest?.frames.length ?? 0);
 // two clocks meet rather than a subtraction scattered through the template.
 const current = computed(() =>
     clientFrames.value.length > 0 ? frameAtTick(clientFrames.value, tick.value + origin.value) : null);
+
+// --- the video half -------------------------------------------------------
+
+/** `null` when there is no recording to place anything in. */
+const clock = computed(() =>
+    parseVideoClock(props.videoManifest ?? null, props.videoTicks ?? null));
+
+const showVideo = computed(() => clock.value !== null && (props.videoSrc ?? null) !== null);
+
+/**
+ * Where in the recording the cursor is.
+ *
+ * **The same `origin` the frame lookup uses.** `observedOrigin()` converts
+ * between the shifted axis and `game.tick` in exactly one place, and adding a
+ * second conversion site here would break that invariant for a saving of
+ * nothing.
+ */
+const videoAt = computed(() =>
+    clock.value === null ? null : tickToVideoSeconds(clock.value, tick.value + origin.value));
+
+/**
+ * Which of the three states the video is in. `null` and `out-of-range` are
+ * different answers: one means there is no recording, the other means there is
+ * one and this moment is not in it.
+ */
+const videoState = computed<'ok' | 'out-of-range' | 'clock-unknown' | null>(() => {
+    if (!showVideo.value || clock.value === null) return null;
+    if (videoAt.value !== null) return 'ok';
+    const range = clockTickRange(clock.value);
+    const absolute = tick.value + origin.value;
+    if (range === null || absolute < range.from || absolute > range.to) return 'out-of-range';
+    // Inside the recording's span, and the clock still will not say where: the
+    // cursor is in a stall.
+    return 'clock-unknown';
+});
+
+const videoUnverified = computed(() => clock.value !== null && !clock.value.rateVerified);
+
+/** What is wrong with the recording itself, as distinct from whether it is ours. */
+const defects = computed(() =>
+    props.videoManifest ? videoDefects(props.videoManifest) : []);
+
+const videoEl = ref<HTMLVideoElement | null>(null);
+/** The last position asked for but not yet applied. */
+let pendingSeek: number | null = null;
+let frameHandle: number | null = null;
+
+function applyPendingSeek(): void {
+    frameHandle = null;
+    const element = videoEl.value;
+    if (element === null || pendingSeek === null) return;
+    // Already seeking: leave the request pending. `onSeeked` applies the last
+    // one, so the final position is right even when intermediate ones are
+    // dropped.
+    if (element.seeking) return;
+    const target = pendingSeek;
+    pendingSeek = null;
+    // Within one frame period of where it already is, a seek buys nothing and
+    // costs a decode.
+    if (Math.abs(element.currentTime - target) < 1 / 60) return;
+    element.currentTime = target;
+}
+
+function requestSeek(seconds: number): void {
+    pendingSeek = seconds;
+    if (frameHandle !== null) return;
+    frameHandle = requestAnimationFrame(applyPendingSeek);
+}
+
+function onSeeked(): void {
+    if (pendingSeek !== null) applyPendingSeek();
+}
+
+watch(videoAt, (position) => {
+    if (position !== null) requestSeek(position.seconds);
+});
+
+onBeforeUnmount(() => {
+    if (frameHandle !== null) cancelAnimationFrame(frameHandle);
+});
 </script>
 
 <template>
@@ -282,6 +393,66 @@ const current = computed(() =>
               showing tick {{ current.frame.tick }} -- {{ current.age }} tick(s) old, the most recent capture at or
               before tick {{ tick }}
             </p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!--
+      The video half. Deliberately outside `showFrameSection`: a run can record
+      video and no frames, and hiding the recording because there is nothing to
+      judge the *frames* against would lose the only artefact it has.
+    -->
+    <div v-if="showVideo" data-testid="video-section" class="flex flex-col gap-2">
+      <p
+        v-if="videoUnverified"
+        data-testid="video-clock-unverified"
+        class="text-xs italic text-warn-dark">
+        This recording's rate was never confirmed against the host clock, so every position in it is
+        approximate -- the offset may be right at the start and wrong by the end.
+      </p>
+
+      <p
+        v-for="defect in defects"
+        :key="defect.kind"
+        data-testid="video-defect"
+        :data-kind="defect.kind"
+        class="text-xs text-warn-dark">
+        {{ defect.message }}
+      </p>
+
+      <div class="flex items-center gap-3">
+        <div class="w-48 shrink-0 text-xs text-ink-muted">video</div>
+        <div class="grow">
+          <div
+            v-if="videoState === 'out-of-range'"
+            data-testid="video-out-of-range"
+            class="flex items-center gap-2 text-sm text-ink-muted">
+            <VideoOff class="size-4 shrink-0" aria-hidden="true"/>
+            <span>tick {{ tick }} is outside this recording</span>
+          </div>
+
+          <!--
+            The element stays mounted through a stall so the browser keeps its
+            buffers, but it is COVERED, not captioned: the frame underneath is a
+            real frame of a real moment, and that moment is not this tick.
+          -->
+          <div v-else class="relative w-fit">
+            <video
+              ref="videoEl"
+              data-testid="video-element"
+              :src="videoSrc ?? undefined"
+              preload="metadata"
+              controls
+              class="max-h-64 w-auto rounded border border-divider"
+              @seeked="onSeeked"/>
+            <div
+              v-if="videoState === 'clock-unknown'"
+              data-testid="video-clock-unknown"
+              class="absolute inset-0 flex items-center justify-center rounded bg-surface/95 p-2 text-center text-xs text-ink">
+              the clock has no reading for tick {{ tick }} -- the game stalled here, and the picture
+              at this position is of some other moment
+            </div>
           </div>
         </div>
       </div>

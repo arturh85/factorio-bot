@@ -4,6 +4,7 @@ import {useRunsStore} from './runsStore';
 import * as client from '@/api/client';
 import {ApiError} from '@/api/http';
 import {ArchivedFrame, EntitySnapshot, MapRecord, RunDetail, RunSummary, Sample, Split} from '@/api/types';
+import {CLEAN_MANIFEST, CLEAN_TICKS, NO_TICKS, NO_VIDEO_MANIFEST} from '@/api/video.fixtures';
 
 vi.mock('@/api/client');
 
@@ -53,6 +54,10 @@ beforeEach(() => {
     vi.mocked(client.getRunSamples).mockResolvedValue({samples: [], skipped: 0});
     vi.mocked(client.getRunMap).mockReset();
     vi.mocked(client.getRunMap).mockResolvedValue({map: [], skipped: 0});
+    vi.mocked(client.getRunVideo).mockReset();
+    vi.mocked(client.getRunVideo).mockResolvedValue(NO_VIDEO_MANIFEST);
+    vi.mocked(client.getRunVideoTicks).mockReset();
+    vi.mocked(client.getRunVideoTicks).mockResolvedValue(NO_TICKS);
 });
 
 describe('loadRuns', () => {
@@ -503,5 +508,62 @@ describe('map', () => {
         await store.openRun('run-2');
         expect(store.entities).toEqual([]);
         expect(store.mapBounds).toBeNull();
+    });
+});
+
+
+describe('the video enrichment', () => {
+    it('loads the recording and its clock beside the other enrichments', async () => {
+        vi.mocked(client.getRun).mockResolvedValue(DETAIL);
+        vi.mocked(client.getRunFrames).mockResolvedValue({frames: []});
+        vi.mocked(client.getRunVideo).mockResolvedValue(CLEAN_MANIFEST);
+        vi.mocked(client.getRunVideoTicks).mockResolvedValue(CLEAN_TICKS);
+        const store = useRunsStore();
+        await store.openRun('run-1');
+        expect(store.video?.run).toBe('run-1');
+        expect(store.videoTicks?.samples).toHaveLength(CLEAN_TICKS.samples.length);
+        expect(store.videoError).toBeNull();
+    });
+
+    it('does not lose the run when a server too old for the video routes 404s', async () => {
+        vi.mocked(client.getRun).mockResolvedValue(DETAIL);
+        vi.mocked(client.getRunFrames).mockResolvedValue({frames: FRAMES});
+        vi.mocked(client.getRunVideo).mockRejectedValue(new ApiError(404, '404 Not Found', null, null));
+        const store = useRunsStore();
+        await store.openRun('run-1');
+        expect(store.error).toBeNull();
+        expect(store.frames).toHaveLength(3);
+        expect(store.video).toBeNull();
+        expect(store.videoError).not.toBeNull();
+    });
+
+    it('keeps neither half when only the clock fails', async () => {
+        // A manifest without its clock can place nothing, and showing half a
+        // recording is worse than showing none.
+        vi.mocked(client.getRun).mockResolvedValue(DETAIL);
+        vi.mocked(client.getRunFrames).mockResolvedValue({frames: []});
+        vi.mocked(client.getRunVideo).mockResolvedValue(CLEAN_MANIFEST);
+        vi.mocked(client.getRunVideoTicks).mockRejectedValue(new Error('boom'));
+        const store = useRunsStore();
+        await store.openRun('run-1');
+        expect(store.video).toBeNull();
+        expect(store.videoTicks).toBeNull();
+        expect(store.videoError).not.toBeNull();
+    });
+
+    it('sizes the axis from the recording when a run captured no frames', async () => {
+        // The silent one: without the video range this axis would be computed
+        // from splits and lanes alone, with nothing erroring and nothing marked.
+        vi.mocked(client.getRun).mockResolvedValue(DETAIL);
+        vi.mocked(client.getRunFrames).mockResolvedValue({frames: []});
+        vi.mocked(client.getRunVideo).mockResolvedValue({
+            ...CLEAN_MANIFEST,
+            tick_range: {from: 59400, to: 60246}
+        });
+        vi.mocked(client.getRunVideoTicks).mockResolvedValue(CLEAN_TICKS);
+        const store = useRunsStore();
+        await store.openRun('run-1');
+        expect(store.bounds).toEqual({from: 59400, to: 60246});
+        expect(store.leadIn).toBe(25);
     });
 });

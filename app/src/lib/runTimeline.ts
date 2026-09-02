@@ -7,7 +7,7 @@
  * in a way you would not notice by looking.
  */
 
-import {ArchivedFrame, Lane, RunSummary, Split} from '@/api/types';
+import {ArchivedFrame, Lane, RunSummary, Split, TickRange} from '@/api/types';
 
 /** A frame that can be placed on the axis: one whose filename parsed. */
 export interface PlacedFrame extends ArchivedFrame {
@@ -81,7 +81,8 @@ export function frameAt(
 function tickSources(
     splits: Split[],
     frames: PlacedFrame[],
-    lanes: Lane[]
+    lanes: Lane[],
+    videoRange: TickRange | null = null
 ): {all: number[]; drawn: number[]} {
     const all: number[] = [];
     // Ticks at which something is actually *drawn*. A split contributes a span
@@ -101,15 +102,28 @@ function tickSources(
         drawn.push(lane.from_tick);
         if (lane.to_tick !== null) all.push(lane.to_tick);
     }
+    // **In the frames' place, never beside them.** Frame ticks have decided
+    // where this axis starts since it existed, and video is an opt-in second
+    // artefact -- so a run that captured both must land on exactly the axis it
+    // would have had without video, or two runs' axes stop lining up for a
+    // reason nothing reports. What this does fix is the silent case in the
+    // other direction: a run with video and no frames used to lose this
+    // contributor entirely and compute its axis from splits and lanes alone,
+    // with nothing erroring and nothing marked.
+    if (videoRange !== null && frames.length === 0) {
+        all.push(videoRange.from, videoRange.to);
+        drawn.push(videoRange.from);
+    }
     return {all, drawn};
 }
 
 export function tickBounds(
     splits: Split[],
     frames: PlacedFrame[],
-    lanes: Lane[] = []
+    lanes: Lane[] = [],
+    videoRange: TickRange | null = null
 ): {from: number; to: number} | null {
-    const {all, drawn} = tickSources(splits, frames, lanes);
+    const {all, drawn} = tickSources(splits, frames, lanes, videoRange);
     if (all.length === 0) return null;
     // Start where there is something to see.
     //
@@ -152,8 +166,13 @@ function axisFrom(all: number[], drawn: number[]): number {
  * does, and a viewer comparing it against the splits table deserves to be
  * told that instead of discovering it.
  */
-export function leadInTicks(splits: Split[], frames: PlacedFrame[], lanes: Lane[] = []): number {
-    const {all, drawn} = tickSources(splits, frames, lanes);
+export function leadInTicks(
+    splits: Split[],
+    frames: PlacedFrame[],
+    lanes: Lane[] = [],
+    videoRange: TickRange | null = null
+): number {
+    const {all, drawn} = tickSources(splits, frames, lanes, videoRange);
     if (all.length === 0) return 0;
     return axisFrom(all, drawn) - Math.min(...all);
 }

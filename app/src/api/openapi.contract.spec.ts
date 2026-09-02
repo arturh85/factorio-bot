@@ -53,6 +53,7 @@ import type {
     ArchivedFrame,
     Bounds,
     BotSample,
+    Calibration,
     ClientRun,
     Divergence,
     EntitySnapshot,
@@ -88,7 +89,14 @@ import type {
     SatisfiedReason,
     ScriptContent,
     Split,
-    StartAccepted
+    StartAccepted,
+    TickKind,
+    TickRange,
+    TickSample,
+    VideoManifest,
+    VideoRecord,
+    VideoStatus,
+    VideoTicksResponse
 } from './types';
 
 interface SchemaObject {
@@ -335,6 +343,50 @@ const OPERATIONS: readonly OperationContract[] = [
         method: 'get',
         caller: 'frames',
         response: {status: '200', schema: 'FramesManifest'}
+    },
+    {
+        path: '/api/v1/video',
+        method: 'get',
+        caller: 'video',
+        response: {status: '200', schema: 'VideoManifest'}
+    },
+    {
+        path: '/api/v1/video/ticks',
+        method: 'get',
+        caller: 'videoTicks',
+        response: {status: '200', schema: 'VideoTicksResponse'}
+    },
+    {
+        path: '/api/v1/video/file',
+        method: 'get',
+        caller: 'videoUrl',
+        // No `query` entry, deliberately. `videoUrl` appends `?run=<id>` and the
+        // server never reads it: it is a cache key, not a parameter. The live
+        // recording is one URL that the next run overwrites, so the browser has
+        // to be told the bytes changed -- but publishing an argument the handler
+        // ignores would put a lie in a generated client.
+        response: {status: '200', mediaType: 'video/mp4'}
+    },
+    {
+        path: '/api/v1/runs/{id}/video',
+        method: 'get',
+        caller: 'getRunVideo',
+        pathParams: ['id'],
+        response: {status: '200', schema: 'VideoManifest'}
+    },
+    {
+        path: '/api/v1/runs/{id}/video/ticks',
+        method: 'get',
+        caller: 'getRunVideoTicks',
+        pathParams: ['id'],
+        response: {status: '200', schema: 'VideoTicksResponse'}
+    },
+    {
+        path: '/api/v1/runs/{id}/video/file',
+        method: 'get',
+        caller: 'runVideoUrl',
+        pathParams: ['id'],
+        response: {status: '200', mediaType: 'video/mp4'}
     },
     {
         path: '/api/v1/frames/{client}/{name}',
@@ -931,6 +983,64 @@ const SCHEMAS: Record<string, SchemaContract> = {
     // into an integer would break `getJob`'s URL building.
     JobId: {kind: 'scalar', type: 'string'},
     JobStatus: enumContract<JobStatus>({running: true, succeeded: true, failed: true}),
+
+    // -- video: the host-side recording ------------------------------------
+    VideoManifest: objectContract<VideoManifest>({
+        run: {required: true, type: 'string', nullable: true},
+        video: {required: true, ref: 'VideoRecord', nullable: true},
+        bytes: {required: true, type: 'integer', nullable: true},
+        samples: {required: true, type: 'integer'},
+        skipped: {required: true, type: 'integer'},
+        tick_range: {required: true, ref: 'TickRange', nullable: true}
+    }),
+    VideoRecord: objectContract<VideoRecord>({
+        run: {required: true, type: 'string'},
+        file: {required: true, type: 'string'},
+        width: {required: true, type: 'integer'},
+        height: {required: true, type: 'integer'},
+        requested_width: {required: true, type: 'integer'},
+        requested_height: {required: true, type: 'integer'},
+        fps: {required: true, type: 'integer'},
+        status: {required: true, ref: 'VideoStatus'},
+        reason: {required: true, type: 'string', nullable: true},
+        ffmpeg_exit: {required: true, type: 'integer', nullable: true},
+        calibration: {required: true, arrayOf: 'Calibration'},
+        // `null` is *unknown*, never "fine": a recording with one calibration
+        // pair had its rate checked by nothing.
+        rate_ok: {required: true, type: 'boolean', nullable: true},
+        window_id: {required: true, type: 'string', nullable: true}
+    }),
+    VideoStatus: enumContract<VideoStatus>({
+        recording: true,
+        stopped: true,
+        killed: true,
+        died: true,
+        failed: true,
+        stopped_low_disk: true
+    }),
+    Calibration: objectContract<Calibration>({
+        host_wall_ms: {required: true, type: 'integer'},
+        out_time_ms: {required: true, type: 'integer'}
+    }),
+    TickRange: objectContract<TickRange>({
+        from: {required: true, type: 'integer'},
+        to: {required: true, type: 'integer'}
+    }),
+    // Short keys because the file this mirrors has thousands of lines. `t` and
+    // `reason` are absent-able because a gap line has neither; `k` is always
+    // written, which is why it is required here and `types.ts` declares it
+    // without a `?`.
+    TickSample: objectContract<TickSample>({
+        t: {required: false, type: 'integer', nullable: true},
+        w: {required: true, type: 'integer'},
+        k: {required: true, ref: 'TickKind'},
+        reason: {required: false, type: 'string', nullable: true}
+    }),
+    TickKind: enumContract<TickKind>({sample: true, start: true, gap: true, stop: true}),
+    VideoTicksResponse: objectContract<VideoTicksResponse>({
+        samples: {required: true, arrayOf: 'TickSample'},
+        skipped: {required: true, type: 'integer'}
+    }),
 
     // -- the error body `http.ts` reads on every failure -------------------
     // Also unbound, for the same reason as `RconBody`: `errorFromResponse`

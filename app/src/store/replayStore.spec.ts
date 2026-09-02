@@ -7,6 +7,7 @@ import * as jobEvents from '@/api/jobEvents';
 import {JobEventHandlers} from '@/api/jobEvents';
 import {Job} from '@/api/types';
 import {REALISTIC_REPLAY_JSON} from '@/api/replay.fixtures';
+import {CLEAN_MANIFEST, CLEAN_TICKS} from '@/api/video.fixtures';
 
 vi.mock('@/api/client');
 vi.mock('@/api/jobEvents');
@@ -191,5 +192,35 @@ describe('useReplayStore.stopWatching', () => {
     it('is safe to call when nothing was ever watched', () => {
         const store = useReplayStore();
         expect(() => store.stopWatching()).not.toThrow();
+    });
+});
+
+
+describe('useReplayStore -- the live recording', () => {
+    it('fetches the manifest and clock beside the replay', async () => {
+        vi.mocked(client.listJobs).mockResolvedValue([]);
+        vi.mocked(client.video).mockResolvedValue(CLEAN_MANIFEST);
+        vi.mocked(client.videoTicks).mockResolvedValue(CLEAN_TICKS);
+        const store = useReplayStore();
+
+        await store.refresh();
+
+        expect(store.getVideo?.run).toBe('run-1');
+        expect(store.getVideoTicks?.samples).toHaveLength(CLEAN_TICKS.samples.length);
+    });
+
+    it('keeps the replay when a server too old for the video routes 404s', async () => {
+        // Video is opt-in in the first place; losing the timeline over it would
+        // be the worst possible trade.
+        vi.mocked(client.listJobs).mockResolvedValue([job('1', REALISTIC_REPLAY_JSON)]);
+        vi.mocked(client.video).mockRejectedValue(new Error('404'));
+        vi.mocked(client.videoTicks).mockRejectedValue(new Error('404'));
+        const store = useReplayStore();
+
+        await store.refresh();
+
+        expect(store.getReplay).not.toBeNull();
+        expect(store.getVideo).toBeNull();
+        expect(store.getVideoTicks).toBeNull();
     });
 });

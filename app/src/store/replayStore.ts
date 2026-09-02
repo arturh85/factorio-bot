@@ -1,9 +1,9 @@
 import {defineStore} from 'pinia'
-import {frames as fetchFrames, listJobs} from '@/api/client';
+import {frames as fetchFrames, listJobs, video as fetchVideo, videoTicks as fetchVideoTicks} from '@/api/client';
 import {subscribeJobEvents} from '@/api/jobEvents';
 import {Job} from '@/api/types';
 import {parseReplayJson, Replay} from '@/api/replay';
-import {FramesManifest} from '@/api/types';
+import {FramesManifest, VideoManifest, VideoTicksResponse} from '@/api/types';
 
 /**
  * The live stream's unsubscribe callback, and the job id it watches.
@@ -57,6 +57,19 @@ export const useReplayStore = defineStore('replay', {
          */
         manifest: null as FramesManifest | null,
         /**
+         * The live recording's manifest and clock, on the same terms as
+         * `manifest`: `null` means "not fetched or the request failed", never
+         * "no video". A run that recorded none answers a manifest describing
+         * nothing, which is a fact and reaches here as a value.
+         *
+         * Fetched beside the replay for the same reason the frame manifest is:
+         * they are joined by tick, so a clock read at a later moment than the
+         * replay it is judged against is exactly the mismatch the join check
+         * exists to catch.
+         */
+        video: null as VideoManifest | null,
+        videoTicks: null as VideoTicksResponse | null,
+        /**
          * Set when the most recently *received* replay text failed to parse.
          * The previous good `replay`, if any, is left on screen rather than
          * being wiped by a bad update -- a malformed document is a reason to
@@ -77,6 +90,12 @@ export const useReplayStore = defineStore('replay', {
         },
         getManifest(): FramesManifest | null {
             return this.manifest
+        },
+        getVideo(): VideoManifest | null {
+            return this.video
+        },
+        getVideoTicks(): VideoTicksResponse | null {
+            return this.videoTicks
         },
         isLoading(): boolean {
             return this.loading
@@ -104,6 +123,20 @@ export const useReplayStore = defineStore('replay', {
                     this.manifest = await fetchFrames()
                 } catch {
                     this.manifest = null
+                }
+                // Same rule again, and it matters more here: a server too old
+                // to have the video routes 404s both of these, and losing the
+                // replay over an artefact that is opt-in in the first place
+                // would be the worst possible trade.
+                try {
+                    this.video = await fetchVideo()
+                } catch {
+                    this.video = null
+                }
+                try {
+                    this.videoTicks = await fetchVideoTicks()
+                } catch {
+                    this.videoTicks = null
                 }
                 const jobs = await listJobs()
                 const latest = mostRecent(jobs)

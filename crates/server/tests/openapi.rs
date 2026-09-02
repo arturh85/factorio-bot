@@ -131,6 +131,9 @@ const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[
     ("get", "/api/v1/runs/{id}/frames/{bot}/{name}"),
     ("get", "/api/v1/runs/{id}/samples"),
     ("get", "/api/v1/runs/{id}/map"),
+    ("get", "/api/v1/runs/{id}/video"),
+    ("get", "/api/v1/runs/{id}/video/ticks"),
+    ("get", "/api/v1/runs/{id}/video/file"),
 ];
 // `/api/v1/frames/{client}/{name}` is registered unconditionally by `manage::router`
 // (it does not need an interpreter), so it is templated in both builds --
@@ -145,6 +148,9 @@ const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[
     ("get", "/api/v1/runs/{id}/frames/{bot}/{name}"),
     ("get", "/api/v1/runs/{id}/samples"),
     ("get", "/api/v1/runs/{id}/map"),
+    ("get", "/api/v1/runs/{id}/video"),
+    ("get", "/api/v1/runs/{id}/video/ticks"),
+    ("get", "/api/v1/runs/{id}/video/file"),
 ];
 
 /// The published response set for `POST /api/v1/instance/start` has to match
@@ -213,6 +219,12 @@ async fn openapi_json_lists_every_route() {
         "/api/v1/fs/exists",
         "/api/v1/frames",
         "/api/v1/frames/{client}/{name}",
+        "/api/v1/video",
+        "/api/v1/video/file",
+        "/api/v1/video/ticks",
+        "/api/v1/runs/{id}/video",
+        "/api/v1/runs/{id}/video/file",
+        "/api/v1/runs/{id}/video/ticks",
     ] {
         assert!(paths.contains_key(path), "spec is missing {path}");
     }
@@ -235,6 +247,9 @@ async fn openapi_json_lists_every_route() {
         ("/api/v1/fs/exists", "get"),
         ("/api/v1/frames", "get"),
         ("/api/v1/frames/{client}/{name}", "get"),
+        ("/api/v1/video", "get"),
+        ("/api/v1/video/file", "get"),
+        ("/api/v1/video/ticks", "get"),
     ] {
         assert!(
             paths[path].get(method).is_some(),

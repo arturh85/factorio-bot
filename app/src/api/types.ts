@@ -771,3 +771,122 @@ export interface EventsResponse {
     /** Lines that did not parse -- in practice the truncated last line of a crashed run. */
     skipped: number;
 }
+
+// --- video: the host-side recording of a run -----------------------------
+//
+// Mirrors `factorio_bot_core::record::video`. Frames stay the record; video is
+// the opt-in second artefact, for the one thing frames cannot do -- show what
+// happened *between* two captures five seconds apart. See
+// `docs/superpowers/specs/2026-09-02-video-capture-design.md`.
+
+/** Where a recording got to. */
+export type VideoStatus =
+    /**
+     * **In an archived run this is a defect, not a state.** It means the run
+     * finished and nobody stopped the encoder, so the recording is of unknown
+     * completeness and its clock never got its second calibration pair.
+     */
+    | 'recording'
+    | 'stopped'
+    /** Did not exit when asked. The file is still playable -- the container is fragmented. */
+    | 'killed'
+    /** The encoder stopped advancing while the run was live, e.g. its window disappeared. */
+    | 'died'
+    /** Never started; `reason` says why. The run went on with frames. */
+    | 'failed'
+    /** Stopped early to leave the disk to the run's own records. */
+    | 'stopped_low_disk';
+
+/**
+ * One `(host clock, encoder clock)` observation.
+ *
+ * The first pair fixes the video's zero; the second, taken at stop, fixes the
+ * *rate*, which is a check rather than a parameter. One pair cannot detect a
+ * capture that dropped frames at all, which is why there are two.
+ */
+export interface Calibration {
+    /** Milliseconds since the recorder's epoch — the same epoch `TickSample.w` counts from. */
+    host_wall_ms: number;
+    /** ffmpeg's own `out_time_us`, in milliseconds. */
+    out_time_ms: number;
+}
+
+/** `video.json`: what the encoder was asked for, what it did, and how it ended. */
+export interface VideoRecord {
+    run: string;
+    file: string;
+    /** The geometry `xwininfo` **observed**, which is what was actually captured. */
+    width: number;
+    height: number;
+    /**
+     * The geometry that was *asked for*. A window manager may refuse or adjust
+     * it — a tiling compositor certainly will unless the window is floated —
+     * and that is a warning on the run, not a failure.
+     */
+    requested_width: number;
+    requested_height: number;
+    fps: number;
+    status: VideoStatus;
+    reason: string | null;
+    ffmpeg_exit: number | null;
+    calibration: Calibration[];
+    /** `null` when there are not two pairs to compare — **unknown**, never "fine". */
+    rate_ok: boolean | null;
+    window_id: string | null;
+}
+
+/** The observed span of a recording's clock. */
+export interface TickRange {
+    from: number;
+    to: number;
+}
+
+/** `GET /api/v1/video` and `GET /api/v1/runs/{id}/video` response. */
+export interface VideoManifest {
+    /** `null` is **unknown**, never *no match* — the same rule as `FramesManifest.run`. */
+    run: string | null;
+    /** `null` when no recorder ever wrote here, which is every run by default. */
+    video: VideoRecord | null;
+    bytes: number | null;
+    samples: number;
+    skipped: number;
+    /**
+     * What `runTimeline.ts` feeds into its `drawn` set in the frames' place for
+     * a video-only run. `null` when the clock observed nothing.
+     */
+    tick_range: TickRange | null;
+}
+
+/** What one `ticks.jsonl` line is. */
+export type TickKind =
+    | 'sample'
+    | 'start'
+    /**
+     * **No tick was observed here.** The video's equivalent of a missing frame
+     * file, and the only thing that can tell a stalled game from a running one:
+     * a video has no null, so while the game stalls the recorder keeps writing
+     * frames of the last drawn image.
+     */
+    | 'gap'
+    | 'stop';
+
+/**
+ * One clock sample. Short keys because the file this mirrors has thousands of
+ * lines and its only job is to be a table.
+ */
+export interface TickSample {
+    /** `game.tick`. Absent on a `gap` line, and only there. */
+    t?: number | null;
+    /** Milliseconds since the recorder's epoch, stamped at the send/receive midpoint. */
+    w: number;
+    /** Always present, including for an ordinary `sample`. */
+    k: TickKind;
+    /** Why, for a gap. */
+    reason?: string | null;
+}
+
+/** `GET /api/v1/video/ticks` and `GET /api/v1/runs/{id}/video/ticks` response. */
+export interface VideoTicksResponse {
+    samples: TickSample[];
+    skipped: number;
+}

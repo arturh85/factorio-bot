@@ -6,6 +6,7 @@ pub mod instance;
 pub mod rcon;
 pub mod scripts;
 pub mod settings;
+pub mod video;
 
 use crate::state::AppState;
 use utoipa_axum::router::OpenApiRouter;
@@ -26,7 +27,10 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(scripts::delete_script))
         .routes(routes!(fs::exists))
         .routes(routes!(frames::list_frames))
-        .routes(routes!(frames::get_frame));
+        .routes(routes!(frames::get_frame))
+        .routes(routes!(video::get_video))
+        .routes(routes!(video::get_video_ticks))
+        .routes(routes!(video::get_video_file));
 
     // Script execution and the job history it produces exist only in a build
     // that has an interpreter: `factorio-bot-scripting-lua` is an optional

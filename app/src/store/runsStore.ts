@@ -1,5 +1,14 @@
 import {defineStore} from 'pinia';
-import {getRun, getRunFrames, getRunLanes, getRunMap, getRunSamples, listRuns} from '@/api/client';
+import {
+    getRun,
+    getRunFrames,
+    getRunLanes,
+    getRunMap,
+    getRunSamples,
+    getRunVideo,
+    getRunVideoTicks,
+    listRuns
+} from '@/api/client';
 import {ApiError} from '@/api/http';
 import {
     ArchivedFrame,
@@ -11,7 +20,9 @@ import {
     Position,
     RunDetail,
     RunSummary,
-    Sample
+    Sample,
+    VideoManifest,
+    VideoTicksResponse
 } from '@/api/types';
 import {
     FrameView,
@@ -62,6 +73,16 @@ export const useRunsStore = defineStore('runs', {
         /** The run's archived entity map, `placed`/`removed`/`keyframe` lines mixed. */
         map: [] as MapRecord[],
         /**
+         * The run's archived recording and its clock.
+         *
+         * `null` means the enrichment did not load; a run that recorded no
+         * video answers a *manifest describing nothing*, which is a value, not
+         * a null. Keeping the two apart is what lets the viewer say "this run
+         * had no video" rather than "we could not tell".
+         */
+        video: null as VideoManifest | null,
+        videoTicks: null as VideoTicksResponse | null,
+        /**
          * Another run's splits, to diff against. Only the splits are fetched:
          * comparing runs does not need the other run's whole log or frames.
          */
@@ -89,7 +110,8 @@ export const useRunsStore = defineStore('runs', {
         frameError: null as string | null,
         lanesError: null as string | null,
         sampleError: null as string | null,
-        mapError: null as string | null
+        mapError: null as string | null,
+        videoError: null as string | null
     }),
 
     getters: {
@@ -102,11 +124,21 @@ export const useRunsStore = defineStore('runs', {
          * nothing to place -- a planning-only run with no milestones.
          */
         bounds(): {from: number; to: number} | null {
-            return tickBounds(this.detail?.splits ?? [], this.placedFrames, this.lanes);
+            return tickBounds(
+                this.detail?.splits ?? [],
+                this.placedFrames,
+                this.lanes,
+                this.video?.tick_range ?? null
+            );
         },
         /** Ticks the axis skips at the front, 0 when it starts at the run. */
         leadIn(): number {
-            return leadInTicks(this.detail?.splits ?? [], this.placedFrames, this.lanes);
+            return leadInTicks(
+                this.detail?.splits ?? [],
+                this.placedFrames,
+                this.lanes,
+                this.video?.tick_range ?? null
+            );
         },
         /** The (bot, camera) pairs this run actually captured. */
         views(): FrameView[] {
@@ -208,14 +240,24 @@ export const useRunsStore = defineStore('runs', {
             this.lanesError = null;
             this.sampleError = null;
             this.mapError = null;
+            this.videoError = null;
             try {
                 this.detail = await getRun(id);
 
-                const [framesResult, lanesResult, samplesResult, mapResult] = await Promise.allSettled([
+                const [
+                    framesResult,
+                    lanesResult,
+                    samplesResult,
+                    mapResult,
+                    videoResult,
+                    videoTicksResult
+                ] = await Promise.allSettled([
                     getRunFrames(id),
                     getRunLanes(id),
                     getRunSamples(id),
-                    getRunMap(id)
+                    getRunMap(id),
+                    getRunVideo(id),
+                    getRunVideoTicks(id)
                 ]);
 
                 if (framesResult.status === 'fulfilled') {
@@ -248,6 +290,24 @@ export const useRunsStore = defineStore('runs', {
                 } else {
                     this.map = [];
                     this.mapError = enrichmentUnavailable('entity map', '/map', mapResult.reason);
+                }
+
+                // Both halves of the recording, or neither: a manifest without
+                // its clock can place nothing, and a clock without its manifest
+                // has no calibration to place it against. Reporting one error
+                // for the pair keeps the viewer from showing half a recording.
+                if (videoResult.status === 'fulfilled' && videoTicksResult.status === 'fulfilled') {
+                    this.video = videoResult.value;
+                    this.videoTicks = videoTicksResult.value;
+                } else {
+                    this.video = null;
+                    this.videoTicks = null;
+                    this.videoError = enrichmentUnavailable(
+                        'video',
+                        '/video',
+                        videoResult.status === 'rejected' ? videoResult.reason :
+                            (videoTicksResult as PromiseRejectedResult).reason
+                    );
                 }
 
                 // A comparison against the previously open run is almost never

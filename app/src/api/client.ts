@@ -31,7 +31,9 @@ import {
     RunSamplesResponse,
     RunsResponse,
     ScriptContent,
-    StartAccepted
+    StartAccepted,
+    VideoManifest,
+    VideoTicksResponse
 } from './types';
 
 export function getSettings(): Promise<AppSettings> {
@@ -212,4 +214,53 @@ export function getRunSamples(id: string): Promise<RunSamplesResponse> {
  */
 export function getRunMap(id: string): Promise<RunMapResponse> {
     return request<RunMapResponse>(`/api/v1/runs/${encodeURIComponent(id)}/map`);
+}
+
+/**
+ * The current run's video manifest.
+ *
+ * A workspace that recorded no video answers a manifest describing nothing, not
+ * a 404 — video is opt-in, so "there is none" is the ordinary case.
+ */
+export function video(): Promise<VideoManifest> {
+    return request<VideoManifest>('/api/v1/video');
+}
+
+/** The current run's video clock, gap lines included. */
+export function videoTicks(): Promise<VideoTicksResponse> {
+    return request<VideoTicksResponse>('/api/v1/video/ticks');
+}
+
+/**
+ * The URL for the live recording's bytes, for a `<video>` element rather than a
+ * `request()` call.
+ *
+ * **Cache-busted by run id**, unlike `frameUrl`. A frame is addressed by
+ * `(client, name)` and is immutable once written, because a tick never recurs.
+ * The live recording is one file at one URL that the *next run overwrites*, so
+ * without the parameter a browser would happily replay the previous run's video
+ * beside this run's timeline. `null` when the run is unknown: the URL is still
+ * usable, it just cannot be busted.
+ */
+export function videoUrl(runId: string | null): string {
+    const base = buildUrl('/api/v1/video/file');
+    return runId === null ? base : base + '?run=' + encodeURIComponent(runId);
+}
+
+/** One archived run's video manifest. */
+export function getRunVideo(id: string): Promise<VideoManifest> {
+    return request<VideoManifest>(`/api/v1/runs/${encodeURIComponent(id)}/video`);
+}
+
+/** One archived run's video clock. */
+export function getRunVideoTicks(id: string): Promise<VideoTicksResponse> {
+    return request<VideoTicksResponse>(`/api/v1/runs/${encodeURIComponent(id)}/video/ticks`);
+}
+
+/**
+ * The URL of one archived recording's bytes. No cache-buster: an archived run
+ * is over, so the bytes at this URL never change.
+ */
+export function runVideoUrl(id: string): string {
+    return buildUrl(`/api/v1/runs/${encodeURIComponent(id)}/video/file`);
 }

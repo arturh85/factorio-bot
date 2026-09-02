@@ -554,6 +554,28 @@ pub fn approach_radius(bound: f64) -> f64 {
     (bound * 0.5).clamp(0.5, bound.max(0.5))
 }
 
+/// The mod's wording for a mine whose target stopped existing part-way through.
+///
+/// Owned by `mods/BotBridge/control.lua`'s mining watchdog, which reports
+/// `ERROR: the target <name> was gone before mining finished -- something else
+/// mined it first` when `p[idx].mining` outlives the entity it names. The
+/// entity does not have to have been stolen: mining a tile to zero destroys it,
+/// and the game may destroy it before `on_player_mined_entity` closes the
+/// action, so this is also how an ordinary exhaustion reaches us.
+const MINE_TARGET_GONE: &str = "was gone before mining finished";
+
+/// Whether a refused mine's verdict says the target is no longer there.
+///
+/// Matched on the mod's text because there is nothing else to match on: the
+/// verdict reaches Rust as one opaque string in
+/// [`crate::errors::RconError`]. Split out as a free function so the wording
+/// this depends on is pinned by a test in this crate rather than only by a live
+/// run -- if `control.lua` ever rewords it, that test fails here instead of the
+/// retirement quietly stopping.
+pub fn mine_reports_target_gone(message: &str) -> bool {
+    message.contains(MINE_TARGET_GONE)
+}
+
 /// How far a dispatch got before it failed.
 ///
 /// # The distinction a timeout cannot make on its own
@@ -1070,7 +1092,12 @@ impl FactorioRcon {
         }
     }
 
-    /// Adds research to the queue
+    /// Adds research to the queue, **without waiting for it to finish**.
+    ///
+    /// The queue-only path, for the Lua binding and the REST endpoint: a
+    /// script that wants to start a research and carry on should not block for
+    /// minutes. Anything that needs the technology to *exist* afterwards wants
+    /// [`FactorioRcon::research_timed`].
     pub async fn add_research(&self, technology_name: &str) -> Result<()> {
         self.add_research_timed(technology_name)
             .await
@@ -1080,10 +1107,14 @@ impl FactorioRcon {
 
     /// [`FactorioRcon::add_research`], reporting the game tick it ran at.
     ///
-    /// Research is queued synchronously: the command runs and returns inside
-    /// one tick, so both ends of [`ActionTicks`] are that tick. That is a
-    /// measurement, not a duplicated estimate -- the game really did receive
-    /// and finish with the command in the same tick.
+    /// **Both ends of the returned [`ActionTicks`] are the tick the technology
+    /// was queued at, and that is all this measures.** Queueing is synchronous
+    /// -- the command runs and returns inside one tick -- but the *research*
+    /// is not: it takes labs, science packs and minutes, and finishes on
+    /// `on_research_finished` long after this has returned. Treating this
+    /// method's success as "the technology exists now" is the defect
+    /// [`FactorioRcon::research_timed`] was added to fix; it reported rung 7 of
+    /// the milestone ladder complete the instant the research was requested.
     pub async fn add_research_timed(
         &self,
         technology_name: &str,
@@ -1112,6 +1143,68 @@ impl FactorioRcon {
             ));
         }
         Ok(ran_at)
+    }
+
+    /// Queues `technology_name` **and waits for the game to finish researching
+    /// it**.
+    ///
+    /// The durative counterpart of [`FactorioRcon::add_research_timed`], and
+    /// the one the executor uses. `LuaForce.add_research` answers "did this
+    /// enter the queue", never "is this researched"; the completion arrives
+    /// ticks or minutes later as `on_research_finished`, which carried no
+    /// action id until the mod started remembering which ids asked for which
+    /// technology (`research_actions`, `mods/BotBridge/control.lua`).
+    ///
+    /// Shaped exactly like [`FactorioRcon::player_craft_timed`], for the same
+    /// reason: in both, the *game* does the durative work and announces the end
+    /// of it, so the mod needs no `on_tick` follower and nothing here polls the
+    /// game. The wait is on the push channel -- the mod's `action_completed`
+    /// writeout, parsed into `world.actions` -- so the reply tick is the game's
+    /// own `game.tick` at the moment the research finished.
+    ///
+    /// The two ticks it returns are therefore genuinely different numbers: when
+    /// the technology was queued, and when it was done.
+    ///
+    /// # The deadline this is subject to
+    ///
+    /// `ACTION_RESULT_DEADLINE` is 360 wall-clock seconds. Research is the one
+    /// action kind whose real duration is set by the factory rather than by the
+    /// bot -- lab count, science supply, speed modules -- so it is also the one
+    /// most able to outlast that deadline honestly. A research that does so is
+    /// reported [`Dispatch::NoVerdict`], which is the correct claim (the game
+    /// took the command and we stopped listening) but is not the same as a
+    /// failure.
+    pub async fn research_timed(
+        &self,
+        world: &Arc<FactorioWorld>,
+        technology_name: &str,
+    ) -> Result<ActionTicks, ActionFailure> {
+        let mut next_action_id = world.as_ref().next_action_id.lock().await;
+        let action_id: ActionId = *next_action_id;
+        *next_action_id = (*next_action_id + 1) % 1000;
+        drop(next_action_id);
+        let (lines, dispatched) = self
+            .remote_call_timed(
+                "action_start_research",
+                vec![action_id.to_string(), str_to_lua(technology_name)],
+            )
+            .await?;
+        // A refusal is answered in the reply body and is the end of it -- the
+        // mod registers nothing for a technology it would not queue, so there
+        // is no completion coming and nothing to wait for. Classified
+        // `Refused` rather than left to `?`: the game did see this command and
+        // did judge it, and that is a stronger claim than `NotDispatched`.
+        if let Some(lines) = lines {
+            return Err(ActionFailure::refused(
+                RconUnexpectedOutput {
+                    output: lines.join("\n"),
+                }
+                .into(),
+                ActionTicks::at(dispatched),
+            ));
+        }
+        self.sleep_for_action_result(world, action_id, dispatched)
+            .await
     }
 
     /// Cheats in an Item in given quantity to given player
@@ -1639,8 +1732,25 @@ impl FactorioRcon {
         let dispatched = self
             .action_start_mining(action_id, player_id, name, position, count)
             .await?;
-        self.sleep_for_action_result(world, action_id, dispatched)
-            .await
+        let outcome = self
+            .sleep_for_action_result(world, action_id, dispatched)
+            .await;
+        // Retire the tile the moment the game says it is done for. Nothing else
+        // does: the mod reports a resource's `amount` when its chunk is written
+        // out and never again, and it emits no depletion event at all, so
+        // without this the planner keeps choosing a tile a bot already mined
+        // dry and the bot walks back to nothing. See
+        // `EntityGraph::resource_mined`.
+        match &outcome {
+            Ok(_) => {
+                world.entity_graph.resource_mined(name, position, count);
+            }
+            Err(failure) if mine_reports_target_gone(&failure.error.to_string()) => {
+                world.entity_graph.retire_resource(name, position);
+            }
+            Err(_) => {}
+        }
+        outcome
     }
 
     pub async fn player_craft(
@@ -3343,6 +3453,50 @@ mod positioning_tests {
         // the game's default build and reach distance is 10, and asking for 0.5
         // there would walk the bot onto the furnace just as surely.
         assert_eq!(approach_radius(10.0), 5.0);
+    }
+
+    /// The wording `mine_reports_target_gone` matches is the mod's, not ours.
+    ///
+    /// This is a cross-language contract with nothing but a string on either
+    /// side, so the mod's own source is read rather than described: if
+    /// `control.lua`'s mining watchdog is reworded, this fails here -- loudly,
+    /// and in the crate that depends on it -- instead of the retirement quietly
+    /// never firing again and mined-out tiles staying in the model for another
+    /// run. `repo_mods_path!` is the same checkout the drift check compares a
+    /// workspace against, so the guard and the run cannot end up talking about
+    /// different files.
+    #[test]
+    fn a_vanished_mine_target_is_recognised_from_the_mods_own_wording() {
+        use crate::process::instance_setup::repo_mods_path;
+        const CONTROL_LUA: &str = include_str!(repo_mods_path!("/BotBridge/control.lua"));
+        assert!(
+            CONTROL_LUA.contains(MINE_TARGET_GONE),
+            "the mod no longer says {MINE_TARGET_GONE:?}, so nothing retires a mined-out tile"
+        );
+
+        // And the phrase survives the wrapping `sleep_for_action_result` puts
+        // a refusal through, which is the only form the caller ever sees.
+        let verdict = "ERROR: the target iron-ore was gone before mining finished -- \
+                       something else mined it first";
+        let refusal: miette::Report = RconError {
+            message: verdict.to_string(),
+        }
+        .into();
+        assert!(
+            mine_reports_target_gone(&refusal.to_string()),
+            "the mod's own verdict must be recognised, got: {refusal}"
+        );
+
+        // The negative control: an out-of-reach refusal must not retire a tile
+        // that is still full of ore.
+        let out_of_reach: miette::Report = RconOutOfResourceReach {
+            target_x: -40.5,
+            target_y: -48.5,
+            distance: 3.345,
+            reach: 2.7,
+        }
+        .into();
+        assert!(!mine_reports_target_gone(&out_of_reach.to_string()));
     }
 }
 

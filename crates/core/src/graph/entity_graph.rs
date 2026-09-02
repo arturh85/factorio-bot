@@ -28,6 +28,32 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::{error, warn};
 
+/// What [`EntityGraph::resource_mined`] did with a mine's result.
+///
+/// Four answers, deliberately not collapsed into an `Option<u32>`: "the model
+/// has no such tile", "the model has the tile but nobody ever said how much is
+/// in it" and "the tile is now empty and has been retired" are three different
+/// facts, and the whole reason the resource map stores `Option<u32>` is that
+/// conflating "nobody said" with a number is what sent bots to tiles holding a
+/// twentieth of what the planner believed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceDepletion {
+    /// The model has no tile of that resource at that position, so there was
+    /// nothing to debit. Mining a tree or a rock lands here, and so does a
+    /// second report for a tile already retired.
+    Absent,
+    /// The tile is in the model, but no payload ever carried an `amount` for
+    /// it, so there is no number to subtract from. Left exactly as it was --
+    /// inventing a capacity in order to decrement it would be the same mistake
+    /// `DEFAULT_RESOURCE_PER_TILE` already made once.
+    AmountUnknown,
+    /// The tile still holds ore, this much of it.
+    Remaining(u32),
+    /// Nothing is left, and the tile has been taken out of the model. It will
+    /// not be offered to the planner again.
+    Exhausted,
+}
+
 pub struct EntityGraph {
     entity_graph: RwLock<EntityGraphInner>,
     blocked_tree: RwLock<BlockedQuadTree>,
@@ -137,8 +163,11 @@ impl EntityGraph {
     /// apart here, because the honest answer to all three is the same: there
     /// is no tile of that name at `pos`, or there is one and the payload that
     /// delivered it carried no `amount`. Neither is "the tile is empty" -- an
-    /// empty resource entity does not exist, the game destroys it and
-    /// `on_resource_depleted` removes it from this map. Use
+    /// empty resource entity does not exist -- the game destroys it, and
+    /// [`EntityGraph::resource_mined`] retires the tile here when what a mine
+    /// took empties it. (This used to name an `on_resource_depleted` that has
+    /// never existed in the mod or in this crate, which is how a mined-out tile
+    /// came to stay in the model for a whole run.) Use
     /// [`EntityGraph::resource_contains`] to ask whether the tile is there at
     /// all; use this to ask what it holds.
     ///
@@ -152,6 +181,91 @@ impl EntityGraph {
         self.resources
             .get(resource_name)
             .and_then(|elements| elements.get(pos).copied().flatten())
+    }
+
+    /// Takes `mined` units out of the resource tile under `position`, and
+    /// **retires the tile** once the model says nothing is left.
+    ///
+    /// # Why the model has to be told at all
+    ///
+    /// Nothing else tells it. The mod reports a tile's `amount` when the chunk
+    /// it lives in is written out and never again, and it emits no event when a
+    /// tile is mined dry -- `mined_item` is commented out in `control.lua`, and
+    /// the `on_resource_depleted` this file's [`EntityGraph::resource_amount`]
+    /// once claimed does the retiring has never existed. So a tile a bot mined
+    /// to zero stayed in `resources` at its pre-run reading, kept turning up in
+    /// `resource_patches`, and the planner kept sending a bot back to walk to
+    /// ore that was not there.
+    ///
+    /// # The position is a tile centre
+    ///
+    /// `position` is the real entity position -- `(-40.5, -48.5)`, never
+    /// `(-41, -49)` -- exactly as it was handed to
+    /// [`FactorioRcon::player_mine_timed`](crate::factorio::rcon::FactorioRcon::player_mine_timed).
+    /// The `Pos` key is derived here by flooring, the same way `add` derived
+    /// it, and the retirement rebuilds the centre rather than reusing the
+    /// floored key. A caller that floors first and passes the corner will miss
+    /// the tile in the quad tree.
+    ///
+    /// # `mined` is what the game took, not what was asked for
+    ///
+    /// A mine that fails part-way has not removed what it was asked for, so a
+    /// caller must pass the count only once the game has said the mine
+    /// succeeded. When the game instead reports the target vanished mid-mine,
+    /// [`EntityGraph::retire_resource`] is the honest call: the entity is gone
+    /// whatever arithmetic says.
+    pub fn resource_mined(
+        &self,
+        resource_name: &str,
+        position: &Position,
+        mined: u32,
+    ) -> ResourceDepletion {
+        let pos: Pos = position.into();
+        // Both guards are dropped before anything below takes the map again:
+        // `retire_resource` needs a `get_mut` on the same shard, and holding a
+        // read guard across it deadlocks the calling task.
+        let stored = self
+            .resources
+            .get(resource_name)
+            .and_then(|tiles| tiles.get(&pos).copied());
+        let Some(stored) = stored else {
+            return ResourceDepletion::Absent;
+        };
+        let Some(amount) = stored else {
+            return ResourceDepletion::AmountUnknown;
+        };
+        let left = amount.saturating_sub(mined);
+        if left == 0 {
+            self.retire_resource(resource_name, position);
+            return ResourceDepletion::Exhausted;
+        }
+        if let Some(mut tiles) = self.resources.get_mut(resource_name) {
+            tiles.insert(pos, Some(left));
+        }
+        ResourceDepletion::Remaining(left)
+    }
+
+    /// Takes a resource tile out of the model entirely: out of `resources`, and
+    /// out of `resource_tree` with it. Answers whether there was one to take.
+    ///
+    /// This is [`EntityGraph::remove`] under a name that says what it is for
+    /// and a signature a caller who only knows *what* was mined and *where* can
+    /// actually reach. `position` is the tile centre, as
+    /// [`EntityGraph::resource_mined`] explains; the entity handed to `remove`
+    /// is rebuilt on the centre of the tile the key names, so passing a
+    /// position anywhere inside the tile retires that tile and only that tile.
+    pub fn retire_resource(&self, resource_name: &str, position: &Position) -> bool {
+        let pos: Pos = position.into();
+        if !self.resource_contains(resource_name, pos.clone()) {
+            return false;
+        }
+        let centre = resource_position_from_pos(pos);
+        let entity = FactorioEntity::new_resource(&centre, Direction::North, resource_name);
+        if let Err(err) = self.remove(&entity) {
+            warn!("failed to retire mined-out {resource_name} at {centre:?}: {err}");
+            return false;
+        }
+        true
     }
 
     /// Whether a resource of *any* name covers `pos`.
@@ -2048,6 +2162,141 @@ mod tests {
         assert!(graph.resource_patches(&iron).is_empty());
         let bounds = Rect::new(&Position::new(-50., -58.), &Position::new(-30., -38.));
         assert!(graph.snapshot_within(&bounds).is_empty());
+    }
+
+    /// One tile, mined twice, the second mine emptying it.
+    ///
+    /// The position is a genuine tile centre. `resources` keys by a flooring
+    /// `Pos`, so a fixture on integers round-trips losslessly and would prove
+    /// nothing about the retirement, which has to rebuild the centre from the
+    /// floored key to find the tile in `resource_tree` at all -- the exact
+    /// round trip that once made every ore on every map unmineable while every
+    /// test stayed green.
+    #[test]
+    fn mining_a_tile_dry_retires_it() {
+        let iron = EntityName::IronOre.to_string();
+        let at = Position::new(-40.5, -48.5);
+        let mut ore = FactorioEntity::new_resource(&at, Direction::North, &iron);
+        ore.amount = Some(10);
+        let graph = entity_graph_from(vec![ore]).unwrap();
+
+        assert_eq!(
+            graph.resource_mined(&iron, &at, 4),
+            ResourceDepletion::Remaining(6),
+            "a partial mine debits the tile and leaves it standing"
+        );
+        assert!(graph.resource_contains(&iron, Pos(-41, -49)));
+        assert_eq!(graph.resource_amount(&iron, &Pos(-41, -49)), Some(6));
+
+        assert_eq!(
+            graph.resource_mined(&iron, &at, 6),
+            ResourceDepletion::Exhausted
+        );
+
+        // Every way the planner can find a tile must now agree it is gone.
+        assert!(
+            !graph.resource_contains(&iron, Pos(-41, -49)),
+            "an emptied tile must leave the resources map"
+        );
+        assert_eq!(graph.resource_amount(&iron, &Pos(-41, -49)), None);
+        assert!(
+            graph.resource_patches(&iron).is_empty(),
+            "an emptied tile must leave the patches the planner picks from"
+        );
+        let bounds = Rect::new(&Position::new(-50., -58.), &Position::new(-30., -38.));
+        assert!(
+            graph.snapshot_within(&bounds).is_empty(),
+            "an emptied tile must leave the quad tree too, or the model still \
+             reports ore the game has destroyed"
+        );
+
+        assert_eq!(
+            graph.resource_mined(&iron, &at, 1),
+            ResourceDepletion::Absent,
+            "a second report for a retired tile has nothing to debit"
+        );
+    }
+
+    /// Retiring one tile must not take its neighbour with it. Adjacent tiles
+    /// are the hard case: their boxes sit inside the same query rectangle and
+    /// differ only in the key.
+    #[test]
+    fn retiring_a_tile_leaves_its_neighbour_alone() {
+        let iron = EntityName::IronOre.to_string();
+        let here = Position::new(-40.5, -48.5);
+        let next = Position::new(-39.5, -48.5);
+        let with_amount = |at: &Position, amount: u32| {
+            let mut ore = FactorioEntity::new_resource(at, Direction::North, &iron);
+            ore.amount = Some(amount);
+            ore
+        };
+        let graph =
+            entity_graph_from(vec![with_amount(&here, 3), with_amount(&next, 500)]).unwrap();
+
+        assert_eq!(
+            graph.resource_mined(&iron, &here, 3),
+            ResourceDepletion::Exhausted
+        );
+
+        assert!(!graph.resource_contains(&iron, Pos(-41, -49)));
+        assert!(
+            graph.resource_contains(&iron, Pos(-40, -49)),
+            "the neighbour was retired along with the tile that was mined"
+        );
+        assert_eq!(graph.resource_amount(&iron, &Pos(-40, -49)), Some(500));
+        let bounds = Rect::new(&Position::new(-50., -58.), &Position::new(-30., -38.));
+        let modelled: Vec<Position> = graph
+            .snapshot_within(&bounds)
+            .into_iter()
+            .map(|entity| entity.position)
+            .collect();
+        assert_eq!(modelled, vec![next]);
+    }
+
+    /// A tile nobody reported an amount for is left exactly as it was.
+    ///
+    /// `None` is "nobody said", not zero. Treating it as a capacity to
+    /// decrement would retire real ore on the first mine, and every
+    /// hand-built fixture tile is `None`.
+    #[test]
+    fn mining_a_tile_of_unknown_amount_changes_nothing() {
+        let iron = EntityName::IronOre.to_string();
+        let at = Position::new(-40.5, -48.5);
+        let graph = entity_graph_from(vec![FactorioEntity::new_resource(
+            &at,
+            Direction::North,
+            &iron,
+        )])
+        .unwrap();
+
+        assert_eq!(
+            graph.resource_mined(&iron, &at, 50),
+            ResourceDepletion::AmountUnknown
+        );
+        assert!(graph.resource_contains(&iron, Pos(-41, -49)));
+        assert_eq!(graph.resource_amount(&iron, &Pos(-41, -49)), None);
+    }
+
+    /// The game destroyed the entity mid-mine. The model has to believe it
+    /// whatever its own arithmetic says -- this is the case the live run hit,
+    /// where a tile delivered 15 ore against an ask of 22 and then vanished,
+    /// leaving the model holding a positive amount for a tile with nothing in
+    /// it.
+    #[test]
+    fn a_vanished_target_is_retired_whatever_the_model_believed() {
+        let iron = EntityName::IronOre.to_string();
+        let at = Position::new(-40.5, -48.5);
+        let mut ore = FactorioEntity::new_resource(&at, Direction::North, &iron);
+        ore.amount = Some(500);
+        let graph = entity_graph_from(vec![ore]).unwrap();
+
+        assert!(graph.retire_resource(&iron, &at));
+        assert!(!graph.resource_contains(&iron, Pos(-41, -49)));
+        assert!(graph.resource_patches(&iron).is_empty());
+        assert!(
+            !graph.retire_resource(&iron, &at),
+            "retiring a tile that is already gone must report that it found none"
+        );
     }
 
     #[test]

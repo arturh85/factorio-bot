@@ -13,6 +13,19 @@
 /** A small, evenly-spaced set of hues, so adjacent types are visually distinct. */
 const HUE_STEP = 47;
 
+/**
+ * Saturation and lightness are varied too, not just hue.
+ *
+ * Hue alone gives 360 buckets drawn at random by a hash, and a real run's map
+ * legend holds around thirty rows -- `crash-site-spaceship` and `iron-ore`
+ * landed on hue 114 and hue 117, two greens nobody could tell apart in a
+ * legend. Three saturations and three lightnesses multiply the space by nine
+ * and, more usefully, separate a near-collision along an axis the eye reads
+ * differently from hue.
+ */
+const SATURATIONS = [52, 68, 84];
+const LIGHTNESSES = [44, 56, 68];
+
 function hashString(value: string): number {
     let hash = 0;
     for (let i = 0; i < value.length; i++) {
@@ -21,8 +34,17 @@ function hashString(value: string): number {
     return Math.abs(hash);
 }
 
-/** Deterministic: the same `entityType` always returns the same colour. */
+/**
+ * Deterministic: the same `entityType` always returns the same colour.
+ *
+ * Salted rather than sliced: the low bits of a `* 31 +` hash track its high
+ * bits closely enough that two names one character apart would land on the
+ * same saturation AND the same lightness, which is the case this exists to
+ * break up.
+ */
 export function colorForEntityType(entityType: string): string {
     const hue = (hashString(entityType) * HUE_STEP) % 360;
-    return `hsl(${hue}, 65%, 50%)`;
+    const saturation = SATURATIONS[hashString(`${entityType}#s`) % SATURATIONS.length];
+    const lightness = LIGHTNESSES[hashString(`${entityType}#l`) % LIGHTNESSES.length];
+    return `hsl(${hue}, ${saturation}%, ${lightness}%)`;
 }

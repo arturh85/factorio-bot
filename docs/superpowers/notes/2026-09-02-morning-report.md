@@ -744,3 +744,59 @@ Milestone 6 gave every step to bot 1; bots 2, 3 and 4 received no dispatch after
 tick 18700, which is *why* they were parked in the first place. That is the
 "a lab is one craft, and no bot can hand an item to another" constraint again,
 and it remains a decision for the project owner rather than a bug.
+
+## Update (~16:45): run 28 — 6 of 7, and one blocker left
+
+Run 28, built at `0011f40c` on a quiet machine (load 2.42 at start). **Matches the
+record and is by far the cleanest route to it:**
+
+```
+milestone 1  satisfied  1 iteration    8 steps
+milestone 2  satisfied  1 iteration    8 steps
+milestone 3  satisfied  1 iteration   37 steps
+milestone 4  satisfied  2 iterations  40 steps
+milestone 5  satisfied  1 iteration   16 steps
+milestone 6  satisfied  3 iterations  46 steps
+milestone 7  stuck after 5 iterations
+```
+
+Rung 6's closing iteration was **44 actions with zero failures of any of the four
+kinds** — the best single pass there has been. And the four-count line earned its
+keep immediately: every rung-7 iteration reads `actions(failed=0 lost=0)
+walks(failed=1 lost=0)`, which under the old summed label would have printed as
+`failed=1` and told nobody which of four different things went wrong.
+
+### One blocker, named plainly
+
+```
+milestone 7: last error: ERROR: stuck while walking,
+             aborted before reaching last waypoint
+```
+
+Not the planner, not crafting, not placement, not research. **A walk.**
+
+### The teleport contributed nothing, again
+
+```
+planned  84   success=46 pending=11  walks(failed=1)  +13 teleports
+planned  55   success=19 pending=19  walks(failed=1)   +2 teleports
+planned 119   success= 1 pending=78  walks(failed=1)   +0 teleports
+planned 118   success= 0 pending=78  walks(failed=1)   +0 teleports
+```
+
+Thirteen teleports in the first iteration and the walk failed anyway; none at all
+in the last two and the same walk still failed. The project owner has directed
+its unconditional removal, replaced by re-pathing with an honest *unreachable*
+failure. That work is in flight.
+
+Note the plan growing — 84, 55, 119, 118 — while the last two iterations
+accomplished 1 and 0 actions against 78 pending. Whatever the walk cannot reach
+blocks a large fraction of the plan behind it, which is the argument for failing
+a walk *fast and honestly* rather than retrying it.
+
+### Where the ladder stands
+
+**6 of 7.** Rung 7 has now been reached in three consecutive runs and satisfied in
+none. Every rung below it closes reliably, most in a single iteration. The
+remaining distance is one walk that cannot reach its destination and a planner
+that cannot route around it because a teleport keeps telling it the walk arrived.

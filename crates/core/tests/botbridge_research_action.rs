@@ -246,9 +246,10 @@ fn a_finished_research_completes_the_action_that_asked_for_it() {
 }
 
 /// The registry has to outlive a save/load, which a module local does not:
-/// `crafting_queue` is one, `on_load` rebuilds nothing, and a research that
-/// spans a save would never settle. `storage` is the only table Factorio
-/// persists.
+/// `on_load` rebuilds nothing, so a research that spans a save would never
+/// settle. `storage` is the only table Factorio persists. Crafting made the
+/// same mistake and was moved to `storage.craft_actions` for the same reason —
+/// see `botbridge_craft_action.rs`.
 #[test]
 fn the_registry_lives_in_storage() {
     let lua = run(&stub_game(&["automation"], true), START_AUTOMATION);

@@ -58,7 +58,8 @@ local last_tick = 0
 local wait_for_player = false
 local todo_next_tick = {}
 local todo_next_tick_other = {}
-local crafting_queue = {} -- array of lists. crafting_queue[character_idx] is a list
+-- The crafts in flight used to live here, in a module local. They live in
+-- `storage.craft_actions` now -- see `craft_actions()`.
 local recent_item_additions   = {} -- recent_item_additions[character_index].{tick,itemlist,recipe?,action_id?}, itemlist = { {"foo",2}, {"bar",17} }
 
 local tile_chunks = {}
@@ -2272,37 +2273,46 @@ function on_some_entity_deleted(event)
 ----	complain("on_some_entity_deleted: "..ent.name.." at "..ent.position.x..","..ent.position.y)
 end
 
+-- One craft finished. Count it against whatever asked for that recipe.
+--
+-- `on_player_crafted_item` carries the player and the recipe and nothing else
+-- -- no request id, no queue position (`workspace/factorio-api-docs/runtime-api.json`,
+-- Factorio 2.1.17) -- so `(player_index, recipe.name)` is the only join there
+-- is. See `craft_actions()` for why it is a *count* against a per-recipe
+-- bucket rather than a position in one list per player.
+--
+-- A craft nobody is waiting on settles nothing: that is the normal case for
+-- every intermediate `begin_crafting` queues on its own way to the requested
+-- item, and for anything a human at the keyboard makes.
 function on_player_crafted_item(event)
-	queue = crafting_queue[event.player_index]
-
 	local tmp_recent_item_addition = {}
 	tmp_recent_item_addition.tick = event.tick
 	tmp_recent_item_addition.recipe = event.recipe
 	tmp_recent_item_addition.itemlist = products_to_dict(event.recipe.products)
-
-	if queue == nil then
---		complain("player "..game.players[event.player_index].name.." unexpectedly crafted "..event.recipe.name)
-	else
-		if queue[1].recipe == event.recipe.name then
-			if queue[1].id == nil then
---				complain("player "..game.players[event.player_index].name.." has crafted "..queue[1].recipe..", but that's not all")
-			else
---				complain("player "..game.players[event.player_index].name.." has finished crafting "..queue[1].recipe.." with id "..queue[1].id)
-				action_completed(event.tick, queue[1].id)
-				tmp_recent_item_addition.action_id = queue[1].id
-			end
-			table.remove(queue,1)
-			if #queue == 0 then
---				complain("done crafting")
-				crafting_queue[event.player_index] = nil
-			end
-		else
---			complain("player "..game.players[event.player_index].name.." crafted "..event.recipe.name.." which is probably an intermediate product")
-		end
-	end
+	tmp_recent_item_addition.action_id = settle_crafted_item(event)
 
 	if recent_item_additions[event.player_index] == nil then recent_item_additions[event.player_index] = {} end
 	table.insert(recent_item_additions[event.player_index], tmp_recent_item_addition)
+end
+
+-- The game says these crafts will not happen. Answer the actions waiting on
+-- them, now, rather than leaving them to time out six minutes later.
+--
+-- `cancel_count` is a number of *crafts*, and the event does not say which
+-- requests they belonged to. They are taken from the back: the game's crafting
+-- queue is FIFO, so the earliest request is the one nearest completion and the
+-- latest is the one a cancellation reaches first.
+--
+-- A request that loses any of its crafts **fails**. It asked for a count and
+-- that count will not arrive, and reporting the partial yield as a success
+-- would tell the executor a bot holds items it does not have.
+--
+-- A wrapper rather than registering `fail_cancelled_crafts` directly, for the
+-- same reason `on_research_finished` wraps `settle_research_actions`: the
+-- registration below runs before that function's `function` statement has
+-- assigned the global, so registering it by name there would register nil.
+function on_player_cancelled_crafting(event)
+	fail_cancelled_crafts(event)
 end
 
 -- Count items in an inventory by name.
@@ -2515,6 +2525,9 @@ script.on_event(defines.events.on_player_changed_position, on_player_changed_pos
 --script.on_event(defines.events.on_player_armor_inventory_changed, on_inventory_changed)
 
 script.on_event(defines.events.on_player_crafted_item, on_player_crafted_item)
+-- The other half of a craft's outcome. Without this a cancelled craft answered
+-- nothing at all and its registry entry outlived the run.
+script.on_event(defines.events.on_player_cancelled_crafting, on_player_cancelled_crafting)
 
 -- The only registration site for the frame cadence. `on_nth_tick` replaces
 -- the handler for a given period rather than adding to it, so re-running this
@@ -3051,18 +3064,16 @@ end
 -- The action ids waiting on each technology: `research_actions()[name]` is an
 -- array of ids, all of which settle when that technology finishes.
 --
--- **In `storage`, not a module local.** `crafting_queue` is a module local and
--- `on_load` rebuilds nothing, so a craft that spans a save/load never settles.
--- A research runs for minutes, which makes it the action most likely to be in
--- flight across a save, so the same mistake here would be the most expensive
--- version of it.
+-- **In `storage`, not a module local.** `on_load` rebuilds nothing, so a
+-- registry kept in a module local is empty after a save/load and every action
+-- in flight across it waits out the executor's deadline. A research runs for
+-- minutes, which makes it the action most likely to be in flight across a save.
 --
 -- **Keyed by technology name** because that is the only join the game offers:
 -- `on_research_finished` carries the technology and nothing else -- no request
 -- id, no queue position. `add_research` appends to the back of a queue that may
 -- already hold other technologies, so completions do not arrive in the order
--- they were asked for and a positional match (the shape `crafting_queue` uses)
--- would settle the wrong action.
+-- they were asked for and a positional match would settle the wrong action.
 --
 -- **An array per name, not one id**, because two actions may ask for the same
 -- technology. Overwriting would leave the first waiting out the executor's
@@ -3094,6 +3105,127 @@ function forget_research_action(technology_name, action_id)
 	if #waiting == 0 then
 		research_actions()[technology_name] = nil
 	end
+end
+
+-- The actions waiting on each craft: `craft_actions()[player_index][recipe]` is
+-- an array of `{ id = action_id, remaining = crafts_still_owed }`, oldest
+-- first.
+--
+-- **In `storage`**, for the reason above `research_actions()`. Its predecessor
+-- was a module local, which is one of the several ways a craft could stop
+-- reporting; see `docs/superpowers/notes/2026-09-02-crafts-that-never-report.md`.
+--
+-- **Keyed by `(player, recipe)`, and counted rather than positional.**
+-- `on_player_crafted_item` carries the player and the recipe and nothing else.
+-- The previous shape was one list per player with the requests concatenated in
+-- order, matched by comparing the head's recipe to the event's -- and a crafted
+-- item that did not match the head was *ignored, leaving the head in place*. So
+-- a single entry that would never be crafted stopped every later craft for that
+-- bot, permanently, with no timeout and no log line. Run
+-- `run-1788347034-00981` lost eleven actions to exactly that shape, each for a
+-- full `ACTION_RESULT_DEADLINE`. Buckets per recipe cannot block one another,
+-- and a stuck bucket can no longer be created: the two ways to make one -- a
+-- partial `begin_crafting` and a cancellation -- are both handled below.
+--
+-- **Counted, not matched one craft to one request**, because the event cannot
+-- tell two requests for the same recipe apart. The game's crafting queue is
+-- FIFO, so crafts of a recipe are attributed to the oldest request still owed
+-- one. That is an attribution, not a measurement, and it is the strongest claim
+-- the event supports.
+--
+-- Created lazily, for the reason above `research_actions()`.
+function craft_actions()
+	if storage.craft_actions == nil then
+		storage.craft_actions = {}
+	end
+	return storage.craft_actions
+end
+
+-- The bucket for one player and one recipe, or nil when nothing waits on it.
+-- With `create`, the bucket is made rather than reported absent.
+function craft_waiters(player_index, recipe_name, create)
+	local per_player = craft_actions()[player_index]
+	if per_player == nil then
+		if not create then return nil end
+		per_player = {}
+		craft_actions()[player_index] = per_player
+	end
+	local waiting = per_player[recipe_name]
+	if waiting == nil then
+		if not create then return nil end
+		waiting = {}
+		per_player[recipe_name] = waiting
+	end
+	return waiting
+end
+
+-- Drop a bucket, and the player's table with it, once they are empty. Without
+-- this the registry grows one permanent entry per recipe ever crafted, and
+-- `storage` is saved with the map.
+function prune_craft_waiters(player_index, recipe_name)
+	local per_player = craft_actions()[player_index]
+	if per_player == nil then
+		return
+	end
+	local waiting = per_player[recipe_name]
+	if waiting ~= nil and #waiting == 0 then
+		per_player[recipe_name] = nil
+	end
+	if next(per_player) == nil then
+		craft_actions()[player_index] = nil
+	end
+end
+
+function forget_craft_action(player_index, recipe_name, action_id)
+	local waiting = craft_waiters(player_index, recipe_name)
+	if waiting == nil then
+		return
+	end
+	for i, waiter in ipairs(waiting) do
+		if waiter.id == action_id then
+			table.remove(waiting, i)
+			break
+		end
+	end
+	prune_craft_waiters(player_index, recipe_name)
+end
+
+-- Count one finished craft against the oldest request still owed one, and
+-- settle that request when it is owed no more. Returns the action id settled,
+-- or nil -- `on_player_crafted_item` records it on the item addition.
+function settle_crafted_item(event)
+	local waiting = craft_waiters(event.player_index, event.recipe.name)
+	if waiting == nil or #waiting == 0 then
+		return nil
+	end
+	local waiter = waiting[1]
+	waiter.remaining = waiter.remaining - 1
+	if waiter.remaining > 0 then
+		return nil
+	end
+	table.remove(waiting, 1)
+	prune_craft_waiters(event.player_index, event.recipe.name)
+	action_completed(event.tick, waiter.id)
+	return waiter.id
+end
+
+-- Fail the requests a cancellation took crafts from. See
+-- `on_player_cancelled_crafting` for why it takes them from the back and why
+-- losing any craft fails the whole request.
+function fail_cancelled_crafts(event)
+	local waiting = craft_waiters(event.player_index, event.recipe.name)
+	if waiting == nil then
+		return
+	end
+	local left = event.cancel_count
+	while left > 0 and #waiting > 0 do
+		local waiter = table.remove(waiting)
+		left = left - waiter.remaining
+		action_failed(event.tick, waiter.id,
+			"the game cancelled " .. tostring(event.cancel_count) ..
+			" craft(s) of " .. tostring(event.recipe.name))
+	end
+	prune_craft_waiters(event.player_index, event.recipe.name)
 end
 
 -- Queue a technology for research, and say so when the game will not.
@@ -3228,18 +3360,62 @@ function rcon_find_tiles_filtered(filters)
 end
 
 
+-- Start a craft the caller will wait for.
+--
+-- Same contract as walking, mining and researching: the reply body carries only
+-- the tick stamp, and the verdict arrives later as an `action_completed`
+-- writeout. The game's own crafting queue does the durative work, so nothing is
+-- added to `on_tick` here.
+--
+-- **Every refusal is answered in the reply body**, which is where
+-- `player_craft_timed` reads one, so a craft the game will not do costs a round
+-- trip rather than the executor's whole `ACTION_RESULT_DEADLINE`. The name is
+-- checked here rather than left to `begin_crafting`, which *raises* on a recipe
+-- that does not exist -- a raise inside the remote call is a far worse answer
+-- than a sentence.
+--
+-- **A partial start is a refusal and registers nothing.** `begin_crafting`
+-- returns "the count that was actually started crafting", which can be less
+-- than the count asked for. The previous version complained *and then
+-- registered all `count` crafts anyway*, so the surplus sat in the registry
+-- forever with nobody waiting on it -- and under the old positional match that
+-- surplus silenced every later craft for that bot. What it does not do is undo
+-- the crafts the game did start: those complete, find no waiter and are
+-- ignored, which under-claims (the bot ends up holding items the executor was
+-- told it did not get) in the direction this codebase chooses everywhere else.
+-- Cancelling them instead would need a queue index and can cascade into other
+-- crafts, per `LuaControl.cancel_crafting`.
 function rcon_action_start_crafting(action_id, player_id, recipe, count)
 	local player = game.players[player_id]
-	local ret = player.begin_crafting{count=count, recipe=recipe}
-	if ret ~= count then
-		complain("could not have player "..player.name.." craft "..count.." "..recipe.." (but only "..ret..")")
+	if player == nil then
+		rcon.print("Error: no such player: " .. tostring(player_id))
+		return
+	end
+	local known = player.force.recipes[recipe]
+	if known == nil then
+		rcon.print("Error: no such recipe: " .. tostring(recipe))
+		return
+	end
+	if not known.enabled then
+		rcon.print("Error: recipe " .. tostring(recipe) .. " is not enabled for this force")
+		return
 	end
 
-	for i = 1,count do
-		local aid = nil
-		if i == count then aid = action_id end
-		if crafting_queue[player_id] == nil then crafting_queue[player_id] = {} end
-		table.insert(crafting_queue[player_id], {recipe=recipe, id=aid})
+	-- Registered *before* `begin_crafting`, and taken back out below if the
+	-- game refuses: nothing documented says a crafted-item event cannot be
+	-- raised from inside that call, and a completion arriving before the id is
+	-- there would be dropped and cost the whole deadline. Same reasoning as
+	-- `start_research`.
+	local waiting = craft_waiters(player.index, recipe, true)
+	table.insert(waiting, { id = action_id, remaining = count })
+
+	local ret = player.begin_crafting{count=count, recipe=recipe}
+	if ret ~= count then
+		forget_craft_action(player.index, recipe, action_id)
+		rcon.print("Error: could not have player " .. player.name .. " craft " ..
+			tostring(count) .. " " .. tostring(recipe) ..
+			" (the game started " .. tostring(ret) .. ")")
+		return
 	end
 	stamp_tick()
 end

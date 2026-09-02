@@ -1768,6 +1768,20 @@ impl FactorioRcon {
 
     /// [`FactorioRcon::player_craft`], reporting the game ticks it was observed
     /// at.
+    ///
+    /// **Durative.** This returns when the game raises
+    /// `on_player_crafted_item` for the last craft the request asked for, not
+    /// when the crafts are queued. The join is `(player, recipe)` — all the
+    /// event carries — and lives in `storage.craft_actions`
+    /// (`mods/BotBridge/control.lua`); the two ticks it returns are therefore
+    /// genuinely different numbers, the queue tick and the finish tick.
+    ///
+    /// A craft the game cancels settles as a failure on
+    /// `on_player_cancelled_crafting`, and a craft the game will not start is
+    /// answered in the reply body, below — neither costs the
+    /// `ACTION_RESULT_DEADLINE`. What still can is a craft the game accepts and
+    /// then neither finishes nor cancels, which is [`Dispatch::NoVerdict`]: the
+    /// correct claim, and not the same as a failure.
     pub async fn player_craft_timed(
         &self,
         world: &Arc<FactorioWorld>,
@@ -1779,9 +1793,33 @@ impl FactorioRcon {
         let action_id: ActionId = *next_action_id;
         *next_action_id = (*next_action_id + 1) % 1000;
         drop(next_action_id);
-        let dispatched = self
-            .action_start_crafting(action_id, player_id, recipe, count)
+        let (lines, dispatched) = self
+            .remote_call_timed(
+                "action_start_crafting",
+                vec![
+                    action_id.to_string(),
+                    player_id.to_string(),
+                    str_to_lua(recipe),
+                    count.to_string(),
+                ],
+            )
             .await?;
+        // A refusal is answered in the reply body and is the end of it -- the
+        // mod registers nothing for a craft it would not start, so there is no
+        // completion coming and nothing to wait for. Classified `Refused`
+        // rather than left to `?` on `action_start_crafting`: the game did see
+        // this command and did judge it, and that is a stronger claim than
+        // `NotDispatched`. It also keeps the dispatch tick, which the weaker
+        // path throws away. Same shape as [`FactorioRcon::research_timed`].
+        if let Some(lines) = lines {
+            return Err(ActionFailure::refused(
+                RconUnexpectedOutput {
+                    output: lines.join("\n"),
+                }
+                .into(),
+                ActionTicks::at(dispatched),
+            ));
+        }
         self.sleep_for_action_result(world, action_id, dispatched)
             .await
     }
@@ -2640,30 +2678,6 @@ impl FactorioRcon {
             entities,
             tiles,
         )
-    }
-
-    pub async fn action_start_crafting(
-        &self,
-        action_id: ActionId,
-        player_id: PlayerId,
-        recipe: &str,
-        count: u32,
-    ) -> Result<Option<u64>> {
-        let action_id = action_id.to_string();
-        let player_id = player_id.to_string();
-        let (result, tick) = self
-            .remote_call_timed(
-                "action_start_crafting",
-                vec![action_id, player_id, str_to_lua(recipe), count.to_string()],
-            )
-            .await?;
-        if let Some(result) = result {
-            return Err(RconError {
-                message: format!("{:?}", result),
-            }
-            .into());
-        }
-        Ok(tick)
     }
 
     pub async fn find_offshore_pump_placement_options(

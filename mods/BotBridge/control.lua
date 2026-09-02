@@ -2264,6 +2264,35 @@ end
 -- bots themselves move on, so a failure-triggered sample would not learn
 -- anything the next beat does not already carry.
 
+-- Does a character collide with this tile, keyed by tile name.
+--
+-- Collision is a property of the tile *prototype* and a tile's name names its
+-- prototype exactly, so one engine call per distinct name gives the same answer
+-- as one per tile. That matters: `writeout_tiles` runs over a whole 32x32 chunk
+-- and its own comment already calls it SLOW, so asking per tile would add 1024
+-- crossings of the mod/engine boundary per chunk to the function least able to
+-- afford them. Prototypes cannot change at runtime, so the cache never goes
+-- stale; it is rebuilt from scratch on load because it is not in `storage`,
+-- which is what we want.
+local tile_player_collides = {}
+
+function player_collides_with_tile(tile)
+	local cached = tile_player_collides[tile.name]
+	if cached == nil then
+		-- Factorio 2.0 renamed every collision layer, dropping the `-layer`
+		-- suffix: `player-layer` became `player`. The old name is not ignored,
+		-- it raises ("Unknown collision-layer name: player-layer") -- which is
+		-- what the TODO that used to stand here was worked around by
+		-- hardcoding `0`, so every tile in every owned run came out walkable
+		-- and no lake ever entered EntityGraph's blocked tree.
+		-- `types.lua`'s serialize_tile has asked for it correctly all along;
+		-- this is the stdout transport catching up with the RCON one.
+		cached = tile.collides_with('player')
+		tile_player_collides[tile.name] = cached
+	end
+	return cached
+end
+
 function writeout_tiles(tick, surface, area) -- SLOW! beastie can do ~2.8 per tick
 	--if my_client_id ~= 1 then return end
 	local header = area.left_top.x..","..area.left_top.y..";"..area.right_bottom.x..","..area.right_bottom.y..": "
@@ -2272,9 +2301,7 @@ function writeout_tiles(tick, surface, area) -- SLOW! beastie can do ~2.8 per ti
 	for y = area.left_top.y, area.right_bottom.y-1 do
 		for x = area.left_top.x, area.right_bottom.x-1  do
 			tile = surface.get_tile(x,y)
-			-- TODO: Factorio 2.0 changed collision layer API, need to update
-			-- For now, assume tiles don't collide with player (walkable)
-			table.insert(line, tile.name .. ":0")
+			table.insert(line, tile.name .. (player_collides_with_tile(tile) and ":1" or ":0"))
 		end
 	end
 	writeout(tick, "tiles", header .. table.concat(line, ","))

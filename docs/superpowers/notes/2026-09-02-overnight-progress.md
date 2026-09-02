@@ -478,3 +478,27 @@ are ingested at `finish()`, so a run killed by a timeout loses its entire
 world-state stream — precisely when it is most wanted. `events.jsonl` and
 `map.jsonl` survive because they are written live. Worth ingesting samples at
 milestone boundaries too, as the spec's own text implies.
+
+## Run 12 — a complete record and a precise failure (~08:00)
+
+`run-1788317597-64759`. Rungs 1-3 satisfied in one iteration each; rung 4
+reached **100-step plans over 5 iterations** before sticking on:
+
+```
+ERROR: could not start mining for 301 ticks:
+       expected coal at (-37.5/5.5), found crash-site-spaceship-wreck-medium-3
+```
+
+Freeplay scatters crash-site debris around spawn and some of it sits on ore. The
+model records coal there; the game has wreckage, so `find_entity("coal", pos)`
+returns the wreck and mining never starts.
+
+This run **finished properly** — `run_finished` present, 158 KB of samples,
+77 KB of map — so unlike run 11 the record is complete.
+
+Same shape as the forest bug, and the machinery already exists:
+`blocking_boxes_within` was added tonight for placement and is not consulted
+when choosing *resource* tiles. Under fix, with one question asked beyond it —
+**does anything remove a mined-out tile from the model?** If not, this failure
+recurs with no debris involved, because the planner will keep sending bots to
+ore that has been exhausted.

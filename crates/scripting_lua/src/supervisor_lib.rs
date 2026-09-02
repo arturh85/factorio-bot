@@ -368,6 +368,70 @@ mod tests {
         );
     }
 
+    /// **The four trouble counts reach the driver as four counts.**
+    ///
+    /// `failed`, `lost`, `walks_failed` and `walks_lost` are four different
+    /// facts along two axes -- the game judging the attempt and saying no
+    /// versus the game never answering, for actions versus for walks. The
+    /// transition used to hand the driver their SUM under the name `failed`,
+    /// while `lost` rode along separately, so a run with one lost action and
+    /// nothing else wrong printed `failed=1 lost=1` -- which reads as two
+    /// problems and is one, counted twice. That line misdirected a live
+    /// diagnosis. Nothing named `failed` may carry anything but `obs.failed`.
+    #[test]
+    fn the_four_trouble_counts_reach_the_driver_separately() {
+        let lua = harness("{5, 0}", "{{lost=1, walks_lost=1, pending=3, success=1}}");
+        lua.load(
+            "local sup = supervisor.new(supervisor.list {'a'}, {})
+             local seen
+             repeat
+                 local t = sup:step()
+                 if t.action == 'ran' then seen = t end
+             until sup:finished()
+             __failed, __lost = seen.failed, seen.lost
+             __walks_failed, __walks_lost = seen.walks_failed, seen.walks_lost",
+        )
+        .exec()
+        .unwrap();
+        let g = lua.globals();
+        assert_eq!(
+            g.get::<i64>("__failed").unwrap(),
+            0,
+            "the game refused nothing; `failed` must not absorb the other three"
+        );
+        assert_eq!(g.get::<i64>("__lost").unwrap(), 1);
+        assert_eq!(g.get::<i64>("__walks_failed").unwrap(), 0);
+        assert_eq!(
+            g.get::<i64>("__walks_lost").unwrap(),
+            1,
+            "a walk nobody heard back about is its own fact and must be reachable"
+        );
+    }
+
+    /// The other half: keeping the four apart must not quietly un-do what the
+    /// sum was for. A run whose *only* trouble is a failed walk still has to
+    /// halt as `stuck` rather than `stuck_silent` (the two tests above pin
+    /// that), and the driver must still be able to see the walk counts that
+    /// made it so -- which is what this checks from the transition's side.
+    #[test]
+    fn a_failed_walk_is_visible_on_the_transition_that_reported_it() {
+        let lua = harness("{5, 0}", "{{walks_failed=2, pending=5}}");
+        lua.load(
+            "local sup = supervisor.new(supervisor.list {'a'}, {})
+             local seen
+             repeat
+                 local t = sup:step()
+                 if t.action == 'ran' then seen = t end
+             until sup:finished()
+             __failed, __walks_failed = seen.failed, seen.walks_failed",
+        )
+        .exec()
+        .unwrap();
+        let g = lua.globals();
+        assert_eq!(g.get::<i64>("__failed").unwrap(), 0);
+        assert_eq!(g.get::<i64>("__walks_failed").unwrap(), 2);
+    }
+
     #[test]
     fn a_keyframe_is_written_once_per_closed_milestone_when_recording() {
         // 10 -> 6 -> 0: one milestone, satisfied on the third plan. `_close`

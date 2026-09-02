@@ -290,18 +290,33 @@ function Sup:step()
     -- reading fields off afterwards.
     local steps = plan.steps
     local obs = goal.run(plan)
-    -- The two walk terms are here for a reason worth stating: a walk has no
-    -- action id, so it is counted in neither `failed` nor `lost`, and when one
-    -- does not succeed the rest of that bot's slice is abandoned -- leaving
-    -- every action `pending` and the whole run looking like `failed = 0`.
-    -- Without these terms a run that dispatched nothing at all was reported
-    -- `stuck_silent` with `last_error: null`, which says the opposite of what
-    -- happened. `run-1788341905-92036` is that run for `walks_failed` (the
-    -- pathfinder refused); `run-1788344167-58471` is it for `walks_lost` (a
-    -- stuck-walk recovery spun until the executor stopped waiting, four times).
-    local failed = (obs.failed or 0) + (obs.lost or 0)
+    -- Four counts, two axes, all four kept apart.
+    --
+    --   failed        the game judged the action and said no
+    --   lost          the game acknowledged it and never answered
+    --   walks_failed  the same, for a walk (usually: the pathfinder refused)
+    --   walks_lost    the same, for a walk (usually: a stuck-walk recovery
+    --                 spun until the executor stopped waiting)
+    --
+    -- The walk terms exist because a walk has no action id, so it is counted
+    -- in neither `failed` nor `lost`, and when one does not succeed the rest
+    -- of that bot's slice is abandoned -- leaving every action `pending` and
+    -- the whole run looking like `failed = 0`. Without them a run that
+    -- dispatched nothing at all was reported `stuck_silent` with
+    -- `last_error: null`, which says the opposite of what happened.
+    -- `run-1788341905-92036` is that run for `walks_failed`;
+    -- `run-1788344167-58471` is it for `walks_lost` (four executor deadlines
+    -- on one spinning recovery).
+    --
+    -- `trouble` is the SUM, and it is deliberately a local: it decides whether
+    -- this run counts as one that went wrong, and nothing else. It used to be
+    -- returned as `t.failed`, next to a separate `t.lost` -- so a run with a
+    -- single lost action printed `failed=1 lost=1`, which reads as two
+    -- problems, is one, and misdirected a live diagnosis. A name that means
+    -- "the game said no" must never carry a total.
+    local trouble = (obs.failed or 0) + (obs.lost or 0)
         + (obs.walks_failed or 0) + (obs.walks_lost or 0)
-    if failed > 0 then
+    if trouble > 0 then
         self.any_failures = true
         if self.first_error == nil then
             self.first_error = obs.first_error
@@ -317,11 +332,18 @@ function Sup:step()
     -- `failed = 0`, and they are completely different events -- the first is
     -- alarming, the second is usually a plan whose actions were all walks.
     -- `pending` is what separates them, so a caller should not have to guess.
+    --
+    -- The four trouble counts are normalised to numbers rather than passed
+    -- through: a driver prints these, and `nil` printed as "nil" reads as
+    -- "unknown" where "none" is what happened.
     return { action = "ran", state = "planning", milestone_index = self.index,
-             failed = failed, first_error = obs.first_error,
+             failed = obs.failed or 0, lost = obs.lost or 0,
+             walks_failed = obs.walks_failed or 0,
+             walks_lost = obs.walks_lost or 0,
+             first_error = obs.first_error,
              iteration = self.iterations,
              done = obs.done, pending = obs.pending, running = obs.running,
-             success = obs.success, lost = obs.lost,
+             success = obs.success,
              steps = steps, actions = obs.actions }
 end
 

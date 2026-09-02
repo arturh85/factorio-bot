@@ -123,9 +123,18 @@ repeat
         -- choosing further-away tiles for no stated reason. Same cadence as
         -- the two flushes above, for the same reason.
         local nr = record.refusals()
-        print(string.format("   ran: success=%s failed=%s lost=%s pending=%s (+%d events, +%d teleports, +%d refusals)",
-            tostring(t.success), tostring(t.failed), tostring(t.lost),
-            tostring(t.pending), n, nt, nr))
+        -- Grouped, because the four trouble counts are two axes and a flat
+        -- list of four `x=n` pairs invites exactly the misreading this line
+        -- used to produce: `failed` and `lost` name the same distinction for
+        -- actions that `walks failed` and `walks lost` name for walks -- the
+        -- game saying no versus the game never answering. Printing them
+        -- ungrouped, with `failed` holding the sum of all four, made one lost
+        -- action read as `failed=1 lost=1`: two problems where there was one.
+        print(string.format(
+            "   ran: success=%s pending=%s actions(failed=%s lost=%s) walks(failed=%s lost=%s) (+%d events, +%d teleports, +%d refusals)",
+            tostring(t.success), tostring(t.pending),
+            tostring(t.failed), tostring(t.lost),
+            tostring(t.walks_failed), tostring(t.walks_lost), n, nt, nr))
         if t.first_error ~= nil then print("        first error: " .. tostring(t.first_error)) end
     elseif t.action == "satisfied" then
         record.milestone_satisfied(t.milestone_index, t.iteration or 0, t.reason)

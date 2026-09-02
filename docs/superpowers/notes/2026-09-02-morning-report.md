@@ -800,3 +800,68 @@ a walk *fast and honestly* rather than retrying it.
 none. Every rung below it closes reliably, most in a single iteration. The
 remaining distance is one walk that cannot reach its destination and a planner
 that cannot route around it because a teleport keeps telling it the walk arrived.
+
+## Update (~17:45): run 29 — the teleport is gone and nothing missed it
+
+Run 29 (`run-1788361433-78052`), built at `4bdf5565`. **6 of 7**, and the first run
+in the project's history with **zero teleports** — 26 iterations, `+0 teleports`
+in every one.
+
+```
+milestone 1  satisfied  1 iteration   6 steps
+milestone 2  satisfied  1 iteration   6 steps
+milestone 3  satisfied  2 iterations 27 steps
+milestone 4  satisfied  2 iterations 30 steps
+milestone 5  satisfied  1 iteration   3 steps
+milestone 6  satisfied  3 iterations 31 steps
+milestone 7  stuck after 4 iterations
+```
+
+Rung 5 closed in a single iteration of **three steps**. Plans are markedly
+smaller than run 28's (27/30/31 against 37/40/46), which is what the ore fixes
+should do: a model that stops forgetting a tile on the first mining swing does
+not re-plan the mining it already did.
+
+### The re-path replacement works, and failed honestly once
+
+```
+milestone 6: last error: ERROR: stuck while walking,
+             gave up after 4 re-paths on one walk
+```
+
+Milestone 6 **survived that and closed anyway**. That is the entire argument for
+the change: the walk failed, said so, and the run routed around it — where a
+teleport would have reported arrival and left the planner choosing the same
+unreachable site.
+
+### Rung 7's blocker has changed
+
+```
+milestone 7: last error: the game reported no readable outcome:
+             no action result received in time
+```
+
+Not a walk any more. An action that never got a verdict — `actions(failed=0
+lost=1)`. That is a different defect and the next thing to diagnose.
+
+### The first video capture failed, and the interesting part is why
+
+`video.mp4` was **0 bytes after 26 minutes** while `ticks.jsonl` grew to 158 KB.
+ffmpeg was a zombie; `video.json` said `status: recording` throughout and only
+recorded `ffmpeg_exit: 234` at stop, 37 minutes late, with `reason: null`.
+
+The immediate cause is one token (`8482d560`): ffmpeg 9.0.1 rejects
+`default_base_is_moof`; the flag is `default_base_moof`. Verified both ways
+against the live client window — the old flag exits 234 with zero bytes, the
+corrected one records 1,148,279 bytes in 8 seconds and emits the progress lines
+the calibration reads. **First measured bitrate: ~143 KB/s at 706x854@15fps**,
+about 8.6 MB/min, on a largely static window.
+
+**The design gap is worth more than the bug.** The spec deliberately chose a
+one-frame trial grab over a version string — the right instinct — and it still
+let this through, because a single PNG frame never touches `-movflags`. The probe
+proved x11grab worked and proved nothing about the command that actually runs.
+
+One thing that did work: Hyprland refused the 1280x720 resize, and because the
+recorder records the geometry it *observes* rather than the one it requested, the
+file is honestly described as 706x854 instead of silently mislabelled.

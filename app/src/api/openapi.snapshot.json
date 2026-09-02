@@ -54,7 +54,7 @@
         "description": "One archived frame, as recorded in `frames/index.json`.",
         "properties": {
           "bot": {
-            "description": "The `client<N>` the frame came from. Bots and clients are 1:1.",
+            "description": "The `client<N>` the frame came from -- the **client** number, despite\nthis field's name.\n\nIt is not a bot id, and clients and bots are not 1:1. A client writes\nwhichever cameras it was asked for, and the assignment is neither fixed\nnor per-bot: on the run archived here, `client3` holds `follow`,\n`bot-1` and `area` while `client1` holds `bot-4`. Which bot a frame is\n*of* is in the `camera` field, and only when the camera names one --\n`follow` and `area` name none.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"

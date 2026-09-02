@@ -16,7 +16,15 @@ const RUN_SIDECAR: &str = "run.json";
 /// One archived frame, as recorded in `frames/index.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ArchivedFrame {
-    /// The `client<N>` the frame came from. Bots and clients are 1:1.
+    /// The `client<N>` the frame came from -- the **client** number, despite
+    /// this field's name.
+    ///
+    /// It is not a bot id, and clients and bots are not 1:1. A client writes
+    /// whichever cameras it was asked for, and the assignment is neither fixed
+    /// nor per-bot: on the run archived here, `client3` holds `follow`,
+    /// `bot-1` and `area` while `client1` holds `bot-4`. Which bot a frame is
+    /// *of* is in the `camera` field, and only when the camera names one --
+    /// `follow` and `area` name none.
     pub bot: u8,
     /// `game.tick` at capture, or `null` when the name does not parse.
     pub tick: Option<u64>,

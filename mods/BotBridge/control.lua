@@ -4221,6 +4221,22 @@ function request_player_path(player, goal, radius)
 		pathfind_flags = {
 			allow_destroy_friendly_entities = false,
 			prefer_straight_paths = true,
+			-- **Set, because the default is `true` and the default is wrong
+			-- for us.** The 2.1 docs say a cached path "might fail to respond
+			-- to changes in the environment", and we are what changes it: bots
+			-- place furnaces, drills and belts on the tiles they are about to
+			-- walk across.
+			--
+			-- This is also the experiment that tests that explanation. Run 30
+			-- returned 12 of 75 paths with a waypoint strictly *inside* a
+			-- furnace we had placed, every one flagged
+			-- `needs_destroy_to_reach = false` -- the game saying it believes
+			-- the tile is clear. If stale caching is the cause, that ratio
+			-- goes to zero on the next run. If it does not, this flag is not
+			-- the answer and the note should say so rather than leave it here
+			-- looking settled. See
+			-- `docs/superpowers/notes/2026-09-02-rung-7-unreachable.md`.
+			cache = false,
 		},
 		entity_to_ignore = player.character,
 	})

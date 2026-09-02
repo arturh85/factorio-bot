@@ -462,6 +462,16 @@ pub enum SatisfiedReason {
     /// The planner produced no steps. Indistinguishable from
     /// [`SatisfiedReason::AlreadySatisfied`] in a record with only
     /// `iterations: 0` to go on, and not the same thing at all.
+    ///
+    /// **No live writer emits this any more**, as of `ee623717`. It was written
+    /// when `goal.holds` answered `nil` — the planner declining to model a goal
+    /// at all — and calling that *satisfied* meant a milestone could report
+    /// success on no evidence whatever. `holds` returning `nil` is now a halt
+    /// carrying a reason, not a satisfaction.
+    ///
+    /// The variant stays because archived runs contain it: several records on
+    /// disk were written before that fix, and a reader that cannot parse
+    /// `plan_empty` cannot read them at all.
     PlanEmpty,
     /// Recorded before this field existed. No live writer ever emits this --
     /// it is only what an old file on disk deserialises to, via
@@ -474,10 +484,16 @@ pub enum SatisfiedReason {
     /// (`crates/scripting_lua/src/globals/record.rs`) refuses any reason
     /// string it does not recognise rather than falling back here, and
     /// `scripts/supervisor.lua` never has this string to pass in the first
-    /// place -- the planner exposes no way for a script to check whether a
-    /// goal already holds independently of planning it, so an empty plan is
-    /// always reported as [`SatisfiedReason::PlanEmpty`], never guessed at as
-    /// [`SatisfiedReason::AlreadySatisfied`].
+    /// place.
+    ///
+    /// The reasoning here used to run "the planner exposes no way for a script
+    /// to check whether a goal already holds independently of planning it, so
+    /// an empty plan is always reported as [`SatisfiedReason::PlanEmpty`]".
+    /// **`goal.holds` has existed since well before this comment was read
+    /// again**, and it is what the supervisor asks; an empty plan is no longer
+    /// reported as satisfied at all when `holds` cannot answer. The conclusion
+    /// survives its premise — nothing here is guessed at as
+    /// [`SatisfiedReason::AlreadySatisfied`] — but the premise was false.
     #[serde(other)]
     Unknown,
 }

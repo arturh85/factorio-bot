@@ -7,10 +7,12 @@
  * headless server and a graphical client with three cameras do not run at the
  * same speed.
  */
-import {computed, onBeforeUnmount, onMounted, ref, watch} from 'vue';
+import {computed, onBeforeUnmount, onMounted, ref, watch, watchEffect} from 'vue';
 import {useRunsStore} from '@/store/runsStore';
 import {runFrameUrl} from '@/api/client';
 import MapPanel from '@/components/MapPanel.vue';
+import {parseVideoClock, tickToVideoSeconds} from '@/api/videoClock';
+import {videoDefects} from '@/api/videoJoin';
 import {
     formatAgo,
     formatTicks,
@@ -68,6 +70,59 @@ async function open(id: string) {
 function viewKey(v: {bot: number; camera: string}): string {
     return `${v.bot}|${v.camera}`;
 }
+/**
+ * What to call a view in the picker.
+ *
+ * The client number is which Factorio process happened to render that camera,
+ * which is an implementation detail the mod decides and a viewer cannot act on
+ * -- `bot-1 -- client 4` invites the reading that client 4 *is* bot 1, and it is
+ * not. So it is shown only when it is the sole thing separating two entries,
+ * which is the one case where dropping it would offer an ambiguous choice.
+ */
+function viewLabel(v: {bot: number; camera: string; count: number}): string {
+    const sameCamera = store.views.filter((o) => o.camera === v.camera).length;
+    const where = sameCamera > 1 ? ` (client ${v.bot})` : '';
+    return `${v.camera}${where} — ${v.count} frames`;
+}
+
+/**
+ * The video half of this page.
+ *
+ * The clock is the whole point: a video has wall-clock frames and everything
+ * else here is keyed on `game.tick`, and UPS is not constant, so the two cannot
+ * be related by multiplying. `parseVideoClock` interpolates between the nearest
+ * sampled pairs and **returns null rather than a number** outside the sampled
+ * range or across a stall -- so an unanswerable tick shows a message instead of
+ * a plausible wrong frame.
+ */
+const videoClock = computed(() => parseVideoClock(store.video, store.videoTicks));
+
+/** The run's own copy, not `workspace/video/`, which the next run overwrites. */
+const videoSrc = computed(() =>
+    store.video?.video == null || store.detail == null
+        ? null
+        : `/api/v1/runs/${store.detail.summary.run_id}/video/file`
+);
+
+const videoAt = computed(() =>
+    videoClock.value === null ? null : tickToVideoSeconds(videoClock.value, store.cursor)
+);
+
+/** Anything the manifest itself says is wrong -- a zero-byte file, an unverified rate. */
+const videoIssues = computed(() => (store.video === null ? [] : videoDefects(store.video)));
+
+const videoEl = ref<HTMLVideoElement | null>(null);
+
+// Follow the shared cursor. `videoAt` is null when the clock declines to answer,
+// and then the element is deliberately left where it was rather than seeked to a
+// guess.
+watchEffect(() => {
+    const at = videoAt.value;
+    const el = videoEl.value;
+    if (el === null || at === null) return;
+    if (Math.abs(el.currentTime - at.seconds) > 0.25) el.currentTime = at.seconds;
+});
+
 const currentViewKey = computed(() =>
     store.bot === null || store.camera === null
         ? ''
@@ -311,6 +366,28 @@ function researchPct(progress: number): string {
                 </div>
             </div>
 
+            <!-- Video sits above the frames because it is the watchable
+                 artefact; frames remain the tick-addressable record. -->
+            <div v-if="store.video?.video" class="video">
+                <h3>Video</h3>
+                <p v-if="store.videoError" class="stream-warning">{{ store.videoError }}</p>
+                <p v-for="d in videoIssues" :key="d.kind" class="stream-warning">{{ d.message }}</p>
+                <video
+                    ref="videoEl"
+                    :src="videoSrc ?? undefined"
+                    preload="metadata"
+                    controls
+                    class="video__player"
+                />
+                <p class="video__meta num">
+                    {{ store.video.video.width }}x{{ store.video.video.height }} ·
+                    {{ store.video.video.fps }} fps ·
+                    {{ ((store.video.bytes ?? 0) / 1048576).toFixed(0) }} MB ·
+                    <template v-if="videoAt">at {{ videoAt.seconds.toFixed(1) }}s</template>
+                    <template v-else>the clock cannot place tick {{ store.cursor }}</template>
+                </p>
+            </div>
+
             <div class="frame">
                 <p v-if="store.frameError" class="stream-warning">{{ store.frameError }}</p>
                 <template v-else>
@@ -327,7 +404,7 @@ function researchPct(progress: number): string {
                                 @change="pickView(($event.target as HTMLSelectElement).value)"
                             >
                                 <option v-for="v in store.views" :key="viewKey(v)" :value="viewKey(v)">
-                                    {{ v.camera }} — client {{ v.bot }} ({{ v.count }} frames)
+                                    {{ viewLabel(v) }}
                                 </option>
                             </select>
                         </label>
@@ -567,6 +644,20 @@ function researchPct(progress: number): string {
     display: flex;
     gap: 1rem;
     align-items: center;
+}
+.video {
+    margin-bottom: 1rem;
+}
+.video__player {
+    max-width: 100%;
+    max-height: 60vh;
+    display: block;
+    border: 1px solid var(--surface-border, #ccc);
+}
+.video__meta {
+    margin: 0.35rem 0 0;
+    font-size: 0.75rem;
+    color: var(--muted, #8b8b8b);
 }
 .frame img {
     max-width: 100%;

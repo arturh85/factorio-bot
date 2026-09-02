@@ -1165,3 +1165,52 @@ Worth noting against the day's pattern: this is the fourth time tonight I have
 suspected a false success and been wrong. Being wrong in that direction is the
 right way round, but the ratio is worth watching — a check that always fires is
 as uninformative as one that never does.
+
+## Run 36 — the first factory cell stands, and produces nothing
+
+`run-1788387591-27166`, 00:18. `goal.producing("iron-plate", 15)` — stage 1 of
+the starter factory, live for the first time.
+
+**The bots built the cell**, in five actions with no failures:
+
+```
+tick 3725  place stone-furnace         at [15, 17]
+tick 3727  place burner-mining-drill   at [15, 19]
+tick 8515  mine 37 coal
+tick 8820  fuel the stone-furnace      with 14 coal
+tick 8822  fuel the burner-mining-drill with 23 coal
+tick 8823  RUN FINISHED (done)
+```
+
+Drill on ore (289 iron-ore tiles inside the keyframe bounds), furnace two tiles
+north where the drill's drop point lands, both fuelled. The geometry works. Only
+8 steps were needed rather than the 27 the fixture predicts, because freeplay
+hands every bot a burner drill and a stone furnace — the bill was mostly already
+held.
+
+### And it made nothing, which is the point
+
+```
+production.made: { "coal": 37 }
+```
+
+Not one iron plate. **The drill was fuelled at tick 8822 and the run declared
+`done` at 8823** — one tick. A burner drill needs ~240 ticks for a single ore and
+the furnace ~192 more, so the cell was reported satisfied while it was
+*physically incapable* of having produced anything.
+
+This is the gap the implementing agent named rather than papered over:
+
+> It can still be satisfied by a cell that produces nothing. `PlanState` models
+> none of fuel running out, output backing up, or a patch exhausted.
+
+It is the fourth appearance of one failure: the lab placed and never powered, the
+base with pole coverage and no generation, `only_ghosts = true` placing an
+overlapping blueprint, and now a factory reported working at one tick old. **A
+machine that stands is not a machine that works**, and nothing in the planner can
+tell the difference.
+
+`supervisor.witness` — dispatch nothing, wait, assert a terminal machine's output
+rose, so any increase is machine-made by construction — is being built now. Run
+36 is the evidence for why: without it "the starter factory works" was one
+sentence away from being written, and it would have been false.

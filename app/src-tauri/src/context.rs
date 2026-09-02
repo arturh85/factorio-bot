@@ -48,16 +48,59 @@ impl Context {
     // that builds two `Context`s is not an error.
     #[cfg(feature = "tokio-console")]
     {
-      console_subscriber::init();
+      // `console_subscriber::init()` binds a fixed TCP port on a background
+      // thread and, if the bind fails (`AddrInUse` -- the exact case where a
+      // viewer build and a game-run build of this same binary are both
+      // started with this feature on), `.expect()`s. This workspace's
+      // `[profile.release]` sets `panic = "abort"`, so that `.expect` does
+      // not just kill its own thread -- it takes down the whole process,
+      // silently as far as anything watching the game is concerned, with a
+      // message naming `console-subscriber` and nothing about Factorio.
+      // Debug tooling must not be able to kill the thing it observes, so the
+      // port is probed here first and a failure degrades to a warning plus
+      // the same plain `tracing` setup the non-console build uses, instead
+      // of reaching console_subscriber's own `.expect` at all.
+      //
+      // The probe resolves the address exactly as `console_subscriber`'s own
+      // `Builder::with_default_env` does -- `TOKIO_CONSOLE_BIND` (a
+      // `HOST:PORT` string) if set, otherwise `127.0.0.1:6669` -- so setting
+      // `TOKIO_CONSOLE_BIND=host:port` before running a second build is the
+      // documented way to let both keep tokio-console instead of one losing
+      // it. There is an inherent, unavoidable race between releasing the
+      // probe socket and console_subscriber binding its own: that only
+      // matters if a *third* party grabs the exact same port in that gap,
+      // not for the two-builds-of-this-binary case this exists to fix.
+      use console_subscriber::Server;
+      use std::net::{SocketAddr, TcpListener, ToSocketAddrs};
+
+      let addr = std::env::var("TOKIO_CONSOLE_BIND")
+        .ok()
+        .and_then(|bind| {
+          bind
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut addrs| addrs.next())
+        })
+        .unwrap_or_else(|| SocketAddr::new(Server::DEFAULT_IP, Server::DEFAULT_PORT));
+
+      match TcpListener::bind(addr) {
+        Ok(probe) => {
+          drop(probe);
+          console_subscriber::init();
+        }
+        Err(err) => {
+          eprintln!(
+            "warning: tokio-console could not bind {addr} ({err}); continuing without it. \
+             Set TOKIO_CONSOLE_BIND=host:port to run two instrumented builds at once, \
+             or stop whichever process already holds that port."
+          );
+          init_plain_tracing();
+        }
+      }
     }
     #[cfg(not(feature = "tokio-console"))]
     {
-      use tracing_subscriber::EnvFilter;
-      let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-      let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .try_init();
+      init_plain_tracing();
     }
 
     create_dir_all(paths::data_local_dir()).into_diagnostic()?;
@@ -84,6 +127,22 @@ impl Context {
     let app_settings = load_app_settings_with(overrides)?.into_shared();
     Ok((app_settings, settings_path))
   }
+}
+
+/// The `tracing` diagnostics subscriber used whenever tokio-console is not
+/// running the show: on every build without the `tokio-console` feature, and
+/// as the fallback when that feature is on but its port could not be bound.
+/// stderr, not stdout -- see [`Context::new`]'s doc comment on why the two
+/// logging systems are kept apart. `try_init` rather than `init` because a
+/// second call must not abort the process -- only one global subscriber can
+/// be set, and a test harness that builds two `Context`s is not an error.
+fn init_plain_tracing() {
+  use tracing_subscriber::EnvFilter;
+  let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+  let _ = tracing_subscriber::fmt()
+    .with_env_filter(filter)
+    .with_writer(std::io::stderr)
+    .try_init();
 }
 
 #[cfg(all(test, feature = "restapi"))]

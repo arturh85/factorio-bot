@@ -1148,17 +1148,90 @@ impl PlanState {
     /// swings", which is what `Condition::ResourceAvailable` needs and which a
     /// claim must not distort; this one answers "may I send another bot here",
     /// and the answer is no — whether because the tile itself is spoken for,
-    /// because a bot mining a nearby claim will be standing on it, or because
-    /// something else already occupies the tile ([`Self::resource_tile_blocked`]).
-    /// All three, in the order they are cheap to test.
+    /// because a bot mining a nearby claim will be standing on it, because a
+    /// character is standing on it *now*
+    /// ([`Self::resource_tile_occupied`]), or because something else occupies
+    /// it ([`Self::resource_tile_blocked`]). All four, in the order they are
+    /// cheap to test.
     pub fn resource_unclaimed(&self, position: &Position, item: &str) -> u32 {
         if self.is_resource_claimed(position) || self.is_resource_crowded(position) {
+            return 0;
+        }
+        if self.resource_tile_occupied(position) {
             return 0;
         }
         if self.resource_tile_blocked(&Pos::from(position)) {
             return 0;
         }
         self.resource_available(position, item)
+    }
+
+    /// Is a character standing on the resource tile whose ore sits at
+    /// `position`, right now, in the world this plan was built from?
+    ///
+    /// The crowding rule ([`PlanState::is_resource_crowded`]) keeps two tiles
+    /// of *one plan* far enough apart that neither bot can stand on the
+    /// other's. It says nothing about a character that is already there and
+    /// that this plan is not moving, because a claim is per-`PlanState` and
+    /// every plan starts with an empty one. Run
+    /// `workspace/runs/run-1788329146-40305` is what that costs: rungs 1-3
+    /// left all four bots parked where their rung-2 copper mine had put them,
+    /// rung 4 then scheduled all of its steps onto bot 1 and none onto bots 2,
+    /// 3 and 4, and the tiles it sent bot 1 to were the tiles the other three
+    /// were still standing on. Bots 2, 3 and 4 did not move once between tick
+    /// 6000 and the end of the run (`samples.jsonl`); bot 4 sat at
+    /// `(23.305, 53.77)` and bot 1 was sent to `(23.5, 53.5)`, bot 2 sat at
+    /// `(22.203, 48.785)` and bot 1 was sent to `(22.5, 48.5)`. Both mines
+    /// died on `could not start mining for 301 ticks: another character is
+    /// standing on the copper-ore`, and the milestone re-planned the same
+    /// tiles eight times before reporting `stuck`.
+    ///
+    /// # Every character, the eventual miner included
+    ///
+    /// A bot standing on the tile it is itself about to mine is fine — the mod
+    /// only refuses when `player.selected` resolves to a character that is not
+    /// the miner — so an exemption for "the assignee" would be the tighter
+    /// rule if it could be stated. It cannot, for two independent reasons.
+    ///
+    /// * **Three of the four selectors have no bot to exempt.**
+    ///   [`crate::method::util::resource_supply_at_least`] and
+    ///   [`crate::method::util::resource_seats`] are reached from
+    ///   `Method::applicable` and `Method::concurrency`, which are handed a
+    ///   `&PlanState` and nothing else; `resource_seats` is what
+    ///   `SplitAcrossBots` sizes a split from. An exemption available only to
+    ///   [`crate::method::util::resource_tiles_for`] would make seats promise
+    ///   bots that selection then refuses to place, which is precisely the
+    ///   agreement this ledger exists to keep.
+    /// * **`Mine::expand`'s `ctx.chain_actor` is not the assignee.** Methods
+    ///   emit `Actor::Role` with `pinned: None`; the runner is decided by
+    ///   `schedule`, and a chain opened because its method `converges` gets no
+    ///   owner at all ("who runs it stays the scheduler's decision", see
+    ///   `expand_goal_body`). A tile chosen while exempting the bot expansion
+    ///   had in hand is a tile the scheduler may hand to a different bot,
+    ///   which reproduces this exact failure in a narrower form. That is the
+    ///   same argument the `characters` field records for placement, and the
+    ///   same one `run-1788322836-81715` settled there.
+    ///
+    /// So the occupant's own presence is not an exception — and it does not
+    /// need to be one. The cost is that a bot parked on ore is sent to the
+    /// next tile of the same patch instead of the one under its feet: one step
+    /// of `resource_tiles_for`'s already-sorted walk, on a patch of thousands.
+    /// The cost of the other direction is the milestone. Only the conservative
+    /// direction is self-correcting.
+    ///
+    /// The predicate is [`PlanState::character_stands_on_tile`] — the mod's
+    /// `another character is standing on the <ore>` stated as geometry, and the
+    /// same one [`PlanState::mining_tile_separation`] is derived from — so the
+    /// two rules cannot disagree about what "standing on" means. `position` is
+    /// a tile *centre*, which is what `EntityGraph::resource_patches` hands
+    /// out, so no half-tile offset has to be restored first; the character's
+    /// centre is recovered from the box
+    /// [`characters`](PlanState#structfield.characters) stores, which was
+    /// built symmetrically around it.
+    fn resource_tile_occupied(&self, position: &Position) -> bool {
+        self.characters
+            .values()
+            .any(|character| self.character_stands_on_tile(&character.center(), position))
     }
 
     /// Does a blocking entity — debris, a tree, a rock, water — sit over the

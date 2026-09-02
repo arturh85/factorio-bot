@@ -122,6 +122,40 @@ pub fn resource_position_from_pos(pos: Pos) -> Position {
     Position::new(f64::from(pos.0) + 0.5, f64::from(pos.1) + 0.5)
 }
 
+/// The bounding box around a set of positions, expanded by `margin` tiles on
+/// every side. `None` for an empty iterator -- there is no honest box around
+/// zero points, and a caller must not synthesise one, for the same reason
+/// [`RunRecorder::placed_bounds`] stays `None` before anything is placed.
+///
+/// This is the run-*start* counterpart to `placed_bounds`: at the moment
+/// `record.start()` runs, nothing has been placed yet, so that source is
+/// empty by construction and stays empty for the entire run if it dies before
+/// its first placement -- the exact run `map.jsonl` needs a keyframe from
+/// most. Bot positions are the one thing that reliably exists that early:
+/// every connected bot has a character with a real position the instant
+/// `record.start()` can see it at all.
+pub fn bounds_around(positions: impl IntoIterator<Item = Position>, margin: f64) -> Option<Bounds> {
+    let mut positions = positions.into_iter();
+    let first = positions.next()?;
+    let mut bounds = Bounds {
+        left: first.x(),
+        top: first.y(),
+        right: first.x(),
+        bottom: first.y(),
+    };
+    for p in positions {
+        bounds.left = bounds.left.min(p.x());
+        bounds.top = bounds.top.min(p.y());
+        bounds.right = bounds.right.max(p.x());
+        bounds.bottom = bounds.bottom.max(p.y());
+    }
+    bounds.left -= margin;
+    bounds.top -= margin;
+    bounds.right += margin;
+    bounds.bottom += margin;
+    Some(bounds)
+}
+
 /// Entities present on exactly one side.
 ///
 /// Order is `game`-only first, then `model`-only, each preserving the order
@@ -289,6 +323,42 @@ mod tests {
             direction: 0,
         }];
         assert!(divergence_between(&game, &model).is_empty());
+    }
+
+    #[test]
+    fn bounds_around_is_none_for_no_positions() {
+        assert_eq!(bounds_around(std::iter::empty(), 16.0), None);
+    }
+
+    #[test]
+    fn bounds_around_a_single_position_is_a_square_of_the_margin() {
+        assert_eq!(
+            bounds_around([Position::new(4.0, -2.0)], 16.0),
+            Some(Bounds {
+                left: 4.0 - 16.0,
+                top: -2.0 - 16.0,
+                right: 4.0 + 16.0,
+                bottom: -2.0 + 16.0,
+            })
+        );
+    }
+
+    #[test]
+    fn bounds_around_several_positions_covers_all_of_them_plus_the_margin() {
+        let positions = [
+            Position::new(-12.0, 8.0),
+            Position::new(10.0, -20.0),
+            Position::new(0.0, 30.0),
+        ];
+        assert_eq!(
+            bounds_around(positions, 16.0),
+            Some(Bounds {
+                left: -12.0 - 16.0,
+                top: -20.0 - 16.0,
+                right: 10.0 + 16.0,
+                bottom: 30.0 + 16.0,
+            })
+        );
     }
 
     fn write_lines(dir: &Path, lines: &[&str]) -> std::path::PathBuf {

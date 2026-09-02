@@ -17,7 +17,7 @@ use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::parking_lot::Mutex;
 use factorio_bot_core::record::map::{
-    EntitySnapshot, MapKind, MapRecord, Placement, divergence_between,
+    Divergence, EntitySnapshot, MapKind, MapRecord, Placement, bounds_around, divergence_between,
 };
 use factorio_bot_core::record::{
     ActionFailure, EventKind, FailureKind, PlannedStep, RunRecorder, SatisfiedReason,
@@ -78,6 +78,45 @@ fn keyframe_relevant(entity_type: &str, name: &str) -> bool {
             | Ok(EntityType::Resource)
     ) || name == "rock-big"
         || name == "rock-huge"
+}
+
+/// Queries the live game and the world model within `bounds` and reports
+/// where they diverge.
+///
+/// Shared by `record.keyframe()` (bounds from placements so far) and the
+/// keyframe `record.start()` writes at the run's very own opening (bounds
+/// from the bots' positions) -- factored out so the two can never disagree
+/// about what counts as "relevant" or how a divergence is computed, which
+/// they would if each grew its own copy of this logic.
+async fn keyframe_snapshot(
+    rcon: &factorio_bot_core::factorio::rcon::FactorioRcon,
+    world: &FactorioWorld,
+    bounds: &factorio_bot_core::record::map::Bounds,
+) -> LuaResult<(Vec<EntitySnapshot>, Vec<EntitySnapshot>, Vec<Divergence>)> {
+    let rect = Rect::new(
+        &Position::new(bounds.left, bounds.top),
+        &Position::new(bounds.right, bounds.bottom),
+    );
+    let game_entities = rcon
+        .find_entities_filtered(&AreaFilter::Rect(rect.clone()), None, None)
+        .await
+        .map_err(rcon_error)?;
+    // Restricted to what `EntityGraph` models -- see `keyframe_relevant` --
+    // so `game` and `model` are comparable populations rather than the
+    // unfiltered box (trees, rocks, ore, characters, dropped items) against
+    // the curated one.
+    let game: Vec<EntitySnapshot> = game_entities
+        .into_iter()
+        .filter(|e| keyframe_relevant(&e.entity_type, &e.name))
+        .map(|e| EntitySnapshot {
+            name: e.name,
+            position: e.position,
+            direction: e.direction,
+        })
+        .collect();
+    let model = world.entity_graph.snapshot_within(&rect);
+    let divergence = divergence_between(&game, &model);
+    Ok((game, model, divergence))
 }
 
 /// The reverse of `run.rs`'s `entity_snapshot_to_lua`: reads the same shape
@@ -295,6 +334,12 @@ local record = {}
 -- Mints a run id, creates `<workspace>/runs/<id>/`, and starts frame capture
 -- with that same id -- one call, so the log and the frames cannot disagree
 -- about which run they belong to.
+--
+-- Also writes an opening keyframe to `map.jsonl`, bounded by the connected
+-- bots' own positions (plus a margin) rather than by placements, since
+-- nothing has been placed yet -- so a run that crashes before its first
+-- placement still leaves a map behind. Writes nothing if no bots are
+-- connected yet.
 -- @treturn string the run id
 -- @raise if a recording is already running, or the run directory cannot be created
 function record.start()
@@ -305,6 +350,7 @@ end
     {
         let slot = slot.clone();
         let rcon = rcon.clone();
+        let world = world.clone();
         let runs_root = runs_root.clone();
         let bots: Vec<u32> = all_bots.iter().map(|id| u32::from(*id)).collect();
         map_table.set(
@@ -312,6 +358,7 @@ end
             lua.create_async_function(move |_lua, ()| {
                 let slot = slot.clone();
                 let rcon = rcon.clone();
+                let world = world.clone();
                 let runs_root = runs_root.clone();
                 let bots = bots.clone();
                 async move {
@@ -333,12 +380,13 @@ end
                         .frame_capture_start(Some(run_id.clone()))
                         .await
                         .map_err(rcon_error)?;
+                    let opened_at = opened_at.unwrap_or_else(|| rcon.last_tick().unwrap_or(0));
 
                     let mut recorder =
                         RunRecorder::start(&runs_root, run_id.clone()).map_err(record_error)?;
                     recorder
                         .record(
-                            opened_at.unwrap_or_else(|| rcon.last_tick().unwrap_or(0)),
+                            opened_at,
                             EventKind::RunStarted {
                                 run_id: run_id.clone(),
                                 bots,
@@ -348,6 +396,52 @@ end
                             },
                         )
                         .map_err(record_error)?;
+
+                    // A keyframe at the run's own opening, not only at
+                    // milestone boundaries. `record.keyframe()`'s bounds come
+                    // from placements so far, and at this instant nothing has
+                    // been placed -- that source is empty for the entire run
+                    // if it dies before its first placement, which is exactly
+                    // the run whose map a diagnosis most wants to open. Bot
+                    // positions are the one thing that reliably exists this
+                    // early: every connected bot has a character with a real
+                    // position, and `bounds_around` widens the box around
+                    // them by the same 16-tile margin `record.keyframe()`
+                    // uses, so the two keyframes stay directly comparable.
+                    //
+                    // An empty roster (a script that did not wait for one)
+                    // writes no keyframe here, exactly like `record.keyframe()`
+                    // writing nothing when nothing has been placed -- both are
+                    // "no bounds to draw yet", not a failure. A genuine
+                    // failure to reach the game or read the model is left to
+                    // raise: `frame_capture_start` two calls above already
+                    // proved the game is reachable, so a failure past that
+                    // point is a real defect, not a mundane timing gap, and
+                    // must not be swallowed into a run that silently starts
+                    // with no opening keyframe and no explanation why.
+                    let players = rcon
+                        .as_ref()
+                        .connected_players()
+                        .await
+                        .map_err(rcon_error)?;
+                    if let Some(bounds) =
+                        bounds_around(players.into_iter().map(|p| p.position), 16.0)
+                    {
+                        let (game, model, divergence) =
+                            keyframe_snapshot(&rcon, &world, &bounds).await?;
+                        recorder
+                            .record_map(MapRecord {
+                                tick: opened_at,
+                                kind: MapKind::Keyframe {
+                                    bounds,
+                                    game,
+                                    model,
+                                    divergence,
+                                },
+                            })
+                            .map_err(record_error)?;
+                    }
+
                     *slot.lock() = Some(recorder);
                     Ok(run_id)
                 }
@@ -755,30 +849,8 @@ end
                         return Ok(false);
                     };
 
-                    let rect = Rect::new(
-                        &Position::new(bounds.left, bounds.top),
-                        &Position::new(bounds.right, bounds.bottom),
-                    );
-                    let game_entities = rcon
-                        .find_entities_filtered(&AreaFilter::Rect(rect.clone()), None, None)
-                        .await
-                        .map_err(rcon_error)?;
-                    // Restricted to what `EntityGraph` models -- see
-                    // `keyframe_relevant` -- so `game` and `model` are
-                    // comparable populations rather than the unfiltered box
-                    // (trees, rocks, ore, characters, dropped items) against
-                    // the curated one.
-                    let game: Vec<EntitySnapshot> = game_entities
-                        .into_iter()
-                        .filter(|e| keyframe_relevant(&e.entity_type, &e.name))
-                        .map(|e| EntitySnapshot {
-                            name: e.name,
-                            position: e.position,
-                            direction: e.direction,
-                        })
-                        .collect();
-                    let model = world.entity_graph.snapshot_within(&rect);
-                    let divergence = divergence_between(&game, &model);
+                    let (game, model, divergence) =
+                        keyframe_snapshot(&rcon, &world, &bounds).await?;
 
                     let mut guard = slot.lock();
                     // Same non-error treatment as the first check, for the

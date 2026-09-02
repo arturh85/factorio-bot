@@ -9,7 +9,21 @@
 -- assuming a fixed bot count or a pre-seeded inventory.
 include("supervisor.lua")
 
--- Wait for the bots the *game* has, not the ones the planner imagines.
+-- Which of `wanted` are missing from `ids`. Empty when every one is there --
+-- including when nothing was wanted, which is what makes the wait below
+-- degrade to "anybody at all" for a caller with no roster to compare against.
+local function missing_from(ids, wanted)
+    local have = {}
+    for _, id in ipairs(ids) do have[id] = true end
+    local missing = {}
+    for _, id in ipairs(wanted) do
+        if not have[id] then missing[#missing + 1] = id end
+    end
+    return missing
+end
+
+-- Wait for the bots the *game* has, not the ones the planner imagines -- and
+-- for ALL of them, not merely the first to appear.
 --
 -- `world.player(id)` answers from the cached world, which holds a bot for
 -- every id the run was started with whether or not that client ever
@@ -18,20 +32,56 @@ include("supervisor.lua")
 -- reports only players with a character, because a connection that has not
 -- finished spawning cannot do the work. See `workspace/scripts/multibot.lua`,
 -- whose `wait_for_roster` this mirrors.
+--
+-- **The first non-empty answer is not the roster**, which is what this used to
+-- return. Freeplay's `on_player_created` runs `crash_site.create_cutscene`
+-- gated on `player_index == 1`, and a player in a cutscene has no `character`
+-- -- exactly what `rcon_players()` filters on. So for its 750 ticks (12.5s)
+-- player 1 alone is invisible here, while 2, 3 and 4 appear the moment they
+-- spawn. Run 30 (`workspace/runs/run-1788365280-15443/`) polled into that gap,
+-- got `[2]`, and froze it: bots 1, 3 and 4 stood still for 162,158 ticks with
+-- zero dispatches while the record showed four connected clients. Four of
+-- nineteen archived runs did this. See
+-- `docs/superpowers/notes/2026-09-02-bot-one-idle.md`.
+--
+-- So the wait is for `all_bots` -- the roster this run was *started* with,
+-- which the script already has -- and not for whoever answers first.
+--
+-- **On timeout it proceeds, and says who is missing.** Refusing outright would
+-- throw away a run whose fourth client genuinely failed to launch, and that
+-- case is real: `Planner::roster` reports only the clients that connected,
+-- precisely because one that never does must produce no bot. Three bots can do
+-- the ladder. What must not happen is the silent version, which is what run 30
+-- was.
+--
+-- It does **not** keep re-checking once the run has started. A bot that
+-- appears at second 13 would be useful for the remaining hour, but the roster
+-- is fixed at `supervisor.new` and every plan is expanded against it; picking
+-- one up mid-run means re-rostering the supervisor between milestones, which
+-- is a change to the loop rather than to this wait.
 local function wait_for_roster(tries)
-    local best = {}
+    local wanted = (type(all_bots) == "table") and all_bots or {}
+    local latest, missing = {}, wanted
     for attempt = 1, tries do
         local ok, ids = pcall(function() return rcon.players() end)
-        if ok and ids ~= nil then
-            best = ids
-            if #ids > 0 then
+        -- By type, not by truthiness: a `nil` crossing the Rust bridge arrives
+        -- as mlua's null sentinel, which is light userdata and therefore true.
+        if ok and type(ids) == "table" then
+            latest = ids
+            missing = missing_from(ids, wanted)
+            if #ids > 0 and #missing == 0 then
                 print("roster ready: " .. #ids .. " bot(s) after " .. attempt .. " checks")
                 return ids
             end
         end
         pcall(function() rcon.inventory_contents_at({}) end)
     end
-    return best
+    if #latest > 0 then
+        print("WARNING: proceeding with " .. #latest .. " of " .. #wanted
+            .. " bot(s) after " .. tries .. " checks; never appeared: "
+            .. table.concat(missing, ", "))
+    end
+    return latest
 end
 
 local BOTS = wait_for_roster(600)
@@ -151,8 +201,16 @@ repeat
         -- `t.best` is the fewest steps any plan for it reached. Both ride
         -- along so a stuck milestone's record carries the reason it got
         -- stuck, not just the verdict.
-        record.milestone_stuck(t.milestone_index, t.state, sup.first_error, t.best)
-        print("   HALTED: " .. t.state)
+        --
+        -- `t.refusal` is present when the planner REFUSED this milestone --
+        -- a verdict about the world ("a lab with no power researches nothing
+        -- at all"), not an action that failed. It leads, because it is what
+        -- closed the milestone; `first_error` may also be set, from a run
+        -- earlier in the same milestone, and that is a different fact.
+        local why = (t.refusal and t.refusal.message) or sup.first_error
+        record.milestone_stuck(t.milestone_index, t.state, why, t.best)
+        print("   HALTED: " .. t.state
+            .. (t.refusal and (" -- refused: " .. t.refusal.message) or ""))
     end
 until sup:finished()
 end)

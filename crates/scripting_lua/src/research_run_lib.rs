@@ -257,4 +257,132 @@ mod tests {
         );
         assert_eq!(finish.get::<String>(1).unwrap(), "crashed");
     }
+
+    // ---- the roster the run is built with --------------------------------
+
+    /// **Freeplay hides player 1 for 750 ticks, and this script used to
+    /// believe the gap.**
+    ///
+    /// `crash_site.create_cutscene` is gated on `player_index == 1`, and a
+    /// player in a cutscene has no `character` -- which is exactly what
+    /// `rcon_players()` filters on. So for 12.5 seconds after joining, player
+    /// 1 alone is invisible to `rcon.players()`. `wait_for_roster` returned
+    /// the first non-empty answer and froze it for the whole run: in run 30
+    /// (`workspace/runs/run-1788365280-15443/`) that answer was `[2]`, and
+    /// bots 1, 3 and 4 stood still for 162,158 ticks while the record showed
+    /// four connected clients. Four of nineteen archived runs did this.
+    ///
+    /// The run's roster is not a mystery -- `all_bots` is what it was started
+    /// with -- so the wait is for *that set*, not for anybody at all. Here the
+    /// first two answers are missing bot 1, exactly as the cutscene makes
+    /// them, and the roster the milestones are planned for must still be all
+    /// four.
+    #[test]
+    fn the_roster_waits_for_every_bot_the_run_was_started_with() {
+        let lua = harness("{}", "{}");
+        lua.load(
+            r#"
+            all_bots = {1, 2, 3, 4}
+            __players_calls = 0
+            rcon.players = function()
+                __players_calls = __players_calls + 1
+                -- The cutscene: bot 1 has no character yet, so the mod does
+                -- not report it.
+                if __players_calls < 3 then return {2, 3, 4} end
+                return {1, 2, 3, 4}
+            end
+            __planned_with = nil
+            goal.plan = function(_g, opts)
+                __planned_with = opts and opts.bots
+                return { steps = {} }
+            end
+        "#,
+        )
+        .exec()
+        .expect("stub installs");
+        lua.load(RESEARCH_RUN_LUA)
+            .exec()
+            .expect("research_run.lua runs");
+
+        let planned: mlua::Table = lua
+            .globals()
+            .get("__planned_with")
+            .expect("the milestones must have been planned for some roster");
+        let bots: Vec<u32> = planned
+            .sequence_values::<u32>()
+            .collect::<mlua::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            bots,
+            vec![1, 2, 3, 4],
+            "the run must plan for every bot it was started with; taking the \
+             first answer costs three of four bots for the whole run"
+        );
+    }
+
+    /// The other side of the same decision: a client that genuinely never
+    /// arrives must not cost the run.
+    ///
+    /// Refusing to start without the full roster would throw away a run whose
+    /// fourth client failed to launch -- and that case is real, which is why
+    /// `Planner::roster` reports only the clients that connected. So the wait
+    /// gives up, **names who is missing**, and proceeds with whoever is there.
+    /// Silently freezing a short roster is what produced run 30; saying so is
+    /// not.
+    #[test]
+    fn a_bot_that_never_appears_is_named_and_the_run_proceeds_without_it() {
+        let lua = harness("{}", "{}");
+        lua.load(
+            r#"
+            all_bots = {1, 2, 3, 4}
+            rcon.players = function() return {1, 2, 4} end
+            __printed = {}
+            print = function(...)
+                local args = {...}
+                table.insert(__printed, table.concat(args, " "))
+            end
+            __planned_with = nil
+            goal.plan = function(_g, opts)
+                __planned_with = opts and opts.bots
+                return { steps = {} }
+            end
+        "#,
+        )
+        .exec()
+        .expect("stub installs");
+        lua.load(RESEARCH_RUN_LUA)
+            .exec()
+            .expect("a missing client must not abort a run three bots can do");
+
+        let planned: mlua::Table = lua.globals().get("__planned_with").expect("planned");
+        let bots: Vec<u32> = planned
+            .sequence_values::<u32>()
+            .collect::<mlua::Result<_>>()
+            .unwrap();
+        assert_eq!(bots, vec![1, 2, 4], "the run proceeds with who showed up");
+
+        let printed: Vec<String> = lua
+            .load("return __printed")
+            .eval::<mlua::Table>()
+            .unwrap()
+            .sequence_values::<String>()
+            .collect::<mlua::Result<_>>()
+            .unwrap();
+        let warning = printed
+            .iter()
+            .find(|line| line.contains("WARNING"))
+            .unwrap_or_else(|| panic!("the short roster must be said out loud: {printed:?}"));
+        assert!(
+            warning.contains("3") && warning.contains("4 bot"),
+            "the warning must say how many of how many: {warning}"
+        );
+        assert!(
+            warning.contains("never appeared: 3"),
+            "and it must name who is missing, or the next reader is back to \
+             counting dispatches per bot: {warning}"
+        );
+
+        let finish: mlua::Table = lua.globals().get("__finish_calls").unwrap();
+        assert_eq!(finish.raw_len(), 1, "the run still records and finishes");
+    }
 }

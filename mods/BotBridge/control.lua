@@ -1361,14 +1361,20 @@ end
 -- precisely when something has gone wrong. So nothing in here renumbers,
 -- backfills, interpolates or retries a missed frame: the gap is the record.
 --
--- Off unless asked for: `storage.frame_capture` is nil until
--- `rcon_frame_capture_start` sets it, because the frames are big and there is
--- one set of them per camera. Measured: 0.72 MB per frame at JPEG quality 85
--- and 1920x1080, and 300 ticks is 12 frames a minute, so one camera costs
--- ~520 MB an hour and the three cameras of a one-bot run cost ~1.56 GB an
--- hour. The camera count is `2 + one per player the game knows of` (see
--- `rcon_frame_capture_start`), so each additional bot adds another ~520 MB an
--- hour. Wiped per run, never accumulated across runs.
+-- **Retired as a default, kept as a switch.** `storage.frame_capture` is nil
+-- until `rcon_frame_capture_start` sets it, and even then it registers *no
+-- camera* unless one was asked for. Video is the visual record now: run
+-- `run-1788365280-15443` wrote 2,164 JPEGs / 947 MB of screenshots against
+-- 290 MB for the same 45 minutes of video, and `game.take_screenshot` renders
+-- synchronously inside the game loop where the video grabber reads a frame the
+-- GPU already drew.
+--
+-- The per-camera cost, for whoever turns it back on: 0.72 MB per frame at JPEG
+-- quality 85 and 1920x1080, and 300 ticks is 12 frames a minute, so one camera
+-- costs ~520 MB an hour and the three cameras of a one-bot run cost ~1.56 GB an
+-- hour. The camera count with `cameras = true` is `2 + one per player the game
+-- knows of` (see `rcon_frame_capture_start`), so each additional bot adds
+-- another ~520 MB an hour. Wiped per run, never accumulated across runs.
 
 local FRAME_CAPTURE_INTERVAL = 300 -- game ticks between frames (5 s at 60 UPS)
 local FRAME_CAPTURE_DIR = "frames"
@@ -1986,9 +1992,19 @@ end
 -- the same event, and `storage` is replicated, so every peer appends the same
 -- camera at the same tick. Nothing is removed on leave -- the camera staying
 -- and writing nothing is exactly how a disconnected bot's absence is recorded.
+--
+-- **Only on a run that asked for every camera.** On a run started with no
+-- cameras -- the default since screenshots were retired -- or with a named
+-- subset, a joining bot gets nothing: a camera appearing here would switch
+-- rendering back on one bot at a time, on a run that asked for none, with
+-- nothing anywhere reporting that it had. The request is what decides, which
+-- is why `all_cameras` is remembered rather than guessed from the list.
 function frame_capture_on_player_joined(player_index)
 	local capture = storage.frame_capture
 	if capture == nil then
+		return
+	end
+	if not capture.all_cameras then
 		return
 	end
 	local camera = frame_capture_bot_camera(player_index)
@@ -1999,6 +2015,95 @@ function frame_capture_on_player_joined(player_index)
 	end
 	frame_capture_validate_cameras({ camera })
 	table.insert(capture.cameras, camera)
+end
+
+-- Every camera this game could offer, in registration order. Three vantage
+-- points, `2 + one per bot` in total:
+--
+--   `follow`  one bot, player 1, the original camera and unchanged.
+--   `bot-N`   one per player the game knows of, following that player.
+--   `area`    all connected bots at once; see `frame_capture_take_area`
+--             for what it centres on and what it does when it cannot.
+--
+-- Built rather than registered: this is the menu a caller chooses from, and
+-- returning it costs nothing. What costs is rendering one, which is why
+-- `frame_capture_select` starts from "none of them".
+--
+-- Every player the game knows, connected right now or not, and that is the
+-- point rather than an oversight. A camera whose player is absent writes no
+-- file for that tick (`frame_capture_take_follow`), so a bot that is offline
+-- for part of a run has frames either side of the gap and nothing in it,
+-- which is where the bot actually was. Registering only the connected ones
+-- would instead delete the camera and leave a viewer unable to tell "this bot
+-- was away" from "nobody ever pointed a camera at it".
+--
+-- `bot-<player_index>`, with the hyphen: a frame name is parsed by taking
+-- everything after the tick's separator, so `tick-0001800-bot-1.jpg` reads
+-- back as camera `bot-1` intact.
+function frame_capture_catalogue()
+	local cameras = {
+		{ id = "follow", kind = "follow", player_index = 1 }
+	}
+	local player_indexes = {}
+	for _, player in pairs(game.players) do
+		table.insert(player_indexes, player.index)
+	end
+	table.sort(player_indexes)
+	for _, index in ipairs(player_indexes) do
+		table.insert(cameras, frame_capture_bot_camera(index))
+	end
+	-- Last, so the per-bot cameras of a tick are written before the frame that
+	-- claims to contain all of them. Nothing depends on the order; it just
+	-- reads better in a directory listing.
+	table.insert(cameras, { id = "area", kind = "area" })
+	return cameras
+end
+
+-- Resolves the `cameras` argument against the catalogue, returning the chosen
+-- cameras and whether *all* of them were asked for.
+--
+-- **Nothing is the default, and nothing is a real answer**, not a degraded
+-- one: screenshots were retired because their cost is not worth paying, and
+-- the capture session still does everything else it did. There is deliberately
+-- no `cameras or <something>` anywhere in here -- a fallback is exactly how a
+-- flag that defaulted wrong would leave a run silently capturing 947 MB.
+--
+-- An id that is not in the catalogue **raises**. It is never dropped: a list
+-- silently reduced to nothing produces a run that looks configured, renders
+-- nothing, and reports the same empty directory a deliberately camera-less run
+-- does. `bot-9` on a two-bot game is that case, and it is a caller mistake
+-- worth hearing about at the moment it is made.
+--
+-- The second return value is kept rather than re-derived from `chosen`,
+-- because "all of them" is a statement about the *request* and `chosen` is a
+-- statement about the game at one instant. A bot joining later has to be
+-- treated the way the run was asked for.
+function frame_capture_select(cameras, catalogue)
+	if cameras == nil or cameras == false then
+		return {}, false
+	end
+	if cameras == true then
+		return catalogue, true
+	end
+	if type(cameras) ~= "table" then
+		error("frame capture cameras must be true, false, absent or a list of camera ids, got "
+			.. type(cameras))
+	end
+	local by_id, available = {}, {}
+	for _, camera in ipairs(catalogue) do
+		by_id[camera.id] = camera
+		table.insert(available, camera.id)
+	end
+	local chosen = {}
+	for _, id in ipairs(cameras) do
+		local camera = by_id[id]
+		if camera == nil then
+			error("unknown frame capture camera id: " .. tostring(id)
+				.. " (available: " .. table.concat(available, ", ") .. ")")
+		end
+		table.insert(chosen, camera)
+	end
+	return chosen, false
 end
 
 -- `run_id` is an opaque tag for this capture run, echoed verbatim into
@@ -2014,13 +2119,45 @@ end
 -- Omitting it is a real choice, not a degraded one: a capture that nobody
 -- needs to correlate simply has no sidecar, and a consumer that finds none
 -- knows it cannot tell rather than being told something false.
-function rcon_frame_capture_start(run_id)
+--
+-- `cameras` decides what is rendered, and **the default is nothing**:
+--
+--     nil / false     no camera at all. The default.
+--     true            every camera: `follow`, `bot-N` per player, `area`.
+--     { ids... }      exactly those, drawn from the same catalogue.
+--
+-- The session still starts either way, and that is the whole reason this is a
+-- switch rather than a deletion. `sample_force` (this handler's last line) and
+-- `sample_bots` (the 60-tick beat) both return early when
+-- `storage.frame_capture` is nil, so the capture *session* is what produces
+-- `samples.jsonl` -- research, production, power, bot inventories. Removing
+-- the call would take all of that with it, silently, and the screenshots are
+-- the only part whose cost is not worth paying.
+--
+-- What that cost is, measured on run `run-1788365280-15443`: 2,164 JPEGs at
+-- 1920x1080, **947 MB**, against **290 MB** for 45 minutes of video at
+-- 700x854 -- 3.3x the disk. And `game.take_screenshot` renders
+-- *synchronously inside the game loop*, once per camera per capture, where
+-- the video grabber reads a frame the GPU already drew. See
+-- `docs/superpowers/notes/2026-09-02-screenshots-retired.md` for what is lost
+-- with them: a tick-exact 1920x1080 still is genuinely better than an
+-- interpolated 700x854 video frame for some questions.
+function rcon_frame_capture_start(run_id, cameras)
 	-- Checked before the wipe, so a call this function is going to refuse
 	-- cannot first destroy the previous run's frames. The check is on the
 	-- *type* only -- reading the value would be interpreting it.
 	if run_id ~= nil and type(run_id) ~= "string" then
 		error("frame capture run id must be a string or absent, got " .. type(run_id))
 	end
+	-- Resolved and validated *before* the wipe, obeying the same law as the
+	-- run-id check above: a call this function is going to refuse must not
+	-- first destroy the previous run's frames. `frame_capture_select` raises
+	-- on an id nobody can supply, and raising is the point -- a list quietly
+	-- reduced to nothing looks exactly like a configured run and captures
+	-- exactly as much as an unconfigured one.
+	local catalogue = frame_capture_catalogue()
+	local chosen, all_cameras = frame_capture_select(cameras, catalogue)
+	frame_capture_validate_cameras(chosen)
 	-- Wipe first, so the directory holds this run's frames and only this
 	-- run's. Without it a leftover frame from an earlier run that landed on
 	-- the same tick would fill a gap this run really had, which is the one
@@ -2029,48 +2166,18 @@ function rcon_frame_capture_start(run_id)
 	--
 	-- This takes `run.json` with it, and must: the wipe and the sidecar have
 	-- to move together or the id can outlive the frames it names.
+	--
+	-- Still done on a run that registered no camera, and the sidecar below is
+	-- still written: an empty `frames/` this run *claims* is what makes
+	-- `archive_frames` walk it and report `index.json: []`, i.e. "none were
+	-- captured". An unclaimed directory is skipped as somebody else's
+	-- leftovers, which reads as "cannot tell".
 	helpers.remove_path(FRAME_CAPTURE_DIR)
 	-- Samples get the same fresh start as frames (F5): server-only, since
 	-- only the server's copy exists to begin with, and `append = false`
 	-- truncates the file rather than appending to whatever a previous run
 	-- left in it.
 	helpers.write_file(SAMPLE_FILE, "", false, 0)
-	-- Three vantage points, `2 + one per bot` cameras in total:
-	--
-	--   `follow`  one bot, player 1, the original camera and unchanged.
-	--   `bot-N`   one per player the game knows of, following that player.
-	--   `area`    all connected bots at once; see `frame_capture_take_area`
-	--             for what it centres on and what it does when it cannot.
-	--
-	-- Costed before it is added to, not after: see the header comment for the
-	-- measured per-frame size and what one more camera costs per hour.
-	local cameras = {
-		{ id = "follow", kind = "follow", player_index = 1 }
-	}
-	-- Every player the game knows, connected right now or not, and that is the
-	-- point rather than an oversight. A camera whose player is absent writes
-	-- no file for that tick (`frame_capture_take_follow`), so a bot that is
-	-- offline for part of a run has frames either side of the gap and nothing
-	-- in it, which is where the bot actually was. Registering only the
-	-- connected ones would instead delete the camera and leave a viewer unable
-	-- to tell "this bot was away" from "nobody ever pointed a camera at it".
-	--
-	-- `bot-<player_index>`, with the hyphen: a frame name is parsed by taking
-	-- everything after the tick's separator, so `tick-0001800-bot-1.jpg` reads
-	-- back as camera `bot-1` intact.
-	local player_indexes = {}
-	for _, player in pairs(game.players) do
-		table.insert(player_indexes, player.index)
-	end
-	table.sort(player_indexes)
-	for _, index in ipairs(player_indexes) do
-		table.insert(cameras, frame_capture_bot_camera(index))
-	end
-	-- Last, so the per-bot cameras of a tick are written before the frame that
-	-- claims to contain all of them. Nothing depends on the order; it just
-	-- reads better in a directory listing.
-	table.insert(cameras, { id = "area", kind = "area" })
-	frame_capture_validate_cameras(cameras)
 	-- `run` is set only from the argument -- nil when the caller passed none,
 	-- exactly like `run.json` below. No fallback, no `run_id or
 	-- storage.something`: `run = capture.run` with a nil value omits the key
@@ -2078,7 +2185,11 @@ function rcon_frame_capture_start(run_id)
 	-- untagged run's samples have no `run` key at all, and Rust falls back to
 	-- tick-range filtering for them (`#[serde(default)]` treats an absent key
 	-- the same as an explicit null).
-	storage.frame_capture = { cameras = cameras, run = run_id }
+	--
+	-- `all_cameras` is remembered because a bot that joins later has to be
+	-- treated the way this run was configured, not the way the last one was:
+	-- see `frame_capture_on_player_joined`.
+	storage.frame_capture = { cameras = chosen, run = run_id, all_cameras = all_cameras }
 	-- After the wipe, and only when asked for. The ordering is what keeps the
 	-- id honest: the directory is emptied first and the sidecar written
 	-- second, so `run.json` is always newer than the wipe that preceded it.

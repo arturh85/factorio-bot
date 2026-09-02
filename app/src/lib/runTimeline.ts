@@ -102,14 +102,19 @@ function tickSources(
         drawn.push(lane.from_tick);
         if (lane.to_tick !== null) all.push(lane.to_tick);
     }
-    // **In the frames' place, never beside them.** Frame ticks have decided
-    // where this axis starts since it existed, and video is an opt-in second
-    // artefact -- so a run that captured both must land on exactly the axis it
-    // would have had without video, or two runs' axes stop lining up for a
-    // reason nothing reports. What this does fix is the silent case in the
-    // other direction: a run with video and no frames used to lose this
-    // contributor entirely and compute its axis from splits and lanes alone,
-    // with nothing erroring and nothing marked.
+    // **In the frames' place, never beside them.** Frame ticks decided where
+    // this axis starts for as long as frames existed -- so a run that captured
+    // both must land on exactly the axis it would have had without video, or
+    // two runs' axes stop lining up for a reason nothing reports.
+    //
+    // Since screenshot cameras were retired (2026-09-02) this is no longer the
+    // corner it was written as: a run captures no frames unless it asks, so
+    // **the video is normally what carries the axis**, and the frames branch is
+    // the exception. The narrowing stays anyway, because a run that opts back
+    // into frames still has to line up against every run recorded before the
+    // retirement. Note the test `frames` here is already `placeable`-filtered,
+    // so a run holding only unparseable frame names does not block the video:
+    // those have no tick and contribute nothing to draw.
     if (videoRange !== null && frames.length === 0) {
         all.push(videoRange.from, videoRange.to);
         drawn.push(videoRange.from);

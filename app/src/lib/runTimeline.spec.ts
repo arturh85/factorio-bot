@@ -193,6 +193,55 @@ describe('a run whose only capture is video', () => {
     it('changes nothing for a run that recorded no video', () => {
         expect(tickBounds(splits, [], [], null)).toEqual(tickBounds(splits, []));
     });
+
+    /**
+     * Screenshot cameras were retired on 2026-09-02, so "no frames" stopped
+     * being the corner case this branch was written for and became the
+     * ordinary one. These pin the branch under that load.
+     */
+    describe('now that a run captures no frames by default', () => {
+        it('never cuts more than it keeps, even when the recording started late', () => {
+            // The guard `axisFrom` applies to frames has to apply to video
+            // too. Without it a run whose recorder only came up near the end
+            // would throw the whole extent the splits carry away and collapse
+            // to the tail -- the same failure the frames' trim was bounded to
+            // avoid, arriving through the contributor that replaced them.
+            expect(tickBounds([split(1, 'a', 100, 400)], [], [], {from: 900, to: 1000}))
+                .toEqual({from: 100, to: 1000});
+            expect(leadInTicks([split(1, 'a', 100, 400)], [], [], {from: 900, to: 1000}))
+                .toBe(0);
+        });
+
+        it('starts at the video when it precedes the first lane bar', () => {
+            const lanes = [
+                {bot: 1, id: 0, action: 'mine', from_tick: 1200, to_tick: 1800,
+                    status: 'success', error: null}
+            ];
+            expect(tickBounds(splits, [], lanes, {from: 300, to: 2000}))
+                .toEqual({from: 300, to: 2000});
+        });
+
+        it('starts at the first lane bar when it precedes the video', () => {
+            // Both are drawn, so the axis begins at whichever is drawn first.
+            // Video does not get priority for being the visual record.
+            const lanes = [
+                {bot: 1, id: 0, action: 'mine', from_tick: 300, to_tick: 1800,
+                    status: 'success', error: null}
+            ];
+            expect(tickBounds(splits, [], lanes, {from: 1200, to: 2000}))
+                .toEqual({from: 300, to: 2000});
+        });
+
+        it('takes the video range over frames that could not be placed', () => {
+            // A frame whose name did not parse is listed but has no tick, so
+            // `placeable` drops it -- and a run holding only those has nothing
+            // frame-shaped on the axis. It must not block the video the way a
+            // real frame does.
+            const unplaceable = placeable([frame(1, null, null)]);
+            expect(tickBounds(splits, unplaceable, [], {from: 300, to: 2000}))
+                .toEqual({from: 300, to: 2000});
+        });
+    });
 });
 
 describe('fractionOf', () => {

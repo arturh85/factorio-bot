@@ -65,6 +65,66 @@ fn lua_string_literal(value: &str) -> String {
     out
 }
 
+/// Which screenshot cameras a capture run registers.
+///
+/// **[`FrameCameras::None`] is the default, and it is a real answer rather
+/// than a degraded one.** Video is the visual record now; the capture session
+/// still runs, because the mod's world-state samplers ride on it, but it
+/// renders nothing. See [`FactorioRcon::frame_capture_start`] for the numbers.
+///
+/// There is deliberately no `Default` that resolves to anything else, and no
+/// `Option<FrameCameras>` anywhere: a call site that forgets to say what it
+/// wants must produce the cheap outcome, not the 947 MB one.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum FrameCameras {
+    /// No camera at all. The session runs; nothing is rendered.
+    #[default]
+    None,
+    /// Every camera the mod can offer: `follow`, `bot-N` per player, `area`.
+    /// A bot joining mid-run gets its own camera under this, and only this.
+    All,
+    /// Exactly these camera ids. The mod **raises** on one it cannot supply,
+    /// which `frame_capture_verdict` surfaces as an error -- a list quietly
+    /// reduced to nothing would look configured and capture as much as
+    /// [`FrameCameras::None`].
+    Only(Vec<String>),
+}
+
+impl FrameCameras {
+    /// The Lua argument the mod reads, or `None` to pass no argument at all --
+    /// which the mod already treats as "no cameras", so the default costs
+    /// nothing on the wire.
+    fn to_lua_literal(&self) -> Option<String> {
+        match self {
+            FrameCameras::None => None,
+            FrameCameras::All => Some("true".to_string()),
+            FrameCameras::Only(ids) => Some(format!(
+                "{{{}}}",
+                ids.iter()
+                    .map(|id| lua_string_literal(id))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )),
+        }
+    }
+}
+
+/// The positional argument list for `frame_capture_start`.
+///
+/// `nil` is spelled out rather than the first argument being omitted when
+/// there is no run id but there are cameras: Lua is positional, and a
+/// shortened list would hand the camera selection to `run_id`, where the mod's
+/// type check would refuse it. Emitted only when it is actually needed, so the
+/// default call is unchanged on the wire from what it always sent.
+fn frame_capture_args(run_id: Option<&str>, cameras: &FrameCameras) -> Vec<String> {
+    match (run_id, cameras.to_lua_literal()) {
+        (Some(run_id), None) => vec![lua_string_literal(run_id)],
+        (Some(run_id), Some(cameras)) => vec![lua_string_literal(run_id), cameras],
+        (None, None) => vec![],
+        (None, Some(cameras)) => vec!["nil".to_string(), cameras],
+    }
+}
+
 /// Judges the reply to either frame-capture toggle.
 ///
 /// Unlike most `remote_call_timed` callers here, this refuses a reply that
@@ -1047,12 +1107,25 @@ impl FactorioRcon {
     ///
     /// # What gets captured, and what it costs
     ///
-    /// The mod registers `2 + one per bot` cameras: `follow` (player 1),
-    /// `bot-<player_index>` for every player the game knows of, and `area`,
-    /// which frames the bounding box of all connected bots. A camera whose bot
-    /// is not connected writes **no file** for that tick rather than a
-    /// substitute, so a bot that joined late has no frames from before it
-    /// joined.
+    /// **Nothing, unless `cameras` asks for something.** Screenshots were
+    /// retired as a default on 2026-09-02 in favour of video: run
+    /// `run-1788365280-15443` wrote 2,164 JPEGs / **947 MB** of them against
+    /// **290 MB** for the same 45 minutes of video, and `game.take_screenshot`
+    /// renders synchronously inside the game loop, once per camera per
+    /// capture, where the video grabber reads a frame the GPU already drew.
+    ///
+    /// This call is still made on every recorded run, and that is deliberate:
+    /// the mod's `sample_force` and `sample_bots` beats are both gated on the
+    /// capture *session*, so `samples.jsonl` -- research, production, power,
+    /// bot inventories -- exists only while one is running. The screenshots
+    /// are the part whose cost is not worth paying; the session is not.
+    ///
+    /// With [`FrameCameras::All`] the mod registers `2 + one per bot` cameras:
+    /// `follow` (player 1), `bot-<player_index>` for every player the game
+    /// knows of, and `area`, which frames the bounding box of all connected
+    /// bots. A camera whose bot is not connected writes **no file** for that
+    /// tick rather than a substitute, so a bot that joined late has no frames
+    /// from before it joined.
     ///
     /// **0.72 MB per frame**, measured at JPEG quality 85 and 1920x1080. One
     /// frame per camera every 300 ticks is 12 a minute, so **one camera costs
@@ -1060,15 +1133,16 @@ impl FactorioRcon {
     /// hour** — and each further bot adds a camera, hence another ~520 MB an
     /// hour. It is wiped per run and never accumulates across runs, but a long
     /// run with several bots fills a disk. The number is here so that whoever
-    /// adds a fourth camera reads it before adding it rather than afterwards.
+    /// turns this back on reads it before doing so rather than afterwards.
     ///
     /// Taken by value rather than as `Option<&str>` because this `impl` is
     /// `#[automock]`ed and mockall cannot elide a lifetime inside a generic.
-    pub async fn frame_capture_start(&self, run_id: Option<String>) -> Result<Option<u64>> {
-        let args = match run_id.as_deref() {
-            Some(run_id) => vec![lua_string_literal(run_id)],
-            None => vec![],
-        };
+    pub async fn frame_capture_start(
+        &self,
+        run_id: Option<String>,
+        cameras: FrameCameras,
+    ) -> Result<Option<u64>> {
+        let args = frame_capture_args(run_id.as_deref(), &cameras);
         frame_capture_verdict(self.remote_call_timed("frame_capture_start", args).await?)
     }
 
@@ -4789,6 +4863,66 @@ mod placement_refusal_tests {
             world.placement_refusals().len(),
             1,
             "reporting must not take the site away from the planner"
+        );
+    }
+}
+
+/// **Screenshots are retired, and the wire has to say so by saying nothing.**
+///
+/// The cost of getting the default wrong here is asymmetric: a run that
+/// captures when it should not writes 947 MB and takes the render inside the
+/// game loop, while a run that does not capture when it should loses pictures
+/// nobody had asked for. So the tests below pin the cheap outcome as the one
+/// an unconfigured call produces, at the last point before the command leaves
+/// this process.
+#[cfg(test)]
+mod frame_camera_tests {
+    use super::{FrameCameras, frame_capture_args};
+
+    /// A call that says nothing about cameras must send exactly the argument
+    /// list it always sent -- one run id and no more -- so the mod's own
+    /// default is what decides, and there is only one place to get it wrong.
+    #[test]
+    fn the_default_asks_for_nothing_and_adds_nothing_to_the_wire() {
+        assert_eq!(FrameCameras::default(), FrameCameras::None);
+        assert_eq!(
+            frame_capture_args(Some("run-1"), &FrameCameras::None),
+            vec!["'run-1'".to_string()]
+        );
+    }
+
+    #[test]
+    fn every_camera_is_the_literal_true_the_mod_reads() {
+        assert_eq!(
+            frame_capture_args(Some("run-1"), &FrameCameras::All),
+            vec!["'run-1'".to_string(), "true".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_subset_is_a_lua_list_of_quoted_ids() {
+        assert_eq!(
+            frame_capture_args(
+                Some("run-1"),
+                &FrameCameras::Only(vec!["follow".into(), "bot-1".into()])
+            ),
+            vec!["'run-1'".to_string(), "{'follow','bot-1'}".to_string()]
+        );
+    }
+
+    /// The positional hazard. Without the placeholder the camera list lands in
+    /// `run_id`, where the mod raises "run id must be a string" -- a refusal
+    /// naming the wrong argument, for a call that was correct.
+    #[test]
+    fn an_untagged_capture_with_cameras_keeps_the_run_id_slot_open() {
+        assert_eq!(
+            frame_capture_args(None, &FrameCameras::All),
+            vec!["nil".to_string(), "true".to_string()]
+        );
+        assert!(
+            frame_capture_args(None, &FrameCameras::None).is_empty(),
+            "and an untagged capture with no cameras still sends no argument \
+             at all -- the mod distinguishes an absent id from any value"
         );
     }
 }

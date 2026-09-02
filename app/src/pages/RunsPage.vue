@@ -406,14 +406,30 @@ function researchPct(progress: number): string {
             <!-- Frames are the tick-addressable record and the video is the
                  watchable one; showing both expanded is two answers to one
                  question. When a video exists the frames fold away, and the
-                 summary line says what they are still for. -->
+                 summary line says what they are still for.
+
+                 Screenshot cameras were retired on 2026-09-02, so zero frames
+                 is the ordinary case and not a failure. It gets a sentence of
+                 its own: the picker with no options in it, above a message
+                 naming a bot and camera nobody chose, read as a panel that had
+                 gone wrong. -->
             <details class="frame" :open="!store.video?.video">
                 <summary v-if="store.video?.video" class="frame__summary">
                     per-camera screenshots ({{ store.frames.length }}) — exact at a tick, where the video interpolates
                 </summary>
+                <!-- A failed listing wins over "none were captured": one means
+                     the panel knows, the other means it could not find out. -->
                 <p v-if="store.frameError" class="stream-warning">{{ store.frameError }}</p>
+                <p v-else-if="store.views.length === 0" data-testid="no-frames" class="frame__none">
+                    No screenshots were captured for this run. Video is the visual record;
+                    per-camera capture is off by default because it renders inside the game
+                    loop and costs several times the disk.
+                    <template v-if="!store.video?.video">
+                        This run has no video either.
+                    </template>
+                </p>
                 <template v-else>
-                    <div class="frame__picker">
+                    <div class="frame__picker" data-testid="frame-picker">
                         <label>
                             view
                             <!-- One list of the pairs that exist. Two selectors
@@ -443,8 +459,10 @@ function researchPct(progress: number): string {
                                 tick {{ firstForSelection }}
                             </button>.
                         </template>
+                        <!-- Views exist but none is chosen. Not "no frames":
+                             the run has some, nobody has said which to show. -->
                         <template v-else>
-                            This bot and camera captured no frames in this run.
+                            Pick a view to see its frames.
                         </template>
                     </p>
                     <p v-if="current" class="frame__caption num">

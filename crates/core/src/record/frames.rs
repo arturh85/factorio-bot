@@ -264,6 +264,52 @@ mod tests {
         assert!(run_dir.join("frames/1/notes.txt").exists());
     }
 
+    /// **A run that captured nothing must read as "none were captured".**
+    ///
+    /// The normal case since screenshot cameras were retired (2026-09-02):
+    /// the mod starts a capture session, claims the directory with
+    /// `run.json`, and registers no camera. The archive then has to produce
+    /// an `index.json` that says `[]` -- a missing file is a viewer tripping
+    /// over an absence, and `manifest.frames` reading 0 beside no index at
+    /// all is indistinguishable from a capture that failed.
+    #[test]
+    fn a_run_that_captured_no_frames_reports_an_empty_index_not_a_missing_file() {
+        let ws = workspace("noframes");
+        seed_client(&ws, 1, "ours", &[]);
+        let run_dir = ws.join("runs").join("ours");
+        fs::create_dir_all(&run_dir).unwrap();
+
+        let archived = archive_frames(&ws, &run_dir, "ours").unwrap();
+        assert!(
+            archived.is_empty(),
+            "nothing was captured, so nothing is archived"
+        );
+
+        let index = run_dir.join("frames").join("index.json");
+        let text = fs::read_to_string(&index)
+            .unwrap_or_else(|err| panic!("index.json must exist at {index:?}: {err}"));
+        let from_disk: Vec<ArchivedFrame> = serde_json::from_str(&text).unwrap();
+        assert!(
+            from_disk.is_empty(),
+            "an empty list is the report; no file at all is a shrug"
+        );
+    }
+
+    /// The same answer for a run with no `client<N>` directory at all -- a
+    /// planning-only run, or `--clients 0`. It is still "none were captured".
+    #[test]
+    fn a_workspace_with_no_clients_still_writes_the_empty_index() {
+        let ws = workspace("noclients");
+        let run_dir = ws.join("runs").join("ours");
+        fs::create_dir_all(&run_dir).unwrap();
+
+        assert!(archive_frames(&ws, &run_dir, "ours").unwrap().is_empty());
+        assert_eq!(
+            fs::read_to_string(run_dir.join("frames").join("index.json")).unwrap(),
+            "[]"
+        );
+    }
+
     #[test]
     fn the_index_is_written_and_matches_what_was_copied() {
         let ws = workspace("index");

@@ -27,23 +27,25 @@ local function walk_a_while(laps)
 end
 
 print("MARK phase-A-start-with-id " .. ALPHA)
-local tick = rcon.frame_capture_start(ALPHA)
+-- `true` throughout: cameras are off by default now, and this script's
+-- evidence is frames appearing and disappearing on disk.
+local tick = rcon.frame_capture_start(ALPHA, true)
 print("MARK phase-A-started tick=" .. tostring(tick))
 walk_a_while(3)
 print("MARK phase-A-settled")
 walk_a_while(1)
 
 -- The case most likely to be got wrong: no id must leave no run.json, and in
--- particular not ALPHA's. There is no argument at all here, not an empty one.
+-- particular not ALPHA's. `nil` for the id, not an empty string.
 print("MARK phase-B-start-without-id")
-tick = rcon.frame_capture_start()
+tick = rcon.frame_capture_start(nil, true)
 print("MARK phase-B-started tick=" .. tostring(tick))
 walk_a_while(3)
 print("MARK phase-B-settled")
 walk_a_while(1)
 
 print("MARK phase-C-start-with-different-id " .. BETA)
-tick = rcon.frame_capture_start(BETA)
+tick = rcon.frame_capture_start(BETA, true)
 print("MARK phase-C-started tick=" .. tostring(tick))
 walk_a_while(3)
 print("MARK phase-C-settled")

@@ -40,7 +40,9 @@ local function walk(bot, x, y)
 end
 
 print("MARK start " .. RUN_ID)
-local tick = rcon.frame_capture_start(RUN_ID)
+-- `true` explicitly: screenshot cameras are retired and a capture registers
+-- none by default, which for this script would mean checking nothing at all.
+local tick = rcon.frame_capture_start(RUN_ID, true)
 print("MARK started tick=" .. tostring(tick))
 
 -- Phase A: drive the bots apart and back, so the area camera's box changes

@@ -1303,10 +1303,34 @@ impl FactorioRcon {
     /// [`FactorioRcon::player_mine`], reporting the game ticks it was observed
     /// at.
     ///
-    /// If the player has to walk to the resource first, the ticks reported are
-    /// the *mining* action's own -- the walk is a separate dispatch with
-    /// separate ticks, and folding the two together would make the mine look
-    /// like it started when the bot set off.
+    /// If the player has to walk to the resource first, the ticks reported on
+    /// **success** are the *mining* action's own -- the walk is a separate
+    /// dispatch with separate ticks, and folding the two together would make
+    /// the mine look like it started when the bot set off.
+    ///
+    /// # A corrective walk that fails keeps what the game stamped on it
+    ///
+    /// On the failure path there are no mining ticks to displace, and the walk
+    /// is dispatched via [`FactorioRcon::move_player_timed`] rather than
+    /// [`FactorioRcon::move_player`] so its [`ActionFailure`] arrives here
+    /// intact. `move_player` ends in `map_err(ActionFailure::into_report)`,
+    /// which keeps only the message: the [`Dispatch`] phase and the
+    /// [`crate::factorio::ticks::ActionTicks`] are dropped, and the `?` here
+    /// then rebuilt the failure through `From<Report>` as
+    /// [`Dispatch::NotDispatched`] with [`ActionTicks::UNKNOWN`].
+    ///
+    /// Both halves of that were wrong for a walk the game had acknowledged and
+    /// then gone quiet on. `NotDispatched` claims nothing is outstanding while
+    /// the bot is still walking somewhere the plan does not know about; and an
+    /// untimed failure is written to the run record as *nothing at all* --
+    /// `record.actions` skips any action with neither tick. Run 9
+    /// (`workspace/runs/run-1788310810-27811`) has two plans that each took a
+    /// full `ACTION_RESULT_DEADLINE` and contain no event explaining where the
+    /// six minutes went, because this is where they went.
+    ///
+    /// The blast radius is only the silent case: everything raised before
+    /// `action_start_walk_waypoints` returns is still `NotDispatched` and
+    /// still renders `Rejected`.
     ///
     /// # The reach is re-checked after that walk, and the mine is refused if it
     /// still is not met
@@ -1352,7 +1376,7 @@ impl FactorioRcon {
         drop(player); // wow, without this factorio (?) freezes (!)
         if !within_resource_reach(&here, position, resource_reach_distance) {
             warn!("too far away, moving first!");
-            self.move_player(
+            self.move_player_timed(
                 world,
                 player_id,
                 position,

@@ -2304,6 +2304,38 @@ function on_research_finished(event)
 	on_player_changed_distance(event)
 	writeout(event.tick, "on_research_finished", "")
 	writeout_forces()
+	-- Last, deliberately. stdout is ordered, so settling the action here means
+	-- the executor has already read the recipes and the force data this
+	-- technology unlocked by the time it is told the research succeeded. The
+	-- other order lets the next plan step run against a world snapshot that
+	-- does not know about the thing it just waited for.
+	settle_research_actions(event)
+end
+
+-- Hand the game's own completion signal back to the actions that asked for it.
+--
+-- This is the join that did not exist: `on_research_finished` carried no action
+-- id, so `Actuator::research` had nothing to wait on and reported success the
+-- instant the technology was *queued*.
+--
+-- Fires for every finished research, including ones nobody here asked for --
+-- a `cheat_technology`, a trigger technology, another player's queue. Those
+-- find no entry and settle nothing.
+function settle_research_actions(event)
+	local tech = event.research
+	if tech == nil then
+		return
+	end
+	local waiting = research_actions()[tech.name]
+	if waiting == nil then
+		return
+	end
+	-- Cleared before the writeouts, so a second `on_research_finished` for the
+	-- same technology cannot report the same action done twice.
+	research_actions()[tech.name] = nil
+	for _, action_id in ipairs(waiting) do
+		action_completed(event.tick, action_id)
+	end
 end
 
 function on_player_main_inventory_changed(event)
@@ -2825,7 +2857,59 @@ function rcon_world_snapshot()
 	}))
 end
 
+-- The action ids waiting on each technology: `research_actions()[name]` is an
+-- array of ids, all of which settle when that technology finishes.
+--
+-- **In `storage`, not a module local.** `crafting_queue` is a module local and
+-- `on_load` rebuilds nothing, so a craft that spans a save/load never settles.
+-- A research runs for minutes, which makes it the action most likely to be in
+-- flight across a save, so the same mistake here would be the most expensive
+-- version of it.
+--
+-- **Keyed by technology name** because that is the only join the game offers:
+-- `on_research_finished` carries the technology and nothing else -- no request
+-- id, no queue position. `add_research` appends to the back of a queue that may
+-- already hold other technologies, so completions do not arrive in the order
+-- they were asked for and a positional match (the shape `crafting_queue` uses)
+-- would settle the wrong action.
+--
+-- **An array per name, not one id**, because two actions may ask for the same
+-- technology. Overwriting would leave the first waiting out the executor's
+-- whole `ACTION_RESULT_DEADLINE` -- six minutes of silence for an action the
+-- game finished.
+--
+-- Created lazily rather than in `on_init`: `on_init` runs only for a save that
+-- never had this mod, and nothing registers `on_configuration_changed`, so a
+-- save that gains this version of BotBridge would otherwise reach the handlers
+-- with the key absent.
+function research_actions()
+	if storage.research_actions == nil then
+		storage.research_actions = {}
+	end
+	return storage.research_actions
+end
+
+function forget_research_action(technology_name, action_id)
+	local waiting = research_actions()[technology_name]
+	if waiting == nil then
+		return
+	end
+	for i, id in ipairs(waiting) do
+		if id == action_id then
+			table.remove(waiting, i)
+			break
+		end
+	end
+	if #waiting == 0 then
+		research_actions()[technology_name] = nil
+	end
+end
+
 -- Queue a technology for research, and say so when the game will not.
+--
+-- `action_id` is optional. With one, the caller is *awaiting* the research and
+-- `on_research_finished` settles it; without one, this is the old fire-and-
+-- forget queueing that `rcon.add_research` and the REST endpoint use.
 --
 -- Two silent failures used to live here. An unknown name raised inside the
 -- remote call, which Factorio reports in the reply body -- fine, except the
@@ -2837,13 +2921,29 @@ end
 -- Checking the name here as well as the boolean is deliberate: `technologies`
 -- is the force's own index, so this answers "no such technology" specifically,
 -- rather than leaving every refusal to arrive as one undifferentiated raise.
-function rcon_add_research(technology_name)
+function start_research(technology_name, action_id)
 	local force = game.forces["player"]
 	if force.technologies[technology_name] == nil then
 		rcon.print("Error: no such technology: " .. tostring(technology_name))
 		return
 	end
+	if action_id ~= nil then
+		-- Registered *before* `add_research`, not after. Nothing documented
+		-- says `on_research_finished` cannot be raised from inside that call,
+		-- and if it ever is, the handler has to find the id already there --
+		-- otherwise the completion is dropped and the action waits out the
+		-- deadline. The refusal path below takes the entry back out.
+		local waiting = research_actions()
+		if waiting[technology_name] == nil then waiting[technology_name] = {} end
+		table.insert(waiting[technology_name], action_id)
+	end
 	if not force.add_research(technology_name) then
+		if action_id ~= nil then
+			-- Nothing is waiting on a refusal: leaving the id registered would
+			-- let somebody else's research settle this action as a success,
+			-- which is the exact overclaim being removed here.
+			forget_research_action(technology_name, action_id)
+		end
 		-- Say which of the several reasons it was. "Refused" alone sends the
 		-- caller guessing, and the guesses are all plausible.
 		local tech = force.technologies[technology_name]
@@ -2861,6 +2961,22 @@ function rcon_add_research(technology_name)
 		return
 	end
 	stamp_tick()
+end
+
+function rcon_add_research(technology_name)
+	start_research(technology_name, nil)
+end
+
+-- Start a research the caller will wait for.
+--
+-- Named `action_start_*` like walking, mining and crafting because it is the
+-- same contract: the reply body carries only the tick stamp, and the verdict
+-- arrives later as an `action_completed` writeout. Research needs no `on_tick`
+-- follower -- the game does the durative work itself and announces the end of
+-- it, exactly as crafting does -- so nothing is added to the tick handler and
+-- no `on_nth_tick` cadence is registered.
+function rcon_action_start_research(action_id, technology_name)
+	start_research(technology_name, action_id)
 end
 
 function rcon_inventory_contents_at(positions)
@@ -3359,5 +3475,6 @@ remote.add_interface("botbridge", {
 	async_request_path=rcon_async_request_path,
 	action_start_walk_waypoints=rcon_action_start_walk_waypoints,
 	action_start_mining=rcon_action_start_mining,
-	action_start_crafting=rcon_action_start_crafting
+	action_start_crafting=rcon_action_start_crafting,
+	action_start_research=rcon_action_start_research
 })

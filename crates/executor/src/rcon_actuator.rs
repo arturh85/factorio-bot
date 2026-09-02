@@ -401,11 +401,20 @@ impl Actuator for RconActuator {
             .map_err(classify)
     }
 
-    /// Research is server-wide: `add_research` takes no player id, so `bot`
-    /// does not appear here. Two bots researching the same technology is
+    /// Research is server-wide: the mod's research entry takes no player id, so
+    /// `bot` does not appear here. Two bots researching the same technology is
     /// idempotent in Factorio.
+    ///
+    /// **Durative.** This returns when the game raises `on_research_finished`,
+    /// not when the technology is queued. It used to be the latter, which meant
+    /// success was reported the instant the research was *requested* and every
+    /// step that depended on the technology ran against a belief nothing
+    /// established. See [`FactorioRcon::research_timed`].
     async fn research(&self, tech: &str) -> Result<ActionTicks, ActuatorFailure> {
-        self.rcon.add_research_timed(tech).await.map_err(classify)
+        self.rcon
+            .research_timed(&self.world, tech)
+            .await
+            .map_err(classify)
     }
 
     /// The game's own clock, asked fresh.

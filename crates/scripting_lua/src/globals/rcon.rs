@@ -259,6 +259,14 @@ end
             r#"
 --- adds research to queue
 -- Sends /silent-command remote.call('add_research', technology_name)
+--
+-- Returns as soon as the technology is QUEUED, not when it is researched.
+-- Factorio's add_research answers "did this enter the research queue"; the
+-- research itself takes labs, science packs and minutes. Errors are still
+-- reported here -- an unknown name, an already-researched technology, unmet
+-- prerequisites -- but a successful return says nothing about the technology
+-- being available yet. Use goal.researched, which plans a research action the
+-- executor waits out, when the next step needs the technology to exist.
 -- @string technology_name name of technology to research
 function rcon.add_research(technology_name)
 end

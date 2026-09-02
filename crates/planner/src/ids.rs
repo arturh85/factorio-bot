@@ -10,12 +10,17 @@ pub type ItemId = String;
 ///
 /// `BotId(3)` is player 3 — not "the third bot", not an index into any roster.
 /// There is deliberately no translation anywhere in the stack: the run's roster
-/// (`Planner::initiate_missing_players_with_default_inventory`) is a list of
-/// player ids, `PlanState::from_world` looks a bot's inventory up by
-/// `world.players[&id.0]`, and `RconActuator` sends `id.0` to the game. A
-/// mapping layer is what this type exists to make impossible — an earlier
-/// version numbered the actuator's bots `0..n` while the scheduler numbered
-/// them `1..=n`, and every action drove the wrong player or none at all.
+/// (`Planner::roster`) is a list of player ids, `PlanState::from_world` looks a
+/// bot's inventory up by `world.players[&id.0]`, and `RconActuator` sends
+/// `id.0` to the game. A mapping layer is what this type exists to make
+/// impossible — an earlier version numbered the actuator's bots `0..n` while
+/// the scheduler numbered them `1..=n`, and every action drove the wrong player
+/// or none at all.
+///
+/// A roster is therefore not necessarily `1..=n` and must never be packed down
+/// to make it one. `Planner::roster` drops any bot whose Factorio client failed
+/// to connect, so `[1, 3]` is an ordinary roster; renumbering it to `[1, 2]`
+/// would drive player 2 for every step bot 3 owns.
 ///
 /// The only thing the executor may do with a `BotId` is *check* that the player
 /// is connected; it must never renumber.

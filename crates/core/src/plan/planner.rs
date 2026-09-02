@@ -71,6 +71,78 @@ impl Planner {
         self.real_world.clone()
     }
 
+    /// The bots a run may actually plan for: the ids in `1..=bot_count` the
+    /// world has a player for.
+    ///
+    /// # A bot that is not in the game is not a bot
+    ///
+    /// This used to be `initiate_missing_players_with_default_inventory`'s job,
+    /// and that function *invents* a player for any id the world does not have
+    /// -- position defaulted, which is `(0, 0)`. In a run whose fourth Factorio
+    /// client failed to connect, the roster still contained bot 4, sitting at
+    /// the origin with a starter inventory, and the planner sized and assigned
+    /// real work to it. Those actions could never complete: `RconActuator`
+    /// checks its own roster against `connected_players()` and refuses a player
+    /// the game does not have, so every step that bot owned was dead on
+    /// dispatch while the plan reported itself as covering four bots.
+    ///
+    /// # Omitted, and named while omitting it
+    ///
+    /// A missing bot is dropped rather than raised, because three working
+    /// clients out of four are three working clients and a run that can still
+    /// do most of the work should. But dropping it *silently* would be its own
+    /// failure mode -- "why did bot 4 do nothing" has to be answerable -- so
+    /// every absent id is named on the way out. The total failure is loud
+    /// without any help from here: no client connected means an empty roster,
+    /// and `crates/planner`'s `schedule` refuses one outright.
+    ///
+    /// # This is not the simulation path
+    ///
+    /// `--clients 0` plans for bots that were never meant to exist, and says so
+    /// (`factorio-bot lua ... --clients 0 --bots 4`). That mode seeds its own
+    /// players through
+    /// [`Planner::initiate_missing_players_with_default_inventory`] before the
+    /// script runs, so they are in the world by the time this reads it and the
+    /// roster comes back whole. The discrimination is the caller's stated
+    /// intent, not a guess made here from an empty player list -- which is the
+    /// one signal that cannot tell "simulating" from "every client failed".
+    pub fn roster(&self, bot_count: u8) -> Vec<u8> {
+        let mut present: Vec<u8> = vec![];
+        let mut absent: Vec<u8> = vec![];
+        for player_id in 1u8..=bot_count {
+            if self.real_world.players.contains_key(&player_id) {
+                present.push(player_id);
+            } else {
+                absent.push(player_id);
+            }
+        }
+        if !absent.is_empty() {
+            warn!(
+                "planning for {} of {} bot(s): the game has no player for {:?}, so nothing will be \
+                 assigned to {}. A client that never connected is not a bot.",
+                present.len(),
+                bot_count,
+                absent,
+                if absent.len() == 1 { "it" } else { "them" }
+            );
+        }
+        present
+    }
+
+    /// Invents a player for every id in `1..=bot_count` the world does not
+    /// already have, at the default position and with a starter inventory, and
+    /// answers with the whole `1..=bot_count`.
+    ///
+    /// **This is the simulation seam, not the roster.** Use
+    /// [`Planner::roster`] for a run with a game behind it. Two callers are
+    /// entitled to this one:
+    ///
+    /// * `--clients 0`, the planning-only mode, where no Factorio client is
+    ///   started at all and the bots are avowedly hypothetical; and
+    /// * fixtures, which build a world from nothing and need bots in it.
+    ///
+    /// Calling it on a live run is what put a phantom bot at `(0, 0)` into
+    /// every roster whose client failed to connect -- see [`Planner::roster`].
     pub fn initiate_missing_players_with_default_inventory(&mut self, bot_count: u8) -> Vec<u8> {
         let mut player_ids: Vec<u8> = vec![];
         for player_id in 1u8..=bot_count {
@@ -191,6 +263,99 @@ mod tests {
         assert!(
             Arc::ptr_eq(&taken_early, &planner.world()),
             "the planner is handing out more than one world"
+        );
+    }
+
+    /// A run that asked for four clients and got three plans for three.
+    ///
+    /// The fourth client never connected, so the game has no player 4 and the
+    /// roster must not contain one. It used to: the roster was built by
+    /// *inventing* every missing id, and an invented player takes
+    /// `FactorioPlayer::default()`'s position, which is the origin. The planner
+    /// then sized and assigned work to a bot that did not exist, and every
+    /// action it owned was refused on dispatch by an actuator that checks the
+    /// game's own player list.
+    #[test]
+    fn a_client_that_never_connected_produces_no_bot() {
+        let world = Arc::new(FactorioWorld::new());
+        for id in [1u8, 2, 3] {
+            world
+                .player_changed_position(moved_to(id, -22.29, 35.34))
+                .expect("seed a connected player");
+        }
+        let planner = Planner::new(world.clone(), None);
+
+        assert_eq!(
+            planner.roster(4),
+            vec![1, 2, 3],
+            "the roster must be who the game has, not who was asked for"
+        );
+        assert!(
+            world.players.get(&4).is_none(),
+            "asking for the roster invented a player the game does not have"
+        );
+    }
+
+    /// A gap in the middle is a gap, not a shift.
+    ///
+    /// `BotId` is the Factorio player id and nothing renumbers it anywhere in
+    /// the stack, so a roster missing player 2 must come back as `[1, 3]` --
+    /// never as `[1, 2]` with the survivors packed down, which would drive the
+    /// wrong player for every step bot 3 owns.
+    #[test]
+    fn a_gap_in_the_middle_of_the_roster_stays_a_gap() {
+        let world = Arc::new(FactorioWorld::new());
+        for id in [1u8, 3] {
+            world
+                .player_changed_position(moved_to(id, 0., 0.))
+                .expect("seed a connected player");
+        }
+        let planner = Planner::new(world.clone(), None);
+
+        assert_eq!(planner.roster(3), vec![1, 3]);
+    }
+
+    /// No client connected at all: the roster is empty and stays empty.
+    ///
+    /// This is the case a caller must be allowed to see. `crates/planner`'s
+    /// `schedule` refuses an empty roster outright, so the run fails with a
+    /// sentence about having no bots rather than quietly planning for four
+    /// ghosts and reporting every action lost.
+    #[test]
+    fn a_run_whose_clients_all_failed_gets_no_bots_at_all() {
+        let planner = Planner::new(Arc::new(FactorioWorld::new()), None);
+        assert!(planner.roster(4).is_empty());
+    }
+
+    /// The simulation seam still simulates.
+    ///
+    /// `--clients 0` has no game to defer to and says so, and this is the call
+    /// that gives it bots. Pinned because the fix for the phantom bot is
+    /// precisely that the *roster* stopped doing this -- if this function ever
+    /// stops inventing, planning-only runs silently plan for nobody.
+    #[test]
+    fn the_simulation_seam_still_invents_the_bots_it_is_asked_for() {
+        let world = Arc::new(FactorioWorld::new());
+        let mut planner = Planner::new(world.clone(), None);
+
+        assert_eq!(
+            planner.initiate_missing_players_with_default_inventory(4),
+            vec![1, 2, 3, 4]
+        );
+        assert_eq!(
+            planner.roster(4),
+            vec![1, 2, 3, 4],
+            "once seeded, the world has them and the roster comes back whole"
+        );
+        assert_eq!(
+            world
+                .players
+                .get(&4)
+                .expect("seeded")
+                .main_inventory
+                .get("stone-furnace")
+                .copied(),
+            Some(1)
         );
     }
 }

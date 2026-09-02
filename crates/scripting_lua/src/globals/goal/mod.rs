@@ -1604,6 +1604,12 @@ mod tests {
             .expect("the research force fixture must parse");
         world.update_force(force).expect("update_force");
         let mut planner = Planner::new(Arc::new(world), None);
+        // The fixture has no Factorio behind it, so the world has no players
+        // and `Planner::roster` would hand the script nobody -- correctly, for
+        // a live run. Seed them the way the planning-only mode does
+        // (`--clients 0`, in `cli/lua.rs`), which is the production caller this
+        // fixture stands in for.
+        planner.initiate_missing_players_with_default_inventory(4);
         crate::lua_runner::run_lua(
             &mut planner,
             include_str!("../../../tests/goal_script.lua"),

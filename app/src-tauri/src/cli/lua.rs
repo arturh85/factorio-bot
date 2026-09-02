@@ -263,6 +263,16 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
       Some(world) => {
         info!("Factorio started, running script...");
         let mut planner = Planner::new(world.clone(), Some(instance_state.rcon.clone()));
+        if clients == 0 {
+          // The one mode entitled to bots the game does not have. `--clients 0`
+          // starts no Factorio client at all, so the world has no players and
+          // `Planner::roster` -- which is what every other run gets -- would
+          // hand the script an empty roster. Seeding them here, where the
+          // intent to simulate is stated, keeps that intent out of the roster
+          // itself: a run that asked for four clients and got three still
+          // plans for three, instead of a phantom bot at the origin.
+          planner.initiate_missing_players_with_default_inventory(bots);
+        }
         run_script_file(&mut planner, script_path, bots, None).await
       }
       None => Err(factorio_bot_core::miette::miette!(

@@ -122,7 +122,12 @@ pub async fn run_lua(
     let mut code_by_path: HashMap<String, String> = HashMap::new();
     code_by_path.insert(filename.clone(), lua_code.to_owned());
     let code_by_path: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(code_by_path));
-    let all_bots = planner.initiate_missing_players_with_default_inventory(bot_count);
+    // The roster is who the game actually has, never `1..=bot_count`. A client
+    // that failed to connect used to be seeded into the world at the default
+    // position and handed real work; see `Planner::roster`. A planning-only run
+    // (`--clients 0`) seeds its own players before this point, so its roster
+    // still comes back whole.
+    let all_bots = planner.roster(bot_count);
     let lua_code = lua_code.to_owned();
 
     // One world handle, and it is the live one. The bindings used to get a
@@ -1329,6 +1334,10 @@ pub(crate) mod tests {
 
         for bot_count in 1..=2 {
             let mut planner = Planner::new(world.clone(), None);
+            // No Factorio behind this world, so seed the bots the way the
+            // planning-only mode does before `roster` reads them -- see
+            // `Planner::roster`.
+            planner.initiate_missing_players_with_default_inventory(bot_count);
             let (_result, (stdout, stderr)) = run_lua(
                 &mut planner,
                 include_str!("../tests/script.lua"),

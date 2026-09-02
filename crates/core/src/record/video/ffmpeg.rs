@@ -54,34 +54,13 @@ pub const GOP_SECONDS: u32 = 2;
 /// terminal's stdin, and this child's stdin is a private pipe only the recorder
 /// writes to. The probe below keeps the flag, because there it is true.
 pub fn record_args(settings: &EncodeSettings, output: &Path) -> Vec<String> {
-    let keyint = (settings.fps * GOP_SECONDS).max(1);
-    let mut args: Vec<String> = ["-hide_banner", "-loglevel", "error", "-f", "x11grab"]
+    let mut args: Vec<String> = ["-hide_banner", "-loglevel", "error"]
         .iter()
         .map(|s| (*s).to_string())
         .collect();
+    args.extend(capture_args(settings, settings.fps));
+    args.extend(output_args(settings));
     args.extend([
-        "-framerate".to_string(),
-        settings.fps.to_string(),
-        "-video_size".to_string(),
-        format!("{}x{}", settings.width, settings.height),
-        "-window_id".to_string(),
-        settings.window_id.clone(),
-        "-i".to_string(),
-        settings.display.clone(),
-        "-pix_fmt".to_string(),
-        "yuv420p".to_string(),
-        "-c:v".to_string(),
-        "libx264".to_string(),
-        "-preset".to_string(),
-        "veryfast".to_string(),
-        "-crf".to_string(),
-        "28".to_string(),
-        "-tune".to_string(),
-        "zerolatency".to_string(),
-        "-x264-params".to_string(),
-        format!("keyint={keyint}:min-keyint={keyint}:scenecut=0"),
-        "-movflags".to_string(),
-        "+frag_keyframe+empty_moov+default_base_moof".to_string(),
         "-progress".to_string(),
         "pipe:1".to_string(),
         "-y".to_string(),
@@ -90,38 +69,96 @@ pub fn record_args(settings: &EncodeSettings, output: &Path) -> Vec<String> {
     args
 }
 
-/// A **one-frame trial grab**, discarded to the null muxer.
+/// What to grab, and how fast: the x11grab input, addressed by window id.
 ///
-/// The design is explicit that the probe must not be a version string: the
-/// stock nixpkgs `ffmpeg` has no x11grab at all and would fail only at the
-/// first grab, which on a 45-minute run means discovering it from a broken
-/// file at the end. This actually opens the display, actually addresses the
-/// window, and actually encodes a frame.
-pub fn probe_args(settings: &EncodeSettings) -> Vec<String> {
+/// `framerate` is a parameter rather than `settings.fps` because the probe
+/// wants one frame *now* while the recording wants the run's rate; everything
+/// else about the capture is identical, and identical is the point.
+fn capture_args(settings: &EncodeSettings, framerate: u32) -> Vec<String> {
     [
-        "-hide_banner",
-        "-nostdin",
-        "-loglevel",
-        "error",
         "-f",
         "x11grab",
         "-framerate",
-        "1",
+        &framerate.to_string(),
         "-video_size",
         &format!("{}x{}", settings.width, settings.height),
         "-window_id",
         &settings.window_id,
         "-i",
         &settings.display,
-        "-frames:v",
-        "1",
-        "-f",
-        "null",
-        "-",
     ]
     .iter()
     .map(|s| (*s).to_string())
     .collect()
+}
+
+/// Everything between the input and the output file: codec, rate control,
+/// GOP, container.
+///
+/// **Factored out so the probe cannot diverge from the recording.** This is the
+/// half that killed a 26-minute capture: `-movflags +...+default_base_is_moof`
+/// is not a flag name ffmpeg 9 knows, it exits 234 at option parsing before
+/// writing a byte, and the probe of the day never passed these arguments at
+/// all -- it grabbed one frame to `-f null`, which builds no container and so
+/// validates no container flag. A shared function plus
+/// [`tests::the_probe_exercises_the_same_output_chain_as_the_recording`] means
+/// any argument added here is exercised by the probe automatically, before the
+/// run starts, rather than 26 minutes into it.
+pub fn output_args(settings: &EncodeSettings) -> Vec<String> {
+    let keyint = (settings.fps * GOP_SECONDS).max(1);
+    [
+        "-pix_fmt",
+        "yuv420p",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "28",
+        "-tune",
+        "zerolatency",
+        "-x264-params",
+        &format!("keyint={keyint}:min-keyint={keyint}:scenecut=0"),
+        "-movflags",
+        "+frag_keyframe+empty_moov+default_base_moof",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect()
+}
+
+/// A **one-frame trial recording**, written through the real muxer to
+/// `output` and deleted by the caller.
+///
+/// The design was already explicit that the probe must not be a version
+/// string: the stock nixpkgs `ffmpeg` has no x11grab at all and would fail only
+/// at the first grab, which on a 45-minute run means discovering it from a
+/// broken file at the end. That instinct was right and still let a whole
+/// capture through, because a single frame discarded to `-f null` exercises
+/// x11grab and *nothing downstream of it*. So the probe now carries
+/// [`output_args`] verbatim and writes a real fragmented MP4: it opens the
+/// display, addresses the window, encodes a frame with the run's codec
+/// settings, and muxes it with the run's container flags. An argument ffmpeg
+/// will reject is rejected here, in a fraction of a second, before the run
+/// starts.
+///
+/// `output` must end in `.mp4`: the muxer is chosen by extension, exactly as it
+/// is for the recording, and probing a different container would be probing a
+/// different command.
+pub fn probe_args(settings: &EncodeSettings, output: &Path) -> Vec<String> {
+    let mut args: Vec<String> = ["-hide_banner", "-nostdin", "-loglevel", "error"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    // One frame, grabbed immediately: `-framerate 1` makes x11grab hand over
+    // the first frame without waiting for a second one.
+    args.extend(capture_args(settings, 1));
+    args.push("-frames:v".to_string());
+    args.push("1".to_string());
+    args.extend(output_args(settings));
+    args.push("-y".to_string());
+    args.push(output.to_string_lossy().into_owned());
+    args
 }
 
 /// Pulls `out_time_us=<n>` off one line of the `-progress` stream.
@@ -231,11 +268,11 @@ mod tests {
     }
 
     #[test]
-    fn the_probe_grabs_exactly_one_frame_and_writes_nothing() {
-        let args = probe_args(&settings());
+    fn the_probe_grabs_exactly_one_frame_into_a_real_file() {
+        let args = probe_args(&settings(), Path::new("/tmp/probe.mp4"));
         assert!(args.windows(2).any(|w| w == ["-frames:v", "1"]), "{args:?}");
-        assert!(args.windows(2).any(|w| w == ["-f", "null"]), "{args:?}");
         assert!(args.iter().any(|a| a == "x11grab"), "{args:?}");
+        assert_eq!(args.last().unwrap(), "/tmp/probe.mp4");
         assert!(
             !args.iter().any(|a| a == "-version"),
             "a version string proves nothing about x11grab support"
@@ -252,7 +289,11 @@ mod tests {
             "-nostdin would make the `q` on stdin a no-op: {args:?}"
         );
         // The probe never gets a `q`, so there the flag is honest.
-        assert!(probe_args(&settings()).iter().any(|a| a == "-nostdin"));
+        assert!(
+            probe_args(&settings(), Path::new("/tmp/probe.mp4"))
+                .iter()
+                .any(|a| a == "-nostdin")
+        );
     }
 
     #[test]
@@ -263,5 +304,38 @@ mod tests {
         assert_eq!(parse_out_time_us("out_time=00:00:59.598000"), None);
         assert!(is_progress_end("progress=end"));
         assert!(!is_progress_end("progress=continue"));
+    }
+
+    /// **The probe must exercise the muxer it will actually use.**
+    ///
+    /// A one-frame grab discarded to `-f null` proves x11grab works and proves
+    /// nothing at all about `-movflags`, `-c:v` or the container -- so an
+    /// encoder argument ffmpeg rejects passes the probe and fails 26 minutes
+    /// later, having written zero bytes. Every output argument the recording
+    /// uses must appear in the probe, contiguously and in order: a *subset*
+    /// check would let a future flag be added to one and not the other, which
+    /// is the same hole in a smaller shape.
+    #[test]
+    fn the_probe_exercises_the_same_output_chain_as_the_recording() {
+        let probe = probe_args(&settings(), Path::new("/tmp/probe.mp4"));
+        let record = record_args(&settings(), Path::new("/tmp/video.mp4"));
+        let chain = output_args(&settings());
+        assert!(!chain.is_empty());
+        for args in [&probe, &record] {
+            assert!(
+                args.windows(chain.len()).any(|w| w == chain.as_slice()),
+                "the whole output chain must be here, in order: {args:?}"
+            );
+        }
+        assert!(
+            probe
+                .windows(2)
+                .any(|w| w == ["-movflags", &chain[chain.len() - 1]]),
+            "the probe must touch the muxer that failed: {probe:?}"
+        );
+        assert!(
+            !probe.windows(2).any(|w| w == ["-f", "null"]),
+            "a null muxer writes no container and validates no container flag: {probe:?}"
+        );
     }
 }

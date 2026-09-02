@@ -109,6 +109,19 @@ fn lua_for_mod_source() -> Lua {
 /// A stub force whose technologies are `known`, with `add_research` answering
 /// `adds` and recording what it was asked for.
 fn stub_game(known: &[&str], adds: bool) -> String {
+    stub_game_researching(known, adds, None)
+}
+
+/// [`stub_game`] with `researching` already the force's current research and
+/// the head of its queue -- the state rung 7 was actually in.
+fn stub_game_researching(known: &[&str], adds: bool, researching: Option<&str>) -> String {
+    let (current, queue) = match researching {
+        Some(name) => (
+            format!(r#"force.technologies["{name}"]"#),
+            format!(r#"{{ force.technologies["{name}"] }}"#),
+        ),
+        None => ("nil".to_string(), "{}".to_string()),
+    };
     let technologies = known
         .iter()
         .map(|name| {
@@ -125,12 +138,17 @@ fn stub_game(known: &[&str], adds: bool) -> String {
         _queued = {{}}
         local force = {{
             technologies = {{ {technologies} }},
+            research_enabled = true,
             add_research = function(name)
                 _queued[#_queued + 1] = name
                 return {adds}
             end,
             print = noop,
         }}
+        -- Set after the table exists, so they can point at its own technologies
+        -- rather than at copies that would compare unequal.
+        force.current_research = {current}
+        force.research_queue = {queue}
         game = {{
             tick = {START_TICK},
             players = {{}},
@@ -331,6 +349,82 @@ fn a_refused_research_leaves_nothing_waiting() {
         Vec::<String>::new(),
         "a refused action must never be settled by somebody else's research"
     );
+}
+
+/// **The reason that actually fired in rung 7, and the one the message never
+/// mentioned.**
+///
+/// `add_research` returned false because the technology was *already the
+/// current research*. The refusal enumerated researched / enabled / trigger /
+/// prerequisites -- all four of which read fine -- so every retry reported a
+/// reason list that excluded the true one and pointed the reader away from the
+/// answer. A diagnostic that is confidently incomplete is worse than one that
+/// says "unknown".
+#[test]
+fn a_refusal_names_the_research_already_under_way() {
+    let lua = run(
+        &stub_game_researching(&["automation"], false, Some("automation")),
+        START_AUTOMATION,
+    );
+    let reply = rcon_lines(&lua);
+    assert_eq!(reply.len(), 1, "one refusal line, got {reply:?}");
+    assert!(
+        reply[0].contains("current_research=automation"),
+        "the refusal has to name the state that caused it. Rung 7 retried \
+         against a list of four reasons none of which were true, because the \
+         one that was is not in the list. Got {:?}",
+        reply[0]
+    );
+    assert!(
+        reply[0].contains("in_queue=true"),
+        "and whether it is already queued, which is the same refusal one \
+         position later. Got {:?}",
+        reply[0]
+    );
+}
+
+/// The absent case has to be reported as absent rather than omitted: a message
+/// that names `current_research` only when there is one leaves the reader
+/// unable to tell "nothing is being researched" from "this build does not
+/// report it".
+#[test]
+fn a_refusal_with_nothing_under_way_says_so_rather_than_going_quiet() {
+    let lua = run(&stub_game(&["automation"], false), START_AUTOMATION);
+    let reply = rcon_lines(&lua);
+    assert!(
+        reply[0].contains("current_research=nil") && reply[0].contains("in_queue=false"),
+        "got {:?}",
+        reply[0]
+    );
+}
+
+/// `research_enabled` is the other cause `add_research` can refuse for that the
+/// message did not name. Included for the same reason as the two above rather
+/// than left for the next diagnosis to rediscover.
+#[test]
+fn a_refusal_names_whether_research_is_enabled_for_the_force_at_all() {
+    let lua = run(&stub_game(&["automation"], false), START_AUTOMATION);
+    assert!(
+        rcon_lines(&lua)[0].contains("research_enabled=true"),
+        "got {:?}",
+        rcon_lines(&lua)[0]
+    );
+}
+
+/// The reasons that were already named must stay named. This is an addition to
+/// the list, not a replacement of it.
+#[test]
+fn a_refusal_still_names_the_reasons_it_always_did() {
+    let lua = run(&stub_game(&["automation"], false), START_AUTOMATION);
+    let reply = &rcon_lines(&lua)[0];
+    for claim in [
+        "researched=false",
+        "enabled=true",
+        "trigger=false",
+        "unmet_prerequisites=[]",
+    ] {
+        assert!(reply.contains(claim), "missing {claim} from {reply:?}");
+    }
 }
 
 /// An unknown name is refused before anything is queued or registered.

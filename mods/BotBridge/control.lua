@@ -3752,6 +3752,19 @@ function start_research(technology_name, action_id)
 		end
 		-- Say which of the several reasons it was. "Refused" alone sends the
 		-- caller guessing, and the guesses are all plausible.
+		--
+		-- **The list has to be complete, or it is worse than saying nothing.**
+		-- Rung 7 failed for a reason that was not on it: the technology was
+		-- already the force's *current research*, so `add_research` refused
+		-- while researched, enabled, trigger and prerequisites all read fine.
+		-- Every retry therefore reported four reasons none of which were true
+		-- and pointed the reader away from the one that was. A confidently
+		-- incomplete diagnostic is worse than one that says "unknown". See
+		-- `docs/superpowers/notes/2026-09-02-rung-7-unreachable.md`.
+		--
+		-- `current_research` and `research_queue` are reported for every
+		-- refusal, including when there is none, so a reader can tell "nothing
+		-- is being researched" from "this build does not report it".
 		local tech = force.technologies[technology_name]
 		local unmet = {}
 		for name, prereq in pairs(tech.prerequisites) do
@@ -3759,11 +3772,24 @@ function start_research(technology_name, action_id)
 				table.insert(unmet, name)
 			end
 		end
+		local current = "nil"
+		if force.current_research ~= nil then
+			current = force.current_research.name
+		end
+		local in_queue = false
+		for _, queued in pairs(force.research_queue) do
+			if queued.name == technology_name then
+				in_queue = true
+			end
+		end
 		rcon.print("Error: cannot research " .. tostring(technology_name) ..
 			": researched=" .. tostring(tech.researched) ..
 			" enabled=" .. tostring(tech.enabled) ..
 			" trigger=" .. tostring(tech.prototype.research_trigger ~= nil) ..
-			" unmet_prerequisites=[" .. table.concat(unmet, ",") .. "]")
+			" unmet_prerequisites=[" .. table.concat(unmet, ",") .. "]" ..
+			" current_research=" .. current ..
+			" in_queue=" .. tostring(in_queue) ..
+			" research_enabled=" .. tostring(force.research_enabled))
 		return
 	end
 	stamp_tick()

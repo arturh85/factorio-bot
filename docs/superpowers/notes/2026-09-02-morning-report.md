@@ -933,3 +933,73 @@ milestone 6: last error: Error: recipe automation-science-pack
 Milestone 6 satisfied anyway on the next iteration, but that message is the
 recipe-gate defect's fingerprint (`21a1228a`) appearing at execution time rather
 than plan time. Worth a look before assuming it is benign.
+
+## Update (~20:20): run 31 — the fastest run yet, and rung 7 fails honestly in seconds
+
+Run 31 (`run-1788372605-35170`), built at `075df7c1`. **12 minutes**, against run 30's
+45. Rungs 1-6 all satisfied:
+
+```
+milestone 1  satisfied  1 iteration   8 steps
+milestone 2  satisfied  1 iteration   8 steps
+milestone 3  satisfied  1 iteration  37 steps
+milestone 4  satisfied  2 iterations 40 steps
+milestone 5  satisfied  1 iteration  16 steps
+milestone 6  satisfied  1 iteration  52 steps   <- first time in one pass
+```
+
+**Screenshots are retired and the samplers survived**: `frames: 0`, `samples: 755`,
+`events: 301`. That was the trap in the change — `sample_force` and `sample_bots`
+both return early when the capture session is nil, so deleting the session would
+have silently emptied three viewer panels. The session still starts and registers
+no camera.
+
+### Rung 7 now refuses in seconds, and the refusal is true
+
+```
+automation needs a lab with 60 kW of electric supply,
+and the plan can show only 0 kW
+```
+
+Run 30 spent **85,030 ticks** discovering nothing on this milestone. Run 31 says
+it at plan time. The refusal is correct: no plan in any archived run has ever
+placed a generator, and `generated_kw` was 0.0 in all 541 of run 30's force
+samples.
+
+### But a correct refusal should not crash the run
+
+```
+RAISED: runtime error: goal: automation needs a lab with 60 kW ...
+RUN FINISHED state=crashed
+```
+
+`ResearchNeedsPower` propagates out of `goal.plan` as a Lua error, through
+`supervisor.lua:197`, and terminates the run. There is no `milestone 7` line in
+the summary at all — the run record cannot say what happened to the milestone it
+died on.
+
+That is the wrong shape for a *planner refusing to plan something impossible*.
+`NoApplicableMethod` and its relatives are verdicts about the world, not faults:
+the milestone should read `stuck` with that reason and the run should finish. As
+written, the most informative failure the planner has ever produced is also the
+one that destroys the record of itself.
+
+### The window size is still not honoured, and it moved
+
+```
+video window is 1426x1728, not the 1280x720 requested -- recording what it is
+```
+
+`window-size=1280x720` in `config.ini` did not take either — and the observed
+geometry *changed*, from run 30's 706x854 to 1426x1728, which is almost exactly
+2x of 713x864. That smells like display scaling rather than the setting being
+ignored outright.
+
+What this establishes: **on a tiling compositor, neither `xdotool windowsize` nor
+Factorio's own `window-size` fixes the geometry.** The window would have to be
+floated by a compositor rule. Worth saying plainly rather than trying a third
+lever.
+
+The safeguard did its job both times: the recorder records the geometry it
+**observes**, so the file is honestly described at 1426x1728 rather than
+mislabelled 1280x720.

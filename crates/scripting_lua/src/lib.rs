@@ -19,6 +19,5 @@ mod doc_guard;
 mod error;
 pub mod lua_docs;
 pub mod research_run_lib;
-pub mod roll_best_seed;
 mod sandbox;
 pub mod supervisor_lib;

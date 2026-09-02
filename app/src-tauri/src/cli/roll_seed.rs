@@ -1,11 +1,48 @@
-use crate::cli::{SETTINGS_PRECEDENCE_HELP, Subcommand, SubcommandCallback, settings_overrides};
-use crate::settings::load_app_settings_with;
-use clap::{Arg, ArgMatches, Command, value_parser};
+//! `roll-seed`, which is declared but does not work, and now says so.
+//!
+//! # What it was meant to do
+//!
+//! Generate maps from one map-exchange string with random seeds, score each
+//! one, and report the best. The scoring lived in
+//! `factorio_bot_scripting_lua::roll_best_seed::score_seed`: it ran a plan
+//! script against a freshly generated map and scored the seed as
+//! `-planner.graph().shortest_path()` -- a shorter critical path through the
+//! old task graph meant a cheaper start -- minus 10000 for every resource type
+//! not found within 3000 tiles of spawn.
+//!
+//! # Why it does not
+//!
+//! `score_seed` was deleted with the old task-graph planner. It had no live
+//! caller even then: the worker loop that called it had been commented out for
+//! a long time, so `roll_seed` pushed nothing onto its join-handle vector,
+//! joined an empty vector, and returned `Ok(None)` -- "no seed found" -- for
+//! every possible input. Before it could even get that far it canonicalized
+//! `plans/{name}.lua`, a path relative to the process CWD, and there is no
+//! `plans/` directory in the repo (`workspace/plans` was a duplicate
+//! extraction, removed as dead in `15d49278`). So the command's real behaviour
+//! was: prepare `--parallel` Factorio instances (default four, minutes of
+//! archive extraction each), then fail on a `canonicalize` of a directory that
+//! does not exist -- and had that path been fixed, spend the same minutes to
+//! print "no seed found".
+//!
+//! # Why this refuses instead of resolving the path
+//!
+//! Because the path was the *second* thing wrong with it. Pointing it at the
+//! workspace scripts directory would have made a dead loop read a file it
+//! never uses, and turned a loud failure into a silent one. Resurrecting seed
+//! rolling means choosing a fitness function for the current planner --
+//! `Schedule::makespan` is the plausible candidate -- and building the
+//! cross-boundary plumbing to read a `Schedule` back out of the handle-based
+//! Lua runtime. That is real design work, not a path fix, so the subcommand is
+//! gated here rather than left looking usable.
+//!
+//! The clap surface below is deliberately kept: it is the interface any
+//! resurrection would implement, and `--help` is where a reader looks first.
 
-use crate::context::Context;
-use factorio_bot_core::miette::Result;
-#[cfg(feature = "lua")]
-use factorio_bot_scripting_lua::roll_best_seed::{RollSeedLimit, roll_seed};
+use crate::cli::{SETTINGS_PRECEDENCE_HELP, Subcommand, SubcommandCallback};
+use clap::{Arg, Command, value_parser};
+
+use factorio_bot_core::miette::{Result, miette};
 
 impl Subcommand for ThisCommand {
   fn name(&self) -> &'static str {
@@ -63,47 +100,34 @@ impl Subcommand for ThisCommand {
           .value_parser(value_parser!(u8))
           .help("number of bots to plan for (no client process is started)"),
       )
-      .about("roll good seed for given map-exchange-string based on heuristics")
+      .about("UNIMPLEMENTED: roll good seed for given map-exchange-string based on heuristics")
       .after_help(SETTINGS_PRECEDENCE_HELP)
   }
 
   fn build_callback(&self) -> SubcommandCallback {
-    |args, context| Box::pin(run(args, context))
+    // `std::future::ready` rather than an `async fn`: there is nothing to
+    // await, and an async wrapper around an immediate error would only
+    // suggest work is being done.
+    |_args, _context| Box::pin(std::future::ready(refuse()))
   }
 }
 
-async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
-  let app_settings = load_app_settings_with(&settings_overrides(matches))?;
-  if let Some((seed, score)) = roll_seed(
-    app_settings.factorio.clone(),
-    matches
-      .get_one::<String>("map")
-      .expect("required by clap")
-      .to_owned(),
-    match matches.get_one::<u64>("rolls") {
-      Some(rolls) => RollSeedLimit::Rolls(*rolls),
-      None => RollSeedLimit::Seconds(
-        *matches
-          .get_one::<u64>("seconds")
-          .expect("defaulted by clap"),
-      ),
-    },
-    *matches
-      .get_one::<u8>("parallel")
-      .expect("defaulted by clap"),
-    matches
-      .get_one::<String>("name")
-      .expect("required by clap")
-      .to_owned(),
-    *matches.get_one::<u8>("clients").expect("defaulted by clap"),
-  )
-  .await?
-  {
-    println!("Best Seed: {seed} with Score {score}");
-  } else {
-    eprintln!("no seed found");
-  }
-  Ok(())
+/// Refuses before doing anything at all.
+///
+/// The refusal is first, ahead of settings loading and ahead of any instance
+/// preparation, because the previous order was the whole user-visible defect:
+/// several minutes of archive extraction bought a failure that had been
+/// certain since the process started. Failing in milliseconds, with the reason
+/// in the message, is the only honest thing this can do until the scoring
+/// function exists again.
+fn refuse() -> Result<()> {
+  Err(miette!(
+    "roll-seed is not implemented: its scoring function was deleted with the \
+     old task-graph planner and the loop that called it had already been \
+     disabled, so this command could never report a seed. See the module \
+     comment in app/src-tauri/src/cli/roll_seed.rs for what resurrecting it \
+     needs."
+  ))
 }
 
 struct ThisCommand {}

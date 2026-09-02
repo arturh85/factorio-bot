@@ -89,6 +89,32 @@ local function plan_for_record(step_list)
     return out
 end
 
+--- Is this caught error a planner VERDICT, or a fault?
+--
+-- A verdict is a statement about the world: the goal cannot be reached from
+-- here, and the planner says exactly why -- no route to the item, nowhere to
+-- stand while mining it, a research whose lab would have no power. Nothing is
+-- broken and nothing is retryable, so the honest thing for this loop to do is
+-- close the milestone with the reason and let the run finish. A fault is a
+-- defect -- a method contradicting itself, a name that refers to nothing --
+-- and it must still end the run loudly. `goal.refusal` (`goal/mod.rs`) is
+-- where that classification is made, variant by variant; this only asks.
+--
+-- `nil` whenever the question cannot be answered: no `goal` table, no
+-- classifier on it, a classifier that itself raised, or an answer that is not
+-- a table. Every one of those is read as *fault*, because "cannot classify"
+-- must never come out as "only a verdict, carry on" -- that is how a real bug
+-- gets recorded as a condition of the world. It is the same rule `goal.plan`'s
+-- placement pre-check follows: an absent checker must never look like a green
+-- answer.
+local function refusal_of(err)
+    if type(goal) ~= "table" or type(goal.refusal) ~= "function" then return nil end
+    local ok, refusal = pcall(goal.refusal, err)
+    if not ok or type(refusal) ~= "table" then return nil end
+    if type(refusal.message) ~= "string" then return nil end
+    return refusal
+end
+
 local Sup = {}
 Sup.__index = Sup
 
@@ -114,6 +140,7 @@ function supervisor.new(source, opts)
         step_counts = nil,
         any_failures = false,
         first_error = nil,
+        refusal = nil,
     }, Sup)
 end
 
@@ -133,6 +160,12 @@ function Sup:_close(outcome)
         outcome = outcome,
         any_failures = self.any_failures,
         first_error = self.first_error,
+        -- Kept apart from `first_error` on purpose. `first_error` is the first
+        -- failed ACTION's own text; a refusal is why the milestone closed and
+        -- no action ran at all. A milestone can have both (a run that failed,
+        -- then a re-plan the planner refused), and collapsing them into one
+        -- field would lose whichever was written second.
+        refusal = self.refusal,
     })
     -- A keyframe at the boundary of every milestone -- the only place
     -- `map.jsonl` gets one; there is deliberately no tick timer driving it.
@@ -185,16 +218,57 @@ function Sup:step()
         self.step_counts = {}
         self.any_failures = false
         self.first_error = nil
+        self.refusal = nil
         self.state = "planning"
         return { action = "acquired", state = "planning", milestone_index = self.index }
     end
 
     if self.state == "planning" then
-        -- Not wrapped: a raise here is a construction error (unknown item or
-        -- technology, a bot outside the roster), not a world condition. It
-        -- propagates, costs no iteration, and is not retried -- retrying a typo
-        -- burns the cap and then reports "stuck", which actively misleads.
-        local plan = goal.plan(self.milestone, { bots = self.bots })
+        -- Wrapped, and only just: `goal.plan` raises for two different reasons
+        -- and exactly one of them is this loop's business.
+        --
+        -- A **fault** -- a construction error (an unknown item or technology, a
+        -- bot outside the roster) or a defect in the planner -- propagates,
+        -- costs no iteration, and is not retried. Retrying a typo burns the cap
+        -- and then reports "stuck", which actively misleads; and a run that
+        -- carries on past a genuine bug reports a world condition for what is
+        -- really broken code.
+        --
+        -- A **verdict** closes the milestone instead. Run 31
+        -- (`workspace/runs/run-1788372605-35170/`) is why: it satisfied six
+        -- milestones and then asked to research automation in a world with no
+        -- electric supply, the planner refused -- correctly, and with the most
+        -- informative sentence it has ever produced -- and the raise went
+        -- straight past this branch. No `_close`, so no history entry, so the
+        -- summary printed milestones 1-6 and no `milestone 7` line at all. The
+        -- refusal destroyed the record of itself.
+        --
+        -- Not retried either, and for a reason of its own: re-planning asks the
+        -- same question of the same world -- nothing ran, so nothing changed --
+        -- and gets the same answer, until the iteration cap turns a stated
+        -- reason into `exhausted`.
+        local ok, planned = pcall(goal.plan, self.milestone, { bots = self.bots })
+        if not ok then
+            local refusal = refusal_of(planned)
+            -- `error(err, 0)`: re-raised as the value it was, with no position
+            -- prefix bolted on. The original error object -- and the traceback
+            -- mlua wrapped it in -- survives for the driver's own pcall.
+            if refusal == nil then error(planned, 0) end
+            self.refusal = refusal
+            -- `stuck`, not `stuck_silent`: that one means "no progress and
+            -- nothing to show for it", and this milestone has the planner's
+            -- own reason to show. Not a word of its own either -- the outcome
+            -- vocabulary (`crates/core/src/record/splits.rs`) says how far a
+            -- milestone got, and "as far as the world allows" is `stuck`; what
+            -- KIND of stuck it was is `h.refusal`, which is data and does not
+            -- need a second verdict word to carry it.
+            self:_close("stuck")
+            self.state = "stuck"
+            return { action = "halted", state = "stuck",
+                     milestone_index = self.index, steps = 0,
+                     iteration = self.iterations, refusal = refusal }
+        end
+        local plan = planned
         local plan_steps = plan.steps
         local steps = #plan_steps
         -- Shaped once and carried on `t.plan` for either outcome below, so a
@@ -327,6 +401,13 @@ function Sup:step()
     -- actually did: the plan knows which bot owns an action and what it is
     -- called, the observation knows when the game ran it and how it ended, and
     -- neither half carries both.
+    --
+    -- `walks` rides along for the same reason and is a THIRD thing, not part
+    -- of either: a walk is not an action, it has no action id, and it is in
+    -- neither `steps` nor `actions`. It is also most of the wall clock, and
+    -- until it was carried here no walk reached the run record at all -- a run
+    -- could fail three walks and leave one error string behind. See
+    -- `record.walks`.
     -- The full tally, not just `failed`. A run that dispatched everything and
     -- learned nothing back and a run that dispatched nothing at all both report
     -- `failed = 0`, and they are completely different events -- the first is
@@ -344,7 +425,7 @@ function Sup:step()
              iteration = self.iterations,
              done = obs.done, pending = obs.pending, running = obs.running,
              success = obs.success,
-             steps = steps, actions = obs.actions }
+             steps = steps, actions = obs.actions, walks = obs.walks }
 end
 
 --- Human-readable summary of everything closed so far.
@@ -355,10 +436,21 @@ function Sup:report()
         for _, n in ipairs(h.step_counts) do
             if best == "-" or n < best then best = n end
         end
+        -- One suffix, and the halt's own reason leads. A refusal is not an
+        -- error the run made -- no action was dispatched, nothing failed -- so
+        -- calling it "last error" would invent a failure that never happened;
+        -- and a milestone that both failed a run and was then refused reports
+        -- the refusal, because that is what closed it. The other text is still
+        -- on the history entry for a reader who wants it.
+        local why = ""
+        if h.refusal then
+            why = ", refused: " .. h.refusal.message
+        elseif h.first_error then
+            why = ", last error: " .. h.first_error
+        end
         lines[#lines + 1] = string.format(
             "  milestone %d: %s after %d iteration(s), best %s steps%s",
-            h.index, h.outcome, h.iterations, tostring(best),
-            h.first_error and (", last error: " .. h.first_error) or "")
+            h.index, h.outcome, h.iterations, tostring(best), why)
     end
     return table.concat(lines, "\n")
 end

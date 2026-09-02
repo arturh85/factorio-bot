@@ -24,7 +24,9 @@ use factorio_bot_core::factorio::rcon::{FactorioRcon, PlacementQuery, PlacementV
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_executor::{Actuator, RconActuator};
-use factorio_bot_planner::{ActionNetwork, BotId, Goal, PlanState, expand, holds, registry_for};
+use factorio_bot_planner::{
+    ActionNetwork, BotId, Goal, PlanState, PlannerError, expand, holds, registry_for,
+};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -78,6 +80,175 @@ pub(crate) type PlacementChecker = Arc<
 /// A planner or executor failure is the script's problem, not the process's.
 fn goal_error(err: impl std::fmt::Display) -> LuaError {
     LuaError::RuntimeError(format!("goal: {err}"))
+}
+
+/// A planner refusal: a **verdict about the world**, carried as an error value
+/// a caller can recognise rather than a sentence a caller has to match on.
+///
+/// Raised, not returned, on purpose. `goal.plan` answers with a plan or it
+/// does not answer at all, and a script that ignores a refusal must not
+/// quietly receive an empty plan and read it as "nothing left to do" -- that
+/// is the exact mistake `goal.holds` was added to stop the supervisor making.
+/// So a refusal stays loud by default, and a caller that means to survive one
+/// asks [`install_goal_refusal`] (`goal.refusal`) what it is holding.
+///
+/// `message` is the planner's own sentence, unprefixed, so a report line can
+/// put its own word ("refused: ...") in front of it; `Display` adds the `goal:`
+/// prefix every other error on this surface carries, so the raise reads exactly
+/// as it always did.
+#[derive(Debug)]
+struct PlanRefusal {
+    /// The planner's own miette code, e.g. `planner::research_needs_power`.
+    code: String,
+    message: String,
+}
+
+impl std::fmt::Display for PlanRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "goal: {}", self.message)
+    }
+}
+
+impl std::error::Error for PlanRefusal {}
+
+/// Is this planner failure a verdict about the world, or a fault?
+///
+/// **A verdict is a statement about the world**: the goal cannot be reached
+/// from here, and the planner says exactly why. Nothing is broken, nothing is
+/// retryable, and the honest thing for a caller that spans several goals to do
+/// is record the reason and carry on -- which is why these carry a
+/// [`PlanRefusal`]. **A fault is a defect**: a method contradicting itself, a
+/// network it could not have built correctly, a roster or a name that never
+/// made sense. Those must end the run loudly, because a run that keeps going
+/// past one reports a world condition for what is really a bug.
+///
+/// The match is exhaustive with no wildcard arm, deliberately. A new
+/// `PlannerError` variant must fail this build rather than default into either
+/// bucket: defaulting to "verdict" would let a new bug be recorded as a world
+/// condition, and defaulting to "fault" would put the next `ResearchNeedsPower`
+/// back on the path that destroyed run 31's own record of itself.
+///
+/// Per-variant reasoning, which is the whole of the decision:
+///
+/// - [`NoApplicableMethod`](PlannerError::NoApplicableMethod),
+///   [`NoRoomToWork`](PlannerError::NoRoomToWork) -- "this world offers no
+///   route to that", and "this world has nowhere to stand while doing it".
+///   Both are readings of the map.
+/// - [`ResearchNeedsPower`](PlannerError::ResearchNeedsPower),
+///   [`UnsupportedResearchTrigger`](PlannerError::UnsupportedResearchTrigger),
+///   [`SelfUnlockingResearchTrigger`](PlannerError::SelfUnlockingResearchTrigger)
+///   -- three ways of saying "that technology cannot be reached from the state
+///   this world is in", each naming what is missing. Their own doc comments in
+///   `crates/planner/src/error.rs` argue for stating the gap rather than
+///   costing it at zero; a caller that dies on the statement gets less than one
+///   that records it.
+/// - [`PreconditionUnsatisfied`](PlannerError::PreconditionUnsatisfied) --
+///   the crate's own doc calls this "the world was not as planned", and the
+///   planner's `two_bots_cannot_mine_the_same_exhausted_tile` shows what it
+///   carries: an exhausted ore tile, named by the condition that failed.
+/// - [`ChainOwnerInfeasible`](PlannerError::ChainOwnerInfeasible) -- the same
+///   rejection as the line above with the blame placed on the chain's owner
+///   instead of on the world; the `condition` it names is still a fact about
+///   the world that does not hold. Splitting the pair would be arbitrary.
+///
+/// And the faults:
+///
+/// - [`InsufficientItems`](PlannerError::InsufficientItems) -- only reachable
+///   by *applying* an effect, which both `schedule` and the method driver do
+///   only after judging the same action feasible. It therefore means the
+///   feasibility check and the effect disagree. A world that is genuinely
+///   short reports `NoApplicableMethod` or `PreconditionUnsatisfied` instead.
+/// - [`UnknownBot`](PlannerError::UnknownBot),
+///   [`NoBots`](PlannerError::NoBots) -- the roster and the state disagree, or
+///   there is no roster. `goal.plan` refuses both before the planner is
+///   reached (`refuse_unknown_bots`), so arriving here at all is a contract
+///   violation and not a shortage of anything.
+/// - [`CyclicNetwork`](PlannerError::CyclicNetwork),
+///   [`Deadlock`](PlannerError::Deadlock) -- a network whose edges cannot be
+///   run. No world makes that true or false; a method built it wrong.
+/// - [`ChainConflict`](PlannerError::ChainConflict),
+///   [`UnownedHandover`](PlannerError::UnownedHandover) -- both say so in
+///   their own doc comments: a pin contradicting a binding is "not about the
+///   world at all", and a handover naming nobody "is a mistake in the method
+///   that wrote the step".
+/// - [`ExpansionTooDeep`](PlannerError::ExpansionTooDeep) -- the depth guard,
+///   which fires on a method expanding into itself.
+/// - [`UnknownTechnology`](PlannerError::UnknownTechnology) -- the borderline
+///   one, and a fault. The name refers to nothing, so no state of the world
+///   makes the goal meaningful: either the script has a typo or the world was
+///   never told about the technology, and both are broken inputs rather than
+///   verdicts. `supervisor.lua` has named "an unknown item or technology" a
+///   construction error since it was written, and this keeps that promise.
+fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
+    use miette::Diagnostic;
+
+    let verdict = match err {
+        PlannerError::NoApplicableMethod { .. }
+        | PlannerError::NoRoomToWork { .. }
+        | PlannerError::ResearchNeedsPower { .. }
+        | PlannerError::UnsupportedResearchTrigger { .. }
+        | PlannerError::SelfUnlockingResearchTrigger { .. }
+        | PlannerError::PreconditionUnsatisfied { .. }
+        | PlannerError::ChainOwnerInfeasible { .. } => true,
+
+        PlannerError::InsufficientItems { .. }
+        | PlannerError::UnknownBot(_)
+        | PlannerError::NoBots
+        | PlannerError::CyclicNetwork(_)
+        | PlannerError::Deadlock { .. }
+        | PlannerError::ChainConflict { .. }
+        | PlannerError::UnownedHandover { .. }
+        | PlannerError::ExpansionTooDeep { .. }
+        | PlannerError::UnknownTechnology { .. } => false,
+    };
+    verdict.then(|| PlanRefusal {
+        // Every variant carries a `#[diagnostic(code(...))]` today. The
+        // fallback exists because the trait allows `None`, and it names no
+        // variant precisely so it can never be mistaken for one.
+        code: err
+            .code()
+            .map_or_else(|| "planner".to_string(), |code| code.to_string()),
+        message: err.to_string(),
+    })
+}
+
+/// A planner failure as a Lua error, with a verdict marked as one.
+///
+/// The single seam between `crates/planner`'s error type and every script:
+/// both places that call the planner (`expand_goal` here, `schedule` in
+/// `plan.rs`) go through it, so a refusal cannot reach Lua by one path
+/// unmarked and by the other marked.
+fn planner_error(err: PlannerError) -> LuaError {
+    match refusal_for(&err) {
+        Some(refusal) => LuaError::external(refusal),
+        None => goal_error(err),
+    }
+}
+
+/// Installs `goal.refusal`: what kind of failure is this error?
+///
+/// The classifier a caller needs to act on the distinction [`refusal_for`]
+/// draws. It answers `nil` for everything that is not a planner verdict --
+/// including a plain string error, an error from any other part of this
+/// surface, and a fault from the planner itself -- because the one answer that
+/// must never be given by accident is "this was only a verdict, carry on".
+fn install_goal_refusal(lua: &Lua, table: &LuaTable) -> LuaResult<()> {
+    table.set(
+        "refusal",
+        lua.create_function(|lua, value: LuaValue| {
+            let LuaValue::Error(err) = &value else {
+                return Ok(LuaValue::Nil);
+            };
+            let Some(refusal) = err.downcast_ref::<PlanRefusal>() else {
+                return Ok(LuaValue::Nil);
+            };
+            let out = lua.create_table()?;
+            out.set("code", refusal.code.as_str())?;
+            out.set("message", refusal.message.as_str())?;
+            Ok(LuaValue::Table(out))
+        })?,
+    )?;
+    Ok(())
 }
 
 /// Poisoning is not a reason to abort: the only thing a panicking holder of one
@@ -352,6 +523,41 @@ end
     )?;
     install_goal_holds(lua, &map_table, plan_world.clone(), roster.clone())?;
 
+    // `goal.refusal`: the classifier that makes a refusal survivable.
+    map_table.set(
+        "__doc_entry_refusal",
+        String::from(
+            r#"
+--- tells a planner verdict from a planner fault
+-- `goal.plan` raises when it cannot plan, and the two reasons it can have are
+-- not the same kind of thing. A **verdict** is a statement about the world:
+-- the goal cannot be reached from here, and the message says why -- no route
+-- to the item, nowhere to stand while mining it, a research whose lab would
+-- have no power. A **fault** is a defect: a method that contradicted itself,
+-- a technology name that refers to nothing, a roster naming a bot the world
+-- has never heard of.
+--
+-- Pass the error a `pcall` caught. A verdict answers with
+-- `{ code = "planner::research_needs_power", message = "automation needs a
+-- lab with ..." }` -- the planner's own diagnostic code, so a caller never
+-- has to match on message text -- and everything else answers `nil`:
+-- a fault, an error from any other call, a plain string. `nil` is the safe
+-- answer, because the one thing that must never happen by accident is a real
+-- bug being read as "only a verdict, carry on".
+--
+-- A loop spanning several goals uses this to record the milestone it could
+-- not plan and finish normally, instead of dying and taking its own record
+-- with it; see `scripts/supervisor.lua`.
+-- @param err the error value a `pcall` around `goal.plan` caught
+-- @treturn table|nil `{ code = ..., message = ... }` for a verdict, `nil` for
+--   anything else
+function goal.refusal(err)
+end
+"#,
+        ),
+    )?;
+    install_goal_refusal(lua, &map_table)?;
+
     // `goal.start` / `goal.run`
     map_table.set(
         "__doc_entry_start",
@@ -555,7 +761,7 @@ fn expand_goal(goal: Goal, world: &Arc<FactorioWorld>, bots: &[BotId]) -> LuaRes
         &registry_for(bots),
         chain_actor,
     )
-    .map_err(goal_error)
+    .map_err(planner_error)
 }
 
 #[cfg(test)]
@@ -1235,7 +1441,8 @@ mod tests {
         lua.load(
             r#"
             local expected = { have=true, researched=true, all=true,
-                               plan=true, run=true, start=true, holds=true }
+                               plan=true, run=true, start=true, holds=true,
+                               refusal=true }
             local actual = {}
             for k, v in pairs(goal) do
                 -- the __doc__ keys are strings consumed by the doc generator
@@ -1859,6 +2066,138 @@ mod tests {
             rec.recorded().len(),
             after_first,
             "the refused second run must not have dispatched anything"
+        );
+    }
+
+    // ------------------------------- a verdict about the world is not a fault
+
+    /// Run 31's own failure, reproduced through the real bindings.
+    ///
+    /// `workspace/runs/run-1788372605-35170/` satisfied six milestones in
+    /// twelve minutes and then asked for `researched("automation")` in a world
+    /// whose plan could show no electric supply at all. The planner refused,
+    /// correctly, and the refusal took the run down with it -- the summary
+    /// printed milestones 1-6 and no `milestone 7` line whatsoever.
+    ///
+    /// `goal.plan` still *raises* it: a caller who ignores a refusal must not
+    /// quietly receive an empty plan instead. What is new is that the raise is
+    /// recognisable -- it carries the planner's own diagnostic code, so a loop
+    /// spanning milestones can tell "this world cannot do that" from "this
+    /// planner is broken" without matching on message text.
+    #[tokio::test]
+    async fn a_research_goal_with_no_power_raises_a_recognisable_refusal() {
+        use factorio_bot_core::types::FactorioForce;
+
+        let world = fixture_world();
+        let force: FactorioForce = factorio_bot_core::serde_json::from_str(RESEARCH_FORCE_JSON)
+            .expect("the research force fixture must parse");
+        world.update_force(force).expect("update_force");
+        seed_players(&world, &[1]);
+
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        lua.set_app_data(crate::lua_runner::PendingWork::default());
+        let table = create_lua_goal_with(
+            &lua,
+            Arc::new(world),
+            factory(Arc::new(StubActuator::new(Failure::Never))),
+            vec![1],
+            None,
+        )
+        .expect("goal table");
+        lua.globals().set("goal", table).expect("install");
+
+        exec_bounded(
+            &lua,
+            r#"
+            local ok, err = pcall(goal.plan, goal.researched("automation"))
+            local refusal = goal.refusal(err)
+            result = { ok = ok, text = tostring(err),
+                       code = refusal and refusal.code,
+                       message = refusal and refusal.message }
+            "#,
+        )
+        .await;
+
+        let result: LuaTable = lua.globals().get("result").expect("result");
+        assert!(
+            !result.get::<bool>("ok").expect("ok"),
+            "a lab with no power cannot be planned; the call must not succeed"
+        );
+        let text: String = result.get("text").expect("text");
+        assert!(
+            text.contains("needs a lab with 60 kW"),
+            "the planner's own sentence must survive to the script: {text}"
+        );
+        assert_eq!(
+            result
+                .get::<Option<String>>("code")
+                .expect("code")
+                .as_deref(),
+            Some("planner::research_needs_power"),
+            "the refusal must be recognisable by the planner's own code, \
+             not by matching the message: {text}"
+        );
+        let message: String = result.get("message").expect("message");
+        assert!(
+            message.starts_with("automation needs a lab"),
+            "the carried message is the planner's sentence, unprefixed, so a \
+             report line can put its own word in front of it: {message}"
+        );
+    }
+
+    /// The negative control, and the reason this is not a catch-all: a
+    /// technology no force defines is a **fault**, so it carries no refusal
+    /// and stays a raise that ends the run.
+    ///
+    /// The name refers to nothing. No amount of mining, building or waiting
+    /// makes `researched("no-such-technology")` mean something, so there is no
+    /// verdict about the world to record -- either the script has a typo or
+    /// the world was never told about the technology, and both are broken
+    /// inputs. `supervisor.lua` has said so since it was written; this pins
+    /// that the classification agrees with it.
+    #[tokio::test]
+    async fn a_technology_no_force_defines_is_a_fault_carrying_no_refusal() {
+        use factorio_bot_core::types::FactorioForce;
+
+        let world = fixture_world();
+        let force: FactorioForce = factorio_bot_core::serde_json::from_str(RESEARCH_FORCE_JSON)
+            .expect("the research force fixture must parse");
+        world.update_force(force).expect("update_force");
+        seed_players(&world, &[1]);
+
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        lua.set_app_data(crate::lua_runner::PendingWork::default());
+        let table = create_lua_goal_with(
+            &lua,
+            Arc::new(world),
+            factory(Arc::new(StubActuator::new(Failure::Never))),
+            vec![1],
+            None,
+        )
+        .expect("goal table");
+        lua.globals().set("goal", table).expect("install");
+
+        exec_bounded(
+            &lua,
+            r#"
+            local ok, err = pcall(goal.plan, goal.researched("no-such-technology"))
+            result = { ok = ok, text = tostring(err), refusal = goal.refusal(err) }
+            "#,
+        )
+        .await;
+
+        let result: LuaTable = lua.globals().get("result").expect("result");
+        assert!(!result.get::<bool>("ok").expect("ok"));
+        let text: String = result.get("text").expect("text");
+        assert!(
+            text.contains("defines no technology"),
+            "the planner's own diagnosis must survive: {text}"
+        );
+        assert_eq!(
+            result.get::<LuaValue>("refusal").expect("refusal"),
+            LuaValue::Nil,
+            "a name that refers to nothing is not a verdict about the world; \
+             calling it one would let a typo end a run quietly: {text}"
         );
     }
 }

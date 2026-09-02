@@ -73,9 +73,29 @@ mod tests {
                 __holds_calls = __holds_calls + 1
                 return __holds
             end
+            -- The Rust classifier's stand-in (`goal.refusal`, `goal/mod.rs`).
+            -- The real one reads a code off the error value; this one answers
+            -- for whatever `goal.plan` raised last, so a test can drive both
+            -- branches without matching on message text -- which is exactly
+            -- what the classifier exists to stop callers doing.
+            --
+            -- The message is run 31's own
+            -- (`workspace/runs/run-1788372605-35170/`), verbatim.
+            __refusal_message = "automation needs a lab with 60 kW of electric supply, and the plan can show only 0 kW"
+            __last_raise_was_a_refusal = false
+            goal.refusal = function(_err)
+                if not __last_raise_was_a_refusal then return nil end
+                return { code = "planner::research_needs_power",
+                         message = __refusal_message }
+            end
             goal.plan = function(_g, _opts)
                 __plan_calls = __plan_calls + 1
                 local n = __plan_steps[__plan_calls]
+                if n == "refuse" then
+                    __last_raise_was_a_refusal = true
+                    error("goal: " .. __refusal_message, 0)
+                end
+                __last_raise_was_a_refusal = false
                 if n == nil then error("stub: no scripted plan #" .. __plan_calls) end
                 if n == "raise" then error("stub: unknown item") end
                 local steps = {}
@@ -744,6 +764,234 @@ mod tests {
         assert!(
             format!("{err}").contains("must be a function"),
             "got: {err}"
+        );
+    }
+
+    // ---- Layer 4: a planner verdict is not a fault ------------------------
+
+    /// **Run 31, and the whole point of this change.**
+    ///
+    /// `workspace/runs/run-1788372605-35170/` satisfied six milestones in
+    /// twelve minutes, asked for `researched("automation")` in a world with no
+    /// electric supply, and the planner refused -- correctly, and with the
+    /// most informative sentence it has ever produced. The raise then went
+    /// straight past this loop: no `_close`, so no history entry, so
+    /// `sup:report()` printed milestones 1-6 and **no `milestone 7` line at
+    /// all**. The run that produced the best result so far is the one whose
+    /// record cannot say what happened to it.
+    ///
+    /// A verdict about the world closes the milestone instead. The run reaches
+    /// a terminal state on its own terms, `record.finish` is handed `stuck`
+    /// rather than `crashed`, and the reason is on the line.
+    #[test]
+    fn a_refusal_closes_the_milestone_instead_of_killing_the_run() {
+        let lua = harness("{'refuse'}", "{}");
+        let (state, plans, runs) = drive(&lua, "{}");
+        assert_eq!(
+            state, "stuck",
+            "a goal this world cannot reach halts the loop; it does not raise \
+             out of it"
+        );
+        assert_eq!(
+            plans, 1,
+            "re-planning a refusal asks the same question of the same world \
+             and gets the same answer; it must not burn the iteration cap \
+             before reporting"
+        );
+        assert_eq!(runs, 0, "nothing was planned, so nothing can be run");
+
+        let report: String = lua.globals().get("__report").expect("__report");
+        assert!(
+            report.contains("milestone 1: stuck"),
+            "the milestone must appear in the summary at all -- its absence is \
+             the defect this closes: {report}"
+        );
+        assert!(
+            report.contains(
+                "refused: automation needs a lab with 60 kW of electric supply, \
+                 and the plan can show only 0 kW"
+            ),
+            "and the summary must carry the planner's own reason: {report}"
+        );
+        assert!(
+            !report.contains("last error"),
+            "nothing failed: no action was dispatched, so calling the refusal \
+             an error would invent one: {report}"
+        );
+        assert_eq!(
+            lua.globals().get::<i64>("__keyframe_calls").unwrap(),
+            1,
+            "a closed milestone is a closed milestone: it gets its keyframe"
+        );
+    }
+
+    /// What the driver sees, which is what reaches the run record.
+    ///
+    /// `Sup:step()` never calls `record.*` itself, so the transition is the
+    /// only channel: `scripts/research_run.lua` reads `t.refusal` and hands
+    /// its message to `record.milestone_stuck`. The code rides along because a
+    /// reader of the record should not have to match on a sentence to know
+    /// which refusal this was.
+    #[test]
+    fn a_refusal_reaches_the_driver_as_a_halt_carrying_the_planners_own_code() {
+        let lua = harness("{'refuse'}", "{}");
+        lua.load(
+            r#"
+            local sup = supervisor.new(supervisor.list {"a"}, {})
+            local seen
+            repeat
+                local t = sup:step()
+                if t.action == "halted" then seen = t end
+            until sup:finished()
+            __action, __state = seen.action, seen.state
+            __code = seen.refusal and seen.refusal.code
+            __message = seen.refusal and seen.refusal.message
+            __steps, __iteration = seen.steps, seen.iteration
+            __first_error = sup.first_error
+            "#,
+        )
+        .exec()
+        .expect("driver runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__action").unwrap(), "halted");
+        assert_eq!(g.get::<String>("__state").unwrap(), "stuck");
+        assert_eq!(
+            g.get::<String>("__code").unwrap(),
+            "planner::research_needs_power",
+            "the planner's own code is what makes this recognisable without \
+             reading the sentence"
+        );
+        assert!(
+            g.get::<String>("__message")
+                .unwrap()
+                .contains("60 kW of electric supply"),
+            "and the sentence is what makes it readable"
+        );
+        assert_eq!(g.get::<i64>("__steps").unwrap(), 0);
+        assert_eq!(
+            g.get::<i64>("__iteration").unwrap(),
+            0,
+            "no plan was ever produced, so no iteration was spent"
+        );
+        assert_eq!(
+            g.get::<Option<String>>("__first_error").unwrap(),
+            None,
+            "`first_error` means the first failed *action*, and no action ran; \
+             a refusal must not put a sentence there and make the run look \
+             like something was dispatched and refused"
+        );
+    }
+
+    /// The negative control for the classification, from this side.
+    ///
+    /// The stub's classifier answers `nil` for anything that was not the
+    /// scripted refusal -- exactly as the real one answers `nil` for a planner
+    /// fault -- and a raise it does not vouch for must still end the run. This
+    /// is what keeps the change from being a catch-all: if this test could not
+    /// go red, the loop would be swallowing genuine bugs and reporting them as
+    /// conditions of the world.
+    #[test]
+    fn a_raise_the_classifier_does_not_vouch_for_still_ends_the_run() {
+        let lua = harness("{'raise'}", "{}");
+        let err = lua
+            .load(
+                "local sup = supervisor.new(supervisor.list {'a'}, {}) \
+                   repeat sup:step() until sup:finished()",
+            )
+            .exec()
+            .expect_err("a fault must propagate even with a classifier present");
+        assert!(
+            format!("{err}").contains("unknown item"),
+            "the original error must survive being caught and re-raised, got: {err}"
+        );
+        assert_eq!(
+            lua.globals().get::<i64>("__plan_calls").unwrap(),
+            1,
+            "a fault must not be retried"
+        );
+    }
+
+    /// And the control for the classifier being absent altogether.
+    ///
+    /// A `goal` table with no `goal.refusal` cannot say a raise was a verdict,
+    /// and the safe reading of "cannot classify" is *fault*: loud, and out of
+    /// the loop. The opposite default would let an old or stubbed binding turn
+    /// every planner bug into a quietly recorded world condition. (This is the
+    /// same rule `goal.plan`'s placement pre-check follows: an absent checker
+    /// must never look like a green answer.)
+    #[test]
+    fn a_goal_table_with_no_classifier_treats_a_raise_as_a_fault() {
+        let lua = sandboxed();
+        lua.load(
+            r#"
+            goal = {}
+            goal.holds = function(_g, _opts) return true end
+            goal.plan = function(_g, _opts) error("goal: something went wrong", 0) end
+            goal.run = function(_plan) return { done = true } end
+        "#,
+        )
+        .exec()
+        .expect("stub installs");
+        lua.load(SUPERVISOR_LUA).exec().expect("supervisor loads");
+        let err = lua
+            .load(
+                "local sup = supervisor.new(supervisor.list {'a'}, {}) \
+                   repeat sup:step() until sup:finished()",
+            )
+            .exec()
+            .expect_err("with nothing to classify the raise, it must propagate");
+        assert!(
+            format!("{err}").contains("something went wrong"),
+            "got: {err}"
+        );
+    }
+
+    /// A refusal that arrives *after* real work must not overwrite the reason
+    /// that work gave.
+    ///
+    /// Milestone 1 plans 5 steps, runs them, one action fails, and the re-plan
+    /// is refused. Both facts belong on the record and they are different
+    /// facts: `first_error` is the first failed action's own text, and the
+    /// refusal is why the milestone closed. Collapsing them would lose
+    /// whichever was written second.
+    #[test]
+    fn a_refusal_after_a_failed_run_keeps_both_reasons_apart() {
+        let lua = harness(
+            "{5, 'refuse'}",
+            "{{failed=1, first_error='no entity to mine'}}",
+        );
+        lua.load(
+            r#"
+            local sup = supervisor.new(supervisor.list {"a"}, {})
+            repeat sup:step() until sup:finished()
+            __state = sup.state
+            __first_error = sup.first_error
+            local h = sup:history()[1]
+            __outcome = h.outcome
+            __refusal = h.refusal and h.refusal.message
+            __report = sup:report()
+            "#,
+        )
+        .exec()
+        .expect("driver runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__state").unwrap(), "stuck");
+        assert_eq!(g.get::<String>("__outcome").unwrap(), "stuck");
+        assert_eq!(
+            g.get::<String>("__first_error").unwrap(),
+            "no entity to mine",
+            "the action that failed keeps its own text"
+        );
+        assert!(
+            g.get::<String>("__refusal")
+                .unwrap()
+                .contains("60 kW of electric supply"),
+            "and the refusal that closed the milestone keeps its own"
+        );
+        let report: String = g.get("__report").unwrap();
+        assert!(
+            report.contains("refused: automation needs a lab"),
+            "the halt's own reason is what the summary leads with: {report}"
         );
     }
 }

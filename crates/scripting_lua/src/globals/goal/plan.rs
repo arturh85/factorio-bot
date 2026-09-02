@@ -19,7 +19,7 @@
 //! is what makes the old mismatch unrepresentable.
 
 use super::value::goal_from_lua;
-use super::{PlacementChecker, expand_goal, goal_error, refuse_unknown_bots};
+use super::{PlacementChecker, expand_goal, goal_error, planner_error, refuse_unknown_bots};
 use factorio_bot_core::factorio::rcon::PlacementQuery;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::mlua::prelude::*;
@@ -478,7 +478,7 @@ async fn plan_verified(
         let state = PlanState::from_world(world.clone(), roster);
         refuse_unknown_bots(&state)?;
         let net = expand_goal(goal.clone(), world, roster)?;
-        let scheduled = schedule(&net, &state, roster).map_err(goal_error)?;
+        let scheduled = schedule(&net, &state, roster).map_err(planner_error)?;
 
         let Some(checker) = checker else {
             return Ok((net, scheduled));

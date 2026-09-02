@@ -9,6 +9,28 @@
 //! two runs are compared on: a headless server and a graphical client with
 //! three cameras do not run at the same speed, so a wall-time comparison
 //! silently compares hardware instead of runs.
+//!
+//! # The outcome vocabulary, and what it does not decide
+//!
+//! An outcome is passed through from the `MilestoneStuck` event **verbatim**:
+//! this module classifies nothing, so the word on a split is whichever word the
+//! driver script used. `Split::outcome`'s own doc lists the five this workspace
+//! writes deliberately -- and a real run has already produced a sixth,
+//! `plan_error`, which `scripts/research_run.lua` records from the outer
+//! `pcall` it uses to close a recording that raised
+//! (`workspace/runs/run-1788372605-35170/splits.json`). That is the fault path,
+//! and it is meant to look unusual.
+//!
+//! A planner **refusal** is not on that path and does not get a word of its
+//! own. When the planner states that a goal cannot be reached from this world
+//! -- "a lab with no power researches nothing at all" -- `scripts/supervisor.lua`
+//! closes the milestone `stuck` and carries the planner's sentence as the
+//! event's `last_error`. `stuck` rather than `stuck_silent`, because that one
+//! means "no progress and nothing to show for it" and a refusal has the reason
+//! to show; and no seventh word, because the vocabulary says *how far a
+//! milestone got*, which is "as far as this world allows", while *what kind* of
+//! stuck it was is data the event already carries. A word nothing consumes is
+//! also a word the viewer has no style for.
 
 use serde::{Deserialize, Serialize};
 
@@ -137,6 +159,33 @@ mod tests {
             vec!["a", "b"]
         );
         assert_eq!(splits[1].elapsed_ticks, Some(60));
+    }
+
+    /// An outcome this module has never heard of still reaches the split.
+    ///
+    /// `plan_error` is what `scripts/research_run.lua` records when the loop
+    /// raised and its outer `pcall` caught it -- it is not in
+    /// `Split::outcome`'s documented list, and run 31
+    /// (`workspace/runs/run-1788372605-35170/splits.json`) has it on milestone
+    /// 7. Deriving splits must not drop, normalise or refuse it: the run that
+    /// ended badly is the one worth reading, and a split that silently
+    /// downgraded its outcome to something familiar would hide exactly that.
+    #[test]
+    fn an_outcome_outside_the_documented_vocabulary_is_passed_through_unchanged() {
+        let splits = derive_splits(&[
+            started(0, "research automation", 41_760),
+            ev(
+                41_760,
+                EventKind::MilestoneStuck {
+                    index: 0,
+                    outcome: "plan_error".into(),
+                    best_steps: None,
+                    last_error: Some("goal: automation needs a lab".into()),
+                },
+            ),
+        ]);
+        assert_eq!(splits[0].outcome, "plan_error");
+        assert_eq!(splits[0].elapsed_ticks, Some(0));
     }
 
     #[test]

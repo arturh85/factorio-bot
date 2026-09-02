@@ -181,17 +181,18 @@ fn the_flags_that_were_already_there_are_unchanged() {
         .expect("request_player_path");
 
     let flags = flags_of_one_request(&lua);
-    assert_eq!(
-        flags
+    assert!(
+        !flags
             .get::<bool>("allow_destroy_friendly_entities")
             .expect("allow_destroy_friendly_entities"),
-        false
+        "a bot must not clear its own buildings to reach a goal"
     );
-    assert_eq!(
+    assert!(
         flags
             .get::<bool>("prefer_straight_paths")
             .expect("prefer_straight_paths"),
-        true
+        "dropping this would change every path in the run while the 12/75 \
+         ratio under test happened to improve"
     );
 }
 

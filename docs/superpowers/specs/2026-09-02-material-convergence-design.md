@@ -113,36 +113,86 @@ for placement geometry: the note explicitly rejected a stand-point model in the
 planner and that rejection stands. Expect this design to make placement
 refusals rarer, not impossible, and do not add planner geometry here.
 
-### 2.3 Symptom 3 — "shares are sized for a roster that does not execute them". **Refuted as stated.**
+### 2.3 Symptom 3 — "shares are sized for a roster that does not execute them". **It happened; the record could not show it; its cause is still not sizing.**
 
-The quoted message does not exist in any run record. Searching every
-`workspace/runs/*/events.jsonl` for `could not have player client<N> craft <n>
-<item> (but only <m>)` returns exactly one distinct string, once:
+I first wrote this section as "refuted", on the strength of the records. That
+was the right method applied to an incomplete archive, and the correction
+matters more than the original claim.
+
+**The three-bot occurrence is real.** The coordinator quoted it from run 25's
+console output, not from memory:
 
 ```
-could not have player client2 craft 3 automation-science-pack (but only 0)
+run-1788351494-76427 (run 25), console log:
+  first error: game rejected the command: Unexpected Response:
+  ["could not have player client3 craft 4 automation-science-pack (but only 0)"]
 ```
 
-in `run-1788338409-63794`, whose `run_started.bots` is `[1, 2, 3, 4]` — a
-**four**-bot roster, not three. There is no `client3`, no `craft 4`, and no
-three-bot occurrence: the one three-bot run in the tree
-(`run-1788351494-76427`) records no such error at all and finished milestone 6's
-pack crafts as a clean 3-step 1/1/1 plan.
+**It is absent from that run's `events.jsonl` because of a different defect,
+since fixed.** Run 25's binary predates `fcb4ed68` — *"fix(record): settle every
+action, including the ones nobody heard back about"*. Counted from the record
+itself: **102 `action_dispatched` against 98 `action_settled`, and all 98 carry
+`"status":"success"`.** Four actions simply vanish. The settle was written
+inside `if let Some(replied) = replied`, and `replied_tick` is legitimately
+`None` when the game never answered — so a craft the game rejected had no way
+to be represented at all. The `milestone_stuck` the run *does* record for
+milestone 6 names a much later and unrelated failure (`bot 1, bot 2, bot 3 are
+not connected players in this world`), which is what a reader mining that file
+would wrongly take for the milestone's cause.
 
-And that message's cause is already diagnosed and fixed.
-`docs/superpowers/notes/2026-09-02-craft-ingredients.md` proves from
-`samples.jsonl` that **every bot held both ingredients** at the moment the game
-said zero; the failure was *ordering*, not sizing — the recipe was locked, three
-sibling shares carried no `Condition::Researched`, and `schedule` put them at
+So the correct statement is: **the symptom occurred, on a three-bot roster, and
+the record could not show it.** Searching the records was right; the records
+were blind for that window.
+
+**What survives from the original correction, unchanged:** the *other* recorded
+instance — `could not have player client2 craft 3 automation-science-pack (but
+only 0)` in `run-1788338409-63794`, a four-bot roster — was **not** a sizing
+failure. `docs/superpowers/notes/2026-09-02-craft-ingredients.md` proves from
+`samples.jsonl` that every bot held both ingredients at the moment the game said
+zero; the failure was *ordering* — the recipe was locked, three sibling shares
+carried no `Condition::Researched`, and `schedule` put them at
 `planned_start: 0` before the lab existed. Commit `21a1228a` added
-`RecipeGate::PlannedResearch` for exactly this.
+`RecipeGate::PlannedResearch` for exactly that. A message of this shape means
+"the game refused a craft"; it does not by itself say whether the cause was
+ordering or sizing, and the two have different fixes.
 
-There *was* a real share-sizing-versus-roster defect, but it is a different one:
-the rung-3/4 finding where the scheduler bound a share's chain to whichever bot
-was cheapest rather than the one its bill was sized against. That was fixed on
-2026-09-02 by giving a `Holder::Share` chain an owner, at a measured cost of
-22,072 ticks of lost concurrency — which is a large part of why symptom 1 is as
-bad as it is. **This spec must not undo that**; see §9.
+There *is* a real share-sizing-versus-roster defect on the record, and it is a
+third thing again: the rung-3/4 finding where the scheduler bound a share's
+chain to whichever bot was cheapest rather than the one its bill was sized
+against. That was fixed on 2026-09-02 by giving a `Holder::Share` chain an
+owner, at a measured cost of 22,072 ticks of lost concurrency — which is a
+large part of why symptom 1 is as bad as it is. **This spec must not undo
+that**; see §9.
+
+Either way, the design is unaffected: convergence is not proposed as the fix
+for a craft the game refused. It is proposed for the distribution in §2.1,
+which is read off `plan_created` payloads — see §2.3.1 for why that distinction
+is load-bearing.
+
+### 2.3.1 Evidence hygiene: which side of `fcb4ed68` a run falls on
+
+**A run record written before `fcb4ed68` cannot be used to prove that a failure
+did not happen.** Failed actions, and actions the game never answered, did not
+settle at all: they left a `action_dispatched` with no matching
+`action_settled`, and every settle that *was* written said `success`. An
+archive read naively therefore reports a flawless run that crashed.
+
+Rules for anyone mining `workspace/runs/` later, this spec's own stages
+included:
+
+* **Check `git log` for the run's binary before quoting an absence.** Runs
+  before `fcb4ed68` are suspect; runs after it are not.
+* **Compare the two counts first.** `grep -c '"kind":"action_dispatched"'`
+  against `grep -c '"kind":"action_settled"'`. Equal counts mean the window is
+  trustworthy; a gap is exactly the number of verdicts that were lost. Run 25's
+  gap is four.
+* **Absence of a verdict is not absence of a problem.** This is the fifth time
+  today that reading has cost something, and it cuts both ways — the coordinator
+  hit it from one side, this spec's first draft from the other.
+* **`plan_created` was never affected.** It is written at planning time, carries
+  the whole DAG, and does not depend on anything settling. Distributions,
+  makespans and dependency edges read from it are sound on both sides of the
+  commit; only *outcomes* are not.
 
 ### 2.4 The underlying claim — "no bot can hand an item to another". **Confirmed, and it is a fact about the game, not a gap in this code.**
 
@@ -612,6 +662,16 @@ Two deliberate approximations, both erring toward *not* converging:
 The middle row is the whole point: the note measured 8,280 of bot 1's 15,922
 ticks as mining, and this is the rule that spreads it.
 
+**None of this arithmetic comes from a failure record, so §2.3's correction does
+not move it.** Every input above is either a `plan_created` payload (step
+counts, makespans, dependency edges, per-bot assignment) or game data
+(`recipe.lua`, mining and recipe ticks) — both written at planning time and
+neither dependent on an action settling. The pre-`fcb4ed68` settlement gap
+(§2.3.1) therefore leaves G4 and G5 exactly as computed. What a corrected record
+*could* change is §12's failure table and stage 3's urgency, since those are
+about what happens when an action does not complete — and they are argued from
+source, not from counts.
+
 ## 8. What happens if the consumer never arrives
 
 **Today: the items are lost to the planner, and the replan re-mines them.** This
@@ -865,3 +925,9 @@ window they widen is the one the furnace path already has.
    of the bill, stage 2 may buy little for 8 plates and an obstacle. Stage 1's
    measured distribution is the input to that decision, and stage 2 should not
    be written before it exists.
+8. **What else the pre-`fcb4ed68` archive is hiding.** Run 25 lost four
+   verdicts out of 102 and reported the remaining 98 as uniformly successful
+   (§2.3.1). Every run older than that commit has the same blind spot, of an
+   unknown size, and this spec's stage-1 acceptance criteria deliberately live
+   in `cargo test` rather than in a run record for that reason. The first live
+   run *after* stage 1 is the first one whose failures can be trusted to appear.

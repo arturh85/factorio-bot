@@ -390,3 +390,33 @@ its teleport lane is empty for that reason rather than for want of teleports.
 **Operational consequence:** the 1500 s run timeout was sized when bots
 teleported. It is now too short for a four-bot ladder that genuinely walks;
 future runs need longer, or a smaller ladder per run.
+
+## Run 10 — a failure that reports itself (~06:00)
+
+`run-1788313837-06402`. Rung 1 stuck after 7 iterations, but the *shape* of the
+failure is the win:
+
+```
+ERROR: could not start mining for 301 ticks: another character is standing on the iron-ore
+```
+
+Named cause, in **2,391 ticks**. The same class of problem in run 9 hung for
+360 s per plan, three times, and said nothing — the bounded mining timeout
+landed since. `map.jsonl` is 582 bytes rather than 0, so the start-of-run
+keyframe works and an early-failing run now records a map.
+
+The defect is the gap the tile-reservation author flagged in writing: **the tile
+selector has no occupancy notion.** Before reservation, four bots raced for one
+tile and the loser failed cleanly; now they are spread across adjacent tiles and
+physically block each other. A bot mining tile A has to stand somewhere, and
+that somewhere is tile B.
+
+## Two operational corrections
+
+The CLI offers `FACTORIO_BOT_REFRESH_MODS=1`, `FACTORIO_BOT_REFRESH_SCRIPTS=1`
+and `FACTORIO_BOT_REFRESH_PLANS=1` — a supported per-file refresh. I have been
+doing this by hand with `cp` and `rm -rf`, badly, and missing a copy.
+
+There is also a **third** copy, `workspace/plans`, holding the same 15 script
+files, and it has been stale all night. Whether anything reads it is unchecked —
+worth establishing rather than assuming it is vestigial.

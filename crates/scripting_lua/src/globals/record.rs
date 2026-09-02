@@ -13,6 +13,7 @@
 //! recent reply the game sent us, which is as current as the last command
 //! issued and honestly `null` before there has been one.
 
+use super::position_from_lua;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::parking_lot::Mutex;
@@ -633,6 +634,12 @@ end
 -- for is not recorded -- it cannot be placed in time, and placing it anywhere
 -- would be an invention. An action that *was* dispatched and never settled is
 -- recorded as the dispatch alone, which is a real state and one worth seeing.
+--
+-- The dispatch also carries `target`, when the action has one: the tile or
+-- position the plan sent the bot to, straight from the plan rather than
+-- anything the game reported back. `nil` for a `craft`/`research` action,
+-- which act nowhere in particular -- never for a `mine`/`place`/`insert`/
+-- `remove` action just because nothing was observed about it yet.
 -- @tparam table steps `plan.steps`
 -- @tparam table actions `observation.actions`
 -- @treturn number how many events were written
@@ -670,6 +677,21 @@ end
                     let replied: Option<u64> = observed.get("replied_tick")?;
                     let error: Option<String> = observed.get("error")?;
                     let placed: Option<LuaTable> = observed.get("placed")?;
+                    // `nil` here means "this action has no target" -- `build_observation`
+                    // (`crates/scripting_lua/src/globals/goal/run.rs`) only omits the key
+                    // for `craft`/`research`, which really do act on no location, never
+                    // for a `mine`/`place`/`insert`/`remove` it merely has not observed
+                    // anything about yet. It is the planner's intent, not the game's
+                    // answer -- see `ActionKind::target_position`'s doc for why. Read
+                    // field-by-field via `position_from_lua`, not `lua.to_value`/
+                    // `from_value`, so a resource tile's half-tile centre passes through
+                    // exactly as the plan set it rather than being rounded by a serde
+                    // bridge on the way.
+                    let target: Option<LuaTable> = observed.get("target")?;
+                    let target = target
+                        .as_ref()
+                        .map(|t| position_from_lua(t, "target"))
+                        .transpose()?;
 
                     if let Some(dispatched) = dispatched {
                         recorder
@@ -679,7 +701,7 @@ end
                                     id,
                                     bot,
                                     action: label,
-                                    target: None,
+                                    target,
                                 },
                             )
                             .map_err(record_error)?;
@@ -1403,6 +1425,71 @@ mod tests {
             read_map(&run_dir).is_empty(),
             "an action that placed nothing must not appear in map.jsonl"
         );
+    }
+
+    // ------------------------------------------------ action_dispatched target
+
+    #[test]
+    fn a_target_on_the_observed_action_reaches_the_dispatched_event() {
+        // Drives the real `record.actions` path end to end: the Lua script
+        // shapes `observation.actions` exactly the way `build_observation`
+        // (`crates/scripting_lua/src/globals/goal/run.rs`) does, and this
+        // checks what actually lands in `events.jsonl`, not just that some
+        // conversion function agrees with itself.
+        //
+        // The position is a resource tile's real centre -- `(-40.5, -48.5)`,
+        // never `(-41, -49)` -- so a regression that floors it anywhere on
+        // the way from Lua to `EventKind::ActionDispatched` fails this test
+        // rather than passing it by coincidence.
+        let (lua, _tmp, run_dir) = recording_lua();
+        lua.load(
+            r#"
+            local steps = { { id = 1, bot = 2, label = "mine iron-ore" } }
+            local actions = {
+                [1] = {
+                    status = "success",
+                    dispatched_tick = 10,
+                    target = { x = -40.5, y = -48.5 },
+                },
+            }
+            record.actions(steps, actions)
+            "#,
+        )
+        .exec()
+        .expect("record.actions runs");
+
+        let events = read_events(&run_dir);
+        match &events[0] {
+            EventKind::ActionDispatched { target, .. } => {
+                assert_eq!(*target, Some(Position::new(-40.5, -48.5)));
+            }
+            other => panic!("expected action_dispatched, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_observed_action_with_no_target_key_records_none_not_a_guess() {
+        // `build_observation` never sets a `target` key for `craft`/
+        // `research` -- this is that omission's shape on the Lua side, and it
+        // must read back as `None`, never a zeroed or guessed position.
+        let (lua, _tmp, run_dir) = recording_lua();
+        lua.load(
+            r#"
+            local steps = { { id = 1, bot = 2, label = "craft iron-gear-wheel" } }
+            local actions = {
+                [1] = { status = "success", dispatched_tick = 10 },
+            }
+            record.actions(steps, actions)
+            "#,
+        )
+        .exec()
+        .expect("record.actions runs");
+
+        let events = read_events(&run_dir);
+        match &events[0] {
+            EventKind::ActionDispatched { target, .. } => assert_eq!(*target, None),
+            other => panic!("expected action_dispatched, got {other:?}"),
+        }
     }
 
     #[test]

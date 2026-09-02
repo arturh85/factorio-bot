@@ -523,7 +523,8 @@
                     "type": "null"
                   },
                   {
-                    "$ref": "#/components/schemas/Position"
+                    "$ref": "#/components/schemas/Position",
+                    "description": "Where the plan sent this action, if it sends it anywhere.\n\n`None` for a `craft`/`research` action, which act on no location --\na true absence, not a gap in what was recorded. Every `mine`,\n`place`, `insert` or `remove` action carries a real position here,\nalways, so `None` can never be read as \"we failed to observe the\ntarget\" for those four.\n\nThis is the **planner's intent**, not the game's resolution: it\ntravels straight from `ActionKind::target_position()`\n(`crates/planner/src/action.rs`), computed before the action ever\nreaches the game. Only a `place` action has a game-side answer to\ncompare it against at all -- `RconActuator::place` hands back the\nentity the game actually created, recorded separately as this run's\n`map.jsonl` `placed` line (`actual`, next to `intent`, which is the\nsame position as this field) -- so a bot sent to a tile the planner\nchose that the game resolved elsewhere shows up as a mismatch\nbetween the two records, not inside this one field."
                   }
                 ]
               }

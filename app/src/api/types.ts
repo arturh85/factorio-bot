@@ -656,6 +656,9 @@ export type EventKind =
           id: number;
           bot: number;
           action: string;
+          /** Where the plan sent this action -- the planner's intent, not the
+           *  game's resolution. `null` for `craft`/`research`, which act on
+           *  no location; always present for `mine`/`place`/`insert`/`remove`. */
           target: Position | null;
       }
     | {

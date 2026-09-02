@@ -114,6 +114,18 @@ fn status_name(status: Status) -> &'static str {
 /// `observed_start` would have quietly given the estimate the measured name
 /// this observation surface has always refused it.
 ///
+/// # `target` is a third kind, and it is not a tick at all
+///
+/// `target` is `ActionKind::target_position()` -- a plan fact, known the
+/// instant the network exists, not something the game reports. It is `nil`
+/// for `Craft`/`Research` (they act on no location) and a real table for
+/// `Mine`/`Place`/`Insert`/`Remove`, always, regardless of `attempt` or
+/// `status`: unlike the tick fields, there is no "not yet observed" state to
+/// distinguish it from, so `nil` here means exactly one thing. It is the
+/// planner's intent, not the game's resolution -- see `target_position`'s own
+/// doc for why only `Place` has a game-side answer to prefer over the intent,
+/// and why the other three use the intent instead.
+///
 /// # `walks` is a separate array because a walk has no action id
 ///
 /// The scheduler emits a walk as its own `StepKind`, not as an `Action`, so it
@@ -188,6 +200,19 @@ fn build_observation(
         // `map.jsonl`'s `placed` lines.
         if let Some(placed) = attempt.and_then(|a| a.placed.as_ref()) {
             t.set("placed", placement_to_lua(lua, placed)?)?;
+        }
+        // Where this action acts, from the plan itself -- known the moment
+        // the network exists, unlike the tick fields above, so it is not
+        // conditioned on `attempt` at all. `nil` for `Craft`/`Research`,
+        // which act nowhere in particular; a real table for the other four,
+        // always -- so `nil` here keeps meaning "this action has no target",
+        // never "we failed to observe one". See `ActionKind::target_position`
+        // for why this is the planner's intent, not the game's answer, and
+        // for the resource-tile half-tile-centre requirement that a
+        // `record.actions` reader (`crates/scripting_lua/src/globals/record.rs`)
+        // must not undo.
+        if let Some(target) = action.kind.target_position() {
+            t.set("target", position_to_lua(lua, &target)?)?;
         }
         actions.set(id.0, t)?;
 
@@ -769,6 +794,70 @@ mod tests {
         assert!(
             nothing.is_nil(),
             "an action that placed nothing must carry no `placed` key at all, got {nothing:?}"
+        );
+    }
+
+    /// `target` comes straight from `ActionKind::target_position()` -- known
+    /// the instant the network exists, not from `attempt`/the actuator -- so
+    /// this drives `build_observation` against a hand-built network with no
+    /// log entries at all (every action stays `Pending`), which is exactly
+    /// what would make `dispatched_tick`/`placed` absent while `target` must
+    /// not be.
+    ///
+    /// The mine action's position is a resource tile's real centre,
+    /// `(-40.5, -48.5)`, never `(-41, -49)` -- see
+    /// `EntityGraph::resource_patches`'s own comment. `target_position` must
+    /// pass that straight through; a regression that floors it anywhere along
+    /// the way would corrupt exactly the field this test exists to check.
+    #[test]
+    fn target_is_the_plans_intent_present_for_a_located_action_and_nil_for_craft() {
+        let mine_id = ActionId(1);
+        let craft_id = ActionId(2);
+        let mut net = ActionNetwork::new();
+        net.add(Action {
+            id: mine_id,
+            kind: ActionKind::Mine {
+                pos: Position::new(-40.5, -48.5),
+                item: "iron-ore".into(),
+                count: 1,
+            },
+            pre: vec![],
+            eff: vec![],
+            duration: 60,
+            pinned: None,
+            label: "mine iron-ore".into(),
+        });
+        net.add(Action {
+            id: craft_id,
+            kind: ActionKind::Craft {
+                item: "iron-gear-wheel".into(),
+                count: 1,
+            },
+            pre: vec![],
+            eff: vec![],
+            duration: 30,
+            pinned: None,
+            label: "craft iron-gear-wheel".into(),
+        });
+        let net = Arc::new(net);
+        let log = ExecutionLog::default();
+
+        let lua = observing_lua();
+        let obs = build_observation(&lua, &net, &log, false, None).expect("observation");
+        let actions: LuaTable = obs.get("actions").expect("actions");
+
+        let mined: LuaTable = actions.get(mine_id.0).expect("mine action entry");
+        let target: LuaTable = mined.get("target").expect("target field");
+        let x: f64 = target.get("x").expect("x");
+        let y: f64 = target.get("y").expect("y");
+        assert_eq!(x, -40.5, "the tile centre, not its floored corner");
+        assert_eq!(y, -48.5, "the tile centre, not its floored corner");
+
+        let crafted: LuaTable = actions.get(craft_id.0).expect("craft action entry");
+        let nothing: LuaValue = crafted.get("target").expect("target field");
+        assert!(
+            nothing.is_nil(),
+            "craft acts on no location, so target must be nil, got {nothing:?}"
         );
     }
 

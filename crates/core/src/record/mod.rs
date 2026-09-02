@@ -97,6 +97,24 @@ pub enum EventKind {
         id: u32,
         bot: u32,
         action: String,
+        /// Where the plan sent this action, if it sends it anywhere.
+        ///
+        /// `None` for a `craft`/`research` action, which act on no location --
+        /// a true absence, not a gap in what was recorded. Every `mine`,
+        /// `place`, `insert` or `remove` action carries a real position here,
+        /// always, so `None` can never be read as "we failed to observe the
+        /// target" for those four.
+        ///
+        /// This is the **planner's intent**, not the game's resolution: it
+        /// travels straight from `ActionKind::target_position()`
+        /// (`crates/planner/src/action.rs`), computed before the action ever
+        /// reaches the game. Only a `place` action has a game-side answer to
+        /// compare it against at all -- `RconActuator::place` hands back the
+        /// entity the game actually created, recorded separately as this run's
+        /// `map.jsonl` `placed` line (`actual`, next to `intent`, which is the
+        /// same position as this field) -- so a bot sent to a tile the planner
+        /// chose that the game resolved elsewhere shows up as a mismatch
+        /// between the two records, not inside this one field.
         target: Option<Position>,
     },
     /// An action reached a verdict.

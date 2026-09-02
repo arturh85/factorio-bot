@@ -326,6 +326,41 @@ pub enum ActionKind {
     },
 }
 
+impl ActionKind {
+    /// Where this action acts, if it acts anywhere in particular.
+    ///
+    /// `None` for `Craft` and `Research`: neither touches a tile, so the
+    /// absence is a true fact about the action, not a gap in what the
+    /// planner knows. Every other variant already carries the position it
+    /// needs to do its job -- this just names which field that is, so a
+    /// caller does not have to match on the kind itself to ask "where".
+    ///
+    /// The position returned is the **planner's intent**, straight out of the
+    /// plan -- not what the game later reports. Only `Place` has a game-side
+    /// answer at all (`RconActuator::place`'s `entity`, carried separately as
+    /// `Attempt::placed.actual`); `Mine`/`Insert`/`Remove` name an existing
+    /// entity or tile by position and the game never echoes one back, so
+    /// there is nothing to prefer over the intent for them, and using the
+    /// same field for all four keeps this method's answer meaning one thing.
+    ///
+    /// For `Mine`, `pos` already carries a resource tile's *centre*
+    /// (`resource_tiles_for` -> `EntityGraph::resource_patches` restores the
+    /// `.5` offset that tile's flooring `Pos` key would otherwise lose --
+    /// see that function's own comment). This method must keep passing it
+    /// through unchanged: rounding or flooring it here would reintroduce
+    /// exactly the corner-vs-centre bug that once made mining fail on every
+    /// map while every test passed.
+    pub fn target_position(&self) -> Option<Position> {
+        match self {
+            ActionKind::Mine { pos, .. }
+            | ActionKind::Insert { pos, .. }
+            | ActionKind::Remove { pos, .. } => Some(pos.clone()),
+            ActionKind::Place { entity } => Some(entity.position.clone()),
+            ActionKind::Craft { .. } | ActionKind::Research { .. } => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Action {
     pub id: ActionId,
@@ -549,6 +584,71 @@ mod tests {
         // Research is global, not per bot, so the binding is irrelevant.
         assert!(cond.holds(&s, BotId(2)));
         assert!(!Condition::Researched("logistics".into()).holds(&s, BotId(1)));
+    }
+
+    #[test]
+    fn target_position_is_none_for_craft_and_research_and_some_for_the_rest() {
+        let pos = Position::new(-40.5, -48.5);
+        assert_eq!(
+            ActionKind::Mine {
+                pos: pos.clone(),
+                item: "iron-ore".into(),
+                count: 1,
+            }
+            .target_position(),
+            Some(pos.clone()),
+            "a resource tile's real centre, not a floored corner"
+        );
+        assert_eq!(
+            ActionKind::Insert {
+                pos: pos.clone(),
+                entity: "stone-furnace".into(),
+                slot: InventorySlot::FurnaceSource,
+                item: "iron-ore".into(),
+                count: 1,
+            }
+            .target_position(),
+            Some(pos.clone())
+        );
+        assert_eq!(
+            ActionKind::Remove {
+                pos: pos.clone(),
+                entity: "stone-furnace".into(),
+                slot: InventorySlot::FurnaceResult,
+                item: "iron-plate".into(),
+                count: 1,
+            }
+            .target_position(),
+            Some(pos.clone())
+        );
+        assert_eq!(
+            ActionKind::Place {
+                entity: Box::new(FactorioEntity {
+                    name: "stone-furnace".into(),
+                    position: pos.clone(),
+                    ..Default::default()
+                }),
+            }
+            .target_position(),
+            Some(pos)
+        );
+        assert_eq!(
+            ActionKind::Craft {
+                item: "iron-gear-wheel".into(),
+                count: 1,
+            }
+            .target_position(),
+            None,
+            "crafting acts on no location"
+        );
+        assert_eq!(
+            ActionKind::Research {
+                tech: "automation".into(),
+            }
+            .target_position(),
+            None,
+            "research acts on no location"
+        );
     }
 
     #[test]

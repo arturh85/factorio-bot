@@ -77,24 +77,70 @@ pub const PIPE_COUNT: u32 = 3;
 /// number.
 pub const PLANT_COAL: u32 = 5;
 
-/// How far from the acting bot the plant may be sited, in tiles.
+/// How far [`plan_plant`] looks for water before paying for a wider read, in
+/// tiles.
 ///
-/// The same bound `PlanState::electric_supply_kw` and `Researched`'s lab
-/// search already use, and for a sharper reason here: everything the plant
-/// needs is carried to it — the pump, the pipes, the boiler, the engine, the
-/// pole, five coal, the lab and ten science packs — and everything it is made
-/// of is mined somewhere else.
-const PLANT_SITE_RADIUS: f64 = 64.;
+/// **A scan bound, not a policy bound.** Water found beyond it is still built
+/// against ([`PLANT_WATER_WIDE_SCAN_RADIUS`]); all this number decides is how
+/// much terrain is read on the common path.
+///
+/// # It used to refuse, and the refusal was wrong
+///
+/// This constant was called `PLANT_SITE_RADIUS`, and its own doc said it was
+/// "the same bound `PlanState::electric_supply_kw` and `Researched`'s lab
+/// search already use". Those two are about a **pole's supply area**, which is
+/// a physical constant of the game. This one guarded a **walk**, which is a
+/// cost. One number stood for two unrelated quantities, and the walk half of
+/// it was never derived from anything.
+///
+/// Run `run-1788379071-00467` is what that cost. It satisfied rungs 1-6 and
+/// refused rung 7 with *"the nearest water is 67.8 tiles away, and a power
+/// plant may not be sited more than 64 tiles from the bot that has to carry
+/// it there"* -- short by 3.8 tiles. Off that same run's `samples.jsonl`,
+/// every bot in it had already been further from spawn than the water was:
+/// 68.8, 69.9, 72.5 and 71.5 tiles. The bound refused a journey the run was
+/// making routinely, in the run it refused.
+///
+/// # Why no cap replaced it
+///
+/// The walk is **already priced**. Every part of the plant carries a
+/// `Condition::AtPosition` at the plant site, so [`crate::schedule`] emits a
+/// walk for it and charges `distance / WALK_TILES_PER_TICK` -- 0.15 tiles per
+/// tick, so 67.8 tiles is 452 ticks. Against run 32's own clock (40,775 ticks
+/// to reach rung 7), a plant at 64 tiles costs 2.1% of the run in walking, at
+/// 128 tiles 4.2%, at 256 tiles 8.4%. None of those is "the bot spends the
+/// run walking", and no measurement says where that line is -- so the planner
+/// does not pretend to know one. A distant plant is a *worse plan*, and a
+/// worse plan is what a makespan is for.
+///
+/// The number itself is unchanged at 64 because nothing about the cheap scan
+/// changed; raising it would only move work from the second tier into the
+/// first.
+const PLANT_WATER_SCAN_RADIUS: f64 = 64.;
 
-/// How far the search looks when it wants to *report* a distance it will then
-/// refuse, in tiles.
+/// How far [`plan_plant`] looks when the cheap scan found nothing, in tiles.
 ///
-/// A refusal that says "the nearest water is 210 tiles away" is worth more
-/// than one that says "no water within 64", and this is what buys the number.
-/// It is deliberately not the siting radius: reading tiles is linear in the
-/// area, a fully charted map carries ~410,000 water tiles since `fa8dabf3`,
-/// and this pass runs only on the path that is about to fail anyway.
-const PLANT_REPORT_RADIUS: f64 = 128.;
+/// This tier used to exist only to write a better epitaph -- it measured a
+/// distance the planner was about to refuse anyway. It now *finds the water
+/// the plant is built against*, which makes it the only remaining bound on
+/// where a plant may go, so it has to carry its own justification rather than
+/// inherit the one the refusal used to have.
+///
+/// **It is a read-cost bound.** `nearest_water_tile` is linear in the tiles
+/// the quad tree holds inside a `2R`-by-`2R` box, and a fully charted map
+/// carries ~410,000 water tiles since `fa8dabf3`. At 128 that box is 65,536
+/// tiles, read once, and only on the path that would otherwise have nothing to
+/// offer; at 256 it is 262,144, four times the cost for a benefit that is
+/// speculative -- water further out is water the game may not have charted at
+/// all, since the planner only ever sees the chunks it has been sent. The cost
+/// grows as `R^2`; the chance of a lake appearing in the new ring does not.
+///
+/// So the refusal that survives is [`PlannerError::PowerPlantNeedsWater`], and
+/// it names this radius. "The plan can see no water within 128 tiles" is a
+/// statement about what was looked at -- true, and actionable -- rather than a
+/// statement about what is allowed, which is what the old bound claimed and
+/// could not support.
+const PLANT_WATER_WIDE_SCAN_RADIUS: f64 = 128.;
 
 /// How far around the nearest water tile a shoreline is looked for, in tiles.
 ///
@@ -367,18 +413,22 @@ pub fn plan_plant(state: &PlanState, from: &Position) -> Result<Plant, PlannerEr
     // The narrow search first, and the wide one **only** when it fails.
     // `nearest_water_tile` is linear in the tiles inside its radius, and since
     // `fa8dabf3` a fully charted map carries ~410,000 water tiles: reading a
-    // 256-by-256 box on every expansion to buy a sentence for the failing case
-    // would charge every successful plan for it.
-    let Some(water) = state.nearest_water_tile(from, PLANT_SITE_RADIUS) else {
-        return Err(match state.nearest_water_tile(from, PLANT_REPORT_RADIUS) {
-            Some(distant) => PlannerError::PowerPlantTooFarFromWater {
-                distance: calculate_distance(&tile_centre(&Pos::from(&distant.position)), from),
-                limit: PLANT_SITE_RADIUS,
-            },
-            None => PlannerError::PowerPlantNeedsWater {
-                radius: PLANT_REPORT_RADIUS,
-            },
-        });
+    // 256-by-256 box on every expansion would charge every successful plan for
+    // a case that almost never arises.
+    //
+    // The second tier *builds against* what it finds. It used to only measure
+    // it and then refuse -- see `PLANT_WATER_SCAN_RADIUS` for the run that
+    // cost, and for why a longer walk is a worse plan rather than an
+    // impossible one. Both tiers order candidates the same way, so a lake at
+    // 60 tiles is preferred over one at 100 by the first tier ever seeing it,
+    // not by any comparison here.
+    let water = match state.nearest_water_tile(from, PLANT_WATER_SCAN_RADIUS) {
+        Some(near) => near,
+        None => state
+            .nearest_water_tile(from, PLANT_WATER_WIDE_SCAN_RADIUS)
+            .ok_or(PlannerError::PowerPlantNeedsWater {
+                radius: PLANT_WATER_WIDE_SCAN_RADIUS,
+            })?,
     };
     let anchor = Pos::from(&water.position);
     let distance = calculate_distance(&tile_centre(&anchor), from);
@@ -985,21 +1035,120 @@ mod tests {
         );
     }
 
+    /// The wide tier measures from the **bot**, not from the origin.
+    ///
+    /// The whole justification for removing the distance refusal is that the
+    /// walk is priced -- and that is only worth anything if the plant is put
+    /// on the water the walk is shortest to. This is the test that says so,
+    /// and it needs two lakes because the shared fixture has one: with a
+    /// single lake, a wide scan anchored on the origin and a wide scan
+    /// anchored on the bot pick the same tile and no assertion can tell them
+    /// apart.
+    ///
+    /// The bot stands at (0, 200). The near lake is at (0, 270) -- 70 tiles
+    /// away, past the cheap scan and inside the wide one, and 270 tiles from
+    /// the origin, so an origin-anchored search cannot see it at all. The
+    /// fixture's own lake at (40, 40) is 165 tiles from the bot and invisible
+    /// to it, but 57 tiles from the origin and so the *first* thing an
+    /// origin-anchored search would find. The two anchors therefore disagree,
+    /// and the assertion names which one is right.
     #[test]
-    fn water_beyond_the_siting_radius_is_refused_with_the_distance() {
-        let s = state();
-        // The fixture's lake is ~54 tiles from the origin; from far enough
-        // away it is still *visible* (the report radius is wider) but too far
-        // to site against, and the refusal carries the number.
-        let err = plan_plant(&s, &Position::new(-40., 40.))
-            .expect_err("80 tiles of separation is past the limit");
-        let PlannerError::PowerPlantTooFarFromWater { distance, limit } = err else {
-            panic!("expected PowerPlantTooFarFromWater, got {err:?}");
-        };
-        assert_eq!(limit, PLANT_SITE_RADIUS);
+    fn the_wide_scan_is_anchored_on_the_bot() {
+        let near_lake = Position::new(0., 270.);
+        let bot = Position::new(0., 200.);
+        let world = fixture_world();
+        let mut tiles = Vec::new();
+        factorio_bot_core::test_utils::spawn_water(
+            &mut tiles,
+            factorio_bot_core::factorio::util::add_to_rect(
+                &factorio_bot_core::types::Rect::from_wh(4., 4.),
+                &near_lake,
+            ),
+        );
+        world.update_chunk_tiles(tiles).expect("a second lake");
+        let s = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+
+        let plant = plan_plant(&s, &bot).expect("the near lake is inside the wide scan");
+        let pump = plant
+            .parts
+            .iter()
+            .find(|p| p.name == PUMP)
+            .expect("a plant has a pump");
+        let edge_of_that_lake = 2. + f64::from(SHORE_SEARCH_RADIUS);
         assert!(
-            distance > PLANT_SITE_RADIUS,
-            "the refusal has to name a distance that actually exceeds the limit, got {distance}"
+            calculate_distance(&pump.position, &near_lake) <= edge_of_that_lake,
+            "the pump landed at {}, which is not the lake nearest the bot",
+            pump.position
+        );
+    }
+
+    /// The negative control for
+    /// `water_past_the_cheap_scan_is_built_against_rather_than_refused`:
+    /// widening the search must not have changed *which water* a plant is
+    /// built on.
+    ///
+    /// The fixture has exactly one lake, a four-by-four block centred on
+    /// (40, 40). Both anchors below must land a pump on **that** lake's edge,
+    /// so the second tier is reaching further to find the same water rather
+    /// than finding different water.
+    ///
+    /// **The two plants are not identical, and should not be.** From (0, 0)
+    /// the nearest tile of that lake is its north-west corner and the plant
+    /// goes on the north shore; from (-40, 40) it is the west edge and the
+    /// plant goes on the west shore. `nearest_water_tile` orders by distance
+    /// from the bot, so the plant is built on the side the bot approaches
+    /// from -- which is the behaviour to want, and is why this asserts a lake
+    /// rather than a `Plant`.
+    #[test]
+    fn the_wide_scan_finds_the_same_lake_the_cheap_one_does() {
+        let lake = Position::new(40., 40.);
+        // The lake's half-width (2) plus the shoreline ring the search is
+        // allowed to walk. Anything inside this is that lake's edge; the
+        // fixture has no other water anywhere.
+        let edge_of_that_lake = 2. + f64::from(SHORE_SEARCH_RADIUS);
+        let s = state();
+        for from in [Position::new(0., 0.), Position::new(-40., 40.)] {
+            let plant = plan_plant(&s, &from).expect("the fixture's lake is reachable");
+            let pump = plant
+                .parts
+                .iter()
+                .find(|p| p.name == PUMP)
+                .expect("a plant has a pump");
+            assert!(
+                calculate_distance(&pump.position, &lake) <= edge_of_that_lake,
+                "from {from}, the pump landed at {} -- that is not the fixture's lake",
+                pump.position
+            );
+        }
+    }
+
+    /// Run 32's refusal, as a test.
+    ///
+    /// `run-1788379071-00467` satisfied rungs 1-6 and refused rung 7 with
+    /// *"the nearest water is 67.8 tiles away, and a power plant may not be
+    /// sited more than 64 tiles from the bot that has to carry it there"* --
+    /// by 3.8 tiles. Every bot in that run had already been further from
+    /// spawn than that: 68.8, 69.9, 72.5 and 71.5 tiles, measured off the
+    /// run's own `samples.jsonl`. The bound refused a journey the run was
+    /// making routinely.
+    ///
+    /// The fixture's lake sits at about (40, 40); from (-40, 40) it is ~80
+    /// tiles away, which is the same shape at a slightly larger number. The
+    /// plant is built and the walk is priced, which is what `schedule` is for.
+    #[test]
+    fn water_past_the_cheap_scan_is_built_against_rather_than_refused() {
+        let s = state();
+        let plant = plan_plant(&s, &Position::new(-40., 40.))
+            .expect("80 tiles of water is a longer walk, not an impossible plant");
+        let pump = plant
+            .parts
+            .iter()
+            .find(|p| p.name == PUMP)
+            .expect("a plant has a pump");
+        assert!(
+            calculate_distance(&pump.position, &Position::new(-40., 40.)) > PLANT_WATER_SCAN_RADIUS,
+            "the point of the test is that the plant is past the cheap scan, got {}",
+            pump.position
         );
     }
 

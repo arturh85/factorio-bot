@@ -226,17 +226,26 @@ pub enum PlannerError {
         supply_kw: f64,
     },
 
-    /// No water within [`PLANT_REPORT_RADIUS`] of the acting bot.
+    /// No water within `PLANT_WATER_WIDE_SCAN_RADIUS` of the acting bot.
     ///
-    /// **Not the same as "this map has no lakes."** Two other things produce
-    /// it, and both are worth telling apart from a genuinely dry map:
+    /// **The only distance refusal a power plant has left.** There used to be
+    /// a second, `PowerPlantTooFarFromWater`, which refused water the planner
+    /// could see but judged too far to carry a plant to. Its 64-tile bound was
+    /// borrowed from a pole's supply area and guarded a walk that
+    /// [`crate::schedule`] already prices, and it halted run
+    /// `run-1788379071-00467` at rung 7 over 3.8 tiles -- in a run whose four
+    /// bots had each already been 68 to 72 tiles from spawn. Distance is now a
+    /// cost, not a veto; see `crate::method::power`'s two scan radii for the
+    /// derivation.
+    ///
+    /// So this says what was *looked at*, not what is *allowed*, and the two
+    /// other things that produce it matter more than ever, because both are
+    /// worth telling apart from a genuinely dry map:
     ///
     /// * a world attached from a snapshot (`crates/core`'s `attach_world`)
     ///   fetches **no tiles at all**, so every question about terrain answers
     ///   "nothing there";
     /// * an owned run only knows the chunks the game has charted.
-    ///
-    /// [`PLANT_REPORT_RADIUS`]: crate::method::power
     #[error("a power plant needs water, and the plan can see none within {radius} tiles")]
     #[diagnostic(
         code(planner::power_plant_needs_water),
@@ -247,27 +256,6 @@ pub enum PlannerError {
         )
     )]
     PowerPlantNeedsWater { radius: f64 },
-
-    /// There is water, and it is too far to build against.
-    ///
-    /// The refusal `2026-09-02-building-power.md` §5 asked for by name: *"the
-    /// nearest water is 300 tiles from the nearest coal"* is a good outcome.
-    /// The bound is a walk rather than a pipe run, because the plant is sited
-    /// at the water — everything it is made of, plus the lab, plus ten science
-    /// packs, is carried to it from wherever the ore was.
-    #[error(
-        "the nearest water is {distance:.1} tiles away, and a power plant may not be sited more \
-         than {limit} tiles from the bot that has to carry it there"
-    )]
-    #[diagnostic(
-        code(planner::power_plant_too_far_from_water),
-        help(
-            "everything the plant is made of is carried to the shore, and the lab has to stand in \
-             its supply area afterwards; a plant further away than this costs more walking than \
-             the whole rest of the research"
-        )
-    )]
-    PowerPlantTooFarFromWater { distance: f64, limit: f64 },
 
     /// Water near enough, but no piece of its edge with room behind it.
     ///

@@ -179,13 +179,16 @@ impl std::error::Error for PlanRefusal {}
 ///   never told about the technology, and both are broken inputs rather than
 ///   verdicts. `supervisor.lua` has named "an unknown item or technology" a
 ///   construction error since it was written, and this keeps that promise.
-/// - The three `PowerPlant*` variants -- verdicts for the same reason
+/// - The two `PowerPlant*` variants -- verdicts for the same reason
 ///   `ResearchNeedsPower` is one, and now the ones a caller actually sees:
 ///   since the plant landed, an unpowered world is answered by *building* a
-///   power plant, so what reaches a script is "there is no water in reach",
-///   "the water is too far to carry a plant to" or "no shoreline here has room
-///   for one". All three are facts about the map, and a different map makes
-///   them false.
+///   power plant, so what reaches a script is "there is no water in reach" or
+///   "no shoreline here has room for one". Both are facts about the map, and
+///   a different map makes them false. There were three until
+///   `PowerPlantTooFarFromWater` was removed: it refused water the planner
+///   could see, on a borrowed 64-tile bound guarding a walk the schedule
+///   already prices, and a distant plant is now a slower plan rather than a
+///   refusal.
 fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
     use miette::Diagnostic;
 
@@ -194,7 +197,6 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::NoRoomToWork { .. }
         | PlannerError::ResearchNeedsPower { .. }
         | PlannerError::PowerPlantNeedsWater { .. }
-        | PlannerError::PowerPlantTooFarFromWater { .. }
         | PlannerError::PowerPlantNeedsShore { .. }
         | PlannerError::UnsupportedResearchTrigger { .. }
         | PlannerError::SelfUnlockingResearchTrigger { .. }

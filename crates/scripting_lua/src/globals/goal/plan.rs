@@ -19,7 +19,9 @@
 //! is what makes the old mismatch unrepresentable.
 
 use super::value::goal_from_lua;
-use super::{PlacementChecker, expand_goal, goal_error, planner_error, refuse_unknown_bots};
+use super::{
+    BufferRefresher, PlacementChecker, expand_goal, goal_error, planner_error, refuse_unknown_bots,
+};
 use factorio_bot_core::factorio::rcon::PlacementQuery;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::mlua::prelude::*;
@@ -387,6 +389,7 @@ pub(crate) fn install_goal_plan(
     world: Arc<FactorioWorld>,
     default_roster: Vec<BotId>,
     checker: Option<PlacementChecker>,
+    refresher: Option<BufferRefresher>,
 ) -> LuaResult<()> {
     table.set(
         "plan",
@@ -394,11 +397,13 @@ pub(crate) fn install_goal_plan(
             let world = world.clone();
             let default_roster = default_roster.clone();
             let checker = checker.clone();
+            let refresher = refresher.clone();
             async move {
                 let goal = goal_from_lua(&g)?;
                 let roster = resolve_roster(opts.as_ref(), &default_roster)?;
                 let (net, scheduled) =
-                    plan_verified(&goal, &world, &roster, checker.as_ref()).await?;
+                    plan_verified(&goal, &world, &roster, checker.as_ref(), refresher.as_ref())
+                        .await?;
                 // The goal, the world and the roster are kept together on the
                 // plan, not because dispatching needs them -- it does not --
                 // but because `obs:recover()` will, one run later, and a
@@ -436,6 +441,74 @@ pub(crate) fn install_goal_plan(
 /// way. The pre-check is an improvement on the failure mode, never a new one.
 const MAX_RESITE_ROUNDS: usize = 2;
 
+/// Ask the game what is in the buffers, and say out loud what came back.
+///
+/// # Both outcomes are narrated, and that is the point
+///
+/// A refresh that found nothing and a refresh that never happened leave
+/// **identical worlds and identical plans**: `FactorioWorld::inventories` is
+/// empty either way, `PlanState::has_buffers` is false either way, and
+/// `Withdraw` claims nothing either way. Only one of those is a defect, and
+/// nothing about the resulting plan distinguishes them -- it re-mines, and if
+/// the ore is gone it stalls, which is the exact failure buffers were made
+/// visible to prevent. So the count is printed whether or not it is
+/// interesting, and silence here means the refresh did not run.
+///
+/// # `paris` on stdout, not `tracing` on stderr
+///
+/// This is narration: a line a person reads *while the run happens*, about
+/// what the run is doing next. The two `tracing::warn!`s in
+/// [`plan_verified`] are diagnostics -- they explain a degraded pre-check to
+/// whoever debugs the run later. A failed refresh is both, so it gets both:
+/// `paris` says what it means for this run, `tracing` carries the error
+/// string. See the logging note in `CLAUDE.md`; the colour markup below is
+/// `paris` syntax and would print literally through `tracing`.
+///
+/// # Volume
+///
+/// One line per `goal.plan`, which the supervisor calls once per milestone
+/// iteration -- tens of lines across a whole run, beside a Factorio server's
+/// own stdout. Cheap enough to always print, and the whole value is in always.
+///
+/// # Warn and carry on
+///
+/// A refresh that cannot be made must not stop a run, exactly as an
+/// unreachable pre-check does not. The plan that follows is the plan this call
+/// would have returned before buffers were visible at all, so the cost of a
+/// failed refresh is the behaviour we already had -- but it is *not* a free
+/// failure the way a missed pre-check is, because the pre-check only narrows a
+/// window while this one decides whether a plan re-mines ore that may be gone.
+/// The warning says so in those terms rather than reporting an RPC error.
+async fn narrate_buffer_refresh(refresher: Option<&BufferRefresher>) {
+    let Some(refresher) = refresher else {
+        // No RCON: `goal.plan` called with no game behind it, which is a
+        // legitimate mode (`--clients 0`) and not a failure. Nothing is said,
+        // because there was nothing to ask and no run to mislead.
+        return;
+    };
+    match refresher().await {
+        Ok(0) => factorio_bot_core::paris::info!(
+            "no buffers to read before planning: the world knows of no furnace or chest yet"
+        ),
+        Ok(asked) => factorio_bot_core::paris::info!(
+            "read the contents of <bright-blue>{}</> buffer(s) before planning",
+            asked
+        ),
+        Err(err) => {
+            factorio_bot_core::paris::warn!(
+                "<red>could not read what is in this world's buffers</>; planning as if every \
+                 furnace and chest were empty. Anything a previous plan left in one is invisible \
+                 to this one, so it will plan to make those materials again -- out of ore that \
+                 may already have been mined for them"
+            );
+            factorio_bot_core::tracing::warn!(
+                "buffer refresh failed before goal.plan, planning against an empty buffer map: {}",
+                err
+            );
+        }
+    }
+}
+
 /// Expands and schedules `goal`, asking the game about the placements the
 /// plan chose and re-expanding around the ones it would refuse.
 ///
@@ -471,7 +544,21 @@ async fn plan_verified(
     world: &Arc<FactorioWorld>,
     roster: &[BotId],
     checker: Option<&PlacementChecker>,
+    refresher: Option<&BufferRefresher>,
 ) -> LuaResult<(ActionNetwork, Schedule)> {
+    // Once, before any expansion, and deliberately outside the loop below.
+    //
+    // What separates two rounds of that loop is the refusal ledger the
+    // previous round's pre-check wrote; nothing in it changes what is standing
+    // in a chest. A refresh per round would buy a second RCON round trip and
+    // an answer the first one already gave.
+    //
+    // Before, rather than after, for a sharper reason: `PlanState::from_world`
+    // reads the buffer map at the top of every round, and `Withdraw` is what
+    // decides whether the plan mines ore or walks to a furnace. Refreshing
+    // after expansion would refresh a fact the plan had already been built
+    // without.
+    narrate_buffer_refresh(refresher).await;
     for round in 0..=MAX_RESITE_ROUNDS {
         // Rebuilt every round, deliberately: this is the read that picks up
         // the refusals the previous round's query wrote.
@@ -1176,6 +1263,15 @@ mod tests {
         roster: &[u8],
         checker: Option<PlacementChecker>,
     ) -> Lua {
+        lua_with_world_checker_and_refresher(world, roster, checker, None)
+    }
+
+    fn lua_with_world_checker_and_refresher(
+        world: Arc<FactorioWorld>,
+        roster: &[u8],
+        checker: Option<PlacementChecker>,
+        refresher: Option<BufferRefresher>,
+    ) -> Lua {
         let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
         lua.set_app_data(crate::lua_runner::PendingWork::default());
         let table = create_lua_goal_with(
@@ -1184,10 +1280,126 @@ mod tests {
             factory(Arc::new(StubActuator::new(Failure::Never))),
             roster.to_vec(),
             checker,
+            refresher,
         )
         .expect("goal table");
         lua.globals().set("goal", table).expect("install");
         lua
+    }
+
+    /// A [`BufferRefresher`] that counts its calls and answers `outcome`.
+    fn stub_refresher(
+        outcome: Result<usize, &'static str>,
+    ) -> (BufferRefresher, Arc<std::sync::atomic::AtomicUsize>) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
+        let refresher: BufferRefresher = Arc::new(move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let outcome = outcome.map_err(|e| e.to_string());
+            Box::pin(async move { outcome })
+                as Pin<Box<dyn Future<Output = Result<usize, String>> + Send>>
+        });
+        (refresher, calls)
+    }
+
+    // ------------------------------------------- goal.plan's buffer refresh
+
+    /// **The wiring, stated as a test.** `goal.plan` asks the game what is in
+    /// the buffers before it plans.
+    ///
+    /// Without this call every piece of the buffer machinery is correct,
+    /// tested and inert: `FactorioWorld::inventories` stays empty,
+    /// `PlanState::has_buffers` answers `false`, `Withdraw` claims nothing,
+    /// and the replan mines ore that may already be gone. That failure looks
+    /// exactly like the code working, which is why the call is pinned rather
+    /// than left to the wiring being obviously there.
+    #[tokio::test]
+    async fn planning_reads_the_buffers_first() {
+        let world = seeded_world_for(&[1, 2]);
+        let (refresher, calls) = stub_refresher(Ok(3));
+        let lua = lua_with_world_checker_and_refresher(world, &[1, 2], None, Some(refresher));
+        lua.load(r#"p = goal.plan(goal.have("iron-plate", 8))"#)
+            .exec_async()
+            .await
+            .expect("plan");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one refresh per goal.plan"
+        );
+    }
+
+    /// Once per `goal.plan`, not once per re-siting round.
+    ///
+    /// The cost claim, and the reason the call sits outside the loop. What
+    /// separates two rounds is the refusal ledger the previous round wrote,
+    /// and nothing in that changes what is standing in a chest -- so a second
+    /// round trip would buy an answer the first one already gave.
+    /// `RefuseEverything` drives the loop to its full budget, so a refresh
+    /// mistakenly placed inside it would be called three times here.
+    #[tokio::test]
+    async fn the_buffers_are_read_once_however_many_times_the_plan_is_re_sited() {
+        let world = seeded_world_for(&[1, 2]);
+        let (checker, log) = stub_checker(world.clone(), Policy::RefuseEverything);
+        let (refresher, calls) = stub_refresher(Ok(2));
+        let lua =
+            lua_with_world_checker_and_refresher(world, &[1, 2], Some(checker), Some(refresher));
+        lua.load(r#"p = goal.plan(goal.have("iron-plate", 8))"#)
+            .exec_async()
+            .await
+            .expect("plan");
+        assert_eq!(
+            log.lock().unwrap_or_else(|e| e.into_inner()).calls.len(),
+            MAX_RESITE_ROUNDS + 1,
+            "the fixture must really drive the re-site loop, or this proves nothing"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the buffers are read once, before the loop, not once per round"
+        );
+    }
+
+    /// A refresh that cannot be made does not stop a run.
+    ///
+    /// The plan that comes back is the plan this call would have returned
+    /// before buffers were visible at all. It is *not* a free failure the way
+    /// a missed pre-check is -- the pre-check narrows a window, while this
+    /// decides whether a plan re-mines ore that may be gone -- so it is
+    /// narrated in those terms. What is pinned here is only that it does not
+    /// raise: `goal.plan` answers with a plan or not at all, and a script that
+    /// caught a raise here would treat an unreachable game as an unsatisfiable
+    /// goal.
+    #[tokio::test]
+    async fn a_refresh_that_fails_still_hands_back_a_plan() {
+        let world = seeded_world_for(&[1, 2]);
+        let (refresher, calls) = stub_refresher(Err("rcon is not connected"));
+        let lua = lua_with_world_checker_and_refresher(world, &[1, 2], None, Some(refresher));
+        let steps: usize = lua
+            .load(r#"p = goal.plan(goal.have("iron-plate", 8)) return #p.steps"#)
+            .eval_async()
+            .await
+            .expect("a failed refresh must not raise");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(steps > 0, "the plan is the one we would have had anyway");
+    }
+
+    /// No RCON, no refresh, no complaint.
+    ///
+    /// `goal.plan` is callable with no game behind it (`--clients 0` plans
+    /// against invented players). An absent refresher is that mode, not a
+    /// failure, and it must not narrate a warning about buffers to a run that
+    /// never had a game to ask.
+    #[tokio::test]
+    async fn planning_without_a_refresher_is_not_a_failure() {
+        let world = seeded_world_for(&[1, 2]);
+        let lua = lua_with_world_checker_and_refresher(world, &[1, 2], None, None);
+        let steps: usize = lua
+            .load(r#"p = goal.plan(goal.have("iron-plate", 8)) return #p.steps"#)
+            .eval_async()
+            .await
+            .expect("no refresher is a mode, not an error");
+        assert!(steps > 0);
     }
 
     // ------------------------------------------- goal.plan's placement pre-check

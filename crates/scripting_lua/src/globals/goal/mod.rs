@@ -23,6 +23,7 @@ mod value;
 use factorio_bot_core::factorio::rcon::{FactorioRcon, PlacementQuery, PlacementVerdict};
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::mlua::prelude::*;
+use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_executor::{Actuator, RconActuator};
 use factorio_bot_planner::{
     ActionNetwork, BotId, Goal, PlanState, PlannerError, expand, holds, registry_for,
@@ -76,6 +77,41 @@ pub(crate) type PlacementChecker = Arc<
         + Send
         + Sync,
 >;
+
+/// How `goal.plan` asks the game what is sitting in the buffers before it
+/// plans, answering how many entities were asked about.
+///
+/// # Why this exists at all
+///
+/// A convergence hands materials over through a machine: one bot loads a
+/// furnace, another unloads it. If the consumer never arrives and the plan is
+/// remade, those plates are in that furnace and **the ore they came from is
+/// gone from the ground** -- so a replan that cannot see them does not merely
+/// forget them, it plans to mine ore that no longer exists, and stalls. The
+/// planner half of that (`PlanState::buffers`, `Withdraw`) landed with
+/// `docs/superpowers/notes/2026-09-03-buffers-are-visible.md`; this is the
+/// call that puts anything in it. Without it every piece of that machinery is
+/// correct, tested and inert.
+///
+/// # A separate seam from [`PlacementChecker`], for a different reason
+///
+/// The pre-check asks about ground the plan *has already chosen*, so it runs
+/// after expansion and its answer feeds a re-expansion. This asks about the
+/// world the plan will be built from, so it runs **once, before** any
+/// expansion -- see `plan::plan_verified`. The two share a transport and
+/// nothing else.
+///
+/// # Why the future returns a count
+///
+/// So that a reader can tell "asked, and the buffers were empty" from "never
+/// asked". Those two produce identical plans and identical worlds, and only
+/// one of them is a defect; the count is what separates them, and
+/// `plan::narrate_buffer_refresh` is what prints it.
+///
+/// `None` -- no game, or a build with no RCON -- means no refresh, which is
+/// exactly the behaviour that existed before buffers were visible at all.
+pub(crate) type BufferRefresher =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<usize, String>> + Send>> + Send + Sync>;
 
 /// A planner or executor failure is the script's problem, not the process's.
 fn goal_error(err: impl std::fmt::Display) -> LuaError {
@@ -299,8 +335,10 @@ pub fn create_lua_goal(
     bots: Vec<u8>,
 ) -> LuaResult<LuaTable> {
     // Cloned before the actuator factory takes ownership of `rcon`: the
-    // pre-check and the actuator both need it and neither owns the other.
+    // pre-check, the buffer refresh and the actuator all need it and none of
+    // them owns the others.
     let probe_rcon = rcon.clone();
+    let refresh_rcon = rcon.clone();
     let actuator: ActuatorFactory = Arc::new(move || {
         let rcon = rcon.clone();
         let world = real_world.clone();
@@ -332,7 +370,31 @@ pub fn create_lua_goal(
                 as Pin<Box<dyn Future<Output = Result<Vec<PlacementVerdict>, String>> + Send>>
         }) as PlacementChecker
     });
-    create_lua_goal_with(lua, plan_world, actuator, bots, checker)
+    // Captures `plan_world` for exactly the reason the pre-check above does:
+    // what this writes is read back by `PlanState::from_world`, which is given
+    // the planning world. The two are the same object today, and if they were
+    // ever separated again, refreshing the wrong one would leave the planner
+    // reading an empty buffer map while believing it had asked -- which is the
+    // failure this whole seam exists to make impossible.
+    //
+    // A `Planner` is built per call rather than held: it is a context holder
+    // (`rcon` plus the world), `Planner::new` is two `Arc` clones, and the two
+    // things it holds are exactly the two things captured here. Keeping one
+    // would be caching a struct that is cheaper to rebuild than to reason
+    // about the lifetime of.
+    let refresher: Option<BufferRefresher> = refresh_rcon.map(|rcon| {
+        let world = plan_world.clone();
+        Arc::new(move || {
+            let planner = Planner::new(world.clone(), Some(rcon.clone()));
+            Box::pin(async move {
+                planner
+                    .refresh_buffers()
+                    .await
+                    .map_err(|err| err.to_string())
+            }) as Pin<Box<dyn Future<Output = Result<usize, String>> + Send>>
+        }) as BufferRefresher
+    });
+    create_lua_goal_with(lua, plan_world, actuator, bots, checker, refresher)
 }
 
 /// [`create_lua_goal`] with the actuator supplied rather than built from RCON.
@@ -345,6 +407,7 @@ pub(crate) fn create_lua_goal_with(
     actuator: ActuatorFactory,
     bots: Vec<u8>,
     placement_checker: Option<PlacementChecker>,
+    buffer_refresher: Option<BufferRefresher>,
 ) -> LuaResult<LuaTable> {
     let map_table = lua.create_table()?;
     map_table.set(
@@ -503,6 +566,7 @@ end
         plan_world.clone(),
         roster.clone(),
         placement_checker,
+        buffer_refresher,
     )?;
 
     // `goal.holds`
@@ -1178,6 +1242,7 @@ mod tests {
             factory(stub),
             vec![1, 2],
             None,
+            None,
         )
         .expect("goal table");
         lua.globals().set("goal", table).expect("install");
@@ -1707,6 +1772,7 @@ mod tests {
                 factory(rec.clone()),
                 roster.clone(),
                 None,
+                None,
             )
             .expect("goal table");
             lua.globals().set("goal", table).expect("install");
@@ -1801,6 +1867,7 @@ mod tests {
                 seeded_world(bot_count),
                 factory(Arc::new(StubActuator::new(Failure::Never))),
                 (1..=bot_count).collect(),
+                None,
                 None,
             )
             .expect("goal table");
@@ -1918,6 +1985,7 @@ mod tests {
             factory(Arc::new(StubActuator::new(Failure::Never))),
             vec![1, 2],
             None,
+            None,
         )
         .expect("goal table");
         lua.globals().set("goal", table).expect("install");
@@ -1965,6 +2033,7 @@ mod tests {
             factory(Arc::new(StubActuator::new(Failure::Never))),
             vec![1, 2],
             None,
+            None,
         )
         .expect("goal table");
         lua.globals().set("goal", table).expect("install");
@@ -2001,6 +2070,7 @@ mod tests {
             world.clone(),
             factory(Arc::new(StubActuator::new(Failure::Never))),
             vec![1, 2],
+            None,
             None,
         )
         .expect("goal table");
@@ -2047,6 +2117,7 @@ mod tests {
             seeded_world_for(&[1, 2]),
             factory(rec.clone()),
             vec![1, 2],
+            None,
             None,
         )
         .expect("goal table");
@@ -2140,6 +2211,7 @@ mod tests {
             factory(Arc::new(StubActuator::new(Failure::Never))),
             vec![1],
             None,
+            None,
         )
         .expect("goal table");
         lua.globals().set("goal", table).expect("install");
@@ -2210,6 +2282,7 @@ mod tests {
             Arc::new(world),
             factory(Arc::new(StubActuator::new(Failure::Never))),
             vec![1],
+            None,
             None,
         )
         .expect("goal table");

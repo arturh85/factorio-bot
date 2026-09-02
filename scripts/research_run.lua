@@ -48,16 +48,37 @@ print("recording run " .. run_id)
 -- recurses through whatever the technology's own bill and prerequisites turn
 -- out to require, so this list only has to name the destination and the raw
 -- materials worth calling out as their own milestones.
+-- A graded ladder: each rung must be reachable only by doing the thing it names.
+--
+-- `iron-plate 10` used to sit here and was worthless as a test. Factorio
+-- freeplay hands every player 8 iron plates, so across a roster the goal was
+-- already met before anyone moved -- it reported `already_satisfied` in zero
+-- iterations on every run and never once exercised smelting. 50 is above what
+-- the roster starts with, so it has to smelt.
+--
+-- `researched("automation")` was also not the next rung after plates but
+-- several: gears, copper plates, science packs, a lab, and the research. Each
+-- of those now stands on its own, so a failure names which step is broken
+-- rather than "research did not happen".
 local goals = {
     goal.have("iron-ore", 20),
     goal.have("copper-ore", 20),
-    goal.have("iron-plate", 10),
+    goal.have("iron-plate", 50),
+    goal.have("copper-plate", 20),
+    goal.have("iron-gear-wheel", 20),
+    goal.have("automation-science-pack", 10),
     goal.researched("automation"),
 }
+-- Must stay aligned with `goals` above, index for index: these strings are what
+-- the record shows for each milestone, and a mismatch would label a failure
+-- with the wrong step.
 local names = {
     "gather iron ore x20",
     "gather copper ore x20",
-    "smelt iron plates x10",
+    "smelt iron plates x50",
+    "smelt copper plates x20",
+    "craft iron gear wheels x20",
+    "craft automation science packs x10",
     "research automation",
 }
 

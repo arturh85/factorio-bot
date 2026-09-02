@@ -1075,3 +1075,50 @@ before it was fixed: a walk teleport that reported arrival at unreachable
 destinations; crafts that never reported completion; actions that could not be
 represented as failed; a planner reading the `enemy` force's technology; and a
 lab with no power, on a map whose water was not solid.
+
+## Run 34 — the ladder is repeatable, and the video claim is closed
+
+`run-1788383263-03016`. **All seven rungs again**, and the step counts are
+*identical* to run 33:
+
+```
+8 · 8 · 37 · 40 · 16 · 52 · 111
+```
+
+Two complete ladders in a row, from the same planner, producing the same plan.
+One success could have been luck; two identical ones are the planner being
+deterministic, which is what the pins have been protecting all along.
+
+### The encoder's UPS cost: measured at last, and it is nothing
+
+Run 34 ran with video **off** (the workspace copy's `record.start()`, with the
+refresh flag deliberately omitted so the repo's `{video = true}` could not
+overwrite it — the repo was never dirtied). Effective UPS is ticks over
+wall-clock:
+
+```
+run 33  video ON    76,428 ticks / 1338 s = 57.12 UPS
+run 34  video OFF   76,149 ticks / 1334 s = 57.08 UPS
+                                   difference: -0.07%
+```
+
+**Video-off is fractionally *slower*, which is noise.** The encoder's cost is
+below what this measurement can see.
+
+That closes a claim I had left open all day. The per-client screenshots were
+retired partly on an *inference* that capture cost UPS — the disk numbers were
+real (947 MB of JPEGs against 290 MB of video for the same run) but the UPS half
+was never measured. It is now, and the honest answer is that **it was never the
+argument**: x11grab captures a frame the GPU has already drawn, where
+`take_screenshot` renders synchronously inside the game loop once per camera.
+The two are not the same operation, and only one of them was ever in the way.
+
+Recorded here rather than quietly dropped, because "we removed something for a
+reason we had not checked" is worth keeping even when the removal turns out
+right.
+
+### What run 34 does not tell us
+
+Both runs used the same map and the same seed, so this measures the encoder, not
+the ladder's robustness to a different world. Two identical runs are evidence of
+determinism, not of generality.

@@ -8,6 +8,22 @@ Factorio Bot is a Rust application that orchestrates Factorio game servers and m
 
 ## Build & Development Commands
 
+**Every cargo command needs `nix develop -c`.** `pkg-config` and Lua 5.4 come
+from the flake, not from the ambient shell, so a bare `cargo build` dies in
+`mlua-sys`' build script with
+
+```
+cannot find Lua5.4 using `pkg-config` ... The pkg-config command could not be found.
+```
+
+which reads like a missing system package and is not one. Same for the
+graphical client: the GL/X11 libraries and `SDL_VIDEODRIVER=x11` are set by the
+dev shell, so a client launched outside it fails with `No available video
+device` — a message that says nothing about the cause (see the Platform Notes).
+Prefix the command (`nix develop -c cargo test --workspace`) or wrap a whole
+script (`nix develop -c bash -s <<'EOF' ... EOF`). Direnv is not configured
+here, so nothing enters the shell for you.
+
 ```bash
 # Master Check Tool, runs Rust clippy, tests, build, takes a few minutes, only run in the end to finalise a change
 # Verify only -- never rewrites a file, so it is safe on a dirty tree and when

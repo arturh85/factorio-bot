@@ -8,6 +8,20 @@ Factorio Bot is a Rust application that orchestrates Factorio game servers and m
 
 ## Build & Development Commands
 
+**Never `git commit --amend` in this checkout, and never `cargo fmt --all`.**
+Both assume you are the only writer and neither checks. An agent amended what it
+believed was its own HEAD; another had committed in the intervening seconds, so
+it amended *their* commit. It was recoverable — `git reset --soft` back to the
+original commit object from the reflog, `git diff` verified empty, then commit
+separately — but only because it noticed. `cargo fmt --all` has the same shape
+and has already rewritten another agent's live files; `cargo fmt -p <crate>`
+still rewrites a whole crate, so use `rustfmt <file>`.
+
+The same reasoning covers `git add -A`, a bare `git commit`, `git reset --hard`
+and `git stash`: commit with explicit paths (`git commit -m "..." -- <paths>`),
+and note that **an explicit path is still a path to the whole file** — naming a
+file carefully does not separate two writers editing it.
+
 **Every cargo command needs `nix develop -c`.** `pkg-config` and Lua 5.4 come
 from the flake, not from the ambient shell, so a bare `cargo build` dies in
 `mlua-sys`' build script with

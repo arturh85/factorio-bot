@@ -61,5 +61,7 @@ not as reassurance.
 Nothing here touches the two numbers that matter for the *decision* to record
 video: no bitrate or file size has been measured, and neither has the encoder's
 UPS cost or the screenshot cost it would be compared against. **Do not claim
-video is cheaper than screenshots.** Those need a capture during a real run,
-which needs the Lua wiring that does not exist yet.
+video is cheaper than screenshots.** Those need a capture during a real run.
+The Lua wiring now exists
+(`docs/superpowers/notes/2026-09-02-video-capture-implementation.md`), so the
+run is the only thing missing.

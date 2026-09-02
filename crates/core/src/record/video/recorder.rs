@@ -23,7 +23,7 @@
 
 use super::clock::{TickKind, TickLog, TickSample};
 use super::ffmpeg;
-use super::window::{Resolution, Tools, WindowQuery, window_id_hex};
+use super::window::{Resolution, Tools, WindowQuery, find_client_pid, window_id_hex};
 use super::{
     Calibration, RECORD_FILE, VIDEO_FILE, VideoRecord, VideoStatus, open_video_dir, rate_ok,
     write_video_record,
@@ -69,11 +69,25 @@ pub struct VideoOptions {
     pub fps: u32,
     /// Which `client<N>` window to film. v0 films it unsteered: the camera
     /// follows whatever that client shows.
+    ///
+    /// **1 by default**, and the default is a choice rather than an accident:
+    /// client 1 is the only client a run is guaranteed to have (a run with any
+    /// graphical client at all has that one), it is registered first with the
+    /// mod so it is the lowest player index, and it is the same client on every
+    /// run -- so two recordings of two runs are comparable without reading
+    /// their manifests. Nothing about it is special otherwise, which is why it
+    /// is configurable.
     pub client: u8,
-    /// The client process's pid, when the caller knows it. Tried first because
-    /// it is the only search that can tell two Factorio clients apart --
-    /// **whether SDL sets `_NET_WM_PID` under Xwayland is unverified**, which is
-    /// why the name search exists as a fallback.
+    /// The client process's pid. Supplied by a caller that knows it, and
+    /// otherwise **discovered** from the workspace directory the client runs
+    /// out of ([`super::window::find_client_pid`]) -- so this being `None` at
+    /// the call site does not mean the search runs blind.
+    ///
+    /// It is the search that matters: **SDL does set `_NET_WM_PID` under
+    /// Xwayland here** (probed live, one window per graphical client), so the
+    /// pid search is the one that can tell four identical Factorio windows
+    /// apart. The name search is a fallback that provably cannot -- it returns
+    /// all four.
     pub pid: Option<u32>,
     pub window_name: String,
     /// `None` reads `DISPLAY` from the environment; no display at all is a
@@ -229,6 +243,36 @@ impl VideoRecorder {
         let dir = open_video_dir(workspace, run_id)?;
         let epoch = Instant::now();
         let (requested_width, requested_height) = options.resolution.size();
+
+        // The pid is what makes the window search able to tell four identical
+        // Factorio windows apart; the name search cannot, and is measured
+        // returning all four on this very machine. Discovering it here rather
+        // than being handed it keeps that ability on every path -- including a
+        // run attached to a game this process did not spawn. Never fatal: a
+        // failure only means the search falls back to the name, which is a
+        // real answer on a single-client run.
+        let mut options = options;
+        if options.pid.is_none() {
+            match find_client_pid(workspace, options.client) {
+                Ok(pid) => {
+                    tracing::info!(
+                        client = options.client,
+                        pid,
+                        "filming the window of the client running out of this workspace"
+                    );
+                    options.pid = Some(pid);
+                }
+                Err(err) => {
+                    warn!(
+                        "could not identify client{}'s process ({}); falling back to the window \
+                         name, which cannot tell two clients apart",
+                        options.client, err
+                    );
+                    tracing::warn!(client = options.client, error = %err, "no client pid; the window search falls back to the name");
+                }
+            }
+        }
+        let options = options;
 
         let mut log = TickLog::create(&dir)?;
         if let Some(tick) = opened_at {

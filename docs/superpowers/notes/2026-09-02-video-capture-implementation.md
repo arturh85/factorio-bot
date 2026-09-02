@@ -6,7 +6,10 @@ serving and contract seam, and the viewer. **Nothing here steers a camera,
 spawns a spectator peer, or depends on `--host`** — step 6 stays gated, as does
 the director camera in the sibling spec.
 
-Nothing below has been run against a live Factorio. See "What is unverified".
+`record.start({video = true})` is wired (see "The trigger, and how the client is
+chosen"). No run has recorded yet: nothing below has captured a frame from a
+live Factorio, and every number in the spec's §2 is still an estimate. See
+"What is unverified".
 
 ## What exists
 
@@ -110,97 +113,129 @@ between them is `null`.
    the spec shows is readable. Cost: ~11 bytes a line, ~60 KB over a 45-minute
    run, against a recording measured in hundreds of megabytes.
 
-## The one thing that is NOT wired: `record.start({video = ...})`
+## The trigger, and how the client is chosen
 
-The Lua entry point lives in `crates/scripting_lua/src/globals/record.rs`, which
-another agent owned for the duration of this change, so it was **not edited**.
-Everything below it is built and tested; the trigger is not connected, so no run
-records video yet.
+`record.start()` takes an optional table, and `record.finish` stops the encoder
+before it archives:
 
-The patch is small. In `create_lua_record_with_slot`:
-
-```rust
-// `start` currently takes no arguments. mlua accepts an absent argument as
-// `None`, so this stays backward compatible with every existing script.
-lua.create_async_function(move |_lua, options: Option<LuaTable>| {
-    // ... existing body, unchanged, through `recorder.record(RunStarted)` ...
-
-    if let Some(video) = video_options(options.as_ref())? {
-        // Never fatal: `VideoRecorder::start` returns Ok with
-        // `status: failed` for every capture failure, and the run goes on
-        // with frames. Only an unwritable video directory is an Err.
-        let capture = VideoRecorder::start(
-            &workspace, &run_id, video, rcon.clone(), Some(opened_at),
-        )
-        .await
-        .map_err(record_error)?;
-        recorder.attach_video(capture);
-    }
-    *slot.lock() = Some(recorder);
-    Ok(run_id)
-})
+```lua
+record.start({video = true})                     -- 720p, 15 fps, client 1
+record.start({video = {resolution = "1080p"}})   -- the opt-in, for a final run
+record.start({video = {client = 2, fps = 30}})   -- film a different client
 ```
 
-with
+Three things about the wiring are decisions, not mechanics:
 
-```rust
-/// `video = true` -> defaults; `video = {resolution = "1080p", fps = 15,
-/// client = 1}` -> overrides. An unknown resolution is an error at start, not
-/// a silent fallback: a run that quietly recorded at the wrong size is worse
-/// than one that refused to start.
-fn video_options(options: Option<&LuaTable>) -> LuaResult<Option<VideoOptions>> {
-    let Some(table) = options else { return Ok(None) };
-    match table.get::<LuaValue>("video")? {
-        LuaValue::Nil | LuaValue::Boolean(false) => Ok(None),
-        LuaValue::Boolean(true) => Ok(Some(VideoOptions::default())),
-        LuaValue::Table(video) => {
-            let mut chosen = VideoOptions::default();
-            if let Some(name) = video.get::<Option<String>>("resolution")? {
-                chosen.resolution = Resolution::parse(&name).map_err(record_error)?;
-            }
-            if let Some(fps) = video.get::<Option<u32>>("fps")? { chosen.fps = fps; }
-            if let Some(client) = video.get::<Option<u8>>("client")? { chosen.client = client; }
-            Ok(Some(chosen))
-        }
-        other => Err(record_error(format!(
-            "record.start: video must be a boolean or a table, got {}", other.type_name()
-        ))),
-    }
-}
+1. **The options are read before anything is created.** `video_options` runs as
+   the first statement of `record.start`, ahead of the already-running check,
+   the run id and the RCON call. A typo in the options therefore costs a Lua
+   error and nothing else — no run directory for a run that never started.
+   Pinned by `a_bad_video_option_is_refused_before_anything_is_created`, which
+   asserts on the *message*: it reports the bad resolution rather than "already
+   running", which it could only do by having read the options first.
+2. **An unknown resolution raises.** `Resolution::parse` refuses anything but
+   `"720p"` / `"1080p"`, and so does a `video` that is neither a boolean nor a
+   table. A run that quietly recorded at the wrong size is worse than one that
+   refused to start.
+3. **`record.finish` had to become async.** It is the only place that can stop
+   the encoder — `RunRecorder::finish` archives the recording but cannot stop
+   it, being sync — and a recording archived while still running is archived
+   saying `status: "recording"`, which the design makes the proof that nobody
+   stopped it. The slot is a `parking_lot::Mutex`, so the recorder is taken out
+   of it in a scope that ends before the `.await`; a guard held across the await
+   is not `Send` and would deadlock the next caller.
+
+**Which client gets filmed: 1, by default, configurable.** Not arbitrary:
+
+- client 1 is the only client a run is *guaranteed* to have — any run with a
+  graphical client at all has that one, so the default means the same thing on a
+  one-bot run and a four-bot one;
+- it is registered with the mod first (`whoami("client1")`, in order), so it is
+  the lowest player index and the bot most scripts drive first;
+- it is the same client on every run, so two recordings are comparable without
+  reading their manifests first.
+
+None of that makes client 1 *special* — which is exactly why `client = N` is an
+option rather than a constant. v0 does not steer the camera either way: the
+video shows whatever that client shows.
+
+## How the pid reaches the recorder
+
+The window search can only tell four identical Factorio windows apart if it has
+a pid (`docs/superpowers/notes/2026-09-02-video-prerequisites-settled.md`), and
+`VideoOptions.pid` was `None` on every path. It is now **discovered**, in
+`window.rs::find_client_pid`, rather than threaded down from the spawn site:
+
+```
+<workspace>/client<N>/            the directory client N is set up in and runs from
+  -> /proc/<pid>/exe               the binary the kernel says a process is executing
+  -> the one pid whose exe lives under that directory
 ```
 
-and, in `record.finish`, **before** `recorder.finish(...)`:
+`VideoOptions.pid` is still honoured when a caller sets it; discovery only fills
+in the `None`.
 
-```rust
-// `finish` archives the recording but cannot stop it -- it is not async. A
-// recording that was never stopped is archived with `status: "recording"`,
-// which the viewer reports as a defect rather than showing as complete.
-recorder.stop_video(Some(tick)).await.map_err(record_error)?;
+Why discovery and not bookkeeping. The pid at the spawn site is the more direct
+fact, but it is available on exactly one path — the process that spawned the
+clients — and reaching the Lua binding from there means a new argument on
+`run_lua`, `run_script`, `run_script_file`, the CLI and the HTTP executor, i.e.
+six files across four crates, of which five are outside this change's boundary.
+The workspace and the client number are already in hand at
+`VideoRecorder::start`, they are true whether or not this process spawned the
+clients, and `/proc/<pid>/exe` is a link the kernel maintains and a process
+cannot rewrite. **If the pid is ever wanted for something other than the window
+search, thread it properly** — this is the cheap correct answer to one question,
+not a general mechanism.
+
+Three rules it enforces, each with a test:
+
+- **The headless server is never a client.** It runs from `<workspace>/server/`,
+  and filming it would film nothing: it renders no window at all. (The live
+  probe agrees — `xdotool search --pid` returned nothing for the server.)
+- **`client1` is not `client10`.** Matching is `Path::starts_with`, which
+  compares whole components; a string prefix test would silently film the wrong
+  peer on a run big enough to have a tenth client.
+- **Two processes from one instance directory are refused, not ranked.** `.lock`
+  should make it impossible; if it happens anyway, picking one films an unknown
+  peer — the same rule the window search follows for two matching windows.
+
+A failed lookup is a warning, never a failure: the search falls back to the
+window name, which is a real answer on a single-client run.
+
+**Validated against the live four-client run, before it exited.** Reading
+`/proc/*/exe` while run 28 was up returned exactly:
+
+```
+3764406  workspace/server/bin/x64/factorio     <- server, correctly not a client
+3769396  workspace/client1/bin/x64/factorio
+3769400  workspace/client2/bin/x64/factorio
+3769402  workspace/client3/bin/x64/factorio
+3769403  workspace/client4/bin/x64/factorio
 ```
 
-Note the lock discipline: the slot is a `parking_lot::Mutex`, so the recorder
-has to be taken out of it (or the guard dropped) around the `.await`.
-
-`VideoOptions.pid` is left `None` by this patch, which means window resolution
-falls back to the name search — see the next section.
+which is *the same pid list*, in the same order, that the window probe in the
+prerequisites note resolved to one window each. So the two halves of the chain
+have now been observed against the same live run — separately. They have still
+never been run end to end.
 
 ## What is unverified without a live capture
 
 Everything that needs an X server, a running Factorio client, or ffmpeg actually
 grabbing pixels. Specifically:
 
-- **Whether `xdotool search --pid` finds anything**, i.e. whether SDL sets
-  `_NET_WM_PID` under Xwayland for this build. The spec flags this as unresolved
-  (§11.2) and the code probes it and falls back: the pid search is tried first,
-  then a name search. Until the caller supplies a pid (see above), only the name
-  search runs — and **a name search cannot tell two Factorio clients apart**, so
-  on a multi-client run it will find several windows and refuse, which is the
-  designed behaviour but is not the behaviour anyone wants. Resolving §11.2 is
-  the highest-value next experiment: `xdotool search --pid <client pid> --name
-  Factorio` against a running client, one line of output or none.
-- **Whether the observed geometry ever matches the request** under Hyprland.
-  The code records the observed one either way and warns on a mismatch; nobody
-  has seen the warning fire or not fire.
+- ~~**Whether `xdotool search --pid` finds anything.**~~ Settled: SDL does set
+  `_NET_WM_PID` under Xwayland here, one window per graphical client and none
+  for the headless server. §11.2's risk does not exist. What is *still*
+  unverified is the pid search running **from inside the recorder** — the
+  discovery and the search have each been observed against the same live run,
+  never joined.
+- **Whether the observed geometry ever matches the request** under Hyprland. It
+  will not: the one window measured was **706x854**, not landscape at all, so
+  the resize is load-bearing rather than belt-and-braces and the mismatch
+  warning should be expected to fire. Whether `xdotool windowsize` moves a
+  tiling-compositor window at all is the open half — the code records what
+  `xwininfo` observes either way, which is the only reason this is a warning and
+  not a silent wrong-size recording.
 - **Whether ffmpeg's x11grab actually captures this window**, whether an
   occluded or unfocused Xwayland window grabs correctly (§11.3), and whether the
   one-frame probe correctly distinguishes an ffmpeg without x11grab. All three
@@ -210,6 +245,9 @@ grabbing pixels. Specifically:
   do before trusting any size trade-off.
 - **The UPS cost of the encoder.** Unmeasured, as is the screenshot cost it
   would be compared against. Do not claim video is cheaper than screenshots.
+- **The whole trigger, end to end.** No `record.start({video = true})` has run
+  against a live game. The Lua path, the pid discovery, the window search, the
+  resize, the probe and the encoder have never executed in sequence.
 - **The `-progress` liveness path and the second calibration pair.** The
   plumbing is there and the arithmetic is unit-tested, but no ffmpeg has ever
   written into that pipe here, so the parse has never met real output.

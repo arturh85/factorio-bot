@@ -20,8 +20,10 @@ use factorio_bot_core::parking_lot::Mutex;
 use factorio_bot_core::record::map::{
     Divergence, EntitySnapshot, MapKind, MapRecord, Placement, bounds_around, divergence_between,
 };
+use factorio_bot_core::record::video::Resolution;
 use factorio_bot_core::record::{
-    ActionFailure, EventKind, FailureKind, PlannedStep, RunRecorder, SatisfiedReason,
+    ActionFailure, EventKind, FailureKind, PlannedStep, RunRecorder, SatisfiedReason, VideoOptions,
+    VideoRecorder,
 };
 use factorio_bot_core::types::{AreaFilter, EntityType, PlayerId, Position, Rect};
 use std::collections::BTreeSet;
@@ -378,6 +380,44 @@ fn classify_failure(error: &str) -> ActionFailure {
     ActionFailure { kind, detail }
 }
 
+/// Reads `record.start`'s `video` option.
+///
+/// `video = true` takes the defaults; `video = {resolution = "1080p", fps = 15,
+/// client = 1}` overrides them; absent, `nil` and `false` all mean no video,
+/// which is what every existing script says by saying nothing.
+///
+/// **An unknown resolution raises at `record.start()`, rather than falling back
+/// to the default.** A run that quietly recorded at the wrong size is worse
+/// than one that refused to start, and the refusal happens while somebody is
+/// still watching the terminal. Same for a `video` that is neither a boolean
+/// nor a table: guessing at `video = "true"` would be guessing at a typo.
+fn video_options(options: Option<&LuaTable>) -> LuaResult<Option<VideoOptions>> {
+    let Some(table) = options else {
+        return Ok(None);
+    };
+    match table.get::<LuaValue>("video")? {
+        LuaValue::Nil | LuaValue::Boolean(false) => Ok(None),
+        LuaValue::Boolean(true) => Ok(Some(VideoOptions::default())),
+        LuaValue::Table(video) => {
+            let mut chosen = VideoOptions::default();
+            if let Some(name) = video.get::<Option<String>>("resolution")? {
+                chosen.resolution = Resolution::parse(&name).map_err(record_error)?;
+            }
+            if let Some(fps) = video.get::<Option<u32>>("fps")? {
+                chosen.fps = fps;
+            }
+            if let Some(client) = video.get::<Option<u8>>("client")? {
+                chosen.client = client;
+            }
+            Ok(Some(chosen))
+        }
+        other => Err(record_error(format!(
+            "record.start: video must be a boolean or a table, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
 /// Records a *live* event: stamped with the game's clock, never earlier than
 /// something already in the log. See [`RunRecorder::not_before`].
 fn record_live(
@@ -480,9 +520,30 @@ local record = {}
 -- nothing has been placed yet -- so a run that crashes before its first
 -- placement still leaves a map behind. Writes nothing if no bots are
 -- connected yet.
+--
+-- Video is opt-in and is a second artefact, never a replacement: frames stay
+-- the record, because a frame's tick is written by the game into its filename
+-- while a video's tick is derived from a table the host built, and because a
+-- video cannot show "nothing was captured here" -- it keeps writing the last
+-- drawn image, which looks exactly like a game that was running and idle.
+--
+--     record.start({video = true})                        -- 720p, 15 fps, client 1
+--     record.start({video = {resolution = "1080p"}})      -- for a final run worth the size
+--     record.start({video = {client = 2, fps = 30}})      -- film a different client
+--
+-- `resolution` is "720p" (the default) or "1080p"; an unknown value raises
+-- here rather than recording at the wrong size. `client` is which graphical
+-- client's window to film, defaulting to 1 -- the one client every run with a
+-- client at all has, so the same option means the same thing on a one-bot run
+-- and a four-bot one. The camera is not steered: the video shows whatever that
+-- client shows.
+--
+-- Video failing to start never fails the run. The run continues with frames,
+-- and `video.json` records what went wrong.
+-- @tparam[opt] table options `{video = true}` or `{video = {resolution = ..., fps = ..., client = ...}}`
 -- @treturn string the run id
--- @raise if a recording is already running, or the run directory cannot be created
-function record.start()
+-- @raise if a recording is already running, the run directory cannot be created, or the video options are not understood
+function record.start(options)
 end
     "#,
         ),
@@ -492,16 +553,26 @@ end
         let rcon = rcon.clone();
         let world = world.clone();
         let runs_root = runs_root.clone();
+        let workspace = workspace.clone();
         let bots: Vec<u32> = all_bots.iter().map(|id| u32::from(*id)).collect();
+        // `start` took no arguments until video existed. mlua reads an absent
+        // argument as `None`, so every script that calls `record.start()` is
+        // unaffected.
         map_table.set(
             "start",
-            lua.create_async_function(move |_lua, ()| {
+            lua.create_async_function(move |_lua, options: Option<LuaTable>| {
                 let slot = slot.clone();
                 let rcon = rcon.clone();
                 let world = world.clone();
                 let runs_root = runs_root.clone();
+                let workspace = workspace.clone();
                 let bots = bots.clone();
                 async move {
+                    // Read before anything is created: a typo in the options is
+                    // the one failure that should cost nothing, and refusing
+                    // after minting a run id would leave a run directory behind
+                    // for a run that never started.
+                    let video = video_options(options.as_ref())?;
                     if slot.lock().is_some() {
                         return Err(record_error(
                             "a recording is already running -- call record.finish() first",
@@ -580,6 +651,24 @@ end
                                 },
                             })
                             .map_err(record_error)?;
+                    }
+
+                    if let Some(video) = video {
+                        // Never fatal: `VideoRecorder::start` returns `Ok` with
+                        // `status: failed` and a reason for every capture
+                        // failure, and the run goes on with frames. Only an
+                        // unwritable video directory is an `Err`, and that is a
+                        // workspace that cannot be written to at all.
+                        let capture = VideoRecorder::start(
+                            &workspace,
+                            &run_id,
+                            video,
+                            rcon.clone(),
+                            Some(opened_at),
+                        )
+                        .await
+                        .map_err(record_error)?;
+                        recorder.attach_video(capture);
                     }
 
                     *slot.lock() = Some(recorder);
@@ -1200,6 +1289,11 @@ end
 -- since the last `record.keyframe()` call (or all of them, if this run never
 -- reached one) -- the same incremental ingestion `record.keyframe()` runs at
 -- every milestone boundary, so nothing is read or archived twice.
+--
+-- Stops the video recorder first, if `record.start` was given one. A recording
+-- that was never stopped is archived still saying `"status": "recording"`,
+-- which the viewer reports as a defect rather than showing as a complete
+-- video -- so stopping it here is what makes that status mean what it says.
 -- @string outcome how the run ended, e.g. "done" or "stuck"
 -- @treturn string the run id
 -- @raise if no recording is running
@@ -1212,23 +1306,46 @@ end
         let slot = slot.clone();
         let rcon = rcon.clone();
         let workspace = workspace.clone();
+        // Async only because the encoder has to be stopped, and stopping it
+        // means awaiting a child process.
         map_table.set(
             "finish",
-            lua.create_function(move |_lua, outcome: String| {
-                let mut guard = slot.lock();
-                let mut recorder = guard
-                    .take()
-                    .ok_or_else(|| record_error("no recording is running"))?;
-                let tick = recorder.not_before(rcon.last_tick().unwrap_or(0));
-                recorder
-                    .finish(
-                        tick,
-                        &outcome,
-                        Some(&workspace),
-                        factorio_bot_core::record::DEFAULT_KEEP,
-                    )
-                    .map_err(record_error)?;
-                Ok(recorder.run_id().to_string())
+            lua.create_async_function(move |_lua, outcome: String| {
+                let slot = slot.clone();
+                let rcon = rcon.clone();
+                let workspace = workspace.clone();
+                async move {
+                    // The slot is a `parking_lot::Mutex`, whose guard is not
+                    // `Send` and would deadlock a second caller across the
+                    // await below. Taking the recorder out and dropping the
+                    // guard in one scope is what keeps the await lock-free --
+                    // and taking it is what `finish` did before video existed,
+                    // so this is the same handover, just made explicit.
+                    let mut recorder = {
+                        let mut guard = slot.lock();
+                        guard
+                            .take()
+                            .ok_or_else(|| record_error("no recording is running"))?
+                    };
+                    let tick = recorder.not_before(rcon.last_tick().unwrap_or(0));
+                    // Before `finish`, which archives the recording but cannot
+                    // stop it. A recording archived while still running is
+                    // archived saying `recording`, which is the design's own
+                    // proof that nobody stopped it.
+                    recorder
+                        .stop_video(Some(tick))
+                        .await
+                        .map_err(record_error)?;
+                    recorder
+                        .finish(
+                            tick,
+                            &outcome,
+                            Some(&workspace),
+                            factorio_bot_core::record::DEFAULT_KEEP,
+                        )
+                        .map_err(record_error)?;
+                    Ok(recorder.run_id().to_string())
+                }
             })?,
         )?;
     }
@@ -2520,6 +2637,120 @@ mod tests {
         assert_eq!(
             written_again, 0,
             "the queue was actually drained, not just read"
+        );
+    }
+
+    /// A `{...}` literal, evaluated in a sandboxed Lua, so these tests read
+    /// the options exactly as a script writes them rather than as a Rust
+    /// author imagines a script writes them.
+    fn options(source: &str) -> (Lua, LuaTable) {
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        let table = lua
+            .load(format!("return {source}"))
+            .eval::<LuaTable>()
+            .expect("an options table");
+        (lua, table)
+    }
+
+    #[test]
+    fn saying_nothing_about_video_means_no_video() {
+        assert!(
+            video_options(None).expect("no options is fine").is_none(),
+            "record.start() records no video, as every existing script expects"
+        );
+        for source in ["{}", "{video = false}", "{video = nil}", "{other = 1}"] {
+            let (_lua, table) = options(source);
+            assert!(
+                video_options(Some(&table)).expect(source).is_none(),
+                "{source} must not start an encoder"
+            );
+        }
+    }
+
+    #[test]
+    fn video_true_takes_the_settled_defaults() {
+        let (_lua, table) = options("{video = true}");
+        let chosen = video_options(Some(&table))
+            .expect("a boolean is understood")
+            .expect("video was asked for");
+        assert_eq!(
+            chosen.resolution.size(),
+            (1280, 720),
+            "720p is the default; 1080p is the opt-in"
+        );
+        assert_eq!(chosen.fps, 15);
+        assert_eq!(chosen.client, 1);
+        assert_eq!(
+            chosen.pid, None,
+            "the pid is discovered from the workspace, not asked of the script"
+        );
+    }
+
+    #[test]
+    fn a_video_table_overrides_only_what_it_names() {
+        let (_lua, table) = options(r#"{video = {resolution = "1080p"}}"#);
+        let chosen = video_options(Some(&table))
+            .expect("a table is understood")
+            .expect("video was asked for");
+        assert_eq!(chosen.resolution.size(), (1920, 1080));
+        assert_eq!(chosen.fps, 15, "untouched keys keep their defaults");
+        assert_eq!(chosen.client, 1);
+
+        let (_lua, table) = options("{video = {client = 3, fps = 30}}");
+        let chosen = video_options(Some(&table))
+            .expect("a table is understood")
+            .expect("video was asked for");
+        assert_eq!(
+            chosen.client, 3,
+            "which client to film is the script's call"
+        );
+        assert_eq!(chosen.fps, 30);
+        assert_eq!(chosen.resolution.size(), (1280, 720));
+    }
+
+    /// The decision this refuses to soften: a run that quietly recorded at the
+    /// wrong size is worse than one that refused to start.
+    #[test]
+    fn an_unknown_resolution_refuses_rather_than_falling_back() {
+        let (_lua, table) = options(r#"{video = {resolution = "4k"}}"#);
+        let err = video_options(Some(&table)).expect_err("4k is not a resolution here");
+        let text = err.to_string();
+        assert!(text.contains("4k"), "{text}");
+        assert!(
+            text.contains("720p"),
+            "the error says what is allowed: {text}"
+        );
+    }
+
+    /// `video = "true"` is a typo, and guessing at it would be guessing at
+    /// whether the run was supposed to record.
+    #[test]
+    fn a_video_that_is_neither_a_boolean_nor_a_table_is_refused() {
+        for source in [r#"{video = "true"}"#, "{video = 1}"] {
+            let (_lua, table) = options(source);
+            let err = video_options(Some(&table)).expect_err(source);
+            let text = err.to_string();
+            assert!(text.contains("boolean or a table"), "{source} -> {text}");
+        }
+    }
+
+    /// The options are read before the run id is minted, the run directory is
+    /// created or the game is called. Proved here by the *message*: with a
+    /// recording already running, a bad option still reports the option --
+    /// which it could only do by having been read first.
+    #[tokio::test]
+    async fn a_bad_video_option_is_refused_before_anything_is_created() {
+        let (lua, _tmp, _dir) = recording_lua();
+        let err = lua
+            .load(r#"record.start({video = {resolution = "4k"}})"#)
+            .exec_async()
+            .await
+            .expect_err("4k is not a resolution here");
+        let text = err.to_string();
+        assert!(text.contains("4k"), "{text}");
+        assert!(
+            !text.contains("already running"),
+            "the option is read before the slot is even looked at: {text}"
         );
     }
 }

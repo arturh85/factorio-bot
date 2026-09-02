@@ -1,6 +1,12 @@
 # Recording the run instead of photographing it
 
-Design only. Nothing here has been implemented and nothing here has been run.
+Design. Steps 2–5 are now built and wired — see
+`docs/superpowers/notes/2026-09-02-video-capture-implementation.md` — but
+**nothing here has been run against a live Factorio**: no window has been
+captured, no bitrate or file size measured, and the encoder's UPS cost is
+unknown. Step 1 (measure first) is still outstanding, so every size and cost
+figure below remains an estimate. Step 6 stays gated.
+
 This is the second half of
 `docs/superpowers/specs/2026-09-02-server-camera-design.md`, which decided
 *what renders*; this decides *what the render is written to*.
@@ -466,7 +472,11 @@ is a bot disappearing. The options:
 - **Film an existing bot client, unsteered (v0).** Capture client 1's window as
   it is. The camera follows bot 1 because that is what bot 1's client shows.
   Honest, fixed, uninteresting, and requires no new process and no unresolved
-  question. This is the version that can be built today, and §12 builds it
+  question. **Client 1 by default and `client = N` to change it**: client 1 is
+  the one client every run with a client at all has, it is registered with the
+  mod first so it is the lowest player index, and it is the same client on every
+  run, so two recordings are comparable without reading their manifests. Nothing
+  else makes it special, which is why it is an option and not a constant. This is the version that can be built today, and §12 builds it
   first precisely so the clock, the encode and the viewer are proven before the
   steering question is opened.
 
@@ -692,14 +702,32 @@ Marked as the sibling spec marks its own: these are gates, not assumptions.
    verbatim from the sibling spec §10.1–2. The version of this design with no
    extra peer (§6) depends on it entirely. **The v0 in §12 does not**, which is
    why v0 is first.
-2. **Finding the window id.** `xdotool` and `xwininfo` are now in the dev shell,
-   but neither has been pointed at a running Factorio client — no Factorio was
-   launched for this spec. The open question is not the tools, it is whether
-   `xdotool search --pid <pid>` finds anything: that needs the client to set
-   `_NET_WM_PID`, which SDL normally does but which nobody has confirmed for
-   this build under Xwayland. `xwininfo -root -tree` plus a name match is the
-   fallback and is worse — it cannot tell two Factorio windows apart, which is
-   exactly the case a four-client run presents.
+2. **~~Finding the window id.~~ — settled, no longer a prerequisite.** Probed
+   against a live four-client run
+   (`docs/superpowers/notes/2026-09-02-video-prerequisites-settled.md`):
+   `xdotool search --pid <client pid>` returns **exactly one window per
+   graphical client and none for the headless server**, so SDL does set
+   `_NET_WM_PID` under Xwayland for this build. `xwininfo` reads the geometry
+   back, and a real `ffmpeg -f x11grab -window_id <id> -frames:v 1` produced a
+   950 KB frame. The risk this item described does not exist.
+
+   Two things the same probe settled that this spec had wrong or vague:
+
+   - **The name-search fallback works and is still useless here.** `xdotool
+     search --name Factorio` returns *all four* clients. So it is a real
+     answer on a single-client run and an ambiguity on any other, exactly as
+     the "refuse rather than guess" rule assumes. It is the rare path, not
+     reassurance.
+   - **The window was 706x854** — not 1280x720, and not even landscape.
+     Resizing before capture is therefore mandatory rather than tidy, and the
+     observed-geometry readback is the only thing that would have caught it.
+     Assume the mismatch warning fires under this compositor.
+
+   Still open: **where the pid comes from**. The recorder discovers it from
+   `<workspace>/client<N>/` via `/proc/<pid>/exe` rather than being handed it by
+   whoever spawned the clients — see the implementation note. Threading it from
+   the spawn site remains the more direct fact and is available only on the path
+   that spawned them.
 3. **Whether an occluded or unfocused Xwayland window grabs correctly.**
    Unverified. This is the difference between a usable artefact and a video of
    somebody else's terminal.
@@ -762,7 +790,9 @@ against an artefact that already exists, before anything depends on it.
 **Step 3 — v0 capture: an existing client's window, unsteered.** Window
 resolution, the ffmpeg child, `-progress` liveness, the two calibration points,
 `video.json` and its `status`, all failure paths in §10. Frames continue
-unchanged. Reviewable as: "kill ffmpeg with -9 mid-run — is the file still
+unchanged. Includes identifying *which* client: the recorder finds client N's
+pid from `<workspace>/client<N>/` and searches by it, because a name search
+returns every client at once (§11.2). Reviewable as: "kill ffmpeg with -9 mid-run — is the file still
 playable, and does the run still finish".
 
 **Step 4 — serving and the contract.** `manage/video.rs`, the archived routes,
@@ -793,6 +823,7 @@ option for final runs worth the size.
 ```lua
 record.start({ video = true })                        -- 720p
 record.start({ video = { resolution = "1080p" } })    -- opt-in
+record.start({ video = { client = 2, fps = 30 } })    -- and the other two knobs
 ```
 
 `resolution` takes `"720p"` (1280×720, default) or `"1080p"` (1920×1080). An

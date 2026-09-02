@@ -98,7 +98,10 @@ pub fn mining_ticks(state: &PlanState, item: &str) -> Ticks {
 /// Reads [`PlanState::resource_unclaimed`], not `resource_available`: this is
 /// tile *selection*, and every selector in this module has to see the same
 /// commitments or two of them will pick the same tile. See the `claimed` field
-/// on [`PlanState`] for why a commitment is whole-tile.
+/// on [`PlanState`] for why a commitment is whole-tile, and
+/// [`PlanState::mining_tile_separation`] for why a commitment also excludes
+/// the tiles *around* it — a bot mining one tile stands on the ones next to
+/// it, and a tile a bot is standing on cannot be mined by anybody else.
 pub fn nearest_resource_tile(
     state: &PlanState,
     item: &str,
@@ -149,6 +152,14 @@ pub fn nearest_resource_tile(
 /// A tile's take is still capped at what the tile holds, so one action never
 /// over-commits one tile either; with exclusivity, that is the only
 /// over-commitment left to prevent.
+///
+/// **Tiles are also spaced.** Exclusivity puts two bots on two tiles; it does
+/// not stop the second bot *standing on* the first one's tile, which is how
+/// run `run-1788313837-06402` lost six of thirteen mines to `another
+/// character is standing on the iron-ore`. Every tile this returns is at least
+/// [`PlanState::mining_tile_separation`] from every other tile the plan has
+/// committed to (through `resource_unclaimed`) and from every other tile this
+/// call itself picks (the check in the loop below).
 pub fn resource_tiles_for(
     state: &PlanState,
     item: &str,
@@ -171,11 +182,24 @@ pub fn resource_tiles_for(
             .then(a.1.y.total_cmp(&b.1.y))
     });
 
-    let mut out = Vec::new();
+    let separation = state.mining_tile_separation();
+    let mut out: Vec<(Position, u32)> = Vec::new();
     let mut remaining = need;
     for (_, tile, available) in candidates {
         if remaining == 0 {
             break;
+        }
+        // The same spacing `PlanState::resource_unclaimed` applies against
+        // tiles claimed *earlier in the plan*, applied here against the tiles
+        // this call has already picked. They are not claimed yet — the claim
+        // lands when `run_steps` applies `Effect::ConsumeResource`, after
+        // `expand` has returned all of them — so without this a single call
+        // could still hand out two adjacent tiles.
+        if out
+            .iter()
+            .any(|(picked, _)| calculate_distance(picked, &tile) < separation)
+        {
+            continue;
         }
         let take = available.min(remaining);
         remaining -= take;
@@ -195,6 +219,20 @@ pub fn resource_tiles_for(
 /// anywhere, never which tiles are nearest, so there is nothing to collect,
 /// nothing to sort and no origin to measure from. Stops at the first tile that
 /// brings the running total up to `need`.
+///
+/// # Where the two stop being identical, and why that is safe
+///
+/// Both read the same per-tile ledger, so they agree exactly on which tiles
+/// are *available* — claimed, crowded, exhausted. They can only differ when a
+/// single call needs **more than one** tile, because `resource_tiles_for` also
+/// spaces its own picks from each other and this cannot: whether `k` spaced
+/// tiles fit in a patch depends on which tile the walk starts from, and there
+/// is no origin here. So this is an upper bound in that one case, and when it
+/// over-reports, `Mine::expand` finds no tile set and returns the *same*
+/// `NoApplicableMethod` a false answer here would have produced one frame
+/// earlier. Nothing plans a mine it cannot execute either way. With a
+/// `DEFAULT_RESOURCE_PER_TILE` of 500 the multi-tile case needs a single
+/// share above 500 ore to arise at all.
 ///
 /// The two must keep agreeing — there is a test that says so — so this reads
 /// the same claim-aware ledger `resource_tiles_for` does. That is also what

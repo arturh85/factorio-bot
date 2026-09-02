@@ -1,7 +1,7 @@
 use crate::error::PlannerError;
 use crate::goal::Holder;
 use crate::ids::{BotId, ItemId};
-use factorio_bot_core::factorio::util::add_to_rect;
+use factorio_bot_core::factorio::util::{add_to_rect, calculate_distance};
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::types::{
     FactorioEntity, FactorioTechnology, Pos, Position, Rect, ResourcePatch,
@@ -30,6 +30,63 @@ const TOUCH_SLACK: f64 = 1. / 512.;
 /// source the `stone-furnace` and `assembling-machine-1` numbers quoted
 /// elsewhere in this file come from).
 const VANILLA_CHARACTER_COLLISION_HALF_SIDE: f64 = 0.19921875;
+
+/// Half the side of the tile a resource entity occupies.
+///
+/// A tile spans one unit and the ore is reported at its *centre* — every real
+/// resource sits at `(-40.5, -48.5)`, never `(-41, -49)` — so every point of
+/// the tile is within this of the position the planner passes around. Used to
+/// turn "a character must not stand on that tile" into a distance between two
+/// tile centres; see [`PlanState::mining_tile_separation`].
+const TILE_HALF_SIDE: f64 = 0.5;
+
+/// A vanilla character's `resource_reach_distance`, used when no bot in the
+/// roster reports a plausible one.
+///
+/// 2.7 is what live 2.1.17 reports (`crates/core/tests/live_2_1_payloads.rs`
+/// pins it), and it is the same number `mine_step_aside_waypoint` in
+/// `mods/BotBridge/control.lua` falls back to.
+const VANILLA_RESOURCE_REACH: f64 = 2.7;
+
+/// Above this, a reported `resource_reach_distance` is not a character's.
+///
+/// A *player* with no character reports `f64::MAX` here — the game's way of
+/// saying "unbounded" — and feeding that into a separation would make every
+/// tile on the map crowd every other one and refuse every mining plan. The
+/// mod's `mine_step_aside_waypoint` guards the same value with the same
+/// bound, for the same reason.
+const MAX_PLAUSIBLE_RESOURCE_REACH: f64 = 1000.;
+
+/// Half the `character` collision box on each axis, as `base` reports it.
+///
+/// Falls back to [`VANILLA_CHARACTER_COLLISION_HALF_SIDE`] on both axes when
+/// the world carries no `character` prototype — see that constant for why a
+/// world can lack one. Read rather than hardcoded because it is prototype data
+/// a mod can change, exactly like `character_mining_speed`'s.
+fn character_half_box(base: &FactorioWorld) -> (f64, f64) {
+    base.entity_prototypes
+        .get("character")
+        .map(|p| {
+            let b = &p.collision_box;
+            (b.width() / 2., b.height() / 2.)
+        })
+        .unwrap_or((
+            VANILLA_CHARACTER_COLLISION_HALF_SIDE,
+            VANILLA_CHARACTER_COLLISION_HALF_SIDE,
+        ))
+}
+
+/// The furthest a character's centre can be from a resource tile's centre
+/// while still standing on that tile.
+///
+/// Two axis-aligned boxes overlap only while the gap on *both* axes is under
+/// the sum of their half-sides, so the extreme separation at which they still
+/// touch is corner to corner — that hypotenuse. It is the supremum of
+/// [`PlanState::character_stands_on_tile`], and a unit test says so.
+fn tile_occupancy_radius(base: &FactorioWorld) -> f64 {
+    let (half_x, half_y) = character_half_box(base);
+    (TILE_HALF_SIDE + half_x).hypot(TILE_HALF_SIDE + half_y)
+}
 
 /// Do two collision boxes share ground? Touching along an edge does not count.
 fn boxes_overlap(a: &Rect, b: &Rect) -> bool {
@@ -155,12 +212,27 @@ pub struct PlanState {
     /// distance, so the second claimant takes the *next* nearest tile — one
     /// tile further on, inside the same patch — rather than a different patch.
     ///
+    /// **A claim covers the ground around the tile, not only the tile.** Whole-
+    /// tile exclusivity stopped two bots being sent to one ore and did nothing
+    /// about the second bot *standing* on the first one's ore: run
+    /// `run-1788313837-06402` spread four bots across four adjacent tiles and
+    /// lost six of thirteen mines to `could not start mining for 301 ticks:
+    /// another character is standing on the iron-ore`. So a claim also
+    /// excludes every tile within [`PlanState::mining_tile_separation`] of it
+    /// ([`PlanState::is_resource_crowded`]).
+    ///
     /// Read through [`PlanState::resource_unclaimed`], never by the physical
     /// queries: [`PlanState::resource_available`] and
     /// `Condition::ResourceAvailable` still report what the ground holds,
     /// because a claim is a fact about *this plan*, not about the world the
     /// executor will meet.
-    claimed: BTreeSet<Pos>,
+    /// The tile centre is kept as the value, not rebuilt from the key.
+    /// `Pos` floors, so `From<&Pos> for Position` hands back `(-41, -49)` for
+    /// a tile whose ore really sits at `(-40.5, -48.5)`. That is harmless
+    /// while a claim is only ever tested for equality, and is off by up to a
+    /// tile the moment a *distance* is measured to it — which
+    /// [`PlanState::is_resource_crowded`] does.
+    claimed: BTreeMap<Pos, Position>,
     /// The one force this plan acts for, or `None` if `base` carries no forces.
     ///
     /// Chosen once, here, and read by everything that asks a question about
@@ -219,6 +291,11 @@ pub struct PlanState {
     /// no defined iteration order, but a maximum over its values does not
     /// depend on that order, so this stays deterministic.
     max_prototype_half_diagonal: f64,
+    /// How far apart two tiles must be before two *different* mining actions
+    /// may claim them. See [`PlanState::mining_tile_separation`] for the
+    /// derivation; computed once in [`PlanState::from_world`] because neither
+    /// `base` nor the roster changes after construction.
+    mining_tile_separation: f64,
 }
 
 impl PlanState {
@@ -253,6 +330,23 @@ impl PlanState {
                 |acc, d| if d.total_cmp(&acc).is_gt() { d } else { acc },
             );
         let force = base.forces.iter().map(|entry| entry.key().clone()).min();
+        // The roster's worst case, not each bot's own: a tile is claimed by
+        // one action and has to keep *every* other bot off it, so the bound
+        // that matters is the largest reach anybody in the roster swings from.
+        // `f64::MAX` — what a player with no character reports — is not a
+        // character's reach and is dropped rather than propagated.
+        let reach = map
+            .values()
+            .map(|bot| bot.resource_reach_distance)
+            .filter(|reach| *reach > 0. && *reach <= MAX_PLAUSIBLE_RESOURCE_REACH)
+            .fold(None, |acc: Option<f64>, reach| {
+                Some(match acc {
+                    Some(best) if best.total_cmp(&reach).is_ge() => best,
+                    _ => reach,
+                })
+            })
+            .unwrap_or(VANILLA_RESOURCE_REACH);
+        let mining_tile_separation = reach + tile_occupancy_radius(&base);
         PlanState {
             base,
             bots: map,
@@ -266,6 +360,7 @@ impl PlanState {
             reserved: Default::default(),
             reserved_by_anyone: Default::default(),
             max_prototype_half_diagonal,
+            mining_tile_separation,
         }
     }
 
@@ -577,17 +672,8 @@ impl PlanState {
             let b = &entity.collision_box;
             (b.width() / 2.).hypot(b.height() / 2.)
         };
-        let character_half_diag = self
-            .base
-            .entity_prototypes
-            .get("character")
-            .map(|p| {
-                let b = &p.collision_box;
-                (b.width() / 2.).hypot(b.height() / 2.)
-            })
-            .unwrap_or_else(|| {
-                VANILLA_CHARACTER_COLLISION_HALF_SIDE.hypot(VANILLA_CHARACTER_COLLISION_HALF_SIDE)
-            });
+        let character = character_half_box(&self.base);
+        let character_half_diag = character.0.hypot(character.1);
         Some(entity_half_diag + character_half_diag)
     }
 
@@ -719,7 +805,96 @@ impl PlanState {
     /// See the [`claimed`](PlanState#structfield.claimed) field for why a
     /// commitment is whole-tile rather than by amount.
     pub fn is_resource_claimed(&self, position: &Position) -> bool {
-        self.claimed.contains(&Pos::from(position))
+        self.claimed.contains_key(&Pos::from(position))
+    }
+
+    /// How far apart the tiles of two *different* mining actions must be.
+    ///
+    /// # Why exclusivity alone was not enough
+    ///
+    /// Whole-tile claims stop two bots being sent to the same ore. They say
+    /// nothing about where a bot *stands* to mine, and a bot has to stand
+    /// somewhere: run `run-1788313837-06402` spread four bots across four
+    /// adjacent tiles and then lost six of thirteen mines to
+    /// `could not start mining for 301 ticks: another character is standing on
+    /// the iron-ore`. Before reservation the four raced for one tile and the
+    /// losers failed cleanly; after it they were neatly spaced one tile apart
+    /// and blocked each other physically.
+    ///
+    /// # The derivation, term by term
+    ///
+    /// * **`resource_reach_distance`** — the radius of the disc a miner may
+    ///   rest in. This is not an estimate of where the walk lands: it is the
+    ///   bound `FactorioRcon::player_mine_timed` *enforces*
+    ///   (`within_resource_reach`, `crates/core/src/factorio/rcon.rs`), and
+    ///   the same bound the mod re-checks before setting `mining_state`. A bot
+    ///   further out than this does not mine at all, so every bot that does
+    ///   mine tile `T` is somewhere in `disc(T, reach)`. The executor actually
+    ///   aims at `approach_radius(reach)` — half of it — so this is the worst
+    ///   case rather than the expected one, which is the direction a
+    ///   separation has to err in. The roster's largest plausible reach is
+    ///   used; see [`MAX_PLAUSIBLE_RESOURCE_REACH`].
+    /// * **`(0.5 + character_x).hypot(0.5 + character_y)`** — the furthest a
+    ///   character's *centre* can be from a tile's centre while its collision
+    ///   box still overlaps that tile. Two axis-aligned boxes overlap only
+    ///   while both axis gaps are under the sum of their half-sides, so the
+    ///   extreme is the corner-to-corner case, which is that hypotenuse.
+    ///   [`TILE_HALF_SIDE`] is the tile's half-side; the character's comes
+    ///   from the world's own `character` prototype (`character_half_box`).
+    ///
+    /// Their sum is the triangle inequality applied once: if
+    /// `d(A, B) >= reach + overlap`, then a bot anywhere within `reach` of `B`
+    /// is more than `overlap` from `A`, and so cannot be standing on `A`.
+    /// With live numbers (2.7, ±0.19921875) that is **3.690** tiles.
+    ///
+    /// # What it deliberately is not
+    ///
+    /// It is not the mod's step-aside distance and does not try to be. The
+    /// step-aside (`mine_step_aside_waypoint`) is the recovery for a bot that
+    /// is *already* blocked; this is what stops the plan creating the block in
+    /// the first place. Both are wanted — a re-plan cannot know where the
+    /// previous plan's bots are still standing, so the step-aside remains the
+    /// backstop across plans — but only one of them belongs in the planner.
+    pub fn mining_tile_separation(&self) -> f64 {
+        self.mining_tile_separation
+    }
+
+    /// Would a character standing at `stand` be standing on the resource tile
+    /// whose ore sits at `tile`?
+    ///
+    /// The character's collision box against the tile's own square. Both are
+    /// axis-aligned, so they share ground exactly while the gap on both axes
+    /// is under the sum of their half-sides. `tile` is a tile *centre* — a
+    /// real resource sits at `(-40.5, -48.5)` — so [`TILE_HALF_SIDE`] reaches
+    /// its edges without any offset being restored first.
+    ///
+    /// This is the thing the mod reports as `another character is standing on
+    /// the <ore>`, stated in geometry the planner can check, and
+    /// [`PlanState::mining_tile_separation`] is derived from it.
+    pub fn character_stands_on_tile(&self, stand: &Position, tile: &Position) -> bool {
+        let (half_x, half_y) = character_half_box(&self.base);
+        (stand.x() - tile.x()).abs() < TILE_HALF_SIDE + half_x
+            && (stand.y() - tile.y()).abs() < TILE_HALF_SIDE + half_y
+    }
+
+    /// Is `position` too close to a tile some *other* mining action has
+    /// already claimed?
+    ///
+    /// Distances are measured between tile *centres*, taken from the claim's
+    /// stored `Position` rather than rebuilt from its flooring `Pos` key —
+    /// see the [`claimed`](PlanState#structfield.claimed) field. Rebuilding
+    /// would shift every claim by half a tile on each axis and make a
+    /// separation that reads exact wrong by up to 0.71 tiles.
+    ///
+    /// The tile's own claim never counts: "claimed" and "crowded" are separate
+    /// questions and a caller can ask either. [`PlanState::resource_unclaimed`]
+    /// asks both.
+    pub fn is_resource_crowded(&self, position: &Position) -> bool {
+        let key = Pos::from(position);
+        self.claimed.iter().any(|(claimed_key, claimed_centre)| {
+            *claimed_key != key
+                && calculate_distance(position, claimed_centre) < self.mining_tile_separation
+        })
     }
 
     /// Ore at a tile that is still *available to plan against*: what
@@ -730,9 +905,11 @@ impl PlanState {
     /// The physical reading answers "will the ore be there when the bot
     /// swings", which is what `Condition::ResourceAvailable` needs and which a
     /// claim must not distort; this one answers "may I send another bot here",
-    /// and the answer is no.
+    /// and the answer is no — whether because the tile itself is spoken for or
+    /// because a bot mining a nearby claim will be standing on it. Both, in
+    /// the order they are cheap to test.
     pub fn resource_unclaimed(&self, position: &Position, item: &str) -> u32 {
-        if self.is_resource_claimed(position) {
+        if self.is_resource_claimed(position) || self.is_resource_crowded(position) {
             return 0;
         }
         self.resource_available(position, item)
@@ -744,7 +921,7 @@ impl PlanState {
     /// of the two it means; `consume_resource` calls this, because taking ore
     /// out of a tile in a plan is also the plan committing to that tile.
     pub fn claim_resource(&mut self, position: &Position) {
-        self.claimed.insert(Pos::from(position));
+        self.claimed.insert(Pos::from(position), position.clone());
     }
 
     /// Take `count` of `item` out of a tile, and commit the tile to the action
@@ -1408,5 +1585,125 @@ mod tests {
         a.reserve(&whose, "stone", 2);
         a.release(&whose, "stone", 9);
         assert_eq!(a.available(&whose, "stone"), 5);
+    }
+
+    /// The separation is a *derived* number, not a tuned one: it is the reach
+    /// the game enforces plus the radius at which a character stops standing
+    /// on a tile. Both halves are pinned here so a change to either shows up
+    /// as a change to this, rather than silently.
+    #[test]
+    fn the_mining_separation_is_reach_plus_the_occupancy_radius() {
+        let a = state();
+        let reach = a.bot(BotId(1)).expect("bot 1").resource_reach_distance;
+        let occupancy = a.mining_tile_separation() - reach;
+        // The fixture world's `character` box, or the vanilla fallback: either
+        // way, half a tile plus half a character on each axis, corner to
+        // corner.
+        let (half_x, half_y) = character_half_box(a.base());
+        assert!(
+            (occupancy - (TILE_HALF_SIDE + half_x).hypot(TILE_HALF_SIDE + half_y)).abs() < 1e-12,
+            "separation {} is not reach {} plus the occupancy radius",
+            a.mining_tile_separation(),
+            reach
+        );
+    }
+
+    /// The occupancy radius has to be the *supremum* of
+    /// `character_stands_on_tile`, or the separation built on it is either
+    /// unsafe (too small) or wasteful (too large). Walked in a fine ring
+    /// rather than argued.
+    #[test]
+    fn the_occupancy_radius_is_exactly_where_a_character_stops_standing_on_a_tile() {
+        let a = state();
+        let tile = Position::new(-40.5, 40.5);
+        let radius =
+            a.mining_tile_separation() - a.bot(BotId(1)).expect("bot 1").resource_reach_distance;
+        for step in 0..720 {
+            let angle = std::f64::consts::TAU * f64::from(step) / 720.;
+            let (sin, cos) = angle.sin_cos();
+            let outside = Position::new(
+                tile.x() + cos * (radius + 1e-6),
+                tile.y() + sin * (radius + 1e-6),
+            );
+            assert!(
+                !a.character_stands_on_tile(&outside, &tile),
+                "a character {radius} out at {angle} rad still stands on the tile"
+            );
+        }
+        // And it is not slack: the corner direction still overlaps just inside.
+        let diagonal = std::f64::consts::FRAC_1_SQRT_2 * (radius - 1e-6);
+        assert!(a.character_stands_on_tile(
+            &Position::new(tile.x() + diagonal, tile.y() + diagonal),
+            &tile
+        ));
+    }
+
+    /// A player with no character reports `f64::MAX` here. Propagating that
+    /// would crowd every tile on the map out of every plan.
+    #[test]
+    fn an_unbounded_reach_does_not_become_an_unbounded_separation() {
+        use factorio_bot_core::types::FactorioPlayer;
+
+        let world = fixture_world();
+        world.players.insert(
+            1,
+            FactorioPlayer {
+                player_id: 1,
+                resource_reach_distance: f64::MAX,
+                ..Default::default()
+            },
+        );
+        let a = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+        assert!(
+            a.mining_tile_separation() < 5.,
+            "separation ran away: {}",
+            a.mining_tile_separation()
+        );
+    }
+
+    /// The whole point of storing the claim's `Position` beside its `Pos` key:
+    /// a tile centre must not be rounded down before a distance is measured
+    /// to it.
+    #[test]
+    fn crowding_is_measured_from_tile_centres_not_from_floored_keys() {
+        let mut a = state();
+        let tile = Position::new(-40.5, 40.5);
+        a.claim_resource(&tile);
+
+        let separation = a.mining_tile_separation();
+        // A tile just outside the separation measured from the *centre*, and
+        // just inside it if the claim had been floored to (-41, 40).
+        let outside = Position::new(-40.5 + separation + 0.01, 40.5);
+        assert!(
+            !a.is_resource_crowded(&outside),
+            "measured from the floored key, this would read as crowded"
+        );
+        let inside = Position::new(-40.5 + separation - 0.01, 40.5);
+        assert!(a.is_resource_crowded(&inside));
+    }
+
+    /// Claimed and crowded are separate questions, and `resource_unclaimed`
+    /// asks both. A tile is never crowded by its own claim.
+    #[test]
+    fn a_tile_next_to_a_claim_is_crowded_without_being_claimed() {
+        let mut a = state();
+        let tile = Position::new(-40.5, 40.5);
+        let neighbour = Position::new(-39.5, 40.5);
+        a.claim_resource(&tile);
+
+        assert!(a.is_resource_claimed(&tile));
+        assert!(
+            !a.is_resource_crowded(&tile),
+            "a tile must not crowd itself, or the two predicates cannot be read apart"
+        );
+        assert!(!a.is_resource_claimed(&neighbour));
+        assert!(a.is_resource_crowded(&neighbour));
+
+        assert_eq!(a.resource_unclaimed(&neighbour, "iron-ore"), 0);
+        assert_eq!(
+            a.resource_available(&neighbour, "iron-ore"),
+            DEFAULT_RESOURCE_PER_TILE,
+            "crowding is a fact about the plan, not about the ground"
+        );
     }
 }

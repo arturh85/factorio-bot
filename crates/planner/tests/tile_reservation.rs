@@ -11,6 +11,7 @@
 //! the defect was never inside one call to `resource_tiles_for` — that always
 //! returned distinct tiles. It was between calls.
 
+use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::test_utils::fixture_world;
 use factorio_bot_core::types::Position;
 use factorio_bot_planner::goal::{Goal, Holder};
@@ -22,6 +23,19 @@ use std::sync::Arc;
 
 fn world(bots: &[BotId]) -> PlanState {
     PlanState::from_world(Arc::new(fixture_world()), bots)
+}
+
+/// Every distinct iron tile the fixture carries, in a fixed order.
+fn iron_tiles(state: &PlanState) -> Vec<Position> {
+    let mut tiles: Vec<Position> = state
+        .resource_patches("iron-ore")
+        .into_iter()
+        .flat_map(|patch| patch.elements)
+        .collect();
+    tiles.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    tiles.dedup_by(|a, b| a.x.total_cmp(&b.x).is_eq() && a.y.total_cmp(&b.y).is_eq());
+    assert!(tiles.len() > 1, "the fixture's iron field has many tiles");
+    tiles
 }
 
 fn gather(item: &str, count: u32) -> Goal {
@@ -179,45 +193,67 @@ fn tile_assignment_is_deterministic() {
 
 /// A patch that cannot seat the whole plan refuses it.
 ///
-/// Every iron tile but one is committed before expansion starts, so the first
-/// share takes the last tile and the second has nowhere to go. The planner
-/// must say so rather than send both bots to the same tile — a refusal at plan
-/// time is cheaper than a crash at action 73.
+/// The patch is committed down to a single usable *seat* — not a single
+/// unclaimed tile. Since tiles are spaced (`PlanState::mining_tile_separation`),
+/// the last unclaimed tile of an otherwise fully committed patch is no longer
+/// usable by anybody: it sits inside the standing room of the tiles around it,
+/// which is exactly the condition that made run `run-1788313837-06402` block.
+/// So the fixture claims the tiles a *separation* away from one anchor and
+/// asserts, rather than assumes, that what is left is one seat.
+///
+/// The planner must then say so rather than send both bots to that seat — a
+/// refusal at plan time is cheaper than a crash at action 73.
 #[test]
 fn a_patch_too_small_for_the_roster_is_refused_not_overcommitted() {
     let bots = [BotId(1), BotId(2)];
     let mut state = world(&bots);
+    let separation = state.mining_tile_separation();
+    let tiles = iron_tiles(&state);
+    let anchor = nearest_resource_tile(&state, "iron-ore", &Position::new(0., 0.), 1)
+        .expect("the fixture has iron ore");
 
-    let mut tiles: Vec<Position> = state
-        .resource_patches("iron-ore")
-        .into_iter()
-        .flat_map(|patch| patch.elements)
+    let claim: Vec<Position> = tiles
+        .iter()
+        .filter(|tile| calculate_distance(tile, &anchor) >= separation)
+        .cloned()
         .collect();
-    tiles.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
-    tiles.dedup_by(|a, b| a.x.total_cmp(&b.x).is_eq() && a.y.total_cmp(&b.y).is_eq());
-    assert!(tiles.len() > 1, "the fixture's iron field has many tiles");
-    for tile in tiles.iter().take(tiles.len() - 1) {
+    for tile in &claim {
         state.claim_resource(tile);
     }
 
-    // One tile left, two shares of one ore each.
+    let seats: Vec<Position> = tiles
+        .iter()
+        .filter(|tile| state.resource_unclaimed(tile, "iron-ore") > 0)
+        .cloned()
+        .collect();
+    assert!(!seats.is_empty(), "the anchor itself must still be usable");
+    for a in &seats {
+        for b in &seats {
+            assert!(
+                a == b || calculate_distance(a, b) < separation,
+                "the fixture must leave one seat, not two: {a} and {b}"
+            );
+        }
+    }
+
+    // One seat, two shares of one ore each.
     let error = expand(
         &[gather("iron-ore", 2)],
         &state,
         &registry_for(&bots),
         BotId(1),
     )
-    .expect_err("the last tile cannot seat two bots");
+    .expect_err("one seat cannot hold two bots");
     assert!(
         error.to_string().contains("iron-ore"),
         "the refusal must name the goal it could not meet: {error}"
     );
 
-    // And the one tile that was left is still plannable on its own, so the
-    // refusal is about the second share, not about the patch being unreadable.
+    // And that seat is still plannable on its own, so the refusal is about the
+    // second share, not about the patch having become unreadable.
     let one = [BotId(1)];
     let mut solo = world(&one);
-    for tile in tiles.iter().take(tiles.len() - 1) {
+    for tile in &claim {
         solo.claim_resource(tile);
     }
     let net = expand(
@@ -226,6 +262,6 @@ fn a_patch_too_small_for_the_roster_is_refused_not_overcommitted() {
         &registry_for(&one),
         BotId(1),
     )
-    .expect("one bot fits on one tile");
+    .expect("one bot fits in one seat");
     assert_eq!(mining(&net).len(), 1);
 }

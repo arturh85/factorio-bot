@@ -7,9 +7,10 @@ use crate::errors::{
 use crate::factorio::snapshot::WorldSnapshot;
 use crate::factorio::ticks::{ActionTicks, take_tick_stamp};
 use crate::factorio::util::{
-    blueprint_build_area, build_entity_path, calculate_distance, hashmap_to_lua, map_blocked_tiles,
-    move_pos, move_position, position_to_lua, rect_to_lua, span_rect, str_to_lua, value_to_lua,
-    vec_to_lua, vector_add, vector_multiply, vector_normalize, vector_substract,
+    add_to_rect, blueprint_build_area, build_entity_path, calculate_distance, hashmap_to_lua,
+    map_blocked_tiles, move_pos, move_position, position_to_lua, rect_to_lua, span_rect,
+    str_to_lua, value_to_lua, vec_to_lua, vector_add, vector_multiply, vector_normalize,
+    vector_substract,
 };
 use crate::factorio::world::{FactorioWorld, PlacementRefusal, RefusalSource};
 use crate::settings::FactorioSettings;
@@ -529,6 +530,245 @@ fn walk_arrives(goal: &Position, radius: Option<f64>, end: &Position) -> bool {
 /// The tolerance [`walk_arrives`] applies, exposed so a failure can report it.
 fn arrival_tolerance(radius: Option<f64>) -> f64 {
     radius.unwrap_or(DEFAULT_PATH_RADIUS) + PATH_ENDPOINT_SLACK
+}
+
+/// The prototype whose collision box a walk's destination must have room for.
+///
+/// Read from the world rather than written down as `0.19921875`, because the
+/// number is a property of the running game's prototypes and this crate has no
+/// business asserting it. When the world does not have it — a world built
+/// before `update_entity_prototypes` ran, which every early tick is — the
+/// footprint degrades to a point, see [`character_footprint`].
+const CHARACTER_PROTOTYPE: &str = "character";
+
+/// How far around a destination to look for an entity that can be *named* in a
+/// refusal.
+///
+/// Only ever used for wording. Whether the destination is blocked is decided by
+/// [`EntityGraph::blocking_boxes_within`](crate::graph::entity_graph::EntityGraph::blocking_boxes_within);
+/// this radius merely has to be wide enough to reach the centre of a large
+/// entity whose box covers the destination, and a miss costs a less specific
+/// message and nothing else.
+const BLOCKER_NAMING_RADIUS: f64 = 3.0;
+
+/// How far outside the footprint to ask the quad tree for boxes.
+///
+/// The tree's query is a narrowing pass that already admits boxes which merely
+/// come close, so this is belt and braces against a degenerate (zero-area)
+/// footprint querying badly; every box it returns is re-tested exactly against
+/// the footprint afterwards, so a wider probe cannot widen the verdict.
+const BLOCKER_PROBE_MARGIN: f64 = 1.0;
+
+/// What is known about a character standing at a position — **not** whether the
+/// ground is clear.
+///
+/// The asymmetry is the whole point, and it is the same one
+/// [`PlacementVerdict::is_durable_refusal`] makes about the game's build
+/// refusals: an observation that something *is* there is a fact, while the
+/// absence of an observation is not.
+/// [`EntityGraph`](crate::graph::entity_graph::EntityGraph) is an in-bounds oracle —
+/// it can only answer about entities and tiles it has been told about — so
+/// "no box overlaps" covers both "the ground is clear" and "the graph has
+/// never seen this ground", and those two are indistinguishable from here.
+///
+/// Hence two variants and not three: only [`StandingVerdict::Blocked`] may
+/// refuse a walk. Everything else is allowed through, including every case
+/// where the answer is really "I cannot tell". This guard sits on the path of
+/// every walk, so a false positive is worse than the stall it prevents.
+#[derive(Debug, Clone, PartialEq)]
+enum StandingVerdict {
+    /// A collision box the graph has actually seen overlaps the character's
+    /// footprint at that position. The string names the obstruction for the
+    /// failure message; see [`describe_blocker`].
+    Blocked { blocker: String },
+    /// Nothing the graph has seen overlaps the footprint. Read as "cannot be
+    /// proved blocked", never as "clear".
+    NotProvablyBlocked,
+}
+
+/// Whether two rectangles overlap in the sense the game collides them: sharing
+/// only an edge is not an overlap.
+///
+/// Strict on all four comparisons, which matters twice. A character whose box
+/// abuts a furnace's exactly — `0.69921875 + 0.19921875` from its centre — is
+/// standing legally and must not be refused; and a degenerate footprint (zero
+/// width and height, the unknown-prototype fallback) reduces this to
+/// [`Rect::contains`], i.e. "the point is strictly inside the box", which is
+/// the weakest claim that still catches a destination inside a building.
+fn boxes_overlap(a: &Rect, b: &Rect) -> bool {
+    a.left_top.x() < b.right_bottom.x()
+        && b.left_top.x() < a.right_bottom.x()
+        && a.left_top.y() < b.right_bottom.y()
+        && b.left_top.y() < a.right_bottom.y()
+}
+
+/// The area a character standing at `at` occupies, as the world's own
+/// prototypes describe it.
+///
+/// With no `character` prototype the footprint collapses to the single point
+/// `at`. That is deliberately a *weaker* question — "is this exact point inside
+/// a building" instead of "does a character fit here" — because guessing an
+/// extent we were never told would refuse walks on an invented number.
+fn character_footprint(world: &FactorioWorld, at: &Position) -> Rect {
+    match world.entity_prototypes.get(CHARACTER_PROTOTYPE) {
+        Some(prototype) => add_to_rect(&prototype.collision_box, at),
+        None => Rect::new(at, at),
+    }
+}
+
+/// Names the obstruction for a refusal message, best effort.
+///
+/// `blocking_boxes_within` answers with rectangles and no names — its payload
+/// is a bare `is_minable` flag — so the name has to come from the entity tree,
+/// which holds only the types that tree tracks. A tree, a rock or a water tile
+/// therefore blocks without being named, and the box is reported instead. The
+/// query is deliberately unfiltered by name and type: narrowing it is what
+/// reintroduced the forest-siting bug that `1b2b2149` was careful to leave
+/// alone.
+fn describe_blocker(world: &FactorioWorld, footprint: &Rect, blocker: &Rect) -> String {
+    let named = world
+        .entity_graph
+        .find_entities_in_radius(footprint.center(), BLOCKER_NAMING_RADIUS, None, None)
+        .into_iter()
+        .find(|entity| boxes_overlap(&entity.bounding_box, footprint));
+    match named {
+        Some(entity) => format!("{} at {}", entity.name, entity.position),
+        None => format!(
+            "a collision box spanning {} to {}",
+            blocker.left_top, blocker.right_bottom
+        ),
+    }
+}
+
+/// Whether the graph can prove a character cannot stand at `at`.
+///
+/// The one caller is [`judge_path`], for the *last* waypoint of a
+/// returned path — which is the walk's non-negotiable destination inside the
+/// mod, the position its follower steers at until it arrives or the leg times
+/// out. Run 30 (`docs/superpowers/notes/2026-09-02-rung-7-unreachable.md`)
+/// had three walks whose last waypoint was inside a stone furnace this same run
+/// had built; each burned four re-paths and a leg timeout on a destination that
+/// was unsatisfiable by arithmetic, and reported it as terrain.
+fn standing_verdict(world: &FactorioWorld, at: &Position) -> StandingVerdict {
+    let footprint = character_footprint(world, at);
+    let probe = Rect::new(
+        &Position::new(
+            footprint.left_top.x() - BLOCKER_PROBE_MARGIN,
+            footprint.left_top.y() - BLOCKER_PROBE_MARGIN,
+        ),
+        &Position::new(
+            footprint.right_bottom.x() + BLOCKER_PROBE_MARGIN,
+            footprint.right_bottom.y() + BLOCKER_PROBE_MARGIN,
+        ),
+    );
+    // The quad tree admits boxes that merely come close (its doc comment says
+    // so), so every candidate is re-tested exactly before it may refuse.
+    match world
+        .entity_graph
+        .blocking_boxes_within(&probe)
+        .into_iter()
+        .find(|blocker| boxes_overlap(blocker, &footprint))
+    {
+        Some(blocker) => StandingVerdict::Blocked {
+            blocker: describe_blocker(world, &footprint, &blocker),
+        },
+        None => StandingVerdict::NotProvablyBlocked,
+    }
+}
+
+/// A walk would have ended somewhere a character cannot stand.
+///
+/// Raised *before* any walk is dispatched, by [`judge_path`], when
+/// the last waypoint of the path the pathfinder returned is inside a collision
+/// box the entity graph has seen. That waypoint is the walk's destination in
+/// the mod, so such a walk cannot finish: the follower steers at a point the
+/// character cannot occupy, wedges against the box, and the re-path that
+/// follows is unsatisfiable too — `WALK_REPATH_RADIUS` is 0.5 while standing
+/// clear of a stone furnace needs 0.8984375.
+///
+/// Lives here rather than in [`crate::errors`] because it is meaningless away
+/// from the one function that raises it, the same arrangement
+/// [`crate::scripts::ScriptPathError`] uses.
+// False positive from the thiserror/miette derives using struct fields in
+// format strings, same as `crate::errors`.
+#[allow(unused_assignments)]
+#[derive(thiserror::Error, Debug, miette::Diagnostic)]
+#[error(
+    "the walk to [{goal_x}, {goal_y}] would end at [{end_x}, {end_y}], inside {blocker} — a character cannot stand there, so the walk could only stall"
+)]
+#[diagnostic(
+    code(factorio::rcon::walk_ends_where_nobody_can_stand),
+    help(
+        "the pathfinder returned a route terminating inside a building; aim beside the target rather than at it — an entity's own position is inside its own collision box"
+    )
+)]
+pub struct RconWalkEndsWhereNobodyCanStand {
+    pub goal_x: f64,
+    pub goal_y: f64,
+    pub end_x: f64,
+    pub end_y: f64,
+    pub blocker: String,
+}
+
+/// Everything [`FactorioRcon::move_player_timed`] decides about a returned path
+/// before it dispatches anything.
+///
+/// A free function, and not inlined into the caller, because both refusals are
+/// pure judgements about data the game already handed over: given the
+/// waypoints, the goal, the radius and a world, the answer is fixed. Driving
+/// them here needs no RCON connection and no running game, which is the only
+/// way run 30's actual coordinates can be a test.
+///
+/// Two questions, in this order:
+///
+/// 1. **Does the path reach the caller's goal?** [`FactorioRcon::player_path`]
+///    is best effort and may have substituted the goal, so a path that lands
+///    outside [`arrival_tolerance`] is [`RconWalkFallsShort`]. Unchanged.
+/// 2. **Can a character stand where it ends?** Only asked of an actual
+///    waypoint. An empty path is not a destination anybody chose — the mod
+///    completes such a walk next tick without moving — so the fallback
+///    position that question 1 judges is deliberately not fed to question 2:
+///    refusing a walk because the bot is *already* standing somewhere the
+///    graph calls blocked would be a refusal about the past.
+fn judge_path(
+    world: &FactorioWorld,
+    goal: &Position,
+    radius: Option<f64>,
+    waypoints: &[Position],
+    here: Option<&Position>,
+) -> Result<(), ActionFailure> {
+    if let Some(end) = walk_end_position(waypoints, here)
+        && !walk_arrives(goal, radius, end)
+    {
+        return Err(ActionFailure::not_dispatched(
+            RconWalkFallsShort {
+                goal_x: goal.x(),
+                goal_y: goal.y(),
+                end_x: end.x(),
+                end_y: end.y(),
+                shortfall: calculate_distance(end, goal),
+                tolerance: arrival_tolerance(radius),
+            }
+            .into(),
+        ));
+    }
+
+    if let Some(end) = waypoints.last()
+        && let StandingVerdict::Blocked { blocker } = standing_verdict(world, end)
+    {
+        return Err(ActionFailure::not_dispatched(
+            RconWalkEndsWhereNobodyCanStand {
+                goal_x: goal.x(),
+                goal_y: goal.y(),
+                end_x: end.x(),
+                end_y: end.y(),
+                blocker,
+            }
+            .into(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// One entry of a `LuaSurface.request_path` result, as the mod's
@@ -1692,6 +1932,24 @@ impl FactorioRcon {
     /// `player_path` keeps that method usable as the "get near" primitive its
     /// other callers want, and checking *before* the dispatch means the bot is
     /// not marched across the map for nothing.
+    ///
+    /// # A walk that ends inside a building is refused too
+    ///
+    /// Arriving is not the only way a path can be useless. The last waypoint is
+    /// the walk's destination *in the mod*, and the pathfinder will happily
+    /// return one inside a building we ourselves built: 12 of run 30's 75
+    /// returned paths had a waypoint strictly inside a stone furnace, each
+    /// flagged `needs_destroy_to_reach: false`. All three of that run's failed
+    /// walks are exactly the ones whose last waypoint was one of those, and
+    /// each cost four re-paths and a leg timeout before reporting the terrain
+    /// as unreachable — while the re-path could not have succeeded, since
+    /// `WALK_REPATH_RADIUS` is 0.5 and standing clear of a stone furnace needs
+    /// 0.8984375.
+    ///
+    /// So the destination is also checked for standability, against the entity
+    /// graph, and refused as [`RconWalkEndsWhereNobodyCanStand`] naming the
+    /// obstruction. Only a *provable* overlap refuses: see
+    /// [`StandingVerdict`] for why "cannot tell" has to be allowed through.
     pub async fn move_player_timed(
         &self,
         world: &Arc<FactorioWorld>,
@@ -1712,26 +1970,13 @@ impl FactorioRcon {
         // one below.
         let waypoints = self.player_path(world, player_id, goal, radius).await?;
 
-        // The arrival check. `player_path` may have substituted the goal, so
-        // the path is judged against what the caller asked for. An unknown
-        // player position with an empty path leaves nothing to judge, and an
-        // unjudgeable walk is dispatched rather than refused on a guess.
+        // The pre-dispatch judgement: does this path reach the goal, and can a
+        // character stand where it ends. `player_path` may have substituted the
+        // goal, so the path is judged against what the caller asked for. An
+        // unknown player position with an empty path leaves nothing to judge,
+        // and an unjudgeable walk is dispatched rather than refused on a guess.
         let here = world.players.get(&player_id).map(|p| p.position.clone());
-        if let Some(end) = walk_end_position(&waypoints, here.as_ref())
-            && !walk_arrives(goal, radius, end)
-        {
-            return Err(ActionFailure::not_dispatched(
-                RconWalkFallsShort {
-                    goal_x: goal.x(),
-                    goal_y: goal.y(),
-                    end_x: end.x(),
-                    end_y: end.y(),
-                    shortfall: calculate_distance(end, goal),
-                    tolerance: arrival_tolerance(radius),
-                }
-                .into(),
-            ));
-        }
+        judge_path(world, goal, radius, &waypoints, here.as_ref())?;
 
         let dispatched = self
             .action_start_walk_waypoints(action_id, player_id, waypoints)
@@ -4924,5 +5169,300 @@ mod frame_camera_tests {
             "and an untagged capture with no cameras still sends no argument \
              at all -- the mod distinguishes an absent id from any value"
         );
+    }
+}
+
+/// A walk must not be dispatched at a destination nobody can stand on — and
+/// must still be dispatched everywhere we cannot prove that.
+///
+/// The data is run 30's, `docs/superpowers/notes/2026-09-02-rung-7-unreachable.md`:
+/// three failed walks, three destinations, each inside a stone furnace the same
+/// run had built, with the collision boxes read from this crate's own prototype
+/// fixtures — which carry the game's real `0.19921875` character and
+/// `0.69921875` stone furnace half-extents, so the arithmetic in these tests is
+/// the arithmetic the run did.
+///
+/// Half the module is about the other direction. This guard sits on the path of
+/// **every** walk, so each refusing test is paired with one that pins what must
+/// not be refused: a graph that has seen nothing, a footprint that merely
+/// touches, a world with no character prototype.
+#[cfg(test)]
+mod walk_destination_tests {
+    use super::*;
+    use crate::test_utils::fixture_entity_prototypes;
+    use crate::types::FactorioEntityPrototype;
+
+    /// A world holding the fixture prototypes and whatever entities the test
+    /// gives it, which is what `FactorioWorld::new` plus
+    /// `update_chunk_entities` gets us: `entity_prototypes` is shared with the
+    /// entity graph, so the furnaces below get the game's own collision box.
+    fn world_with(furnaces: &[Position]) -> Arc<FactorioWorld> {
+        let world = FactorioWorld::new();
+        let prototypes: Vec<FactorioEntityPrototype> = fixture_entity_prototypes()
+            .iter()
+            .map(|v| v.clone())
+            .collect();
+        world.update_entity_prototypes(prototypes).unwrap();
+        let entities = furnaces
+            .iter()
+            .map(|position| {
+                FactorioEntity::from_prototype(
+                    "stone-furnace",
+                    position.clone(),
+                    None,
+                    None,
+                    None,
+                    world.entity_prototypes.clone(),
+                )
+                .expect("the fixture has a stone-furnace prototype")
+            })
+            .collect();
+        world.update_chunk_entities(entities).unwrap();
+        Arc::new(world)
+    }
+
+    fn refusal(result: Result<(), ActionFailure>) -> ActionFailure {
+        result.expect_err("this destination is inside a furnace, so the walk cannot arrive")
+    }
+
+    /// Run 30's walk 72, tick 81,661, verbatim. The mine's corrective walk
+    /// toward the copper at `(-23.5, 18.5)` got a path ending 1.2309 tiles
+    /// short of it — comfortably inside the 2.35 tolerance
+    /// `approach_radius(2.7)` implies, so the arrival check passes and passed
+    /// then — but that endpoint is inside the stone furnace the same run built
+    /// at `(-22, 18)` at tick 33,342.
+    #[test]
+    fn run_30_walk_72_is_refused_before_dispatch_and_names_the_furnace() {
+        let world = world_with(&[Position::new(-22., 18.)]);
+        let goal = Position::new(-23.5, 18.5);
+        let radius = Some(approach_radius(2.7));
+        let end = Position::new(-22.30078125, 18.22265625);
+
+        assert!(
+            walk_arrives(&goal, radius, &end),
+            "the arrival check passes this path -- that is why it was dispatched"
+        );
+
+        let failure = refusal(judge_path(&world, &goal, radius, &[end], None));
+        let message = format!("{:?}", failure.error);
+        assert!(
+            message.contains("stone-furnace") && message.contains("[-22, 18]"),
+            "the refusal must name the obstruction and where it is, not blame \
+             the terrain: {message}"
+        );
+        assert!(
+            message.contains("-22.3") && message.contains("18.22"),
+            "and name the destination it refused: {message}"
+        );
+        assert_eq!(
+            failure.dispatch,
+            Dispatch::NotDispatched,
+            "the walk never happened, so nothing is outstanding"
+        );
+        assert_eq!(
+            failure.ticks,
+            ActionTicks::UNKNOWN,
+            "the game never saw this, so there is no measurement to report"
+        );
+    }
+
+    /// Run 30's walk 96, tick 89,002. Its furnace at `(-22, 24)` was placed at
+    /// tick 87,493, 1,509 ticks before the walk that ended inside it: the graph
+    /// knew, and nobody asked.
+    #[test]
+    fn run_30_walk_96_is_refused_before_dispatch() {
+        let world = world_with(&[Position::new(-22., 24.)]);
+        let goal = Position::new(-22.5, 22.5);
+        let end = Position::new(-22.2890625, 23.3359375);
+
+        assert!(
+            walk_arrives(&goal, None, &end),
+            "this path arrives, by the only check that used to exist"
+        );
+        let message = format!(
+            "{:?}",
+            refusal(judge_path(&world, &goal, None, &[end], None)).error
+        );
+        assert!(
+            message.contains("stone-furnace") && message.contains("[-22, 24]"),
+            "{message}"
+        );
+    }
+
+    /// Run 30's walk 179, tick 165,964 — the cleanest of the three. Its goal is
+    /// the furnace's *own position*, which is what a `take from the furnace`
+    /// step's `AtPosition` target is, so the endpoint 0.707 tiles away is both
+    /// a perfectly good arrival and a place no character can be.
+    #[test]
+    fn run_30_walk_179_is_refused_even_though_it_lands_where_it_was_asked_to() {
+        let world = world_with(&[Position::new(-19., 20.)]);
+        let goal = Position::new(-19., 20.);
+        let end = Position::new(-19.5, 19.5);
+
+        assert!(walk_arrives(&goal, None, &end), "0.707 is well inside 2.0");
+        let message = format!(
+            "{:?}",
+            refusal(judge_path(&world, &goal, None, &[end], None)).error
+        );
+        assert!(
+            message.contains("stone-furnace") && message.contains("[-19, 20]"),
+            "{message}"
+        );
+    }
+
+    /// The regression that would matter. `blocking_boxes_within` is an
+    /// **in-bounds** oracle: an empty answer means "nothing I have seen is
+    /// there", never "the ground is clear". Run 30's own walk 72 destination,
+    /// against a graph that has not been told about the furnace, must be walked
+    /// -- refusing here would ground every bot on ground we have not surveyed,
+    /// which is worse than the stall this guard prevents.
+    #[test]
+    fn a_destination_the_graph_has_never_seen_is_walked() {
+        let world = world_with(&[]);
+        let end = Position::new(-22.30078125, 18.22265625);
+        assert_eq!(
+            standing_verdict(&world, &end),
+            StandingVerdict::NotProvablyBlocked,
+            "an unseen obstruction is not an observed one"
+        );
+        assert!(
+            judge_path(
+                &world,
+                &Position::new(-23.5, 18.5),
+                Some(approach_radius(2.7)),
+                &[end],
+                None
+            )
+            .is_ok(),
+            "cannot tell must not refuse"
+        );
+    }
+
+    /// The false positive that would matter next: a destination beside the
+    /// furnace, on the tile centre the pathfinder actually aims at, with the
+    /// furnace right there in the graph.
+    #[test]
+    fn a_destination_next_to_a_known_furnace_is_walked() {
+        let world = world_with(&[Position::new(-22., 18.)]);
+        assert_eq!(
+            standing_verdict(&world, &Position::new(-23.5, 18.5)),
+            StandingVerdict::NotProvablyBlocked,
+            "a tile away from the box is not inside it"
+        );
+    }
+
+    /// The exact arithmetic the note turns on, as a boundary test.
+    /// `0.69921875 + 0.19921875 = 0.8984375` is where a character stands clear
+    /// of a stone furnace; its box then *touches* the furnace's and touching is
+    /// not colliding. One 1/256th nearer is an overlap. Both directions, one
+    /// position unit apart.
+    #[test]
+    fn a_footprint_that_only_touches_the_furnace_is_walked_and_one_unit_nearer_is_not() {
+        let world = world_with(&[Position::new(-22., 18.)]);
+        assert_eq!(
+            standing_verdict(&world, &Position::new(-22.8984375, 18.)),
+            StandingVerdict::NotProvablyBlocked,
+            "sharing an edge is legal standing room and must not be refused"
+        );
+        assert!(
+            matches!(
+                standing_verdict(&world, &Position::new(-22.89453125, 18.)),
+                StandingVerdict::Blocked { .. }
+            ),
+            "1/256 nearer and the boxes genuinely overlap"
+        );
+    }
+
+    /// With no `character` prototype the footprint collapses to a point, which
+    /// is a weaker question and must stay weaker: run 30's endpoint is still
+    /// strictly inside the furnace and is still refused, while a position where
+    /// only a character's *extent* would overlap is no longer provably blocked
+    /// and is walked.
+    #[test]
+    fn without_a_character_prototype_the_question_narrows_rather_than_guesses() {
+        let world = world_with(&[Position::new(-22., 18.)]);
+        world.entity_prototypes.remove(CHARACTER_PROTOTYPE);
+
+        assert!(
+            matches!(
+                standing_verdict(&world, &Position::new(-22.30078125, 18.22265625)),
+                StandingVerdict::Blocked { .. }
+            ),
+            "a point strictly inside a building is blocked whatever stands on it"
+        );
+        assert_eq!(
+            standing_verdict(&world, &Position::new(-22.89453125, 18.)),
+            StandingVerdict::NotProvablyBlocked,
+            "an extent we were never told is not one to invent"
+        );
+    }
+
+    /// An empty path is not a destination anybody chose. The mod completes such
+    /// a walk on the next tick without moving, and the bot's current position
+    /// is judged by the arrival check alone -- so a bot standing somewhere the
+    /// graph calls blocked (a furnace built on top of it, a stale box) is not
+    /// refused a walk it never asked for.
+    #[test]
+    fn an_empty_path_is_not_judged_for_standing_room() {
+        let world = world_with(&[Position::new(-22., 18.)]);
+        let here = Position::new(-22.30078125, 18.22265625);
+        assert!(
+            matches!(
+                standing_verdict(&world, &here),
+                StandingVerdict::Blocked { .. }
+            ),
+            "the position itself is inside the furnace"
+        );
+        assert!(
+            judge_path(&world, &here, None, &[], Some(&here)).is_ok(),
+            "but there is no walk here to refuse"
+        );
+    }
+
+    /// The arrival check keeps its precedence and its wording: a path that
+    /// falls short is still `RconWalkFallsShort`, not the new refusal, even
+    /// when its endpoint is also inside a furnace.
+    #[test]
+    fn a_path_that_falls_short_is_still_reported_as_falling_short() {
+        let world = world_with(&[Position::new(-22., 18.)]);
+        let failure = refusal(judge_path(
+            &world,
+            &Position::new(40., 40.),
+            None,
+            &[Position::new(-22.30078125, 18.22265625)],
+            None,
+        ));
+        let message = format!("{:?}", failure.error);
+        assert!(
+            message.contains("no path to"),
+            "a walk that does not arrive is refused for not arriving: {message}"
+        );
+    }
+
+    /// Not every blocker has a name to give. `blocked_tree` holds water tiles
+    /// and trees, which the entity tree never sees, so the refusal falls back
+    /// to the box it did find rather than inventing a name or -- worse --
+    /// declining to refuse.
+    #[test]
+    fn an_unnameable_blocker_is_still_refused_and_reported_as_a_box() {
+        let world = FactorioWorld::new();
+        let prototypes: Vec<FactorioEntityPrototype> = fixture_entity_prototypes()
+            .iter()
+            .map(|v| v.clone())
+            .collect();
+        world.update_entity_prototypes(prototypes).unwrap();
+        world
+            .update_chunk_entities(vec![FactorioEntity::new_tree(&Position::new(3., 4.))])
+            .unwrap();
+        let world = Arc::new(world);
+
+        let verdict = standing_verdict(&world, &Position::new(3., 4.));
+        match verdict {
+            StandingVerdict::Blocked { blocker } => assert!(
+                blocker.contains("collision box spanning"),
+                "an unnamed blocker reports its box: {blocker}"
+            ),
+            other => panic!("a tree is a blocker: {other:?}"),
+        }
     }
 }

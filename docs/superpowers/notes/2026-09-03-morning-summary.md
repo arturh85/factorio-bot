@@ -43,7 +43,26 @@ history, and the first evidence of *production* rather than *placement*. 480
 ticks against a predicted 432 (drill 240 + furnace 192): model and game agree
 within 11%.
 
-Stage 2 — red science by machine, ~620 kW — is in progress.
+**Stage 2 — red science by machine, ~620 kW — is part-landed.** Its two
+prerequisites are in (`7a129420`), and they are exactly the two ways it could
+have shipped dead:
+
+- **`Powered` is now a network budget**, not a per-consumer test. Its red, before
+  a line was written: *"twelve assemblers already draw the whole 900 kW; the
+  thirteenth has nothing left to run on."* Supply and demand now share one
+  network walk so they cannot disagree about what "the same network" means.
+- **The inserter direction rule is checkable**, validated against the two
+  measurements CLAUDE.md made *in a running game* rather than against itself —
+  the right authority, since those measurements exist because a layout once
+  placed perfectly and did nothing.
+
+**What stops it: there is no `set_recipe` anywhere in this project.** Zero hits
+across `crates/` and `mods/`. Stage 2 *is* an assembling machine with a recipe on
+it, and the verb spans planner → executor → core → mod. That is authorised and in
+progress as one task, because the executor's dispatch match is exhaustive and
+splitting the chain would deadlock.
+
+No makespan pin moved.
 
 ### How it got there, and why the intermediate step mattered
 

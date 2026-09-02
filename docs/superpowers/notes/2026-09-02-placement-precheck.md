@@ -330,3 +330,218 @@ before; they run the same scripts through the same bindings.
 
 All Rust gates through `nix develop --command`; a bare `cargo` cannot build
 `mlua-sys` in this checkout.
+
+---
+
+# Field verification, and cause six — 2026-09-02, later
+
+## What this section is
+
+The pre-check above was already built, committed (`d0db355c`) and noted
+(`a1071153`) at 09:32. A later brief asked for it again, so this session
+verified it rather than rebuilding it, and then went to the record to ask the
+only question that matters: **run 24 still ended on
+`can_place_entity said 'no'` — did the pre-check fail?**
+
+It did not. Cause six is a different thing, it is now identified from the
+record rather than argued, and the pre-check is architecturally incapable of
+catching it *by design*. What it *did* do wrong is let a transient blocker be
+written into the never-expired ledger as a fact about the ground.
+
+## The implementation is intact and green
+
+Verified present, not assumed: `rcon_can_place_entities` and
+`placement_check_args` (`mods/BotBridge/control.lua`), `PlacementQuery` /
+`PlacementVerdict` / `accept_verdicts` / `FactorioRcon::can_place_entities`
+(`crates/core/src/factorio/rcon.rs`), `PlacementChecker` and its RCON wiring
+(`crates/scripting_lua/src/globals/goal/mod.rs`), `plan_verified` /
+`placement_queries` / `MAX_RESITE_ROUNDS` (`.../goal/plan.rs`).
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --workspace --all-features --all-targets -- --deny warnings` — exit 0.
+- `cargo test --workspace` — exit 0, **1275 passed, 0 failed**.
+
+And it was live in run 24: `d0db355c` is an ancestor of `7da3d5e9` (the commit
+run 24 was built from), and `workspace/mods/BotBridge/control.lua` is
+byte-identical to the repo's, copied at 13:02 before the 13:28 run. The mod was
+not stale, which was the first thing worth ruling out.
+
+## Cause six: a *different* bot parked in the footprint
+
+Run `run-1788347034-00981` (run 24), from its own `events.jsonl` and
+`samples.jsonl`:
+
+```
+tick  9105  plan_created (28 steps, 4 bots) — includes id 22, "place stone-furnace at [-21, 24]" for bot 4
+tick 11338  bot 3 places stone-furnace at [-23, 24]
+tick 11360  bot 2 places stone-furnace at [-21, 22]
+tick 11433  bot 1 places stone-furnace at [-21, 20]
+tick 11531  bot 4 dispatches "place stone-furnace at [-21, 24]"
+tick 12593  placement_refused  stone-furnace [-21, 24]  source=dispatch  blockers=[]  tile=null
+```
+
+The bot positions at tick 11520, eleven ticks before the dispatch:
+
+| bot | position |
+|---|---|
+| 1 | (-19.60, 20.15) |
+| 2 | (-20.00, 22.26) |
+| **3** | **(-21.47, 23.73)** |
+| 4 | (-16.39, 20.46) |
+
+A stone furnace's collision box is `±0.9`, so the footprint tested at
+`[-21, 24]` is `x ∈ [-21.9, -20.1], y ∈ [23.1, 24.9]`. **Bot 3 is inside it**,
+by a third of a tile in x and six tenths in y, and it does not move between
+tick 11400 and tick 11700 — it is parked where servicing its own furnace at
+`[-23, 24]` left it. The four furnaces are on a 2-tile grid, so the gap between
+two of them is 0.2 tiles; a character is 0.4 wide and cannot stand in that gap
+without spilling into a neighbour's footprint.
+
+**Why no plan-time source could have seen it.** At tick 9105, when the plan was
+built and the pre-check asked, all four bots were 80 tiles away mining coal and
+stone. The `characters` occupancy source (`crates/planner/src/state.rs`) reads
+`base.players`, which is where each bot *was*. Bot 3 walked into that footprint
+2400 ticks later **as part of executing this very plan**. This is staleness
+item 3 in the section above — "an earlier step of the same plan changes the
+ground" — observed for the first time, and it is item 1 as well: the executor's
+walk-aside handles the *acting* bot, never another one.
+
+So the pre-check answered correctly and the answer went stale. Nothing about
+the query, the batching, the join, or the ledger is implicated.
+
+## The actual defect: a transient blocker became a permanent one
+
+`rcon_place_entity` (`mods/BotBridge/control.lua`) splits a refusal two ways:
+
+```lua
+if position_in_rect(player.position, bb) then
+    rcon.print("§player_blocks_placement§")     -- the ACTING player only
+else
+    rcon.print("cannot place item '...' because surface.can_place_entity said 'no'")
+end
+```
+
+Any character that is not the acting player falls into the `else`, and that
+wording is exactly what `note_placement_refusal` matches on. So `[-21, 24]` —
+ground with nothing wrong with it — went into `FactorioWorld::placement_refusals`
+and is fenced off for the rest of the run. The next plan fled to `[-26, 14]`.
+
+Two costs, and the second is the larger:
+
+1. **A false red in a ledger that is never expired.** The refusal-memory note's
+   case for never expiring rests on "only ground the game itself turned down
+   ever enters", and it is right that the game turned this down — but it turned
+   it down about a *bot*, not about the ground.
+2. **The recovery that would have worked is suppressed.** `recover`'s tier 1
+   reschedules the same network, which is precisely the right response to a
+   blocker that walks away on its own. But tier 1 is skipped when the failed
+   `Place` sits on a refused footprint (`refused_by_the_game`), so recording the
+   refusal removes the one recovery tier suited to it.
+
+Note the asymmetry this exposes: the **pre-check** path already gets this right.
+`rcon_can_place_entities` sets `rec.character = true` for *any* character in the
+box and `PlacementVerdict::is_durable_refusal` excludes it. The dispatch path
+makes the narrower acting-player-only distinction, and cause six lives in
+exactly that gap.
+
+## Proposed fix (not applied — see "What needs a decision")
+
+Mod-only, and **no Rust change at all**, because the Rust side already filters
+on wording:
+
+```lua
+if not surface.can_place_entity(placement_check_args(entproto, entity_position, direction, player.force)) then
+    local pos = {x = entity_position[1], y = entity_position[2]}
+    local bb = add_to_bounding_box(expand_rect_floor_ceil(entproto.collision_box), pos)
+    if position_in_rect(player.position, bb) then
+        rcon.print("§player_blocks_placement§")
+    elseif character_in_footprint(surface, entproto, pos) then
+        rcon.print("cannot place item '"..item_name.."' because another character is standing in the footprint")
+    else
+        rcon.print("cannot place item '"..item_name.."' because surface.can_place_entity said 'no'")
+    end
+    stamp_tick()
+    return
+end
+```
+
+with a helper that queries the **raw** collision box — the box
+`can_place_entity` actually tested — for the same reason
+`rcon_can_place_entities` does, rather than the floor/ceil-expanded box the
+acting-player test uses:
+
+```lua
+function character_in_footprint(surface, entproto, position)
+    local bb = add_to_bounding_box(entproto.collision_box, position)
+    return #surface.find_entities_filtered{ area = bb, type = "character" } > 0
+end
+```
+
+Three consequences, all of them the ones wanted:
+
+- `note_placement_refusal` does not learn it — the wording is outside the
+  `can_place_entity said 'no'` family, which is the filter that already exists
+  and that `an_unpaid_placement_reads_as_a_material_refusal_not_a_site_refusal`
+  already pins from the other side.
+- It is not `§player_blocks_placement§`, so the RCON layer does not walk the
+  *acting* bot around eight compass points to escape a bot that is not it.
+- The action still fails, `refused_by_the_game` is now false, and tier 1
+  reschedules — the recovery that fits a blocker which leaves on its own.
+
+Ordering matters and is deliberate: acting player first (its existing
+walk-aside recovery is strictly better than a reschedule), then any other
+character, then the ground.
+
+## What I rejected
+
+1. **Widening the pre-check to catch this.** It cannot. The blocker did not
+   exist at plan time and was created by the plan itself. A pre-check re-run at
+   dispatch would catch it, but that is the executor's seam, it costs a round
+   trip per placement, and the answer would be "a bot is there" — which is a
+   reschedule, not a re-site. Tier 1 already does the reschedule for free once
+   the refusal stops being recorded.
+2. **Expiring character-caused refusals after N iterations.** Rejected for the
+   same reasons as in the refusal-memory note, and unnecessary: the fix is to
+   not record them, not to forget them later.
+3. **Making the ledger position-aware of characters at read time.** The
+   `characters` source already re-reads every character on every plan; a refusal
+   is supposed to be the thing that source *cannot* see. Cross-checking one
+   against the other at read time would make the ledger's meaning conditional
+   and would still believe the refusal once the bot moved on.
+4. **Spacing furnaces further apart in the planner** (option B in the report).
+   It would work for this shape — a 3-tile grid leaves a character-width gap —
+   but it is a policy decision with real costs (more ground, more walking, more
+   search), it only covers furnace rows rather than the general case of a bot
+   standing anywhere, and I would be guessing the constant. Not mine to pick.
+
+## What I could not verify without a live run
+
+- That the fix removes the failure from run 25. Everything above is from run
+  24's record and from a Lua-driven test of the mod; whether a rung 6/7 run
+  completes cleanly needs the run.
+- Whether cause six is the *only* remaining cause. Run 24's single
+  `placement_refused` is now fully explained, which is the first time a refusal
+  in this project has been explained without forensics — the `blockers`/`tile`
+  fields were not even needed, because `samples.jsonl` had the bot positions.
+  That is one data point, not a proof that the list is closed.
+- Whether other 2x2-on-a-2-tile-grid layouts hit the same wall as often as this
+  one. The record shows one occurrence; the geometry says every furnace row is
+  a candidate.
+
+## What needs a decision (why the fix is proposed, not applied)
+
+The change belongs in `mods/BotBridge/control.lua`, which is inside this
+session's file boundaries. Its regression test does not: the right home is
+`crates/core/tests/botbridge_placement_material.rs`, which already drives the
+real `control.lua` in a Lua 5.4 interpreter and already asserts the *inverse*
+invariant (`an_unpaid_placement_reads_as_a_material_refusal_not_a_site_refusal`
+checks that a material refusal stays out of the `can_place_entity said 'no'`
+family). The new test is its sibling and needs `stub_place` to grow a
+`can_place_entity` verdict flag and a `find_entities_filtered` returning a
+character.
+
+That file is outside the assigned boundaries and unassigned, and committing a
+behaviour change to the mod with no test — when a test home plainly exists — is
+the half-built outcome the brief rules out. So: permission to touch
+`crates/core/tests/botbridge_placement_material.rs`, or a reassignment of the
+fix to whoever owns it.

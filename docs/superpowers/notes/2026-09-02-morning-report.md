@@ -419,3 +419,47 @@ than a one-night fix". This work is the measurement that note asked for.
 is a parallelism problem, not a reliability one. Reliability is the stated
 priority and the ladder is not blocked on this. It is a decision to put to the
 project owner, not a ruling to make at 13:00 while a run is in flight.
+
+## Update (~13:35): run 24 — rung 6 falls, and rung 7 is reached for the first time
+
+`run 24`, built from a clean worktree at `7da3d5e9` (the teleport-spin fix)
+because another agent was mid-edit in `crates/planner/src/method/have.rs` —
+building from the shared tree would have compiled unknown in-progress work into
+the run.
+
+**The ladder is at 6 of 7.** Rung 6, `craft automation science packs x10`, is
+satisfied for the first time since it was added:
+
+```
+ran: success=32 failed=4 lost=0 pending=0
+ran: success= 8 failed=1 lost=1 pending=35
+ran: success= 0 failed=4 lost=4 pending=0
+SATISFIED
+```
+
+Rung 7, `research automation`, planned **114 steps** and is executing. It has
+never been reached before, and until this morning it could not have worked at
+all — `Actuator::research` reported success the instant it sent the command, so a
+green rung 7 would have been a false green.
+
+**The teleport numbers, before and after:**
+
+| | run 23 | run 24 |
+|---|---|---|
+| teleports, whole run | 1414 | **2** |
+| iterations with zero teleports | — | 8 of 10 |
+| ticks spent on one spinning action | 87,766 | none |
+
+Rungs 1-5 kept run 23's improved profile: copper in 2 iterations, gears in 1.
+
+**What is still failing, and it is the old acquaintance:**
+
+```
+first error: cannot place item 'stone-furnace' because surface.can_place_entity said 'no'
+```
+
+That is the failure that has now ended or damaged six runs across five distinct
+causes. The refusal memory added last night keeps a replan from re-choosing the
+same refused site, but nothing yet asks the game *before* committing — the
+pre-check the refusal-memory note argued had to come second, because the planner
+is pure and needs somewhere to put the answer. That somewhere now exists.

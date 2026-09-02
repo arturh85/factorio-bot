@@ -187,6 +187,45 @@ pub enum PlannerError {
     #[diagnostic(code(planner::unowned_handover))]
     UnownedHandover { holder: String },
 
+    /// A research whose lab would have no electric supply.
+    ///
+    /// **Refusing is the point.** Until 2026-09-02 the planner treated
+    /// `Researched(tech)` as satisfied by *crafting* a lab: run 30
+    /// (`workspace/runs/run-1788365280-15443/`) crafted one on each of five
+    /// milestone-7 plans, placed none of them, generated `0.0 kW` in all 541
+    /// of its force samples, and sat at `research_progress 0.0` for 60,661
+    /// ticks before the action timed out as `lost`. Nothing in the plan said
+    /// anything was wrong; a plan that cannot finish is worse than one that
+    /// refuses, because a caller cannot tell the first from success in
+    /// progress.
+    ///
+    /// The planner can place the lab and feed it, and cannot yet build a
+    /// boiler, a steam engine and the pipes between them — that is a whole
+    /// subsystem, and the offshore pump alone needs shoreline geometry nothing
+    /// here models. So it states what research needs, checks it, and says so
+    /// by name when it is missing.
+    ///
+    /// `supply_kw` is what [`crate::state::PlanState::electric_supply_kw`]
+    /// could actually see, which is **not** the same as what the game has: the
+    /// entity graph does not expose poles or generators a live world already
+    /// contains, so a hand-built power plant reads as `0` here. See that
+    /// method's own doc.
+    #[error(
+        "{technology} needs a lab with {needed_kw} kW of electric supply, and the plan can show only {supply_kw} kW"
+    )]
+    #[diagnostic(
+        code(planner::research_needs_power),
+        help(
+            "the planner can place and feed a lab but cannot yet build a generator; a lab with no \
+             power researches nothing at all rather than researching slowly"
+        )
+    )]
+    ResearchNeedsPower {
+        technology: String,
+        needed_kw: f64,
+        supply_kw: f64,
+    },
+
     #[error(
         "expansion of {goal} exceeded {depth} levels; a method is probably expanding into itself"
     )]

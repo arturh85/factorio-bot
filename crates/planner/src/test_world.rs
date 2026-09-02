@@ -16,11 +16,12 @@
 //! `automation` carries the real game's numbers; the rest are chosen to reach
 //! specific branches and are commented with which.
 
+use crate::state::PlanState;
 use factorio_bot_core::factorio::util::add_to_rect;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::serde_json;
 use factorio_bot_core::test_utils::fixture_world;
-use factorio_bot_core::types::{FactorioForce, Position, Rect};
+use factorio_bot_core::types::{FactorioEntity, FactorioForce, Position, Rect};
 
 /// A world whose iron front can seat a whole roster, and its ore neighbours
 /// with it.
@@ -200,6 +201,50 @@ const FIXTURE_FORCE_JSON: &str = r#"
 }
 "#;
 
+/// Put a small electric pole and a steam engine into `state`'s overlay, so a
+/// research planned against it has somewhere powered to put a lab.
+///
+/// **Why the overlay and not the world.** `EntityGraph::add`
+/// (`crates/core/src/graph/entity_graph.rs`) only inserts a whitelist of
+/// entity types into its entity tree, and `electric-pole` and `generator` are
+/// not on it: an entity added through `update_chunk_entities` would block
+/// placements and still be unreadable by name, so
+/// `PlanState::electric_supply_kw` would score it zero. Entities placed
+/// *by a plan* go through `PlanState::create_entity` and are visible at once,
+/// which is the path this imitates — and the path a future power-building
+/// method will really take. Widening that whitelist is a one-line change in a
+/// crate this work does not own; see
+/// `docs/superpowers/notes/2026-09-02-research-needs-power.md`.
+///
+/// The geometry, all of it deliberate:
+///
+/// * The pole sits at `(10.5, 10.5)`, clear of the fixture's ore (all of it
+///   west), its rocks (`(20, 20)` and `(40, 30)`), its trees (`(-20, -20)`)
+///   and its water (`(40, 40)`), so nothing about smelting or mining moves.
+/// * A small pole's supply area is 5x5, so it covers `[8, 13]` on both axes.
+/// * The steam engine at `(12.5, 10.5)` is 2.5 x 4.7 tiles, so its box spans
+///   `x [11.25, 13.75]` and overlaps that supply area — **which is the whole
+///   test**: a generator the pole does not cover contributes nothing, and an
+///   earlier draft of this fixture put the engine at `(14.5, 10.5)`, a quarter
+///   of a tile outside, and read 0 kW. Coverage is not capacity in both
+///   directions.
+/// * The lab the search then sites at `(8.5, 8.5)` is 2.4 tiles across, so it
+///   clears the engine by 1.5 tiles and the pole by 0.65 — nowhere near the
+///   2-tile furnace spacing whose `0.1015625` of slack per side pressed the
+///   character against a box in 18 of 18 walk stalls in run 30.
+pub(crate) fn with_steam_power(state: &mut PlanState) {
+    for (name, position) in [
+        ("small-electric-pole", Position::new(10.5, 10.5)),
+        ("steam-engine", Position::new(12.5, 10.5)),
+    ] {
+        state.create_entity(FactorioEntity {
+            name: name.into(),
+            position,
+            ..Default::default()
+        });
+    }
+}
+
 /// A force named `{name}` in which `automation` is researched iff `{done}`.
 ///
 /// Deliberately minimal and deliberately *disagreeing* between instances: the
@@ -248,7 +293,10 @@ fn one_technology_force(name: &str, done: bool) -> FactorioForce {
 ///
 /// `forces` is a `DashMap`, so this is also the fixture that says whether the
 /// planner's answer depends on the hash seed. The names are passed in so a
-/// caller can put the researched one first or last alphabetically.
+/// caller can put the researched one first or last alphabetically — and, since
+/// the acting force is looked up by name, so a caller can build the world run
+/// 30 actually had: `enemy`, `neutral` and `player`, with only `player`
+/// holding the technology.
 pub(crate) fn world_with_forces(forces: &[(&str, bool)]) -> FactorioWorld {
     let world = fixture_world();
     for (name, done) in forces {
@@ -599,17 +647,17 @@ mod tests {
     }
 
     /// The seam D1 named: `is_researched` used to answer over *any* force
-    /// while costs were read from the alphabetically first one. `alpha` has
+    /// while costs were read from the alphabetically first one. `player` has
     /// not researched automation and `zeta` has, so the two questions have
     /// opposite answers and only a planner that asks one force gets a
     /// consistent pair.
     ///
     /// Written against the *acting* force rather than against either literal
-    /// answer: `alpha` sorts first, so the acting force has not researched it,
-    /// and the cost read must be `alpha`'s 10 rather than `zeta`'s 99.
+    /// answer: the acting force is `player`, which has not researched it, and
+    /// the cost read must be `player`'s 10 rather than `zeta`'s 99.
     #[test]
     fn a_world_of_disagreeing_forces_is_answered_by_one_of_them() {
-        let world = Arc::new(world_with_forces(&[("alpha", false), ("zeta", true)]));
+        let world = Arc::new(world_with_forces(&[("player", false), ("zeta", true)]));
         let state = PlanState::from_world(world, &[BotId(1)]);
 
         assert!(
@@ -626,11 +674,11 @@ mod tests {
         );
     }
 
-    /// The other direction, so neither result can be a constant: with the
-    /// researched force sorting *first*, both answers flip together.
+    /// The other direction, so neither result can be a constant: flip which
+    /// force has the technology and both answers flip together.
     #[test]
     fn the_acting_force_decides_both_answers_together() {
-        let world = Arc::new(world_with_forces(&[("alpha", true), ("zeta", false)]));
+        let world = Arc::new(world_with_forces(&[("player", true), ("zeta", false)]));
         let state = PlanState::from_world(world, &[BotId(1)]);
 
         assert!(state.is_researched("automation"));
@@ -643,21 +691,70 @@ mod tests {
         );
     }
 
+    /// **The run-30 shape, and the reason the acting force is now named rather
+    /// than sorted for.**
+    ///
+    /// `writeout_forces` (`mods/BotBridge/control.lua`) emits all of
+    /// `game.forces`, so a world gains `enemy` and `neutral` at the first
+    /// research completion of every run — tick 26,449 of run 30. `enemy` sorts
+    /// before `player`, so the old `forces.keys().min()` selected a force that
+    /// never researches anything, and all five of milestone 7's plans
+    /// re-derived a technology the `player` force had finished 50,000 ticks
+    /// earlier.
+    ///
+    /// The two other forces disagree with `player` on both questions, so a
+    /// planner that consults either gives the opposite answer to both.
+    #[test]
+    fn the_other_forces_in_the_world_do_not_get_a_vote() {
+        let world = Arc::new(world_with_forces(&[
+            ("enemy", false),
+            ("neutral", false),
+            ("player", true),
+        ]));
+        let state = PlanState::from_world(world, &[BotId(1)]);
+
+        assert!(
+            state.is_researched("automation"),
+            "the player force has it; enemy and neutral sorting first is not a vote"
+        );
+        assert_eq!(
+            state
+                .technology("automation")
+                .expect("the acting force defines it")
+                .research_unit_count,
+            99,
+            "and the cost comes from the same force"
+        );
+    }
+
+    /// A world with forces but none of them `player` acts for none.
+    ///
+    /// The honest reading of a world this planner is not in: refusing to plan
+    /// beats planning for somebody else, which is precisely what the sort did.
+    #[test]
+    fn a_world_without_the_player_force_acts_for_no_force() {
+        let world = Arc::new(world_with_forces(&[("enemy", true), ("neutral", true)]));
+        let state = PlanState::from_world(world, &[BotId(1)]);
+
+        assert!(state.technology("automation").is_none());
+        assert!(!state.is_researched("automation"));
+    }
+
     /// `forces` is a `DashMap`, whose iteration order moves with the hash
-    /// seed. Choosing the acting force by `min` collapses that order by
+    /// seed. Looking the acting force up by name collapses that order by
     /// construction, so the answer must be identical across freshly built
     /// worlds rather than merely usually the same.
     ///
-    /// Six forces so that "first by iteration" and "first by name" are very
+    /// Six forces so that "first by iteration" and "the one we want" are very
     /// unlikely to coincide, and fifty fresh worlds so a seed-dependent
-    /// implementation has room to show it. This is the same fixture the two
-    /// tests above use, run for a different property.
+    /// implementation has room to show it. This is the same fixture the tests
+    /// above use, run for a different property.
     #[test]
     fn the_acting_force_does_not_depend_on_map_order() {
         let names = [
             ("mu", true),
             ("zeta", true),
-            ("alpha", false),
+            ("player", false),
             ("kappa", true),
             ("beta", true),
             ("omega", true),

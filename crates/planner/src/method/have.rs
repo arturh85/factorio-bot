@@ -45,14 +45,14 @@ use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::ids::{ActionId, BotId, Ticks};
 use crate::method::util::{
-    CRAFTING_CATEGORY, RecipeGate, SMELTING_CATEGORY, free_area_near, ingredients_of, mining_ticks,
-    nearest_resource_tile, output_per_craft, recipe_for, recipe_gate, recipe_ticks,
-    research_ingredients, research_ticks, resource_seats, resource_supply_at_least,
+    CRAFTING_CATEGORY, RecipeGate, SMELTING_CATEGORY, free_area_near, free_area_near_where,
+    ingredients_of, mining_ticks, nearest_resource_tile, output_per_craft, recipe_for, recipe_gate,
+    recipe_ticks, research_ingredients, research_ticks, resource_seats, resource_supply_at_least,
     resource_tiles_for, smelting_ticks, trigger_requirement,
 };
 use crate::method::{ExpansionCtx, GoalSite, Method, MethodRegistry, Step};
 use crate::state::PlanState;
-use factorio_bot_core::types::FactorioEntity;
+use factorio_bot_core::types::{FactorioEntity, Position};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Does `item` still have to be *produced*, in the sense that no single bot
@@ -1084,14 +1084,125 @@ impl Method for HandCraft {
 /// `MAX_EXPANSION_DEPTH` and comes back as `ExpansionTooDeep`, naming the goal.
 /// It cannot hang.
 ///
-/// **On consumption.** The research action carries `LoseItem` for every pack it
-/// needs, so a second research cannot be planned out of the same packs. That is
-/// right about the packs and approximate about who spends them: in the game a
-/// lab consumes them, not the bot, and nothing here yet moves packs from a bot
-/// into a lab. Until a `Supply the labs` method exists, the plan debits the
-/// bot, which is the conservative direction — it over-counts what has to be
-/// produced rather than under-counting it.
+/// **What a research actually needs, since 2026-09-02.** A lab that is
+/// *placed*, *fed* and *powered* — not one that has been crafted. Until this
+/// method was rewritten it emitted `craft 1 lab` and then `research <tech>`,
+/// and run 30 (`workspace/runs/run-1788365280-15443/`) shows exactly what that
+/// buys: all 17 `placed` records in the run are stone furnaces, no science pack
+/// was inserted into anything, `generated_kw` was `0.0` in all 541 force
+/// samples, and `automation` sat at `research_progress 0.0` from tick 105,300
+/// to the end of the run — 60,661 ticks — before the action was recorded
+/// `lost`. So:
+///
+/// * the lab is **placed**, by a `Place` action this method emits, at a site
+///   inside an existing supply area ([`lab_site`]);
+/// * the packs are **inserted** into its `lab_input`, one action each, and the
+///   research action no longer debits the bot for them — a lab consumes what is
+///   in its input slots, not what somebody is carrying;
+/// * the research action states `Condition::Powered`, and expansion **refuses**
+///   with [`PlannerError::ResearchNeedsPower`] when the plan cannot show the
+///   supply. An unpowered lab does not research slowly; it researches not at
+///   all, and a plan whose last step can never complete is worse than one that
+///   says so.
+///
+/// **What is not covered.** Nothing here builds the power. An offshore pump, a
+/// boiler, a steam engine and the pipes between them are a subsystem of their
+/// own — shoreline geometry, fluid connections, pole placement — and none of it
+/// is modelled. A plan that needs power it cannot see is refused, not
+/// improvised. Nor is fuel: a boiler that has run out reads as generating,
+/// because the world model carries nameplate capacity and not throughput.
 pub struct Researched;
+
+/// The building research happens in.
+///
+/// Hardcoded for the same reason `Smelt` hardcodes `stone-furnace`: the
+/// planner picks one machine per job and states which. A world could carry
+/// several `entity_type = "lab"` prototypes; choosing between them is a
+/// question about research *speed*, and nothing here models that yet.
+const LAB: &str = "lab";
+
+/// What a vanilla lab draws while it is researching, in kW.
+///
+/// Written down rather than read from the world because the mod does not send
+/// `energy_usage` — see [`crate::state::PlanState::electric_supply_kw`] for the
+/// same gap on the generation side. 60 kW is the shipped 2.1 figure.
+const LAB_POWER_KW: f64 = 60.0;
+
+/// How far from the acting bot the method looks for a lab that is already
+/// standing, and for the power to run one, in tiles.
+///
+/// The same bound `PlanState::electric_supply_kw` searches under, and for the
+/// same reason: there is no "every entity" query, and a lab on the other side
+/// of the map is not one this bot is going to walk to anyway.
+const LAB_SEARCH_RADIUS: f64 = 64.0;
+
+/// Where this research will happen, and whether the plan has to build it.
+struct LabSite {
+    pos: Position,
+    /// False when a powered lab is already standing there — a second research
+    /// in the same plan reuses the first one's lab rather than building
+    /// another. `Effect::CreateEntity` lands in the expansion overlay as the
+    /// `Place` is emitted, so the reuse works within one plan as well as
+    /// across runs.
+    needs_placing: bool,
+}
+
+/// Is a lab centred at `pos` supplied with enough power to research?
+fn lab_is_powered(state: &PlanState, pos: &Position) -> bool {
+    match state.collision_area(LAB, pos) {
+        Some(area) => state
+            .electric_supply_kw(&area)
+            .total_cmp(&LAB_POWER_KW)
+            .is_ge(),
+        None => false,
+    }
+}
+
+/// Pick the lab this research runs in: one already standing and powered, or a
+/// free site inside an existing supply area.
+///
+/// Refuses rather than falling back on an unpowered site. A lab with no power
+/// does not research slowly, it researches **not at all**, and a plan whose
+/// last step can never complete is the failure this whole method was rewritten
+/// to remove — see [`PlannerError::ResearchNeedsPower`].
+fn lab_site(state: &PlanState, from: &Position, technology: &str) -> Result<LabSite, PlannerError> {
+    // A standing lab first, so two researches in one plan share one building.
+    // `entities_within` is already in a fixed order, so "the first powered
+    // one" is the same lab on every run.
+    if let Some(existing) = state
+        .entities_within(from, LAB_SEARCH_RADIUS)
+        .into_iter()
+        .find(|entity| entity.name == LAB && lab_is_powered(state, &entity.position))
+    {
+        return Ok(LabSite {
+            pos: existing.position,
+            needs_placing: false,
+        });
+    }
+
+    let Some(anchor) = state.nearest_supply_anchor(from, LAB_SEARCH_RADIUS, LAB_POWER_KW) else {
+        return Err(PlannerError::ResearchNeedsPower {
+            technology: technology.to_string(),
+            needed_kw: LAB_POWER_KW,
+            supply_kw: 0.0,
+        });
+    };
+    // Sited around the supplying pole rather than around the bot: the search
+    // reaches 12 tiles, and a lab has to end up inside a supply area, not
+    // inside walking distance. The candidate grid is the lab's own -- a lab
+    // covers three tiles on each axis, so its centre belongs at `n + 0.5`,
+    // which `free_area_near_where` takes from the prototype.
+    let pos = free_area_near_where(state, &anchor, LAB, |candidate| {
+        lab_is_powered(state, candidate)
+    })
+    .ok_or_else(|| PlannerError::NoApplicableMethod {
+        goal: format!("research {}", technology),
+    })?;
+    Ok(LabSite {
+        pos,
+        needs_placing: true,
+    })
+}
 
 impl Method for Researched {
     fn name(&self) -> &'static str {
@@ -1124,6 +1235,23 @@ impl Method for Researched {
             .flatten()
             .into_iter()
             .collect::<Vec<_>>();
+        // **The lab is deliberately not counted here**, though it is one more
+        // thing that has to land in the acting bot's hands. Counting it was
+        // tried and reverted: `automation` needs one pack type, so the lab
+        // would tip it over the threshold, and a `Researched` goal that
+        // converges opens a chain *at the top of its own subtree* — after
+        // which `expand_goal_body`'s `ctx.chain.is_none()` guard stops each
+        // `Holder::Share` subgoal below it from opening a chain of its own,
+        // and with it from recording its owner. That owner binding is the fix
+        // `docs/superpowers/notes/2026-09-02-rung-3-4-findings.md` landed for
+        // a live four-bot crash, and `the_live_four_bot_research_run_plans_and_schedules`
+        // caught the loss immediately.
+        //
+        // Nothing is lost by not counting it: every subgoal this method emits
+        // names `Holder::Share(ctx.chain_actor)`, so the lab and the packs are
+        // welded to one bot by the holder they state, which is a stronger
+        // guarantee than a convergence chain and is where the ownership comes
+        // from. Convergence is for decompositions where *nothing* names a bot.
         research_ingredients(&tech)
             .iter()
             .chain(trigger.iter())
@@ -1205,6 +1333,106 @@ impl Method for Researched {
             }));
             return Ok(steps);
         }
+        // Where this research will happen. Chosen before the bill is emitted so
+        // that a research with no power refuses without first planning the
+        // mining, smelting and crafting of packs nothing would ever consume.
+        let from = ctx
+            .state
+            .bot(ctx.chain_actor)
+            .map(|b| b.position.clone())
+            .unwrap_or_default();
+        let site = lab_site(&ctx.state, &from, name)?;
+
+        let build = ctx
+            .state
+            .bot(ctx.chain_actor)
+            .map(|b| b.build_distance)
+            .unwrap_or(10.0);
+        let reach = ctx
+            .state
+            .bot(ctx.chain_actor)
+            .map(|b| b.reach_distance)
+            .unwrap_or(10.0);
+
+        if site.needs_placing {
+            // `Holder::Share` for the same reason the packs below use it: the
+            // bot that places the lab is the bot that has to be holding it.
+            steps.push(Step::Subgoal(Goal::Have {
+                item: LAB.into(),
+                count: 1,
+                whose: Holder::Share(ctx.chain_actor),
+            }));
+            let lab = FactorioEntity {
+                name: LAB.into(),
+                entity_type: LAB.into(),
+                position: site.pos.clone(),
+                ..Default::default()
+            };
+            // The annulus's inner bound, exactly as `Smelt`'s placement uses
+            // it: a lab is 2.4 tiles across, and standing on the tile it is
+            // going for satisfies a plain disc trivially and then has the game
+            // refuse the build with `player_blocks_placement`.
+            let min_radius = ctx.state.placement_clearance(LAB).unwrap_or(0.0);
+            steps.push(Step::Act(Box::new(Action {
+                id: ctx.ids.next(),
+                kind: ActionKind::Place {
+                    entity: Box::new(lab.clone()),
+                },
+                pre: vec![
+                    Condition::AtPosition {
+                        who: Actor::Role,
+                        pos: site.pos.clone(),
+                        radius: build,
+                        min_radius,
+                    },
+                    Condition::AreaFree {
+                        pos: site.pos.clone(),
+                        entity: LAB.into(),
+                    },
+                    Condition::HasItem {
+                        who: Actor::Role,
+                        item: LAB.into(),
+                        count: 1,
+                    },
+                ],
+                eff: vec![
+                    Effect::LoseItem {
+                        who: Actor::Role,
+                        item: LAB.into(),
+                        count: 1,
+                    },
+                    Effect::CreateEntity(Box::new(lab)),
+                ],
+                duration: PLACE_TICKS,
+                pinned: None,
+                label: format!("place lab at {}", site.pos),
+            })));
+            // **The site is taken now, not when the action runs.** `expand`
+            // returns its whole step list before `run_steps` executes any of
+            // it, so a technology's prerequisites -- which are `Researched`
+            // subgoals of their own, expanded afterwards -- would each call
+            // `lab_site` against a state where this site is still empty and
+            // choose it again. `military` came out of that with three
+            // `place lab at [8.5, 8.5]` actions, only the first of which the
+            // game would accept.
+            //
+            // Recording it here makes them find this lab standing and reuse
+            // it, and it keeps every *other* placement in the plan off the
+            // ground it is going to occupy. It is the same reservation
+            // `Mine` makes when it claims a resource tile during expansion,
+            // for the same reason and at the same moment.
+            //
+            // `run_steps` applies the action's own `Effect::CreateEntity`
+            // later; both write the same entity under the same `Pos` key, so
+            // the repeat is a no-op rather than a second lab.
+            ctx.state.create_entity(FactorioEntity {
+                name: LAB.into(),
+                entity_type: LAB.into(),
+                position: site.pos.clone(),
+                ..Default::default()
+            });
+        }
+
         for (item, count) in &ingredients {
             // `Holder::Share`, not `Holder::Anyone`. The research is one action
             // reading one bot's inventory, so the packs have to end up in one
@@ -1226,35 +1454,81 @@ impl Method for Researched {
             }));
         }
 
+        // The packs, into the lab. This is the step run 30 did not have: it
+        // crafted ten automation science packs, carried them, and inserted
+        // them nowhere, so `research_progress` stayed at 0.0 for the remaining
+        // 60,661 ticks of the run.
+        let mut insert_ids: Vec<ActionId> = Vec::new();
+        for (item, count) in &ingredients {
+            let id = ctx.ids.next();
+            insert_ids.push(id);
+            steps.push(Step::Act(Box::new(Action {
+                id,
+                kind: ActionKind::Insert {
+                    pos: site.pos.clone(),
+                    entity: LAB.into(),
+                    slot: InventorySlot::LabInput,
+                    item: item.clone(),
+                    count: *count,
+                },
+                pre: vec![
+                    Condition::AtPosition {
+                        who: Actor::Role,
+                        pos: site.pos.clone(),
+                        radius: reach,
+                        min_radius: 0.0,
+                    },
+                    Condition::EntityAt {
+                        pos: site.pos.clone(),
+                        name: LAB.into(),
+                    },
+                    Condition::HasItem {
+                        who: Actor::Role,
+                        item: item.clone(),
+                        count: *count,
+                    },
+                ],
+                eff: vec![Effect::LoseItem {
+                    who: Actor::Role,
+                    item: item.clone(),
+                    count: *count,
+                }],
+                duration: TRANSFER_TICKS,
+                pinned: None,
+                label: format!("insert {} {} into the lab", count, item),
+            })));
+        }
+
         let mut pre: Vec<Condition> = prerequisites
             .iter()
             .map(|prerequisite| Condition::Researched(prerequisite.clone()))
             .collect();
-        let mut eff: Vec<Effect> = Vec::new();
-        for (item, count) in &ingredients {
-            pre.push(Condition::HasItem {
-                who: Actor::Role,
-                item: item.clone(),
-                count: *count,
-            });
-            eff.push(Effect::LoseItem {
-                who: Actor::Role,
-                item: item.clone(),
-                count: *count,
-            });
-        }
-        // No trigger handling here: the trigger path returned above. Anything
-        // reaching this point is unlocked by science packs, which is what the
-        // bill and the research action below have always assumed.
-        eff.push(Effect::Researched(name.clone()));
+        // The lab has to exist before anything is put into it, and the
+        // research has to happen at a lab that is standing and supplied. Both
+        // are stated; neither was, and run 30 is what that cost.
+        pre.push(Condition::EntityAt {
+            pos: site.pos.clone(),
+            name: LAB.into(),
+        });
+        pre.push(Condition::Powered {
+            pos: site.pos.clone(),
+            entity: LAB.into(),
+            kw: LAB_POWER_KW,
+        });
+        // No `HasItem`/`LoseItem` for the packs any more. They are spent by
+        // the inserts above, which is where the game spends them: a lab
+        // consumes what is in its `lab_input`, not what a bot is carrying.
+        // The old shape debited the bot at research time, which was
+        // deliberately conservative about *how many* packs a plan needs and
+        // silent about the fact that nobody ever put them anywhere.
+        //
+        // No trigger handling here either: the trigger path returned above.
+        // Anything reaching this point is unlocked by science packs.
+        let eff: Vec<Effect> = vec![Effect::Researched(name.clone())];
 
-        // No explicit `Link` steps: every edge this action needs is stated as a
-        // precondition, and `ActionNetwork::infer_edges` turns
-        // `Effect::GainItem`/`HasItem` and `Effect::Researched`/
-        // `Condition::Researched` into ordering edges. A method cannot link to
-        // its subgoals' actions in any case — it never sees their ids.
+        let research_id = ctx.ids.next();
         steps.push(Step::Act(Box::new(Action {
-            id: ctx.ids.next(),
+            id: research_id,
             kind: ActionKind::Research { tech: name.clone() },
             pre,
             eff,
@@ -1262,6 +1536,20 @@ impl Method for Researched {
             pinned: None,
             label: format!("research {}", name),
         })));
+
+        // `Condition::EntityAt` already orders the research after the place,
+        // and each insert's `HasItem` orders it after whatever produced the
+        // packs -- but nothing states that the packs are in the lab *before*
+        // the research starts, because no effect of an insert satisfies any
+        // condition of the research. Inference cannot draw this edge; the
+        // method holds both ids, so it states it.
+        for id in insert_ids {
+            steps.push(Step::Link {
+                from: id,
+                to: research_id,
+                lag: 0,
+            });
+        }
 
         Ok(steps)
     }
@@ -1858,7 +2146,7 @@ mod tests {
     use crate::ids::ActionId;
     use crate::ids::BotId;
     use crate::method::expand;
-    use crate::method::util::unlocking_technology;
+    use crate::method::util::{tile_alignment, unlocking_technology};
     use crate::network::ActionNetwork;
     use crate::schedule::{StepKind, schedule};
     use crate::state::PlanState;
@@ -1884,7 +2172,14 @@ mod tests {
     /// research test uses this; nothing else does, so the fixtures the
     /// makespan figures are pinned to stay exactly as they were.
     fn tech_state(bots: &[BotId]) -> PlanState {
-        PlanState::from_world(Arc::new(crate::test_world::world_with_technologies()), bots)
+        let mut state =
+            PlanState::from_world(Arc::new(crate::test_world::world_with_technologies()), bots);
+        // Every research needs somewhere powered to put a lab, so the research
+        // fixture supplies one. Tests about the *absence* of power build their
+        // own state and deliberately skip this -- see
+        // `research_refuses_when_the_lab_would_have_no_power`.
+        crate::test_world::with_steam_power(&mut state);
+        state
     }
 
     /// The steps `Researched` emits for `tech`, without running the driver
@@ -1897,6 +2192,56 @@ mod tests {
         Researched
             .expand(&Goal::Researched(tech.into()), &mut ctx)
             .expect("the fixture technologies all expand")
+    }
+
+    /// The one research action among `steps`.
+    ///
+    /// Not `steps.last()`: since the packs go into a lab, the method emits
+    /// `Step::Link`s after the research to state that each insert precedes it,
+    /// and inference cannot draw those edges itself (no effect of an insert
+    /// satisfies any condition of the research).
+    fn research_step(steps: &[Step]) -> &Action {
+        steps
+            .iter()
+            .find_map(|step| match step {
+                Step::Act(action) if matches!(action.kind, ActionKind::Research { .. }) => {
+                    Some(&**action)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no research action among {steps:?}"))
+    }
+
+    /// The step that puts `item` into the lab.
+    fn insert_step<'a>(steps: &'a [Step], item: &str) -> &'a Action {
+        steps
+            .iter()
+            .find_map(|step| match step {
+                Step::Act(action) => match &action.kind {
+                    ActionKind::Insert {
+                        item: got, slot, ..
+                    } if got == item && *slot == InventorySlot::LabInput => Some(&**action),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no lab insert of {item} among {steps:?}"))
+    }
+
+    /// Where the `Place` among `steps` puts the lab.
+    fn lab_site_of(steps: &[Step]) -> Position {
+        steps
+            .iter()
+            .find_map(|step| match step {
+                Step::Act(action) => match &action.kind {
+                    ActionKind::Place { entity } if entity.name == "lab" => {
+                        Some(entity.position.clone())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no lab placement among {steps:?}"))
     }
 
     fn subgoals(steps: &[Step]) -> Vec<Goal> {
@@ -1940,39 +2285,60 @@ mod tests {
         let steps = research_steps(&s, "automation");
         assert_eq!(
             subgoals(&steps),
-            vec![Goal::Have {
-                item: "automation-science-pack".into(),
-                count: 10,
-                whose: Holder::Share(BotId(1)),
-            }]
+            vec![
+                // The lab, since 2026-09-02: research happens in a building,
+                // and a research whose lab is only crafted is the defect this
+                // method was rewritten to remove.
+                Goal::Have {
+                    item: "lab".into(),
+                    count: 1,
+                    whose: Holder::Share(BotId(1)),
+                },
+                Goal::Have {
+                    item: "automation-science-pack".into(),
+                    count: 10,
+                    whose: Holder::Share(BotId(1)),
+                }
+            ]
         );
 
-        let Some(Step::Act(action)) = steps.last() else {
-            panic!("the last step must be the research action, got {steps:?}");
-        };
+        let action = research_step(&steps);
         assert_eq!(
             action.kind,
             ActionKind::Research {
                 tech: "automation".into()
             }
         );
+        // The bill is spent by the insert, not by the research: a lab consumes
+        // what is in its `lab_input`, and debiting the bot at research time
+        // was the old shape's way of getting the *arithmetic* right while
+        // nobody ever put the packs anywhere.
+        let insert = insert_step(&steps, "automation-science-pack");
         assert!(
-            action.pre.contains(&Condition::HasItem {
+            insert.pre.contains(&Condition::HasItem {
                 who: Actor::Role,
                 item: "automation-science-pack".into(),
                 count: 10,
             }),
-            "the action must require the whole bill, got {:?}",
-            action.pre
+            "the insert must require the whole bill, got {:?}",
+            insert.pre
         );
         assert!(
-            action.eff.contains(&Effect::LoseItem {
+            insert.eff.contains(&Effect::LoseItem {
                 who: Actor::Role,
                 item: "automation-science-pack".into(),
                 count: 10,
             }),
             "the packs are spent, got {:?}",
-            action.eff
+            insert.eff
+        );
+        assert!(
+            !action.pre.iter().any(|c| matches!(
+                c,
+                Condition::HasItem { item, .. } if item == "automation-science-pack"
+            )),
+            "and the research itself no longer holds them, got {:?}",
+            action.pre
         );
         assert!(
             action
@@ -1996,6 +2362,11 @@ mod tests {
             subgoals(&steps),
             vec![
                 Goal::Researched("logistics".into()),
+                Goal::Have {
+                    item: "lab".into(),
+                    count: 1,
+                    whose: Holder::Share(BotId(1)),
+                },
                 Goal::Have {
                     item: "automation-science-pack".into(),
                     count: 10,
@@ -2026,6 +2397,11 @@ mod tests {
         assert_eq!(
             subgoals(&research_steps(&s, "mixed-research")),
             vec![
+                Goal::Have {
+                    item: "lab".into(),
+                    count: 1,
+                    whose: Holder::Share(BotId(1)),
+                },
                 Goal::Have {
                     item: "automation-science-pack".into(),
                     count: 2,
@@ -2208,10 +2584,283 @@ mod tests {
         );
     }
 
+    // ---- rung 7: a research needs a lab, placed, fed and powered -----------
+
+    /// **Run 30's milestone 7, as a test.**
+    ///
+    /// `workspace/runs/run-1788365280-15443/` planned `… craft 1 lab …
+    /// research automation` five times. All 17 `placed` records in the whole
+    /// run are stone furnaces — the lab was crafted and never put down — no
+    /// science pack was inserted into anything, and `research_progress` stayed
+    /// at `0.0` for the last 60,661 ticks. The plan must now say all three
+    /// things: the lab is placed, the packs go into it, and the research waits
+    /// on both.
+    #[test]
+    fn a_research_places_its_lab_feeds_it_and_waits_for_both() {
+        let bots = [BotId(1)];
+        let s = tech_state(&bots);
+        let net = expand(
+            &[Goal::Researched("automation".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("the goal expands against a powered fixture");
+
+        let place = net
+            .actions()
+            .find(|a| matches!(&a.kind, ActionKind::Place { entity } if entity.name == "lab"))
+            .unwrap_or_else(|| {
+                let labels: Vec<&str> = net.actions().map(|a| a.label.as_str()).collect();
+                panic!("the lab must be placed, not merely crafted; got {labels:#?}")
+            });
+        let ActionKind::Place { entity } = &place.kind else {
+            unreachable!("matched above")
+        };
+        let site = entity.position.clone();
+
+        let insert = net
+            .actions()
+            .find(|a| {
+                matches!(
+                    &a.kind,
+                    ActionKind::Insert { slot, item, .. }
+                        if *slot == InventorySlot::LabInput && item == "automation-science-pack"
+                )
+            })
+            .expect("the packs must go into the lab");
+        let ActionKind::Insert { pos, count, .. } = &insert.kind else {
+            unreachable!("matched above")
+        };
+        assert_eq!(
+            pos, &site,
+            "into the lab this plan placed, not somewhere else"
+        );
+        assert_eq!(*count, 10, "the whole bill, in one insert");
+
+        let research = net
+            .actions()
+            .find(|a| matches!(a.kind, ActionKind::Research { .. }))
+            .expect("and the research itself");
+        assert!(
+            research.pre.contains(&Condition::EntityAt {
+                pos: site.clone(),
+                name: "lab".into(),
+            }),
+            "the research must require a standing lab, got {:?}",
+            research.pre
+        );
+        assert!(
+            research.pre.contains(&Condition::Powered {
+                pos: site.clone(),
+                entity: "lab".into(),
+                kw: LAB_POWER_KW,
+            }),
+            "and a powered one, got {:?}",
+            research.pre
+        );
+
+        // The ordering, stated rather than left to inference: no effect of an
+        // insert satisfies any condition of the research, so `infer_edges`
+        // cannot draw this edge and the method has to.
+        assert!(
+            net.preds(research.id)
+                .iter()
+                .any(|(from, _)| *from == insert.id),
+            "the research must wait for the packs to be in the lab"
+        );
+        assert!(
+            net.preds(insert.id)
+                .iter()
+                .any(|(from, _)| *from == place.id),
+            "and the insert must wait for the lab to be standing"
+        );
+    }
+
+    /// The same world and the same goal give the same research plan, twice.
+    ///
+    /// The new machinery is full of places this could stop being true: the
+    /// pole scan reads a quad tree whose query order is undefined, the network
+    /// components come out of a union-find over that scan, and the site search
+    /// walks rings whose first acceptable candidate decides an `ActionId`
+    /// allocation and therefore `schedule`'s `(end, ActionId, BotId)`
+    /// tie-break. Asserting the *schedule* as well as the network is what
+    /// makes this a statement about the plan rather than about the labels.
+    #[test]
+    fn a_research_plan_is_identical_on_a_second_expansion() {
+        let bots = [BotId(1), BotId(2)];
+        let s = tech_state(&bots);
+        let plan_of = || {
+            let net = expand(
+                &[Goal::Researched("automation".into())],
+                &s,
+                &registry_for(&bots),
+                BotId(1),
+            )
+            .expect("expands");
+            let shape: Vec<String> = net
+                .actions()
+                .map(|a| format!("{:?} {} {:?} {:?}", a.id, a.label, a.pre, a.eff))
+                .collect();
+            let plan = schedule(&net, &s, &bots).expect("schedules");
+            (shape, plan.makespan, plan.steps)
+        };
+        let first = plan_of();
+        for _ in 0..10 {
+            assert_eq!(plan_of(), first);
+        }
+    }
+
+    /// The lab is sited where the power is, not where the bot is.
+    ///
+    /// `free_area_near` reaches 12 tiles, so a search anchored on the bot would
+    /// only ever find supply the bot happened to be standing in. The fixture
+    /// puts its pole at `(10.5, 10.5)` with a 5x5 supply area and the bot at
+    /// the origin, which is outside it.
+    #[test]
+    fn the_lab_is_sited_inside_an_existing_supply_area() {
+        let s = tech_state(&[BotId(1)]);
+        let steps = research_steps(&s, "automation");
+        let site = lab_site_of(&steps);
+        assert!(
+            lab_is_powered(&s, &site),
+            "the lab at {site} is not inside any supply area"
+        );
+        assert!(
+            calculate_distance(&site, &Position::new(0., 0.)) > 5.,
+            "and it is not merely under the bot's feet: {site}"
+        );
+    }
+
+    /// A lab covers three tiles on each axis, so its centre belongs at a tile
+    /// **centre** — `n + 0.5` — exactly as a resource does. An even-sized
+    /// entity like a stone furnace keeps the integer grid.
+    ///
+    /// Getting this backwards is the corner-versus-centre mistake that once
+    /// made mining fail on every real map while every test passed, and it is
+    /// silent: a badly aligned building is refused by the game, not by any
+    /// arithmetic here.
+    #[test]
+    fn an_odd_sized_entity_is_centred_on_a_tile_centre() {
+        let s = tech_state(&[BotId(1)]);
+        assert_eq!(
+            tile_alignment(&s, "lab"),
+            (0.5, 0.5),
+            "a lab is 2.3984 tiles across, which covers three"
+        );
+        assert_eq!(
+            tile_alignment(&s, "stone-furnace"),
+            (0., 0.),
+            "a stone furnace is 1.3984 across, which covers two"
+        );
+
+        let site = lab_site_of(&research_steps(&s, "automation"));
+        assert_eq!(
+            (site.x.fract().abs(), site.y.fract().abs()),
+            (0.5, 0.5),
+            "the chosen site must be a tile centre, got {site}"
+        );
+    }
+
+    /// A lab already standing and powered is used again rather than built a
+    /// second time — which is what a plan researching two technologies would
+    /// otherwise do, and what run 30 did across iterations.
+    #[test]
+    fn a_standing_powered_lab_is_reused_rather_than_built_again() {
+        let bots = [BotId(1)];
+        let s = tech_state(&bots);
+        // `military` needs `logistics`, which needs `automation`: three
+        // researches in one plan.
+        let net = expand(
+            &[Goal::Researched("military".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("the chain expands");
+
+        assert_eq!(research_actions(&net).len(), 3, "three technologies");
+        let labs: Vec<&Action> = net
+            .actions()
+            .filter(|a| matches!(&a.kind, ActionKind::Place { entity } if entity.name == "lab"))
+            .collect();
+        assert_eq!(labs.len(), 1, "but only one lab, got {:?}", labs);
+    }
+
+    /// **The refusal.** With nothing generating anywhere, the goal is refused
+    /// by name instead of producing a plan whose last step can never complete.
+    ///
+    /// This is the whole point of the rewrite: run 30 spent 85,030 ticks on a
+    /// milestone that could not close, and the only thing in the record saying
+    /// so was a `research_progress` of `0.0` that nobody was watching.
+    #[test]
+    fn research_refuses_when_the_lab_would_have_no_power() {
+        let bots = [BotId(1)];
+        // `tech_state` powers itself; this is the same world without that.
+        let s = PlanState::from_world(
+            Arc::new(crate::test_world::world_with_technologies()),
+            &bots,
+        );
+        let err = expand(
+            &[Goal::Researched("automation".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect_err("an unpowered world must refuse, not plan a dead lab");
+        let PlannerError::ResearchNeedsPower {
+            technology,
+            needed_kw,
+            supply_kw,
+        } = &err
+        else {
+            panic!("expected ResearchNeedsPower, got {err:?}");
+        };
+        assert_eq!(technology, "automation");
+        assert_eq!(*needed_kw, 60.0);
+        assert_eq!(*supply_kw, 0.0);
+    }
+
+    /// **Coverage is not capacity.** A pole reaching the lab with nothing
+    /// generating on its network is refused exactly as bare ground is.
+    ///
+    /// CLAUDE.md records why this is worth a test of its own: an
+    /// under-supplied network does not run slowly, it reads as completely
+    /// dead, so a check that stopped at "a pole reaches it" would pass on the
+    /// base that produced run 30's `generated_kw = 0.0`.
+    #[test]
+    fn a_pole_with_nothing_generating_is_not_power() {
+        let bots = [BotId(1)];
+        let mut s = PlanState::from_world(
+            Arc::new(crate::test_world::world_with_technologies()),
+            &bots,
+        );
+        s.create_entity(FactorioEntity {
+            name: "small-electric-pole".into(),
+            position: Position::new(10.5, 10.5),
+            ..Default::default()
+        });
+        let err = expand(
+            &[Goal::Researched("automation".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect_err("a pole is not a generator");
+        assert!(
+            matches!(err, PlannerError::ResearchNeedsPower { .. }),
+            "got {err:?}"
+        );
+    }
+
     /// Convergence, for the same reason hand-crafting converges: one research
     /// action carries a `HasItem` for every pack, so two packs that both have
     /// to be produced must meet in one inventory. One that does not — because
     /// the bot already holds it — is not a convergence.
+    ///
+    /// The lab a research now needs is deliberately *not* a third producer
+    /// here; see the comment in `Researched::converges` for the chain-owner
+    /// binding that counting it cost.
     #[test]
     fn research_converges_only_when_two_ingredients_need_producing() {
         let s = tech_state(&[BotId(1)]);
@@ -2231,6 +2880,29 @@ mod tests {
         assert!(
             !Researched.converges(&Goal::Researched("automation".into()), &s),
             "one ingredient type is never a convergence"
+        );
+    }
+
+    /// **The negative control for the paragraph in `Researched::converges`.**
+    ///
+    /// A lab that still has to be crafted must not make a one-pack research
+    /// converge. It is not that the lab does not have to land in one pair of
+    /// hands — it does — but that saying so *here* opens a chain at the top of
+    /// the research's own subtree, which stops every `Holder::Share` subgoal
+    /// below it from opening one and recording its owner. Counting it was
+    /// tried; `the_live_four_bot_research_run_plans_and_schedules` failed on
+    /// the spot.
+    #[test]
+    fn a_lab_that_must_be_crafted_is_not_a_convergence_on_its_own() {
+        let s = tech_state(&[BotId(1)]);
+        assert_eq!(
+            s.inventory_count(BotId(1), "lab"),
+            0,
+            "the premise: nobody holds a lab, so one has to be crafted"
+        );
+        assert!(
+            !Researched.converges(&Goal::Researched("automation".into()), &s),
+            "the lab is welded by the Holder::Share its subgoal names, not by a convergence"
         );
     }
 
@@ -2428,9 +3100,9 @@ mod tests {
         }
     }
 
-    /// D1, end to end. Two forces disagree about `automation`: `alpha`, which
-    /// sorts first and is therefore the one this plan acts for, has not
-    /// researched it; `zeta` has. The plan must research it.
+    /// D1, end to end. Two forces disagree about `automation`: `player`, the
+    /// one this plan acts for, has not researched it; `zeta` has. The plan
+    /// must research it.
     ///
     /// Before the acting force was fixed, `is_researched` answered over *any*
     /// force and said yes, `AlreadySatisfied` claimed the goal, and `expand`
@@ -2441,10 +3113,11 @@ mod tests {
     fn a_force_that_lacks_a_technology_researches_it_whatever_other_forces_have() {
         let bots = [BotId(1)];
         let world = Arc::new(crate::test_world::world_with_forces(&[
-            ("alpha", false),
+            ("player", false),
             ("zeta", true),
         ]));
-        let s = PlanState::from_world(world, &bots);
+        let mut s = PlanState::from_world(world, &bots);
+        crate::test_world::with_steam_power(&mut s);
         let net = expand(
             &[Goal::Researched("automation".into())],
             &s,
@@ -2460,7 +3133,7 @@ mod tests {
         assert!(
             net.actions()
                 .any(|a| matches!(&a.kind, ActionKind::Mine { .. })),
-            "and it must pay alpha's price rather than assume zeta's stock"
+            "and it must pay the player force's price rather than assume zeta's stock"
         );
     }
 
@@ -2470,7 +3143,7 @@ mod tests {
     fn a_force_that_has_a_technology_plans_nothing_whatever_other_forces_lack() {
         let bots = [BotId(1)];
         let world = Arc::new(crate::test_world::world_with_forces(&[
-            ("alpha", true),
+            ("player", true),
             ("zeta", false),
         ]));
         let s = PlanState::from_world(world, &bots);
@@ -2514,7 +3187,8 @@ mod tests {
     fn a_twenty_deep_prerequisite_chain_expands() {
         let bots = [BotId(1)];
         let world = Arc::new(crate::test_world::world_with_prerequisite_chain(20));
-        let s = PlanState::from_world(world, &bots);
+        let mut s = PlanState::from_world(world, &bots);
+        crate::test_world::with_steam_power(&mut s);
         let net = expand(
             &[Goal::Researched("chain-0".into())],
             &s,
@@ -2533,7 +3207,8 @@ mod tests {
     fn a_prerequisite_chain_past_the_bound_is_refused_not_run() {
         let bots = [BotId(1)];
         let world = Arc::new(crate::test_world::world_with_prerequisite_chain(64));
-        let s = PlanState::from_world(world, &bots);
+        let mut s = PlanState::from_world(world, &bots);
+        crate::test_world::with_steam_power(&mut s);
         let err = expand(
             &[Goal::Researched("chain-0".into())],
             &s,
@@ -4391,12 +5066,19 @@ mod tests {
     // ---------------------------------------------------------------
 
     fn locked_state(recipe: &str, unlockers: &[&str], bots: &[BotId]) -> PlanState {
-        PlanState::from_world(
+        let mut state = PlanState::from_world(
             Arc::new(crate::test_world::world_with_locked_recipe(
                 recipe, unlockers,
             )),
             bots,
-        )
+        );
+        // These fixtures exist to ask about recipe *gating*, and an unlocker
+        // that has to be researched now needs somewhere powered to put a lab.
+        // Supplying it keeps these tests about the question they were written
+        // for; `research_refuses_when_the_lab_would_have_no_power` owns the
+        // other one.
+        crate::test_world::with_steam_power(&mut state);
+        state
     }
 
     /// The premise: the fixture really does present a disabled recipe.
@@ -4992,6 +5674,7 @@ mod tests {
             Arc::new(crate::test_world::world_with_trigger_prerequisite()),
             &bots,
         );
+        crate::test_world::with_steam_power(&mut s);
         for bot in bots {
             // `initiate_missing_players_with_default_inventory`, plus the eight
             // iron plates freeplay really starts a player with.
@@ -5076,6 +5759,7 @@ mod tests {
         // The one addition over the test above: bot 4 — the 4-ore bot — is on
         // the iron patch, and so is cheapest for the chain that opens there.
         s.set_position(BotId(4), Position::new(-38., 36.));
+        crate::test_world::with_steam_power(&mut s);
 
         let net = expand(
             &[Goal::Researched("automation".into())],
@@ -5288,24 +5972,34 @@ mod tests {
         }
     }
 
-    /// A pack-researched technology must be completely unaffected: it still
-    /// bills packs, still spends them, and still takes lab time. This is the
-    /// control for every test above.
+    /// A pack-researched technology must be completely unaffected by the
+    /// *trigger* path: it still bills packs, still spends them, and still
+    /// takes lab time. This is the control for every test above.
+    ///
+    /// The spending moved, in 2026-09-02's rewrite, from the research action
+    /// to the insert that puts the packs into the lab — so this asserts it on
+    /// the insert. It is the same claim about the same items; what changed is
+    /// that the plan now says where they go.
     #[test]
     fn a_pack_researched_technology_is_untouched_by_the_trigger_path() {
         let s = tech_state(&[BotId(1)]);
         let tech = s.technology("automation").expect("the fixture defines it");
         assert_eq!(tech.research_trigger, None);
         let steps = research_steps(&s, "automation");
-        let Some(Step::Act(action)) = steps.last() else {
-            panic!("the last step must be the research action");
-        };
-        assert_eq!(action.duration, 6000, "10 units at 600 ticks each");
-        assert!(action.eff.contains(&Effect::LoseItem {
-            who: Actor::Role,
-            item: "automation-science-pack".into(),
-            count: 10,
-        }));
+        assert_eq!(
+            research_step(&steps).duration,
+            6000,
+            "10 units at 600 ticks each"
+        );
+        assert!(
+            insert_step(&steps, "automation-science-pack")
+                .eff
+                .contains(&Effect::LoseItem {
+                    who: Actor::Role,
+                    item: "automation-science-pack".into(),
+                    count: 10,
+                })
+        );
     }
 
     // ---- the unlock subtree's distribution ---------------------------------

@@ -352,10 +352,26 @@ pub fn resource_seats(state: &PlanState, item: &str, cap: u32) -> u32 {
 /// over. Searching by tile and testing by tile is what sited two furnaces one
 /// tile apart and had the game refuse the second.
 ///
-/// Candidates stay on the integer grid the tile search has always used, which
-/// is where Factorio wants an even-sized entity like a furnace; the *test* is
-/// `is_area_free`, which is exact.
+/// Candidates sit on the grid [`tile_alignment`] gives this entity — the
+/// integer grid for an even-sized one like a stone furnace, the half-tile grid
+/// for an odd-sized one like a lab — and the *test* is `is_area_free`, which is
+/// exact.
 pub fn free_area_near(state: &PlanState, from: &Position, entity: &str) -> Option<Position> {
+    free_area_near_where(state, from, entity, |_| true)
+}
+
+/// [`free_area_near`], with a second test the site must also pass.
+///
+/// Split out rather than duplicated so the ring order — and therefore which
+/// site any given search settles on — is written once. `accept` is called only
+/// for sites that already fit, so it never has to re-ask that question.
+pub fn free_area_near_where(
+    state: &PlanState,
+    from: &Position,
+    entity: &str,
+    accept: impl Fn(&Position) -> bool,
+) -> Option<Position> {
+    let (offset_x, offset_y) = tile_alignment(state, entity);
     let base_x = from.x.floor() as i32;
     let base_y = from.y.floor() as i32;
     for radius in 0..=FREE_TILE_SEARCH_RADIUS {
@@ -365,14 +381,49 @@ pub fn free_area_near(state: &PlanState, from: &Position, entity: &str) -> Optio
                 if dx.abs() != radius && dy.abs() != radius {
                     continue;
                 }
-                let candidate = Position::new((base_x + dx) as f64, (base_y + dy) as f64);
-                if state.is_area_free(entity, &candidate) {
+                let candidate = Position::new(
+                    (base_x + dx) as f64 + offset_x,
+                    (base_y + dy) as f64 + offset_y,
+                );
+                if state.is_area_free(entity, &candidate) && accept(&candidate) {
                     return Some(candidate);
                 }
             }
         }
     }
     None
+}
+
+/// Where on the tile grid `entity`'s centre belongs, as an offset to add to an
+/// integer tile coordinate: `0.0` or `0.5` on each axis.
+///
+/// Factorio aligns a building to the tile grid by its *footprint*, not by its
+/// centre. An entity that covers an **even** number of tiles on an axis has its
+/// centre on a tile boundary — a stone furnace is 1.3984 tiles across, covers
+/// two, and sits at an integer. One that covers an **odd** number has its centre
+/// at a tile *centre* — a lab is 2.3984 across, covers three, and sits at
+/// `n + 0.5`. This is the same half-tile the resource positions carry, and
+/// getting it wrong has cost this project a day once already.
+///
+/// Read from the prototype's own `collision_box`, so nothing here has to know
+/// that a lab is 3x3. An entity the world has no prototype for keeps the
+/// integer grid, which is what every caller did before this existed; its
+/// placement is refused by `Condition::AreaFree` on the same missing prototype
+/// anyway.
+pub fn tile_alignment(state: &PlanState, entity: &str) -> (f64, f64) {
+    let Some(prototype) = state.base().entity_prototypes.get(entity) else {
+        return (0., 0.);
+    };
+    let axis = |extent: f64| {
+        // `ceil` and not `round`: an entity 2.3984 tiles across occupies three
+        // tiles, not two. The tiny epsilon keeps a box that is exactly `n`
+        // tiles wide -- which the binary-fraction prototype numbers really can
+        // be -- from ceiling to `n + 1` on float noise.
+        let tiles = (extent - 1. / 512.).ceil() as i64;
+        if tiles.rem_euclid(2) == 0 { 0. } else { 0.5 }
+    };
+    let box_ = &prototype.collision_box;
+    (axis(box_.width()), axis(box_.height()))
 }
 
 /// Ingredients of `item`, or an empty vector when the recipe has none.

@@ -48,6 +48,92 @@ const TILE_HALF_SIDE: f64 = 0.5;
 /// `mods/BotBridge/control.lua` falls back to.
 const VANILLA_RESOURCE_REACH: f64 = 2.7;
 
+/// The force the bots play for, and the only one this planner reasons about.
+///
+/// `"player"` is Factorio's own name for the default player force, and it is
+/// what `mods/BotBridge/control.lua`'s `collect_player_force` and
+/// `collect_recipes` both already hardcode. `crates/executor`'s
+/// `rcon_actuator::BOT_FORCE` names the same string for the same reason, with
+/// its own test guarding it; the two are deliberately *not* one shared
+/// constant yet, because the only place both crates can see is
+/// `crates/core`, which belongs to other work right now. Unifying them is a
+/// one-line follow-up and is named in
+/// `docs/superpowers/notes/2026-09-02-research-needs-power.md`.
+pub const BOT_FORCE: &str = "player";
+
+/// How far from an entity [`PlanState::electric_supply_kw`] looks for the poles
+/// and generators that might power it, in tiles.
+///
+/// A bound, not a physical limit: `EntityGraph` offers no "every entity"
+/// query, and an unbounded scan on every condition check would be a full pass
+/// over the map. 64 tiles comfortably contains a boiler-and-engine plant next
+/// to the thing it powers, and a plant beyond it reads as absent — a refusal
+/// rather than a false promise.
+const POWER_SEARCH_RADIUS: f64 = 64.;
+
+/// Half the side of a pole's supply area, by pole name, from vanilla 2.1.
+///
+/// A table rather than prototype data because the mod does not send
+/// `supply_area_distance` — `FactorioEntityPrototype`
+/// (`crates/core/src/types.rs`) carries `collision_box`, mining and crafting
+/// fields and nothing electrical. Sending it is the follow-up that makes this
+/// table unnecessary; until then it is written down where it can be checked
+/// rather than guessed at a call site. Same discipline as
+/// [`crate::method::have::COAL_BURN_TICKS`], which hardcodes a stone furnace's
+/// 90 kW for the same reason.
+///
+/// A pole this does not name contributes no coverage at all, which refuses
+/// rather than over-credits.
+fn pole_supply_half_extent(name: &str) -> Option<f64> {
+    match name {
+        // 5x5 supply area.
+        "small-electric-pole" => Some(2.5),
+        // 7x7.
+        "medium-electric-pole" => Some(3.5),
+        // 4x4 — a big pole is for spanning distance, not for covering ground.
+        "big-electric-pole" => Some(2.0),
+        // 18x18.
+        "substation" => Some(9.0),
+        _ => None,
+    }
+}
+
+/// A pole's maximum copper-wire distance, by pole name, from vanilla 2.1.
+///
+/// Two poles are wired when their centres are within the **smaller** of their
+/// two reaches, which is the game's rule and is why this is a per-pole number
+/// rather than one constant.
+fn pole_wire_reach(name: &str) -> Option<f64> {
+    match name {
+        "small-electric-pole" => Some(7.5),
+        "medium-electric-pole" => Some(9.0),
+        "big-electric-pole" => Some(30.0),
+        "substation" => Some(18.0),
+        _ => None,
+    }
+}
+
+/// What a generator contributes to a network, in kW, when it is running.
+///
+/// **Deterministic sources only.** A steam engine's 900 kW is the same at
+/// every hour of every day; a solar panel's 60 kW is an average over a
+/// day/night cycle and its instantaneous output is whatever the map's clock
+/// says. CLAUDE.md records what that costs: "the same blueprint runs or does
+/// not run depending on when the run starts". A planner whose output must be
+/// identical for identical inputs cannot credit a number that is not, so solar
+/// panels and accumulators are absent from this table and a solar base reads
+/// as unpowered.
+///
+/// Nameplate capacity, not observed output: nothing in `FactorioWorld` says
+/// whether a steam engine has steam. See [`PlanState::electric_supply_kw`].
+fn generation_kw(name: &str) -> Option<f64> {
+    match name {
+        "steam-engine" => Some(900.0),
+        "steam-turbine" => Some(5800.0),
+        _ => None,
+    }
+}
+
 /// Above this, a reported `resource_reach_distance` is not a character's.
 ///
 /// A *player* with no character reports `f64::MAX` here — the game's way of
@@ -352,7 +438,8 @@ pub struct PlanState {
     ///
     /// See [`MiningClaim::runner`] for what it buys and why it is sound.
     claim_runner: Option<ClaimRunner>,
-    /// The one force this plan acts for, or `None` if `base` carries no forces.
+    /// The one force this plan acts for, or `None` if `base` carries no force
+    /// by that name.
     ///
     /// Chosen once, here, and read by everything that asks a question about
     /// technology — `is_researched` and `technology` both. That single
@@ -370,11 +457,28 @@ pub struct PlanState {
     /// one, and the type says so: there is nowhere else to make the choice and
     /// nothing else to disagree with.
     ///
-    /// Which force: the alphabetically first, because `FactorioWorld::forces`
-    /// is a `DashMap` whose iteration order moves with the hash seed and
-    /// planning has to be reproducible. Every world this plans against has a
-    /// single force, so the tie-break decides nothing in practice; it exists so
-    /// that a world with several cannot make planning depend on the seed.
+    /// **Which force: [`BOT_FORCE`], by name.** It used to be the
+    /// alphabetically first, on the stated premise that "every world this
+    /// plans against has a single force, so the tie-break decides nothing in
+    /// practice". That premise was false from the first research completion of
+    /// every run. `writeout_forces` in `mods/BotBridge/control.lua` emits all
+    /// of `game.forces`, so `FactorioWorld::forces` gains `enemy` and
+    /// `neutral` the moment the mod re-sends them, and `min()` returns
+    /// **`enemy`** — a force that never researches anything. In run 30
+    /// (`workspace/runs/run-1788365280-15443/`) that happened at tick 26,449,
+    /// which is milestones 6 and 7 in full: the `player` force had finished
+    /// `automation-science-pack` by tick 53,485 and `enemy` had not, so all
+    /// five milestone-7 plans re-derived its trigger and crafted a second lab
+    /// for a technology the force already had.
+    ///
+    /// It was also *inconsistently* wrong, which is worse than uniformly
+    /// wrong: the mod's `collect_recipes` hardcodes `game.forces["player"]`,
+    /// so recipe gating read the right force while every technology question
+    /// read `enemy`, and one `PlanState` gave two different answers about the
+    /// same game. Naming the force is what makes the two agree.
+    ///
+    /// Reproducibility was the sort's whole justification and a name keeps it:
+    /// a lookup by key does not depend on the `DashMap`'s hash seed either.
     force: Option<String>,
     /// Technologies the plan has completed.
     ///
@@ -571,7 +675,9 @@ impl PlanState {
                 0.0_f64,
                 |acc, d| if d.total_cmp(&acc).is_gt() { d } else { acc },
             );
-        let force = base.forces.iter().map(|entry| entry.key().clone()).min();
+        // By name, never by sort. See the `force` field's own doc for the run
+        // that established what the sort actually selected.
+        let force = base.forces.get(BOT_FORCE).map(|entry| entry.key().clone());
         // The roster's worst case, not each bot's own: a tile is claimed by
         // one action and has to keep *every* other bot off it, so the bound
         // that matters is the largest reach anybody in the roster swings from.
@@ -1125,6 +1231,231 @@ impl PlanState {
         self.is_area_clear(&tile_area(&Pos::from(position)))
     }
 
+    /// Every entity the plan can *name* within `radius` of `centre`, newest
+    /// first: the ones this plan has placed, then the ones the base world
+    /// already had, with anything this plan removed left out.
+    ///
+    /// Ordered by `(x, y, name)` with `total_cmp`, because
+    /// `EntityGraph::find_entities_in_radius` walks a quad tree whose query
+    /// order is not defined and this crate's output has to be byte-identical
+    /// across runs.
+    ///
+    /// # What "can name" excludes, and why it matters here
+    ///
+    /// `EntityGraph::add` only inserts a **whitelist** of entity types into
+    /// its entity tree (`crates/core/src/graph/entity_graph.rs`), and
+    /// `electric-pole` and `generator` are not on it. So a steam engine or a
+    /// pole that a *live* world already contains is invisible to this: it
+    /// reaches `blocked_tree` and therefore blocks placements, but nothing
+    /// here can read its name. Entities this plan places itself go through
+    /// [`PlanState::create_entity`] and are visible immediately.
+    ///
+    /// That is a gap in `crates/core`, not in the model above it, and it is
+    /// deliberately not worked around here: adding two variants to that
+    /// whitelist is a one-line change in a crate this work does not own. Until
+    /// it lands, [`PlanState::electric_supply_kw`] under-reports a hand-built
+    /// power plant to zero — which refuses a plan that could have run, the
+    /// conservative direction, rather than planning one that cannot.
+    pub fn entities_within(&self, centre: &Position, radius: f64) -> Vec<FactorioEntity> {
+        let mut out: Vec<FactorioEntity> = Vec::new();
+        let mut seen: BTreeSet<Pos> = BTreeSet::new();
+        for entity in self.added.values() {
+            if calculate_distance(&entity.position, centre) <= radius {
+                seen.insert(Pos::from(&entity.position));
+                out.push(entity.clone());
+            }
+        }
+        for entity in
+            self.base
+                .entity_graph
+                .find_entities_in_radius(centre.clone(), radius, None, None)
+        {
+            let key = Pos::from(&entity.position);
+            if self.removed.contains(&key) || !seen.insert(key) {
+                continue;
+            }
+            out.push(entity);
+        }
+        out.sort_by(|a, b| {
+            a.position
+                .x
+                .total_cmp(&b.position.x)
+                .then(a.position.y.total_cmp(&b.position.y))
+                .then(a.name.cmp(&b.name))
+        });
+        out
+    }
+
+    /// The nearest pole to `from`, within `radius`, whose own supply area
+    /// already carries at least `kw` of generation — i.e. somewhere a
+    /// consumer could be built and actually run.
+    ///
+    /// The anchor a method searches around when it needs a *powered* site.
+    /// Searching around the bot instead would only ever find power the bot
+    /// happens to be standing in, and `free_area_near`'s rings reach 12 tiles.
+    ///
+    /// Ordered by `(distance, x, y)` with `total_cmp`, so two poles equally far
+    /// away resolve the same way on every run.
+    ///
+    /// Subject to exactly the blindness [`PlanState::entities_within`]
+    /// describes: a pole a live world already contains is not visible here.
+    pub fn nearest_supply_anchor(&self, from: &Position, radius: f64, kw: f64) -> Option<Position> {
+        let mut candidates: Vec<(f64, Position, Rect)> = self
+            .entities_within(from, radius)
+            .into_iter()
+            .filter_map(|entity| {
+                let supply = pole_supply_half_extent(&entity.name)?;
+                let box_ = Rect::new(
+                    &Position::new(entity.position.x() - supply, entity.position.y() - supply),
+                    &Position::new(entity.position.x() + supply, entity.position.y() + supply),
+                );
+                Some((
+                    calculate_distance(&entity.position, from),
+                    entity.position.clone(),
+                    box_,
+                ))
+            })
+            .collect();
+        candidates.sort_by(|a, b| {
+            a.0.total_cmp(&b.0)
+                .then(a.1.x.total_cmp(&b.1.x))
+                .then(a.1.y.total_cmp(&b.1.y))
+        });
+        candidates
+            .into_iter()
+            .find(|(_, _, box_)| self.electric_supply_kw(box_).total_cmp(&kw).is_ge())
+            .map(|(_, position, _)| position)
+    }
+
+    /// How much generation, in kW, is wired to whatever occupies `area`.
+    ///
+    /// The question `Condition::Powered` asks, and the reason it is asked at
+    /// all: **power coverage is not power capacity.** A lab can sit inside a
+    /// pole's supply area, be fully connected, and do nothing whatever,
+    /// because nothing on that network generates. Run 30 read
+    /// `generated_kw = 0.0` in all 541 of its force samples while the plan
+    /// treated `Researched(automation)` as satisfied by crafting a lab.
+    ///
+    /// Three steps, in order, and each one is load-bearing:
+    ///
+    /// 1. **Coverage.** Which poles' supply areas overlap `area` at all.
+    ///    Overlap, not containment, because that is the game's own rule: an
+    ///    entity is supplied when its bounding box meets the supply area.
+    /// 2. **Connectivity.** Which poles those poles reach, transitively, by
+    ///    copper wire. Two poles are wired when they are within the *smaller*
+    ///    of their two maximum wire distances, which is what the game does.
+    /// 3. **Capacity.** The generators whose own footprint is covered by a
+    ///    pole in that same component, summed. A generator on another network
+    ///    contributes nothing, which is the failure `is_powered`-style
+    ///    coverage checks miss.
+    ///
+    /// # What this deliberately does not count
+    ///
+    /// * **Solar panels.** Their output depends on the in-game time of day, so
+    ///   the same plan would be feasible or not according to when the run
+    ///   started. CLAUDE.md names this as the trap that makes a layout "run or
+    ///   not run depending on when the run starts"; a planner that has to be
+    ///   deterministic cannot credit it. A solar-powered base is therefore
+    ///   reported as unpowered — a false refusal, and the safe direction.
+    /// * **Accumulators**, for the same reason once removed: they store what
+    ///   solar generated.
+    /// * **Whether the generator is actually running.** A steam engine with no
+    ///   steam produces nothing, and nothing in `FactorioWorld` says whether
+    ///   it has any. This counts nameplate capacity, so a boiler that is out
+    ///   of fuel reads as powered. Naming it here because it is the residual
+    ///   this function does *not* close.
+    /// * **Anything further than [`POWER_SEARCH_RADIUS`] from `area`.** A
+    ///   bounded search, because the entity graph offers no "every entity"
+    ///   query and an unbounded one would be a full scan on every condition
+    ///   check. A power plant beyond that radius reads as absent.
+    pub fn electric_supply_kw(&self, area: &Rect) -> f64 {
+        let centre = Position::new(
+            (area.left_top.x() + area.right_bottom.x()) / 2.,
+            (area.left_top.y() + area.right_bottom.y()) / 2.,
+        );
+        let nearby = self.entities_within(&centre, POWER_SEARCH_RADIUS);
+
+        // 1. Poles, with the supply box and wire reach the vanilla prototypes
+        //    give them.
+        let poles: Vec<(&FactorioEntity, Rect, f64)> = nearby
+            .iter()
+            .filter_map(|entity| {
+                let supply = pole_supply_half_extent(&entity.name)?;
+                let wire = pole_wire_reach(&entity.name)?;
+                let box_ = Rect::new(
+                    &Position::new(entity.position.x() - supply, entity.position.y() - supply),
+                    &Position::new(entity.position.x() + supply, entity.position.y() + supply),
+                );
+                Some((entity, box_, wire))
+            })
+            .collect();
+        if poles.is_empty() {
+            return 0.;
+        }
+
+        // 2. Connectivity, as a union-find over pole indices. `poles` is
+        //    already in the deterministic order `entities_within` fixed, so
+        //    the components come out the same on every run.
+        let mut parent: Vec<usize> = (0..poles.len()).collect();
+        fn find(parent: &mut [usize], mut i: usize) -> usize {
+            while parent[i] != i {
+                parent[i] = parent[parent[i]];
+                i = parent[i];
+            }
+            i
+        }
+        for a in 0..poles.len() {
+            for b in (a + 1)..poles.len() {
+                let reach = poles[a].2.min(poles[b].2);
+                if calculate_distance(&poles[a].0.position, &poles[b].0.position) <= reach {
+                    let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+                    if ra != rb {
+                        parent[ra] = rb;
+                    }
+                }
+            }
+        }
+
+        // The components that reach `area` at all. A `BTreeSet` of roots, so
+        // two poles of one network are one entry however many cover the site.
+        let covering: Vec<usize> = poles
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, supply, _))| boxes_overlap(supply, area))
+            .map(|(index, _)| index)
+            .collect();
+        let mut supplying: BTreeSet<usize> = BTreeSet::new();
+        for index in covering {
+            let root = find(&mut parent, index);
+            supplying.insert(root);
+        }
+        if supplying.is_empty() {
+            return 0.;
+        }
+
+        // 3. Capacity on those components.
+        let mut total = 0.;
+        for entity in &nearby {
+            let Some(kw) = generation_kw(&entity.name) else {
+                continue;
+            };
+            let footprint = self.footprint_of(entity);
+            let touching: Vec<usize> = poles
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, supply, _))| boxes_overlap(supply, &footprint))
+                .map(|(index, _)| index)
+                .collect();
+            let wired = touching
+                .into_iter()
+                .any(|index| supplying.contains(&find(&mut parent, index)));
+            if wired {
+                total += kw;
+            }
+        }
+        total
+    }
+
     /// Records a placed entity, giving it the footprint its prototype says it
     /// has if it arrived without one.
     ///
@@ -1596,6 +1927,203 @@ mod tests {
             position: Position::new(x, y),
             ..Default::default()
         }
+    }
+
+    // ---- electric supply ---------------------------------------------------
+
+    /// A `PlanState` with a pole at `pole` and, optionally, a steam engine at
+    /// `engine`.
+    ///
+    /// Built through `create_entity` — the overlay — rather than through the
+    /// world, because `EntityGraph::add`'s whitelist does not admit
+    /// `electric-pole` or `generator` and an entity added to the world would
+    /// be unreadable by name. See [`PlanState::entities_within`].
+    fn powered(pole: Option<Position>, engine: Option<Position>) -> PlanState {
+        let mut s = state();
+        for (name, position) in [("small-electric-pole", pole), ("steam-engine", engine)] {
+            if let Some(position) = position {
+                s.create_entity(FactorioEntity {
+                    name: name.into(),
+                    position,
+                    ..Default::default()
+                });
+            }
+        }
+        s
+    }
+
+    /// The box a lab centred at `pos` would cover.
+    fn lab_area(s: &PlanState, pos: Position) -> Rect {
+        s.collision_area("lab", &pos)
+            .expect("the fixture has a lab")
+    }
+
+    /// A pole covering the site with a generator wired to it is power.
+    #[test]
+    fn a_covered_site_with_a_generator_on_its_network_has_supply() {
+        let s = powered(
+            Some(Position::new(10.5, 10.5)),
+            Some(Position::new(12.5, 10.5)),
+        );
+        assert_eq!(
+            s.electric_supply_kw(&lab_area(&s, Position::new(8.5, 8.5))),
+            900.0,
+            "one steam engine, covered by the same pole as the site"
+        );
+    }
+
+    /// **Coverage is not capacity.** The same pole, the same site, no
+    /// generator: zero.
+    ///
+    /// This is the check that would have passed on the base run 30 actually
+    /// had — `generated_kw = 0.0` in all 541 force samples — if it stopped at
+    /// "a pole reaches it".
+    #[test]
+    fn a_pole_with_no_generator_supplies_nothing() {
+        let s = powered(Some(Position::new(10.5, 10.5)), None);
+        assert_eq!(
+            s.electric_supply_kw(&lab_area(&s, Position::new(8.5, 8.5))),
+            0.0
+        );
+    }
+
+    /// And capacity is not coverage: a generator with no pole reaching the
+    /// site is not power either.
+    #[test]
+    fn a_generator_with_no_pole_supplies_nothing() {
+        let s = powered(None, Some(Position::new(12.5, 10.5)));
+        assert_eq!(
+            s.electric_supply_kw(&lab_area(&s, Position::new(8.5, 8.5))),
+            0.0
+        );
+    }
+
+    /// A generator on a *different* network contributes nothing.
+    ///
+    /// Two poles 20 tiles apart — well past a small pole's 7.5-tile wire
+    /// reach — so they are two networks. The engine sits in the far pole's
+    /// supply area, the site in the near one's. Both halves of the naive check
+    /// pass (there is a pole here, there is a generator somewhere) and the
+    /// answer is still nothing.
+    #[test]
+    fn a_generator_on_another_network_does_not_supply_the_site() {
+        let mut s = powered(Some(Position::new(10.5, 10.5)), None);
+        s.create_entity(FactorioEntity {
+            name: "small-electric-pole".into(),
+            position: Position::new(30.5, 10.5),
+            ..Default::default()
+        });
+        s.create_entity(FactorioEntity {
+            name: "steam-engine".into(),
+            position: Position::new(32.5, 10.5),
+            ..Default::default()
+        });
+        assert_eq!(
+            s.electric_supply_kw(&lab_area(&s, Position::new(8.5, 8.5))),
+            0.0,
+            "20 tiles apart is two networks, not one"
+        );
+
+        // Bridge them with a pole in wire range of both, and the same engine
+        // now counts — so the zero above is about connectivity and not about
+        // the engine being unreadable.
+        s.create_entity(FactorioEntity {
+            name: "small-electric-pole".into(),
+            position: Position::new(17.5, 10.5),
+            ..Default::default()
+        });
+        s.create_entity(FactorioEntity {
+            name: "small-electric-pole".into(),
+            position: Position::new(24.5, 10.5),
+            ..Default::default()
+        });
+        assert_eq!(
+            s.electric_supply_kw(&lab_area(&s, Position::new(8.5, 8.5))),
+            900.0,
+            "two hops of 7 tiles each, inside a small pole's 7.5-tile reach"
+        );
+    }
+
+    /// Solar is deliberately not credited: its output depends on the in-game
+    /// time of day, and a planner whose output must be identical for identical
+    /// inputs cannot make a feasibility decision on a number that is not.
+    ///
+    /// The steam engine in the same position *is* credited, so this is about
+    /// the panel and not about the geometry.
+    #[test]
+    fn a_solar_panel_is_not_counted_as_generation() {
+        let mut s = powered(Some(Position::new(10.5, 10.5)), None);
+        s.create_entity(FactorioEntity {
+            name: "solar-panel".into(),
+            position: Position::new(12.5, 10.5),
+            ..Default::default()
+        });
+        assert_eq!(
+            s.electric_supply_kw(&lab_area(&s, Position::new(8.5, 8.5))),
+            0.0,
+            "a solar panel's output is a function of the clock"
+        );
+
+        let steam = powered(
+            Some(Position::new(10.5, 10.5)),
+            Some(Position::new(12.5, 10.5)),
+        );
+        assert_eq!(
+            steam.electric_supply_kw(&lab_area(&steam, Position::new(8.5, 8.5))),
+            900.0,
+            "the same geometry with a steam engine does count"
+        );
+    }
+
+    /// The anchor a placement search uses: the nearest pole with generation on
+    /// its own network, and `None` when there is none.
+    #[test]
+    fn the_supply_anchor_is_a_pole_with_generation_behind_it() {
+        let s = powered(
+            Some(Position::new(10.5, 10.5)),
+            Some(Position::new(12.5, 10.5)),
+        );
+        assert_eq!(
+            s.nearest_supply_anchor(&Position::new(0., 0.), 64., 60.),
+            Some(Position::new(10.5, 10.5))
+        );
+        // Out of range of the search, not out of range of the pole.
+        assert_eq!(
+            s.nearest_supply_anchor(&Position::new(0., 0.), 5., 60.),
+            None
+        );
+        // And a demand the network cannot meet is refused rather than rounded.
+        assert_eq!(
+            s.nearest_supply_anchor(&Position::new(0., 0.), 64., 1_000.),
+            None
+        );
+    }
+
+    /// `entities_within` orders its answer, because a quad-tree query does
+    /// not and this crate's output has to be byte-identical across runs.
+    #[test]
+    fn entities_within_comes_back_in_a_fixed_order() {
+        let s = powered(
+            Some(Position::new(10.5, 10.5)),
+            Some(Position::new(12.5, 10.5)),
+        );
+        let names: Vec<String> = s
+            .entities_within(&Position::new(0., 0.), 64.)
+            .into_iter()
+            .map(|e| format!("{} {}", e.name, e.position))
+            .collect();
+        for _ in 0..20 {
+            let again: Vec<String> = s
+                .entities_within(&Position::new(0., 0.), 64.)
+                .into_iter()
+                .map(|e| format!("{} {}", e.name, e.position))
+                .collect();
+            assert_eq!(names, again);
+        }
+        assert!(
+            names.iter().any(|n| n.starts_with("small-electric-pole")),
+            "the overlay's own entities are in it: {names:?}"
+        );
     }
 
     #[test]

@@ -79,6 +79,27 @@ pub enum Condition {
         entity: ItemId,
     },
     Researched(String),
+    /// Electric supply reaches an entity of `entity` centred at `pos`, with at
+    /// least `kw` of generation wired to it.
+    ///
+    /// **Both halves, deliberately.** Coverage alone — "a pole reaches it" —
+    /// is the check that passes on a base with no generator at all, and an
+    /// under-supplied network does not degrade into "slow": it reads as
+    /// completely dead. Run 30 researched nothing for 60,661 ticks with
+    /// `generated_kw = 0.0` in all 541 of its force samples.
+    ///
+    /// **Nothing produces this yet**, so `ActionNetwork::infer_edges` draws no
+    /// edge to it and no method can satisfy it: it is a statement about the
+    /// world, checked at expansion time, and a method that needs it refuses
+    /// when [`crate::state::PlanState::electric_supply_kw`] cannot show it.
+    /// The day a method builds a boiler and a steam engine, its
+    /// `Effect::CreateEntity` lands in the same overlay `electric_supply_kw`
+    /// reads and this starts holding with no change here.
+    Powered {
+        pos: Position,
+        entity: ItemId,
+        kw: f64,
+    },
     ResourceAvailable {
         pos: Position,
         item: ItemId,
@@ -110,6 +131,14 @@ impl Condition {
             Condition::PositionFree { pos } => state.is_position_free(pos),
             Condition::AreaFree { pos, entity } => state.is_area_free(entity, pos),
             Condition::Researched(tech) => state.is_researched(tech),
+            Condition::Powered { pos, entity, kw } => match state.collision_area(entity, pos) {
+                // No prototype, no footprint, no answer — and the answer this
+                // gives is "not powered", matching `is_area_free`'s reading of
+                // the same absence: an entity the world cannot size is not one
+                // the planner will commit to.
+                Some(area) => state.electric_supply_kw(&area).total_cmp(kw).is_ge(),
+                None => false,
+            },
             Condition::ResourceAvailable { pos, item, count } => {
                 state.resource_available(pos, item) >= *count
             }
@@ -153,6 +182,9 @@ impl std::fmt::Display for Condition {
             Condition::PositionFree { pos } => write!(f, "{} is free", pos),
             Condition::AreaFree { pos, entity } => write!(f, "{} fits at {}", entity, pos),
             Condition::Researched(tech) => write!(f, "{} researched", tech),
+            Condition::Powered { pos, entity, kw } => {
+                write!(f, "{} at {} has {} kW of supply", entity, pos, kw)
+            }
             Condition::ResourceAvailable { pos, item, count } => {
                 write!(f, "{} {} available at {}", count, item, pos)
             }

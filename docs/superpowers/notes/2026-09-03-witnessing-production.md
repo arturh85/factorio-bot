@@ -6,8 +6,22 @@
 when" was not met, and the answer to the objection that a `Producing` goal can
 be satisfied by machines that stand and make nothing.
 
-**Nothing here has been run against a game.** Every claim below is source,
-tests, the mod's own serialiser and the vanilla prototype numbers.
+**Written before any of it had met a game; then it met one.** Everything below
+was source, tests, the mod's own serialiser and the vanilla prototype numbers at
+the time of writing. **Run 37 (`run-1788390446-74562`) then witnessed a live
+cell**, and the three paragraphs marked *[run 37]* are the only ones in this
+file that are measurements rather than derivations:
+
+```
+WITNESSED: iron-plate in 1 watched machine(s) went 0 -> 1 (+1, wanted 1)
+           in 480 of 2400 ticks, 466 polls
+```
+
+An iron plate appeared in the furnace's output inventory while every bot stood
+still. See `2026-09-02-morning-report.md`'s run 37 section for the run itself,
+including the false-pass scare it caused: the force sampler writes every 300
+ticks and could not see a 192-tick event, so its last line showed no plate. The
+witness polls about once a tick and is the finer instrument, which is the point.
 
 ---
 
@@ -67,7 +81,10 @@ can be optimistic.
 
 The cost is asymmetric on purpose. With `at_least = 1`, a working cell stops the
 wait the moment it has proved itself — about 500 ticks, eight seconds — and only
-a cell that produces nothing runs the clock out. `a_cell_whose_output_rises_is_
+a cell that produces nothing runs the clock out. *[run 37]* **Measured: 480
+ticks against the 432 predicted, an 11% error, and the window was never within a
+factor of four of running out.** The margin was sized for the model being
+optimistic; the model was pessimistic by 48 ticks. `a_cell_whose_output_rises_is_
 witnessed_and_the_wait_stops_early` pins the short circuit, and
 `a_cell_that_stands_and_produces_nothing_halts_with_its_own_code` pins that the
 dead verdict is only given after the full window.
@@ -374,13 +391,15 @@ whether it is measuring anything.
   would have to wait long enough to measure one, which is minutes, and would
   then be measuring the model's own arithmetic back at itself. The honest claim
   is the one made: the cell produces.
-* **Nothing here has met a game.** The two things a live run would settle first
-  are whether a burner drill's output really lands in a stone furnace two tiles
-  away (§15.1 of the spec, still open) and whether ~2400 rcon round trips over
-  40 seconds contend with four graphical clients badly enough to matter. The
-  poll loop is paced by Factorio processing rcon once per tick, so it should be
-  about one call per tick; that is an inference from how the game works, not a
-  measurement.
+* ~~**Nothing here has met a game.**~~ *[run 37]* Both of the questions this
+  bullet listed are now answered, and both the way the design assumed. A burner
+  drill's output really does land in a stone furnace two tiles away — §15.1 of
+  the spec, closed by an actual plate rather than by geometry. And the poll loop
+  really is paced by Factorio processing rcon once per tick: **466 polls across
+  480 ticks**, 0.97 per tick, where the note above it had only an inference from
+  how the game works. What is still unmeasured is the *dead-cell* cost: run 37
+  short-circuited at 480 ticks, so nothing has yet paid the full 2400-tick window
+  against four graphical clients.
 * **`from`/`into` are names.** A witness pointed at the wrong two entity kinds
   finds no cell and reports `no_cell` — correctly, and for a reason the reader
   will have to work out. There is no check that the pair is the pair the goal was

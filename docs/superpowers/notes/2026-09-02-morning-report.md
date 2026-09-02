@@ -177,3 +177,44 @@ ore would surface.
 
 Note the error message itself is one this work rewrote to be truthful: it says
 *why* the chain is bound to that bot rather than claiming a caller named it.
+
+
+---
+
+## Update (~12:30): run 18, and the last known blocker
+
+Run 17's crash was **one ulp**. `1.2705824974445776` was not a resource count —
+it is `placement_clearance("stone-furnace")`, a distance in tiles, bit-exact
+against the prototype fixtures. `arrival_point` returned `to.x() + min_radius`,
+a rounded sum whose distance measured back out came to `...772` against an
+inclusive inner bound of `...776`, so **the scheduler rejected the arrival point
+it had just computed**. Fatal only because the share-binding fix gives a chain
+an owner, leaving no second candidate. Two of tonight's own fixes interacting.
+
+That diagnosis also killed my exhausted-tile hypothesis with evidence: 128 mine
+dispatches at 128 *distinct* tiles, at most 5 each against a modelled 500.
+
+**Run 18** (`run-1788329146-40305`): 175 actions, **172 succeeded**, rungs 1-3
+satisfied, rung 4 running **8 iterations of 89-step plans** — the most
+consistent run yet — before:
+
+```
+ERROR: could not start mining for 301 ticks: another character is standing on the copper-ore
+```
+
+That is a gap the obstructed-tiles work named and **deliberately left open**,
+for a good reason: `resource_unclaimed` ignores characters because *a miner
+legitimately stands on its own target*, and a blanket rule would fence every bot
+off the tile it was sent to. The distinction is whose feet.
+
+Likely our own doing again: split capacity sizes rung 4 to fewer bots than the
+roster, so bots are **parked**, and a parked bot standing on ore is invisible to
+a selector that only reasons about miners.
+
+## `wall_ms` removed rather than left wrong
+
+It stamped the moment `record()` was *called*. The supervisor flushes a whole
+plan's events in one batch after execution finishes, so every event in a batch
+carried the batch-flush time — the `33780 → 738866` across 10 ticks. Making it
+truthful needs real timestamps captured in the executor and threaded across the
+mlua boundary. Nothing read it, so it went.

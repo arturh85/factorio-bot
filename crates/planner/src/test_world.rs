@@ -25,21 +25,28 @@ use factorio_bot_core::types::{FactorioForce, Position, Rect};
 /// A world whose iron front can seat a whole roster, and its ore neighbours
 /// with it.
 ///
-/// **Why this exists, measured rather than assumed.** `fixture_world`'s iron
-/// patch is 121 tiles, and at the separation two hand-mining characters need
-/// (3.99 tiles, from `PlanState::mining_tile_separation`) that is **nine
-/// seats** for the whole plan — a claim is committed for the length of an
-/// expansion and never released. The un-converged four-bot unlock plan already
-/// uses eight of the nine. So the shared fixture cannot host any multi-bot
-/// mining beyond what it already does: a converged smelt claims one seat per
-/// supplier where a solo one claims one in total, and the ninth seat is the
-/// only slack there is.
+/// **Why this exists, and why it no longer carries the argument it was built
+/// for.** `fixture_world`'s iron patch is 121 tiles, and at the separation two
+/// hand-mining characters need (3.99 tiles, from
+/// `PlanState::mining_tile_separation`) that is **nine seats**. While a claim
+/// was held for the length of an expansion and crowded every other bot out of
+/// its neighbourhood, the un-converged four-bot unlock plan spent eight of
+/// those nine — one per mining *action* — and the shared fixture could host no
+/// multi-bot mining at all beyond what it already did. So convergence was
+/// demonstrated on a front sized like a real one instead, and the shared
+/// fixture was left exactly as it is, with the makespans `tests/red_science.rs`
+/// and `tests/scheduling.rs` pin untouched.
 ///
-/// That is a fact about the fixture, not about the design — a real Factorio ore
-/// field is thousands of tiles and hundreds of seats. So convergence is
-/// demonstrated on a front sized like a real one, and the shared fixture is
-/// left exactly as it is, with the makespans `tests/red_science.rs` and
-/// `tests/scheduling.rs` pin untouched.
+/// A claim now names the serial timeline it sits on
+/// (`crate::state::ClaimRunner`), and one bot's own claims never conflict, so
+/// those eight actions cost **four** seats and the shared fixture hosts the
+/// handover perfectly well: `the_unlock_subtree_spreads_on_the_shared_fixture`
+/// is the headline now, and this front changes its makespan by 25 ticks.
+///
+/// Kept as a control. A real Factorio ore field is thousands of tiles and
+/// hundreds of seats, and a fixture that only ever seats nine is a poor proxy
+/// for one; this is also what would catch a seat model that had quietly
+/// started depending on how much ore there is.
 ///
 /// The extra ore is a separate block, clear of every existing patch, rather
 /// than an enlargement of one: overlapping `spawn_ore` would put two resource

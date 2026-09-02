@@ -1,6 +1,6 @@
 use crate::error::PlannerError;
 use crate::goal::Holder;
-use crate::ids::{BotId, ItemId};
+use crate::ids::{BotId, ChainId, ItemId};
 use factorio_bot_core::factorio::util::{add_to_rect, calculate_distance};
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::types::{
@@ -167,6 +167,102 @@ impl Default for BotState {
     }
 }
 
+/// One tile this plan has committed to a mining action, and *when* it is held.
+///
+/// # The time axis, and why it is a runner rather than a tick range
+///
+/// Two mining actions have to be kept apart in space only if they can happen
+/// at the same **time** — the whole reason for
+/// [`PlanState::mining_tile_separation`] is that a bot mining one tile stands
+/// on the tiles around it, and standing there stops *somebody else* mining
+/// them. A tile the first bot has finished with and walked away from is free.
+///
+/// A plan being expanded has no clock: who runs an action and when is
+/// [`crate::schedule`]'s decision, taken after the whole network exists. But
+/// the scheduler makes one guarantee that expansion can read off the network
+/// it is building, and it is exactly the guarantee needed here:
+///
+/// * a bot runs **one action at a time** (`free_at` in `schedule`, which every
+///   chosen action advances to its own end), and
+/// * a chain with an **owner** is offered to that bot and to no other — the
+///   owner tier in `schedule`'s `candidate_tiers` is a single-bot tier with no
+///   fallback, so an owner is a hard constraint, not a preference — and a
+///   chain *without* one is still bound to a single bot the moment its first
+///   action is placed (`chain_binding`), so its own actions are serial too,
+///   even though nothing says which bot they are serial on.
+///
+/// So two claims made inside chains owned by the *same* bot — or inside the
+/// *same* unowned chain — are provably disjoint in time, whatever the schedule
+/// turns out to be, and they need no separation from each other at all. That
+/// is what `runner` records: not a tick, but **whose serial timeline the claim
+/// sits on**. See [`ClaimRunner`] for the two ways that can be known.
+///
+/// `None` means the claim was made outside any chain at all, where the action
+/// stays individually assignable and could land on any bot at any time. Such a
+/// claim conflicts with everything, itself included. Conservative by
+/// construction: an unknown runner is never treated as a match, not even
+/// against another unknown one.
+///
+/// # What this deliberately does not relax
+///
+/// Whole-tile exclusivity ([`PlanState::is_resource_claimed`]) stays global.
+/// It is not a simultaneity rule: it exists because the planner cannot know
+/// what a tile really holds (see [`DEFAULT_RESOURCE_PER_TILE`]), and one bot
+/// mining one tile twice runs into that same unknown however far apart in time
+/// the two swings are.
+#[derive(Clone, Debug)]
+struct MiningClaim {
+    /// The tile's centre, kept beside its flooring `Pos` key so a distance is
+    /// never measured to a rounded-down position. See the
+    /// [`claimed`](PlanState#structfield.claimed) field.
+    centre: Position,
+    /// The bot whose serial timeline this claim sits on, or `None` when the
+    /// runner was not known where the claim was made.
+    runner: Option<ClaimRunner>,
+}
+
+/// Whose serial timeline a mining claim sits on.
+///
+/// Two spellings of the same guarantee, because the scheduler makes it twice
+/// over:
+///
+/// * [`ClaimRunner::Bot`] — the claim was made inside a chain with an
+///   **owner**. `schedule` offers an owned chain to that bot and to no other
+///   (the owner tier in `candidate_tiers` is a single-bot tier with no
+///   fallback), so every chain that bot owns runs on it, and a bot runs one
+///   action at a time.
+/// * [`ClaimRunner::Chain`] — the claim was made inside a chain with no
+///   owner, which `converges` opens because "who runs it stays the
+///   scheduler's decision". The bot is unknown, but `chain_binding` still
+///   welds the whole chain to *one* of them, so the actions inside it are
+///   still serial with each other.
+///
+/// `Bot` is the wider statement and subsumes `Chain` for the chains it owns;
+/// they are never mixed, because a chain either has an owner where it was
+/// opened or does not. Two claims match only when they are the same variant
+/// carrying the same id, so an unowned chain never matches a bot even if the
+/// scheduler later happens to put them together — the conservative direction,
+/// and the only one that is sound without the schedule in hand.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ClaimRunner {
+    /// Every chain this bot owns, all of it serial on that bot.
+    Bot(BotId),
+    /// One unowned chain, serial on whichever bot the scheduler binds it to.
+    Chain(ChainId),
+}
+
+/// Do two claim runners provably name the same serial timeline?
+///
+/// `None` is *unknown*, never a wildcard and never a match — not even against
+/// another `None`. Two claims neither of which knows its runner may well end
+/// up on two different bots at the same moment, which is the case the
+/// separation exists for. Written as one function because both the crowding
+/// predicate and the tile walk in [`crate::method::util`] have to answer it
+/// the same way or they stop agreeing about which tiles are free.
+fn same_runner(a: Option<ClaimRunner>, b: Option<ClaimRunner>) -> bool {
+    matches!((a, b), (Some(x), Some(y)) if x == y)
+}
+
 /// The world at a point in a hypothetical plan.
 ///
 /// `base` is shared and never mutated; every difference lives in the overlay
@@ -245,7 +341,17 @@ pub struct PlanState {
     /// while a claim is only ever tested for equality, and is off by up to a
     /// tile the moment a *distance* is measured to it — which
     /// [`PlanState::is_resource_crowded`] does.
-    claimed: BTreeMap<Pos, Position>,
+    claimed: BTreeMap<Pos, MiningClaim>,
+    /// Whose serial timeline a claim made **now** sits on, and whose timeline
+    /// a crowding question is being asked *for*.
+    ///
+    /// Driver-set, saved and restored exactly where `ExpansionCtx::chain` is
+    /// (see `method::mod::expand_goal` and the `Step::Owned` arm of
+    /// `run_steps`), because it is the same fact: a chain with an owner runs
+    /// wholly on that bot, and `None` outside such a chain.
+    ///
+    /// See [`MiningClaim::runner`] for what it buys and why it is sound.
+    claim_runner: Option<ClaimRunner>,
     /// The one force this plan acts for, or `None` if `base` carries no forces.
     ///
     /// Chosen once, here, and read by everything that asks a question about
@@ -543,6 +649,7 @@ impl PlanState {
             removed: Default::default(),
             consumed: Default::default(),
             claimed: Default::default(),
+            claim_runner: None,
             force,
             researched: Default::default(),
             reserved: Default::default(),
@@ -1156,12 +1263,56 @@ impl PlanState {
     /// The tile's own claim never counts: "claimed" and "crowded" are separate
     /// questions and a caller can ask either. [`PlanState::resource_unclaimed`]
     /// asks both.
+    ///
+    /// Asked on behalf of [`PlanState::claim_runner`] — the bot whose timeline
+    /// the *next* claim would sit on. See
+    /// [`PlanState::is_resource_crowded_for`], which this is the driver-facing
+    /// spelling of.
     pub fn is_resource_crowded(&self, position: &Position) -> bool {
+        self.is_resource_crowded_for(position, self.claim_runner)
+    }
+
+    /// [`PlanState::is_resource_crowded`], asked on behalf of a stated runner
+    /// rather than the current one.
+    ///
+    /// A claim held by `runner` does not crowd `runner`: one bot runs one
+    /// action at a time, so its own claims are disjoint in time and need no
+    /// separation from each other. See [`MiningClaim`] for the whole argument
+    /// and for why `None` on either side is never a match.
+    ///
+    /// Spelled out as a parameter as well as read off the state because the
+    /// two questions are genuinely different and both are asked.
+    /// [`crate::method::util::resource_seats`] counts how many *distinct* bots
+    /// can mine an item at once and so must ask with `None`, whatever chain it
+    /// happens to be called from; every selector that is choosing a tile for
+    /// the chain in hand asks with that chain's runner. Passing it explicitly
+    /// is what keeps a seat count from silently answering the tile-selection
+    /// question.
+    pub fn is_resource_crowded_for(
+        &self,
+        position: &Position,
+        runner: Option<ClaimRunner>,
+    ) -> bool {
         let key = Pos::from(position);
-        self.claimed.iter().any(|(claimed_key, claimed_centre)| {
+        self.claimed.iter().any(|(claimed_key, claim)| {
             *claimed_key != key
-                && calculate_distance(position, claimed_centre) < self.mining_tile_separation
+                && !same_runner(claim.runner, runner)
+                && calculate_distance(position, &claim.centre) < self.mining_tile_separation
         })
+    }
+
+    /// Whose timeline a claim made now sits on. See
+    /// [`claim_runner`](PlanState#structfield.claim_runner).
+    pub fn claim_runner(&self) -> Option<ClaimRunner> {
+        self.claim_runner
+    }
+
+    /// Bind claims made from here on to `runner`'s timeline, and answer
+    /// crowding questions for it. Returns the previous binding, which the
+    /// driver restores on every exit path exactly as it restores
+    /// `ExpansionCtx::chain`.
+    pub fn set_claim_runner(&mut self, runner: Option<ClaimRunner>) -> Option<ClaimRunner> {
+        std::mem::replace(&mut self.claim_runner, runner)
     }
 
     /// Ore at a tile that is still *available to plan against*: what
@@ -1178,8 +1329,28 @@ impl PlanState {
     /// ([`Self::resource_tile_occupied`]), or because something else occupies
     /// it ([`Self::resource_tile_blocked`]). All four, in the order they are
     /// cheap to test.
+    ///
+    /// Crowding is asked for the *current* claim runner
+    /// ([`PlanState::claim_runner`]); everything else here is runner-blind,
+    /// because a tile that is spoken for, occupied or built over is that way
+    /// for everybody. [`PlanState::resource_unclaimed_for`] is the same
+    /// question asked on behalf of a stated runner.
     pub fn resource_unclaimed(&self, position: &Position, item: &str) -> u32 {
-        if self.is_resource_claimed(position) || self.is_resource_crowded(position) {
+        self.resource_unclaimed_for(position, item, self.claim_runner)
+    }
+
+    /// [`PlanState::resource_unclaimed`], asked on behalf of a stated runner.
+    ///
+    /// `None` is the strictest answer — it treats every claim in the plan as a
+    /// conflict — and is what [`crate::method::util::resource_seats`] asks
+    /// with, because seats are about *distinct bots at once*.
+    pub fn resource_unclaimed_for(
+        &self,
+        position: &Position,
+        item: &str,
+        runner: Option<ClaimRunner>,
+    ) -> u32 {
+        if self.is_resource_claimed(position) || self.is_resource_crowded_for(position, runner) {
             return 0;
         }
         if self.resource_tile_occupied(position) {
@@ -1297,8 +1468,18 @@ impl PlanState {
     /// Separate from [`PlanState::consume_resource`] so a caller can say which
     /// of the two it means; `consume_resource` calls this, because taking ore
     /// out of a tile in a plan is also the plan committing to that tile.
+    ///
+    /// The claim is stamped with [`PlanState::claim_runner`] — whose timeline
+    /// it sits on — which is why the driver has to have bound that before the
+    /// effect is applied. See [`MiningClaim`].
     pub fn claim_resource(&mut self, position: &Position) {
-        self.claimed.insert(Pos::from(position), position.clone());
+        self.claimed.insert(
+            Pos::from(position),
+            MiningClaim {
+                centre: position.clone(),
+                runner: self.claim_runner,
+            },
+        );
     }
 
     /// Take `count` of `item` out of a tile, and commit the tile to the action
@@ -2101,5 +2282,125 @@ mod tests {
             DEFAULT_RESOURCE_PER_TILE,
             "crowding is a fact about the plan, not about the ground"
         );
+    }
+
+    /// The ceiling this lifts, stated at the smallest scale it exists at.
+    ///
+    /// One bot mining two neighbouring tiles cannot be standing on the second
+    /// while it mines the first: `schedule` runs a bot's actions one at a
+    /// time. So a claim on a bot's own timeline must not crowd that bot out of
+    /// the tile beside it, however close it is.
+    #[test]
+    fn a_runner_is_not_crowded_by_its_own_claim() {
+        let mut a = state();
+        a.set_claim_runner(Some(ClaimRunner::Bot(BotId(1))));
+        let tile = Position::new(-40.5, 40.5);
+        let neighbour = Position::new(-39.5, 40.5);
+        a.claim_resource(&tile);
+
+        assert!(
+            calculate_distance(&tile, &neighbour) < a.mining_tile_separation(),
+            "the fixture must put these two inside the separation, or this \
+             test asserts nothing"
+        );
+        assert!(
+            !a.is_resource_crowded(&neighbour),
+            "a bot cannot stand on its own next tile while mining this one"
+        );
+        assert_eq!(
+            a.resource_unclaimed(&neighbour, "iron-ore"),
+            DEFAULT_RESOURCE_PER_TILE
+        );
+    }
+
+    /// The negative control for `a_runner_is_not_crowded_by_its_own_claim`:
+    /// two *different* bots really can be there at once, so the separation
+    /// stands. Without this the relaxation could be "nothing crowds anything"
+    /// and both tests would pass.
+    #[test]
+    fn a_claim_on_another_bots_timeline_still_crowds() {
+        let mut a = state();
+        a.set_claim_runner(Some(ClaimRunner::Bot(BotId(1))));
+        let tile = Position::new(-40.5, 40.5);
+        let neighbour = Position::new(-39.5, 40.5);
+        a.claim_resource(&tile);
+
+        a.set_claim_runner(Some(ClaimRunner::Bot(BotId(2))));
+        assert!(a.is_resource_crowded(&neighbour));
+        assert_eq!(a.resource_unclaimed(&neighbour, "iron-ore"), 0);
+    }
+
+    /// An unowned chain is still **one** chain, and `schedule`'s
+    /// `chain_binding` puts a whole chain on one bot. So its own claims are
+    /// serial with each other — and with nobody else's, because which bot it
+    /// landed on is not known here.
+    #[test]
+    fn an_unowned_chain_is_one_timeline_and_only_its_own() {
+        let mut a = state();
+        let tile = Position::new(-40.5, 40.5);
+        let neighbour = Position::new(-39.5, 40.5);
+
+        a.set_claim_runner(Some(ClaimRunner::Chain(ChainId(7))));
+        a.claim_resource(&tile);
+        assert!(
+            !a.is_resource_crowded(&neighbour),
+            "one chain is one runner, whoever it turns out to be"
+        );
+
+        a.set_claim_runner(Some(ClaimRunner::Chain(ChainId(8))));
+        assert!(
+            a.is_resource_crowded(&neighbour),
+            "two chains may be two bots at once"
+        );
+        a.set_claim_runner(Some(ClaimRunner::Bot(BotId(1))));
+        assert!(
+            a.is_resource_crowded(&neighbour),
+            "an unowned chain may be bot 1's, and may not; unknown is not a match"
+        );
+    }
+
+    /// `None` is *unknown*, not a wildcard — and two unknowns are not each
+    /// other. An action in no chain at all stays individually assignable, so
+    /// two of them may run on two bots at the same moment.
+    ///
+    /// This is also what keeps every pre-existing caller of `claim_resource`
+    /// — the tests in this crate, and `PlanState::consume_resource` reached
+    /// outside an expansion — behaving exactly as it did.
+    #[test]
+    fn an_unknown_runner_matches_nothing_including_another_unknown() {
+        let mut a = state();
+        let tile = Position::new(-40.5, 40.5);
+        let neighbour = Position::new(-39.5, 40.5);
+        a.claim_resource(&tile);
+
+        assert_eq!(a.claim_runner(), None);
+        assert!(a.is_resource_crowded(&neighbour));
+        assert!(a.is_resource_crowded_for(&neighbour, Some(ClaimRunner::Bot(BotId(1)))));
+    }
+
+    /// Time-awareness relaxes *crowding* and nothing else. Whole-tile
+    /// exclusivity is not a simultaneity rule — it exists because the planner
+    /// cannot know what a tile really holds — so a bot is still refused its
+    /// own claimed tile.
+    #[test]
+    fn a_runner_does_not_get_its_own_tile_back() {
+        let mut a = state();
+        a.set_claim_runner(Some(ClaimRunner::Bot(BotId(1))));
+        let tile = Position::new(-40.5, 40.5);
+        a.claim_resource(&tile);
+
+        assert!(a.is_resource_claimed(&tile));
+        assert_eq!(a.resource_unclaimed(&tile, "iron-ore"), 0);
+    }
+
+    /// The binding is a stack, not a setting: `set_claim_runner` hands back
+    /// what it replaced so the driver can restore it on every exit path, the
+    /// way it restores `ExpansionCtx::chain`.
+    #[test]
+    fn setting_a_claim_runner_returns_the_one_it_replaced() {
+        let mut a = state();
+        assert_eq!(a.set_claim_runner(Some(ClaimRunner::Bot(BotId(1)))), None);
+        assert_eq!(a.set_claim_runner(None), Some(ClaimRunner::Bot(BotId(1))));
+        assert_eq!(a.claim_runner(), None);
     }
 }

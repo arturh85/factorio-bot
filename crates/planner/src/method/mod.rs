@@ -8,7 +8,7 @@ use crate::action::Action;
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::ids::{ActionId, ActionIdGen, BotId, ChainId, ChainIdGen, ItemId, Ticks};
-use crate::state::PlanState;
+use crate::state::{ClaimRunner, PlanState};
 use std::collections::BTreeMap;
 
 /// One element of a method's expansion.
@@ -140,6 +140,12 @@ pub struct ExpansionCtx {
 
 impl ExpansionCtx {
     pub fn new(state: PlanState, chain_actor: BotId) -> Self {
+        // Outside any chain nothing is known about who runs what, and the
+        // state may have been forked from one that was mid-expansion. Stated
+        // rather than assumed, so an expansion always begins with mining
+        // claims answering to nobody.
+        let mut state = state;
+        state.set_claim_runner(None);
         ExpansionCtx {
             state,
             ids: ActionIdGen::new(),
@@ -425,6 +431,12 @@ fn expand_goal(
     let previous_top_level = ctx.top_level;
     let previous_concurrency = ctx.concurrency;
     let previous_converging = ctx.converging;
+    // Whose timeline a mining claim would sit on. Kept in the state and
+    // nowhere else — every tile selector reads it from there, so a second copy
+    // in the context could only ever drift from the one that is consulted.
+    // `set_claim_runner` hands back what it replaced, which makes the state
+    // itself the save slot.
+    let previous_claim_runner = ctx.state.claim_runner();
     if let Some(Holder::Bot(bot) | Holder::Share(bot)) = stated_holder(goal) {
         // The same reconciliation `expand` does for `chain_actor`, applied to
         // the roster a method decomposes with: `SplitAcrossBots` addresses the
@@ -450,6 +462,10 @@ fn expand_goal(
     ctx.top_level = previous_top_level;
     ctx.concurrency = previous_concurrency;
     ctx.converging = previous_converging;
+    // A frame that did not restore this would leave the tile selectors
+    // answering for a bot the driver has already stopped expanding for — a
+    // sibling goal picking its ore under a nephew's crowding rule.
+    ctx.state.set_claim_runner(previous_claim_runner);
     result
 }
 
@@ -595,6 +611,21 @@ fn expand_goal_body(
             if let Some(bot) = owner {
                 net.set_chain_owner(chain, bot);
             }
+            // Opening a chain is also the answer to "when": everything
+            // emitted under it runs on one bot, one action at a time, so its
+            // mining claims cannot collide with each other. An owner names
+            // that bot, and so covers every *other* chain it owns too; an
+            // unowned chain names only itself, which is the weaker but still
+            // sound reading — see `crate::state::ClaimRunner`.
+            //
+            // Set on the same lines as the owner rather than derived later, so
+            // the two can never disagree about which chains are owned.
+            // `expand_goal` restores both halves.
+            let runner = Some(match owner {
+                Some(bot) => ClaimRunner::Bot(bot),
+                None => ClaimRunner::Chain(chain),
+            });
+            ctx.state.set_claim_runner(runner);
         }
     }
 
@@ -789,6 +820,11 @@ fn run_steps(
                 ctx.chain_actor = bot;
                 ctx.chain = Some(chain);
                 ctx.top_level = false;
+                // Always owned, so the supplier's mining claims always know
+                // whose timeline they sit on — the one place in the crate
+                // where that is true by construction rather than by what the
+                // caller happened to state.
+                let previous_claim_runner = ctx.state.set_claim_runner(Some(ClaimRunner::Bot(bot)));
                 // `ctx.converging` is deliberately *not* cleared: a supplier's
                 // own production must not converge again either.
 
@@ -808,6 +844,7 @@ fn run_steps(
                 ctx.chain_actor = previous_actor;
                 ctx.chain = previous_chain;
                 ctx.top_level = previous_top_level;
+                ctx.state.set_claim_runner(previous_claim_runner);
                 result?;
             }
         }

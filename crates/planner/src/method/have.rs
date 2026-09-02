@@ -1639,24 +1639,36 @@ pub fn worth_converging(
     // G6. The working spots this split claims must be spots the plan can
     // spare.
     //
-    // Not in the design, and found by measurement. A solo smelt claims **one**
-    // mining seat; a converged one claims `k`, and a claim is never released
-    // during an expansion — `PlanState::claimed` commits a whole tile and the
-    // tiles around it, for the whole plan, because the model cannot yet say
-    // "at the same time". So convergence spends a plan-global resource `k`
-    // times over, and spending it where it is scarce does not make the plan
-    // slower, it makes it **impossible**: `Mine::applicable` goes false and the
-    // whole expansion comes back `NoApplicableMethod` for a goal that a solo
-    // smelt would have satisfied.
+    // Not in the design, and found by measurement. A converged smelt asks `k`
+    // bots to mine where a solo one asks one, so it wants `k` places to stand
+    // *at the same time*, and there are only so many on a patch. Spending
+    // seats where they are scarce does not make the plan slower, it makes it
+    // **impossible**: `Mine::applicable` goes false and the whole expansion
+    // comes back `NoApplicableMethod` for a goal a solo smelt would have
+    // satisfied.
     //
-    // Measured on `unlock_state`: a 121-tile iron field seats nine miners at a
-    // separation of 3.99, and the un-converged plan already uses eight of them.
+    // **The slack term was halved when claims learned to carry time.** It was
+    // `2 * roster`, calibrated on a measurement that no longer holds: a claim
+    // used to be held for the whole expansion and to crowd everybody, so the
+    // un-converged four-bot unlock plan spent **eight** of `unlock_state`'s
+    // nine iron seats — one per mining *action*. A claim now names the serial
+    // timeline it sits on (`crate::state::ClaimRunner`), so the same plan
+    // spends one seat per mining *runner*, measured at four. One spare seat
+    // per bot is therefore the most the rest of the plan can want at once, and
+    // that is what this reserves.
     //
-    // So the front must seat this split *and* still seat the roster
-    // afterwards. `seats` is counted to twice the roster (see
-    // `expand_goal_body`), which is the largest number this line can use.
-    // Erring toward refusal, as every other gate here does.
-    if seats < k.saturating_add(2u32.saturating_mul(known.len() as u32)) {
+    // What it bought, measured on `unlock_state` — the *shared* 121-tile
+    // fixture, where the old term left room for no convergence at all: the
+    // unlock subtree goes from `{bot 1: 48}` to `{bot 1: 48, bot 2: 4,
+    // bot 3: 4, bot 4: 4}` and the makespan from **15866 to 12403**, with
+    // `wide_unlock_state` landing within 25 ticks of the same number. The
+    // wider ore front is no longer what unlocks the behaviour; it was the seat
+    // model all along.
+    //
+    // `seats` is counted to three times the roster (see `expand_goal_body`),
+    // which is the largest number this line can use. Erring toward refusal, as
+    // every other gate here does.
+    if seats < k.saturating_add(known.len() as u32) {
         return None;
     }
 
@@ -5357,58 +5369,54 @@ mod tests {
         s
     }
 
-    /// **A characterisation test, not a regression test: it pins a defect.**
+    /// **The after column, on the fixture that could not host it.**
     ///
     /// Every action of the unlock subtree — mining the ore, the coal and the
     /// stone, crafting and placing the furnaces, loading them, taking the
     /// plates, crafting the gears, the cable, the circuits, the belts and the
-    /// lab itself — lands on **one** bot, whatever the roster. Only the
-    /// science-pack crafts, which `SplitAcrossBots` splits, reach the others.
+    /// lab itself — used to land on **one** bot, whatever the roster: 49 / 12
+    /// / 12 / 12 steps and a makespan of 15922, against 12 / 12 / 12 / 12 and
+    /// 2304 for the same goal with `asp-tech` already researched. 86% of the
+    /// makespan was the unlock, and all of it was one bot's; of that bot's
+    /// 15922 ticks, 8280 were *mining*.
     ///
-    /// Measured on this fixture with four bots and a shortfall of four packs:
-    /// **49 / 12 / 12 / 12** steps and a makespan of 15922, against 12 / 12 /
-    /// 12 / 12 and 2304 for the same goal with `asp-tech` already researched.
-    /// So 86% of the makespan is the unlock, and all of it is one bot's. Of
-    /// that bot's 15922 ticks, 8280 are *mining* — a third of the plan, and
-    /// the part a roster could obviously share.
+    /// The lab is one craft, so its ~50 iron plates and ~16 copper plates have
+    /// to meet in one inventory. `Researched` states its trigger bill as
+    /// `Holder::Share(ctx.chain_actor)`, that share owns the chain
+    /// (`method/mod.rs`, the owner-binding comment), and the chain welded all
+    /// of it to one runner. What moves it is a way for several bots to load
+    /// one machine that a single bot then unloads — the furnace as buffer,
+    /// landed as `SharedSmelt`.
     ///
-    /// **Why it is like this, and why the obvious fixes do not move it.** The
-    /// lab is one craft, so its ~50 iron plates and ~16 copper plates have to
-    /// meet in one inventory, and this planner has no way for a second bot to
-    /// put an item into a first bot's hands. `Researched` therefore states its
-    /// trigger bill as `Holder::Share(ctx.chain_actor)`, that share owns the
-    /// chain (`method/mod.rs`, the owner-binding comment), and the chain is
-    /// what welds all of it to one runner.
+    /// **It did not move it here until claims learned to carry time, and the
+    /// reason was the seat model rather than the design.** A claim used to be
+    /// held for the whole expansion and to crowd every other bot out of its
+    /// neighbourhood, so `fixture_world`'s 121-tile iron patch — nine seats at
+    /// a hand-mining separation of 3.99 — read as *fully spent* by the eight
+    /// mining actions the un-converged plan emitted. `worth_converging`'s G6
+    /// correctly declined rather than spending seats the rest of the plan
+    /// needed; without that gate the expansion came back
+    /// `NoApplicableMethod { goal: "have 2 iron-ore" }` rather than merely
+    /// slower. Eight actions, but only **four** runners: a bot's own claims
+    /// are serial and never conflict. Once `crate::state::ClaimRunner` said so,
+    /// the same patch had room, G6's slack term halved, and this plan changed
+    /// shape.
     ///
-    /// * Splitting the *research* across shares builds four labs for one
-    ///   force-wide unlock — rejected in
-    ///   `docs/superpowers/notes/2026-09-02-craft-ingredients.md`.
-    /// * Hoisting the `Goal::Researched` to a top-level sibling was measured
-    ///   here and changes the distribution not at all (49 / 12 / 12 / 12): the
-    ///   subtree simply opens its own chain, owned by `chain_actor`, and the
-    ///   makespan gets *worse* — 16832 — because the hoisted chain no longer
-    ///   shares intermediates with the share it used to sit under.
+    /// Measured, with four bots and a shortfall of four packs:
     ///
-    /// What moves it is a way for several bots to load one machine that a
-    /// single bot then unloads — the furnace as buffer, landed as
-    /// `SharedSmelt`. **It does not move it here, and the reason is this
-    /// fixture rather than the design.**
+    /// | | steps | unlock subtree | makespan |
+    /// | --- | --- | --- | --- |
+    /// | before | 49 / 12 / 12 / 12 | `{bot 1: 48}` | 15866 |
+    /// | after | 49 / 16 / 16 / 16 | `{1: 48, 2: 4, 3: 4, 4: 4}` | **12403** |
     ///
-    /// `fixture_world`'s iron patch is 121 tiles, which at a hand-mining
-    /// separation of 3.99 seats **nine** miners for the whole plan — a claim is
-    /// committed for the length of an expansion and never released. The plan
-    /// below already uses eight of the nine. A converged smelt claims one seat
-    /// per supplier where a solo one claims one in total, so there is room here
-    /// for no convergence at all, and `worth_converging`'s G6 declines rather
-    /// than spending seats the rest of the plan needs. Without that gate this
-    /// expansion does not come out slower, it comes out
-    /// `NoApplicableMethod { goal: "have 2 iron-ore" }`.
+    /// (15922 in the note this work started from; 15866 after time-aware
+    /// claims alone, which pack one bot's tiles a little tighter.)
     ///
-    /// So this stays the before column, unchanged, and
-    /// `the_unlock_subtree_spreads_when_the_ore_front_can_seat_the_roster`
-    /// is the after column on a front sized like a real one.
+    /// The makespan is pinned rather than stated as a ratio because the number
+    /// *is* the claim: a handover that spreads the subtree and does not shorten
+    /// the plan is the outcome stage 1 measured and could not defend.
     #[test]
-    fn the_whole_unlock_subtree_lands_on_one_bot() {
+    fn the_unlock_subtree_spreads_on_the_shared_fixture() {
         let bots = vec![BotId(1), BotId(2), BotId(3), BotId(4)];
         let s = unlock_state(&bots);
         let net = expand(
@@ -5462,55 +5470,43 @@ mod tests {
         );
         assert_eq!(
             unlock_owners.len(),
-            1,
-            "the unlock subtree is spread over {unlock_owners:?}; whole plan {per_bot:?}"
+            bots.len(),
+            "every bot should be supplying the unlock: {unlock_owners:?}; \
+             whole plan {per_bot:?}"
         );
-        // Stated as a ratio rather than as 49/12/12/12, so a recipe or a
-        // geometry change moves the numbers without moving the claim.
-        let busiest = per_bot.values().copied().max().expect("some work");
-        let idlest = per_bot.values().copied().min().expect("some work");
-        assert!(
-            busiest >= idlest * 3,
-            "one bot should be carrying the unlock alone: {per_bot:?}"
+        assert_eq!(
+            plan.makespan, 12403,
+            "the unlock was 15866 ticks on this fixture with the subtree on one \
+             bot; {per_bot:?}"
         );
     }
 
-    /// **The after column.** The same goal, the same roster, the same bill —
-    /// on an ore front that can seat the roster.
+    /// **The wider ore front is no longer what makes the subtree spread.**
     ///
-    /// The only difference from `the_whole_unlock_subtree_lands_on_one_bot` is
-    /// `widen_ore_front`, which adds a block of iron clear of every existing
-    /// patch. That is what a real Factorio ore field looks like and what the
-    /// shared fixture is not; see `widen_ore_front` for the measurement.
+    /// Identical to `the_unlock_subtree_spreads_on_the_shared_fixture` in
+    /// every respect but one: `widen_ore_front` adds a block of iron clear of
+    /// every existing patch, which is what a real Factorio ore field looks like
+    /// and what the shared fixture is not.
     ///
-    /// **What it buys, measured, and it is less than the design hoped.** The
-    /// unlock subtree goes from `{bot 1: 48}` to `{bot 1: 48, bot 2: 2,
-    /// bot 3: 2, bot 4: 2}` — the handover really happens, three bots really
-    /// mine and load ore for a furnace a fourth unloads — but the plan as a
-    /// whole goes 49/12/12/12 at makespan 15922 to 49/14/14/14 at **17122**.
-    /// Convergence costs 1,200 ticks here and saves none.
+    /// It existed because the shared fixture could not host a handover at all —
+    /// nine seats, eight of them spent by the un-converged plan's eight mining
+    /// actions. It bought the spread and cost 1,200 ticks doing it: the plan
+    /// went 49/12/12/12 at 15922 to 49/14/14/14 at 17122, because the wide
+    /// front let one convergence through and nothing else changed.
     ///
-    /// Two measured reasons, both worth having in writing before stage 2:
+    /// Since claims carry the timeline they sit on
+    /// (`crate::state::ClaimRunner`) the eight actions cost four seats, not
+    /// eight, and the *shared* fixture hosts the same handover. So this is now
+    /// a control rather than the headline: sixty-five seats instead of nine
+    /// change the plan by **25 ticks**, which is the honest size of the ore
+    /// front's contribution once the seat model stops over-charging.
     ///
-    /// * **The bill is not one smelt, it is many.** `HandCraft` decomposes the
-    ///   lab into gears, circuits and belts, and each asks for its own plates,
-    ///   so the largest single iron-plate goal is about twenty — not the fifty
-    ///   the design costed. A handover's overhead is paid per smelt, so a bill
-    ///   split into five smelts pays it five times or, as here, clears the bar
-    ///   only once.
-    /// * **G5 assumes the suppliers are idle.** It compares `solo` against
-    ///   `solo / k`, which is the right arithmetic only when the other bots
-    ///   have nothing else to do. Here they have their own pack shares, so a
-    ///   supplier's detour delays its own chain *and* the taker's take waits
-    ///   for whichever supplier arrives last. In the run this design was
-    ///   written for, three bots idled 13,000 ticks — that is the case where
-    ///   the assumption holds, and this fixture is not it.
-    ///
-    /// So this asserts the thing that is true and checkable — the subtree is no
-    /// longer one bot's — and does **not** assert a makespan improvement,
-    /// because there is not one to assert.
+    /// Kept, and kept separate, because a real ore front is what production
+    /// runs meet and a fixture that only ever seats nine is a poor proxy for
+    /// one. It is also the test that would catch a seat model that has quietly
+    /// started depending on how much ore there is.
     #[test]
-    fn the_unlock_subtree_spreads_when_the_ore_front_can_seat_the_roster() {
+    fn a_wider_ore_front_barely_moves_the_spread_it_used_to_unlock() {
         let bots = vec![BotId(1), BotId(2), BotId(3), BotId(4)];
         let s = wide_unlock_state(&bots);
         let net = expand(
@@ -5551,14 +5547,163 @@ mod tests {
                 *unlock_owners.entry(step.bot).or_default() += 1;
             }
         }
-        assert!(
-            unlock_owners.len() > 1,
-            "the unlock subtree still lands on one bot: {unlock_owners:?}; \
-             whole plan {per_bot:?}"
-        );
-        assert!(
-            unlock_owners.len() >= bots.len(),
+        assert_eq!(
+            unlock_owners.len(),
+            bots.len(),
             "every bot the front can seat should be supplying it: {unlock_owners:?}"
+        );
+        assert_eq!(
+            plan.makespan, 12428,
+            "17122 before time-aware claims, and 12403 on the narrow fixture \
+             now: {per_bot:?}"
+        );
+    }
+
+    /// **The safety property time-aware claims put most at risk, on the plan
+    /// that exercises them hardest.**
+    ///
+    /// Relaxing crowding for one bot's own claims is sound only if the claim
+    /// is stamped with the bot that will really swing at it. Stamp it with the
+    /// wrong one — by failing to restore the binding when a `Step::Owned`
+    /// supplier block ends, say, so the taker's next mine is booked to the
+    /// supplier — and the plan quietly packs *two different bots* onto
+    /// neighbouring tiles. That is `another character is standing on the
+    /// iron-ore` (`run-1788313837-06402`, six of thirteen mines lost), and it
+    /// is invisible in a plan that still validates and still schedules.
+    ///
+    /// `unlock_state` converges, so its expansion opens supplier chains inside
+    /// a taker's chain and restores the binding on the way out; the assertion
+    /// is the game's own condition, taken from `tests/tile_occupancy.rs` —
+    /// `character_stands_on_tile` is `another character is standing on the
+    /// <ore>` stated as geometry. Bots are read off the *schedule*, because
+    /// same runner implies same bot but the reverse needs no assuming.
+    ///
+    /// Both halves are asserted: no cross-bot pair is too close, and at least
+    /// one same-bot pair *is*, so the first half cannot be passing because
+    /// nothing packed.
+    #[test]
+    fn a_converged_plan_never_seats_two_bots_on_adjacent_tiles() {
+        let bots = vec![BotId(1), BotId(2), BotId(3), BotId(4)];
+        let s = unlock_state(&bots);
+        let net = expand(
+            &[Goal::Have {
+                item: "automation-science-pack".into(),
+                count: 4,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a trigger-unlocked pack plans");
+        let plan = schedule(&net, &s, &bots).expect("schedulable");
+        let reach = s
+            .bot(BotId(1))
+            .expect("bot 1 is in the roster")
+            .resource_reach_distance;
+
+        let mines: Vec<(Position, BotId)> = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                crate::action::ActionKind::Mine { pos, .. } => Some((
+                    pos.clone(),
+                    plan.assignment(a.id).expect("every action is scheduled"),
+                )),
+                _ => None,
+            })
+            .collect();
+
+        let mut packed_same_bot = 0;
+        for (mine, miner) in &mines {
+            for (other, owner) in &mines {
+                if mine == other {
+                    continue;
+                }
+                let apart = factorio_bot_core::factorio::util::calculate_distance(mine, other);
+                if miner == owner {
+                    if apart < s.mining_tile_separation() {
+                        packed_same_bot += 1;
+                    }
+                    continue;
+                }
+                // The closest a legal miner of `mine` can get to `other`: it
+                // must be within `resource_reach_distance` of its own tile.
+                let stand = if apart <= reach {
+                    other.clone()
+                } else {
+                    Position::new(
+                        mine.x() + (other.x() - mine.x()) / apart * reach,
+                        mine.y() + (other.y() - mine.y()) / apart * reach,
+                    )
+                };
+                assert!(
+                    !s.character_stands_on_tile(&stand, other),
+                    "bot {miner:?} mining {mine} may stand at {stand}, which is on \
+                     bot {owner:?}'s {other} — {apart:.3} apart, under the {:.3} \
+                     separation",
+                    s.mining_tile_separation()
+                );
+            }
+        }
+        assert!(
+            packed_same_bot > 0,
+            "no bot packed two of its own tiles, so the cross-bot check above \
+             distinguishes nothing: {mines:?}"
+        );
+    }
+
+    /// The driver really does bind a chain that names no bot, and the binding
+    /// really does reach the tile walk.
+    ///
+    /// `default_registry` carries no `SplitAcrossBots`, so a top-level goal is
+    /// claimed by `HandCraft` instead — and a lab is short of two ingredients
+    /// at once, so `HandCraft::converges` is true and `expand_goal_body` opens
+    /// a chain with **no owner**. Nothing names a bot anywhere in this
+    /// expansion, so if an unowned chain were left answering to nobody every
+    /// mining action would be spaced from every other. They are not: one chain
+    /// is one runner, whoever the scheduler gives it to.
+    #[test]
+    fn an_unowned_chain_binds_a_timeline_the_tile_walk_can_see() {
+        let bots = vec![BotId(1), BotId(2)];
+        let mut s = PlanState::from_world(Arc::new(fixture_world()), &bots);
+        for bot in &bots {
+            s.gain(*bot, "stone-furnace", 8);
+            s.gain(*bot, "coal", 40);
+        }
+        let net = expand(
+            &[Goal::Have {
+                item: "lab".into(),
+                count: 1,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &default_registry(),
+            BotId(1),
+        )
+        .expect("a lab plans");
+
+        let tiles: Vec<Position> = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                crate::action::ActionKind::Mine { pos, item, .. } if item == "iron-ore" => {
+                    Some(pos.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            tiles.len() >= 2,
+            "the lab needs several iron mines: {tiles:?}"
+        );
+        let packed = tiles.iter().enumerate().any(|(i, a)| {
+            tiles.iter().skip(i + 1).any(|b| {
+                factorio_bot_core::factorio::util::calculate_distance(a, b)
+                    < s.mining_tile_separation()
+            })
+        });
+        assert!(
+            packed,
+            "an unowned chain's own mines are serial and should pack: {tiles:?}"
         );
     }
 
@@ -5570,6 +5715,16 @@ mod tests {
     /// that reaches this planner through a `DashMap` and where `PlanState`'s
     /// research overlay is written mid-expansion. Assignments as well as
     /// labels, because *who* runs the unlock is the thing under discussion.
+    ///
+    /// It is also the determinism assertion for time-aware mining claims, and
+    /// deliberately on `unlock_state` rather than the wide fixture: this path
+    /// now converges, so every run of it binds `PlanState::claim_runner` a few
+    /// hundred times, stamps every claim with it, and picks tiles against a
+    /// crowding rule that reads it. Nothing there may depend on iteration
+    /// order — `claimed` is a `BTreeMap`, `ClaimRunner` is compared for
+    /// equality only, and `ChainId` comes from a monotone generator driven by
+    /// step order — and two identical plans out of two identical inputs is the
+    /// check rather than the argument.
     #[test]
     fn the_unlock_path_plans_identically_twice() {
         let bots = vec![BotId(1), BotId(2), BotId(3), BotId(4)];

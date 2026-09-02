@@ -195,9 +195,19 @@ pub fn resource_tiles_for(
         // lands when `run_steps` applies `Effect::ConsumeResource`, after
         // `expand` has returned all of them — so without this a single call
         // could still hand out two adjacent tiles.
-        if out
-            .iter()
-            .any(|(picked, _)| calculate_distance(picked, &tile) < separation)
+        //
+        // And dropped on exactly the condition that drops it for a claim: one
+        // `Mine::expand` emits one action per tile into the *one* chain it is
+        // expanding under, so when that chain names a runner
+        // (`PlanState::claim_runner`) the actions are serial and no bot is
+        // ever standing on another's tile. Keeping the spacing here while
+        // relaxing it for claims would leave the two disagreeing about the
+        // same fact — one call's tiles spaced, the next call's not — which is
+        // the disagreement `resource_unclaimed` exists to prevent.
+        if state.claim_runner().is_none()
+            && out
+                .iter()
+                .any(|(picked, _)| calculate_distance(picked, &tile) < separation)
         {
             continue;
         }
@@ -309,7 +319,14 @@ pub fn resource_seats(state: &PlanState, item: &str, cap: u32) -> u32 {
     let separation = state.mining_tile_separation();
     let mut seats: Vec<Position> = Vec::new();
     for tile in tiles {
-        if state.resource_unclaimed(&tile, item) == 0 {
+        // `_for(.., None)`, never the current runner's view. A seat is a spot
+        // for a bot that is *not yet in the plan*, working at the same time as
+        // everyone already in it, so every existing claim conflicts with it
+        // whoever holds it -- which is exactly what an unknown runner means.
+        // Asking with the enclosing chain's runner would count that chain's
+        // own tiles as free seats and promise a split more participants than
+        // the ground can hold at once. See `PlanState::is_resource_crowded_for`.
+        if state.resource_unclaimed_for(&tile, item, None) == 0 {
             continue;
         }
         if seats
@@ -684,7 +701,7 @@ pub fn research_ticks(tech: &FactorioTechnology) -> Ticks {
 mod tests {
     use super::*;
     use crate::ids::BotId;
-    use crate::state::{DEFAULT_RESOURCE_PER_TILE, PlanState};
+    use crate::state::{ClaimRunner, DEFAULT_RESOURCE_PER_TILE, PlanState};
     use factorio_bot_core::serde_json;
     use factorio_bot_core::test_utils::fixture_world;
     use factorio_bot_core::types::{Direction, FactorioEntity, FactorioForce, Position};
@@ -967,6 +984,104 @@ mod tests {
         assert_eq!(resource_seats(&s, "iron-ore", 4), 4);
         assert_eq!(resource_seats(&s, "iron-ore", 1), 1);
         assert_eq!(resource_seats(&s, "iron-ore", 0), 0);
+    }
+
+    /// **The ceiling this work lifts, measured on the fixture it capped.**
+    ///
+    /// `fixture_world`'s iron patch is 121 tiles and seats nine miners *at
+    /// once* at a separation of 3.99. Before a claim carried a runner that was
+    /// also the number of mining actions the whole plan could ever emit
+    /// against that patch, because a claim was held for the length of the
+    /// expansion and crowded everybody out of its neighbourhood — the
+    /// un-converged four-bot unlock plan already used eight of the nine, which
+    /// is why `worth_converging`'s G6 has to decline there and why nine
+    /// pre-existing tests went red the first time convergence fired.
+    ///
+    /// One bot's own claims are serial, so they need no separation from each
+    /// other, and one runner can now work the whole patch tile by tile. The
+    /// seat count is unchanged and must be: nine is still the right answer to
+    /// "how many bots at once".
+    #[test]
+    fn one_runner_may_work_the_whole_patch_the_roster_can_only_seat_nine_of() {
+        let seats = resource_seats(&state(), "iron-ore", u32::MAX);
+        assert_eq!(
+            seats, 9,
+            "the fixture patch is what the convergence work measured it to be"
+        );
+
+        let mut s = state();
+        s.set_claim_runner(Some(ClaimRunner::Bot(BotId(1))));
+        let origin = Position::new(0., 0.);
+        let mut taken = 0u32;
+        while let Some(tile) = nearest_resource_tile(&s, "iron-ore", &origin, 1) {
+            s.claim_resource(&tile);
+            taken += 1;
+            assert!(taken <= 1000, "the walk must terminate on a finite patch");
+        }
+        assert_eq!(
+            taken, 121,
+            "one runner works its own patch tile by tile; seats are for other bots"
+        );
+
+        // And the patch really is used up afterwards, so nothing here has made
+        // a tile reusable — only reachable by the one bot whose timeline the
+        // claims sit on.
+        assert_eq!(resource_seats(&s, "iron-ore", u32::MAX), 0);
+    }
+
+    /// A seat is a spot for a bot that is **not yet in the plan**, so it is
+    /// counted against every claim whoever holds it. Sharing a runner with the
+    /// claims must not make them invisible to the count, or a split would be
+    /// promised more participants than the ground can hold at once — which is
+    /// exactly the over-commitment `resource_seats` exists to prevent.
+    #[test]
+    fn seats_are_counted_blind_to_whose_claims_they_are() {
+        let mut blind = state();
+        let mut owned = state();
+        owned.set_claim_runner(Some(ClaimRunner::Bot(BotId(1))));
+
+        let tile =
+            nearest_resource_tile(&blind, "iron-ore", &Position::new(0., 0.), 1).expect("iron ore");
+        blind.claim_resource(&tile);
+        owned.claim_resource(&tile);
+
+        assert_eq!(
+            resource_seats(&owned, "iron-ore", u32::MAX),
+            resource_seats(&blind, "iron-ore", u32::MAX),
+            "a claim costs a seat whoever made it"
+        );
+        assert!(
+            resource_seats(&owned, "iron-ore", u32::MAX) < 9,
+            "and it really does cost one, or the comparison above is vacuous"
+        );
+    }
+
+    /// The in-call spacing follows the same rule as the claim, because it is
+    /// the same fact: one `Mine::expand` emits one action per tile into one
+    /// chain, and a chain is serial. A share big enough to need two tiles gets
+    /// the two *nearest* ones when the runner is known, and spaced ones when
+    /// it is not.
+    #[test]
+    fn one_calls_own_tiles_are_spaced_only_when_the_runner_is_unknown() {
+        let origin = Position::new(0., 0.);
+        let need = DEFAULT_RESOURCE_PER_TILE + 1;
+
+        let blind = state();
+        let spaced = resource_tiles_for(&blind, "iron-ore", &origin, need);
+        assert_eq!(spaced.len(), 2, "one tile cannot cover more than it holds");
+        assert!(
+            calculate_distance(&spaced[0].0, &spaced[1].0) >= blind.mining_tile_separation(),
+            "with no runner named, two actions may be two bots at once: {spaced:?}"
+        );
+
+        let mut owned = state();
+        owned.set_claim_runner(Some(ClaimRunner::Bot(BotId(1))));
+        let packed = resource_tiles_for(&owned, "iron-ore", &origin, need);
+        assert_eq!(packed.len(), 2);
+        assert!(
+            calculate_distance(&packed[0].0, &packed[1].0) < owned.mining_tile_separation(),
+            "one bot's two swings are serial, so it takes the nearer tile: {packed:?}"
+        );
     }
 
     /// An item with no patches seats nobody, and says so without panicking on

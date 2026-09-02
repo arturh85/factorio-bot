@@ -24,7 +24,9 @@ use factorio_bot_core::test_utils::fixture_world;
 use factorio_bot_core::types::Position;
 use factorio_bot_planner::goal::{Goal, Holder};
 use factorio_bot_planner::method::util::nearest_resource_tile;
-use factorio_bot_planner::{ActionKind, ActionNetwork, BotId, PlanState, expand, registry_for};
+use factorio_bot_planner::{
+    ActionKind, ActionNetwork, BotId, PlanState, Schedule, expand, registry_for, schedule,
+};
 use std::sync::Arc;
 
 fn world(bots: &[BotId]) -> PlanState {
@@ -49,6 +51,28 @@ fn mined_tiles(net: &ActionNetwork) -> Vec<Position> {
         })
         .collect();
     out.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    out
+}
+
+/// Every scheduled `Mine` action's tile and the bot that will swing at it.
+///
+/// The bot comes from the schedule rather than from the chain owner because
+/// the schedule is the last word: a chain the driver left unowned still ends
+/// up on exactly one bot, and it is that bot the ore has to be spaced from.
+///
+/// Sorted by tile so the pair walk below is reproducible.
+fn scheduled_mines(net: &ActionNetwork, plan: &Schedule) -> Vec<(Position, BotId)> {
+    let mut out: Vec<(Position, BotId)> = net
+        .actions()
+        .filter_map(|a| match &a.kind {
+            ActionKind::Mine { pos, .. } => Some((
+                pos.clone(),
+                plan.assignment(a.id).expect("every action is scheduled"),
+            )),
+            _ => None,
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.x.total_cmp(&b.0.x).then(a.0.y.total_cmp(&b.0.y)));
     out
 }
 
@@ -120,6 +144,22 @@ fn no_bots_standing_position_lands_on_another_bots_tile() {
 /// The same property one level up, where the ore is an ingredient of several
 /// different items rather than the goal itself, so the mining actions come
 /// from four unrelated chains instead of one split.
+///
+/// **Stated between bots, because that is what the rule is about.** A bot
+/// mining one tile stands on the tiles around it and stops *somebody else*
+/// mining them; it does not stop itself, because `schedule` runs a bot's
+/// actions one at a time (`free_at`). Since claims learned whose timeline they
+/// sit on (`crate::state::ClaimRunner`), one bot really does pack its own
+/// tiles side by side — and the same-bot half of this test asserts that it
+/// does, so the cross-bot half cannot be passing merely because nothing got
+/// close.
+///
+/// Read off the *schedule*, not off the chain owners, so the assertion is
+/// about the bots that will really swing. Same runner implies same bot in both
+/// directions an owner can be known — an owned chain is offered to one bot with
+/// no fallback tier, and an unowned one is welded by `chain_binding` — so two
+/// mines on two bots are always two runners, and this is the strongest
+/// spelling of the invariant available.
 #[test]
 fn a_multi_item_plan_never_seats_a_bot_on_another_bots_tile() {
     let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
@@ -139,21 +179,45 @@ fn a_multi_item_plan_never_seats_a_bot_on_another_bots_tile() {
         BotId(1),
     )
     .expect("expands");
+    let plan = schedule(&net, &state, &bots).expect("schedulable");
 
-    let tiles = mined_tiles(&net);
-    assert!(tiles.len() >= 4, "a real plan mines: {tiles:?}");
-    for mine in &tiles {
-        for other in &tiles {
+    let mines = scheduled_mines(&net, &plan);
+    assert!(mines.len() >= 4, "a real plan mines: {mines:?}");
+
+    let mut cross_bot_pairs = 0;
+    let mut packed_same_bot_pairs = 0;
+    for (mine, miner) in &mines {
+        for (other, owner) in &mines {
             if mine == other {
                 continue;
             }
+            if miner == owner {
+                if calculate_distance(mine, other) < state.mining_tile_separation() {
+                    packed_same_bot_pairs += 1;
+                }
+                continue;
+            }
+            cross_bot_pairs += 1;
             let stand = worst_standing_position(mine, other, reach);
             assert!(
                 !state.character_stands_on_tile(&stand, other),
-                "a bot mining {mine} may stand at {stand}, which is on {other}"
+                "bot {miner:?} mining {mine} may stand at {stand}, which is on \
+                 bot {owner:?}'s {other} — the tiles are {:.3} apart, under the \
+                 {:.3} separation",
+                calculate_distance(mine, other),
+                state.mining_tile_separation()
             );
         }
     }
+    assert!(
+        cross_bot_pairs > 0,
+        "nothing was compared across bots: {mines:?}"
+    );
+    assert!(
+        packed_same_bot_pairs > 0,
+        "no bot packed two of its own tiles together, so the cross-bot check \
+         above is not distinguishing anything: {mines:?}"
+    );
 }
 
 /// The negative control. Spacing is a rule between *different* mining actions;

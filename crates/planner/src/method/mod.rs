@@ -84,6 +84,20 @@ pub struct ExpansionCtx {
     /// of a top-level `Goal::All`), false beneath any method's subgoal.
     /// Driver-owned, for the same reason `chain` is.
     pub(crate) top_level: bool,
+    /// How many holders may pursue the goal being expanded *at the same time*,
+    /// when some method named a limit; `None` when none did.
+    ///
+    /// Driver-owned like `chain` and `top_level`, and for a sharper reason
+    /// than either: the answer is a fact about the whole registry, and a
+    /// method computing it for itself would be asking only itself. The driver
+    /// holds the registry, so the driver asks — see `expand_goal_body`, which
+    /// fills this in at scatter sites and nowhere else.
+    ///
+    /// Read by exactly one method, `SplitAcrossBots`, which is the only method
+    /// that hands one goal to several bots at once. It reads a *number* and
+    /// never learns what produced it, which is what keeps a generic
+    /// item-splitting method free of any notion of ore.
+    pub(crate) concurrency: Option<u32>,
     pub depth: u32,
 }
 
@@ -96,6 +110,7 @@ impl ExpansionCtx {
             chain_actor,
             chain: None,
             top_level: true,
+            concurrency: None,
             depth: 0,
         }
     }
@@ -161,6 +176,35 @@ pub trait Method {
         false
     }
 
+    /// How many holders can pursue `goal` **at the same time**, if this method
+    /// is what would satisfy it? `None` — the default — means this method
+    /// names no limit.
+    ///
+    /// This exists so that a method which splits a goal across bots can size
+    /// the split against what the world can actually accommodate, without
+    /// learning what any particular method's obstacle *is*. `SplitAcrossBots`
+    /// is a generic item-splitting method; seats on an ore patch are a
+    /// resource-mining concept; the limit is the one thing they have to agree
+    /// on, so the limit is what crosses the boundary and nothing else does.
+    /// A method that wants to cap concurrency answers here in its own terms,
+    /// and every method that has nothing to say keeps the default and is
+    /// unaffected.
+    ///
+    /// **Answered whether or not the method is applicable.** A patch this plan
+    /// has already committed makes `Mine::applicable` false, and that is
+    /// exactly the state whose limit a caller most needs to hear about: an
+    /// applicability-gated question would go quiet at zero and report "no
+    /// limit". So `None` here must mean "this method has nothing to say about
+    /// this goal at all" — not "this method cannot help right now".
+    ///
+    /// `cap` is the largest answer the caller can use, so a method whose count
+    /// is expensive may stop there. Returning more than `cap` is allowed and
+    /// harmless; returning less than the true limit is a narrower plan, never
+    /// a wrong one, which is the direction to err in.
+    fn concurrency(&self, _goal: &Goal, _state: &PlanState, _cap: u32) -> Option<u32> {
+        None
+    }
+
     fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError>;
 }
 
@@ -185,6 +229,26 @@ impl MethodRegistry {
             .iter()
             .find(|m| m.claims(site) && m.applicable(goal, state))
             .map(|m| m.as_ref())
+    }
+
+    /// How many holders may pursue `goal` at once: the tightest limit any
+    /// method names, or `None` when none of them names one.
+    ///
+    /// **Every method is asked, not the one `find` would pick.** The goal a
+    /// splitter is looking at is the *shared* form; the goals its shares will
+    /// become carry a different count and a different holder, so which method
+    /// claims them is not settled yet. The minimum over everyone who has
+    /// something to say is the conservative reading of that uncertainty, and
+    /// it is exact in practice because an item is either mined or crafted and
+    /// never both — only one method has anything to say about any given item.
+    ///
+    /// See [`Method::concurrency`] for why applicability is deliberately not
+    /// consulted.
+    pub fn concurrency(&self, goal: &Goal, state: &PlanState, cap: u32) -> Option<u32> {
+        self.methods
+            .iter()
+            .filter_map(|m| m.concurrency(goal, state, cap))
+            .min()
     }
 }
 
@@ -295,6 +359,7 @@ fn expand_goal(
     let previous_actor = ctx.chain_actor;
     let previous_chain = ctx.chain;
     let previous_top_level = ctx.top_level;
+    let previous_concurrency = ctx.concurrency;
     if let Some(Holder::Bot(bot) | Holder::Share(bot)) = stated_holder(goal) {
         // The same reconciliation `expand` does for `chain_actor`, applied to
         // the roster a method decomposes with: `SplitAcrossBots` addresses the
@@ -318,6 +383,7 @@ fn expand_goal(
     ctx.chain_actor = previous_actor;
     ctx.chain = previous_chain;
     ctx.top_level = previous_top_level;
+    ctx.concurrency = previous_concurrency;
     result
 }
 
@@ -350,6 +416,34 @@ fn expand_goal_body(
             .ok_or_else(|| PlannerError::NoApplicableMethod {
                 goal: goal.to_string(),
             })?;
+
+    // How many holders may pursue this goal at once, if any method names a
+    // limit. See `Method::concurrency` for why the question exists and
+    // `MethodRegistry::concurrency` for why every method is asked.
+    //
+    // Computed at a **scatter site** and nowhere else. A scatter site is
+    // exactly where one goal can be handed to several bots at once — the same
+    // condition `SplitAcrossBots::claims` tests — so it is the only place an
+    // answer can change a plan, and asking anywhere else would buy a walk of
+    // an ore field per subgoal for a number nobody reads. The site is the
+    // driver's own concept (see `GoalSite`), not a special case for one
+    // method: any future method that scatters a goal is claimed at the same
+    // sites and served by the same value.
+    //
+    // Assigned unconditionally rather than left alone, so a nested expansion
+    // can never read an ancestor's answer about a different goal.
+    ctx.concurrency = if site.top_level && !site.in_chain {
+        // No more holders can ever be wanted than the state has bots, so that
+        // is the ceiling a counting method may stop at — and it is a true
+        // ceiling, not merely a plausible one, because `SplitAcrossBots`
+        // refuses a roster naming a bot the state does not know before it
+        // sizes anything. Were that not so, this would silently narrow a
+        // split to the state's roster and hide the caller's mistake.
+        let cap = ctx.state.bot_ids().len() as u32;
+        registry.concurrency(goal, &ctx.state, cap)
+    } else {
+        None
+    };
 
     // A chain welds actions to one runner. Three things ask for that.
     //

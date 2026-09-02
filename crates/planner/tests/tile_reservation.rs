@@ -191,7 +191,8 @@ fn tile_assignment_is_deterministic() {
     assert_eq!(mining(&first), mining(&second));
 }
 
-/// A patch that cannot seat the whole plan refuses it.
+/// A patch that cannot seat the whole roster is *narrowed*, never
+/// overcommitted.
 ///
 /// The patch is committed down to a single usable *seat* — not a single
 /// unclaimed tile. Since tiles are spaced (`PlanState::mining_tile_separation`),
@@ -201,10 +202,16 @@ fn tile_assignment_is_deterministic() {
 /// So the fixture claims the tiles a *separation* away from one anchor and
 /// asserts, rather than assumes, that what is left is one seat.
 ///
-/// The planner must then say so rather than send both bots to that seat — a
-/// refusal at plan time is cheaper than a crash at action 73.
+/// **This test used to assert a refusal, and the old expectation was wrong.**
+/// One seat and two bots is a one-bot plan, and returning `NoApplicableMethod`
+/// for it threw away a plan the world could run — see
+/// `tests/split_capacity.rs` for the design that fixed it. What must not
+/// happen is the *other* failure, both bots sent to the one seat, and that is
+/// what is asserted here: one mining action, carrying the whole goal, on the
+/// tile that is actually free. A refusal is still right when the patch seats
+/// *nobody*, which `split_capacity.rs` pins.
 #[test]
-fn a_patch_too_small_for_the_roster_is_refused_not_overcommitted() {
+fn a_patch_too_small_for_the_roster_is_narrowed_not_overcommitted() {
     let bots = [BotId(1), BotId(2)];
     let mut state = world(&bots);
     let separation = state.mining_tile_separation();
@@ -236,21 +243,27 @@ fn a_patch_too_small_for_the_roster_is_refused_not_overcommitted() {
         }
     }
 
-    // One seat, two shares of one ore each.
-    let error = expand(
+    // One seat, so one share of two ore — not two shares of one on the same
+    // tile, which is the defect this file exists for.
+    let net = expand(
         &[gather("iron-ore", 2)],
         &state,
         &registry_for(&bots),
         BotId(1),
     )
-    .expect_err("one seat cannot hold two bots");
-    assert!(
-        error.to_string().contains("iron-ore"),
-        "the refusal must name the goal it could not meet: {error}"
+    .expect("one seat is still a plan, for one bot");
+    let mined = mining(&net);
+    assert_eq!(mined.len(), 1, "one seat, one mining action: {mined:?}");
+    assert_eq!(mined[0].2, 2, "and it carries the whole goal: {mined:?}");
+    assert_eq!(
+        mined[0].0,
+        format!("{}", anchor),
+        "on the tile that is actually free: {mined:?}"
     );
 
-    // And that seat is still plannable on its own, so the refusal is about the
-    // second share, not about the patch having become unreadable.
+    // And the same seat plans the same way for a roster of one, so the
+    // narrowing above is about the second bot having nowhere to stand and not
+    // about the patch having become unreadable.
     let one = [BotId(1)];
     let mut solo = world(&one);
     for tile in &claim {

@@ -262,6 +262,70 @@ pub fn resource_supply_at_least(state: &PlanState, item: &str, need: u32) -> boo
     false
 }
 
+/// How many bots can mine `item` **at the same time**, counting no further
+/// than `cap`.
+///
+/// A seat is an uncommitted tile that is at least
+/// [`PlanState::mining_tile_separation`] from every other seat counted, which
+/// is the same rule [`resource_tiles_for`] applies when it hands tiles out.
+/// So this answers "how many miners fit on this item's patches", and it is the
+/// only question `SplitAcrossBots` asks about resources — through
+/// [`Method::concurrency`](crate::method::Method::concurrency), never
+/// directly, so the generic splitting method never learns what ore is.
+///
+/// # It is a packing, not the maximum packing
+///
+/// Greedy from a fixed order, so what it returns is a set of seats that
+/// genuinely exists — never an over-count — but not necessarily the largest
+/// such set, which is a maximum-independent-set problem nobody needs solved.
+/// Erring low is the safe direction: a split sized from this plans fewer
+/// chains than the patch could theoretically hold, and every chain it does
+/// plan has somewhere to stand.
+///
+/// The order is every patch's tiles flattened into one `(x, y)` sort, *not*
+/// each patch walked in turn: `PlanState::resource_patches` partitions one
+/// contiguous field into two or three patches differently from call to call
+/// (see its doc), and a per-patch walk would count a different number of seats
+/// each time. Flattening first makes the count depend only on the tile set.
+///
+/// # Why the cap
+///
+/// A real ore field is thousands of tiles and hundreds of seats, and the scan
+/// is quadratic in the seats it finds. Nothing ever needs a number larger than
+/// the roster — no split can open more chains than there are bots — so the
+/// caller states its ceiling and the walk stops there.
+pub fn resource_seats(state: &PlanState, item: &str, cap: u32) -> u32 {
+    if cap == 0 {
+        return 0;
+    }
+    let mut tiles: Vec<Position> = state
+        .resource_patches(item)
+        .into_iter()
+        .flat_map(|patch| patch.elements)
+        .collect();
+    tiles.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    tiles.dedup_by(|a, b| a.x.total_cmp(&b.x).is_eq() && a.y.total_cmp(&b.y).is_eq());
+
+    let separation = state.mining_tile_separation();
+    let mut seats: Vec<Position> = Vec::new();
+    for tile in tiles {
+        if state.resource_unclaimed(&tile, item) == 0 {
+            continue;
+        }
+        if seats
+            .iter()
+            .any(|seat| calculate_distance(seat, &tile) < separation)
+        {
+            continue;
+        }
+        seats.push(tile);
+        if seats.len() as u32 >= cap {
+            break;
+        }
+    }
+    seats.len() as u32
+}
+
 /// The nearest spot to `from` where an `entity` actually fits, searched in
 /// rings so the result is close and reproducible.
 ///
@@ -829,6 +893,65 @@ mod tests {
             !resource_tiles_for(&s, "iron-ore", &origin, 1).is_empty(),
             "the two must agree on claims, not only on consumption"
         );
+    }
+
+    /// The fixture's iron field is 121 tiles and seats nine bots.
+    ///
+    /// Derived, not observed: the field is 11 tiles on each axis and the
+    /// fixture separation is 3.989, so a greedy walk in `(x, y)` order takes
+    /// tiles 0, 4 and 8 along each axis and nothing between them — three
+    /// columns of three. A test that read the number back off the function
+    /// would pass against any number the function happened to produce.
+    #[test]
+    fn a_patch_seats_far_fewer_bots_than_it_has_tiles() {
+        let s = state();
+        let tiles: usize = s
+            .resource_patches("iron-ore")
+            .into_iter()
+            .map(|patch| patch.elements.len())
+            .sum();
+        assert_eq!(tiles, 121, "the fixture's iron field is 11 by 11");
+        assert_eq!(resource_seats(&s, "iron-ore", 100), 9);
+    }
+
+    /// A committed patch seats nobody — which is the answer that turns an
+    /// unreadable `NoApplicableMethod` into `PlannerError::NoRoomToWork`, so
+    /// it has to be zero rather than merely small.
+    #[test]
+    fn a_fully_committed_patch_seats_nobody() {
+        let mut s = state();
+        let tiles: Vec<Position> = s
+            .resource_patches("iron-ore")
+            .into_iter()
+            .flat_map(|patch| patch.elements)
+            .collect();
+        for tile in &tiles {
+            s.claim_resource(tile);
+        }
+        assert_eq!(resource_seats(&s, "iron-ore", 100), 0);
+        // The copper field next door is untouched, so this is a fact about
+        // the patch and not about the state having stopped answering.
+        assert!(resource_seats(&s, "copper-ore", 100) > 0);
+    }
+
+    /// The cap is a ceiling on the count, not on the patch. It exists only so
+    /// that a real ore field — thousands of tiles, hundreds of seats — is not
+    /// walked further than any caller can use.
+    #[test]
+    fn counting_seats_stops_at_the_cap() {
+        let s = state();
+        assert_eq!(resource_seats(&s, "iron-ore", 4), 4);
+        assert_eq!(resource_seats(&s, "iron-ore", 1), 1);
+        assert_eq!(resource_seats(&s, "iron-ore", 0), 0);
+    }
+
+    /// An item with no patches seats nobody, and says so without panicking on
+    /// an empty walk. `Mine::concurrency` is what turns this into "no limit"
+    /// rather than "a limit of zero"; the count itself has no opinion.
+    #[test]
+    fn an_item_that_is_not_a_resource_has_no_seats() {
+        let s = state();
+        assert_eq!(resource_seats(&s, "iron-plate", 100), 0);
     }
 
     #[test]

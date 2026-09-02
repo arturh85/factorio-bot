@@ -97,6 +97,32 @@ pub enum PlannerError {
     #[diagnostic(code(planner::no_applicable_method))]
     NoApplicableMethod { goal: String },
 
+    /// A goal several bots could have shared, in a world with nowhere for even
+    /// one of them to work on it.
+    ///
+    /// Deliberately not a `NoApplicableMethod`, which is what this used to be
+    /// and which says only "no method can satisfy goal: have 40 iron-ore
+    /// (anyone)" — true, and silent about *why*. The reader then has to guess
+    /// between "this world has no iron ore", "the recipe is not unlocked" and
+    /// the real answer, which is that the plan itself has already committed
+    /// every seat on the patch. Naming the shortage is the whole point of the
+    /// variant: a refusal a reader cannot act on costs as much as no refusal.
+    ///
+    /// `holders` is how many bots could have shared the goal, so a reader can
+    /// tell "nobody fits" from "not everybody fits" — the latter is not an
+    /// error at all any more, it plans a narrower split.
+    #[error(
+        "nothing in this world can seat a bot to work on {goal}; {holders} were available to share it"
+    )]
+    #[diagnostic(
+        code(planner::no_room_to_work),
+        help(
+            "a mining goal is seated by its patch, and a tile inside another miner's standing \
+             room is not a seat — so a patch this plan has already committed to offers none"
+        )
+    )]
+    NoRoomToWork { goal: String, holders: u32 },
+
     /// A Factorio 2.0 `research_trigger` technology whose trigger this planner
     /// has no goal for.
     ///

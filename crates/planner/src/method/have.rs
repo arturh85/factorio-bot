@@ -37,8 +37,8 @@ use crate::ids::{BotId, Ticks};
 use crate::method::util::{
     CRAFTING_CATEGORY, RecipeGate, SMELTING_CATEGORY, free_area_near, ingredients_of, mining_ticks,
     nearest_resource_tile, output_per_craft, recipe_for, recipe_gate, recipe_ticks,
-    research_ingredients, research_ticks, resource_supply_at_least, resource_tiles_for,
-    smelting_ticks, trigger_requirement,
+    research_ingredients, research_ticks, resource_seats, resource_supply_at_least,
+    resource_tiles_for, smelting_ticks, trigger_requirement,
 };
 use crate::method::{ExpansionCtx, GoalSite, Method, MethodRegistry, Step};
 use crate::state::PlanState;
@@ -627,6 +627,40 @@ impl Method for Mine {
         resource_supply_at_least(state, item, need)
     }
 
+    /// How many bots can mine this item at once: the patches' free *seats*.
+    ///
+    /// This is the whole of what mining tells the rest of the planner about
+    /// concurrency, and it is stated as a count rather than as a patch, a tile
+    /// or a separation — `SplitAcrossBots` sizes its split from this number
+    /// and never learns that ore exists.
+    ///
+    /// `None`, not `Some(0)`, for an item that is not a resource at all: this
+    /// method has nothing to say about iron plate, and saying "zero" would cap
+    /// every crafting split at nothing. `Some(0)` means the opposite and is
+    /// load-bearing — the item *is* mined, and there is nowhere left to mine
+    /// it, which is what turns an unreadable `NoApplicableMethod` into
+    /// `NoRoomToWork`.
+    ///
+    /// Deliberately independent of `applicable`, which goes false on exactly
+    /// the committed-patch state whose seat count matters most. See
+    /// [`Method::concurrency`].
+    ///
+    /// **One seat per participant, not per mining action.** A share big enough
+    /// to need two tiles needs two seats, and this does not count that: with
+    /// `DEFAULT_RESOURCE_PER_TILE` at 500 it takes a single share above 500
+    /// ore to arise, and the over-count is then caught by `expand`'s own tile
+    /// walk failing — the same refusal, one frame later.
+    fn concurrency(&self, goal: &Goal, state: &PlanState, cap: u32) -> Option<u32> {
+        let item = match goal {
+            Goal::Have { item, .. } | Goal::Produced { item, .. } => item,
+            _ => return None,
+        };
+        if state.resource_patches(item).is_empty() {
+            return None;
+        }
+        Some(resource_seats(state, item, cap))
+    }
+
     fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
         let Some(Demand {
             item,
@@ -1047,6 +1081,21 @@ pub fn default_registry() -> MethodRegistry {
 /// with a shortfall of one — `Have(automation-science-pack, 1)`, or the last
 /// iteration of any incremental plan — would expand with no chain at all, and a
 /// branching recipe's two roots would land on different bots.
+///
+/// # How wide the split is
+///
+/// Three numbers bound it, and only two of them are this method's own: the
+/// roster it was built with, the shortfall (a share of nothing is not a
+/// share), and — since 2026-09-02 — how many holders the world can
+/// accommodate at once, which arrives as a plain count on
+/// [`ExpansionCtx::concurrency`](crate::method::ExpansionCtx).
+///
+/// The third is what this method must **not** know the reason for. It splits
+/// items; ore patches, tiles and standing room belong to `Mine`, which answers
+/// [`Method::concurrency`] in those terms and hands over nothing but the
+/// number. Teaching this method about seats, or passing it a tile count, would
+/// couple a generic item-splitting method to resources permanently — and
+/// mining is not the last constraint that will want to narrow a split.
 pub struct SplitAcrossBots {
     pub bots: Vec<BotId>,
 }
@@ -1115,16 +1164,67 @@ impl Method for SplitAcrossBots {
         // not depend on the caller's slice order at all, only on the set of
         // bots and their holdings.
         let mut seen = BTreeSet::new();
-        let mut candidates: Vec<(u32, BotId)> = self
+        let distinct: Vec<BotId> = self
             .bots
             .iter()
             .copied()
             .filter(|b| seen.insert(*b))
+            .collect();
+
+        // The registry's roster against the state's, checked over *every*
+        // candidate rather than only the ones that end up with a share.
+        //
+        // `expand_goal` makes the same check when it meets a `Holder::Share`,
+        // so this used to be reached incidentally — but only for a bot that
+        // actually got a share. It was therefore already silent whenever the
+        // split was narrower than the roster (a shortfall of two across four
+        // bots has never checked bots 3 and 4), and capacity makes narrow
+        // splits ordinary rather than exceptional. A roster naming a bot the
+        // state has never heard of is a caller's mistake whoever wins a seat,
+        // so it is answered before anything is sized.
+        for bot in &distinct {
+            if ctx.state.bot(*bot).is_none() {
+                return Err(PlannerError::UnknownBot(*bot));
+            }
+        }
+
+        let mut candidates: Vec<(u32, BotId)> = distinct
+            .into_iter()
             .map(|bot| (ctx.state.available(&Holder::Share(bot), item), bot))
             .collect();
         candidates.sort_unstable();
 
-        let chains = (candidates.len() as u32).min(need);
+        // How many holders the world can accommodate at once, if anything
+        // named a limit. The driver put it there (see `ExpansionCtx`), having
+        // asked the registry; `None` means nobody named one.
+        //
+        // **This is a number and stays a number.** Mining answers it in seats
+        // on an ore patch, and this method must not learn that: it splits
+        // *items*, and a split narrowed because a patch is crowded is the same
+        // split, narrower. Passing a tile count in here instead would weld an
+        // item-splitting method to a resource concept permanently, for a
+        // constraint that is neither the only one nor the last one.
+        //
+        // Before this, the width came from the roster alone: four bots on a
+        // three-seat patch made three shares that fitted and a fourth that
+        // could not, and the *whole* expansion came back
+        // `NoApplicableMethod`. A three-bot plan on a three-seat patch is a
+        // perfectly good plan and is now what comes out.
+        let seats = ctx.concurrency.unwrap_or(u32::MAX);
+        if seats == 0 {
+            // Nobody fits. Refused rather than planned at zero width: a plan
+            // that quietly does no work is worse than a refusal, because a
+            // caller cannot tell it happened. Named rather than folded into
+            // `NoApplicableMethod`, which said only that the goal could not be
+            // met and left the reader to guess between "no ore in this world"
+            // and "this plan has already taken every seat".
+            return Err(PlannerError::NoRoomToWork {
+                goal: goal.to_string(),
+                holders: candidates.len() as u32,
+            });
+        }
+
+        let chains = (candidates.len() as u32).min(need).min(seats);
         let base = need / chains;
         let remainder = need % chains;
 
@@ -1205,6 +1305,15 @@ mod tests {
 
     fn state(bots: &[BotId]) -> PlanState {
         PlanState::from_world(Arc::new(fixture_world()), bots)
+    }
+
+    /// A shared `Have` goal — the only shape `SplitAcrossBots` ever sees.
+    fn gather(item: &str, count: u32) -> Goal {
+        Goal::Have {
+            item: item.into(),
+            count,
+            whose: Holder::Anyone,
+        }
     }
 
     /// The same world, plus the one force `crate::test_world` bolts on. Every
@@ -2675,6 +2784,64 @@ mod tests {
                 other => panic!("expected mines, got {:?}", other),
             }
         }
+    }
+
+    /// Mining is the only method that names a concurrency limit, and it names
+    /// it in seats.
+    ///
+    /// The `None` is as load-bearing as the numbers: "this method has nothing
+    /// to say about iron plate" and "this item can be mined by nobody" are
+    /// different answers, and collapsing the first into `Some(0)` would cap
+    /// every crafting split at nothing.
+    #[test]
+    fn only_mining_names_a_limit_and_it_names_it_in_seats() {
+        let s = state(&[BotId(1)]);
+        assert_eq!(Mine.concurrency(&gather("iron-ore", 4), &s, 100), Some(9));
+        assert_eq!(Mine.concurrency(&gather("iron-plate", 4), &s, 100), None);
+        assert_eq!(HandCraft.concurrency(&gather("iron-ore", 4), &s, 100), None);
+        assert_eq!(Smelt.concurrency(&gather("iron-plate", 4), &s, 100), None);
+        assert_eq!(
+            SplitAcrossBots { bots: vec![] }.concurrency(&gather("iron-ore", 4), &s, 100),
+            None,
+            "the splitter names no limit of its own; it only reads them"
+        );
+    }
+
+    /// A committed patch still answers, and answers zero.
+    ///
+    /// `Mine::applicable` is *false* in this state — an all-claimed patch
+    /// supplies nothing — so a concurrency question gated on applicability
+    /// would go quiet at exactly the moment the answer matters, and the split
+    /// would widen to the roster and fail one share at a time. This is why
+    /// `Method::concurrency` is deliberately answered whether or not the
+    /// method can help.
+    #[test]
+    fn a_committed_patch_still_reports_its_zero() {
+        let mut s = state(&[BotId(1)]);
+        let tiles: Vec<Position> = s
+            .resource_patches("iron-ore")
+            .into_iter()
+            .flat_map(|patch| patch.elements)
+            .collect();
+        for tile in &tiles {
+            s.claim_resource(tile);
+        }
+        let goal = gather("iron-ore", 4);
+        assert!(
+            !Mine.applicable(&goal, &s),
+            "the precondition of this test: mining cannot help here"
+        );
+        assert_eq!(Mine.concurrency(&goal, &s, 100), Some(0));
+        assert_eq!(
+            registry_for(&[BotId(1)]).concurrency(&goal, &s, 100),
+            Some(0),
+            "the registry passes the tightest limit anyone named"
+        );
+        assert_eq!(
+            registry_for(&[BotId(1)]).concurrency(&gather("iron-plate", 4), &s, 100),
+            None,
+            "and reports no limit when nobody named one"
+        );
     }
 
     #[test]

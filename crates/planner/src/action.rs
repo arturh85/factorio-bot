@@ -38,6 +38,20 @@ pub enum Condition {
         who: Actor,
         pos: Position,
         radius: f64,
+        /// The annulus's inner bound: how close is *too* close.
+        ///
+        /// Zero for every non-placement use of this condition — mining,
+        /// inserting, crafting all want a plain disc, satisfied by standing
+        /// anywhere from directly on `pos` out to `radius`. A `Place` sets
+        /// this to [`crate::state::PlanState::placement_clearance`] instead:
+        /// standing on the tile a placement targets satisfies a disc's
+        /// `radius` trivially (distance zero), which is exactly how the
+        /// planner used to schedule a furnace on the bot's own feet and have
+        /// the game refuse it with `player_blocks_placement`. A nonzero
+        /// minimum makes that same standing point fail the condition, so
+        /// [`crate::schedule::schedule`] emits a real `Walk` instead of
+        /// skipping it.
+        min_radius: f64,
     },
     EntityAt {
         pos: Position,
@@ -78,8 +92,16 @@ impl Condition {
             Condition::HasItem { who, item, count } => {
                 state.inventory_count(who.resolve(binding), item) >= *count
             }
-            Condition::AtPosition { who, pos, radius } => match state.bot(who.resolve(binding)) {
-                Some(bot) => calculate_distance(&bot.position, pos) <= *radius,
+            Condition::AtPosition {
+                who,
+                pos,
+                radius,
+                min_radius,
+            } => match state.bot(who.resolve(binding)) {
+                Some(bot) => {
+                    let distance = calculate_distance(&bot.position, pos);
+                    distance.total_cmp(min_radius).is_ge() && distance.total_cmp(radius).is_le()
+                }
                 None => false,
             },
             Condition::EntityAt { pos, name } => {
@@ -94,15 +116,18 @@ impl Condition {
         }
     }
 
-    /// The position this condition requires the acting bot to stand near, if any.
-    /// The scheduler reads this to decide whether a walk is needed.
-    pub fn required_position(&self) -> Option<(Position, f64)> {
+    /// The position this condition requires the acting bot to stand near, if
+    /// any, as `(pos, min_radius, radius)` — the annulus the scheduler must
+    /// land the bot inside. `min_radius` is `0.` for every disc (every
+    /// non-placement use today), which makes the annulus a disc again.
+    pub fn required_position(&self) -> Option<(Position, f64, f64)> {
         match self {
             Condition::AtPosition {
                 who: Actor::Role,
                 pos,
                 radius,
-            } => Some((pos.clone(), *radius)),
+                min_radius,
+            } => Some((pos.clone(), *min_radius, *radius)),
             _ => None,
         }
     }
@@ -112,8 +137,17 @@ impl std::fmt::Display for Condition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Condition::HasItem { item, count, .. } => write!(f, "has {} {}", count, item),
-            Condition::AtPosition { pos, radius, .. } => {
-                write!(f, "within {} of {}", radius, pos)
+            Condition::AtPosition {
+                pos,
+                radius,
+                min_radius,
+                ..
+            } => {
+                if min_radius.total_cmp(&0.0).is_gt() {
+                    write!(f, "between {} and {} of {}", min_radius, radius, pos)
+                } else {
+                    write!(f, "within {} of {}", radius, pos)
+                }
             }
             Condition::EntityAt { pos, name } => write!(f, "{} at {}", name, pos),
             Condition::PositionFree { pos } => write!(f, "{} is free", pos),
@@ -307,8 +341,9 @@ pub struct Action {
 
 impl Action {
     /// Where the acting bot must stand, taken from its `AtPosition`
-    /// precondition. The scheduler emits a walk to satisfy it.
-    pub fn required_position(&self) -> Option<(Position, f64)> {
+    /// precondition, as `(pos, min_radius, radius)`. The scheduler emits a
+    /// walk to satisfy it.
+    pub fn required_position(&self) -> Option<(Position, f64, f64)> {
         self.pre.iter().find_map(|c| c.required_position())
     }
 }
@@ -366,14 +401,54 @@ mod tests {
             who: Actor::Role,
             pos: Position::new(3., 4.),
             radius: 5.0,
+            min_radius: 0.0,
         };
         let far = Condition::AtPosition {
             who: Actor::Role,
             pos: Position::new(3., 4.),
             radius: 4.9,
+            min_radius: 0.0,
         };
         assert!(near.holds(&s, BotId(1)));
         assert!(!far.holds(&s, BotId(1)));
+    }
+
+    #[test]
+    fn at_position_respects_the_annulus() {
+        // The fix in miniature: the exact scenario milestone 4 hit. Standing
+        // on the target satisfies a disc (distance zero is `<= radius`) but
+        // must fail an annulus whose inner bound is positive, and standing
+        // at a legitimate distance must still hold.
+        let mut s = state();
+        s.set_position(BotId(1), Position::new(3., 4.));
+        let annulus = Condition::AtPosition {
+            who: Actor::Role,
+            pos: Position::new(3., 4.),
+            radius: 5.0,
+            min_radius: 1.0,
+        };
+        assert!(
+            !annulus.holds(&s, BotId(1)),
+            "standing exactly on the target must fail an annulus with a positive inner bound"
+        );
+
+        s.set_position(BotId(1), Position::new(4., 4.));
+        assert!(
+            annulus.holds(&s, BotId(1)),
+            "one tile out clears the inner bound and stays within the outer one"
+        );
+
+        // The boundaries themselves: touching either edge holds, matching the
+        // disc's own inclusive `<=` at its outer edge.
+        s.set_position(BotId(1), Position::new(4., 4.0)); // distance 1.0 == min_radius
+        assert!(annulus.holds(&s, BotId(1)), "the inner edge itself holds");
+        s.set_position(BotId(1), Position::new(8., 4.0)); // distance 5.0 == radius
+        assert!(annulus.holds(&s, BotId(1)), "the outer edge itself holds");
+        s.set_position(BotId(1), Position::new(8.1, 4.0)); // distance 5.1 > radius
+        assert!(
+            !annulus.holds(&s, BotId(1)),
+            "past the outer edge must still fail, same as a disc"
+        );
     }
 
     #[test]
@@ -500,6 +575,7 @@ mod tests {
                     who: Actor::Bound(BotId(1)),
                     pos: Position::new(3., 4.),
                     radius: 10.0,
+                    min_radius: 1.5,
                 },
                 Condition::PositionFree {
                     pos: Position::new(3., 4.),

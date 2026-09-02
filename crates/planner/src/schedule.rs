@@ -12,13 +12,48 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Character walking speed in tiles per tick (roughly 9 tiles/second).
 pub const WALK_TILES_PER_TICK: f64 = 0.15;
 
-/// Ticks to get from `from` to within `radius` of `to`. Zero if already there.
-pub fn travel_ticks(from: &Position, to: &Position, radius: f64) -> Ticks {
+/// Ticks to get `from` into the annulus `(min_radius, radius]` around `to`.
+/// Zero if already there.
+///
+/// Two ways to be outside it: too far, as ever (walk in, toward `to`, until
+/// within `radius`); or, for a placement's annulus, too close — standing
+/// inside the footprint the disc used to accept at distance zero. That case
+/// walks the other way: away from `to`, until clear of `min_radius`. Every
+/// comparison against a bound goes through `total_cmp`, per the planner's
+/// determinism rule for float comparisons.
+pub fn travel_ticks(from: &Position, to: &Position, min_radius: f64, radius: f64) -> Ticks {
     let distance = calculate_distance(from, to);
-    if distance <= radius {
+    if distance.total_cmp(&min_radius).is_ge() && distance.total_cmp(&radius).is_le() {
         return 0;
     }
+    if distance.total_cmp(&min_radius).is_lt() {
+        return ((min_radius - distance) / WALK_TILES_PER_TICK).ceil() as Ticks;
+    }
     ((distance - radius) / WALK_TILES_PER_TICK).ceil() as Ticks
+}
+
+/// The position simulated as reached once a walk into `(min_radius, radius]`
+/// around `to` completes.
+///
+/// For a plain disc (`min_radius == 0.`) this is `to` itself: the centre
+/// trivially satisfies "within radius of `to`" for any non-negative radius,
+/// which is why a disc's walk has always simply moved the bot onto the
+/// target (see the call site in [`schedule`] this feeds — naming a point on
+/// the *outer* ring instead would need to know which points are walkable,
+/// knowledge the planner deliberately does not have).
+///
+/// An annulus's inner bound makes the centre the one point that can *never*
+/// satisfy it, so this instead picks the point `min_radius` out along a fixed
+/// direction. The direction is arbitrary — [`crate::action::Condition::holds`]
+/// only measures distance, not bearing — so any direction that lands on the
+/// correct distance is exactly as valid as any other; a fixed one keeps this
+/// function deterministic without needing to know which directions are
+/// actually walkable, the same limitation the disc case already accepts.
+fn arrival_point(to: &Position, min_radius: f64) -> Position {
+    if min_radius.total_cmp(&0.0).is_le() {
+        return to.clone();
+    }
+    Position::new(to.x() + min_radius, to.y())
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -297,7 +332,9 @@ pub fn schedule(
                 for bot in tier.iter().copied() {
                     let from = &sim.bot(bot).ok_or(PlannerError::UnknownBot(bot))?.position;
                     let travel = match action.required_position() {
-                        Some((ref pos, radius)) => travel_ticks(from, pos, radius),
+                        Some((ref pos, min_radius, radius)) => {
+                            travel_ticks(from, pos, min_radius, radius)
+                        }
                         None => 0,
                     };
                     let walk_start = free_at[&bot];
@@ -321,8 +358,9 @@ pub fn schedule(
                     // what the shared `Arc` base is for.
                     let mut trial = sim.fork();
                     if travel > 0 {
-                        // The radius is deliberately dropped *here* and only
-                        // here. The simulated arrival is the centre, which
+                        // The exact target is deliberately dropped *here* and
+                        // only here, in favour of `arrival_point`. For a disc
+                        // (`min_radius == 0.`) that is the centre, which
                         // satisfies the condition for every radius and so is
                         // the one point that cannot make a feasible pair look
                         // infeasible. Naming a concrete point on the ring
@@ -332,9 +370,15 @@ pub fn schedule(
                         // A guess there would turn an optimistic estimate into
                         // a confidently wrong one, so the ring is resolved
                         // where the knowledge is: by the game's pathfinder,
-                        // from the radius `StepKind::Walk` now carries.
-                        if let Some((pos, _)) = action.required_position() {
-                            trial.set_position(bot, pos);
+                        // from the radius `StepKind::Walk` now carries. An
+                        // annulus's inner bound makes the centre the one point
+                        // that can *never* satisfy it, so `arrival_point`
+                        // picks a point at exactly `min_radius` instead —
+                        // still not a claim about where the bot will really
+                        // end up, only the least committal point that could
+                        // make this precondition true.
+                        if let Some((pos, min_radius, _)) = action.required_position() {
+                            trial.set_position(bot, arrival_point(&pos, min_radius));
                         }
                     }
                     let failing = action.pre.iter().find(|c| !c.holds(&trial, bot));
@@ -401,19 +445,34 @@ pub fn schedule(
         // Walk first, so the AtPosition precondition holds by `act_start`. The
         // walk may finish well before it, if the action waits on a lag.
         if chosen.travel > 0 {
-            let (target, radius) = action
+            let (target, min_radius, radius) = action
                 .required_position()
                 .expect("travel is non-zero only when a position is required");
+            // For a disc (`min_radius == 0.`) this is `target` and `radius`
+            // unchanged — the walk this has always emitted. For an annulus,
+            // "go stand within `radius` of `target`" would be a lie: `target`
+            // is inside the exclusion zone, and a wide `radius` around it
+            // would happily let the pathfinder stop right back on it. The
+            // walk must instead name a point the annulus actually accepts —
+            // `arrival_point` again, at zero tolerance, so the step the plan
+            // records is a claim the replay-time precondition check can
+            // verify, not just a number `travel_ticks` charged for internally.
+            let to = arrival_point(&target, min_radius);
+            let walk_radius = if min_radius.total_cmp(&0.0).is_gt() {
+                0.0
+            } else {
+                radius
+            };
             steps.push(ScheduledStep {
                 what: StepKind::Walk {
-                    to: target.clone(),
-                    radius,
+                    to: to.clone(),
+                    radius: walk_radius,
                 },
                 bot: chosen.bot,
                 start: chosen.walk_start,
                 end: chosen.walk_start + chosen.travel,
             });
-            sim.set_position(chosen.bot, target);
+            sim.set_position(chosen.bot, to);
         }
 
         // No precondition check here: selection already proved every one of them
@@ -481,24 +540,10 @@ mod tests {
         }
     }
 
-    /// An action requiring the bot to stand within `radius` of `pos`.
+    /// An action requiring the bot to stand within `radius` of `pos` — a
+    /// plain disc, `min_radius: 0.0`.
     fn at(id_gen: &mut ActionIdGen, label: &str, pos: Position, radius: f64) -> Action {
-        Action {
-            id: id_gen.next(),
-            kind: ActionKind::Craft {
-                item: "iron-gear-wheel".into(),
-                count: 1,
-            },
-            pre: vec![Condition::AtPosition {
-                who: Actor::Role,
-                pos: pos.clone(),
-                radius,
-            }],
-            eff: vec![],
-            duration: 60,
-            pinned: None,
-            label: label.into(),
-        }
+        at_annulus(id_gen, label, pos, 0.0, radius)
     }
 
     /// Like `at`, but with a caller-chosen duration.
@@ -519,9 +564,39 @@ mod tests {
                 who: Actor::Role,
                 pos: pos.clone(),
                 radius,
+                min_radius: 0.0,
             }],
             eff: vec![],
             duration,
+            pinned: None,
+            label: label.into(),
+        }
+    }
+
+    /// An action requiring the bot to stand in the annulus
+    /// `(min_radius, radius]` around `pos` — the shape a `Place` action's own
+    /// `AtPosition` now carries.
+    fn at_annulus(
+        id_gen: &mut ActionIdGen,
+        label: &str,
+        pos: Position,
+        min_radius: f64,
+        radius: f64,
+    ) -> Action {
+        Action {
+            id: id_gen.next(),
+            kind: ActionKind::Craft {
+                item: "iron-gear-wheel".into(),
+                count: 1,
+            },
+            pre: vec![Condition::AtPosition {
+                who: Actor::Role,
+                pos: pos.clone(),
+                radius,
+                min_radius,
+            }],
+            eff: vec![],
+            duration: 60,
             pinned: None,
             label: label.into(),
         }
@@ -673,6 +748,102 @@ mod tests {
         let result = schedule(&net, &state(&bots), &bots).unwrap();
         assert_eq!(result.steps.len(), 1);
         assert_eq!(result.makespan, 60);
+    }
+
+    /// The defect this annulus exists to fix, reproduced at the scheduler's
+    /// own level: a bot standing exactly on a placement's target used to
+    /// satisfy a disc precondition with zero travel, so no `Walk` step ever
+    /// moved it clear of the footprint it was about to build on
+    /// (milestone 4's `place stone-furnace at [38, 16]`, bot standing at
+    /// `(38.30, 16.48)` — see `docs/superpowers/notes/2026-09-02-rcon-reply-fix.md`).
+    /// With a positive `min_radius`, standing on the target now fails the
+    /// precondition, and the scheduler must emit a real walk to satisfy it.
+    #[test]
+    fn a_walk_is_emitted_when_the_bot_stands_inside_the_annulus() {
+        let mut id_gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        // The bot starts at the origin (see `state()`), and the target is the
+        // origin too: distance zero, which a disc would accept outright.
+        net.add(at_annulus(
+            &mut id_gen,
+            "place on my own feet",
+            Position::new(0., 0.),
+            1.5,
+            10.0,
+        ));
+        let bots = [BotId(1)];
+        let result = schedule(&net, &state(&bots), &bots).unwrap();
+        match &result.steps[0].what {
+            StepKind::Walk { to, radius } => {
+                // The stored walk must be a claim the annulus itself accepts
+                // -- not "within 10 of the origin", which the bot already
+                // satisfied without moving. Landing exactly on the inner edge
+                // at zero tolerance is what makes that claim checkable.
+                assert_eq!(*radius, 0.0);
+                assert_eq!(
+                    calculate_distance(to, &Position::new(0., 0.)),
+                    1.5,
+                    "the walk must land exactly on the annulus's inner edge"
+                );
+            }
+            other => panic!(
+                "standing inside the inner bound must still produce a walk, got {:?}",
+                other
+            ),
+        }
+        assert!(matches!(result.steps[1].what, StepKind::Act { .. }));
+        // ceil(1.5 / 0.15) = 10 travel ticks, then the 60-tick action.
+        assert_eq!(result.makespan, 70);
+    }
+
+    /// The other half of the same fix: a bot standing at a distance the
+    /// annulus was always going to accept must not be walked anywhere. An
+    /// annulus that is satisfied everywhere the old disc was not sufficient
+    /// evidence it does the right thing — it must also stay silent everywhere
+    /// the old disc already was.
+    #[test]
+    fn no_walk_is_emitted_at_a_legitimate_annulus_distance() {
+        let mut id_gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        // Bot at the origin, target two tiles away: inside `(1.5, 10.0]`.
+        net.add(at_annulus(
+            &mut id_gen,
+            "place at a sane distance",
+            Position::new(2., 0.),
+            1.5,
+            10.0,
+        ));
+        let bots = [BotId(1)];
+        let result = schedule(&net, &state(&bots), &bots).unwrap();
+        assert_eq!(
+            result.steps.len(),
+            1,
+            "no walk should have been scheduled: {:?}",
+            result.steps
+        );
+        assert_eq!(result.makespan, 60, "just the action, no travel");
+    }
+
+    #[test]
+    fn travel_ticks_treats_both_annulus_edges_as_already_arrived() {
+        let to = Position::new(0., 0.);
+        // Exactly on the inner edge.
+        assert_eq!(
+            travel_ticks(&Position::new(1.5, 0.), &to, 1.5, 10.0),
+            0,
+            "the inner edge itself must count as arrived"
+        );
+        // Exactly on the outer edge.
+        assert_eq!(
+            travel_ticks(&Position::new(10.0, 0.), &to, 1.5, 10.0),
+            0,
+            "the outer edge itself must count as arrived"
+        );
+        // A hair inside the inner edge must still cost a walk out.
+        assert_eq!(
+            travel_ticks(&Position::new(1.0, 0.), &to, 1.5, 10.0),
+            (0.5f64 / WALK_TILES_PER_TICK).ceil() as Ticks,
+        );
     }
 
     #[test]

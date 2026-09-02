@@ -40,6 +40,7 @@ fn mine_at(id_gen: &mut ActionIdGen, pos: &Position, count: u32) -> Action {
                 who: Actor::Role,
                 pos: pos.clone(),
                 radius: 3.0,
+                min_radius: 0.0,
             },
             Condition::ResourceAvailable {
                 pos: pos.clone(),
@@ -83,6 +84,7 @@ fn place_at(id_gen: &mut ActionIdGen, pos: &Position) -> Action {
                 who: Actor::Role,
                 pos: pos.clone(),
                 radius: 10.0,
+                min_radius: 0.0,
             },
             Condition::PositionFree { pos: pos.clone() },
         ],
@@ -109,6 +111,7 @@ fn insert_at(id_gen: &mut ActionIdGen, pos: &Position) -> Action {
                 who: Actor::Role,
                 pos: pos.clone(),
                 radius: 10.0,
+                min_radius: 0.0,
             },
             Condition::EntityAt {
                 pos: pos.clone(),

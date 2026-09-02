@@ -357,6 +357,7 @@ mod tests {
                 who: Actor::Role,
                 pos: Position::new(1., 1.),
                 radius: 3.0,
+                min_radius: 0.0,
             }],
             eff: vec![Effect::GainItem {
                 who: Actor::Role,

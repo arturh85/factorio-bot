@@ -399,6 +399,17 @@ impl Method for Smelt {
         }));
 
         let place_id = ctx.ids.next();
+        // The annulus's inner bound: how far the furnace's own footprint (and
+        // the acting character's) keeps a stand-point from the site's centre.
+        // `None` only when the world carries no `stone-furnace` prototype at
+        // all, in which case `Condition::AreaFree` below refuses this action
+        // outright on the same missing data -- so falling back to a plain
+        // disc here does not let an unknown-sized entity slip past the
+        // annulus's own protection; it fails on `AreaFree` instead.
+        let min_radius = ctx
+            .state
+            .placement_clearance(&furnace_entity)
+            .unwrap_or(0.0);
         steps.push(Step::Act(Box::new(Action {
             id: place_id,
             kind: ActionKind::Place {
@@ -409,6 +420,7 @@ impl Method for Smelt {
                     who: Actor::Role,
                     pos: pos.clone(),
                     radius: build,
+                    min_radius,
                 },
                 Condition::AreaFree {
                     pos: pos.clone(),
@@ -453,6 +465,7 @@ impl Method for Smelt {
                             who: Actor::Role,
                             pos: pos.clone(),
                             radius: reach,
+                            min_radius: 0.0,
                         },
                         Condition::EntityAt {
                             pos: pos.clone(),
@@ -494,6 +507,7 @@ impl Method for Smelt {
                     who: Actor::Role,
                     pos: pos.clone(),
                     radius: reach,
+                    min_radius: 0.0,
                 },
                 Condition::EntityAt {
                     pos: pos.clone(),
@@ -531,6 +545,7 @@ impl Method for Smelt {
                         who: Actor::Role,
                         pos: pos.clone(),
                         radius: reach,
+                        min_radius: 0.0,
                     },
                     Condition::EntityAt {
                         pos: pos.clone(),
@@ -648,6 +663,7 @@ impl Method for Mine {
                         who: Actor::Role,
                         pos: pos.clone(),
                         radius: reach,
+                        min_radius: 0.0,
                     },
                     Condition::ResourceAvailable {
                         pos: pos.clone(),
@@ -2202,6 +2218,108 @@ mod tests {
             2,
             "iron ore and coal"
         );
+    }
+
+    /// Milestone 4, reproduced through the real production path rather than a
+    /// hand-built `Condition`: `Smelt::expand`'s own `Place` action must carry
+    /// a positive `min_radius` derived from the real `stone-furnace`
+    /// collision box, and a bot that (for whatever reason) already stands on
+    /// the site it schedules the placement at must be walked off it first.
+    ///
+    /// `docs/superpowers/notes/2026-09-02-rcon-reply-fix.md`: the live run had
+    /// bot 1 at `(38.30, 16.48)`, told to place a stone-furnace at `[38, 16]`
+    /// — inside the furnace's own footprint. The game refused it with
+    /// `player_blocks_placement`.
+    #[test]
+    fn a_furnace_placed_where_the_bot_already_stands_gets_walked_off_first() {
+        let mut s = state(&[BotId(1)]);
+        s.gain(BotId(1), "stone-furnace", 1);
+        let net = expand(
+            &[Goal::Have {
+                item: "iron-plate".into(),
+                count: 2,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &default_registry(),
+            BotId(1),
+        )
+        .unwrap();
+
+        let place = net
+            .actions()
+            .find(|a| matches!(a.kind, ActionKind::Place { .. }))
+            .expect("a placement");
+        let pos = match &place.kind {
+            ActionKind::Place { entity } => entity.position.clone(),
+            _ => unreachable!("filtered above"),
+        };
+        let min_radius = place
+            .pre
+            .iter()
+            .find_map(|c| match c {
+                Condition::AtPosition { min_radius, .. } => Some(*min_radius),
+                _ => None,
+            })
+            .expect("the placement has a positional precondition");
+
+        let expected = s
+            .placement_clearance("stone-furnace")
+            .expect("fixture has a stone-furnace prototype");
+        assert_eq!(
+            min_radius, expected,
+            "the Place action's own minimum radius must come from the real \
+             collision geometry, not be left at zero"
+        );
+        assert!(min_radius > 0.0, "a stone-furnace does need real clearance");
+
+        // Reproduce the live failure exactly: whatever put the bot there, it
+        // now stands on the tile it is about to build on.
+        let mut on_site = s.fork();
+        on_site.set_position(BotId(1), pos.clone());
+        let result = schedule(&net, &on_site, &[BotId(1)]).expect("schedulable");
+
+        let place_index = result
+            .steps
+            .iter()
+            .position(
+                |step| matches!(&step.what, StepKind::Act { action, .. } if *action == place.id),
+            )
+            .expect("the placement was scheduled");
+        assert!(
+            place_index > 0,
+            "the placement must not be the plan's very first step once the \
+             bot starts on its own build site: {:?}",
+            result.steps
+        );
+        match &result.steps[place_index - 1].what {
+            StepKind::Walk { to, .. } => {
+                assert!(
+                    (calculate_distance(to, &pos) - min_radius).abs() < 1e-9,
+                    "the walk must land exactly at the annulus's inner edge, \
+                     {min_radius} from the furnace site; landed {} away",
+                    calculate_distance(to, &pos)
+                );
+                // The replay-time check the whole fix exists to pass: what
+                // the walk claims must actually satisfy the placement's own
+                // precondition, not just the ticks `schedule()` charged for
+                // it internally.
+                let mut replay = s.fork();
+                replay.set_position(BotId(1), to.clone());
+                for condition in &place.pre {
+                    assert!(
+                        condition.holds(&replay, BotId(1)),
+                        "precondition `{condition}` does not hold at the walk's own \
+                         destination `{to}` -- the plan would fail replay just as \
+                         milestone 4 did"
+                    );
+                }
+            }
+            other => panic!(
+                "expected a walk immediately before the placement, got {:?}",
+                other
+            ),
+        }
     }
 
     #[test]

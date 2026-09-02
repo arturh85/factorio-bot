@@ -583,6 +583,7 @@ mod tests {
                 who: Actor::Role,
                 pos: Position::new(10., 10.),
                 radius: WALK_FIXTURE_RADIUS,
+                min_radius: 0.0,
             }],
             eff: vec![Effect::GainItem {
                 who: Actor::Role,

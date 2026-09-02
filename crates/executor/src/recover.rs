@@ -384,6 +384,7 @@ mod tests {
                     who: Actor::Role,
                     pos: pos.clone(),
                     radius: 3.0,
+                    min_radius: 0.0,
                 },
                 Condition::ResourceAvailable {
                     pos: pos.clone(),

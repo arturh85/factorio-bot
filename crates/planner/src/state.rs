@@ -18,6 +18,19 @@ use std::sync::Arc;
 /// would see; it only keeps float noise from reading as one.
 const TOUCH_SLACK: f64 = 1. / 512.;
 
+/// Half either side of a vanilla `character`'s collision box, used only when
+/// the world's own `entity_prototypes` carries no `character` entry at all.
+///
+/// No real game omits its own player character from that table — this exists
+/// for the hand-built fixtures that do, the same situation
+/// `character_mining_speed`'s `VANILLA_CHARACTER_MINING_SPEED` fallback
+/// covers. The number itself is not guessed: it is the `collision_box` of the
+/// `character` entry in `crates/core/tests/entity-prototype-fixtures.json`,
+/// which was captured off a live Factorio 2.1 game (`±0.19921875`, the same
+/// source the `stone-furnace` and `assembling-machine-1` numbers quoted
+/// elsewhere in this file come from).
+const VANILLA_CHARACTER_COLLISION_HALF_SIDE: f64 = 0.19921875;
+
 /// Do two collision boxes share ground? Touching along an edge does not count.
 fn boxes_overlap(a: &Rect, b: &Rect) -> bool {
     a.left_top.x() < b.right_bottom.x() - TOUCH_SLACK
@@ -500,6 +513,54 @@ impl PlanState {
         }
     }
 
+    /// How far a placement's own footprint pushes the acting character's
+    /// stand-point away from the entity's centre: half the diagonal of the
+    /// entity's collision box, plus half the diagonal of the character's.
+    ///
+    /// This is the annulus's inner radius, not a margin on top of one — at
+    /// exactly this distance the two boxes can, in the worst-case orientation,
+    /// touch at a corner (which `boxes_overlap`'s own `TOUCH_SLACK` already
+    /// treats as clear); any closer and they are guaranteed to overlap.
+    ///
+    /// The guarantee: no point of a box is farther from that box's own centre
+    /// than the box's half-diagonal (that is what a half-diagonal *is* — the
+    /// distance from centre to corner). So if a point `p` is common to both
+    /// boxes, the triangle inequality gives `|entity_centre - character_centre|
+    /// <= |entity_centre - p| + |p - character_centre| <= entity_half_diag +
+    /// character_half_diag`. Contrapositive: centres farther apart than that
+    /// sum cannot share a point. This is the same reasoning
+    /// [`PlanState::is_area_clear`] already uses to widen its own search
+    /// radius, applied here to bound a minimum instead of a maximum.
+    ///
+    /// `None` when the world has no prototype for `name` — mirrors
+    /// [`PlanState::collision_area`]: an unknown size is not something this
+    /// can bound, not a guessed zero. In practice this is moot for any `Place`
+    /// action that could ever run: its own [`crate::action::Condition::AreaFree`]
+    /// needs the same prototype and refuses the action first.
+    ///
+    /// The character's own box falls back to
+    /// [`VANILLA_CHARACTER_COLLISION_HALF_SIDE`] when the world carries no
+    /// `character` prototype; see that constant's doc for where it comes from.
+    pub fn placement_clearance(&self, name: &str) -> Option<f64> {
+        let entity = self.base.entity_prototypes.get(name)?;
+        let entity_half_diag = {
+            let b = &entity.collision_box;
+            (b.width() / 2.).hypot(b.height() / 2.)
+        };
+        let character_half_diag = self
+            .base
+            .entity_prototypes
+            .get("character")
+            .map(|p| {
+                let b = &p.collision_box;
+                (b.width() / 2.).hypot(b.height() / 2.)
+            })
+            .unwrap_or_else(|| {
+                VANILLA_CHARACTER_COLLISION_HALF_SIDE.hypot(VANILLA_CHARACTER_COLLISION_HALF_SIDE)
+            });
+        Some(entity_half_diag + character_half_diag)
+    }
+
     /// Whether anything the plan can see occupies `area`.
     ///
     /// Three sources, because no single one of them sees everything:
@@ -778,6 +839,79 @@ mod tests {
         assert!(
             !s.is_area_free("not-a-real-entity", &Position::new(0., 0.)),
             "an unknown size must fail to plan, not be assumed small"
+        );
+    }
+
+    /// Drives the same `boxes_overlap` the real box-against-box check uses,
+    /// with an actual character-sized box standing at the computed distance.
+    ///
+    /// Not a ghost check: ghosts do not collide (`only_ghosts = true`
+    /// validates nothing, per `CLAUDE.md`'s note on the trap), so a test that
+    /// only asked `is_area_free`/a ghost placement to succeed would prove
+    /// nothing about whether the clearance is actually big enough. This asks
+    /// the geometry question directly, against the real fixture collision
+    /// boxes.
+    ///
+    /// The diagonal, not an axis, because two axis-aligned squares first
+    /// touch along their diagonal at exactly the sum of their half-diagonals —
+    /// on an axis the true threshold is the (smaller) sum of half-*widths*,
+    /// so an axis-aligned probe would pass even for a clearance far too small
+    /// to be safe in the worst-case orientation.
+    #[test]
+    fn placement_clearance_keeps_the_characters_own_box_off_the_footprint() {
+        let s = state();
+        let clearance = s
+            .placement_clearance("stone-furnace")
+            .expect("fixture has a stone-furnace prototype");
+
+        let furnace_box = s
+            .collision_area("stone-furnace", &Position::new(0., 0.))
+            .expect("fixture has a stone-furnace prototype");
+        let character_box = fixture_entity_prototypes()
+            .get("character")
+            .expect("fixture has a character prototype")
+            .collision_box
+            .clone();
+
+        let diag = std::f64::consts::FRAC_1_SQRT_2;
+        let stand_at_clearance = Position::new(clearance * diag, clearance * diag);
+        assert!(
+            !boxes_overlap(
+                &furnace_box,
+                &add_to_rect(&character_box, &stand_at_clearance)
+            ),
+            "a character standing at the computed clearance, on the diagonal, \
+             must clear the furnace's own footprint"
+        );
+
+        // A few centimetres inside it, same direction, must overlap -- or the
+        // clearance is generous enough to pass regardless of what it actually
+        // computed.
+        let too_close = clearance - 0.05;
+        let stand_too_close = Position::new(too_close * diag, too_close * diag);
+        assert!(
+            boxes_overlap(&furnace_box, &add_to_rect(&character_box, &stand_too_close)),
+            "0.05 tiles inside the computed clearance must still collide on \
+             the diagonal, or this test proves nothing"
+        );
+    }
+
+    #[test]
+    fn placement_clearance_grows_with_the_entity_and_is_none_for_an_unknown_one() {
+        let s = state();
+        let furnace = s
+            .placement_clearance("stone-furnace")
+            .expect("fixture has a stone-furnace prototype");
+        let assembler = s
+            .placement_clearance("assembling-machine-1")
+            .expect("fixture has an assembling-machine-1 prototype");
+        assert!(
+            assembler > furnace,
+            "a bigger entity needs more clearance: furnace {furnace}, assembler {assembler}"
+        );
+        assert!(
+            s.placement_clearance("not-a-real-entity").is_none(),
+            "an unknown size must not be guessed at, same as `collision_area`"
         );
     }
 

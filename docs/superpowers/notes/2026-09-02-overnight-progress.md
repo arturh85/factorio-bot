@@ -365,3 +365,28 @@ about.
 already prints are worth reading rather than scrolling past. It also warned
 about `workspace/plans` (15 files) — unexamined, probably irrelevant, but
 unexamined.
+
+## Run 9 — a regression, and part of it is the truth arriving (~05:30)
+
+`run-1788310810-27811` hit the 25-minute timeout having dispatched **9 mine
+actions**, against run 7's 107. Two failed with `ERROR: too far too mine`. All
+four bots connected this time, where earlier runs got three.
+
+Under diagnosis. The hypothesis worth stating up front is that some of this is
+not a regression at all: before the walk fix, bots teleported past every path
+leg over ~9.2 tiles, so runs were fast and their durations were fiction. They
+now walk. Tile reservation then sends four bots to four *different* tiles, which
+are further apart than one shared tile, so there is more walking to do and it is
+now really done.
+
+The diagnosis was told to separate that honest cost from any genuine defect, and
+explicitly not to propose reverting the walk fix. Restoring the old throughput
+number by reintroducing teleportation would be the same category of mistake this
+whole night has been about, pointed the other way.
+
+Note also: run 9 was still running the **stale** `workspace/scripts` copy, so
+its teleport lane is empty for that reason rather than for want of teleports.
+
+**Operational consequence:** the 1500 s run timeout was sized when bots
+teleported. It is now too short for a four-bot ladder that genuinely walks;
+future runs need longer, or a smaller ladder per run.

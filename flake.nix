@@ -61,12 +61,30 @@
             libxau
             libxdmcp
           ];
+
+          # Recording the graphical host as VIDEO instead of screenshotting it.
+          #
+          # `ffmpeg-full`, not `ffmpeg`: the default build has no x11grab. The
+          # ffmpeg already on this machine's PATH lists only kmsgrab, fbdev,
+          # v4l2 and audio -- kmsgrab needs root and takes the whole physical
+          # display, which is not what we want. x11grab (xcbgrab) takes a
+          # `window_id`, so it records the Factorio window alone and keeps
+          # following it, ignoring the rest of the desktop.
+          #
+          # x11 and not a wayland recorder even on a wayland session, because
+          # `SDL_VIDEODRIVER = "x11"` above means Factorio is an Xwayland
+          # client: it really is an X11 window with an X11 window id.
+          #
+          # xdotool finds that id (`search --class factorio`); xwininfo reads
+          # its geometry, which the recorder needs when the window is resized.
+          captureTools = with pkgs; [ ffmpeg-full xdotool xwininfo ];
         in {
           # Only native/system libraries live here; the language toolchains are
           # pinned in mise.toml (rust, node, pnpm).
           default = pkgs.mkShell {
             nativeBuildInputs = with pkgs; [ pkg-config ]
-              ++ lib.optionals stdenv.hostPlatform.isLinux [ patchelf file chromium ];
+              ++ lib.optionals stdenv.hostPlatform.isLinux
+                   ([ patchelf file chromium ] ++ captureTools);
 
             buildInputs = libs;
 

@@ -298,16 +298,29 @@ frames are literally named `tick-<digits>-<camera>.jpg`, and `frameJoin.ts`
 is not constant (it sagged to ~53 under capture, exactly the condition you would
 be recording in), so the two cannot be related by multiplying.
 
-Note the shape of that fix against `wall_ms` above. `wall_ms` was removed because
-it stamped the moment `record()` was *called*, and the supervisor flushes a whole
-plan's events in one batch — so a batch's events all carried the flush time. A
-tick↔wall sidecar written **by the mod, at a known `game.tick`** is a different
-source with none of that defect. The lesson from `wall_ms` is not "no
-timestamps"; it is "timestamp at the event, not at the flush".
+**Corrected an hour later, by the spec:** I wrote here that the sidecar should be
+written *by the mod at a known `game.tick`*. The mod **cannot do that at all** —
+Factorio's control stage has no clock. All 157 classes of `runtime-api.json` were
+searched; the only real-time source is `LuaProfiler`, which explicitly refuses to
+yield a number to Lua and can only be rendered into a `LocalisedString`. The
+clock has to be built host-side, which turns out to be strictly better anyway:
+ffmpeg and the tick sampler then share one monotonic clock with no cross-process
+skew. Every RCON reply already carries a `game.tick` stamp (`rcon.rs:711`).
 
-Frames have never once diagnosed a run — `samples.jsonl` and `map.jsonl` did,
-four times unaided. So moving frames to video costs the analysis path nothing and
-changes only the watchability path, which is the half video is better at.
+The `wall_ms` lesson survives the correction, but it is about *where* the stamp is
+taken, not who takes it: `wall_ms` was removed because it stamped the moment
+`record()` was called, and the supervisor flushes a whole plan's events in one
+batch, so a batch's events all carried the flush time. Timestamp at the event,
+not at the flush.
+
+**Also corrected: frames ARE in the analysis path**, in exactly one place I had
+not looked. `runTimeline.ts` `tickSources` pushes frame ticks into the `drawn`
+set, and `tickBounds`/`leadInTicks` use `drawn` to decide where the axis starts —
+the lead-in trimming built yesterday. So a video-only run moves the analysis axis
+**silently**: no error, nothing marked. My claim that moving frames to video
+costs the analysis path nothing was wrong. It is still true that no run has ever
+been *diagnosed* from a picture; that is a different statement, and I generalised
+it past what it supports.
 
 **Unmeasured, and load-bearing:** nobody has A/B'd what screenshot capture
 actually costs. The "~7 UPS from six cameras" figure is inference. Any argument

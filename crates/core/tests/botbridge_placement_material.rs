@@ -425,8 +425,23 @@ const ACTOR_AWAY: (f64, f64) = (-16.39, 20.46);
 /// A character's collision box is `±0.2` by `±0.3`, so this box is
 /// `[-21.67, -21.27] x [23.43, 24.03]` — inside the furnace footprint
 /// `[-21.9, -20.1] x [23.1, 24.9]` by a third of a tile in x.
+///
+/// `player` is the index the stub's `game.players` answers to, which is how
+/// the mod gets from a character entity to something it can walk. A character
+/// with no player behind it is [`PARKED_STRANGER`].
 const PARKED_BOT: &str = r#"
-    { name = "character", type = "character", bounding_box = {
+    { name = "character", type = "character", player_index = 3,
+      position = { x = -21.47, y = 23.73 },
+      bounding_box = {
+        left_top = { x = -21.67, y = 23.43 },
+        right_bottom = { x = -21.27, y = 24.03 } } }
+"#;
+/// The same character with nothing behind it — no player, so nothing to ask.
+/// Physically identical, and the mod must neither move it nor raise.
+const PARKED_STRANGER: &str = r#"
+    { name = "character", type = "character",
+      position = { x = -21.47, y = 23.73 },
+      bounding_box = {
         left_top = { x = -21.67, y = 23.43 },
         right_bottom = { x = -21.27, y = 24.03 } } }
 "#;
@@ -449,10 +464,18 @@ fn stub_refused_place(player_position: (f64, f64), occupants: &str) -> String {
         r#"
         _filter_area = "not called"
         local occupants = {{ {occupants} }}
+        -- Flipped by a test to make every spot look occupied.
+        _nowhere_to_stand = false
+        _searched_from = {{}}
         local surface = {{
             can_place_entity = function(args) return false end,
             create_entity = function(args) error("must not build a refused site") end,
             find_entity = function(name, pos) return nil end,
+            find_non_colliding_position = function(name, center, radius, precision)
+                _searched_from[#_searched_from + 1] = {{ x = center.x, y = center.y }}
+                if _nowhere_to_stand then return nil end
+                return {{ x = center.x, y = center.y }}
+            end,
             find_entities_filtered = function(args)
                 local a = args.area
                 _filter_area = string.format("%.2f,%.2f,%.2f,%.2f",
@@ -471,6 +494,7 @@ fn stub_refused_place(player_position: (f64, f64), occupants: &str) -> String {
             end,
         }}
         local player = {{
+            index = 1,
             name = "bot4",
             position = {{ x = {px}, y = {py} }},
             force = "player",
@@ -487,9 +511,31 @@ fn stub_refused_place(player_position: (f64, f64), occupants: &str) -> String {
                 }},
             }} }},
         }} }}
+        -- The bots the mod could ask to move. Keyed by index, as
+        -- `game.players` is, and cross-linked to the occupant list above so a
+        -- character the footprint scan returns leads to something walkable.
+        storage = {{ p = {{ [1] = {{}} }} }}
+        local players = {{ player }}
+        for _, e in ipairs(occupants) do
+            if e.player_index ~= nil then
+                local blocker = {{
+                    index = e.player_index,
+                    name = "bot" .. e.player_index,
+                    connected = true,
+                    character_running_speed = 0.15,
+                    walking_state = {{ walking = false }},
+                    character = {{ position = e.position }},
+                    surface = surface,
+                }}
+                blocker.position = e.position
+                e.player = blocker
+                players[e.player_index] = blocker
+                storage.p[e.player_index] = {{}}
+            end
+        end
         game = {{
             tick = {tick},
-            players = {{ player }},
+            players = players,
             forces = {{ player = {{ print = noop }} }},
         }}
     "#,
@@ -603,5 +649,262 @@ fn the_acting_player_still_gets_the_walk_aside_sentinel() {
         "§player_blocks_placement§",
         "the acting bot in its own footprint is the case the RCON layer can \
          fix by walking it, and that must win over the reschedule path"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cause seven: the transient that never ends.
+// ---------------------------------------------------------------------------
+
+/// What the mod did to the bots it found in the footprint, as
+/// `player index -> the waypoint it was sent to`, or an empty map if it asked
+/// nobody to move.
+fn asked_to_move(lua: &Lua) -> Vec<(u32, (f64, f64))> {
+    lua.load(
+        r#"
+        local out = {}
+        for idx, p in pairs(storage.p) do
+            if p.walking ~= nil and p.walking.step_aside then
+                local w = p.walking.waypoints[1]
+                out[#out + 1] = { idx, w.x, w.y }
+            end
+        end
+        table.sort(out, function(a, b) return a[1] < b[1] end)
+        return out
+    "#,
+    )
+    .eval::<mlua::Table>()
+    .expect("storage.p")
+    .sequence_values::<mlua::Table>()
+    .map(|row| {
+        let row = row.expect("a row");
+        (
+            row.get::<u32>(1).expect("player index"),
+            (
+                row.get::<f64>(2).expect("waypoint x"),
+                row.get::<f64>(3).expect("waypoint y"),
+            ),
+        )
+    })
+    .collect()
+}
+
+/// The footprint under test, `[-21, 24]` expanded by a stone furnace's
+/// `±0.9` box: what `can_place_entity` just judged.
+const FOOTPRINT: (f64, f64, f64, f64) = (-21.9, 23.1, -20.1, 24.9);
+
+fn inside_footprint((x, y): (f64, f64)) -> bool {
+    let (l, t, r, b) = FOOTPRINT;
+    x > l && x < r && y > t && y < b
+}
+
+/// **The defect: an idle bot in the footprint is a permanent blocker, and
+/// nothing in the system ever asks it to move.**
+///
+/// `537adf30` made this a transient rather than a verdict about the ground,
+/// which was right and is not enough. A transient is only transient if
+/// something ends it, and a bot that parked there after servicing its own
+/// furnace has no reason to leave: `run-1788353986-24634` (run 27) has bot 3
+/// motionless at `(-23.5078125, 16.203125)` from tick 18240 to the end of the
+/// run while milestone 6 re-planned onto that ground three times and gave up —
+/// `stuck after 6 iteration(s)`, `success=0 failed=1 lost=0 pending=30`.
+///
+/// The mod already walks the **acting** player out of its own footprint
+/// (`§player_blocks_placement§`, handled in `place_entity_timed`). This widens
+/// that from "the bot I happen to be holding" to "any bot I can reach", which
+/// is the same widening `537adf30` made to the *classification* — one concept,
+/// now drawn the same way by both halves of the same branch.
+#[test]
+fn a_parked_bot_in_the_footprint_is_asked_to_walk_out() {
+    let lua = refuse(ACTOR_AWAY, PARKED_BOT);
+    let moved = asked_to_move(&lua);
+    assert_eq!(
+        moved.len(),
+        1,
+        "the one bot standing in the footprint has to be asked to leave; \
+         nothing else in the system will ever ask it. Got {moved:?}"
+    );
+    let (idx, waypoint) = moved[0];
+    assert_eq!(idx, 3, "and it is the bot that is actually standing there");
+    assert!(
+        !inside_footprint(waypoint),
+        "a step aside that lands back inside the footprint is a walk that \
+         costs time and changes nothing. {waypoint:?} is inside {FOOTPRINT:?}"
+    );
+}
+
+/// The reply is exactly what it was, because the classification was already
+/// right and must not be reopened.
+///
+/// Two things at once. The wording stays outside the `can_place_entity said
+/// 'no'` family that `note_placement_refusal` learns from — a character still
+/// says nothing about the ground. And **nothing extra reaches the RCON reply
+/// body**: `place_entity_timed` reads that body as the action's whole verdict,
+/// so a step-aside that printed anything would turn this refusal into
+/// `Unexpected Response` and lose the message that names the cause.
+#[test]
+fn asking_a_blocker_to_move_does_not_change_what_the_reply_says() {
+    let lua = refuse(ACTOR_AWAY, PARKED_BOT);
+    let line = one_line_reply(&lua);
+    assert_eq!(
+        line, "cannot place item 'stone-furnace' because a character is standing in the footprint",
+        "the transient/refusal distinction landed in 537adf30 is not this \
+         change's to move"
+    );
+}
+
+/// **A bot the mod is already driving is left strictly alone.**
+///
+/// This is the one way the fix could cost more than it saves.
+/// `storage.p[idx].walking` is how `on_tick` steers a bot through the
+/// waypoints an executor action is waiting on; overwriting it would strand
+/// that action until the 360-second `ACTION_RESULT_DEADLINE` calls it lost,
+/// which is a far worse outcome than the refusal being fixed.
+///
+/// It is also unnecessary: a bot that is walking is *going* to leave. Only a
+/// bot with nothing to do is a permanent blocker, and "the mod is not steering
+/// it" is exactly that condition, decided inside a single RCON command and so
+/// not racing anything.
+#[test]
+fn a_blocker_the_mod_is_already_walking_is_not_touched() {
+    let lua = run(
+        &stub_refused_place(ACTOR_AWAY, PARKED_BOT),
+        &format!(
+            "{STUB_SERIALISE}\n\
+             storage.p[3].walking = {{ idx = 1, action_id = 77, idx_tick = 5, \
+             leg_timeout = 60, waypoints = {{ {{ x = 9.5, y = 9.5 }} }} }}\n"
+        ),
+        &format!(r#"rcon_place_entity(1, "stone-furnace", {SITE}, 0)"#),
+    );
+    assert!(
+        asked_to_move(&lua).is_empty(),
+        "a walk in progress must not be replaced"
+    );
+    let survived: u32 = lua
+        .load("return storage.p[3].walking.action_id")
+        .eval()
+        .expect("the original walk");
+    assert_eq!(
+        survived, 77,
+        "the executor's own walk has to reach on_tick untouched; clobbering \
+         it strands the action it belongs to"
+    );
+}
+
+/// And neither is one that is mining. Same reason: the mod is steering it, an
+/// action is waiting on it, and it will move when it is done.
+#[test]
+fn a_blocker_that_is_mining_is_not_touched() {
+    let lua = run(
+        &stub_refused_place(ACTOR_AWAY, PARKED_BOT),
+        &format!("{STUB_SERIALISE}\nstorage.p[3].mining = {{ action_id = 88, left = 3 }}\n"),
+        &format!(r#"rcon_place_entity(1, "stone-furnace", {SITE}, 0)"#),
+    );
+    assert!(
+        asked_to_move(&lua).is_empty(),
+        "a mining bot is busy, will finish, and is not a permanent blocker"
+    );
+}
+
+/// A tree does not walk. The step-aside must reach only the class of blocker
+/// that can act on the request, or it is a walk dispatched at scenery.
+#[test]
+fn a_tree_in_the_footprint_is_asked_nothing() {
+    let lua = refuse(ACTOR_AWAY, TREE);
+    assert!(
+        asked_to_move(&lua).is_empty(),
+        "only a character can be asked to move"
+    );
+}
+
+/// A character with no player behind it cannot be walked — `walking_state` is
+/// a `LuaControl` property and the mod's walker steers players. It must be
+/// skipped silently rather than raising inside an RCON handler, where a raise
+/// costs the caller its reply.
+#[test]
+fn a_character_with_no_player_is_asked_nothing_and_does_not_raise() {
+    let lua = refuse(ACTOR_AWAY, PARKED_STRANGER);
+    assert!(
+        asked_to_move(&lua).is_empty(),
+        "there is nothing to ask; the refusal still reports the character"
+    );
+    assert_eq!(
+        one_line_reply(&lua),
+        "cannot place item 'stone-furnace' because a character is standing in the footprint",
+        "and the reply is unaffected by there being nobody to move"
+    );
+}
+
+/// The acting player keeps its own, better recovery and this path stays out of
+/// it. `§player_blocks_placement§` walks the actor around eight compass points
+/// and **retries the placement**, which beats a step-aside plus a failed action
+/// — so the branch order must not change, and no bot is asked to move on it.
+#[test]
+fn the_acting_player_branch_asks_nobody_to_step_aside() {
+    let actor_in_the_box = (-21.0, 24.0);
+    let lua = refuse(actor_in_the_box, PARKED_BOT);
+    assert_eq!(one_line_reply(&lua), "§player_blocks_placement§");
+    assert!(
+        asked_to_move(&lua).is_empty(),
+        "the RCON layer is about to walk the actor and retry; a second, \
+         competing walk dispatched here would fight it"
+    );
+}
+
+/// Nowhere to stand means no walk. `find_non_colliding_position` answering
+/// `nil` is the game saying the character does not fit anywhere near the
+/// target, and dispatching a walk to a spot it cannot occupy buys a leg
+/// timeout and a stuck-abort instead of an answer.
+#[test]
+fn a_blocker_with_nowhere_to_stand_is_not_sent_walking() {
+    let lua = run(
+        &stub_refused_place(ACTOR_AWAY, PARKED_BOT),
+        &format!("{STUB_SERIALISE}\n_nowhere_to_stand = true\n"),
+        &format!(r#"rcon_place_entity(1, "stone-furnace", {SITE}, 0)"#),
+    );
+    assert!(
+        asked_to_move(&lua).is_empty(),
+        "a walk to a spot the character cannot occupy is worse than no walk"
+    );
+    assert_eq!(
+        one_line_reply(&lua),
+        "cannot place item 'stone-furnace' because a character is standing in the footprint",
+        "and the refusal is reported the same way either way"
+    );
+}
+
+/// The spot asked for is outside the footprint before the game is consulted,
+/// so a `find_non_colliding_position` that answers "yes, right there" cannot
+/// hand back somewhere still in the way.
+///
+/// It is asked for the **nearest** exit, which for run 24's parked bot is
+/// westward: its centre is 0.43 tiles from the western edge against 1.37 from
+/// the eastern, and a step aside that crosses the whole footprint is a longer
+/// walk to no better place.
+#[test]
+fn the_step_aside_aims_out_of_the_nearest_edge() {
+    let lua = refuse(ACTOR_AWAY, PARKED_BOT);
+    let searched: Vec<(f64, f64)> = lua
+        .load("local o = {} for i, p in ipairs(_searched_from) do o[i] = { p.x, p.y } end return o")
+        .eval::<mlua::Table>()
+        .expect("_searched_from")
+        .sequence_values::<mlua::Table>()
+        .map(|t| {
+            let t = t.expect("a search");
+            (t.get::<f64>(1).unwrap(), t.get::<f64>(2).unwrap())
+        })
+        .collect();
+    assert_eq!(searched.len(), 1, "one bot, one question. Got {searched:?}");
+    let (x, y) = searched[0];
+    assert!(
+        !inside_footprint((x, y)),
+        "the target handed to the game must already be clear of {FOOTPRINT:?}; \
+         got ({x}, {y})"
+    );
+    assert!(
+        x < FOOTPRINT.0 && (y - 23.73).abs() < 1e-9,
+        "the nearest edge is the western one (0.43 tiles away against 1.37 \
+         eastward), and stepping sideways off the exit axis is extra walking \
+         for nothing. Got ({x}, {y})"
     );
 }

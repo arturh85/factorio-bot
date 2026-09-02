@@ -326,6 +326,35 @@ WALK_STUCK_TELEPORT_PRECISION = 0.5
 --- unreachable waypoint.
 WALK_STUCK_TELEPORT_LIMIT = 8
 
+--- Where a bot standing in a refused footprint is asked to stand instead, and
+--- how hard the game is asked to find it somewhere.
+---
+--- The target is the nearest edge of the footprint the game just judged, plus
+--- the character's own half-width, plus this margin. The margin exists because
+--- `can_place_entity` and the walker disagree about what "just outside" means:
+--- the walker stops anywhere within a 0.3-by-0.3 box of its waypoint, so a
+--- target exactly on the boundary is a coin flip about whether the retry finds
+--- the footprint clear.
+PLACEMENT_STEP_ASIDE_MARGIN = 0.4
+
+--- The search radius and precision handed to `find_non_colliding_position`
+--- when placing that target. Same values, and the same reasoning, as
+--- WALK_STUCK_TELEPORT_RADIUS/PRECISION: half a tile is the coarsest step that
+--- can always find the gap beside an occupied position, and a few tiles is
+--- room for a handful of stacked bots and no more. A radius of 0 would search
+--- forever **[V]**, so it may not be zero.
+PLACEMENT_STEP_ASIDE_RADIUS = 4
+PLACEMENT_STEP_ASIDE_PRECISION = 0.5
+
+--- The action id an internal step-aside walk is dispatched under.
+---
+--- Outside the executor's own id space, which is `next_action_id % 1000`
+--- (`crates/core/src/factorio/rcon.rs`), so an `action_completed` for one of
+--- these can never be mistaken for a reply to a dispatched action. 4711 is the
+--- same trick, used by the mining step-aside; this is its neighbour rather
+--- than the same number so the two are told apart in a log.
+PLACEMENT_STEP_ASIDE_ACTION_ID = 4712
+
 --- How long the mining handler may fail to start mining before it gives the
 --- action a verdict.
 ---
@@ -369,6 +398,43 @@ function mine_step_aside_waypoint(player, ent)
 	end
 	local offset = (reach * 0.5) / math.sqrt(2)
 	return { ent.position.x - offset, ent.position.y - offset }
+end
+
+-- Reports where a character *is*, under the same key the game's own movement
+-- event uses.
+--
+-- **Factorio raises `on_player_changed_position` once per tile a character
+-- crosses, not once per position change.** Read straight off run 27's log
+-- (`workspace/runs/run-1788353986-24634`, and `workspace/server-log.txt`):
+-- consecutive events for one walking bot are ~1.0 tiles and ~7 ticks apart.
+--
+-- While a bot is walking that costs nothing -- the next tile is a few ticks
+-- away. When it stops it costs everything, because the character carries on up
+-- to a tile past the boundary that raised the last event and then raises no
+-- more. Bot 3's last event in that run was at tick 18187 naming
+-- `(-23.19140625, 16.96484375)`; it came to rest at `(-23.5078125, 16.203125)`
+-- and stood there for the remaining 13,000 ticks. Both are inside tile
+-- `(-24, 16)`.
+--
+-- `crates/planner`'s `characters` occupancy source reads exactly that
+-- position, and 0.825 tiles is the whole difference between a stone furnace's
+-- 1.398-tile footprint clearing a parked bot and covering it. Milestone 6
+-- sited a furnace at `[-23, 16]` three times, the game refused it three times,
+-- and the planner was reasoning correctly the whole way -- from a fact the
+-- world had grown out of.
+--
+-- So: every point the walker lets a character stop reports where it stopped.
+-- That is the moment a resting position becomes a fact, and the only moment
+-- anything is in a position to say so.
+function writeout_player_position(tick, player_id, player)
+	if player == nil or player.character == nil then
+		return
+	end
+	local pos = player.character.position
+	writeout(tick, "on_player_changed_position", helpers.table_to_json({
+		player_id = player_id,
+		position = { x = pos.x, y = pos.y },
+	}))
 end
 
 -- Emits a machine-readable record of a `player.teleport` call, since none of
@@ -781,6 +847,10 @@ function on_tick(event)
 					-- while reporting "ok" every tick forever too.
 					player.walking_state = {walking=false}
 					storage.p[idx].walking = nil
+					-- The character has stopped. Say where, before anything
+					-- else: see `writeout_player_position` for why nothing
+					-- else ever will.
+					writeout_player_position(event.tick, idx, player)
 					if w.stuck then
 						-- `w.stuck` carries the reason as a string. It used to
 						-- be a bare `true` with the message hardcoded here,
@@ -806,6 +876,7 @@ function on_tick(event)
 							player.walking_state = {walking=false}
 							action_completed(event.tick, w.action_id)
 							storage.p[idx].walking = nil
+							writeout_player_position(event.tick, idx, player)
 							dx = 0
 							dy = 0
 						else
@@ -913,6 +984,11 @@ function on_tick(event)
 								-- intent asserts something untrue about where
 								-- the bot is.
 								teleport_writeout(event.tick, idx, "walk_stuck", pos, player.character.position, w.action_id)
+								-- A teleport that lands inside the tile it
+								-- started in raises no movement event either,
+								-- and this one is aimed at a waypoint the
+								-- character was already next to.
+								writeout_player_position(event.tick, idx, player)
 								-- THE LEG IS SPENT. Advance, rather than aim at
 								-- the same waypoint again.
 								--
@@ -2540,6 +2616,32 @@ function rcon_action_start_walk_waypoints(action_id, player_id, waypoints) -- e.
 	if player == nil then
 		return
 	end
+	start_walk_waypoints(action_id, player_id, waypoints)
+	stamp_tick()
+end
+
+-- The body of the walk dispatch, with **no RCON output of any kind**.
+--
+-- Split out of `rcon_action_start_walk_waypoints` for one reason:
+-- `step_aside_from_footprint` dispatches a walk from inside
+-- `rcon_place_entity`, whose reply body is read by `place_entity_timed`
+-- (crates/core/src/factorio/rcon.rs) as the placement's entire verdict. A
+-- second `rcon.print` there -- `get_player`'s error, or the tick stamp -- turns
+-- a refusal that names its cause into `Unexpected Response`. Same trap as
+-- debugging the mod with `rcon.print`, reached by accident instead of on
+-- purpose.
+--
+-- `step_aside` marks a walk the mod dispatched for its own reasons rather than
+-- one an executor action is waiting on. Nothing branches on it today; it is
+-- what tells a reader of `storage` which walks were nobody's request.
+function start_walk_waypoints(action_id, player_id, waypoints, step_aside)
+	local player = game.players[player_id]
+	if player == nil or not player.connected or player.character == nil then
+		return false
+	end
+	if storage.p[player_id] == nil then
+		storage.p[player_id] = {}
+	end
 	local tmp = {}
 	for i = 1, #waypoints do
 		tmp[i] = {x=waypoints[i][1], y=waypoints[i][2]}
@@ -2561,8 +2663,9 @@ function rcon_action_start_walk_waypoints(action_id, player_id, waypoints) -- e.
 		action_id = action_id,
 		idx_tick = game.tick,
 		leg_timeout = leg_timeout,
+		step_aside = step_aside,
 	}
-	stamp_tick()
+	return true
 end
 
 function rcon_action_start_mining(action_id, player_id, name, position, count)
@@ -2657,6 +2760,12 @@ function rcon_place_entity(player_id, item_name, entity_position, direction)
 		if position_in_rect(player.position, bb) then
 			rcon.print("§player_blocks_placement§")
 		elseif character_in_footprint(surface, entproto, pos) then
+			-- Ask whoever it is to move, so the next attempt has a chance of
+			-- finding the ground it was always going to find. Before this, the
+			-- classification was right and nothing acted on it: an idle bot in
+			-- a footprint was a transient with no end. See
+			-- `step_aside_from_footprint`.
+			step_aside_from_footprint(surface, entproto, pos, player)
 			rcon.print("cannot place item '"..item_name.."' because a character is standing in the footprint")
 		else
 			rcon.print("cannot place item '"..item_name.."' because surface.can_place_entity said 'no'")
@@ -2773,6 +2882,123 @@ end
 function character_in_footprint(surface, entproto, position)
 	local bb = add_to_bounding_box(entproto.collision_box, position)
 	return #surface.find_entities_filtered{ area = bb, type = "character" } > 0
+end
+
+-- Where to send a character that is standing inside `bb`, and why that spot.
+--
+-- Out through the **nearest** edge, plus the character's own half-width, plus
+-- `PLACEMENT_STEP_ASIDE_MARGIN`. Nearest, because a step aside is meant to be
+-- a step: crossing the whole footprint to leave by the far side is a longer
+-- walk to no better place, and the run this exists for had its blocker 0.43
+-- tiles from one edge and 1.37 from the other.
+--
+-- Pure geometry, and deliberately so -- it makes no query and reads no state,
+-- which is what lets a test pin the choice without a game. Ties resolve
+-- west, east, north, south, in that order, so the answer does not depend on
+-- table iteration.
+--
+-- The half-width comes from the character's own `bounding_box` rather than
+-- from the prototype table: it is already in hand from the scan that found
+-- this character, it is exact, and `rcon_place_entity` must not depend on a
+-- prototype lookup that could be nil in the middle of a reply.
+function placement_step_aside_target(bb, character)
+	local pos = character.position
+	local half_x, half_y = 0.2, 0.2
+	local box = character.bounding_box
+	if box ~= nil then
+		half_x = (box.right_bottom.x - box.left_top.x) / 2.0
+		half_y = (box.right_bottom.y - box.left_top.y) / 2.0
+	end
+	local out_west = pos.x - bb.left_top.x
+	local out_east = bb.right_bottom.x - pos.x
+	local out_north = pos.y - bb.left_top.y
+	local out_south = bb.right_bottom.y - pos.y
+
+	local best = out_west
+	local target = { x = bb.left_top.x - half_x - PLACEMENT_STEP_ASIDE_MARGIN, y = pos.y }
+	if out_east < best then
+		best = out_east
+		target = { x = bb.right_bottom.x + half_x + PLACEMENT_STEP_ASIDE_MARGIN, y = pos.y }
+	end
+	if out_north < best then
+		best = out_north
+		target = { x = pos.x, y = bb.left_top.y - half_y - PLACEMENT_STEP_ASIDE_MARGIN }
+	end
+	if out_south < best then
+		target = { x = pos.x, y = bb.right_bottom.y + half_y + PLACEMENT_STEP_ASIDE_MARGIN }
+	end
+	return target
+end
+
+-- Asks every bot standing in a refused footprint to walk out of it.
+--
+-- **A transient is only transient if something ends it.** `537adf30` stopped
+-- reporting a character in the footprint as a verdict about the ground, which
+-- was right: a character moves on its own, and remembering one fences the
+-- planner off open ground for the rest of the run. But "moves on its own" is
+-- an assumption about a bot that has work to do, and an idle bot has none. It
+-- parked where servicing its own furnace left it and it will stand there
+-- forever.
+--
+-- Run 27 (`workspace/runs/run-1788353986-24634`) is that forever. Bot 3 stood
+-- at `(-23.5078125, 16.203125)` from tick 18240 to the end of the run;
+-- milestone 6 re-planned onto that ground and reported
+-- `success=0 failed=1 lost=0 pending=30` three iterations running before
+-- giving up. Nothing was wrong except that nobody had asked bot 3 to move.
+--
+-- This is the acting-player recovery widened to the bot that is actually in
+-- the way. `rcon_place_entity` answers `§player_blocks_placement§` when the
+-- ACTOR is in its own footprint and the RCON layer walks it around eight
+-- compass points and retries; that has always been the better answer than a
+-- reschedule, and it was only ever available to one of the characters that can
+-- be standing there.
+--
+-- **Only bots the mod is not already steering.** `storage.p[idx].walking` and
+-- `.mining` are how `on_tick` drives a bot through an action the executor is
+-- waiting on; replacing either would strand that action until the 360-second
+-- `ACTION_RESULT_DEADLINE` calls it lost, which is a worse outcome than the
+-- refusal being fixed. It is also unnecessary -- a bot that is walking or
+-- mining is going to leave. Only a bot with nothing to do is a permanent
+-- blocker, and "the mod is not steering it" is exactly that condition. Decided
+-- and acted on inside one RCON command, so it races nothing: the executor's
+-- next dispatch for that bot is a later command, and it would simply replace
+-- this walk, which is nobody's request and has nothing waiting on it.
+--
+-- **A legitimate walk, not a teleport.** The bot is handed to the same
+-- `walking_state` machinery every other walk goes through.
+--
+-- This does not make the placement succeed. The action still fails, still
+-- reports the transient wording, and still teaches the refusal ledger nothing;
+-- the difference is that by the time anything asks again, the blocker is
+-- somewhere else.
+function step_aside_from_footprint(surface, entproto, position, acting_player)
+	local bb = add_to_bounding_box(entproto.collision_box, position)
+	for _, character in ipairs(surface.find_entities_filtered{ area = bb, type = "character" }) do
+		-- `LuaEntity.player` is "the player connected to this character, if
+		-- any" **[V]** (runtime-api.json, Factorio 2.1.17, api 6). Nil for a
+		-- character nobody is driving, which cannot be asked to walk and must
+		-- not raise here -- a raise inside an RCON handler costs the caller
+		-- its whole reply.
+		local blocker = character.player
+		if blocker ~= nil and blocker.index ~= acting_player.index
+			and blocker.connected and blocker.character ~= nil then
+			local state = storage.p[blocker.index]
+			if state ~= nil and state.walking == nil and state.mining == nil then
+				local target = placement_step_aside_target(bb, character)
+				local landing = surface.find_non_colliding_position(
+					"character", target,
+					PLACEMENT_STEP_ASIDE_RADIUS, PLACEMENT_STEP_ASIDE_PRECISION)
+				-- Nil is the game saying the character fits nowhere near
+				-- there, and a landing back inside the footprint is a walk
+				-- that costs time and changes nothing. Either way, better no
+				-- walk than a walk that ends in a leg timeout.
+				if landing ~= nil and not position_in_rect(landing, bb) then
+					start_walk_waypoints(PLACEMENT_STEP_ASIDE_ACTION_ID, blocker.index,
+						{ { landing.x, landing.y } }, true)
+				end
+			end
+		end
+	end
 end
 
 -- Answers, for a batch of candidate placements, whether the game would allow

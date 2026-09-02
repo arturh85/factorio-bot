@@ -185,3 +185,120 @@ fn the_block_is_the_character_box_and_no_larger() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// `run-1788353986-24634` (run 27): the model was right and the input was
+// stale, which looks exactly the same from the plan.
+// ---------------------------------------------------------------------------
+
+/// The last position run 27's server ever reported for bot 3, at tick 18187.
+///
+/// From `workspace/server-log.txt`:
+///
+/// ```text
+/// §18187§on_player_changed_position§{"player_id":3,"position":{"y":16.96484375,"x":-23.19140625}}
+/// ```
+///
+/// Nothing followed it. Factorio raises `on_player_changed_position` once per
+/// **tile** crossed, so a character that stops part-way into a tile is last
+/// heard from at the boundary it entered by.
+const RUN27_REPORTED: (f64, f64) = (-23.19140625, 16.96484375);
+
+/// Where bot 3 actually stood, from run 27's own `samples.jsonl`, unchanged
+/// from tick 18240 to the end of the run.
+///
+/// Both points are inside tile `(-24, 16)`. The gap between them is 0.825
+/// tiles, and it is permanent: a parked character raises no further events, so
+/// nothing corrects it.
+const RUN27_RESTED: (f64, f64) = (-23.5078125, 16.203125);
+
+/// The site milestone 6 chose, dispatched, and had refused — three plans in a
+/// row, at ticks 22713, 27281 and 31329.
+const RUN27_SITE: (f64, f64) = (-23., 16.);
+
+/// **The whole of cause seven in one assertion.**
+///
+/// A stone furnace's collision box is ±0.69921875 and a character's is
+/// ±0.19921875 (both read off run 27's own `entity_prototypes` writeout, not
+/// from memory). Centred on `RUN27_SITE` the furnace spans
+/// `[-23.699, -22.301] x [15.301, 16.699]`.
+///
+/// * At `RUN27_REPORTED` the character spans `y [16.766, 17.164]` — clear of
+///   the furnace by 0.067 tiles, so the planner sited there and was **right to,
+///   given what it was told**.
+/// * At `RUN27_RESTED` it spans `y [16.004, 16.402]` — squarely inside, which
+///   is why `can_place_entity` said no every time.
+///
+/// So the planner's `characters` occupancy source was never the problem: the
+/// six sources are a model of the world, and this one was being fed a position
+/// the world had grown out of. The fix is upstream, in `mods/BotBridge`'s
+/// walker reporting where a character comes to rest
+/// (`crates/core/tests/botbridge_rest_position.rs`), and this test is the
+/// arithmetic that says why 0.825 tiles was enough to cost a milestone.
+#[test]
+fn run27s_reported_position_clears_the_site_and_its_real_one_does_not() {
+    let believed = state_with_parked_bot(&[(3, RUN27_REPORTED)], &[BotId(1), BotId(3)]);
+    let (x, y) = RUN27_SITE;
+    assert!(
+        believed.is_area_free("stone-furnace", &Position::new(x, y)),
+        "with bot 3 believed at {RUN27_REPORTED:?} the site is open, and the \
+         planner choosing it is correct reasoning from a stale fact. If this \
+         ever fails the diagnosis of run 27 is wrong and the note should be \
+         reopened"
+    );
+
+    let truth = state_with_parked_bot(&[(3, RUN27_RESTED)], &[BotId(1), BotId(3)]);
+    assert!(
+        !truth.is_area_free("stone-furnace", &Position::new(x, y)),
+        "with bot 3 where it actually stood, the same site is blocked — so \
+         nothing in the planner needed changing, only what it is told"
+    );
+}
+
+/// And with the truth in hand the search moves on, so an accurate position is
+/// the whole fix at this end: no re-siting loop, no refusal ledger entry, no
+/// iteration spent.
+#[test]
+fn the_site_search_walks_past_run27s_parked_bot_once_it_is_told_the_truth() {
+    let state = state_with_parked_bot(&[(3, RUN27_RESTED)], &[BotId(1), BotId(3)]);
+    let from = Position::new(RUN27_SITE.0, RUN27_SITE.1);
+    let found = free_area_near(&state, &from, "stone-furnace").expect("open ground nearby");
+    assert!(
+        found != Position::new(RUN27_SITE.0, RUN27_SITE.1),
+        "the site the game refused three times must not be chosen a fourth"
+    );
+    assert!(
+        state.is_area_free("stone-furnace", &found),
+        "the search must not return a site it would itself refuse"
+    );
+}
+
+/// The planner is pure and deterministic, and a position arriving later must
+/// not make it less so: the same world built twice must choose the same site.
+///
+/// Cheap to assert and worth asserting here specifically, because the fix this
+/// file documents makes character positions change **more often** than they
+/// used to — a resting position now arrives as its own event. Ordering is the
+/// thing that would break first if `characters` were ever collected straight
+/// off the `players` `DashMap` instead of into a `BTreeMap`.
+#[test]
+fn the_same_world_sites_the_same_furnace_twice() {
+    let from = Position::new(RUN27_SITE.0, RUN27_SITE.1);
+    let bots = [BotId(1), BotId(3)];
+    let first = free_area_near(
+        &state_with_parked_bot(&[(3, RUN27_RESTED), (1, PARKED)], &bots),
+        &from,
+        "stone-furnace",
+    );
+    let second = free_area_near(
+        &state_with_parked_bot(&[(1, PARKED), (3, RUN27_RESTED)], &bots),
+        &from,
+        "stone-furnace",
+    );
+    assert_eq!(
+        first, second,
+        "identical inputs must give byte-identical plans, whatever order the \
+         positions were learned in"
+    );
+    assert!(first.is_some(), "the fixture has open ground near the site");
+}

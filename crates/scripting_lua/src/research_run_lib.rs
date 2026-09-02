@@ -142,8 +142,7 @@ mod tests {
         // count, which is a slower thing to read.
         let plans = format!(
             "{{{}}}",
-            std::iter::repeat("0")
-                .take(MILESTONES as usize)
+            std::iter::repeat_n("0", MILESTONES as usize)
                 .collect::<Vec<_>>()
                 .join(", ")
         );

@@ -282,6 +282,22 @@ pub(crate) fn world_with_prerequisite_chain(len: u32) -> FactorioWorld {
 /// it on" case is. Each is prerequisite-free and pack-free, so the fixture
 /// isolates the unlock question from research cost and prerequisite depth.
 pub(crate) fn world_with_locked_recipe(recipe: &str, unlockers: &[&str]) -> FactorioWorld {
+    locked_recipe_world(recipe, unlockers, false)
+}
+
+/// The same fixture, with every unlocker already researched **in the world**.
+///
+/// The distinction from calling `PlanState::set_researched` on the fixture
+/// above is the point: `set_researched` writes the plan's *overlay*, which
+/// means "an action in this plan will do it", whereas this says the force
+/// finished it before planning began. `recipe_gate` answers those two
+/// differently on purpose (`PlannedResearch` versus `Open`), so a test that
+/// wants the second cannot get there through the first.
+pub(crate) fn world_with_researched_unlocker(recipe: &str, unlockers: &[&str]) -> FactorioWorld {
+    locked_recipe_world(recipe, unlockers, true)
+}
+
+fn locked_recipe_world(recipe: &str, unlockers: &[&str], researched: bool) -> FactorioWorld {
     let world = fixture_world();
 
     let mut locked = world
@@ -308,7 +324,7 @@ pub(crate) fn world_with_locked_recipe(recipe: &str, unlockers: &[&str]) -> Fact
                   "name": "{tech}",
                   "enabled": true,
                   "upgrade": false,
-                  "researched": false,
+                  "researched": {researched},
                   "prerequisites": [],
                   "research_unit_ingredients": [],
                   "research_unit_count": 1,

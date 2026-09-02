@@ -490,11 +490,32 @@ pub fn smelting_ticks(state: &PlanState, recipe: &FactorioRecipe, machine: &str)
 /// *wrongly* plannable, emitting a craft the game would refuse.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecipeGate {
-    /// Craftable as things stand — either the force already has it, or the
-    /// technology that unlocks it is researched (possibly by this very plan).
+    /// Craftable as things stand: either the recipe is enabled outright, or
+    /// the force finished the technology that unlocks it before this plan
+    /// began. Nothing in the plan has to run first, so nothing orders against
+    /// it.
     Open,
     /// Craftable only after this technology is researched.
     NeedsResearch(String),
+    /// Disabled in the world, but a *sibling of this expansion* has already
+    /// undertaken the research that unlocks it.
+    ///
+    /// The distinction from [`RecipeGate::Open`] is the whole reason this
+    /// variant exists, and it is worth stating plainly: the recipe is not open,
+    /// it is *going to be* open, once an action this plan already contains has
+    /// run. A caller must therefore emit no second research subgoal — the work
+    /// is already in the network — but must still state
+    /// `Condition::Researched`, because that condition is what
+    /// `ActionNetwork::infer_edges` turns into the edge keeping the craft after
+    /// the unlock.
+    ///
+    /// Reporting this as `Open` is what `run-1788338409-63794` died of: a
+    /// `Have(automation-science-pack, 10)` split four ways, the first share
+    /// expanded the unlock, and the other three read the recipe as open and
+    /// came out with empty `deps` and `planned_start: 0`. The game answered
+    /// `could not have player client2 craft 3 automation-science-pack (but only
+    /// 0)` while client2 was holding six copper plates and five gear wheels.
+    PlannedResearch(String),
     /// Disabled and no technology unlocks it, so nothing this planner can do
     /// will ever turn it on. Live 2.1.17 has eight of these — `loader`,
     /// `pistol`, `infinity-chest` and friends, which are editor or map-editor
@@ -543,13 +564,16 @@ pub fn recipe_gate(state: &PlanState, recipe: &FactorioRecipe) -> RecipeGate {
         return RecipeGate::Open;
     }
     match unlocking_technology(state, &recipe.name) {
-        // `is_researched` reads the overlay as well as the world, so a
-        // technology an earlier sibling of this expansion already researched
-        // leaves the recipe Open and costs no second subgoal. That is what
-        // keeps the common case free: `Researched` emits its prerequisites
-        // before its science packs, and the technology unlocking a pack's
-        // recipe is normally one of those prerequisites.
-        Some(tech) if state.is_researched(&tech) => RecipeGate::Open,
+        // Three states, not two. The world's own flag is the only one that
+        // means "nothing has to happen first"; the overlay means "something in
+        // this plan has to happen first, and it is already written down". Both
+        // cost no second research subgoal — which is what keeps the common
+        // case free, since `Researched` emits its prerequisites before its
+        // science packs and the technology unlocking a pack's recipe is
+        // normally one of those prerequisites — but only the first of them
+        // needs no ordering edge. See `RecipeGate::PlannedResearch`.
+        Some(tech) if state.is_world_researched(&tech) => RecipeGate::Open,
+        Some(tech) if state.is_researched(&tech) => RecipeGate::PlannedResearch(tech),
         Some(tech) => RecipeGate::NeedsResearch(tech),
         None => RecipeGate::Unobtainable,
     }

@@ -374,9 +374,16 @@ impl Method for Smelt {
         // removal alone, so the plan does not load a furnace it may not yet
         // fire. See `HandCraft::expand` for why the subgoal is emitted first.
         let mut research_pre: Vec<Condition> = Vec::new();
-        if let RecipeGate::NeedsResearch(tech) = recipe_gate(&ctx.state, &recipe) {
-            steps.push(Step::Subgoal(Goal::Researched(tech.clone())));
-            research_pre.push(Condition::Researched(tech));
+        match recipe_gate(&ctx.state, &recipe) {
+            RecipeGate::NeedsResearch(tech) => {
+                steps.push(Step::Subgoal(Goal::Researched(tech.clone())));
+                research_pre.push(Condition::Researched(tech));
+            }
+            // The research is already in this network, put there by a sibling.
+            // The condition still has to be stated or nothing orders this
+            // smelt after it -- see `RecipeGate::PlannedResearch`.
+            RecipeGate::PlannedResearch(tech) => research_pre.push(Condition::Researched(tech)),
+            RecipeGate::Open | RecipeGate::Unobtainable => {}
         }
 
         // Ingredients, fuel, and the furnace itself, as subgoals.
@@ -802,11 +809,21 @@ impl Method for HandCraft {
         //
         // Emitted before the ingredients on purpose: the research subgoal
         // applies `Effect::Researched` as it expands, so a sibling ingredient
-        // whose own recipe the same technology unlocks comes out `Open` and
-        // costs nothing further.
-        if let RecipeGate::NeedsResearch(tech) = recipe_gate(&ctx.state, &recipe) {
-            steps.push(Step::Subgoal(Goal::Researched(tech.clone())));
-            pre.push(Condition::Researched(tech));
+        // whose own recipe the same technology unlocks comes out
+        // `PlannedResearch` and costs no second subgoal -- while still being
+        // ordered after the research, which `Open` would not have been.
+        match recipe_gate(&ctx.state, &recipe) {
+            RecipeGate::NeedsResearch(tech) => {
+                steps.push(Step::Subgoal(Goal::Researched(tech.clone())));
+                pre.push(Condition::Researched(tech));
+            }
+            // A sibling share already undertook the research, so there is
+            // nothing further to plan -- but this craft is still gated on it,
+            // and saying so is the only thing that orders it after the unlock.
+            // Omitting it is what dispatched three of four bots to craft a
+            // locked recipe at tick zero; see `RecipeGate::PlannedResearch`.
+            RecipeGate::PlannedResearch(tech) => pre.push(Condition::Researched(tech)),
+            RecipeGate::Open | RecipeGate::Unobtainable => {}
         }
 
         for (ingredient, amount) in ingredients_of(&recipe) {
@@ -3975,11 +3992,17 @@ mod tests {
         );
     }
 
-    /// A technology already researched leaves the recipe open and costs no
-    /// second subgoal — which is what keeps the common case free, since
-    /// `Researched` expands its prerequisites before its science packs.
+    /// A technology researched *by this plan* costs no second subgoal — which
+    /// is what keeps the common case free, since `Researched` expands its
+    /// prerequisites before its science packs — but it is not `Open`.
+    ///
+    /// This test used to assert `Open` here and was wrong to. The overlay says
+    /// an action **in this network** still has to run, so the recipe is not
+    /// craftable yet and whatever wants it must be ordered after that action.
+    /// Reading the two as one value is the defect
+    /// `run-1788338409-63794` stuck on; see `RecipeGate::PlannedResearch`.
     #[test]
-    fn an_already_researched_unlocker_leaves_the_recipe_open() {
+    fn an_unlocker_this_plan_researches_leaves_the_recipe_planned_not_open() {
         let mut s = locked_state("automation-science-pack", &["asp-tech"], &[BotId(1)]);
         let recipe = recipe_for(&s, "automation-science-pack").unwrap();
         assert_eq!(
@@ -3990,8 +4013,70 @@ mod tests {
         s.set_researched("asp-tech");
         assert_eq!(
             recipe_gate(&s, &recipe),
-            RecipeGate::Open,
-            "and open after it"
+            RecipeGate::PlannedResearch("asp-tech".into()),
+            "planned, not open: something in this network still has to run"
+        );
+    }
+
+    /// ...whereas a technology the *world* finished before planning began
+    /// really is `Open`: no action orders against it because there is no
+    /// action. Without this the variant above could have been implemented by
+    /// never reporting `Open` at all.
+    #[test]
+    fn an_unlocker_the_world_already_researched_leaves_the_recipe_open() {
+        let s = PlanState::from_world(
+            Arc::new(crate::test_world::world_with_researched_unlocker(
+                "automation-science-pack",
+                &["asp-tech"],
+            )),
+            &[BotId(1)],
+        );
+        let recipe = recipe_for(&s, "automation-science-pack").unwrap();
+        assert!(!recipe.enabled, "the fixture must still disable the recipe");
+        assert_eq!(recipe_gate(&s, &recipe), RecipeGate::Open);
+    }
+
+    /// And an open recipe emits neither the subgoal nor the condition: a
+    /// `Condition::Researched` nothing produces would be inert here, but it is
+    /// noise in every rendered plan and would quietly become load-bearing the
+    /// day a method starts reasoning over preconditions.
+    #[test]
+    fn a_world_researched_unlocker_leaves_the_craft_ungated() {
+        let s = PlanState::from_world(
+            Arc::new(crate::test_world::world_with_researched_unlocker(
+                "automation-science-pack",
+                &["asp-tech"],
+            )),
+            &[BotId(1)],
+        );
+        let mut ctx = ExpansionCtx::new(s.fork(), BotId(1));
+        let steps = HandCraft
+            .expand(
+                &Goal::Have {
+                    item: "automation-science-pack".into(),
+                    count: 1,
+                    whose: Holder::Share(BotId(1)),
+                },
+                &mut ctx,
+            )
+            .expect("the unlocker is researched, so the recipe plans");
+        assert!(
+            !subgoals(&steps)
+                .iter()
+                .any(|g| matches!(g, Goal::Researched(_))),
+            "nothing left to research: {:?}",
+            subgoals(&steps)
+        );
+        let Some(Step::Act(craft)) = steps.last() else {
+            panic!("the last step must be the craft");
+        };
+        assert!(
+            !craft
+                .pre
+                .iter()
+                .any(|c| matches!(c, Condition::Researched(_))),
+            "nothing to order against: {:?}",
+            craft.pre
         );
     }
 
@@ -4073,6 +4158,82 @@ mod tests {
             craft_start >= research_end,
             "craft starts at {craft_start}, research ends at {research_end}"
         );
+    }
+
+    /// The defect `workspace/runs/run-1788338409-63794` closed on, reduced.
+    ///
+    /// A shared `Have` for a locked recipe splits across the roster. The first
+    /// share expands the unlock — a `Researched` subgoal *and* a
+    /// `Condition::Researched` on its own craft — and applying that subgoal's
+    /// `Effect::Researched` to the expansion state left every *later* share
+    /// seeing an open recipe: no condition, therefore no inferred edge,
+    /// therefore `planned_start: 0`. In the live run three of the four bots
+    /// were dispatched `craft automation-science-pack` before anything had
+    /// unlocked the recipe, and the game answered "(but only 0)" while those
+    /// bots were holding the ingredients.
+    #[test]
+    fn every_share_of_a_locked_recipe_waits_for_the_one_research() {
+        let bots = vec![BotId(1), BotId(2)];
+        let s = locked_state("automation-science-pack", &["asp-tech"], &bots);
+        let net = expand(
+            &[Goal::Have {
+                item: "automation-science-pack".into(),
+                count: 2,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a locked recipe with an unlocker plans");
+        assert_eq!(
+            researched_techs(&net),
+            vec!["asp-tech".to_string()],
+            "one research for the whole force, not one per share"
+        );
+
+        let crafts: Vec<&Action> = net
+            .actions()
+            .filter(|a| matches!(&a.kind, ActionKind::Craft { item, .. } if item == "automation-science-pack"))
+            .collect();
+        assert_eq!(crafts.len(), 2, "one craft per share: {crafts:?}");
+        for craft in &crafts {
+            assert!(
+                craft
+                    .pre
+                    .contains(&Condition::Researched("asp-tech".into())),
+                "craft {} does not wait for the unlock: {:?}",
+                craft.id.0,
+                craft.pre
+            );
+        }
+
+        let plan = schedule(&net, &s, &bots).expect("schedulable");
+        let kind_of = |id: ActionId| net.actions().find(|a| a.id == id).map(|a| a.kind.clone());
+        let mut research_end = None;
+        let mut craft_starts = Vec::new();
+        for step in &plan.steps {
+            let StepKind::Act { action, .. } = &step.what else {
+                continue;
+            };
+            match kind_of(*action) {
+                Some(ActionKind::Research { tech }) if tech == "asp-tech" => {
+                    research_end = Some(step.end);
+                }
+                Some(ActionKind::Craft { item, .. }) if item == "automation-science-pack" => {
+                    craft_starts.push(step.start);
+                }
+                _ => {}
+            }
+        }
+        let research_end = research_end.expect("the research is scheduled");
+        assert_eq!(craft_starts.len(), 2, "both crafts are scheduled");
+        for start in craft_starts {
+            assert!(
+                start >= research_end,
+                "a craft starts at {start}, research ends at {research_end}"
+            );
+        }
     }
 
     // ---- research_trigger technologies -------------------------------------
@@ -4522,6 +4683,62 @@ mod tests {
             }],
             "another technology unlocks it, so this trigger is reachable"
         );
+    }
+
+    /// The live shape of `run-1788338409-63794`, end to end.
+    ///
+    /// There the unlock did not ride on an `ActionKind::Research` at all: the
+    /// technology was a Factorio 2.0 `craft-item` trigger (craft a lab), so
+    /// `attach_unlock` hung `Effect::Researched` on an ordinary craft. The
+    /// sibling shares therefore have to be ordered after *that craft*, which
+    /// only happens if they state the condition. Same fixture idea, cheaper
+    /// trigger item.
+    #[test]
+    fn every_share_waits_for_a_trigger_unlock_riding_on_a_craft() {
+        let bots = vec![BotId(1), BotId(2)];
+        let s = PlanState::from_world(
+            Arc::new(crate::test_world::world_with_trigger(
+                "asp-tech",
+                r#"{"type": "craft-item", "item": "iron-gear-wheel", "count": 1}"#,
+                Some("automation-science-pack"),
+                None,
+            )),
+            &bots,
+        );
+        let net = expand(
+            &[Goal::Have {
+                item: "automation-science-pack".into(),
+                count: 2,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a trigger-unlocked recipe plans");
+        assert!(
+            research_actions(&net).is_empty(),
+            "a trigger technology issues no research action"
+        );
+
+        let unlocker = net
+            .actions()
+            .find(|a| a.eff.contains(&Effect::Researched("asp-tech".into())))
+            .map(|a| a.id)
+            .expect("some action carries the unlock");
+        let crafts: Vec<ActionId> = net
+            .actions()
+            .filter(|a| matches!(&a.kind, ActionKind::Craft { item, .. } if item == "automation-science-pack"))
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(crafts.len(), 2, "one craft per share");
+        for craft in &crafts {
+            assert!(
+                net.preds(*craft).iter().any(|(from, _)| *from == unlocker),
+                "craft {} is not ordered after the unlock",
+                craft.0
+            );
+        }
     }
 
     /// A pack-researched technology must be completely unaffected: it still

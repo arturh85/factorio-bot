@@ -1344,6 +1344,25 @@ impl PlanState {
         matches!(self.technology(tech), Some(t) if t.researched)
     }
 
+    /// Had the acting force finished `tech` *before this plan started*?
+    ///
+    /// [`Self::is_researched`]'s world half, without the overlay. The two
+    /// answer different questions and the difference is load-bearing: a
+    /// technology the overlay knows about is one some action in this same plan
+    /// still has to run, so anything depending on it needs an ordering edge to
+    /// that action. A technology the *world* reports is already done, so
+    /// nothing orders against it and nothing has to.
+    ///
+    /// Collapsing the two is what `run-1788338409-63794` cost: the first share
+    /// of a split goal researched `automation-science-pack` and applied
+    /// `Effect::Researched` to the expansion state, so every later share read
+    /// the recipe as plainly open, emitted no `Condition::Researched`, got no
+    /// inferred edge, and was dispatched at tick zero. Three of four bots were
+    /// told to craft a recipe the force had not unlocked yet.
+    pub fn is_world_researched(&self, tech: &str) -> bool {
+        matches!(self.technology(tech), Some(t) if t.researched)
+    }
+
     pub fn set_researched(&mut self, tech: &str) {
         self.researched.insert(tech.to_string());
     }

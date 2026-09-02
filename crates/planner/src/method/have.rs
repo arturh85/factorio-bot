@@ -4760,4 +4760,182 @@ mod tests {
             count: 10,
         }));
     }
+
+    // ---- the unlock subtree's distribution ---------------------------------
+
+    /// The whole world an unlock-distribution test needs: four bots, a
+    /// `craft-item` trigger on a **lab**, and `automation-science-pack` locked
+    /// behind it. That is the live shape of
+    /// `workspace/runs/run-1788341905-92036` milestone 6, reduced to the
+    /// fixture recipes — the fixture's `lab` really does cost 10 gears, 10
+    /// circuits and 4 belts, so the bill under the trigger is the game's.
+    ///
+    /// Coal and spare furnaces are seeded because the fixture's coal patch is
+    /// too small for seven furnaces' worth of fuel and the expansion is
+    /// refused outright (`NoApplicableMethod` on `have 1 coal`). Fuel is not
+    /// what these tests are about; ore is.
+    ///
+    /// Positions are spread so travel cost is a real signal rather than a tie
+    /// broken by bot id, for the same reason `tests/red_science.rs` moves bot
+    /// 2 thirty tiles east.
+    fn unlock_state(bots: &[BotId]) -> PlanState {
+        let mut s = PlanState::from_world(
+            Arc::new(crate::test_world::world_with_trigger(
+                "asp-tech",
+                r#"{"type": "craft-item", "item": "lab", "count": 1}"#,
+                Some("automation-science-pack"),
+                None,
+            )),
+            bots,
+        );
+        for (index, bot) in bots.iter().enumerate() {
+            s.gain(*bot, "stone-furnace", 4);
+            s.gain(*bot, "coal", 40);
+            s.set_position(*bot, Position::new(index as f64 * 6.0, 0.));
+        }
+        s
+    }
+
+    /// **A characterisation test, not a regression test: it pins a defect.**
+    ///
+    /// Every action of the unlock subtree — mining the ore, the coal and the
+    /// stone, crafting and placing the furnaces, loading them, taking the
+    /// plates, crafting the gears, the cable, the circuits, the belts and the
+    /// lab itself — lands on **one** bot, whatever the roster. Only the
+    /// science-pack crafts, which `SplitAcrossBots` splits, reach the others.
+    ///
+    /// Measured on this fixture with four bots and a shortfall of four packs:
+    /// **49 / 12 / 12 / 12** steps and a makespan of 15922, against 12 / 12 /
+    /// 12 / 12 and 2304 for the same goal with `asp-tech` already researched.
+    /// So 86% of the makespan is the unlock, and all of it is one bot's. Of
+    /// that bot's 15922 ticks, 8280 are *mining* — a third of the plan, and
+    /// the part a roster could obviously share.
+    ///
+    /// **Why it is like this, and why the obvious fixes do not move it.** The
+    /// lab is one craft, so its ~50 iron plates and ~16 copper plates have to
+    /// meet in one inventory, and this planner has no way for a second bot to
+    /// put an item into a first bot's hands. `Researched` therefore states its
+    /// trigger bill as `Holder::Share(ctx.chain_actor)`, that share owns the
+    /// chain (`method/mod.rs`, the owner-binding comment), and the chain is
+    /// what welds all of it to one runner.
+    ///
+    /// * Splitting the *research* across shares builds four labs for one
+    ///   force-wide unlock — rejected in
+    ///   `docs/superpowers/notes/2026-09-02-craft-ingredients.md`.
+    /// * Hoisting the `Goal::Researched` to a top-level sibling was measured
+    ///   here and changes the distribution not at all (49 / 12 / 12 / 12): the
+    ///   subtree simply opens its own chain, owned by `chain_actor`, and the
+    ///   makespan gets *worse* — 16832 — because the hoisted chain no longer
+    ///   shares intermediates with the share it used to sit under.
+    ///
+    /// What would move it is a way for several bots to load one machine that
+    /// a single bot then unloads — the furnace as buffer. That is option 3 of
+    /// `docs/superpowers/notes/2026-09-02-rung-3-4-findings.md` and is
+    /// written up in `docs/superpowers/notes/2026-09-02-research-bill-spread.md`.
+    /// When it lands, this test's assertion flips and its numbers are the
+    /// before column.
+    #[test]
+    fn the_whole_unlock_subtree_lands_on_one_bot() {
+        let bots = vec![BotId(1), BotId(2), BotId(3), BotId(4)];
+        let s = unlock_state(&bots);
+        let net = expand(
+            &[Goal::Have {
+                item: "automation-science-pack".into(),
+                count: 4,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a trigger-unlocked pack plans");
+        let plan = schedule(&net, &s, &bots).expect("schedulable");
+
+        // The unlock subtree, named by what it is for rather than by where
+        // it was written: the action that carries `Effect::Researched` — here
+        // the lab craft, since this is a `craft-item` trigger — together with
+        // everything the network says must happen before it. Bots 2-4 also
+        // run their *own* shares' gears and plates, which is ordinary split
+        // work and not what this test is about.
+        let unlocker = net
+            .actions()
+            .find(|a| a.eff.contains(&Effect::Researched("asp-tech".into())))
+            .map(|a| a.id)
+            .expect("some action carries the unlock");
+        let mut subtree: BTreeSet<ActionId> = BTreeSet::new();
+        let mut frontier = vec![unlocker];
+        while let Some(id) = frontier.pop() {
+            if !subtree.insert(id) {
+                continue;
+            }
+            frontier.extend(net.preds(id).into_iter().map(|(from, _)| from));
+        }
+
+        let mut per_bot: BTreeMap<BotId, usize> = BTreeMap::new();
+        let mut unlock_owners: BTreeMap<BotId, usize> = BTreeMap::new();
+        for step in &plan.steps {
+            let StepKind::Act { action, .. } = &step.what else {
+                continue;
+            };
+            *per_bot.entry(step.bot).or_default() += 1;
+            if subtree.contains(action) {
+                *unlock_owners.entry(step.bot).or_default() += 1;
+            }
+        }
+        assert!(
+            subtree.len() >= 30,
+            "the unlock bill should be substantial, got {} actions",
+            subtree.len()
+        );
+        assert_eq!(
+            unlock_owners.len(),
+            1,
+            "the unlock subtree is spread over {unlock_owners:?}; whole plan {per_bot:?}"
+        );
+        // Stated as a ratio rather than as 49/12/12/12, so a recipe or a
+        // geometry change moves the numbers without moving the claim.
+        let busiest = per_bot.values().copied().max().expect("some work");
+        let idlest = per_bot.values().copied().min().expect("some work");
+        assert!(
+            busiest >= idlest * 3,
+            "one bot should be carrying the unlock alone: {per_bot:?}"
+        );
+    }
+
+    /// Same goal, same state, twice: byte-identical plans.
+    ///
+    /// The crate's determinism is already pinned for the un-researched path by
+    /// `tests/red_science.rs::expansion_is_deterministic`; this pins it for the
+    /// unlock path, where the expansion additionally walks a technology table
+    /// that reaches this planner through a `DashMap` and where `PlanState`'s
+    /// research overlay is written mid-expansion. Assignments as well as
+    /// labels, because *who* runs the unlock is the thing under discussion.
+    #[test]
+    fn the_unlock_path_plans_identically_twice() {
+        let bots = vec![BotId(1), BotId(2), BotId(3), BotId(4)];
+        let goal = Goal::Have {
+            item: "automation-science-pack".into(),
+            count: 4,
+            whose: Holder::Anyone,
+        };
+        let once = || {
+            let s = unlock_state(&bots);
+            let net = expand(
+                std::slice::from_ref(&goal),
+                &s,
+                &registry_for(&bots),
+                BotId(1),
+            )
+            .expect("plans");
+            let plan = schedule(&net, &s, &bots).expect("schedulable");
+            let labels: Vec<String> = net.actions().map(|a| a.label.clone()).collect();
+            let assignments: Vec<(BotId, u32, u32, String)> = plan
+                .steps
+                .iter()
+                .map(|s| (s.bot, s.start, s.end, format!("{:?}", s.what)))
+                .collect();
+            (labels, assignments, plan.makespan)
+        };
+        assert_eq!(once(), once());
+    }
 }

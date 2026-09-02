@@ -40,7 +40,12 @@ if #BOTS == 0 then
     return
 end
 
-local run_id = record.start()
+-- `video = true` films client 1's window at 720p alongside the frames. It is
+-- opt-in and deliberately non-fatal: if the window cannot be found, resized or
+-- grabbed, the capture reports `status: failed` with a reason and the run
+-- carries on with frames. Frames remain the tick-addressable record; the video
+-- is the watchable one, joined to it by `ticks.jsonl`.
+local run_id = record.start({video = true})
 print("recording run " .. run_id)
 
 -- Milestones building toward automation: gather the ores, smelt the plates

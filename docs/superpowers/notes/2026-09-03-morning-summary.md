@@ -27,9 +27,25 @@ before it was fixed:
 4. a planner reading the **`enemy` force's** technology, not the bots';
 5. a lab with no power, on a map whose water was not solid.
 
-## The new milestone, and where it actually stands
+## The new milestone: stage 1 is DONE and WITNESSED
 
-The starter factory. **Stage 1 works and does not.**
+**A factory produced, and we proved it.** Run 37:
+
+```
+WITNESSED: iron-plate in 1 watched machine(s) went 0 -> 1 (+1, wanted 1)
+           in 480 of 2400 ticks, 466 polls
+```
+
+An iron plate appeared in a furnace's output inventory **while every bot stood
+still**. `supervisor.witness` dispatches no actions, so a plate that appears can
+only have been smelted there — the first machine-made item in this project's
+history, and the first evidence of *production* rather than *placement*. 480
+ticks against a predicted 432 (drill 240 + furnace 192): model and game agree
+within 11%.
+
+Stage 2 — red science by machine, ~620 kW — is in progress.
+
+### How it got there, and why the intermediate step mattered
 
 Run 36 built a real cell — a burner drill standing on iron ore, a stone furnace
 exactly where the drill's drop point lands, both fuelled. Five actions, zero
@@ -38,6 +54,8 @@ failures, correct geometry.
 **It produced nothing.** `production.made` was `{coal: 37}` — the coal a bot
 hand-mined. The drill was fuelled at tick 8822 and the run declared `done` at
 **8823**. One tick. A burner drill needs ~240 ticks for a single ore.
+
+That failure is what the witness was built for, and run 37 closed it.
 
 That is the fourth appearance of one failure, and the first time we caught it
 *before* claiming success:

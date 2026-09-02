@@ -17,6 +17,7 @@ pub use run_script::{
 #[cfg(test)]
 mod doc_guard;
 mod error;
+pub mod factory_stage1_lib;
 pub mod lua_docs;
 pub mod research_run_lib;
 mod sandbox;

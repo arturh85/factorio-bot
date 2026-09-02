@@ -222,6 +222,47 @@ end
     }
 
     map_table.set(
+        "__doc_entry_game_tick",
+        String::from(
+            r#"
+--- asks the game what tick it is **now**
+-- Sends /silent-command, and needs no mod: `game.tick` is vanilla, so this
+-- keeps working against a save whose BotBridge copy is older than this binary.
+--
+-- **The difference from `rcon.last_tick` is the whole reason this exists.**
+-- That one reports the stamp on the last *timed* call, and only the calls that
+-- ACT carry one -- so a loop that waits without dispatching anything reads a
+-- frozen number there and concludes that no time passed. This asks, so it
+-- advances whether or not anything was dispatched. `supervisor.witness` is
+-- built on exactly that: it waits a stated number of ticks while dispatching
+-- nothing at all, and it can only say how long it waited because of this.
+--
+-- Ticks, never seconds. A headless server sharing a machine with graphical
+-- clients does not deliver 60 a second: run `run-1788320177-77989` waited the
+-- modelled 4032 ticks in wall clock and got ~3599 real ones, then asked a
+-- furnace for 20 plates and found 18. Converting a tick budget to seconds and
+-- sleeping is a weaker claim than reading this clock.
+--
+-- `nil` when the game answered nothing readable -- never a zero, which would
+-- read as tick zero.
+-- @treturn number|nil the current game tick, or nil if the game did not answer
+function rcon.game_tick()
+end
+    "#,
+        ),
+    )?;
+    {
+        let rcon = _rcon.clone();
+        map_table.set(
+            "game_tick",
+            lua.create_async_function(move |_lua, ()| {
+                let rcon = rcon.clone();
+                async move { rcon.as_ref().game_tick().await.map_err(rcon_error) }
+            })?,
+        )?;
+    }
+
+    map_table.set(
         "__doc_entry_frame_capture_start",
         String::from(
             r#"

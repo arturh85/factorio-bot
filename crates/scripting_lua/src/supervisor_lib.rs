@@ -1158,4 +1158,549 @@ mod tests {
             "only the empty re-plan asks"
         );
     }
+
+    // ---- Layer 6: the witness -- a machine that stands is not one that works
+
+    /// **The stage-1 cell, with the game's own numbers, and a decoy.**
+    ///
+    /// A burner mining drill at `(-35, 35)` facing north reports
+    /// `drop_position = (-35.35, 33.7)`; the stone furnace two tiles north at
+    /// `(-35, 33)` has the collision box the prototype gives it,
+    /// `±0.69921875`, so its near edge sits at `33.69921875`. **The drop point
+    /// is outside that box by 0.00078125 of a tile**, one part in 1280 — so a
+    /// witness that asked whether the point is inside the box would answer
+    /// "not fed" for the one layout stage 1 exists to build. See
+    /// `PlanState::delivers_into`, which decides it the same way.
+    ///
+    /// `__decoy` is the other half of the trap and is not incidental: stage
+    /// 1's bill hand-smelts in stone furnaces of its own, and one of them
+    /// holds two plates a *bot* put there. Nothing drops into it, so a witness
+    /// that watched every furnace in the area would be counting a bot's
+    /// leftovers as machine-made production.
+    const CELL_FIXTURE: &str = r#"
+        __drill = {
+            name = "burner-mining-drill", position = {x = -35, y = 35}, direction = 0,
+            drop_position = {x = -35.35, y = 33.7},
+            bounding_box = { left_top = {x = -35.9, y = 34.1},
+                             right_bottom = {x = -34.1, y = 35.9} },
+        }
+        __furnace = {
+            name = "stone-furnace", position = {x = -35, y = 33}, direction = 0,
+            bounding_box = { left_top = {x = -35.69921875, y = 32.30078125},
+                             right_bottom = {x = -34.30078125, y = 33.69921875} },
+            output_inventory = {},
+        }
+        __decoy = {
+            name = "stone-furnace", position = {x = -37, y = 33}, direction = 0,
+            bounding_box = { left_top = {x = -37.69921875, y = 32.30078125},
+                             right_bottom = {x = -36.30078125, y = 33.69921875} },
+            output_inventory = { { name = "iron-plate", quality = "normal", count = 2 } },
+        }
+    "#;
+
+    /// The real supervisor over a stub game.
+    ///
+    /// `rcon.game_tick` advances one tick per call, which is not an arbitrary
+    /// stub: Factorio processes rcon once per tick, so a round trip cannot come
+    /// back sooner than the next one. That is the only clock the wait has —
+    /// the sandbox has no sleep — and it is why the loop is self-paced rather
+    /// than spinning.
+    ///
+    /// The watched furnace produces nothing by default. A cell that stands and
+    /// makes nothing is the failure this whole layer exists for, so it is what
+    /// the fixture does unless a test says otherwise.
+    fn witness_harness(extra: &str) -> Lua {
+        let lua = sandboxed();
+        let stub = format!(
+            r#"
+            {CELL_FIXTURE}
+            __tick = 1000
+            __tick_step = 1
+            __tick_calls = 0
+            __find_calls = 0
+            __produce_from_tick = nil
+            __produce_count = 0
+            __world = {{ __drill, __furnace, __decoy }}
+            rcon = {{}}
+            rcon.game_tick = function()
+                __tick_calls = __tick_calls + 1
+                __tick = __tick + __tick_step
+                return __tick
+            end
+            rcon.find_entities_in_radius = function(_centre, _radius, name)
+                __find_calls = __find_calls + 1
+                if __produce_from_tick ~= nil and __tick >= __produce_from_tick then
+                    __furnace.output_inventory = {{
+                        {{ name = "iron-plate", quality = "normal", count = __produce_count }}
+                    }}
+                end
+                local out = {{}}
+                for _, e in ipairs(__world) do
+                    if name == nil or e.name == name then out[#out + 1] = e end
+                end
+                return out
+            end
+            goal = {{}}
+            __plan_calls, __run_calls, __holds_calls = 0, 0, 0
+            goal.plan = function(_g, _o)
+                __plan_calls = __plan_calls + 1
+                return {{ steps = {{}} }}
+            end
+            goal.run = function(_p) __run_calls = __run_calls + 1; return {{ done = true }} end
+            goal.holds = function(_g, _o) __holds_calls = __holds_calls + 1; return true end
+            __keyframe_calls = 0
+            record = {{}}
+            record.keyframe = function() __keyframe_calls = __keyframe_calls + 1 end
+        "#
+        );
+        lua.load(&stub).exec().expect("stub installs");
+        lua.load(SUPERVISOR_LUA).exec().expect("supervisor loads");
+        lua.load(extra).exec().expect("test fixture installs");
+        lua
+    }
+
+    /// The stage-1 witness spec, as `factory_stage1.lua` writes it.
+    const WITNESS_SPEC: &str = r#"supervisor.witness {
+        item = "iron-plate", from = "burner-mining-drill", into = "stone-furnace",
+        near = { x = 0, y = 0 }, radius = 250,
+        at_least = 1, within_ticks = 600, probe_ticks = 60,
+    }"#;
+
+    /// Drives one witness milestone to its terminal state and hands back the
+    /// last transition it produced, as a driver would see it.
+    fn drive_witness(lua: &Lua) {
+        lua.load(
+            r#"
+            local sup = supervisor.new(supervisor.list { __spec }, {})
+            local seen
+            local guard = 0
+            repeat
+                local t = sup:step()
+                if t.action ~= "acquired" and t.action ~= "finished" then seen = t end
+                guard = guard + 1
+                if guard > 20 then error("a witness milestone did not terminate") end
+            until sup:finished()
+            __action, __state = seen.action, seen.state
+            __code = seen.refusal and seen.refusal.code
+            __message = seen.refusal and seen.refusal.message
+            __reason = seen.reason
+            __w = seen.witness
+            __sup_state = sup.state
+            __report = sup:report()
+            "#,
+        )
+        .exec()
+        .expect("the witness milestone runs to a verdict");
+    }
+
+    /// **The property the whole thing rests on: it dispatches nothing.**
+    ///
+    /// If no bot acted, an item that appeared can only have been made by a
+    /// machine — that is the entire argument for why a witness is evidence
+    /// where `goal.holds` is only a claim about ground. A witness that planned,
+    /// or ran, or even asked the planner a question would forfeit it.
+    #[test]
+    fn a_witness_dispatches_nothing_at_all() {
+        let lua = witness_harness(&format!("__spec = {WITNESS_SPEC}"));
+        drive_witness(&lua);
+        let g = lua.globals();
+        assert_eq!(
+            g.get::<i64>("__plan_calls").unwrap(),
+            0,
+            "a witness must not cost the planner an expansion, or a ladder with \
+             one in it would plan differently from a ladder without"
+        );
+        assert_eq!(g.get::<i64>("__run_calls").unwrap(), 0, "and nothing ran");
+        assert_eq!(
+            g.get::<i64>("__holds_calls").unwrap(),
+            0,
+            "nor is `goal.holds` consulted: the witness asks the game, not the \
+             planner, and the planner's answer is the one that cannot see this"
+        );
+    }
+
+    /// A cell that produces is witnessed, and the wait stops as soon as it has
+    /// proved itself rather than running the clock out.
+    #[test]
+    fn a_cell_whose_output_rises_is_witnessed_and_the_wait_stops_early() {
+        let lua = witness_harness(&format!(
+            "__spec = {WITNESS_SPEC}
+             __produce_from_tick = 1120
+             __produce_count = 3"
+        ));
+        drive_witness(&lua);
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__action").unwrap(), "satisfied");
+        assert_eq!(g.get::<String>("__sup_state").unwrap(), "done");
+        let w: mlua::Table = g.get("__w").expect("the observation rides along");
+        assert_eq!(w.get::<i64>("before").unwrap(), 0);
+        assert_eq!(w.get::<i64>("after").unwrap(), 3);
+        assert_eq!(w.get::<i64>("gained").unwrap(), 3);
+        assert_eq!(
+            w.get::<i64>("watched").unwrap(),
+            1,
+            "one furnace is fed; the hand-smelt decoy two tiles west is not"
+        );
+        let elapsed = w.get::<i64>("elapsed_ticks").unwrap();
+        assert!(
+            (120..600).contains(&elapsed),
+            "the wait must end when the cell has proved itself, not when the \
+             deadline runs out; elapsed was {elapsed}"
+        );
+    }
+
+    /// **The failure the witness exists for.** The cell stands — the planner
+    /// would say the goal holds — and it makes nothing.
+    #[test]
+    fn a_cell_that_stands_and_produces_nothing_halts_with_its_own_code() {
+        let lua = witness_harness(&format!("__spec = {WITNESS_SPEC}"));
+        drive_witness(&lua);
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__action").unwrap(), "halted");
+        assert_eq!(g.get::<String>("__state").unwrap(), "stuck");
+        assert_eq!(
+            g.get::<String>("__code").unwrap(),
+            "supervisor::not_producing"
+        );
+        let message = g.get::<String>("__message").unwrap();
+        assert!(
+            message.contains("stands and produces nothing"),
+            "the verdict has to say which of the two it is: {message}"
+        );
+        assert!(
+            message.contains("no bot acted"),
+            "and why that is evidence rather than a coincidence: {message}"
+        );
+        let w: mlua::Table = g.get("__w").unwrap();
+        assert!(
+            w.get::<i64>("elapsed_ticks").unwrap() >= 600,
+            "a dead cell may only be called dead after the whole window"
+        );
+        let report: String = g.get("__report").unwrap();
+        assert!(
+            report.contains("milestone 1: stuck") && report.contains("refused:"),
+            "and it closes the milestone in the summary like any other verdict: \
+             {report}"
+        );
+    }
+
+    /// **A dead cell and an unbuilt one have different fixes, so they get
+    /// different verdicts.** Nothing is fed here — the drill is gone — and
+    /// reporting that as "produces nothing" would send the next reader to
+    /// check fuel levels for a cell that was never built.
+    #[test]
+    fn a_cell_that_was_never_built_reads_differently_from_a_dead_one() {
+        let lua = witness_harness(&format!(
+            "__spec = {WITNESS_SPEC}
+             __world = {{ __furnace, __decoy }}"
+        ));
+        drive_witness(&lua);
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__state").unwrap(), "stuck");
+        assert_eq!(g.get::<String>("__code").unwrap(), "supervisor::no_cell");
+        let message = g.get::<String>("__message").unwrap();
+        assert!(
+            message.contains("Nothing was built to watch"),
+            "it must name the absence, not the silence: {message}"
+        );
+        assert!(
+            message.contains("says nothing about whether anything produces"),
+            "and must refuse the verdict it did not earn: {message}"
+        );
+        assert!(
+            !message.contains("produces nothing"),
+            "which is the one sentence it must not be confusable with: {message}"
+        );
+    }
+
+    /// The decoy, from the other end. Two furnaces stand and one of them holds
+    /// plates a bot smelted; only the fed one is watched, so the witness still
+    /// says the cell produces nothing.
+    #[test]
+    fn a_furnace_nothing_drops_into_is_not_watched_however_full_it_is() {
+        let lua = witness_harness(&format!("__spec = {WITNESS_SPEC}"));
+        drive_witness(&lua);
+        let g = lua.globals();
+        let w: mlua::Table = g.get("__w").unwrap();
+        assert_eq!(
+            w.get::<i64>("watched").unwrap(),
+            1,
+            "two stone furnaces stand, one is fed"
+        );
+        assert_eq!(
+            w.get::<i64>("before").unwrap(),
+            0,
+            "the decoy's two hand-smelted plates must not be in the baseline — \
+             a witness that summed every furnace would call a bot's leftovers \
+             production the moment one more appeared anywhere"
+        );
+        assert_eq!(
+            g.get::<String>("__code").unwrap(),
+            "supervisor::not_producing"
+        );
+    }
+
+    /// **The 1/1280.** The drop point of the vanilla starter pair is outside
+    /// the furnace's collision box by 0.00078125 of a tile, so box containment
+    /// would reject the one layout stage 1 builds. A drop point resolves to the
+    /// tile it lands in; the furnace covers both of its tiles.
+    #[test]
+    fn the_drop_point_that_misses_the_box_by_one_part_in_1280_still_feeds_it() {
+        let lua = witness_harness("");
+        lua.load(
+            r#"
+            __fed = supervisor.delivers_into(__drill, __furnace)
+            -- the measurement, so nobody later "fixes" this into box containment
+            __miss = __drill.drop_position.y - __furnace.bounding_box.right_bottom.y
+            __decoy_fed = supervisor.delivers_into(__drill, __decoy)
+            __backwards = supervisor.delivers_into(__furnace, __drill)
+            "#,
+        )
+        .exec()
+        .expect("the pure geometry runs without a game");
+        let g = lua.globals();
+        assert!(
+            g.get::<bool>("__fed").unwrap(),
+            "the starter pair feeds; anything that says otherwise has rejected \
+             the whole of stage 1"
+        );
+        assert!(
+            (g.get::<f64>("__miss").unwrap() - 0.00078125).abs() < 1e-12,
+            "and it does so by 1/1280 of a tile, which is the number that makes \
+             tile containment load-bearing rather than a convenience"
+        );
+        assert!(
+            !g.get::<bool>("__decoy_fed").unwrap(),
+            "the furnace two tiles west of the fed one is not fed"
+        );
+        assert!(
+            !g.get::<bool>("__backwards").unwrap(),
+            "and a furnace reports no drop position at all, so it feeds nothing \
+             — the direction of the link is not symmetric"
+        );
+    }
+
+    /// A witness may not call a cell dead on a wait that did not happen.
+    ///
+    /// The game's clock stands still — paused, saving, gone — so the window
+    /// never elapses. The poll cap ends the loop, and the verdict is that
+    /// nothing was established, which is a different thing from "nothing was
+    /// produced".
+    #[test]
+    fn a_clock_that_does_not_advance_is_inconclusive_and_not_a_dead_cell() {
+        let lua = witness_harness(&format!(
+            "__spec = {WITNESS_SPEC}
+             __tick_step = 0"
+        ));
+        drive_witness(&lua);
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__state").unwrap(), "stuck");
+        assert_eq!(
+            g.get::<String>("__code").unwrap(),
+            "supervisor::witness_inconclusive",
+            "a wait that did not happen proves nothing in either direction"
+        );
+        let message = g.get::<String>("__message").unwrap();
+        assert!(
+            message.contains("clock is not advancing"),
+            "and it must name the cause it can actually see: {message}"
+        );
+        assert!(
+            !message.contains("produces nothing"),
+            "never the verdict it did not earn: {message}"
+        );
+    }
+
+    /// The other half of the same rule: a game that will not report a tick at
+    /// all cannot be waited in either.
+    #[test]
+    fn a_game_that_reports_no_tick_is_inconclusive_rather_than_assumed() {
+        let lua = witness_harness(&format!(
+            "__spec = {WITNESS_SPEC}
+             rcon.game_tick = function() return nil end"
+        ));
+        drive_witness(&lua);
+        assert_eq!(
+            lua.globals().get::<String>("__code").unwrap(),
+            "supervisor::witness_inconclusive"
+        );
+    }
+
+    /// A witness closes its milestone like any other, so the run's record and
+    /// summary carry it. `_close` is the only place a keyframe is written.
+    #[test]
+    fn a_witness_milestone_is_closed_and_gets_its_keyframe() {
+        let lua = witness_harness(&format!("__spec = {WITNESS_SPEC}"));
+        drive_witness(&lua);
+        assert_eq!(
+            lua.globals().get::<i64>("__keyframe_calls").unwrap(),
+            1,
+            "one milestone was closed, so exactly one keyframe"
+        );
+    }
+
+    /// A satisfied witness must still be recordable by a driver that only
+    /// knows the two `SatisfiedReason` strings `record.milestone_satisfied`
+    /// accepts. This pins the one it uses, because a third string would be
+    /// refused by name at the Rust boundary and take the run down with it.
+    #[test]
+    fn a_satisfied_witness_carries_a_reason_the_record_will_accept() {
+        let lua = witness_harness(&format!(
+            "__spec = {WITNESS_SPEC}
+             __produce_from_tick = 1120
+             __produce_count = 1"
+        ));
+        drive_witness(&lua);
+        assert_eq!(
+            lua.globals().get::<String>("__reason").unwrap(),
+            "already_satisfied",
+            "`record.milestone_satisfied` accepts only `already_satisfied` and \
+             `plan_empty`; anything else raises inside the recorder"
+        );
+    }
+
+    /// **`within_ticks` has no default and the constructor says so.** It is
+    /// the number that decides what a failure means; a library that guessed it
+    /// would be handing back a verdict nobody derived.
+    #[test]
+    fn a_witness_with_no_deadline_is_refused_at_construction() {
+        let lua = witness_harness("");
+        let err = lua
+            .load(
+                r#"supervisor.witness { item = "iron-plate", from = "a", into = "b",
+                                        near = { x = 0, y = 0 } }"#,
+            )
+            .exec()
+            .expect_err("a witness with no deadline must raise");
+        assert!(
+            format!("{err}").contains("`within_ticks` is required"),
+            "got: {err}"
+        );
+    }
+
+    /// And the rest of the shape, refused where the mistake is cheap rather
+    /// than twenty minutes into a run.
+    #[test]
+    fn a_witness_missing_the_two_ends_of_its_link_is_refused_at_construction() {
+        let lua = witness_harness("");
+        for (spec, want) in [
+            (
+                r#"supervisor.witness { from = "a", into = "b", near = {x=0,y=0}, within_ticks = 1 }"#,
+                "`item` must be a string",
+            ),
+            (
+                r#"supervisor.witness { item = "i", into = "b", near = {x=0,y=0}, within_ticks = 1 }"#,
+                "`from` must be a string",
+            ),
+            (
+                r#"supervisor.witness { item = "i", from = "a", near = {x=0,y=0}, within_ticks = 1 }"#,
+                "`into` must be a string",
+            ),
+            (
+                r#"supervisor.witness { item = "i", from = "a", into = "b", within_ticks = 1 }"#,
+                "`near` must be a position",
+            ),
+        ] {
+            let err = lua
+                .load(spec)
+                .exec()
+                .expect_err("an incomplete witness must raise at construction");
+            assert!(format!("{err}").contains(want), "wanted {want}, got: {err}");
+        }
+    }
+
+    /// The counter, on the shapes the bridge actually produces.
+    #[test]
+    fn count_item_reads_output_inventories_and_survives_the_null_sentinel() {
+        let lua = witness_harness("");
+        lua.load(
+            r#"
+            __empty = supervisor.count_item({ { name = "stone-furnace" } }, "iron-plate")
+            __mixed = supervisor.count_item({
+                { output_inventory = { { name = "iron-plate", count = 4 },
+                                       { name = "stone", count = 9 } } },
+                { output_inventory = { { name = "iron-plate", count = 2 } } },
+            }, "iron-plate")
+            "#,
+        )
+        .exec()
+        .expect("the pure counter runs");
+        let g = lua.globals();
+        assert_eq!(
+            g.get::<i64>("__empty").unwrap(),
+            0,
+            "an entity with no output inventory contributes nothing, and must \
+             not raise: `Option::None` arrives as light userdata, which is \
+             truthy, so `inv or {{}}` would hand `ipairs` a sentinel"
+        );
+        assert_eq!(
+            g.get::<i64>("__mixed").unwrap(),
+            6,
+            "summed across machines, and only the item asked for"
+        );
+    }
+
+    /// A witness whose game is not there is a **fault**, not a verdict: the
+    /// script was built wrong, nothing about the world was established, and
+    /// halting quietly would record a condition of the world for a defect in
+    /// the run. Same rule `refusal_of` follows for an unclassifiable raise.
+    #[test]
+    fn a_witness_with_no_game_to_look_at_raises_rather_than_halting() {
+        let lua = witness_harness(&format!("__spec = {WITNESS_SPEC}\nrcon = nil"));
+        let err = lua
+            .load(
+                "local sup = supervisor.new(supervisor.list { __spec }, {}) \
+                   repeat sup:step() until sup:finished()",
+            )
+            .exec()
+            .expect_err("a witness with no rcon must propagate");
+        assert!(
+            format!("{err}").contains("no game to witness it in"),
+            "got: {err}"
+        );
+    }
+
+    /// The loop's other milestones are untouched by a witness beside them: a
+    /// goal rung still plans and runs, and the witness rung still costs the
+    /// planner nothing.
+    #[test]
+    fn a_witness_beside_a_goal_leaves_the_goals_own_milestone_alone() {
+        let lua = witness_harness(&format!(
+            "__spec = {WITNESS_SPEC}
+             __produce_from_tick = 1120
+             __produce_count = 1"
+        ));
+        lua.load(
+            r#"
+            local sup = supervisor.new(supervisor.list { "a", __spec }, {})
+            local outcomes = {}
+            repeat
+                local t = sup:step()
+                if t.action == "satisfied" or t.action == "halted" then
+                    outcomes[#outcomes + 1] = t.milestone_index .. ":" .. t.action
+                end
+            until sup:finished()
+            __outcomes = table.concat(outcomes, " ")
+            __state = sup.state
+            "#,
+        )
+        .exec()
+        .expect("driver runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__state").unwrap(), "done");
+        assert_eq!(
+            g.get::<String>("__outcomes").unwrap(),
+            "1:satisfied 2:satisfied"
+        );
+        assert_eq!(
+            g.get::<i64>("__plan_calls").unwrap(),
+            1,
+            "the goal rung planned once; the witness rung planned not at all"
+        );
+        assert_eq!(
+            g.get::<i64>("__keyframe_calls").unwrap(),
+            2,
+            "two milestones closed, two keyframes"
+        );
+    }
 }

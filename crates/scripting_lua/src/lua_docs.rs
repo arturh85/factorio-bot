@@ -498,6 +498,7 @@ mod tests {
                 "function rcon.cheat_technology(",
                 "function rcon.craft(",
                 "function rcon.find_entities_in_radius(",
+                "function rcon.game_tick(",
                 "function rcon.insert_to_inventory(",
                 "function rcon.inventory_contents_at(",
                 "function rcon.mine(",

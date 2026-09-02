@@ -4,13 +4,20 @@
 -- furnace that is fuelled. Nine iron plates and ten stone; no research, no
 -- power, no executor or mod change.
 --
--- WHAT THIS CAN AND CANNOT TELL US. It answers "do the bots build the cell" --
--- do they site a drill on ore, put a furnace where the drill's drop point
--- lands, and fuel both. It does NOT answer "does the cell produce", because
--- nothing checks that yet: `PlanState` models neither fuel running out, nor
--- output backing up, nor a patch running dry, and `supervisor.witness` -- the
--- spec's answer, which dispatches no actions and asserts a terminal machine's
--- output rose -- does not exist. So a `satisfied` here means the cell STANDS.
+-- WHAT THIS CAN AND CANNOT TELL US. **Two rungs, and they answer two different
+-- questions.** The first asks "do the bots build the cell" -- do they site a
+-- drill on ore, put a furnace where the drill's drop point lands, and fuel
+-- both. Satisfying it means the cell STANDS, and standing is not producing:
+-- `PlanState` models neither fuel running out, nor output backing up, nor a
+-- patch running dry, so all three leave the planner saying yes to a cell that
+-- makes nothing.
+--
+-- The second rung is the witness, and it is the only line in this run that is
+-- evidence about production. It **dispatches no actions at all**: it reads the
+-- fed furnace's output inventory, waits, reads it again, and asserts the count
+-- rose. Because no bot acted in between, a plate that appeared can only have
+-- been smelted there. A `Producing` that holds is a claim about ground; only
+-- the witness is evidence about production, which is why the ladder runs both.
 --
 -- That distinction is the whole reason this file says so at the top. A placed
 -- machine reported as a working one is the same failure as the lab that was
@@ -132,14 +139,62 @@ print("recording run " .. run_id)
 -- several: gears, copper plates, science packs, a lab, and the research. Each
 -- of those now stands on its own, so a failure names which step is broken
 -- rather than "research did not happen".
+--
+-- **How long the witness waits, and why that number.** Stage 1's cell is a
+-- burner mining drill dropping into a stone furnace, and the planner's own
+-- arithmetic for it (`crates/planner/src/method/produce.rs`) is
+--
+--     drill:   ceil(60 * ore.mining_time / drill.mining_speed) = 240 ticks/ore
+--     furnace: smelting_ticks(recipe, stone-furnace) / yield   = 192 ticks/plate
+--
+-- Those are the two stages of one pipeline, so the FIRST plate is 240 + 192 =
+-- 432 ticks away -- the fill, not the period. Every plate after it is 240,
+-- because the drill is the bottleneck.
+--
+-- 2400 is 5.5 times that fill. The margin is not for wall-clock slowness --
+-- the witness counts game ticks, so a server running below 60 UPS costs it
+-- seconds and not ticks -- it is for the two numbers above being a MODEL:
+-- `mining_speed`, `mining_time` and the smelting time are read off the
+-- prototypes, and the whole reason to witness a cell is that the model can be
+-- optimistic. A window five times the prediction is one nothing but a genuinely
+-- dead cell reaches.
+--
+-- And the cost is asymmetric on purpose: `at_least = 1` with a 2400-tick window
+-- means a working cell stops the wait at ~500 ticks (about 8 seconds), while
+-- only a dead one pays the whole 40. One plate is enough because no bot acts
+-- during the window -- an item that appears in a furnace's output can only have
+-- been smelted there.
+--
+-- `near`/`radius` are how the cell is found at all: the planner chose its site,
+-- this script never learns it, so the witness sweeps for a stone furnace that a
+-- burner drill's own reported `drop_position` lands in. The hand-smelt furnaces
+-- the bill also builds have nothing dropping into them and are not watched.
+local WITNESS_WITHIN_TICKS = 2400
+
 local goals = {
     goal.producing("iron-plate", 15),
+    supervisor.witness {
+        item = "iron-plate",
+        from = "burner-mining-drill",
+        into = "stone-furnace",
+        near = { x = 0, y = 0 },
+        radius = 300,
+        at_least = 1,
+        within_ticks = WITNESS_WITHIN_TICKS,
+    },
 }
 -- Must stay aligned with `goals` above, index for index: these strings are what
 -- the record shows for each milestone, and a mismatch would label a failure
 -- with the wrong step.
+--
+-- The second rung's name carries the word "witness" because the record cannot:
+-- `record.milestone_satisfied` takes one of two `SatisfiedReason` strings and a
+-- witness reports `already_satisfied`, which is true (nothing was planned and
+-- the world met it) but does not say what kind of milestone it was. The name
+-- does.
 local names = {
     "an iron-plate cell producing 15/min",
+    "witness: the cell's furnace fills while every bot stands still",
 }
 
 local sup = supervisor.new(supervisor.list(goals),
@@ -215,7 +270,18 @@ repeat
         if t.first_error ~= nil then print("        first error: " .. tostring(t.first_error)) end
     elseif t.action == "satisfied" then
         record.milestone_satisfied(t.milestone_index, t.iteration or 0, t.reason)
-        print("   SATISFIED (" .. tostring(t.reason) .. ")")
+        -- A witness's satisfaction is the one line in this run that is evidence
+        -- about production rather than about ground, so it prints its numbers
+        -- rather than the reason word it had to borrow.
+        if type(t.witness) == "table" then
+            print(string.format(
+                "   WITNESSED: %s in %d watched machine(s) went %d -> %d (+%d, wanted %d) in %d of %d ticks, %d polls",
+                tostring(t.witness.item), t.witness.watched, t.witness.before,
+                t.witness.after, t.witness.gained, t.witness.at_least,
+                t.witness.elapsed_ticks, t.witness.within_ticks, t.witness.polls))
+        else
+            print("   SATISFIED (" .. tostring(t.reason) .. ")")
+        end
     elseif t.action == "halted" then
         -- `sup.first_error` is the first failed action's own text for this
         -- milestone (set by the "ran" branch above, nil for `stuck_silent`,

@@ -115,6 +115,232 @@ local function refusal_of(err)
     return refusal
 end
 
+-- ---------------------------------------------------------------------------
+-- The witness: the durative half of "producing"
+-- ---------------------------------------------------------------------------
+--
+-- A `Goal::Producing` is satisfied by STRUCTURE. The planner asks whether a
+-- burner drill stands on ore and drops into a fuelled stone furnace, and it can
+-- answer yes about a cell that is producing nothing at all: fuel run out,
+-- output backed up, patch exhausted. `PlanState` models none of the three --
+-- nothing in it reads a fuel level or a container's contents -- so `goal.holds`
+-- keeps saying yes while the cell stands there dead. Those are rows 1, 3 and 4
+-- of `docs/superpowers/specs/2026-09-03-starter-factory-design.md`'s failure
+-- table, and the spec puts all three on this.
+--
+-- The witness is the other half, and its whole strength is one sentence:
+-- **it dispatches no actions at all**. It reads a machine's output inventory,
+-- waits, reads it again, and asserts the count rose. Because no bot acted in
+-- between, an item that appeared can only have been made by a machine. That is
+-- a property the structural predicate cannot have, which is why the two are not
+-- redundant and why the ladder runs both.
+--
+-- It is the same failure this project has already paid for three times -- a lab
+-- placed and never powered, pole coverage mistaken for generation, and
+-- `only_ghosts = true` placing a blueprint whose entities overlap. A machine
+-- that stands is not a machine that works.
+
+--- How far two collision boxes may reach into each other before it counts.
+-- `crates/planner/src/state.rs`'s `TOUCH_SLACK`, verbatim. A 1/512 tile is
+-- finer than the 1/256 the game stores positions at, so nothing this admits is
+-- a collision the game would see; it only keeps float noise from reading as one.
+local TOUCH_SLACK = 1 / 512
+
+--- Does `source` drop what it makes into `target`?
+--
+-- Pure, and answered entirely from what the **game itself** reported: the mod
+-- sends `drop_position` and `bounding_box` on every entity it serialises
+-- (`mods/BotBridge/types.lua`, `serialize_entity`), so this needs no copy of
+-- the planner's hand-written `delivery_offset` table and cannot disagree with
+-- it. A wrong table is exactly the risk row 5 of the spec's failure list names,
+-- and the point of a witness is not to inherit it.
+--
+-- **Tiles, not the box, and the number that decides it.** A burner drill at an
+-- integer position facing north drops at `(-0.35, -1.3)` from its own centre.
+-- The stone furnace two tiles north -- the vanilla starter pair, the entire
+-- content of stage 1 -- has a collision box of +/-0.69921875, so its near edge
+-- sits at `-1.30078125` and the drop point misses it by **0.00078125 of a
+-- tile**, one part in 1280. Asking whether the point is inside the box would
+-- therefore answer "not fed" for the one layout stage 1 exists to build. A drop
+-- point resolves to the tile it lands in, the furnace covers both of its tiles,
+-- and the 1/1280 never comes up. `PlanState::delivers_into` decides it the same
+-- way for the same reason.
+--
+-- `false` whenever either half cannot be read -- an entity with no drop point,
+-- a target with no bounding box. Refusing to guess, in the direction that
+-- reports less rather than more.
+function supervisor.delivers_into(source, target)
+    if type(source) ~= "table" or type(target) ~= "table" then return false end
+    local drop = source.drop_position
+    -- By type, not by truthiness: `Option::None` crosses the Rust bridge as
+    -- mlua's null sentinel, which is light userdata and therefore TRUE. Every
+    -- entity that is not a drill or an inserter carries one here.
+    if type(drop) ~= "table" or type(drop.x) ~= "number" or type(drop.y) ~= "number" then
+        return false
+    end
+    local box = target.bounding_box
+    if type(box) ~= "table" or type(box.left_top) ~= "table"
+        or type(box.right_bottom) ~= "table" then
+        return false
+    end
+    local x0 = math.floor(box.left_top.x + TOUCH_SLACK)
+    local x1 = math.floor(box.right_bottom.x - TOUCH_SLACK)
+    local y0 = math.floor(box.left_top.y + TOUCH_SLACK)
+    local y1 = math.floor(box.right_bottom.y - TOUCH_SLACK)
+    local tx, ty = math.floor(drop.x), math.floor(drop.y)
+    return tx >= x0 and tx <= x1 and ty >= y0 and ty <= y1
+end
+
+--- Which of `candidates` something in `sources` drops into.
+--
+-- Pure. This is how the witness decides **which machine to watch**, and it is
+-- the reason the answer is trustworthy: the stage-1 bill hand-smelts in stone
+-- furnaces of its own, and a witness that watched every furnace in the area
+-- would count a bot's leftover batch finishing as machine-made production. A
+-- furnace nothing drops into is not a cell, so it is not watched.
+--
+-- An entity is never its own source: an assembling machine that dropped into
+-- itself would otherwise witness itself.
+--
+-- Order is `candidates`' own, preserved rather than sorted, because the caller
+-- sums over the result and the sum does not depend on order. Nothing here reads
+-- the order the game returned equal entities in.
+function supervisor.fed_machines(sources, candidates)
+    local out = {}
+    if type(sources) ~= "table" or type(candidates) ~= "table" then return out end
+    for _, target in ipairs(candidates) do
+        for _, source in ipairs(sources) do
+            if source ~= target and supervisor.delivers_into(source, target) then
+                out[#out + 1] = target
+                break
+            end
+        end
+    end
+    return out
+end
+
+--- How many of `item` sit in these entities' **output** inventories.
+--
+-- Output only, and that is the whole trick. A furnace's output holds what the
+-- furnace made; its input holds what somebody put there. The mod reports both
+-- `output_inventory` and `fuel_inventory` and does not report input slots at
+-- all (`serialize_entity`), which is a real gap for other purposes and exactly
+-- right for this one.
+function supervisor.count_item(entities, item)
+    local total = 0
+    if type(entities) ~= "table" then return total end
+    for _, entity in ipairs(entities) do
+        local inv = type(entity) == "table" and entity.output_inventory or nil
+        -- By type again: an entity with no output inventory arrives as the null
+        -- sentinel, and `inv or {}` would hand `ipairs` light userdata.
+        if type(inv) == "table" then
+            for _, slot in ipairs(inv) do
+                if type(slot) == "table" and slot.name == item then
+                    total = total + (tonumber(slot.count) or 0)
+                end
+            end
+        end
+    end
+    return total
+end
+
+--- Names a machine by kind and where it stands, for the watch set.
+-- `%.5f` resolves the 1/256 of a tile the game stores positions at.
+local function machine_key(entity)
+    local p = type(entity) == "table" and entity.position or nil
+    if type(p) ~= "table" then return nil end
+    return string.format("%s@%.5f,%.5f", tostring(entity.name), p.x, p.y)
+end
+
+--- Build a witness milestone: a rung that dispatches nothing and asserts
+--- something happened anyway.
+--
+--     supervisor.witness {
+--         item = "iron-plate",
+--         from = "burner-mining-drill", into = "stone-furnace",
+--         near = { x = 0, y = 0 }, radius = 250,
+--         at_least = 1, within_ticks = 2400,
+--     }
+--
+-- Hand it to a source like any goal: `supervisor.list { goal.producing(...),
+-- supervisor.witness { ... } }`. **It is a rung, not an automatic follow-up.**
+-- A witness costs real game time -- a dead cell pays the whole window -- and
+-- charging every milestone for one would be paying to watch a `have` goal that
+-- has no machine in it. So the ladder says when to look, which is also the
+-- spec's own position: that every `Producing` milestone is followed by its
+-- witness is a fact about what a run proves, and belongs in the run.
+--
+-- `within_ticks` has **no default**, deliberately. It is the number that
+-- decides what a failure means, and a library that guessed it would be handing
+-- back a verdict nobody derived. Derive it from the cell's own predicted rate:
+-- stage 1's drill takes 240 ticks an ore and its furnace 192 ticks a plate, so
+-- the first plate is 432 ticks away and each one after that is 240.
+--
+-- `from`/`into` name the two ends of one machine-to-machine link, which is
+-- stage 1's whole shape. A longer chain -- drill to furnace to assembler --
+-- means naming the terminal, and choosing it is the caller's job because only
+-- the caller knows which end of the chain the goal was about.
+function supervisor.witness(spec)
+    if type(spec) ~= "table" then
+        error("supervisor.witness: expected a table of options")
+    end
+    local function required_string(key)
+        if type(spec[key]) ~= "string" then
+            error("supervisor.witness: `" .. key .. "` must be a string naming an entity or item")
+        end
+        return spec[key]
+    end
+    local function positive_number(key, default)
+        local v = spec[key]
+        if v == nil then
+            if default == nil then
+                error("supervisor.witness: `" .. key .. "` is required and has no default")
+            end
+            return default
+        end
+        if type(v) ~= "number" or v <= 0 then
+            error("supervisor.witness: `" .. key .. "` must be a positive number")
+        end
+        return v
+    end
+    local item = required_string("item")
+    local from = required_string("from")
+    local into = required_string("into")
+    local near = spec.near
+    if type(near) ~= "table" or type(near.x) ~= "number" or type(near.y) ~= "number" then
+        error("supervisor.witness: `near` must be a position, `{ x = ..., y = ... }`")
+    end
+    local within_ticks = positive_number("within_ticks")
+    return {
+        __witness = true,
+        item = item,
+        from = from,
+        into = into,
+        near = { x = near.x, y = near.y },
+        radius = positive_number("radius", 250),
+        at_least = positive_number("at_least", 1),
+        within_ticks = within_ticks,
+        -- How often the output inventory is re-read while waiting. Every 60
+        -- ticks is once a game-second: frequent enough that a working cell
+        -- stops the wait as soon as it has proved itself, cheap enough that the
+        -- reply is a handful of furnaces.
+        probe_ticks = positive_number("probe_ticks", 60),
+        -- The loop has no sleep -- the sandbox has none -- so it waits by
+        -- asking the game what tick it is, and Factorio processes rcon once per
+        -- tick, which paces it at roughly one poll per tick. The cap is what
+        -- stops a game whose clock is NOT advancing (paused, saving, gone) from
+        -- spinning forever, and hitting it is its own verdict: inconclusive,
+        -- never "dead".
+        max_polls = positive_number("max_polls", within_ticks + 600),
+    }
+end
+
+--- Is this milestone a witness rather than a goal?
+-- A real goal value is userdata, so this cannot collide with one.
+function supervisor.is_witness(milestone)
+    return type(milestone) == "table" and milestone.__witness == true
+end
+
 local Sup = {}
 Sup.__index = Sup
 
@@ -197,6 +423,168 @@ function Sup:_close(outcome)
     end
 end
 
+--- Run a witness milestone to its verdict, and close it. Dispatches nothing.
+--
+-- Three ways this ends, and **they are three because their fixes are three**.
+-- The one thing a witness must never do is report "your cell is dead" for a
+-- cell that was never built, or for a wait that was cut short:
+--
+--   * `supervisor::no_cell` -- nothing in the area is fed by anything, so
+--     there is no cell to watch. The build did not happen, or the drill faces
+--     the wrong way and drops on the ground. **Says nothing about production**,
+--     and says so.
+--   * `supervisor::not_producing` -- a cell IS standing, the full window
+--     elapsed, and its output did not rise by `at_least`. This is the verdict
+--     the witness exists to be able to give: placed, fed, fuelled on paper, and
+--     making nothing.
+--   * `supervisor::witness_inconclusive` -- the poll budget ran out before the
+--     window did, or the game would not say what tick it is. Nothing is
+--     established either way, and calling that a dead cell would be the same
+--     mistake as calling an unanswerable goal a satisfied one.
+--
+-- All three close the milestone `stuck` and carry their reason on `t.refusal`,
+-- which is the family a planner refusal and `supervisor::unanswerable` are
+-- already in: a verdict that halts cleanly with a stated reason, on the channel
+-- every driver already reads. `code` is what tells them apart without reading
+-- the sentence, and no `PlannerError` can produce any of these three.
+function Sup:_witness(w)
+    local function observation(before, after, elapsed, polls, watched, missing)
+        return { item = w.item, watched = watched, missing = missing,
+                 before = before, after = after, gained = after - before,
+                 at_least = w.at_least, elapsed_ticks = elapsed,
+                 within_ticks = w.within_ticks, polls = polls }
+    end
+    local function halt(code, message, obs)
+        self.refusal = { code = code, message = message }
+        self:_close("stuck")
+        self.state = "stuck"
+        return { action = "halted", state = "stuck", milestone_index = self.index,
+                 steps = 0, iteration = 0, refusal = self.refusal, witness = obs }
+    end
+    local where = string.format("(%s, %s)", tostring(w.near.x), tostring(w.near.y))
+
+    -- A witness with no game to look at is a FAULT, not a verdict: the run was
+    -- built wrong, nothing about the world is established, and quietly halting
+    -- would record a condition of the world for a defect in the script. Same
+    -- rule `refusal_of` follows -- "cannot tell" is never "carry on".
+    if type(rcon) ~= "table" or type(rcon.find_entities_in_radius) ~= "function"
+        or type(rcon.game_tick) ~= "function" then
+        error("supervisor: milestone " .. tostring(self.index) .. " is a witness, "
+            .. "but there is no game to witness it in: `rcon` is missing "
+            .. "`find_entities_in_radius` and/or `game_tick`", 0)
+    end
+
+    local sources = rcon.find_entities_in_radius(w.near, w.radius, w.from)
+    local candidates = rcon.find_entities_in_radius(w.near, w.radius, w.into)
+    if type(sources) ~= "table" then sources = {} end
+    if type(candidates) ~= "table" then candidates = {} end
+    local watched = supervisor.fed_machines(sources, candidates)
+    if #watched == 0 then
+        return halt("supervisor::no_cell", string.format(
+            "milestone %d witnesses %s, but no %s within %d tiles of %s is fed "
+            .. "by a %s: %d %s and %d %s stand there and none of them are a "
+            .. "cell. Nothing was built to watch, so this says nothing about "
+            .. "whether anything produces",
+            self.index, w.item, w.into, w.radius, where, w.from,
+            #sources, w.from, #candidates, w.into),
+            observation(0, 0, 0, 0, 0, 0))
+    end
+
+    -- The watch set is fixed here, by name and position, and re-read by those
+    -- keys. Re-deriving it every probe would let a machine placed mid-window
+    -- into the sum, and nothing places anything mid-window -- but the guard
+    -- costs one table and removes the question.
+    local watch = {}
+    for _, machine in ipairs(watched) do
+        local key = machine_key(machine)
+        if key ~= nil then watch[key] = true end
+    end
+
+    local function read()
+        local ok, list = pcall(rcon.find_entities_in_radius, w.near, w.radius, w.into)
+        if not ok or type(list) ~= "table" then return nil, nil end
+        local seen, found = {}, 0
+        for _, machine in ipairs(list) do
+            local key = machine_key(machine)
+            if key ~= nil and watch[key] then
+                seen[#seen + 1] = machine
+                found = found + 1
+            end
+        end
+        return supervisor.count_item(seen, w.item), #watched - found
+    end
+
+    local t0 = rcon.game_tick()
+    if type(t0) ~= "number" then
+        return halt("supervisor::witness_inconclusive", string.format(
+            "milestone %d watched %d %s but the game would not say what tick it "
+            .. "is, so the wait cannot be timed and nothing follows from it",
+            self.index, #watched, w.into),
+            observation(0, 0, 0, 0, #watched, 0))
+    end
+    local before = supervisor.count_item(watched, w.item)
+    local after, missing, now, polls = before, 0, t0, 0
+    local next_probe = w.probe_ticks
+
+    while true do
+        polls = polls + 1
+        if polls > w.max_polls then
+            return halt("supervisor::witness_inconclusive", string.format(
+                "milestone %d gave up after %d polls with only %d of %d ticks "
+                .. "elapsed: the game's clock is not advancing (paused, saving "
+                .. "or gone). %s went from %d to %d, and no verdict follows "
+                .. "from a wait that did not happen",
+                self.index, polls - 1, now - t0, w.within_ticks,
+                w.item, before, after),
+                observation(before, after, now - t0, polls - 1, #watched, missing))
+        end
+        -- `pcall`: one refused round trip in a wait thousands long must not end
+        -- the run. A hiccup costs this poll and nothing else -- the clock is
+        -- read again next time round, and the cap above still bounds the loop.
+        local ok, tick = pcall(rcon.game_tick)
+        if ok and type(tick) == "number" then now = tick end
+        local elapsed = now - t0
+        local over = elapsed >= w.within_ticks
+        if over or elapsed >= next_probe then
+            next_probe = elapsed + w.probe_ticks
+            local seen, gone = read()
+            if seen ~= nil then after, missing = seen, gone end
+            if after - before >= w.at_least then
+                self:_close("satisfied")
+                self.state = "acquiring"
+                return { action = "satisfied", state = "acquiring",
+                         milestone_index = self.index, steps = 0, iteration = 0,
+                         -- `already_satisfied`, and not a word of its own.
+                         -- `SatisfiedReason` (`crates/core/src/record/mod.rs`)
+                         -- has exactly two variants, both mirrored into
+                         -- `app/src/api/types.ts` and the OpenAPI snapshot, so
+                         -- a third is a cross-boundary change this does not
+                         -- make. Of the two, this is the one that is not a lie:
+                         -- no planning was attempted and the world met the
+                         -- milestone without being asked to do anything. WHAT
+                         -- was observed is on `t.witness`, and the milestone's
+                         -- recorded name says "witness" out loud.
+                         reason = "already_satisfied",
+                         witness = observation(before, after, elapsed, polls,
+                                               #watched, missing) }
+            end
+        end
+        if over then break end
+    end
+
+    local gone = ""
+    if missing > 0 then
+        gone = string.format(" (%d of them is no longer there)", missing)
+    end
+    return halt("supervisor::not_producing", string.format(
+        "milestone %d watched %d %s that a %s feeds%s for %d ticks and no bot "
+        .. "acted: %s went from %d to %d, %d short of the %d that would have "
+        .. "proved a machine made it. The cell stands and produces nothing",
+        self.index, #watched, w.into, w.from, gone, now - t0,
+        w.item, before, after, w.at_least - (after - before), w.at_least),
+        observation(before, after, now - t0, polls, #watched, missing))
+end
+
 --- Perform exactly one action and return a transition record.
 function Sup:step()
     if self:finished() then
@@ -224,6 +612,16 @@ function Sup:step()
     end
 
     if self.state == "planning" then
+        -- A witness never plans. It is checked here rather than in `acquiring`
+        -- so it shares the milestone bookkeeping that branch sets up -- index,
+        -- history, keyframe -- and so `goal.plan` is not called even once for
+        -- it: a milestone that dispatches nothing must also not cost the
+        -- planner an expansion, or a ladder with a witness in it would produce
+        -- different plans from one without.
+        if supervisor.is_witness(self.milestone) then
+            return self:_witness(self.milestone)
+        end
+
         -- Wrapped, and only just: `goal.plan` raises for two different reasons
         -- and exactly one of them is this loop's business.
         --

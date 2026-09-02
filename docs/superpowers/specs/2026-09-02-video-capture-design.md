@@ -380,7 +380,7 @@ ffmpeg -hide_banner -nostdin
   -vf scale=1280:-2 -pix_fmt yuv420p
   -c:v libx264 -preset veryfast -crf 28 -tune zerolatency
   -x264-params keyint=30:min-keyint=30:scenecut=0
-  -movflags +frag_keyframe+empty_moov+default_base_is_moof
+  -movflags +frag_keyframe+empty_moov+default_base_moof
   -progress pipe:1
   <workspace>/video/video.mp4
 ```

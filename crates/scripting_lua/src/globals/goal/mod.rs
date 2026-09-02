@@ -2194,12 +2194,19 @@ mod tests {
         world.update_force(force).expect("update_force");
         seed_players(&world, &[1]);
         // `fixture_world`'s lake is the 4x4 block of tiles at (38..=41) on
-        // both axes. From here it is ~80 tiles away: visible, and too far to
-        // carry a power plant to.
+        // both axes. From here it is ~240 tiles away -- beyond the wide scan,
+        // so the planner cannot find water at all.
+        //
+        // This used to stand at (-40, 40), ~80 tiles out, and assert the
+        // *distance* refusal. `e3ea04fe` deleted that refusal deliberately:
+        // the walk is already priced by `travel_ticks`, so a distant plant is a
+        // slower plan, not an impossible one, and a bound on top charged the
+        // same distance twice. Only the unreachable case is still a refusal,
+        // and this test now pins that one.
         world
             .player_changed_position(PlayerChangedPositionEvent {
                 player_id: 1,
-                position: Position::new(-40., 40.),
+                position: Position::new(-200., 40.),
             })
             .expect("moving a seeded player cannot fail");
 
@@ -2235,7 +2242,7 @@ mod tests {
         );
         let text: String = result.get("text").expect("text");
         assert!(
-            text.contains("the nearest water is"),
+            text.contains("needs water") && text.contains("can see none"),
             "the planner's own sentence must survive to the script: {text}"
         );
         assert_eq!(
@@ -2243,13 +2250,13 @@ mod tests {
                 .get::<Option<String>>("code")
                 .expect("code")
                 .as_deref(),
-            Some("planner::power_plant_too_far_from_water"),
+            Some("planner::power_plant_needs_water"),
             "the refusal must be recognisable by the planner's own code, \
              not by matching the message: {text}"
         );
         let message: String = result.get("message").expect("message");
         assert!(
-            message.starts_with("the nearest water is"),
+            message.starts_with("a power plant needs water"),
             "the carried message is the planner's sentence, unprefixed, so a \
              report line can put its own word in front of it: {message}"
         );

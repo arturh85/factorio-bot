@@ -1,5 +1,6 @@
 use crate::actuator::{ActionTicks, Actuator, ActuatorError, ActuatorFailure};
 use async_trait::async_trait;
+use factorio_bot_core::constants::BOT_FORCE;
 use factorio_bot_core::factorio::rcon::{ActionFailure, Dispatch, FactorioRcon, approach_radius};
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::record::map::{EntitySnapshot, Placement, drift_between};
@@ -112,20 +113,6 @@ const FACTORIO_2_1_INVENTORY_DEFINES: [&str; 56] = [
 pub const DEFINES_QUERY: &str = "/silent-command \
 local t={} for k,v in pairs(defines.inventory) do t[k]=v end \
 rcon.print(helpers.table_to_json(t))";
-
-/// The force the bots act for, by the mod's own definition.
-///
-/// **Named, not derived.** `mods/BotBridge/control.lua` hardcodes
-/// `game.forces["player"]` in every place that speaks for the bots —
-/// `collect_recipes`, `collect_player_force`, `start_research` — so this is
-/// the force whose technology table describes them.
-///
-/// It must not be picked by sorting `FactorioWorld::forces`: `writeout_forces`
-/// emits **all** of `game.forces`, so from the first `on_research_finished` of
-/// a run the world also holds `enemy` and `neutral`, whose technology tables
-/// describe nobody and are researched by nobody. See
-/// `docs/superpowers/notes/2026-09-02-recipe-not-enabled.md`.
-const BOT_FORCE: &str = "player";
 
 /// Whether `world` records `tech` as researched for the force the bots act for.
 ///

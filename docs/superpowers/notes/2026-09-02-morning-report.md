@@ -637,3 +637,55 @@ shares were sized against a four-bot roster's materials and executed by three.
 Also still true in this build: **102 dispatched against 98 settled, and all 98
 settled are `success`.** The four lost actions are invisible, because this binary
 predates `fcb4ed68`. The next run is the first to carry the settlement fix.
+
+## Update (~15:10): run 27 — two fixes proven, and the blocker moves to geometry
+
+Run 27 (`run-1788353986-24634`), built at `d0a5e094` on a quiet machine (load
+1.71 at run start, with a load gate in the run script after run 26). **5 of 7**,
+stuck at milestone 6.
+
+### Two fixes proven live
+
+**Awaited crafts work.** `lost=0` in every iteration of the run. The previous run
+had eleven lost crafts, each burning a 360-second deadline. Zero now.
+
+**Every action settles.** 154 dispatched, 154 settled. Run 25 had 102 dispatched
+against 98 settled with all 98 reported `success` — four actions simply absent.
+That hole is closed.
+
+**And the transient classification is right.** `placement_refused: 0`. The three
+failures are all the new message:
+
+```
+cannot place item 'stone-furnace' because a character is standing in the footprint
+```
+
+so a parked bot no longer poisons the durable refusal ledger, and tier-1
+reschedule stays available. Milestone 4 **recovered** from exactly this and was
+satisfied after three iterations.
+
+### Why milestone 6 still stuck, and why every layer was correct
+
+Milestone 6's last three iterations read `success=0 failed=1 lost=0 pending=30`.
+One placement fails and thirty actions wait behind it.
+
+Every layer behaved as designed, which is the point:
+
+- The mod correctly says *a character is standing here*, not *this ground is bad*.
+- Because that is not a refusal, the site is not blacklisted.
+- The replanner therefore re-chooses the same site — **correctly**, the ground is
+  good.
+- **But the blocking bot is idle.** It parked after servicing its own furnace and
+  has no reason to move, ever.
+
+So the retry is right, the site is right, and nothing changes. A perfect
+transient that never resolves.
+
+The placement note predicted this in as many words: *"the fix makes each
+occurrence cost a reschedule instead of a site, but does not make occurrences
+rarer."* The 2-tile furnace grid leaves a 0.2-tile gap against a 0.4-wide
+character, so a servicing bot **must** stand where the next furnace goes. The
+layout manufactures the collision.
+
+That is now the top item, and it is the first blocker in days that is a design
+question rather than a bug.

@@ -295,6 +295,70 @@ pub enum PlannerError {
     )]
     PowerPlantNeedsShore { distance: f64, radius: f64 },
 
+    /// The rate asked for needs more cells than one plan may build.
+    ///
+    /// A bound on work rather than a claim about what a map could hold. Siting
+    /// a cell walks an ore patch, so a rate needing millions of them would hang
+    /// rather than refuse; this makes it refuse, and names both numbers so the
+    /// caller can see how far past the bound it is.
+    #[error("that rate needs {cells} cells and a plan may build at most {max}")]
+    #[diagnostic(
+        code(planner::too_many_cells),
+        help("ask for a smaller rate, or build it up over several plans")
+    )]
+    TooManyCells { cells: u64, max: u32 },
+
+    /// Nothing this planner knows how to build produces `item` by machine.
+    ///
+    /// Stage 1 of the starter factory builds exactly one shape of cell: a
+    /// burner mining drill dropping into a stone furnace. So the items it can
+    /// make are the ones with a **smelting** recipe taking a single ore
+    /// ingredient the map actually carries — the four plates, and nothing else.
+    /// Everything a bot can still craft by hand remains reachable through
+    /// [`crate::goal::Goal::Have`]; what this says is that no *machine* the
+    /// planner can build makes it.
+    #[error("no cell this planner can build produces {item} by machine")]
+    #[diagnostic(
+        code(planner::no_cell_produces),
+        help(
+            "stage 1 builds a burner mining drill dropping into a stone furnace, so it can \
+             produce the plates that smelt from one ore and nothing else; assembling machines \
+             and their recipes are stage 2"
+        )
+    )]
+    NoCellProduces { item: ItemId },
+
+    /// Ore is there, but no legal ground for a cell on it.
+    ///
+    /// A cell wants a drill standing **on** the patch with a furnace two tiles
+    /// ahead of it standing **off** the patch, both clear of everything else,
+    /// so it fits at a patch edge and nowhere else. A fully enclosed patch, a
+    /// patch already built over, or one whose edges the plan has committed
+    /// elsewhere produces this.
+    #[error(
+        "no room for a {ore} cell within {radius} tiles of the patch: a drill needs to stand on \
+         the ore with a furnace two tiles ahead of it standing off it"
+    )]
+    #[diagnostic(
+        code(planner::no_room_for_cell),
+        help(
+            "a cell fits at a patch edge; try a different patch, or clear the ground beside \
+             this one"
+        )
+    )]
+    NoRoomForCell { ore: ItemId, radius: i32 },
+
+    /// The map carries no patch of the ore a cell for this item would mine.
+    #[error("producing {item} by machine needs a {ore} patch, and the plan can see none")]
+    #[diagnostic(
+        code(planner::no_patch_for_cell),
+        help(
+            "a world attached from a snapshot carries only what the snapshot held, and an owned \
+             run knows only the chunks the game has charted"
+        )
+    )]
+    NoPatchForCell { item: ItemId, ore: ItemId },
+
     #[error(
         "expansion of {goal} exceeded {depth} levels; a method is probably expanding into itself"
     )]

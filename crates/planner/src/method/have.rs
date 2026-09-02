@@ -179,11 +179,17 @@ fn attach_unlock(steps: &mut [Step], item: &ItemId, unlocks: Option<&str>) {
 ///
 /// * `Some(true)` / `Some(false)` — the goal names a *state*, and the state
 ///   either holds or does not.
-/// * `None` — the goal names an **event**, or something this planner does not
-///   model, so possession cannot answer it. [`Goal::Produced`] is the first
-///   kind: a bot carrying six labs has not crafted one, so no inventory read
-///   ever settles it. [`Goal::Producing`] is the second: no method satisfies a
-///   throughput yet, so nothing here can say whether one is met.
+/// * `None` — the goal names an **event**, so possession cannot answer it.
+///   [`Goal::Produced`] is the only such goal: a bot carrying six labs has not
+///   crafted one, so no inventory read ever settles it.
+///
+/// [`Goal::Producing`] used to be the second kind and is no longer. It names a
+/// *state* — a standing arrangement of machines — which the entity overlay can
+/// answer, and it is answered by
+/// [`crate::method::produce::holds_producing`]. What that answer is **not** is
+/// an observation that anything is coming out; see that function, and
+/// `Goal::Producing`'s own doc, for the boundary and for who stands on the
+/// other side of it.
 ///
 /// Collapsing `None` into `false` would report unfinished work for a goal that
 /// may well be done, and into `true` would be the very lie this exists to stop.
@@ -209,7 +215,15 @@ pub fn holds(goal: &Goal, state: &PlanState) -> Option<bool> {
         // have to learn to subtract and this comment would be wrong — that is
         // the assumption to check first.
         Goal::Researched(tech) => Some(state.is_researched(tech)),
-        Goal::Produced { .. } | Goal::Producing { .. } => None,
+        Goal::Produced { .. } => None,
+        // Structural, and narrower than the goal's name: enough cells stand,
+        // on the right ore, each delivering into its furnace. Nothing here
+        // reads a fuel level or an output inventory.
+        Goal::Producing { item, per_minute } => Some(crate::method::produce::holds_producing(
+            state,
+            item,
+            *per_minute,
+        )),
         Goal::All(goals) => {
             let mut answer = Some(true);
             for g in goals {
@@ -1803,6 +1817,7 @@ pub fn default_registry() -> MethodRegistry {
         .with(Box::new(HandCraft))
         .with(Box::new(Mine))
         .with(Box::new(Researched))
+        .with(Box::new(crate::method::produce::BuildCell))
 }
 
 /// Split a shared goal into one independent chain per bot.
@@ -2384,6 +2399,11 @@ pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
         .with(Box::new(HandCraft))
         .with(Box::new(Mine))
         .with(Box::new(Researched))
+        // Last: it claims `Goal::Producing`, which nothing else claims, so
+        // where it sits changes no other goal's method. Behind
+        // `AlreadySatisfied`, which now has a real answer for a production
+        // goal, so a factory that already stands expands to nothing.
+        .with(Box::new(crate::method::produce::BuildCell))
 }
 
 #[cfg(test)]
@@ -3288,7 +3308,7 @@ mod tests {
     /// no inventory read settles whether it happened, so the honest answer is
     /// that this question cannot be answered by looking.
     #[test]
-    fn a_production_goal_has_no_answer_from_possession() {
+    fn a_produced_goal_has_no_answer_from_possession_but_a_producing_one_does() {
         let bots = [BotId(1)];
         let mut s = state(&bots);
         s.gain(BotId(1), "iron-plate", 50);
@@ -3309,12 +3329,14 @@ mod tests {
             holds(
                 &Goal::Producing {
                     item: "iron-plate".into(),
-                    rate: 30.0,
+                    per_minute: 30,
                 },
                 &s
             ),
-            None,
-            "and nothing here models a throughput at all"
+            Some(false),
+            "fifty plates in hand is not a factory either -- but that is a \
+             question about entities, which this state can answer, so the \
+             answer is `no` rather than `I cannot say`"
         );
     }
 
@@ -3333,9 +3355,13 @@ mod tests {
             count: 40,
             whose: Holder::Anyone,
         };
-        let unanswerable = Goal::Producing {
+        // `Produced` is now the only goal possession cannot settle;
+        // `Producing` became answerable the day it got a method.
+        let unanswerable = Goal::Produced {
             item: "iron-plate".into(),
-            rate: 30.0,
+            count: 30,
+            whose: Holder::Anyone,
+            unlocks: None,
         };
         assert_eq!(holds(&Goal::All(vec![met.clone()]), &s), Some(true));
         assert_eq!(

@@ -216,12 +216,26 @@ impl std::error::Error for PlanRefusal {}
 ///   the world. Somebody *else* emptying the container between planning and
 ///   dispatch is a different and real failure, and it surfaces as a refused
 ///   `Remove` at the game, not here.
+/// - [`TooManyCells`](PlannerError::TooManyCells) -- the caller asked for a
+///   rate needing more machines than one plan may build. The bound is a
+///   constant of this planner, so **no state of the world makes the goal
+///   meaningful**: a retry on a different map meets exactly the same number.
+///   That is `UnknownTechnology`'s test, and it puts this on the fault side
+///   even though its three siblings below are verdicts.
 /// - [`UnknownTechnology`](PlannerError::UnknownTechnology) -- the borderline
 ///   one, and a fault. The name refers to nothing, so no state of the world
 ///   makes the goal meaningful: either the script has a typo or the world was
 ///   never told about the technology, and both are broken inputs rather than
 ///   verdicts. `supervisor.lua` has named "an unknown item or technology" a
 ///   construction error since it was written, and this keeps that promise.
+/// - The three cell variants -- [`NoCellProduces`](PlannerError::NoCellProduces),
+///   [`NoPatchForCell`](PlannerError::NoPatchForCell) and
+///   [`NoRoomForCell`](PlannerError::NoRoomForCell) -- verdicts, the first for
+///   `NoApplicableMethod`'s reason and the other two for the `PowerPlant*`
+///   ones'. "No machine I can build makes this", "this map has no such ore"
+///   and "this patch has no edge with room" are all facts a different world
+///   makes false, and a script can act on each: hand-craft it instead, chart
+///   more map, or aim at another patch.
 /// - The two `PowerPlant*` variants -- verdicts for the same reason
 ///   `ResearchNeedsPower` is one, and now the ones a caller actually sees:
 ///   since the plant landed, an unpowered world is answered by *building* a
@@ -244,7 +258,10 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::UnsupportedResearchTrigger { .. }
         | PlannerError::SelfUnlockingResearchTrigger { .. }
         | PlannerError::PreconditionUnsatisfied { .. }
-        | PlannerError::ChainOwnerInfeasible { .. } => true,
+        | PlannerError::ChainOwnerInfeasible { .. }
+        | PlannerError::NoCellProduces { .. }
+        | PlannerError::NoPatchForCell { .. }
+        | PlannerError::NoRoomForCell { .. } => true,
 
         PlannerError::InsufficientItems { .. }
         | PlannerError::UnknownBot(_)
@@ -255,7 +272,8 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::UnownedHandover { .. }
         | PlannerError::ExpansionTooDeep { .. }
         | PlannerError::BufferShort { .. }
-        | PlannerError::UnknownTechnology { .. } => false,
+        | PlannerError::UnknownTechnology { .. }
+        | PlannerError::TooManyCells { .. } => false,
     };
     verdict.then(|| PlanRefusal {
         // Every variant carries a `#[diagnostic(code(...))]` today. The
@@ -419,8 +437,8 @@ pub(crate) fn create_lua_goal_with(
 -- into an action network by the planner, assigned to bots by the scheduler,
 -- and then executed against the running game.
 --
--- Nothing here is a handle. `goal.have`, `goal.researched` and `goal.all`
--- build **goal values**: ordinary Lua tables you can read (`g.item`,
+-- Nothing here is a handle. `goal.have`, `goal.researched`, `goal.producing`
+-- and `goal.all` build **goal values**: ordinary Lua tables you can read (`g.item`,
 -- `g.count`), print and pass around. `goal.plan` turns one into a
 -- **PlanValue**, which carries the schedule it was given and answers questions
 -- about it (`plan.makespan`, `plan.bots`, `plan.steps`, `plan:count{...}`,
@@ -444,7 +462,7 @@ local goal = {}
 
     let roster: Vec<BotId> = bots.into_iter().map(BotId).collect();
 
-    // `goal.have` / `goal.researched` / `goal.all`: the goal-value
+    // `goal.have` / `goal.researched` / `goal.producing` / `goal.all`: the goal-value
     // constructors. Pure — they touch neither the world nor the planner, so
     // an unknown item is not an error here; it is one at `goal.plan`, which
     // is the first call that has a world to check it against.
@@ -495,6 +513,38 @@ end
         ),
     )?;
     map_table.set(
+        "__doc_entry_producing",
+        String::from(
+            r#"
+--- builds a goal value: a factory that makes an item at a rate
+--
+-- Pure, like `goal.have`. This is the goal that means *build a machine*: the
+-- other three are satisfied by hand-mining and hand-crafting, and this one is
+-- satisfied only by machines that stand, face the right way and deliver into
+-- one another.
+--
+-- Planning it builds one or more cells, each a burner mining drill standing on
+-- the ore and dropping straight into a stone furnace, and fuels both with
+-- coal. Cells that already stand count towards the rate, so replanning a
+-- half-built factory finishes it rather than doubling it. Only the plates that
+-- smelt from a single ore can be produced this way today; anything else raises
+-- at `goal.plan`, which is the first call with a world to check it against.
+--
+-- **What it does not claim.** `goal.holds` answers this from *structure* -- the
+-- machines are there and connected -- and never from observation. A drill whose
+-- fuel has run out and a furnace nobody empties both still read as standing.
+-- Follow a production milestone with one that dispatches nothing and watches
+-- the furnace's output rise; only that is evidence about production.
+-- @string item_name name of the item, e.g. "iron-plate"
+-- @number per_minute how many a minute are wanted; an integer >= 1
+-- @treturn table a goal value
+-- @raise if the item name is empty, or the rate is not an integer >= 1
+function goal.producing(item_name, per_minute)
+end
+"#,
+        ),
+    )?;
+    map_table.set(
         "__doc_entry_all",
         String::from(
             r#"
@@ -519,7 +569,7 @@ end
 --- expands a goal value and schedules it against one roster, in one call
 -- Consumes a goal value: a table with a `kind` field, such as
 -- `{ kind = "have", item = "iron-plate", count = 8 }`, built by `goal.have`,
--- `goal.researched` or `goal.all`. Expansion and scheduling always share the
+-- `goal.researched`, `goal.producing` or `goal.all`. Expansion and scheduling share the
 -- same roster -- `SplitAcrossBots` sizes each bot's share against that bot's
 -- own holdings, so a network expanded for four bots only ever makes sense
 -- scheduled on those same four; this call is what makes the mismatch
@@ -1525,9 +1575,9 @@ mod tests {
         let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never)));
         lua.load(
             r#"
-            local expected = { have=true, researched=true, all=true,
-                               plan=true, run=true, start=true, holds=true,
-                               refusal=true }
+            local expected = { have=true, researched=true, producing=true,
+                               all=true, plan=true, run=true, start=true,
+                               holds=true, refusal=true }
             local actual = {}
             for k, v in pairs(goal) do
                 -- the __doc__ keys are strings consumed by the doc generator

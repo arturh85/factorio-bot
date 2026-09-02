@@ -111,6 +111,34 @@ pub enum Condition {
         entity: ItemId,
         kw: f64,
     },
+    /// The machine standing at `from` delivers what it makes into the machine
+    /// standing at `to`.
+    ///
+    /// **The first machine-to-machine claim this planner can state**, and the
+    /// reason a `Goal::Producing` is not satisfied by two machines that merely
+    /// stand near each other. A burner drill two tiles from a furnace places
+    /// 100 %, passes every geometry check and moves nothing if it is facing the
+    /// wrong way — the same class of silent failure as `only_ghosts = true`
+    /// validating a blueprint whose entities overlap, and as an inserter whose
+    /// `direction` names the side it drops into rather than the side it picks
+    /// up from.
+    ///
+    /// **Nothing produces this**, exactly as nothing produces
+    /// [`Condition::Powered`]: [`Effect::satisfies`] has no arm for it, so
+    /// `ActionNetwork::infer_edges` draws no edge to it and no method can
+    /// satisfy it by acting. It becomes true because two
+    /// [`Effect::CreateEntity`]s landed with compatible positions and
+    /// directions, and it is checked — at expansion time and again by the
+    /// scheduler — against [`crate::state::PlanState::delivers_into`].
+    ///
+    /// Which is why a method that emits one must also order it after both
+    /// placements: this condition orders nothing by itself. In stage 1 of the
+    /// starter factory the ordering comes free, because the action carrying
+    /// this also carries a [`Condition::EntityAt`] for each end.
+    Feeds {
+        from: Position,
+        to: Position,
+    },
     ResourceAvailable {
         pos: Position,
         item: ItemId,
@@ -192,6 +220,7 @@ impl Condition {
                 Some(area) => state.electric_supply_kw(&area).total_cmp(kw).is_ge(),
                 None => false,
             },
+            Condition::Feeds { from, to } => state.delivers_into(from, to),
             Condition::ResourceAvailable { pos, item, count } => {
                 state.resource_available(pos, item) >= *count
             }
@@ -248,6 +277,9 @@ impl std::fmt::Display for Condition {
             Condition::Researched(tech) => write!(f, "{} researched", tech),
             Condition::Powered { pos, entity, kw } => {
                 write!(f, "{} at {} has {} kW of supply", entity, pos, kw)
+            }
+            Condition::Feeds { from, to } => {
+                write!(f, "the machine at {} feeds the one at {}", from, to)
             }
             Condition::ResourceAvailable { pos, item, count } => {
                 write!(f, "{} {} available at {}", count, item, pos)

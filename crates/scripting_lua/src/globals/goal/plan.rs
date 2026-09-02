@@ -28,6 +28,7 @@ use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::types::Position;
 use factorio_bot_executor::{ExecutionLog, Recovery};
 use factorio_bot_planner::ids::{ActionId, BotId};
+use factorio_bot_planner::method::produce::{cell_spec, cells_for, cells_standing};
 use factorio_bot_planner::{
     ActionKind, ActionNetwork, Goal, InventorySlot, PlanState, Schedule, ScheduledStep, StepKind,
     Ticks, graphviz, mermaid_gantt, schedule,
@@ -479,6 +480,112 @@ const MAX_RESITE_ROUNDS: usize = 2;
 /// failure the way a missed pre-check is, because the pre-check only narrows a
 /// window while this one decides whether a plan re-mines ore that may be gone.
 /// The warning says so in those terms rather than reporting an RPC error.
+/// Say how much of each production goal is already standing, before planning
+/// the rest.
+///
+/// # Why a `Producing` goal in particular needs a line
+///
+/// Every other goal this planner takes is satisfied by *actions*, so a plan
+/// that does something is visible in the run's own output. A `Producing` goal
+/// is satisfied by *machines*, and machines persist: the second time a
+/// supervisor asks for one, the honest plan is empty. An empty plan and a plan
+/// nobody asked for look exactly alike from outside — identical worlds,
+/// identical output, and only one of them a defect. That is the same
+/// indistinguishability [`narrate_buffer_refresh`] exists to remove, one level
+/// out, and it is worth more here: the thing that "already stands" is a
+/// factory, and a wrong belief about it is a milestone that closes satisfied
+/// having built nothing.
+///
+/// # What it does not say
+///
+/// **That anything is coming out.** `cells_standing` counts structure — a
+/// drill on the right ore, delivering into a furnace — and reads no fuel level
+/// and no output inventory. The line below says "stand", never "produce", on
+/// purpose, and a run that wants the other claim has to watch a furnace's
+/// output rise with every bot idle.
+///
+/// # Volume
+///
+/// One line per production goal per `goal.plan`, and a run has one or two such
+/// goals at most; a ladder that never asks for one prints nothing at all.
+/// `paris` on stdout, because this is narration a person reads while the run
+/// happens — see the logging note in `CLAUDE.md`.
+fn narrate_production_goals(goal: &Goal, state: &PlanState) {
+    for p in production_progress(goal, state) {
+        if p.standing == 0 {
+            factorio_bot_core::paris::info!(
+                "no <bright-blue>{}</> cell stands yet: planning <bright-blue>{}</> of them for {} a minute",
+                p.item,
+                p.wanted,
+                p.per_minute
+            );
+        } else if p.standing >= p.wanted {
+            factorio_bot_core::paris::info!(
+                "<bright-blue>{}</> <bright-blue>{}</> cell(s) already stand and {} a minute \
+                 needs {}: nothing left to build. They *stand*, which is not the same as \
+                 producing -- only a furnace's output rising says that",
+                p.standing,
+                p.item,
+                p.per_minute,
+                p.wanted
+            );
+        } else {
+            factorio_bot_core::paris::info!(
+                "<bright-blue>{}</> of <bright-blue>{}</> {} cell(s) already stand: planning \
+                 the other {}",
+                p.standing,
+                p.wanted,
+                p.item,
+                p.wanted - p.standing
+            );
+        }
+    }
+}
+
+/// How far along one `Goal::Producing` is: what it asks for, and what stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Production {
+    item: String,
+    per_minute: u32,
+    /// Complete cells for `item` the state already carries.
+    standing: u32,
+    /// Complete cells `per_minute` needs in all.
+    wanted: u32,
+}
+
+/// The production goals in `goal`, with their progress — the whole decision
+/// [`narrate_production_goals`] reports, split out so it can be tested without
+/// reading stdout.
+///
+/// A goal whose item no cell can make, or whose rate the planner refuses
+/// outright, yields nothing: `expand` is about to refuse it by name, and
+/// saying so twice would be noise. Recurses into `Goal::All` exactly as
+/// `goal_from_lua` does, so a production goal inside a bundle is not silently
+/// skipped.
+fn production_progress(goal: &Goal, state: &PlanState) -> Vec<Production> {
+    match goal {
+        Goal::All(goals) => goals
+            .iter()
+            .flat_map(|member| production_progress(member, state))
+            .collect(),
+        Goal::Producing { item, per_minute } => {
+            let Some(spec) = cell_spec(state, item) else {
+                return Vec::new();
+            };
+            let Ok(wanted) = cells_for(*per_minute, spec.ticks_per_item) else {
+                return Vec::new();
+            };
+            vec![Production {
+                item: item.clone(),
+                per_minute: *per_minute,
+                standing: cells_standing(state, &spec),
+                wanted,
+            }]
+        }
+        _ => Vec::new(),
+    }
+}
+
 async fn narrate_buffer_refresh(refresher: Option<&BufferRefresher>) {
     let Some(refresher) = refresher else {
         // No RCON: `goal.plan` called with no game behind it, which is a
@@ -564,6 +671,11 @@ async fn plan_verified(
         // the refusals the previous round's query wrote.
         let state = PlanState::from_world(world.clone(), roster);
         refuse_unknown_bots(&state)?;
+        // First round only: the re-siting rounds below re-expand against the
+        // same standing machines, and saying it three times would be noise.
+        if round == 0 {
+            narrate_production_goals(goal, &state);
+        }
         let net = expand_goal(goal.clone(), world, roster)?;
         let scheduled = schedule(&net, &state, roster).map_err(planner_error)?;
 
@@ -941,6 +1053,109 @@ mod tests {
     use factorio_bot_core::factorio::world::{PlacementRefusal, RefusalSource};
     use std::future::Future;
     use std::pin::Pin;
+
+    /// The three branches of the production narration, chosen by the two
+    /// numbers and nothing else.
+    ///
+    /// The line itself goes to stdout through `paris` and is not read back
+    /// here -- what is worth pinning is the *decision*, and that is the part a
+    /// change could get wrong: reporting "nothing left to build" for a factory
+    /// that is half there is exactly the indistinguishability this narration
+    /// exists to remove.
+    #[test]
+    fn production_progress_reports_what_stands_against_what_is_wanted() {
+        use factorio_bot_planner::method::produce::{DRILL, FURNACE, plan_cell};
+        use factorio_bot_planner::{BotId, PlanState};
+
+        let world = seeded_world_for(&[1]);
+        let mut state = PlanState::from_world(world, &[BotId(1)]);
+        let goal = |per_minute| Goal::Producing {
+            item: "iron-plate".into(),
+            per_minute,
+        };
+
+        // Nothing stands.
+        assert_eq!(
+            production_progress(&goal(30), &state),
+            vec![Production {
+                item: "iron-plate".into(),
+                per_minute: 30,
+                standing: 0,
+                wanted: 2,
+            }]
+        );
+
+        // One cell stands: the partial branch, and the one that must not read
+        // as "done".
+        let spec = cell_spec(&state, "iron-plate").expect("iron plate smelts from one ore");
+        let cell = plan_cell(
+            &state,
+            &factorio_bot_core::types::Position::new(0., 0.),
+            &spec,
+        )
+        .expect("the fixture has iron ore");
+        for (name, position, facing) in [
+            (DRILL, cell.drill.clone(), cell.facing),
+            (
+                FURNACE,
+                cell.furnace.clone(),
+                factorio_bot_core::types::Direction::North,
+            ),
+        ] {
+            let entity_type = state
+                .base()
+                .entity_prototypes
+                .get(name)
+                .map(|p| p.entity_type.clone())
+                .expect("the fixture carries both prototypes");
+            state.create_entity(factorio_bot_core::types::FactorioEntity {
+                name: name.into(),
+                entity_type,
+                position,
+                direction: factorio_bot_core::num_traits::ToPrimitive::to_u8(&facing).unwrap_or(0),
+                ..Default::default()
+            });
+        }
+        assert_eq!(
+            production_progress(&goal(30), &state)[0].standing,
+            1,
+            "one of two, which must narrate as partial rather than as done"
+        );
+        assert_eq!(
+            production_progress(&goal(15), &state)[0],
+            Production {
+                item: "iron-plate".into(),
+                per_minute: 15,
+                standing: 1,
+                wanted: 1,
+            },
+            "and the same cell satisfies the smaller rate outright"
+        );
+
+        // A goal no cell can make says nothing at all: `expand` refuses it by
+        // name a moment later, and saying so twice is noise.
+        assert!(production_progress(&goal_for("iron-gear-wheel"), &state).is_empty());
+        // So does a bundle of goals with no production in it.
+        assert!(
+            production_progress(
+                &Goal::All(vec![Goal::Researched("automation".into())]),
+                &state
+            )
+            .is_empty()
+        );
+        // And a production goal nested in a bundle is still found.
+        assert_eq!(
+            production_progress(&Goal::All(vec![goal(15)]), &state).len(),
+            1
+        );
+    }
+
+    fn goal_for(item: &str) -> Goal {
+        Goal::Producing {
+            item: item.into(),
+            per_minute: 15,
+        }
+    }
 
     /// A hand-built network and schedule covering every step kind, so the
     /// step-shape test does not depend on what the planner happens to emit.

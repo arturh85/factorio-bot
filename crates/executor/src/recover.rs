@@ -491,14 +491,20 @@ mod tests {
     }
 
     /// The same dead plan, but asking for something no method in the registry
-    /// can decompose — `Goal::Producing` has no method at all. Both mechanical
-    /// tiers are therefore closed.
+    /// can decompose. Both mechanical tiers are therefore closed.
+    ///
+    /// The goal is a `Goal::Producing` for an item no cell can make. That used
+    /// to be *any* `Producing`, because nothing claimed the variant at all;
+    /// since stage 1 of the starter factory, `BuildCell` claims the ones it
+    /// understands — a plate that smelts from one ore, mined by a drill it can
+    /// site. An automation science pack is crafted, not smelted, so no machine
+    /// this planner can build makes it and `BuildCell::applicable` says no.
     fn nothing_can_satisfy_the_goal() -> (Goal, ActionNetwork, PlanState, Vec<BotId>, ExecutionLog)
     {
         let (_, net, s, bots, log) = ore_patch_exhausted();
         let goal = Goal::Producing {
-            item: "iron-plate".into(),
-            rate: 30.0,
+            item: "automation-science-pack".into(),
+            per_minute: 30,
         };
         (goal, net, s, bots, log)
     }

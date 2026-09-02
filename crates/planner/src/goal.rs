@@ -102,11 +102,33 @@ pub enum Goal {
         whose: Holder,
         unlocks: Option<String>,
     },
-    /// The functorio bridge: `BusLane item rate` transcribed into Rust. No
-    /// method satisfies this yet; blueprint generation is a later increment.
+    /// A standing arrangement that yields `item` at `per_minute` without
+    /// further intervention.
+    ///
+    /// **Satisfied by structure, not by observation.** See
+    /// [`crate::method::have::holds`]: this asks whether machines capable of
+    /// the rate stand, stand on the resource they consume, and *deliver into
+    /// one another*. It does **not** ask whether anything is coming out. A
+    /// drill with an empty fuel slot reads as a drill and a furnace with a
+    /// full output reads as a furnace, because [`crate::state::PlanState`]
+    /// models neither. The observation lives in `supervisor.witness` — a
+    /// milestone that dispatches no actions at all and asserts a terminal
+    /// machine's output inventory rose anyway — and nowhere in this crate.
+    ///
+    /// # `per_minute` is an integer on purpose
+    ///
+    /// It was `rate: f64` until stage 1 of the starter factory. The machine
+    /// count is `ceil(target / per-machine)`, and a target that is exactly one
+    /// machine's output — 15 iron plates a minute against a burner drill's
+    /// 15 — is a ceiling sitting on a representation boundary. This crate's
+    /// defining constraint is byte-identical plans for identical inputs, so
+    /// the numerator is an integer and
+    /// [`crate::method::produce`] does the whole division in integer ticks.
+    /// Rational arithmetic over a recipe matrix is stage 3's problem, where a
+    /// cell consumes its own output and one division no longer suffices.
     Producing {
         item: ItemId,
-        rate: f64,
+        per_minute: u32,
     },
     All(Vec<Goal>),
 }
@@ -125,7 +147,9 @@ impl std::fmt::Display for Goal {
                 Some(tech) => write!(f, "produce {} {} to unlock {}", count, item, tech),
                 None => write!(f, "produce {} {}", count, item),
             },
-            Goal::Producing { item, rate } => write!(f, "produce {} {}/min", rate, item),
+            Goal::Producing { item, per_minute } => {
+                write!(f, "produce {} {}/min", per_minute, item)
+            }
             Goal::All(goals) => write!(f, "all of {} goals", goals.len()),
         }
     }
@@ -177,7 +201,7 @@ mod tests {
             Goal::Researched("automation".into()),
             Goal::Producing {
                 item: "iron-plate".into(),
-                rate: 30.0,
+                per_minute: 30,
             },
         ]);
         let json = serde_json::to_string(&goal).expect("serialises");

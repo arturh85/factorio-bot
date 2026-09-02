@@ -138,6 +138,38 @@ fn generation_kw(name: &str) -> Option<f64> {
     }
 }
 
+/// Where a machine puts what it produces, as a north-frame offset from its own
+/// position.
+///
+/// Vanilla's `vector_to_place_result`, read off
+/// `base/prototypes/entity/mining-drill.lua` in this repo's `workspace/data`
+/// (`{-0.35, -1.3}` for the burner drill, `{0, -1.85}` for the electric one)
+/// and written down here for the same reason as [`pole_supply_half_extent`],
+/// [`generation_kw`] and `power.rs`'s fluid-connection tables:
+/// **`FactorioEntityPrototype` carries no such field and the mod does not send
+/// one.** Sending `vector_to_place_result`, `supply_area_distance`,
+/// `maximum_wire_distance` and `energy_usage` is the one follow-up that
+/// deletes all four tables at once.
+///
+/// A machine this table does not name delivers into nothing at all, which
+/// refuses rather than over-credits — the same direction
+/// [`pole_supply_half_extent`] and `collides_with_water` choose for an unknown
+/// name. **Inserters are deliberately absent**: they belong to stage 2 of the
+/// starter factory together with the pickup/drop pair that makes their
+/// `direction` checkable, and an entry here that nothing exercises is a
+/// hand-written number nobody would notice was wrong.
+///
+/// `None` for a half-diagonal direction, because [`Position::turn`] names no
+/// rotation for one and no machine stands on one.
+fn delivery_offset(name: &str, direction: Direction) -> Option<Position> {
+    let north = match name {
+        "burner-mining-drill" => (-0.35, -1.3),
+        "electric-mining-drill" => (0., -1.85),
+        _ => return None,
+    };
+    Position::new(north.0, north.1).turn(direction)
+}
+
 /// Above this, a reported `resource_reach_distance` is not a character's.
 ///
 /// A *player* with no character reports `f64::MAX` here — the game's way of
@@ -1370,6 +1402,96 @@ impl PlanState {
     /// answer here is `None` for it. That is the right failure — a plant sited
     /// against terrain nobody has read would be sited by guesswork — but it is
     /// a failure, not an observation.
+    /// Does `area` cover at least one tile that still holds `item`?
+    ///
+    /// The question a mining drill's site has to answer, and the mirror of the
+    /// one [`PlanState::is_area_clear_of`] asks: that one refuses ground with
+    /// ore under it for everything except a drill, and this one *requires* it
+    /// for the drill. A drill placed one tile off the patch places 100 % and
+    /// mines nothing, which is the same silent failure as a drill facing the
+    /// wrong way.
+    ///
+    /// Tiles, not the box, for the same reason [`PlanState::delivers_into`]
+    /// works in tiles: a resource occupies a whole tile and a collision box
+    /// covers 1.398 of every 2 tiles it stands on.
+    ///
+    /// **A drill neither claims nor consumes what it stands on.**
+    /// `Effect::ConsumeResource` is emitted by mining and by nothing else, so
+    /// this reads what is left after the *plan's own hand-mining* and says
+    /// nothing about the patch being drained by the machine. That is a
+    /// modelling gap this stage does not close.
+    pub fn covers_resource(&self, area: &Rect, item: &str) -> bool {
+        tiles_under(area)
+            .iter()
+            .any(|tile| self.resource_available(&Position::from(tile), item) > 0)
+    }
+
+    /// Where the machine `entity` puts what it makes, in world coordinates.
+    ///
+    /// **The game's own answer when it has one.** `FactorioEntity` carries a
+    /// `drop_position` and the mod fills it in for every entity it serialises,
+    /// so a drill a live save already contains reports where it really drops —
+    /// including a pumpjack, whose reported value `EntityGraph::add` has to
+    /// correct. Only an entity *this plan placed* has none, because a method
+    /// builds a `FactorioEntity` from a name, a position and a direction and
+    /// nothing else; for those the north-frame table
+    /// [`delivery_offset`] is turned into the entity's own facing.
+    ///
+    /// `None` when neither source can say, which is a refusal to guess: a
+    /// wrong delivery point is a cell that places 100 % and produces nothing.
+    pub fn delivery_position(&self, entity: &FactorioEntity) -> Option<Position> {
+        if let Some(drop) = &entity.drop_position {
+            return Some(drop.clone());
+        }
+        let facing = Direction::from_u8(entity.direction)?;
+        Some(entity.position.add(&delivery_offset(&entity.name, facing)?))
+    }
+
+    /// Does the machine standing at `from` deliver into the machine standing at
+    /// `to`?
+    ///
+    /// The model behind [`crate::action::Condition::Feeds`], and the whole of
+    /// what makes a `Goal::Producing` more than "two machines stand somewhere".
+    ///
+    /// # Tile containment, not box containment, and the number that decides it
+    ///
+    /// A burner drill at an integer position facing north drops at
+    /// `(-0.35, -1.3)` from its own centre. The stone furnace two tiles north
+    /// of it — the vanilla starter pair, the thing this is here to model — has
+    /// a collision box of `+/-0.69921875`, so its near edge is at `-1.30078125`
+    /// and the drop point misses it by **0.00078125 of a tile**, one part in
+    /// 1280. Box containment would therefore reject the one layout the whole of
+    /// stage 1 is built on, and any layout that satisfied it would have been
+    /// derived from the wrong rule.
+    ///
+    /// A drop point resolves to the *tile* it lands in, so the question is
+    /// whether that tile is one of the tiles the target covers — the same
+    /// `tiles_under` this state already uses to ask whether ore is in the way.
+    /// The furnace covers both of its tiles, the drop lands in one of them, and
+    /// the 1/1280 never comes up.
+    ///
+    /// Both ends must be machines this state can *see* and *size*: an unknown
+    /// prototype, an entity that has been removed, or a source with no delivery
+    /// point all answer `false`.
+    pub fn delivers_into(&self, from: &Position, to: &Position) -> bool {
+        let Some(source) = self.entity_at(from) else {
+            return false;
+        };
+        let Some(target) = self.entity_at(to) else {
+            return false;
+        };
+        let Some(drop) = self.delivery_position(&source) else {
+            return false;
+        };
+        let Some(facing) = Direction::from_u8(target.direction) else {
+            return false;
+        };
+        let Some(area) = self.collision_area_facing(&target.name, &target.position, facing) else {
+            return false;
+        };
+        tiles_under(&area).contains(&Pos::from(&drop))
+    }
+
     pub fn nearest_water_tile(&self, from: &Position, max_radius: f64) -> Option<FactorioTile> {
         self.base.entity_graph.nearest_water_tile(from, max_radius)
     }

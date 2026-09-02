@@ -515,6 +515,7 @@ mod tests {
                 "function goal.all(",
                 "function goal.have(",
                 "function goal.plan(",
+                "function goal.producing(",
                 "function goal.researched(",
                 "function goal.run(",
                 "function goal.start(",

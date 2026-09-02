@@ -1,7 +1,8 @@
 //! `goal.*` values: Lua tables that describe a `Goal` without holding a
 //! handle into the interpreter or the running game.
 //!
-//! Every constructor (`goal.have`, `goal.researched`, `goal.all`) validates
+//! Every constructor (`goal.have`, `goal.researched`, `goal.producing`,
+//! `goal.all`) validates
 //! eagerly, so a mistake raises on the line that made it. [`goal_from_lua`]
 //! validates again on the way back to a planner `Goal`, because a Lua table
 //! is open: nothing stops a script from hand-building one that skips what a
@@ -13,14 +14,14 @@ use super::goal_error;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_planner::{BotId, Goal, Holder};
 
-/// Installs `have`, `researched` and `all` on `table`.
+/// Installs `have`, `researched`, `producing` and `all` on `table`.
 ///
-/// All three share one metatable -- built once here and cloned (cheaply: a
-/// Lua table is refcounted) onto every value the three functions return -- so
+/// All four share one metatable -- built once here and cloned (cheaply: a
+/// Lua table is refcounted) onto every value the four functions return -- so
 /// `tostring(g)` renders the same way regardless of which of them built `g`.
 ///
-/// Called by `create_lua_goal_with`: these three *are* `goal.have`,
-/// `goal.researched` and `goal.all` as a script sees them.
+/// Called by `create_lua_goal_with`: these four *are* `goal.have`,
+/// `goal.researched`, `goal.producing` and `goal.all` as a script sees them.
 pub(crate) fn install_goal_constructors(lua: &Lua, table: &LuaTable) -> LuaResult<()> {
     let metatable = lua.create_table()?;
     metatable.set(
@@ -65,6 +66,26 @@ pub(crate) fn install_goal_constructors(lua: &Lua, table: &LuaTable) -> LuaResul
         })?,
     )?;
 
+    let mt = metatable.clone();
+    table.set(
+        "producing",
+        lua.create_function(move |lua, (item, per_minute): (LuaValue, LuaValue)| {
+            let item = require_item(item)?;
+            // The same `>= 1` integer rule as a count, and for a sharper
+            // reason: the planner's own `Goal::Producing` carries a `u32`
+            // rather than an `f64` precisely so that the machine count is
+            // integer arithmetic end to end. A rate arriving as 15.0000001
+            // from Lua would put that back.
+            let per_minute = require_count(per_minute)?;
+            let t = lua.create_table()?;
+            t.set("kind", "producing")?;
+            t.set("item", item)?;
+            t.set("per_minute", per_minute)?;
+            t.set_metatable(Some(mt.clone()))?;
+            Ok(t)
+        })?,
+    )?;
+
     table.set(
         "all",
         lua.create_function(move |lua, goals: LuaTable| {
@@ -88,7 +109,7 @@ pub(crate) fn install_goal_constructors(lua: &Lua, table: &LuaTable) -> LuaResul
     Ok(())
 }
 
-/// Converts a goal table -- built by `goal.have`/`goal.researched`/
+/// Converts a goal table -- built by `goal.have`/`goal.researched`/`goal.producing`/
 /// `goal.all`, or hand-built by a script -- to the planner's own [`Goal`].
 ///
 /// Never produces `Holder::Share`: that variant is the expansion's own
@@ -111,6 +132,10 @@ pub(crate) fn goal_from_lua(value: &LuaTable) -> LuaResult<Goal> {
         "researched" => Ok(Goal::Researched(require_technology(
             value.get("technology")?,
         )?)),
+        "producing" => Ok(Goal::Producing {
+            item: require_item(value.get("item")?)?,
+            per_minute: require_count(value.get("per_minute")?)?,
+        }),
         "all" => {
             let goals = require_table_field(value.get("goals")?, "goals")?;
             let len = goals.raw_len();
@@ -138,6 +163,11 @@ fn render_goal(t: &LuaTable) -> LuaResult<String> {
             "researched {}",
             require_technology(t.get("technology")?)?
         )),
+        "producing" => Ok(format!(
+            "producing {} {}/min",
+            require_count(t.get("per_minute")?)?,
+            require_item(t.get("item")?)?
+        )),
         "all" => {
             let goals = require_table_field(t.get("goals")?, "goals")?;
             let len = goals.raw_len();
@@ -159,10 +189,10 @@ fn require_kind(t: &LuaTable) -> LuaResult<String> {
     }
 }
 
-/// The three kinds a goal table may name. Fixed by this module -- no world is
+/// The four kinds a goal table may name. Fixed by this module -- no world is
 /// consulted to decide whether a `kind` is one of them, which is why an
 /// unknown one is a shape error rather than a semantic one.
-const KINDS: &[&str] = &["have", "researched", "all"];
+const KINDS: &[&str] = &["have", "researched", "producing", "all"];
 
 /// [`require_kind`], plus the check that it names a kind that exists.
 fn require_known_kind(t: &LuaTable) -> LuaResult<String> {
@@ -315,6 +345,13 @@ mod tests {
             (r#"goal.have("iron-plate", -1)"#, "count"),
             (r#"goal.have("", 1)"#, "item"),
             (r#"goal.researched("")"#, "technology"),
+            (r#"goal.producing("", 15)"#, "item"),
+            // The integer rule, from the Lua side: the planner's own
+            // `Goal::Producing` carries a `u32` so that the machine count is
+            // integer arithmetic end to end, and a rate arriving as 15.5
+            // would put a float back on that path.
+            (r#"goal.producing("iron-plate", 0)"#, "count"),
+            (r#"goal.producing("iron-plate", 15.5)"#, "count"),
             (r#"goal.all({})"#, "at least one"),
             (r#"goal.all({ 42 })"#, "goal"),
             (r#"goal.have("iron-plate", 1, { bot = 0 })"#, "bot"),
@@ -357,6 +394,7 @@ mod tests {
                 goal.have("iron-plate", 5),
                 goal.have("coal", 2, { bot = 3 }),
                 goal.researched("automation"),
+                goal.producing("iron-plate", 15),
             }
         "#,
             )
@@ -377,8 +415,44 @@ mod tests {
                     whose: Holder::Bot(BotId(3))
                 },
                 Goal::Researched("automation".into()),
+                Goal::Producing {
+                    item: "iron-plate".into(),
+                    per_minute: 15,
+                },
             ])
         );
+    }
+
+    #[test]
+    fn producing_builds_an_inspectable_table_and_renders_its_rate() {
+        let lua = lua_with_goal();
+        lua.load(
+            r#"
+            local g = goal.producing("iron-plate", 15)
+            assert(g.kind == "producing", "kind")
+            assert(g.item == "iron-plate", "item")
+            assert(g.per_minute == 15, "per_minute, not rate")
+            assert(tostring(g) == "producing 15 iron-plate/min", tostring(g))
+        "#,
+        )
+        .exec()
+        .expect("script");
+    }
+
+    #[test]
+    fn a_producing_goal_may_sit_inside_goal_all() {
+        // `goal.all` is the one constructor that takes a caller-built table
+        // and checks the `kind` itself, so a new kind that was not added to
+        // `KINDS` would be rejected here and nowhere else.
+        let lua = lua_with_goal();
+        lua.load(
+            r#"
+            local g = goal.all { goal.producing("iron-plate", 15) }
+            assert(#g.goals == 1, "one sub-goal")
+        "#,
+        )
+        .exec()
+        .expect("script");
     }
 
     #[test]

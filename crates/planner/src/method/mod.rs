@@ -3,6 +3,7 @@
 
 pub mod have;
 pub mod power;
+pub mod produce;
 pub mod util;
 
 use crate::action::Action;
@@ -1398,12 +1399,12 @@ mod tests {
     }
 
     #[test]
-    fn producing_has_no_method_in_this_increment() {
+    fn producing_needs_a_registry_that_carries_build_cell() {
         let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
         let reg = MethodRegistry::new().with(Box::new(Produce));
         let goal = Goal::Producing {
             item: "automation-science-pack".into(),
-            rate: 150.0,
+            per_minute: 150,
         };
         assert!(matches!(
             expand(&[goal], &state, &reg, BotId(1)),

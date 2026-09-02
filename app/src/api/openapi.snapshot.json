@@ -1193,6 +1193,7 @@
           "missing_item",
           "unreachable",
           "blocked",
+          "partial_transfer",
           "rejected",
           "timeout",
           "other"

@@ -217,6 +217,39 @@ pub trait Actuator: Send + Sync {
         Ok(1.0)
     }
 
+    /// What tick the game is on **now**, or `None` from an actuator with no
+    /// clock.
+    ///
+    /// # Why a lag edge cannot be waited out on the wall clock
+    ///
+    /// A lag edge is a count of *game* ticks — how long the furnace needs, not
+    /// how long we should stand around. Converting it to seconds through
+    /// [`Actuator::game_speed`] assumes the server actually delivers
+    /// `60 * speed` ticks a second, and a server that is behind delivers
+    /// fewer. `game.speed` cannot report that: it is the rate the game is
+    /// *asked* to run at, and a headless server sharing a machine with four
+    /// graphical clients and screenshotting six cameras every 300 ticks misses
+    /// it by around a tenth.
+    ///
+    /// A tenth is enough. Run `run-1788320177-77989` waited a modelled 4032
+    /// ticks for 20 iron plates, ~3599 ticks passed, the furnace had made 18,
+    /// and the rung died there. The loss scales with the batch, which is why
+    /// the small smelts earlier in the same run came back clean — nothing was
+    /// wrong with the model, only with the clock it was measured against.
+    ///
+    /// So the wait reads this instead, and the wall clock survives only as the
+    /// estimate of how long to sleep between readings. Returning `None` says
+    /// "I have no clock" and puts the caller back on the old wall-clock wait,
+    /// which is what every mock does and why none of them needed changing.
+    ///
+    /// A bare [`ActuatorError`] for the same reason as
+    /// [`Actuator::game_speed`]: this asks the game a question rather than
+    /// telling a bot to do something, so there is no dispatch for a tick to
+    /// belong to.
+    async fn game_tick(&self) -> Result<Option<u64>, ActuatorError> {
+        Ok(None)
+    }
+
     /// Claims the placement `bot` most recently made, if this actuator is
     /// tracking one.
     ///

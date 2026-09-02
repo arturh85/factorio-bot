@@ -201,6 +201,68 @@ fn parse_satisfied_reason(reason: &str) -> LuaResult<SatisfiedReason> {
     }
 }
 
+/// Reads the two counts and the item out of a partial transfer, or `None` if
+/// this error is not one.
+///
+/// BotBridge does not report transfer *results*; it reports complaints, and a
+/// transfer that moved less than asked complains in one of three wordings
+/// (`mods/BotBridge/control.lua`, `rcon_insert_to_inventory` /
+/// `rcon_remove_from_inventory`):
+///
+/// ```text
+/// tried to remove 20 iron-plate but removed 18
+/// tried to insert 20x iron-plate but inserted 18
+/// cannot insert 20x iron-plate, because player #1 only has 18. clamping...
+/// ```
+///
+/// All three reach here wrapped in `game rejected the command: Unexpected
+/// Response: [...]`, which is why this is matched on the inner wording. The
+/// first two are checked before the third because they describe what the
+/// transfer *did*, while the clamp line describes what it decided to attempt;
+/// a run that clamped and then fell short again prints both, and the transfer
+/// line is the one whose numbers are the outcome.
+///
+/// Parsed rather than pattern-matched wholesale so a wording change costs a
+/// `None` -- the failure then classifies as [`FailureKind::Rejected`] and the
+/// whole message is still in `error` for a person -- rather than a wrong
+/// number. Nothing here invents a count: both must parse as integers or this
+/// declines.
+fn partial_transfer_detail(error: &str) -> Option<String> {
+    fn digits(text: &str) -> Option<u64> {
+        let head: &str = text.split(|c: char| !c.is_ascii_digit()).next()?;
+        head.parse().ok()
+    }
+    fn between<'a>(text: &'a str, open: &str, close: &str) -> Option<(&'a str, &'a str)> {
+        text.split_once(open)?.1.split_once(close)
+    }
+
+    // `tried to remove <asked> <item> but removed <moved>`
+    if let Some((head, tail)) = between(error, "tried to remove ", " but removed ")
+        && let Some((asked, item)) = head.split_once(' ')
+        && let (Some(asked), Some(moved)) = (digits(asked), digits(tail))
+    {
+        return Some(format!("moved {moved} of {asked} {item}"));
+    }
+    // `tried to insert <asked>x <item> but inserted <moved>`
+    if let Some((head, tail)) = between(error, "tried to insert ", " but inserted ")
+        && let Some((asked, item)) = head.split_once("x ")
+        && let (Some(asked), Some(moved)) = (digits(asked), digits(tail))
+    {
+        return Some(format!("moved {moved} of {asked} {item}"));
+    }
+    // `cannot insert <asked>x <item>, because player #<id> only has <moved>.
+    //  clamping...` -- the insert did happen, at the clamped count.
+    if let Some((head, tail)) = between(error, "cannot insert ", ", because ")
+        && tail.contains("clamping")
+        && let Some((asked, item)) = head.split_once("x ")
+        && let Some(have) = tail.split_once("only has ")
+        && let (Some(asked), Some(moved)) = (digits(asked), digits(have.1))
+    {
+        return Some(format!("moved {moved} of {asked} {item}"));
+    }
+    None
+}
+
 /// Classifies a settled action's error text into a coarse [`FailureKind`].
 ///
 /// Matched against the outer `ActuatorError` wording
@@ -214,7 +276,20 @@ fn parse_satisfied_reason(reason: &str) -> LuaResult<SatisfiedReason> {
 /// (`crates/executor/src/actuator.rs`); the inner text is not, so a wording
 /// change there is the first thing to check if a failure starts landing in
 /// `Other` that used to classify correctly.
+///
+/// [`FailureKind::PartialTransfer`] is checked *before*
+/// [`FailureKind::Rejected`] and must stay there: a partial transfer arrives
+/// wrapped in `game rejected the command`, so testing the outer wording first
+/// would swallow every one of them into `Rejected` and throw the counts away.
 fn classify_failure(error: &str) -> ActionFailure {
+    // Checked ahead of the coarse kinds because it produces its own detail and
+    // its text satisfies `Rejected`'s match as well.
+    if let Some(detail) = partial_transfer_detail(error) {
+        return ActionFailure {
+            kind: FailureKind::PartialTransfer,
+            detail: Some(detail),
+        };
+    }
     let kind = if error.contains("no action result received in time") {
         FailureKind::Timeout
     } else if error.contains("no path to")
@@ -1319,6 +1394,75 @@ mod tests {
             Some(ActionFailure {
                 kind: FailureKind::MissingItem,
                 detail: Some("iron-plate".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn a_partial_removal_carries_both_counts_rather_than_reading_as_a_rejection() {
+        // The failure that stuck rung 4 of `run-1788320177-77989`. A rejection
+        // means nothing moved; this means 18 plates are in the bot's hands and
+        // 2 are not, and the two must not share a kind. The counts are the
+        // point: "it failed" cannot be replanned against.
+        assert_eq!(
+            recorded_failure(
+                "failed",
+                r#""game rejected the command: Unexpected Response: [\"tried to remove 20 iron-plate but removed 18\"]""#
+            ),
+            Some(ActionFailure {
+                kind: FailureKind::PartialTransfer,
+                detail: Some("moved 18 of 20 iron-plate".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn a_partial_insert_is_read_the_same_way_from_the_other_wording() {
+        // `rcon_insert_to_inventory`'s complaint puts an `x` after the count
+        // where `rcon_remove_from_inventory`'s does not, which is exactly the
+        // sort of difference a single substring match gets wrong.
+        assert_eq!(
+            recorded_failure(
+                "failed",
+                r#""game rejected the command: Unexpected Response: [\"tried to insert 50x coal but inserted 12\"]""#
+            ),
+            Some(ActionFailure {
+                kind: FailureKind::PartialTransfer,
+                detail: Some("moved 12 of 50 coal".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn a_clamped_insert_is_a_partial_transfer_too() {
+        // The mod clamps to what the player actually holds and then inserts
+        // that. Items moved, just not as many as asked -- the same fact, said
+        // in the mod's third wording.
+        assert_eq!(
+            recorded_failure(
+                "failed",
+                r#""game rejected the command: Unexpected Response: [\"cannot insert 20x iron-ore, because player #1 only has 18. clamping...\"]""#
+            ),
+            Some(ActionFailure {
+                kind: FailureKind::PartialTransfer,
+                detail: Some("moved 18 of 20 iron-ore".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn a_transfer_complaint_with_no_readable_counts_falls_back_to_rejected() {
+        // The classifier parses rather than pattern-matching, so a wording it
+        // cannot read must cost a coarser kind and nothing else -- never an
+        // invented number. The whole message is still in `error` beside this.
+        assert_eq!(
+            recorded_failure(
+                "failed",
+                r#""game rejected the command: Unexpected Response: [\"tried to remove some iron-plate but removed fewer\"]""#
+            ),
+            Some(ActionFailure {
+                kind: FailureKind::Rejected,
+                detail: None,
             })
         );
     }

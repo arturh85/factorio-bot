@@ -502,6 +502,16 @@ impl std::fmt::Display for ActionFailure {
 
 impl std::error::Error for ActionFailure {}
 
+/// The Lua the game runs to report its current tick, for
+/// [`FactorioRcon::game_tick`].
+///
+/// Deliberately not a BotBridge function: `game.tick` and `rcon.print` are both
+/// vanilla, so this answers against any save the server will load, including
+/// one whose `workspace/mods` copy predates this binary. It reuses the mod's
+/// own [`crate::factorio::ticks::TICK_STAMP_PREFIX`] so exactly one parser
+/// ([`take_tick_stamp`]) reads a tick off a reply, whoever wrote it.
+pub const GAME_TICK_QUERY: &str = "/silent-command rcon.print(\"§tick§\"..game.tick)";
+
 pub struct FactorioRcon {
     pool: Option<bb8::Pool<ConnectionManager>>,
     silent: Arc<RwLock<bool>>,
@@ -631,6 +641,34 @@ impl FactorioRcon {
             0 => None,
             tick => Some(tick),
         }
+    }
+
+    /// Ask the game what tick it is **now**, rather than reading the stamp off
+    /// whatever was last sent ([`FactorioRcon::last_tick`]).
+    ///
+    /// # Why anything needs this
+    ///
+    /// A tick is the game's own clock and it does not run at 60 a second just
+    /// because it is meant to. A headless server sharing a machine with
+    /// graphical clients, or one taking screenshots, delivers fewer: run
+    /// `run-1788320177-77989` asked a furnace for 20 plates after waiting the
+    /// modelled 4032 ticks *in wall clock* and got 18, because only ~3599
+    /// ticks had actually elapsed. Anything that means "wait for the machine
+    /// to do N ticks of work" has to read this clock; converting ticks to
+    /// seconds and sleeping is a different, weaker claim.
+    ///
+    /// Uses BotBridge's own `§tick§` stamp format
+    /// ([`crate::factorio::ticks::TICK_STAMP_PREFIX`]) but not BotBridge
+    /// itself: `game.tick` needs no mod, so this keeps working against a save
+    /// whose mod copy is older than this binary. `None` when the game answered
+    /// nothing readable -- never a zero, which would read as tick zero.
+    pub async fn game_tick(&self) -> Result<Option<u64>> {
+        let (_, tick) = take_tick_stamp(self.send(GAME_TICK_QUERY).await?);
+        if let Some(tick) = tick {
+            self.last_tick
+                .store(tick, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(tick)
     }
 
     /// Calls a BotBridge function whose reply must be one *complete* JSON
@@ -3128,6 +3166,43 @@ mod reply_snippet_tests {
 }
 
 #[cfg(test)]
+mod game_tick_query_tests {
+    use super::*;
+    use crate::factorio::ticks::{TICK_STAMP_PREFIX, take_tick_stamp};
+
+    /// The query has to be readable by the one parser that reads ticks, and it
+    /// has to be answerable without BotBridge -- otherwise a save whose
+    /// `workspace/mods` copy predates this binary silently loses its clock and
+    /// every lag wait quietly reverts to the wall-clock guess this replaced.
+    #[test]
+    fn the_query_is_vanilla_lua_stamped_in_the_format_take_tick_stamp_reads() {
+        assert!(GAME_TICK_QUERY.starts_with("/silent-command "));
+        assert!(GAME_TICK_QUERY.contains("game.tick"));
+        assert!(GAME_TICK_QUERY.contains(TICK_STAMP_PREFIX));
+        assert!(
+            !GAME_TICK_QUERY.contains("remote.call"),
+            "the point is that this needs no mod"
+        );
+        assert!(!GAME_TICK_QUERY.contains('\n'));
+    }
+
+    /// A round trip: the reply the query's own Lua would print must come back
+    /// out of the parser as that tick and no payload. Written against the
+    /// format rather than against a live game, which is the half that can
+    /// break silently.
+    #[test]
+    fn the_reply_the_query_produces_parses_back_to_the_tick() {
+        let printed = format!("{TICK_STAMP_PREFIX}64738\n");
+        let (payload, tick) = take_tick_stamp(split_reply(&printed, true));
+        assert_eq!(tick, Some(64738));
+        assert_eq!(
+            payload, None,
+            "the stamp is the whole reply; anything left over would be judged as an error"
+        );
+    }
+}
+
+#[cfg(test)]
 mod transfer_guarantee_tests {
     use super::*;
     use crate::factorio::ticks::take_tick_stamp;
@@ -3430,11 +3505,46 @@ mod transfer_guarantee_tests {
     }
 
     /// A partial move is a failure too — `Success` asserts the *full* count.
+    ///
+    /// The complaint is asserted **whole**, not by fragment, because a second
+    /// reader now depends on its shape: `classify_failure`
+    /// (`crates/scripting_lua/src/globals/record.rs`) parses both counts and
+    /// the item name out of this exact wording to build a
+    /// `FailureKind::PartialTransfer`, so that a run's record says *18 of 20
+    /// moved* rather than only *rejected*. Those two live in different crates
+    /// and cannot check each other; this assertion is the pin. If it fails
+    /// because the mod's wording moved, the classifier's own tests are the
+    /// other half to update.
     #[test]
     fn a_remove_that_moved_some_but_not_all_is_a_failure() {
         let (verdict, printed) = transfer(REMOVE_TEN, 0, 7);
         verdict.expect_err("a remove that moved 7 of 10 reported success");
-        assert!(printed.contains("but removed 7"), "printed {printed:?}");
+        assert_eq!(
+            printed,
+            format!("tried to remove 10 iron-plate but removed 7\n§tick§{STUB_TICK}"),
+            "the shortfall wording is parsed by `classify_failure` in \
+             crates/scripting_lua; both counts and the item must stay where it \
+             looks for them"
+        );
+    }
+
+    /// The insert side's clamp wording, pinned for the same reader and the
+    /// same reason. It states the two counts differently — `20x` rather than
+    /// `20`, and the moved count after `only has` — which is exactly why the
+    /// classifier parses three shapes rather than one.
+    #[test]
+    fn a_clamped_insert_states_both_counts_in_the_wording_the_record_parses() {
+        let (verdict, printed) = transfer(INSERT_TEN, 6, 6);
+        verdict.expect_err("an insert clamped from 10 to 6 reported success");
+        assert_eq!(
+            printed,
+            format!(
+                "cannot insert 10x iron-ore, because player #1 only has 6. clamping...\n\
+                 §tick§{STUB_TICK}"
+            ),
+            "the clamp wording is parsed by `classify_failure` in \
+             crates/scripting_lua"
+        );
     }
 
     /// The discriminator. Without this the three tests above would all pass

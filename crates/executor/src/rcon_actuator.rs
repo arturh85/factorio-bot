@@ -408,6 +408,24 @@ impl Actuator for RconActuator {
         self.rcon.add_research_timed(tech).await.map_err(classify)
     }
 
+    /// The game's own clock, asked fresh.
+    ///
+    /// Not [`FactorioRcon::last_tick`]: that is the stamp off whatever was
+    /// last sent, and the whole point of the caller
+    /// (`run::wait_out_lag`) is that nothing is being sent while a furnace
+    /// works. A stale tick there would report the wait finished the moment it
+    /// began.
+    ///
+    /// A round trip that fails is reported as `Ok(None)` rather than as an
+    /// error: "I could not read the clock" and "I have no clock" put the
+    /// caller in exactly the same position, and the caller's answer to both —
+    /// fall back to the wall-clock estimate — is right for both. Failing the
+    /// wait outright over an unreadable clock would abandon a plan for a
+    /// reason that has nothing to do with the plan.
+    async fn game_tick(&self) -> Result<Option<u64>, ActuatorError> {
+        Ok(self.rcon.game_tick().await.ok().flatten())
+    }
+
     /// Claims the placement `bot` most recently made, if one is waiting.
     ///
     /// Removes it: a placement is a fact about one attempt, and leaving it in

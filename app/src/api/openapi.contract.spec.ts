@@ -803,6 +803,7 @@ const SCHEMAS: Record<string, SchemaContract> = {
         missing_item: true,
         unreachable: true,
         blocked: true,
+        partial_transfer: true,
         rejected: true,
         timeout: true,
         other: true

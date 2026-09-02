@@ -257,6 +257,22 @@ pub enum FailureKind {
     MissingItem,
     Unreachable,
     Blocked,
+    /// Some of what was asked for moved, and the rest did not.
+    ///
+    /// Split out of [`FailureKind::Rejected`] because the two leave the world
+    /// in opposite states and a reader cannot tell them apart from the kind
+    /// alone. A rejection is a command the game declined: nothing moved, and
+    /// re-issuing it unchanged is a coherent thing to want. A partial transfer
+    /// *already happened* -- BotBridge's `rcon_remove_from_inventory` removes
+    /// whatever the inventory had and hands it to the player before it
+    /// complains -- so the 18 plates are in the bot's hands and the only
+    /// honest retry is for the 2 that are not.
+    ///
+    /// [`ActionFailure::detail`] carries both numbers and the item, e.g.
+    /// `moved 18 of 20 iron-plate`, because "it failed" is not enough to
+    /// replan against and the numbers were otherwise reachable only by
+    /// re-parsing the human-readable `error` string.
+    PartialTransfer,
     Rejected,
     Timeout,
     /// A kind this build does not know, or one not worth a variant yet.

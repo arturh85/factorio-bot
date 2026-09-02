@@ -455,20 +455,100 @@ async fn await_preds(
     // predecessor's own completion signal does not cover that wait, so honour
     // the lag once every predecessor has succeeded.
     if max_lag > 0 {
-        // A speed the actuator cannot report falls back to normal speed
-        // rather than aborting the run over a missing nicety: a wrong-but-
-        // finite wait is recoverable (recovery re-checks preconditions before
-        // dispatching the next action), a hung run is not.
-        let speed = act.game_speed().await.unwrap_or(1.0);
-        tokio::time::sleep(ticks_to_wall_clock(max_lag, speed)).await;
+        wait_out_lag(act, max_lag).await;
     }
     PredOutcome::Ready
 }
 
-/// Factorio runs at `60 * speed` ticks per second; `speed` is `game.speed`
-/// (`Actuator::game_speed`), where `1.0` is normal. A non-default speed
-/// scales how fast machine time passes without changing how many ticks a lag
-/// edge represents, so wall-clock time is `ticks / (60 * speed)`.
+/// How much *extra* wall clock a lag wait may spend chasing the game's clock,
+/// as a multiple of the wait it first estimated.
+///
+/// The loop below re-reads the game tick and sleeps again for whatever is
+/// still owed, which converges fast against a server merely running behind —
+/// a 10% deficit is gone in two extra readings. It does not converge at all
+/// against a game that is *stopped*: `/editor`, a paused single-player host,
+/// a server between saves. That case must not hang the run, so the budget
+/// caps it. Spending the budget and dispatching anyway is deliberate: the
+/// action's own verdict is then the report, which is a far better failure than
+/// a bot that never moves again.
+const LAG_CHASE_BUDGET: u32 = 1;
+
+/// Wait for `lag` ticks of machine time to actually pass.
+///
+/// # The clock this reads, and the one it does not
+///
+/// `lag` counts *game* ticks. The obvious implementation — divide by 60,
+/// sleep that long — silently reinterprets it as a wall-clock duration, and
+/// the two are only equal on a server that is keeping up. One that is not
+/// hands back a wait that is short by exactly the fraction it is behind, and
+/// nothing says so: an early collection from a furnace looks identical to a
+/// furnace that was slow.
+///
+/// `run-1788320177-77989` is what that costs. A 4032-tick lag before taking 20
+/// iron plates was slept as 67.2 s; ~3599 ticks passed (six 1920x1080
+/// screenshots every 300 ticks will do that); the furnace had made 18; the
+/// take failed and rung 4 spent the rest of its budget replanning. The
+/// planner's one-cycle headroom (192 ticks, 4.8%) could not cover a ~10.7%
+/// deficit, and the deficit scales with the batch while the headroom does not
+/// — which is why the same run's earlier, smaller smelts all came back clean.
+///
+/// So: ask the game where its clock is, sleep the *estimated* remaining time,
+/// then ask again. The wall clock survives only as the estimate for how long
+/// to sleep between readings, where being wrong costs an extra round trip
+/// instead of a plan.
+///
+/// An actuator with no clock ([`Actuator::game_tick`] returning `None`) keeps
+/// the old wall-clock wait, which is the honest fallback: it is the best
+/// available claim when nobody can be asked what time it is.
+async fn wait_out_lag(act: &dyn Actuator, lag: Ticks) {
+    // A speed the actuator cannot report falls back to normal speed rather
+    // than aborting the run over a missing nicety: a wrong-but-finite wait is
+    // recoverable (recovery re-checks preconditions before dispatching the
+    // next action), a hung run is not. It is only an estimate now either way.
+    let speed = act.game_speed().await.unwrap_or(1.0);
+    let Some(started) = act.game_tick().await.ok().flatten() else {
+        tokio::time::sleep(ticks_to_wall_clock(lag, speed)).await;
+        return;
+    };
+    let deadline = started.saturating_add(u64::from(lag));
+
+    let mut estimate = lag;
+    let mut budget = lag.saturating_mul(LAG_CHASE_BUDGET);
+    loop {
+        tokio::time::sleep(ticks_to_wall_clock(estimate, speed)).await;
+        // A clock that stops answering mid-wait leaves us with the wait we
+        // already did and no way to check it. Returning is right: we have
+        // slept at least the estimate, which is what the old code did on its
+        // own, and inventing a further wait on no evidence would be worse.
+        let Some(now) = act.game_tick().await.ok().flatten() else {
+            return;
+        };
+        let owed = deadline.saturating_sub(now);
+        if owed == 0 {
+            return;
+        }
+        // Saturating rather than wrapping: `owed` cannot exceed `lag` in
+        // practice (the clock only moves forward), and if a game somehow
+        // rewound its tick the right answer is still "wait what is left of the
+        // budget", not "wait 4 billion ticks".
+        estimate = u32::try_from(owed).unwrap_or(Ticks::MAX).min(budget);
+        if estimate == 0 {
+            return;
+        }
+        budget -= estimate;
+    }
+}
+
+/// Factorio *aims* to run at `60 * speed` ticks per second; `speed` is
+/// `game.speed` (`Actuator::game_speed`), where `1.0` is normal. A non-default
+/// speed scales how fast machine time passes without changing how many ticks a
+/// lag edge represents, so wall-clock time is `ticks / (60 * speed)`.
+///
+/// **An estimate, not a measurement.** A server that cannot keep up delivers
+/// fewer ticks per second than this says and reports nothing about it, so
+/// [`wait_out_lag`] uses this only to decide how long to sleep before asking
+/// the game's clock again — never as the answer to "has the machine had its
+/// ticks yet". See [`Actuator::game_tick`] for what that cost once.
 ///
 /// `speed` is defensively floored to normal rather than trusted blindly:
 /// Factorio's own minimum is `0.01`, but an actuator stub or a future bug
@@ -705,6 +785,15 @@ mod tests {
         /// bot asks first. `None` for every test written before this field
         /// existed, matching `Actuator::take_placement`'s own default.
         placement: Option<Placement>,
+        /// How many game ticks this actuator's clock advances per second of
+        /// (virtual) wall clock, or `None` for an actuator with no clock.
+        ///
+        /// `None` by default, matching `Actuator::game_tick`'s own default, so
+        /// every test written before this field existed keeps taking the
+        /// wall-clock path. A value **below 60** is a server running behind —
+        /// the case that broke `run-1788320177-77989` — and `Some(0.0)` is a
+        /// clock that has stopped.
+        ticks_per_second: Option<f64>,
     }
 
     impl Default for Script {
@@ -716,6 +805,7 @@ mod tests {
                 fail_mine: BTreeSet::new(),
                 speed: 1.0,
                 placement: None,
+                ticks_per_second: None,
             }
         }
     }
@@ -867,6 +957,20 @@ mod tests {
 
         async fn game_speed(&self) -> Result<f64, ActuatorError> {
             Ok(self.script.speed)
+        }
+
+        /// A game clock running at `script.ticks_per_second`, read off the
+        /// same virtual clock the sleeps use.
+        ///
+        /// This is the whole point of the fixture: a real server's tick rate
+        /// is *not* `60 * game.speed`, it is whatever the machine manages, and
+        /// no test that derives the tick from the sleep it just did can tell
+        /// the two apart.
+        async fn game_tick(&self) -> Result<Option<u64>, ActuatorError> {
+            let Some(rate) = self.script.ticks_per_second else {
+                return Ok(None);
+            };
+            Ok(Some((self.origin.elapsed().as_secs_f64() * rate) as u64))
         }
 
         fn take_placement(&self, _bot: BotId) -> Option<Placement> {
@@ -1576,6 +1680,74 @@ mod tests {
         assert!(
             gap >= Duration::from_millis(500) && gap < Duration::from_millis(1_000),
             "expected a ~500ms wait at double speed, got {gap:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_lag_edge_waits_for_game_ticks_not_for_seconds() {
+        // The defect from `run-1788320177-77989`, in miniature. The game runs
+        // at 50 ticks a second rather than 60 -- a server behind by a sixth,
+        // which is what six 1920x1080 screenshots every 300 ticks cost -- and
+        // `game.speed` still reports 1.0, because it is the rate the game is
+        // *asked* for and says nothing about the rate it achieves.
+        //
+        // 60 ticks of machine time is therefore 1.2 s of wall clock, not 1.0.
+        // The old code slept 1.0 and dispatched into a furnace that had not
+        // finished; anything under 1.2 s here is that same bug.
+        let script = Script {
+            ticks_per_second: Some(50.0),
+            ..Default::default()
+        };
+        let act = RecordingAct::new(script);
+        let (net, sched) = cross_bot_fixture(60);
+        within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
+
+        let iron = act.mine_started_at("iron-ore").expect("iron-ore mined");
+        let copper = act.mine_started_at("copper-ore").expect("copper-ore mined");
+        let gap = copper - iron;
+        assert!(
+            gap >= Duration::from_millis(1_150),
+            "60 game ticks at 50 ticks/second is 1.2s of wall clock; waiting \
+             {gap:?} means the lag was spent as seconds rather than as ticks"
+        );
+        assert!(
+            gap < Duration::from_millis(1_500),
+            "the wait must stop once the game's clock reaches the deadline, \
+             not overshoot: got {gap:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stopped_game_clock_ends_the_lag_wait_instead_of_hanging_the_run() {
+        // A clock that never advances -- a paused host, `/editor`, a server
+        // mid-save. Chasing it would wait forever, and a bot that never moves
+        // again is a far worse failure than an action the game gets to judge
+        // and refuse. So the chase is budgeted: it gives up and dispatches.
+        let script = Script {
+            ticks_per_second: Some(0.0),
+            ..Default::default()
+        };
+        let act = RecordingAct::new(script);
+        let (net, sched) = cross_bot_fixture(60);
+        within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
+
+        let iron = act.mine_started_at("iron-ore").expect("iron-ore mined");
+        let copper = act
+            .mine_started_at("copper-ore")
+            .expect("copper-ore must still be mined: a stopped clock is not a reason to hang");
+        let gap = copper - iron;
+        assert!(
+            gap >= Duration::from_millis(1_000),
+            "the first estimated wait must still be served in full, got {gap:?}"
+        );
+        assert!(
+            gap <= Duration::from_millis(2_100),
+            "LAG_CHASE_BUDGET caps the chase at one extra estimate, so this \
+             may not exceed ~2x the 1s estimate: got {gap:?}"
         );
     }
 

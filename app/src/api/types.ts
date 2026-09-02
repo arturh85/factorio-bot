@@ -591,8 +591,22 @@ export interface PlannedStep {
  */
 export type SatisfiedReason = 'already_satisfied' | 'plan_empty' | 'unknown';
 
-/** How an `ActionFailure` failed, coarse enough to group by in a query. */
-export type FailureKind = 'missing_item' | 'unreachable' | 'blocked' | 'rejected' | 'timeout' | 'other';
+/**
+ * How an `ActionFailure` failed, coarse enough to group by in a query.
+ *
+ * `partial_transfer` is deliberately not `rejected`: a rejection moved
+ * nothing, while a partial transfer already moved some of what was asked for
+ * and left the rest behind. `ActionFailure.detail` then carries both counts
+ * and the item, e.g. `moved 18 of 20 iron-plate`.
+ */
+export type FailureKind =
+    | 'missing_item'
+    | 'unreachable'
+    | 'blocked'
+    | 'partial_transfer'
+    | 'rejected'
+    | 'timeout'
+    | 'other';
 
 /**
  * A structured failure, carried *beside* `EventKind`'s `action_settled.error`

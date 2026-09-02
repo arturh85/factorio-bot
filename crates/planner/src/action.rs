@@ -99,6 +99,16 @@ pub enum Condition {
     /// completely dead. Run 30 researched nothing for 60,661 ticks with
     /// `generated_kw = 0.0` in all 541 of its force samples.
     ///
+    /// **And it is a network budget, not a per-consumer test.** The kilowatts
+    /// this asks for must be *uncommitted*: what
+    /// [`crate::state::PlanState::electric_supply_kw`] reports less what
+    /// [`crate::state::PlanState::electric_demand_kw`] already spends on the
+    /// same network, excluding whatever stands at `pos` itself. Without the
+    /// subtraction every consumer is told about the whole engine and thirteen
+    /// assemblers pass individually on nine hundred kilowatts — the same
+    /// *coverage is not capacity* failure the paragraph above describes, one
+    /// level up, and the level at which a factory rather than a lab meets it.
+    ///
     /// **Nothing produces this yet**, so `ActionNetwork::infer_edges` draws no
     /// edge to it and no method can satisfy it: it is a statement about the
     /// world, checked at expansion time, and a method that needs it refuses
@@ -217,7 +227,19 @@ impl Condition {
                 // gives is "not powered", matching `is_area_free`'s reading of
                 // the same absence: an entity the world cannot size is not one
                 // the planner will commit to.
-                Some(area) => state.electric_supply_kw(&area).total_cmp(kw).is_ge(),
+                Some(area) => {
+                    // **Uncommitted** capacity, not nameplate. Supply alone is
+                    // a per-consumer test that says yes to every consumer for
+                    // ever: twelve assemblers on one 900 kW engine each ask
+                    // for 75 kW and each are told there is 900. The consumer
+                    // being asked about is excluded from the demand, or a
+                    // machine this plan already placed is charged against its
+                    // own budget and the second check of an identical plan
+                    // refuses what the first accepted.
+                    let headroom = state.electric_supply_kw(&area)
+                        - state.electric_demand_kw(&area, Some(pos));
+                    headroom.total_cmp(kw).is_ge()
+                }
                 None => false,
             },
             Condition::Feeds { from, to } => state.delivers_into(from, to),
@@ -550,6 +572,116 @@ mod tests {
 
     fn state() -> PlanState {
         PlanState::from_world(Arc::new(fixture_world()), &[BotId(1), BotId(2)])
+    }
+
+    // ---- the power budget -------------------------------------------------
+
+    fn put(s: &mut PlanState, name: &str, x: f64, y: f64) {
+        s.create_entity(FactorioEntity {
+            name: name.into(),
+            position: Position::new(x, y),
+            ..Default::default()
+        });
+    }
+
+    /// One steam engine, and a row of small poles all on its network.
+    ///
+    /// Poles every three tiles along `y = 10.5`, well inside a small pole's
+    /// 7.5-tile wire reach, so the whole row is one component. Each pole's
+    /// 5x5 supply box is `[x-2.5, x+2.5] x [8, 13]`.
+    fn one_engine_and_a_pole_row(poles: usize) -> PlanState {
+        let mut s = state();
+        for k in 0..poles {
+            put(&mut s, "small-electric-pole", 10.5 + 3. * k as f64, 10.5);
+        }
+        put(&mut s, "steam-engine", 12.5, 10.5);
+        s
+    }
+
+    fn powered_for(name: &str, x: f64, y: f64, kw: f64) -> Condition {
+        Condition::Powered {
+            pos: Position::new(x, y),
+            entity: name.into(),
+            kw,
+        }
+    }
+
+    /// **Twelve assemblers exhaust a 900 kW engine, and the thirteenth must be
+    /// refused.**
+    ///
+    /// Each one asks "is there 75 kW of supply here" and, on a per-consumer
+    /// test, each one is told yes -- for ever. This is "coverage is not
+    /// capacity" one level up: the network is fully connected, every check
+    /// passes, and the base browns out.
+    #[test]
+    fn the_thirteenth_assembler_on_one_engine_is_refused() {
+        let mut s = one_engine_and_a_pole_row(12);
+        // Twelve assembling machines, one per pole, each covered by it:
+        // a 3x3 machine at `y = 14` has a box of `[12.8, 15.2]`, which meets
+        // the pole row's `[8, 13]`.
+        for k in 0..12 {
+            put(&mut s, "assembling-machine-1", 10.5 + 3. * k as f64, 14.0);
+        }
+        // 12 x 75 kW is exactly the engine's 900 kW: the network is full.
+        let thirteenth = powered_for("assembling-machine-1", 10.5, 7.6, 75.);
+        assert!(
+            !thirteenth.holds(&s, BotId(1)),
+            "twelve assemblers already draw the whole 900 kW; the thirteenth \
+             has nothing left to run on"
+        );
+    }
+
+    /// The other side of the same rule: a consumer the network *can* still
+    /// carry is not refused.
+    #[test]
+    fn a_consumer_a_full_network_can_still_carry_is_allowed() {
+        let mut s = one_engine_and_a_pole_row(12);
+        for k in 0..11 {
+            put(&mut s, "assembling-machine-1", 10.5 + 3. * k as f64, 14.0);
+        }
+        // 11 x 75 = 825 kW committed, 75 kW left, and 75 kW asked for.
+        let twelfth = powered_for("assembling-machine-1", 10.5, 7.6, 75.);
+        assert!(
+            twelfth.holds(&s, BotId(1)),
+            "825 kW committed of 900 leaves exactly the 75 this one wants"
+        );
+    }
+
+    /// **Excluding self is not optional.** A consumer already standing must
+    /// not be counted against its own budget, or the second check of an
+    /// identical plan refuses what the first accepted -- a non-idempotent
+    /// predicate, which in a supervisor loop is an oscillation.
+    #[test]
+    fn a_standing_consumer_is_not_charged_against_itself() {
+        let mut s = one_engine_and_a_pole_row(12);
+        for k in 0..12 {
+            put(&mut s, "assembling-machine-1", 10.5 + 3. * k as f64, 14.0);
+        }
+        // The twelfth one, already standing, asked about again. Eleven others
+        // draw 825 kW; it wants 75; 900 - 825 >= 75.
+        let itself = powered_for("assembling-machine-1", 43.5, 14.0, 75.);
+        assert!(
+            itself.holds(&s, BotId(1)),
+            "a machine that already stands pays for itself once, not twice"
+        );
+    }
+
+    /// A consumer on a *different* network does not eat this one's budget.
+    #[test]
+    fn a_consumer_on_another_network_spends_nothing_here() {
+        let mut s = one_engine_and_a_pole_row(1);
+        // Twenty tiles away, past a small pole's 7.5-tile wire reach: its own
+        // island, with its own consumers and no generator.
+        put(&mut s, "small-electric-pole", 40.5, 10.5);
+        for k in 0..12 {
+            put(&mut s, "assembling-machine-1", 38.5 + 1.0 * k as f64, 14.0);
+        }
+        let here = powered_for("assembling-machine-1", 10.5, 7.6, 75.);
+        assert!(
+            here.holds(&s, BotId(1)),
+            "twelve assemblers on an island of their own draw nothing from \
+             the engine's network"
+        );
     }
 
     #[test]

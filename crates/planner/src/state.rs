@@ -138,6 +138,124 @@ fn generation_kw(name: &str) -> Option<f64> {
     }
 }
 
+/// One electric network as seen from a patch of ground: the poles near it, the
+/// wire components they form, and which of those components reach the ground.
+///
+/// Built once by [`PlanState::electric_network`] and asked twice — by
+/// [`PlanState::electric_supply_kw`] and [`PlanState::electric_demand_kw`] —
+/// so that the two agree, by construction, about what "the same network"
+/// means. Two independent walks would be two notions of it, and a demand
+/// subtracted from a supply computed over a different network is worse than no
+/// demand at all.
+struct ElectricNetwork {
+    /// Every entity within [`POWER_SEARCH_RADIUS`] of the ground asked about,
+    /// in the fixed order [`PlanState::entities_within`] returns.
+    nearby: Vec<FactorioEntity>,
+    /// Each pole's supply box, in that same order.
+    poles: Vec<Rect>,
+    /// Union-find over `poles`, by index, already path-compressed as it was
+    /// built.
+    parent: Vec<usize>,
+    /// The component roots whose supply areas meet the ground asked about.
+    supplying: BTreeSet<usize>,
+}
+
+impl ElectricNetwork {
+    /// Read-only find. No compression, because `carries` takes `&self` so both
+    /// callers can iterate `nearby` while asking — and a pole row is a handful
+    /// of entries that the construction pass has already flattened.
+    fn root(&self, mut i: usize) -> usize {
+        while self.parent[i] != i {
+            i = self.parent[i];
+        }
+        i
+    }
+
+    /// Is `footprint` covered by a pole of a component that reaches the
+    /// ground this network was built for?
+    ///
+    /// The predicate both a generator and a consumer are tested with, which is
+    /// what makes a kilowatt of supply and a kilowatt of demand commensurable.
+    fn carries(&self, footprint: &Rect) -> bool {
+        self.poles
+            .iter()
+            .enumerate()
+            .filter(|(_, supply)| boxes_overlap(supply, footprint))
+            .any(|(index, _)| self.supplying.contains(&self.root(index)))
+    }
+}
+
+/// The pessimistic duty-cycle draw of a basic electric inserter, in kW.
+///
+/// **Not a prototype field, and the only entry in [`consumer_kw`] that is not
+/// one.** Vanilla gives an `inserter` a 0.4 kW idle `drain` plus 5 kJ per
+/// movement and 5 kJ per rotation (`base/prototypes/entity/entities.lua`);
+/// what a network budget needs is what a *busy* one costs, and that is a duty
+/// cycle rather than a field. 13 kW is the figure
+/// `docs/superpowers/specs/2026-09-03-starter-factory-design.md` §4.2 chose,
+/// with its reason stated there: budgeting the 0.4 kW drain for an inserter
+/// that never stops swinging is the same error as counting coverage as
+/// capacity, one table down.
+///
+/// The faster inserters below scale it by their own per-swing energy against
+/// this one's 5 kJ, so there is one duty cycle in this file and not four.
+const INSERTER_DUTY_KW: f64 = 13.0;
+
+/// What a consumer draws from an electric network, in kW, when it is running.
+///
+/// The other half of [`generation_kw`], and the table
+/// [`PlanState::electric_demand_kw`] sums. Every figure except
+/// [`INSERTER_DUTY_KW`] is the prototype's own `energy_usage`, read off
+/// `base/prototypes/entity/entities.lua` and
+/// `base/prototypes/entity/mining-drill.lua` in this repo's `workspace/data`
+/// (base 2.1.17), and written down here for the same reason as
+/// [`pole_supply_half_extent`], [`pole_wire_reach`], [`generation_kw`] and
+/// [`delivery_offset`]: **the mod does not send `energy_usage`** and
+/// `FactorioEntityPrototype` has no field for it. Sending it is the one
+/// follow-up that deletes all five tables at once.
+///
+/// # The direction an unknown name errs in, which is not the usual one
+///
+/// Every other table in this file answers `None` for a name it does not know
+/// and thereby **under**-credits: an unknown pole covers nothing, an unknown
+/// generator makes nothing, an unknown machine delivers into nothing, and each
+/// of those refuses a plan rather than promising one. This table is the
+/// opposite: a consumer it does not name draws **nothing**, so an unmodelled
+/// machine on the network is headroom that is not there. That is the unsafe
+/// direction and it is stated rather than hidden — it is why the table names
+/// every electric consumer this planner can place, and why the residual is
+/// listed in `docs/superpowers/notes/2026-09-03-red-science-automated.md`
+/// rather than treated as closed.
+///
+/// **Burner machines are deliberately absent**, and they are absent rather
+/// than zero-valued for a reason: a stone furnace draws 90 kW *of coal*, not
+/// of electricity, and an entry for it here would be a number in the wrong
+/// units that every test would agree with. So are `offshore-pump` (its
+/// `energy_source` is `type = "void"`, whatever its 60 kW `energy_usage`
+/// says), `boiler` and `steam-engine`.
+fn consumer_kw(name: &str) -> Option<f64> {
+    match name {
+        "assembling-machine-1" => Some(75.0),
+        "assembling-machine-2" => Some(150.0),
+        "assembling-machine-3" => Some(375.0),
+        "electric-mining-drill" => Some(90.0),
+        "pumpjack" => Some(90.0),
+        "lab" => Some(60.0),
+        "electric-furnace" => Some(180.0),
+        "chemical-plant" => Some(210.0),
+        "oil-refinery" => Some(420.0),
+        "radar" => Some(300.0),
+        "beacon" => Some(480.0),
+        // 5 kJ a movement and 5 kJ a rotation: the duty cycle itself.
+        "inserter" | "long-handed-inserter" => Some(INSERTER_DUTY_KW),
+        // 7 kJ each, so 7/5 of the same cycle.
+        "fast-inserter" => Some(INSERTER_DUTY_KW * 7. / 5.),
+        // 20 kJ each, so four times it.
+        "bulk-inserter" => Some(INSERTER_DUTY_KW * 20. / 5.),
+        _ => None,
+    }
+}
+
 /// Where a machine puts what it produces, as a north-frame offset from its own
 /// position.
 ///
@@ -154,10 +272,19 @@ fn generation_kw(name: &str) -> Option<f64> {
 /// A machine this table does not name delivers into nothing at all, which
 /// refuses rather than over-credits — the same direction
 /// [`pole_supply_half_extent`] and `collides_with_water` choose for an unknown
-/// name. **Inserters are deliberately absent**: they belong to stage 2 of the
-/// starter factory together with the pickup/drop pair that makes their
-/// `direction` checkable, and an entry here that nothing exercises is a
-/// hand-written number nobody would notice was wrong.
+/// name.
+///
+/// **The inserters are the pair with [`pickup_offset`], and neither is useful
+/// without the other.** An inserter's `direction` names the side it *picks up*
+/// from, so its drop is the *opposite* tile — the single most expensive thing
+/// to get backwards in this whole design, because a backwards inserter places
+/// 100 %, passes every geometry check, and moves nothing. The two offsets are
+/// therefore written as one rule turned by one direction rather than as four
+/// hand-written cases, and they are checked against two measurements CLAUDE.md
+/// made **in a running game** rather than against each other:
+/// `direction = 12` ("west") moves items west to east, and a row fed from a
+/// belt to its north uses `direction = 0` at both ends. Both are asserted in
+/// this file's `inserter_geometry_tests`.
 ///
 /// `None` for a half-diagonal direction, because [`Position::turn`] names no
 /// rotation for one and no machine stands on one.
@@ -165,9 +292,52 @@ fn delivery_offset(name: &str, direction: Direction) -> Option<Position> {
     let north = match name {
         "burner-mining-drill" => (-0.35, -1.3),
         "electric-mining-drill" => (0., -1.85),
-        _ => return None,
+        // The far side from the pickup: `+y` is south, and north-facing means
+        // "picks up from the north".
+        name => (0., inserter_reach(name)?),
     };
     Position::new(north.0, north.1).turn(direction)
+}
+
+/// How far an inserter reaches, in tiles, on **each** side of itself.
+///
+/// A vanilla inserter swings between the tile in front of it and the tile
+/// behind it; a long-handed one skips a tile on both sides. There is no
+/// prototype field for it that reaches this crate — `FactorioEntityPrototype`
+/// carries none of `pickup_position`, `insert_position` or
+/// `energy_per_movement` — so this is the fifth hand-written table in this
+/// file and it goes in the same follow-up.
+///
+/// `None` for anything that is not an inserter, which is what keeps the pickup
+/// half of [`PlanState::delivers_into`] an *inserter's* claim: a stone furnace
+/// does not reach out and take from the chest beside it.
+fn inserter_reach(name: &str) -> Option<f64> {
+    match name {
+        "inserter"
+        | "burner-inserter"
+        | "fast-inserter"
+        | "bulk-inserter"
+        | "filter-inserter"
+        | "stack-inserter"
+        | "stack-filter-inserter" => Some(1.),
+        "long-handed-inserter" => Some(2.),
+        _ => None,
+    }
+}
+
+/// Where an inserter standing at its own origin picks **up** from, as a
+/// north-frame offset turned by `direction`.
+///
+/// **The direction points here.** `direction = 0` picks up one tile *north*
+/// and drops one tile south; `direction = 12` (west) picks up one tile west
+/// and drops one east, which is CLAUDE.md's "direction 12 is what moves items
+/// west to east". Both of that file's measured cases fall out of these two
+/// lines and [`delivery_offset`]'s inserter arm, which is why they are written
+/// as one rule and not as a case table.
+///
+/// `None` for anything [`inserter_reach`] does not name.
+fn pickup_offset(name: &str, direction: Direction) -> Option<Position> {
+    Position::new(0., -inserter_reach(name)?).turn(direction)
 }
 
 /// Above this, a reported `resource_reach_distance` is not a character's.
@@ -1480,16 +1650,48 @@ impl PlanState {
         let Some(target) = self.entity_at(to) else {
             return false;
         };
-        let Some(drop) = self.delivery_position(&source) else {
+        // A push: the source has a drop point and the target covers the tile
+        // it lands in. A drill, and an inserter's drop side.
+        if let Some(drop) = self.delivery_position(&source)
+            && self.covers_tile(&target, &drop)
+        {
+            return true;
+        }
+        // A pull: the *target* is an inserter whose pickup tile is one the
+        // source covers. A furnace does not push into an inserter and an
+        // inserter is not "delivered into" in the drill's sense — but items do
+        // move from the one to the other, which is what this predicate is
+        // named for. `pickup_position` answers `None` for everything that is
+        // not an inserter, so this disjunct widens nothing else.
+        if let Some(pickup) = self.pickup_position(&target)
+            && self.covers_tile(&source, &pickup)
+        {
+            return true;
+        }
+        false
+    }
+
+    /// Where the inserter standing as `entity` picks up from, or `None` if it
+    /// is not an inserter.
+    pub fn pickup_position(&self, entity: &FactorioEntity) -> Option<Position> {
+        let facing = Direction::from_u8(entity.direction)?;
+        Some(entity.position.add(&pickup_offset(&entity.name, facing)?))
+    }
+
+    /// Is `point` inside one of the tiles `entity` stands on?
+    ///
+    /// Tiles, not the box, for the 1/1280 reason [`delivers_into`] states at
+    /// length: a burner drill's drop point misses a stone furnace's collision
+    /// box by 0.00078125 of a tile, and box containment would reject the one
+    /// layout stage 1 exists to build.
+    fn covers_tile(&self, entity: &FactorioEntity, point: &Position) -> bool {
+        let Some(facing) = Direction::from_u8(entity.direction) else {
             return false;
         };
-        let Some(facing) = Direction::from_u8(target.direction) else {
+        let Some(area) = self.collision_area_facing(&entity.name, &entity.position, facing) else {
             return false;
         };
-        let Some(area) = self.collision_area_facing(&target.name, &target.position, facing) else {
-            return false;
-        };
-        tiles_under(&area).contains(&Pos::from(&drop))
+        tiles_under(&area).contains(&Pos::from(point))
     }
 
     pub fn nearest_water_tile(&self, from: &Position, max_radius: f64) -> Option<FactorioTile> {
@@ -1860,8 +2062,8 @@ impl PlanState {
         out
     }
 
-    /// The nearest pole to `from`, within `radius`, whose own supply area
-    /// already carries at least `kw` of generation — i.e. somewhere a
+    /// The nearest pole to `from`, within `radius`, whose own supply area has
+    /// at least `kw` of generation **left uncommitted** — i.e. somewhere a
     /// consumer could be built and actually run.
     ///
     /// The anchor a method searches around when it needs a *powered* site.
@@ -1897,7 +2099,16 @@ impl PlanState {
         });
         candidates
             .into_iter()
-            .find(|(_, _, box_)| self.electric_supply_kw(box_).total_cmp(&kw).is_ge())
+            // Headroom, not nameplate, and for the same reason
+            // `Condition::Powered` uses it: a pole whose network is already
+            // spoken for is not somewhere a consumer "could be built and
+            // actually run". Nothing is excluded from the demand here because
+            // the consumer this is siting does not exist yet.
+            .find(|(_, _, box_)| {
+                (self.electric_supply_kw(box_) - self.electric_demand_kw(box_, None))
+                    .total_cmp(&kw)
+                    .is_ge()
+            })
             .map(|(_, position, _)| position)
     }
 
@@ -1968,6 +2179,86 @@ impl PlanState {
     ///   query and an unbounded one would be a full scan on every condition
     ///   check. A power plant beyond that radius reads as absent.
     pub fn electric_supply_kw(&self, area: &Rect) -> f64 {
+        let Some(net) = self.electric_network(area) else {
+            return 0.;
+        };
+        // 3. Capacity on those components.
+        let mut total = 0.;
+        for entity in &net.nearby {
+            let Some(kw) = generation_kw(&entity.name) else {
+                continue;
+            };
+            if net.carries(&self.footprint_of(entity)) {
+                total += kw;
+            }
+        }
+        total
+    }
+
+    /// How much draw, in kW, is already committed on the network that reaches
+    /// `area` — the *other* half of the question
+    /// [`electric_supply_kw`](Self::electric_supply_kw) answers.
+    ///
+    /// **`Condition::Powered` is a per-consumer test without this, and that is
+    /// not the same as a network budget.** Each consumer asks "does 900 kW
+    /// reach this ground" and each is told yes, so twelve assembling machines,
+    /// four drills, a lab and thirty inserters — 1,560 kW — all pass
+    /// individually on one 900 kW engine. For a single lab nobody could have
+    /// hit it; for a factory it is *coverage is not capacity* one level up,
+    /// and it fails quietly: Factorio degrades an under-supplied network
+    /// proportionally, so everything runs at 58 % and every lag edge in the
+    /// plan is wrong by 1.7× with no error anywhere.
+    ///
+    /// `except` names a consumer **not** to charge — the one being asked
+    /// about. Excluding it is not an optimisation: a machine this plan has
+    /// already placed would otherwise be counted against its own budget, so
+    /// the second check of an identical plan would refuse what the first
+    /// accepted. A non-idempotent predicate is an oscillation in a supervisor
+    /// loop. The match is by tile, through [`Pos`], because that is how
+    /// [`create_entity`](Self::create_entity) keys the overlay and two
+    /// consumers cannot stand on one tile anyway.
+    ///
+    /// The walk is [`electric_supply_kw`](Self::electric_supply_kw)'s own —
+    /// literally the same [`ElectricNetwork`], built by the same three steps —
+    /// so there is one notion of "the same network" and not two. A budget
+    /// subtracted from a supply computed over a *different* network would be
+    /// worse than no budget at all.
+    ///
+    /// # What it cannot see
+    ///
+    /// A consumer [`consumer_kw`] does not name draws nothing here, which
+    /// over-states headroom. That is the one table in this file whose unknown
+    /// name errs towards permitting rather than refusing, and its own doc
+    /// comment says so.
+    pub fn electric_demand_kw(&self, area: &Rect, except: Option<&Position>) -> f64 {
+        let Some(net) = self.electric_network(area) else {
+            return 0.;
+        };
+        let skip = except.map(Pos::from);
+        let mut total = 0.;
+        for entity in &net.nearby {
+            if skip
+                .as_ref()
+                .is_some_and(|pos| *pos == Pos::from(&entity.position))
+            {
+                continue;
+            }
+            let Some(kw) = consumer_kw(&entity.name) else {
+                continue;
+            };
+            if net.carries(&self.footprint_of(entity)) {
+                total += kw;
+            }
+        }
+        total
+    }
+
+    /// Steps 1 and 2 of [`electric_supply_kw`](Self::electric_supply_kw):
+    /// which poles are near `area`, which of them are wired together, and
+    /// which of those components reach `area` at all.
+    ///
+    /// `None` when no pole reaches the ground, which is both callers' zero.
+    fn electric_network(&self, area: &Rect) -> Option<ElectricNetwork> {
         let centre = Position::new(
             (area.left_top.x() + area.right_bottom.x()) / 2.,
             (area.left_top.y() + area.right_bottom.y()) / 2.,
@@ -1976,7 +2267,7 @@ impl PlanState {
 
         // 1. Poles, with the supply box and wire reach the vanilla prototypes
         //    give them.
-        let poles: Vec<(&FactorioEntity, Rect, f64)> = nearby
+        let poles: Vec<(Position, Rect, f64)> = nearby
             .iter()
             .filter_map(|entity| {
                 let supply = pole_supply_half_extent(&entity.name)?;
@@ -1985,11 +2276,11 @@ impl PlanState {
                     &Position::new(entity.position.x() - supply, entity.position.y() - supply),
                     &Position::new(entity.position.x() + supply, entity.position.y() + supply),
                 );
-                Some((entity, box_, wire))
+                Some((entity.position.clone(), box_, wire))
             })
             .collect();
         if poles.is_empty() {
-            return 0.;
+            return None;
         }
 
         // 2. Connectivity, as a union-find over pole indices. `poles` is
@@ -2006,7 +2297,7 @@ impl PlanState {
         for a in 0..poles.len() {
             for b in (a + 1)..poles.len() {
                 let reach = poles[a].2.min(poles[b].2);
-                if calculate_distance(&poles[a].0.position, &poles[b].0.position) <= reach {
+                if calculate_distance(&poles[a].0, &poles[b].0) <= reach {
                     let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
                     if ra != rb {
                         parent[ra] = rb;
@@ -2029,30 +2320,14 @@ impl PlanState {
             supplying.insert(root);
         }
         if supplying.is_empty() {
-            return 0.;
+            return None;
         }
-
-        // 3. Capacity on those components.
-        let mut total = 0.;
-        for entity in &nearby {
-            let Some(kw) = generation_kw(&entity.name) else {
-                continue;
-            };
-            let footprint = self.footprint_of(entity);
-            let touching: Vec<usize> = poles
-                .iter()
-                .enumerate()
-                .filter(|(_, (_, supply, _))| boxes_overlap(supply, &footprint))
-                .map(|(index, _)| index)
-                .collect();
-            let wired = touching
-                .into_iter()
-                .any(|index| supplying.contains(&find(&mut parent, index)));
-            if wired {
-                total += kw;
-            }
-        }
-        total
+        Some(ElectricNetwork {
+            nearby,
+            poles: poles.into_iter().map(|(_, supply, _)| supply).collect(),
+            parent,
+            supplying,
+        })
     }
 
     /// Records a placed entity, giving it the footprint its prototype says it
@@ -2776,6 +3051,227 @@ mod tests {
             900.0,
             "the same geometry with a steam engine does count"
         );
+    }
+
+    // ---- electric demand ---------------------------------------------------
+
+    /// The demand walk answers over the same network the supply walk does.
+    #[test]
+    fn demand_counts_the_consumers_the_same_poles_reach() {
+        let mut s = powered(
+            Some(Position::new(10.5, 10.5)),
+            Some(Position::new(12.5, 10.5)),
+        );
+        let site = lab_area(&s, Position::new(8.5, 8.5));
+        assert_eq!(s.electric_supply_kw(&site), 900.0);
+        assert_eq!(
+            s.electric_demand_kw(&site, None),
+            0.0,
+            "an engine and a pole are not consumers"
+        );
+
+        // A lab inside the pole's 5x5 supply box.
+        s.create_entity(FactorioEntity {
+            name: "lab".into(),
+            position: Position::new(8.5, 8.5),
+            ..Default::default()
+        });
+        assert_eq!(s.electric_demand_kw(&site, None), 60.0);
+
+        // And an assembling machine beside it.
+        s.create_entity(FactorioEntity {
+            name: "assembling-machine-1".into(),
+            position: Position::new(11.5, 8.5),
+            ..Default::default()
+        });
+        assert_eq!(s.electric_demand_kw(&site, None), 135.0, "60 + 75");
+    }
+
+    /// `except` names a tile, and it excludes exactly that one.
+    #[test]
+    fn the_consumer_asked_about_is_the_one_left_out_of_its_own_budget() {
+        let mut s = powered(
+            Some(Position::new(10.5, 10.5)),
+            Some(Position::new(12.5, 10.5)),
+        );
+        for (name, pos) in [
+            ("lab", Position::new(8.5, 8.5)),
+            ("assembling-machine-1", Position::new(11.5, 8.5)),
+        ] {
+            s.create_entity(FactorioEntity {
+                name: name.into(),
+                position: pos,
+                ..Default::default()
+            });
+        }
+        let site = lab_area(&s, Position::new(8.5, 8.5));
+        assert_eq!(s.electric_demand_kw(&site, None), 135.0);
+        assert_eq!(
+            s.electric_demand_kw(&site, Some(&Position::new(8.5, 8.5))),
+            75.0,
+            "the lab is left out and the assembler is not"
+        );
+        assert_eq!(
+            s.electric_demand_kw(&site, Some(&Position::new(11.5, 8.5))),
+            60.0,
+            "and the other way round"
+        );
+        assert_eq!(
+            s.electric_demand_kw(&site, Some(&Position::new(30.5, 30.5))),
+            135.0,
+            "a tile no consumer stands on excludes nothing"
+        );
+    }
+
+    /// A consumer on another network is not this network's problem, exactly as
+    /// a generator on another network is not this network's supply.
+    #[test]
+    fn demand_on_another_network_is_not_counted() {
+        let mut s = powered(Some(Position::new(10.5, 10.5)), None);
+        // Twenty tiles away, past a small pole's 7.5-tile wire reach.
+        s.create_entity(FactorioEntity {
+            name: "small-electric-pole".into(),
+            position: Position::new(30.5, 10.5),
+            ..Default::default()
+        });
+        s.create_entity(FactorioEntity {
+            name: "lab".into(),
+            position: Position::new(30.5, 8.5),
+            ..Default::default()
+        });
+        let site = lab_area(&s, Position::new(8.5, 8.5));
+        assert_eq!(
+            s.electric_demand_kw(&site, None),
+            0.0,
+            "the far lab is on an island of its own"
+        );
+
+        // Bridge the two networks and the same lab now counts, so the zero
+        // above is about connectivity and not about the lab being unreadable.
+        for x in [17.5, 24.5] {
+            s.create_entity(FactorioEntity {
+                name: "small-electric-pole".into(),
+                position: Position::new(x, 10.5),
+                ..Default::default()
+            });
+        }
+        assert_eq!(s.electric_demand_kw(&site, None), 60.0);
+    }
+
+    /// Burner machines draw coal, not kilowatts, and are absent from
+    /// `consumer_kw` rather than zero-valued.
+    #[test]
+    fn a_burner_machine_spends_none_of_the_electric_budget() {
+        let mut s = powered(
+            Some(Position::new(10.5, 10.5)),
+            Some(Position::new(12.5, 10.5)),
+        );
+        // **Distinct tiles.** `create_entity` keys the overlay by floored
+        // `Pos`, so three machines at one position are one machine — the first
+        // draft of this test put all three at `(9.5, 11.5)` and passed a
+        // mutation that gives `stone-furnace` a 90 kW electric draw, because
+        // the furnace was never in the state at all.
+        for (name, x, y) in [
+            ("stone-furnace", 9.5, 11.5),
+            ("burner-mining-drill", 11.5, 11.5),
+            ("burner-inserter", 12.5, 8.5),
+        ] {
+            s.create_entity(FactorioEntity {
+                name: name.into(),
+                position: Position::new(x, y),
+                ..Default::default()
+            });
+        }
+        let site = lab_area(&s, Position::new(8.5, 8.5));
+        // Each one really is standing, on the pole's own network, or the zero
+        // below would be about absence rather than about units.
+        let mut seen: Vec<String> = s
+            .entities_within(&Position::new(10.5, 10.5), 8.)
+            .into_iter()
+            .filter(|e| e.name.starts_with("stone-") || e.name.starts_with("burner-"))
+            .map(|e| e.name)
+            .collect();
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec!["burner-inserter", "burner-mining-drill", "stone-furnace"]
+        );
+        // And a consumer among them would be counted, so the walk reaches this
+        // ground.
+        let mut check = s.clone();
+        check.create_entity(FactorioEntity {
+            name: "lab".into(),
+            position: Position::new(9.5, 11.5),
+            ..Default::default()
+        });
+        assert_eq!(check.electric_demand_kw(&site, None), 60.0);
+
+        assert_eq!(
+            s.electric_demand_kw(&site, None),
+            0.0,
+            "a stone furnace's 90 kW is coal, and an entry for it here would \
+             be a number in the wrong units"
+        );
+    }
+
+    /// The anchor will not site a consumer on a network whose generation is
+    /// already spoken for.
+    #[test]
+    fn the_supply_anchor_refuses_a_network_that_is_already_committed() {
+        let mut s = powered(
+            Some(Position::new(10.5, 10.5)),
+            Some(Position::new(12.5, 10.5)),
+        );
+        assert_eq!(
+            s.nearest_supply_anchor(&Position::new(0., 0.), 64., 900.),
+            Some(Position::new(10.5, 10.5)),
+            "an idle engine has all 900 kW to give"
+        );
+        // One assembling machine of the largest kind: 375 kW committed.
+        s.create_entity(FactorioEntity {
+            name: "assembling-machine-3".into(),
+            position: Position::new(9.5, 8.5),
+            ..Default::default()
+        });
+        assert_eq!(
+            s.nearest_supply_anchor(&Position::new(0., 0.), 64., 900.),
+            None,
+            "525 kW is what is left, and 900 was asked for"
+        );
+        assert_eq!(
+            s.nearest_supply_anchor(&Position::new(0., 0.), 64., 525.),
+            Some(Position::new(10.5, 10.5)),
+            "and 525 is exactly what is left"
+        );
+    }
+
+    /// Two reads of the same state give the same number, bit for bit.
+    ///
+    /// A sum of `f64`s is order-dependent, so this is a claim about
+    /// `entities_within`'s ordering reaching all the way through the demand
+    /// walk, not about arithmetic.
+    #[test]
+    fn the_same_state_gives_the_same_demand_twice() {
+        let mut s = powered(
+            Some(Position::new(10.5, 10.5)),
+            Some(Position::new(12.5, 10.5)),
+        );
+        for (name, x, y) in [
+            ("lab", 8.5, 8.5),
+            ("assembling-machine-1", 11.5, 8.5),
+            ("inserter", 9.5, 12.5),
+            ("electric-mining-drill", 12.5, 8.5),
+        ] {
+            s.create_entity(FactorioEntity {
+                name: name.into(),
+                position: Position::new(x, y),
+                ..Default::default()
+            });
+        }
+        let site = lab_area(&s, Position::new(8.5, 8.5));
+        let first = s.electric_demand_kw(&site, None);
+        assert_eq!(first.to_bits(), s.electric_demand_kw(&site, None).to_bits());
+        assert_eq!(first, 60.0 + 75.0 + 13.0 + 90.0);
     }
 
     /// The anchor a placement search uses: the nearest pole with generation on
@@ -3748,5 +4244,191 @@ mod tests {
         assert_eq!(a.set_claim_runner(Some(ClaimRunner::Bot(BotId(1)))), None);
         assert_eq!(a.set_claim_runner(None), Some(ClaimRunner::Bot(BotId(1))));
         assert_eq!(a.claim_runner(), None);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod inserter_geometry_tests {
+    use super::*;
+    use factorio_bot_core::test_utils::fixture_world;
+    use factorio_bot_core::types::{FactorioEntity, Position};
+
+    fn state() -> PlanState {
+        PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)])
+    }
+
+    fn put(s: &mut PlanState, name: &str, x: f64, y: f64, direction: u8) {
+        s.create_entity(FactorioEntity {
+            name: name.into(),
+            position: Position::new(x, y),
+            direction,
+            ..Default::default()
+        });
+    }
+
+    /// **CLAUDE.md's first measured case**, taken from a real game rather than
+    /// from this table: chest / burner-inserter / chest, and
+    /// `direction = 12` ("west") is what moves items *west to east*.
+    ///
+    /// The rule under test is that an inserter's `direction` names the side it
+    /// **picks up** from. Getting it backwards produces a layout that places
+    /// 100 %, passes every geometry check, and does absolutely nothing.
+    #[test]
+    fn an_inserter_facing_west_moves_items_west_to_east() {
+        let mut s = state();
+        put(&mut s, "iron-chest", 9.5, 10.5, 0);
+        put(&mut s, "burner-inserter", 10.5, 10.5, Direction::West as u8);
+        put(&mut s, "iron-chest", 11.5, 10.5, 0);
+
+        let west = Position::new(9.5, 10.5);
+        let inserter = Position::new(10.5, 10.5);
+        let east = Position::new(11.5, 10.5);
+
+        assert!(
+            s.delivers_into(&west, &inserter),
+            "direction 12 picks up from the west chest"
+        );
+        assert!(
+            s.delivers_into(&inserter, &east),
+            "and drops into the east one"
+        );
+        assert!(
+            !s.delivers_into(&east, &inserter),
+            "it does not pick up from the side it drops into"
+        );
+        assert!(
+            !s.delivers_into(&inserter, &west),
+            "and it does not drop into the side it picks up from"
+        );
+    }
+
+    /// **CLAUDE.md's second measured case**: for a row fed from a belt to its
+    /// north, input and output inserters are both `direction = 0`.
+    ///
+    /// An input inserter takes from the belt north of it and puts into the
+    /// machine south of it. Both cases fall out of the same two offsets, which
+    /// is the point: one rule, two independent measurements.
+    #[test]
+    fn a_row_fed_from_the_north_takes_from_the_north_and_drops_to_the_south() {
+        let mut s = state();
+        put(&mut s, "iron-chest", 10.5, 9.5, 0);
+        put(&mut s, "inserter", 10.5, 10.5, Direction::North as u8);
+        put(&mut s, "assembling-machine-1", 10.5, 12.5, 0);
+
+        let belt = Position::new(10.5, 9.5);
+        let inserter = Position::new(10.5, 10.5);
+        let machine = Position::new(10.5, 12.5);
+
+        assert!(
+            s.delivers_into(&belt, &inserter),
+            "direction 0 picks up one tile north"
+        );
+        assert!(
+            s.delivers_into(&inserter, &machine),
+            "and drops one tile south, which a 3x3 machine centred two tiles \
+             south covers"
+        );
+    }
+
+    /// The trap itself, stated as a test: the same three machines with the
+    /// inserter turned round move nothing.
+    #[test]
+    fn an_inserter_turned_round_feeds_nothing_although_it_places_perfectly() {
+        let mut s = state();
+        put(&mut s, "iron-chest", 9.5, 10.5, 0);
+        put(&mut s, "burner-inserter", 10.5, 10.5, Direction::East as u8);
+        put(&mut s, "iron-chest", 11.5, 10.5, 0);
+
+        let west = Position::new(9.5, 10.5);
+        let inserter = Position::new(10.5, 10.5);
+        let east = Position::new(11.5, 10.5);
+
+        // It places: the ground is clear and every box is disjoint.
+        assert!(s.entity_at(&inserter).is_some());
+        // And it runs backwards.
+        assert!(!s.delivers_into(&west, &inserter));
+        assert!(!s.delivers_into(&inserter, &east));
+        assert!(s.delivers_into(&east, &inserter));
+        assert!(s.delivers_into(&inserter, &west));
+    }
+
+    /// A long-handed inserter reaches two tiles, not one, on both sides.
+    #[test]
+    fn a_long_handed_inserter_reaches_two_tiles_on_each_side() {
+        let mut s = state();
+        put(&mut s, "iron-chest", 10.5, 8.5, 0);
+        put(&mut s, "long-handed-inserter", 10.5, 10.5, 0);
+        put(&mut s, "iron-chest", 10.5, 12.5, 0);
+        let far_north = Position::new(10.5, 8.5);
+        let inserter = Position::new(10.5, 10.5);
+        let far_south = Position::new(10.5, 12.5);
+        assert!(s.delivers_into(&far_north, &inserter));
+        assert!(s.delivers_into(&inserter, &far_south));
+
+        // And a plain inserter in the same place reaches neither.
+        let mut short = state();
+        put(&mut short, "iron-chest", 10.5, 8.5, 0);
+        put(&mut short, "inserter", 10.5, 10.5, 0);
+        put(&mut short, "iron-chest", 10.5, 12.5, 0);
+        assert!(!short.delivers_into(&far_north, &inserter));
+        assert!(!short.delivers_into(&inserter, &far_south));
+    }
+
+    /// The pickup half is an **inserter's** claim, not a general one.
+    ///
+    /// **The geometry here is chosen so the test can fail.** The first draft
+    /// used a 2x2 stone furnace, and a 2x2 machine's own hypothetical pickup
+    /// tile lands *inside itself*, so the assertion held whatever
+    /// `inserter_reach` said — it survived the mutation that gives every
+    /// entity an inserter's reach. A 1x1 entity one tile from the chest is the
+    /// arrangement in which "not an inserter" is the only thing standing
+    /// between the two.
+    #[test]
+    fn only_an_inserter_takes_from_the_machine_beside_it() {
+        let mut s = state();
+        let chest = Position::new(10.5, 9.5);
+        let pole = Position::new(10.5, 10.5);
+        put(&mut s, "iron-chest", chest.x(), chest.y(), 0);
+        put(&mut s, "small-electric-pole", pole.x(), pole.y(), 0);
+        // An *inserter* in the pole's place would take from the chest, which
+        // is what makes the refusal below about the entity kind and not about
+        // the distance.
+        let mut with_inserter = state();
+        put(&mut with_inserter, "iron-chest", chest.x(), chest.y(), 0);
+        put(&mut with_inserter, "inserter", pole.x(), pole.y(), 0);
+        assert!(with_inserter.delivers_into(&chest, &pole));
+
+        assert!(
+            !s.delivers_into(&chest, &pole),
+            "a pole beside a chest is two entities standing near each other"
+        );
+    }
+
+    /// Stage 1's drill-into-furnace claim is untouched by the pickup half.
+    ///
+    /// The disjunction added for inserters could have widened `Feeds` for
+    /// everything; this pins that it did not.
+    #[test]
+    fn a_furnace_does_not_reach_back_into_a_drill_that_faces_away() {
+        let mut s = state();
+        put(
+            &mut s,
+            "burner-mining-drill",
+            10.0,
+            10.0,
+            Direction::South as u8,
+        );
+        put(&mut s, "stone-furnace", 10.0, 8.0, 0);
+        let drill = Position::new(10.0, 10.0);
+        let furnace = Position::new(10.0, 8.0);
+        assert!(
+            !s.delivers_into(&drill, &furnace),
+            "a drill facing south drops to the south"
+        );
+        assert!(
+            !s.delivers_into(&furnace, &drill),
+            "and a furnace takes from nothing"
+        );
     }
 }

@@ -2447,15 +2447,64 @@ function rcon_place_entity(player_id, item_name, entity_position, direction)
 		return
 	end
 
-	player.remove_item({name=item_name,count=1})
-	result = surface.create_entity{name=entproto.name,position=entity_position,direction=direction,force=player.force, fast_replace=true, player=player, spill=true}
+	-- **Build first, charge second, and check both returns.**
+	--
+	-- This used to `remove_item` and then `create_entity`, discarding both
+	-- return values, which is two bugs in two lines. `create_entity` returns
+	-- "the created entity or `nil` if the creation failed" (verified against
+	-- workspace/factorio-api-docs/runtime-api.json, Factorio 2.1.17, runtime
+	-- api 6, `LuaSurface::create_entity`), so a failed placement left the item
+	-- already taken and nothing built: the material was destroyed. And
+	-- `LuaControl::remove_item` returns "the number of items that were
+	-- actually removed", so a removal that moved *nothing* still built the
+	-- entity -- a free build, the exact failure `charge_item_to` was written
+	-- for one function down.
+	--
+	-- Placement failure is the dominant failure mode in this project's runs,
+	-- so the destructive path was the well travelled one.
+	--
+	-- Order: create, then charge, then undo if the charge fails. The other
+	-- order (charge, then create, then refund) has to hand the item back
+	-- through `insert`, which can itself fall short if the inventory filled in
+	-- between -- a refund that silently loses material is the bug again with
+	-- more steps. Undoing a build is exact: `destroy()` cannot half-work.
+	--
+	-- Nothing is announced until it is paid for. `on_some_entity_created` --
+	-- the only thing that tells the Rust `EntityGraph` this entity exists --
+	-- runs *after* the charge succeeds, so the undo path never leaves a
+	-- phantom behind and needs no matching deletion event. `create_entity`
+	-- does not raise `script_raised_built` unless asked (`raise_built`
+	-- defaults to false **[V]**), so the game does not announce it either.
+	local result = surface.create_entity{name=entproto.name,position=entity_position,direction=direction,force=player.force, fast_replace=true, player=player, spill=true}
 
 	if result == nil then
 		complain("placing item '"..item_name.."' failed, surface.create_entity returned nil :(")
-	else
-		on_some_entity_created({tick=last_tick, entity = result})
-		rcon.print(helpers.table_to_json(serialize_entity(result)))
+		stamp_tick()
+		return
 	end
+
+	if player.remove_item({name=item_name,count=1}) ~= 1 then
+		-- The affordability check above passed and the spend still took
+		-- nothing. `get_item_count` and `remove_item` are the matched pair --
+		-- both act on every inventory the player has -- so the two can only
+		-- disagree if something moved in between, or if the item counted is
+		-- not the item spendable (an `ItemStackDefinition` quality defaults to
+		-- `normal`, so an uncommon stack counts and cannot be taken).
+		--
+		-- Whichever it was, this is a *material* refusal and not a verdict
+		-- about the site: the wording deliberately stays out of the
+		-- `can_place_entity said 'no'` family that `note_placement_refusal`
+		-- (crates/core/src/factorio/rcon.rs) remembers and fences the planner
+		-- out of, and is not the `§player_blocks_placement§` sentinel that
+		-- makes the RCON layer walk the bot aside and retry.
+		result.destroy()
+		complain("cannot place item '"..item_name.."' because taking it from the player '"..player.name.."' removed nothing")
+		stamp_tick()
+		return
+	end
+
+	on_some_entity_created({tick=last_tick, entity = result})
+	rcon.print(helpers.table_to_json(serialize_entity(result)))
 	stamp_tick()
 end
 
@@ -2989,6 +3038,45 @@ function charge_item_to(holder_player_id, item)
 	return holder.get_main_inventory().remove({name=item, count=1}) == 1
 end
 
+-- Translate this mod's caller-facing `force_build` boolean into the parameter
+-- `build_blueprint` has actually taken since Factorio 2.0.
+--
+-- **The old name was not renamed away, it was silently ignored.** 1.1's
+-- `build_blueprint` took `force_build :: boolean`; 2.x takes `build_mode ::
+-- defines.build_mode`. Verified against
+-- workspace/factorio-api-docs/runtime-api.json (Factorio 2.1.17, runtime api
+-- 6): `LuaItemCommon::build_blueprint` declares {surface, force, position,
+-- direction, build_mode, skip_fog_of_war, by_player, raise_built} and there is
+-- no `force_build` on it at all. An unknown key in a `takes_table` call is
+-- simply not read, so every `force_build = true` since the 2.0 port has been
+-- discarded and the *default* used instead -- and the default is the opposite
+-- of what the caller asked for. The docs for the parameter, verbatim: "If
+-- `normal`, blueprint will not be built if any one thing can't be built. If
+-- `forced`, anything that can be built is built and obstructing nature
+-- entities will be deconstructed. If `superforced`, all obstructions will be
+-- deconstructed and the blueprint will be built", defaulting to `normal`. So
+-- `force_build = true` -- "build what you can" -- has been getting
+-- all-or-nothing.
+--
+-- `superforced` is deliberately not reachable from the boolean: it
+-- deconstructs *all* obstructions, which is a bigger promise than any caller
+-- here has made.
+--
+-- Do not confuse this with `can_place_entity`, which `placement_check_args`
+-- above documents: that method has no build_mode/force_build parameter in any
+-- version, and its `forced` field is a different thing read only for the ghost
+-- check types.
+--
+-- One helper for both blueprint call sites (`rcon_place_blueprint` and
+-- `rcon_cheat_blueprint`) so the two cannot drift into asking for different
+-- build modes from the same flag.
+function blueprint_build_mode(force_build)
+	if force_build then
+		return defines.build_mode.forced
+	end
+	return defines.build_mode.normal
+end
+
 function rcon_place_blueprint(player_id, blueprint, pos_x, pos_y, direction, force_build, only_ghosts, inventory_player_ids)
 	local player = get_player(player_id)
 	if player == nil then
@@ -3014,8 +3102,9 @@ function rcon_place_blueprint(player_id, blueprint, pos_x, pos_y, direction, for
 		by_player = player,
 		-- direction :: defines.direction (optional): The direction to use when building
 		direction = direction,
-		-- force_build :: boolean (optional): When true, anything that can be built is else nothing is built if any one thing can't be built
-		force_build = force_build
+		-- build_mode :: defines.build_mode (optional), 2.0's replacement for
+		-- 1.1's `force_build` boolean -- see `blueprint_build_mode`.
+		build_mode = blueprint_build_mode(force_build)
 	})
 	bp_entity.destroy()
 
@@ -3120,8 +3209,9 @@ function rcon_cheat_blueprint(player_id, blueprint, pos_x, pos_y, direction, for
 		by_player = player,
 		-- direction :: defines.direction (optional): The direction to use when building
 		direction = direction,
-		-- force_build :: boolean (optional): When true, anything that can be built is else nothing is built if any one thing can't be built
-		force_build = force_build
+		-- build_mode :: defines.build_mode (optional), 2.0's replacement for
+		-- 1.1's `force_build` boolean -- see `blueprint_build_mode`.
+		build_mode = blueprint_build_mode(force_build)
 	})
 	bp_entity.destroy()
 	local result = {}

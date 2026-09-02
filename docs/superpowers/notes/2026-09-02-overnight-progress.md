@@ -312,3 +312,33 @@ footnote: it is exactly the "every gate was green while the thing did not work"
 shape this night has been about, and I walked into it while chasing rung 4.
 
 Note there is a `factorio-bot serve` on :7492 that I did not start — left alone.
+
+## Run 8b, and the viewer finally seeing a real run (~04:40)
+
+Tile reservation helped planning and exposed the next layer:
+
+- milestone 1 down to **1 iteration** (was 3);
+- rung 4's plan up to **96 steps** (was 73);
+- but only 11 actions dispatched before sticking on
+  `cannot place item 'stone-furnace' because surface.can_place_entity said 'no'`.
+
+The annulus got the bot out of its own footprint; the game now refuses the tile
+for a different reason. That is a model-versus-game disagreement, which is
+precisely what the keyframe `divergence` list was built to catch — and it has
+never been used in anger. The diagnosis was told to look there first.
+
+Note the copper-ore contention error still appeared once at milestone 2, which
+matches the tile-reservation author's own stated limit: claims are per-plan, so
+two *successive* plans can still pick the same tile.
+
+**The viewer now serves a real run.** Against run 7 on :7500:
+`/samples` 722 records, `/map` 15, `/frames` 720, `skipped: 0` on both new
+streams — so the schema stamp, ingestion and readers all hold against genuine
+data rather than fixtures.
+
+**Trap worth keeping:** an `--all-features` build enables the tokio-console
+subscriber, which binds a fixed port, so a viewer and a game run cannot both be
+`--all-features`. Run 8 died with `AddrInUse` and a core dump whose panic named
+`console-subscriber` and nothing about the game. The binaries are now split:
+`factorio-bot-serve` (all features) for the viewer, `factorio-bot`
+(`cli,lua`) for runs.

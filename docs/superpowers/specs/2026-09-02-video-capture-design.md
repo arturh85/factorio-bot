@@ -782,3 +782,54 @@ to `samples.jsonl` on the same tick axis exactly as the sibling spec's §5
 requires — a camera whose subject is only implied is a camera that can lie, and
 that is as true of a video as of a screenshot. Re-run step 1's measurement in
 this configuration before keeping it.
+
+---
+
+## Decision: 720p default, 1080p opt-in (2026-09-02)
+
+Settled by the project owner: **720p is the default**, with 1080p available as an
+option for final runs worth the size.
+
+```lua
+record.start({ video = true })                        -- 720p
+record.start({ video = { resolution = "1080p" } })    -- opt-in
+```
+
+`resolution` takes `"720p"` (1280×720, default) or `"1080p"` (1920×1080). An
+unknown value is an error at start, not a silent fallback — a run that quietly
+recorded at the wrong size is worse than one that refused to start.
+
+### Get the resolution by sizing the window, not by scaling the capture
+
+This is the part that is easy to get backwards. `x11grab` captures the window at
+whatever size the window actually is. There are two ways to reach 720p and they
+are not equivalent:
+
+- **Size the Factorio window to 1280×720** and grab it 1:1. The game renders
+  fewer pixels, so this is cheaper on the GPU *and* on the encoder, and no
+  resampling happens at all.
+- **Leave the window large and downscale in ffmpeg.** The game still renders
+  every pixel, and ffmpeg pays for the scale on every frame. Strictly worse on
+  both ends, and it softens the image.
+
+So the recorder sets the window geometry and grabs 1:1. `xwininfo` (now in the
+dev shell) reads back what the window actually became, and the recorder records
+*that* — a window manager may refuse or adjust a requested size, and a tiling
+compositor like the Hyprland session here will certainly ignore it unless the
+window is floated. **The recorded geometry is the observed one, never the
+requested one**, for the same reason the teleport record must log where a bot
+landed rather than where it was sent.
+
+If the observed geometry does not match the request, that is a warning on the
+run, not a failure: the video is still usable and still joins on ticks.
+
+### What this changes about the size estimates
+
+The estimates in this spec were computed at 1080p30 (~1.1 GB for the reference
+run, against ~246 MB for one camera of screenshots). 720p is 44% of the pixels,
+so 720p30 should land near half of that — still above screenshot parity, which
+only 720p15 reached. Both numbers remain **estimates**; no Factorio window has
+been encoded here yet, and step 1 of the plan replaces them with measurements.
+
+Nothing about the tick clock, the join, or the failure modes changes with
+resolution.

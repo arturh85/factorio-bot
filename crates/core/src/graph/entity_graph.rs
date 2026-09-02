@@ -20,7 +20,7 @@ use petgraph::visit::{Bfs, EdgeRef};
 use serde::de::{MapAccess, Visitor};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::ops::Deref;
 use std::str::FromStr;
@@ -37,17 +37,42 @@ pub struct EntityGraph {
     entity_prototypes: Arc<DashMap<String, FactorioEntityPrototype>>,
     recipes: Arc<DashMap<String, FactorioRecipe>>,
     /// Every tile each named resource covers, keyed by the *floored* tile so
-    /// one tile is one entry.
+    /// one tile is one entry, with the ore the game says is left in it.
     ///
-    /// A `BTreeSet`, not a `Vec`, and that is a correctness choice rather than
-    /// a performance one: the same ore tile reaches [`EntityGraph::add`] more
-    /// than once (a chunk's entities are written out by both
-    /// `on_chunk_generated` and the mod's `initial_discovery` replay of the
-    /// chunks that already exist), and a `Vec` grew a second copy each time.
-    /// The recorded run at `workspace/runs/run-1788319014-01846` held every
-    /// resource exactly twice -- 900 `iron-ore` tiles against the game's 417.
-    /// See `add`.
-    resources: DashMap<String, BTreeSet<Pos>>,
+    /// A map keyed by tile, not a `Vec`, and that is a correctness choice
+    /// rather than a performance one: the same ore tile reaches
+    /// [`EntityGraph::add`] more than once (a chunk's entities are written out
+    /// by both `on_chunk_generated` and the mod's `initial_discovery` replay
+    /// of the chunks that already exist), and a `Vec` grew a second copy each
+    /// time. The recorded run at `workspace/runs/run-1788319014-01846` held
+    /// every resource exactly twice -- 900 `iron-ore` tiles against the game's
+    /// 417. See `add`.
+    ///
+    /// # The value is how much ore is left, and `None` means nobody said
+    ///
+    /// `serialize_entity` (`mods/BotBridge/types.lua`) has always sent
+    /// `record.amount = entity.amount` for a `type == "resource"` entity, and
+    /// `FactorioEntity::amount` has always carried it in. This map used to be
+    /// a `BTreeSet<Pos>` and threw it away at the door, so every consumer had
+    /// to invent a number -- `crates/planner`'s `DEFAULT_RESOURCE_PER_TILE`,
+    /// 500, applied to every tile on every map.
+    ///
+    /// Run `workspace/runs/run-1788334911-41961` is what that cost. One bot,
+    /// six iron-ore tiles, six different tiles, and five of the six mines
+    /// failed with `the target iron-ore was gone before mining finished --
+    /// something else mined it first` after delivering 15, 6, 14, 10 and 2
+    /// ore against asks of 22, 7, 50, 36 and 26. Nothing else mined them: the
+    /// bot mined each tile dry and the mod's `ent.valid` check reports a
+    /// vanished target with the only wording it has. The tiles held what
+    /// twenty earlier runs had left in them, and the planner believed all six
+    /// held 500.
+    ///
+    /// `None` is *not* zero and not a default: it is a tile nobody reported an
+    /// amount for, which is every tile a hand-built fixture spawns
+    /// (`FactorioEntity::new_resource` leaves `amount: None`). Substituting a
+    /// number is the reader's decision, made once, in
+    /// `PlanState::resource_available`.
+    resources: DashMap<String, BTreeMap<Pos, Option<u32>>>,
     resource_tree: RwLock<ResourceQuadTree>,
 }
 
@@ -99,10 +124,34 @@ impl EntityGraph {
     pub fn resource_contains(&self, resource_name: &str, pos: Pos) -> bool {
         let elements = self.resources.get(resource_name);
         if let Some(elements) = elements {
-            elements.contains(&pos)
+            elements.contains_key(&pos)
         } else {
             false
         }
+    }
+
+    /// How much of `resource_name` the game last said is left in `pos`, or
+    /// `None` when nobody has said.
+    ///
+    /// Three answers collapse into `None` and a caller must not tell them
+    /// apart here, because the honest answer to all three is the same: there
+    /// is no tile of that name at `pos`, or there is one and the payload that
+    /// delivered it carried no `amount`. Neither is "the tile is empty" -- an
+    /// empty resource entity does not exist, the game destroys it and
+    /// `on_resource_depleted` removes it from this map. Use
+    /// [`EntityGraph::resource_contains`] to ask whether the tile is there at
+    /// all; use this to ask what it holds.
+    ///
+    /// What to do with `None` is the reader's decision. `crates/planner`'s
+    /// `PlanState::resource_available` substitutes `DEFAULT_RESOURCE_PER_TILE`,
+    /// which is the fixture fallback and nothing more -- see the
+    /// [`resources`](EntityGraph#structfield.resources) field for the run that
+    /// established the difference between a reported amount and a modelled
+    /// one.
+    pub fn resource_amount(&self, resource_name: &str, pos: &Pos) -> Option<u32> {
+        self.resources
+            .get(resource_name)
+            .and_then(|elements| elements.get(pos).copied().flatten())
     }
 
     /// Whether a resource of *any* name covers `pos`.
@@ -114,7 +163,7 @@ impl EntityGraph {
     pub fn any_resource_at(&self, pos: &Pos) -> bool {
         self.resources
             .iter()
-            .any(|entry| entry.value().contains(pos))
+            .any(|entry| entry.value().contains_key(pos))
     }
 
     pub fn find_entities_in_radius(
@@ -258,7 +307,7 @@ impl EntityGraph {
             );
             return vec![];
         }
-        for point in resource.unwrap().iter() {
+        for point in resource.unwrap().keys() {
             positions_by_id.insert(point.clone(), None);
         }
         let mut next_id: u32 = 0;
@@ -378,13 +427,33 @@ impl EntityGraph {
                 // copies), but `snapshot_within` reported them all, and
                 // `remove` deleted only one copy from this map -- so a mined
                 // tile stayed in the model as ore.
+                //
+                // The *amount* is refreshed on every delivery, though, and
+                // that is the one thing a repeat is good for: the mod sends
+                // `entity.amount` with every resource it serialises, so a
+                // later payload for a tile already known carries a fresher
+                // reading than the one stored. Dropping it because the tile is
+                // not new would be the same mistake as never reading it at
+                // all. A delivery that carries no amount (a fixture, a
+                // blueprint) leaves whatever is stored alone rather than
+                // erasing it -- silence is not a report of zero.
                 let pos: Pos = (&entity.position).into();
-                if !self
-                    .resources
-                    .entry(entity.name.clone())
-                    .or_default()
-                    .insert(pos)
-                {
+                let already_known = {
+                    let mut tiles = self.resources.entry(entity.name.clone()).or_default();
+                    match tiles.get_mut(&pos) {
+                        Some(stored) => {
+                            if entity.amount.is_some() {
+                                *stored = entity.amount;
+                            }
+                            true
+                        }
+                        None => {
+                            tiles.insert(pos, entity.amount);
+                            false
+                        }
+                    }
+                };
+                if already_known {
                     continue;
                 }
                 let rect: QuadTreeRect = add_to_rect(
@@ -485,7 +554,7 @@ impl EntityGraph {
                                         self.resources
                                             .get(&resource)
                                             .and_then(|resources| {
-                                                if resources.contains(&p.into()) {
+                                                if resources.contains_key(&p.into()) {
                                                     Some(true)
                                                 } else {
                                                     None
@@ -1726,6 +1795,128 @@ mod tests {
     5 -> 2 [ label = "1" ]
 }
 "#,
+        );
+    }
+
+    /// A resource tile keeps the amount the game reported for it.
+    ///
+    /// The mod has always sent it (`serialize_entity`, `mods/BotBridge/types.lua`)
+    /// and `FactorioEntity::amount` has always carried it in; this map used to
+    /// drop it at the door, which left `crates/planner` inventing 500 for every
+    /// tile on every map. A live capture
+    /// (`crates/core/tests/live-2.1.17-entities-resources.json`) has iron tiles
+    /// holding 13.
+    #[test]
+    fn a_resource_tile_keeps_the_amount_the_game_reported() {
+        let mut ore = FactorioEntity::new_resource(
+            &Position::new(-40.5, -48.5),
+            Direction::North,
+            &EntityName::IronOre.to_string(),
+        );
+        ore.amount = Some(13);
+        let graph = entity_graph_from(vec![ore]).unwrap();
+
+        let tile = Pos(-41, -49);
+        assert!(graph.resource_contains(&EntityName::IronOre.to_string(), tile.clone()));
+        assert_eq!(
+            graph.resource_amount(&EntityName::IronOre.to_string(), &tile),
+            Some(13)
+        );
+    }
+
+    /// A tile nobody reported an amount for reads as *unknown*, not as empty
+    /// and not as full.
+    ///
+    /// Every hand-built fixture is in this state -- `FactorioEntity::new_resource`
+    /// sets no amount -- so this is the case the planner's
+    /// `DEFAULT_RESOURCE_PER_TILE` fallback exists for. It has to be
+    /// distinguishable from `Some(0)`, which cannot happen for a live tile at
+    /// all: the game destroys a resource entity the moment it empties.
+    #[test]
+    fn a_resource_tile_nobody_reported_an_amount_for_reads_as_unknown() {
+        let graph = entity_graph_from(vec![FactorioEntity::new_resource(
+            &Position::new(-40.5, -48.5),
+            Direction::North,
+            &EntityName::IronOre.to_string(),
+        )])
+        .unwrap();
+
+        let tile = Pos(-41, -49);
+        assert!(graph.resource_contains(&EntityName::IronOre.to_string(), tile.clone()));
+        assert_eq!(
+            graph.resource_amount(&EntityName::IronOre.to_string(), &tile),
+            None,
+            "no amount was reported, so none is known"
+        );
+    }
+
+    /// A tile nobody has ever delivered has no amount either, and asking does
+    /// not invent one.
+    #[test]
+    fn an_unknown_tile_has_no_amount() {
+        let graph = entity_graph_from(vec![]).unwrap();
+        assert_eq!(
+            graph.resource_amount(&EntityName::IronOre.to_string(), &Pos(-41, -49)),
+            None
+        );
+    }
+
+    /// A second delivery of a tile already known refreshes its amount.
+    ///
+    /// Resource tiles arrive here repeatedly by design of the transport (see
+    /// `add`), and the repeat is deduplicated -- but the *reading* it carries
+    /// is newer than the stored one, and throwing it away would be the same
+    /// mistake as never reading it. The tile itself must still be one entry.
+    #[test]
+    fn a_second_delivery_refreshes_the_amount_without_duplicating_the_tile() {
+        let at = Position::new(-40.5, -48.5);
+        let mut first =
+            FactorioEntity::new_resource(&at, Direction::North, &EntityName::IronOre.to_string());
+        first.amount = Some(13);
+        let graph = entity_graph_from(vec![first]).unwrap();
+
+        let mut again =
+            FactorioEntity::new_resource(&at, Direction::North, &EntityName::IronOre.to_string());
+        again.amount = Some(7);
+        graph.add(vec![again], None).unwrap();
+
+        let tile = Pos(-41, -49);
+        assert_eq!(
+            graph.resource_amount(&EntityName::IronOre.to_string(), &tile),
+            Some(7)
+        );
+        let patches = graph.resource_patches(&EntityName::IronOre.to_string());
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0].elements.len(), 1, "one tile, one entry");
+    }
+
+    /// A delivery carrying no amount leaves a known one alone.
+    ///
+    /// Silence is not a report of zero, and it is not a report of anything
+    /// else either. A blueprint import or a fixture must not be able to erase
+    /// what the game said about a tile.
+    #[test]
+    fn a_delivery_without_an_amount_does_not_erase_a_known_one() {
+        let at = Position::new(-40.5, -48.5);
+        let mut first =
+            FactorioEntity::new_resource(&at, Direction::North, &EntityName::IronOre.to_string());
+        first.amount = Some(13);
+        let graph = entity_graph_from(vec![first]).unwrap();
+
+        graph
+            .add(
+                vec![FactorioEntity::new_resource(
+                    &at,
+                    Direction::North,
+                    &EntityName::IronOre.to_string(),
+                )],
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            graph.resource_amount(&EntityName::IronOre.to_string(), &Pos(-41, -49)),
+            Some(13)
         );
     }
 

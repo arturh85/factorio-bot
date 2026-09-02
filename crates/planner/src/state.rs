@@ -122,14 +122,27 @@ fn tiles_under(area: &Rect) -> Vec<Pos> {
     out
 }
 
-/// How much ore one tile yields before this plan exhausts it.
+/// How much ore a tile is assumed to hold when **nobody has said**.
 ///
-/// Factorio reports per-tile resource amounts, but they do not survive into the
-/// entity graph: `FactorioEntity::new_resource` (`core/src/types.rs:686`) leaves
-/// `amount` as `None`, and `EntityGraph::add` (`core/src/graph/entity_graph.rs:217`)
-/// never inserts resource entities into the entity tree. A constant is therefore
-/// the only capacity available. Honouring real amounts needs a BotBridge change and
-/// is out of scope.
+/// A fallback, no longer the answer. `EntityGraph::resource_amount` reports
+/// what the game said is left in a tile -- the mod has always sent
+/// `entity.amount` for a resource, and `FactorioEntity::amount` has always
+/// carried it -- so this stands in only where that is `None`: a hand-built
+/// fixture, whose `FactorioEntity::new_resource` sets no amount, or a resource
+/// that reached the graph from a blueprint rather than from the game.
+///
+/// It used to be the answer for every tile on every map, and
+/// `workspace/runs/run-1788334911-41961` is what that cost. Rung 6 asked one
+/// bot for 50 iron ore from a tile the model said held 500; the tile held 14,
+/// the bot mined it dry, and the mod reported `the target iron-ore was gone
+/// before mining finished -- something else mined it first` -- which was true
+/// about the disappearance and wrong about the cause, because there was no
+/// something else. Five of the run's six iron mines died that way, on six
+/// *different* tiles, against a roster the scheduler had put a single bot in.
+///
+/// The number itself is not a measurement and never was: it is large enough
+/// that a fixture's ore never runs out mid-test, which is all a fixture needs.
+/// A real tile near a twenty-run-old spawn holds single digits.
 pub const DEFAULT_RESOURCE_PER_TILE: u32 = 500;
 
 /// A bot's simulated state during planning.
@@ -1039,7 +1052,19 @@ impl PlanState {
         if !self.base.entity_graph.resource_contains(item, key.clone()) {
             return 0;
         }
-        DEFAULT_RESOURCE_PER_TILE.saturating_sub(self.consumed.get(&key).copied().unwrap_or(0))
+        // What the game said, and only if it said nothing,
+        // `DEFAULT_RESOURCE_PER_TILE`. The substitution happens exactly here,
+        // once, so every selector that reads this ledger -- and the four in
+        // `method::util` all do, through `resource_unclaimed` -- sees the same
+        // capacity for a tile. A second substitution site is how the seats
+        // count and the tile walk would start disagreeing about how many bots
+        // a patch can hold.
+        let capacity = self
+            .base
+            .entity_graph
+            .resource_amount(item, &key)
+            .unwrap_or(DEFAULT_RESOURCE_PER_TILE);
+        capacity.saturating_sub(self.consumed.get(&key).copied().unwrap_or(0))
     }
 
     /// Has this plan already committed `position` to a mining action?

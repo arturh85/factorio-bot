@@ -88,3 +88,35 @@ The two defects compound.
 
 Nothing was lost — no failed actions, no destroyed material. The run simply
 stopped, politely, with a record saying there was no error.
+
+## A third record defect, found while diagnosing the first two
+
+Teleport events and action events cannot be joined.
+
+```
+action_dispatched  {"tick":3769,"id":0,"bot":1,"action":"mine 5 iron-ore", ...}
+teleport           {"tick":19007,"bot":1,"reason":"walk_stuck","action_id":93, ...}
+```
+
+`action_dispatched`/`action_settled` carry **`id`**, which is the plan-local node
+id and restarts at 0 for every plan. `teleport` carries **`action_id`**, from a
+different, run-global space (60, 87, 92, 93, 108, 110 in this run). Two
+near-identically named fields, two id spaces, no mapping between them.
+
+So the question this run raised — *which action was a bot walking for when the
+recovery teleported it onto another bot* — cannot be answered from the record at
+all. The teleport data alone still proves the collision, because `from`/`to` are
+absolute coordinates and two bots show the same `to` in one tick. But that is
+luck: the join would have been the direct evidence.
+
+## What is working, confirmed in the same file
+
+The morning's placement work shows up as **structured** failure data, not just a
+message:
+
+```json
+{"status":"failed","failure":{"kind":"partial_transfer","detail":"moved 4 of 5 copper-plate"}}
+```
+
+Three of those in this run. Before today each would have silently destroyed
+copper plate.

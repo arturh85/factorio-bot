@@ -14,13 +14,12 @@ function planCreated(milestoneIndex: number, plan: PlannedStep[], tick = 0): Eve
         makespan: 0,
         bots: [],
         plan,
-        tick,
-        wall_ms: 0
+        tick
     };
 }
 
 function dispatched(id: number, bot: number, tick: number): Event {
-    return {kind: 'action_dispatched', id, bot, action: 'x', target: null, tick, wall_ms: 0};
+    return {kind: 'action_dispatched', id, bot, action: 'x', target: null, tick};
 }
 
 function settled(id: number, bot: number, status: string, elapsedTicks: number | null): Event {
@@ -32,8 +31,7 @@ function settled(id: number, bot: number, status: string, elapsedTicks: number |
         elapsed_ticks: elapsedTicks,
         error: null,
         failure: null,
-        tick: elapsedTicks ?? 0,
-        wall_ms: 0
+        tick: elapsedTicks ?? 0
     };
 }
 
@@ -46,8 +44,7 @@ function failedSettle(id: number, bot: number, tick: number, kind: 'missing_item
         elapsed_ticks: 100,
         error: 'boom',
         failure: {kind, detail: null},
-        tick,
-        wall_ms: 0
+        tick
     };
 }
 
@@ -128,7 +125,7 @@ describe('joinPlanToOutcome', () => {
     it('ignores event kinds that are neither a dispatch nor a settle', () => {
         const rows = joinPlanToOutcome(
             [step(0, 1, 'a', 300)],
-            [{kind: 'run_finished', outcome: 'success', elapsed_ticks: 1000, tick: 1000, wall_ms: 0}]
+            [{kind: 'run_finished', outcome: 'success', elapsed_ticks: 1000, tick: 1000}]
         );
         expect(rows[0].status).toBe('never dispatched');
     });
@@ -253,7 +250,7 @@ describe('milestonesOf', () => {
         const first = step(0, 1, 'first plan', 10);
         const second = step(0, 1, 'replanned', 20);
         const events: Event[] = [
-            {kind: 'milestone_started', index: 0, goal: 'have 10 iron-plate', tick: 0, wall_ms: 0},
+            {kind: 'milestone_started', index: 0, goal: 'have 10 iron-plate', tick: 0},
             {
                 kind: 'plan_created',
                 milestone_index: 0,
@@ -261,8 +258,7 @@ describe('milestonesOf', () => {
                 makespan: 10,
                 bots: [1],
                 plan: [first],
-                tick: 1,
-                wall_ms: 0
+                tick: 1
             },
             {
                 kind: 'plan_created',
@@ -271,8 +267,7 @@ describe('milestonesOf', () => {
                 makespan: 20,
                 bots: [1],
                 plan: [second],
-                tick: 2,
-                wall_ms: 0
+                tick: 2
             }
         ];
         const rows = milestonesOf(events);
@@ -281,8 +276,8 @@ describe('milestonesOf', () => {
 
     it('records the satisfied reason and iteration count', () => {
         const events: Event[] = [
-            {kind: 'milestone_started', index: 0, goal: 'have 10 iron-plate', tick: 0, wall_ms: 0},
-            {kind: 'milestone_satisfied', index: 0, iterations: 0, reason: 'plan_empty', tick: 5, wall_ms: 0}
+            {kind: 'milestone_started', index: 0, goal: 'have 10 iron-plate', tick: 0},
+            {kind: 'milestone_satisfied', index: 0, iterations: 0, reason: 'plan_empty', tick: 5}
         ];
         const rows = milestonesOf(events);
         expect(rows[0]).toMatchObject({satisfiedReason: 'plan_empty', iterations: 0});
@@ -297,18 +292,17 @@ describe('milestonesOf', () => {
                 makespan: 0,
                 bots: [],
                 plan: [],
-                tick: 0,
-                wall_ms: 0
+                tick: 0
             },
-            {kind: 'milestone_satisfied', index: 7, iterations: 1, reason: 'unknown', tick: 1, wall_ms: 0}
+            {kind: 'milestone_satisfied', index: 7, iterations: 1, reason: 'unknown', tick: 1}
         ];
         expect(milestonesOf(events)).toEqual([]);
     });
 
     it('sorts rows by milestone index', () => {
         const events: Event[] = [
-            {kind: 'milestone_started', index: 2, goal: 'b', tick: 0, wall_ms: 0},
-            {kind: 'milestone_started', index: 1, goal: 'a', tick: 0, wall_ms: 0}
+            {kind: 'milestone_started', index: 2, goal: 'b', tick: 0},
+            {kind: 'milestone_started', index: 1, goal: 'a', tick: 0}
         ];
         expect(milestonesOf(events).map((r) => r.index)).toEqual([1, 2]);
     });

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::types::Position;
 
@@ -326,10 +326,39 @@ pub struct ActionFailure {
 /// `tick` is *when this happened*; a duration is always `elapsed_ticks`. The
 /// two were briefly both called `ticks`, which reads fine until someone plots
 /// it.
+///
+/// There used to be a `wall_ms` here too, and it is gone on purpose --
+/// see [`RunRecorder::record`] for the full account. In short: it was
+/// stamped from `self.started.elapsed()` at the moment `record()` was
+/// *called*, but `record.actions()`/`record.teleports()`/`record.refusals()`
+/// (`crates/scripting_lua/src/globals/record.rs`) are each called once per
+/// supervisor "ran" transition, i.e. once an entire multi-bot plan has
+/// finished executing -- which can be minutes of real time and thousands of
+/// ticks after the earliest event in that same call flushed. Every event in
+/// such a batch therefore got the wall clock reading from the moment the
+/// *batch* was written, not the moment each event actually happened, which
+/// is exactly the `docs/superpowers/notes/2026-09-02-inventory-shortfall.md`
+/// finding of `wall_ms` jumping `33780 -> 738866` while `tick` moved only
+/// `10`. Making it mean "real time this event happened" would require the
+/// executor to capture `SystemTime::now()` at the point it actually
+/// dispatches/observes each action (`ExecutionLog::start`/`observe`/
+/// `start_walk`/`observe_walk` in `crates/executor/src/log.rs`, called from
+/// `crates/executor/src/run.rs`) and carry that across the mlua boundary
+/// (`build_observation` in `crates/scripting_lua/src/globals/goal/run.rs`)
+/// into `record.actions()` -- a cross-crate change to the executor's public
+/// attempt/walk types and every test that asserts their shape, not a fix to
+/// a wrong timestamp. Nothing reads the field today (`app/src/lib/
+/// runTimeline.ts`, `runDiff.ts` and the analysis page never touch it; the
+/// only Rust readers were test-fixture helpers), so there is no consumer to
+/// preserve, and a batch-stamped column that looks like a per-event
+/// timestamp is worse than no column at all. `#[serde(default)]` is not
+/// needed for removal -- an old `events.jsonl` line's leftover `"wall_ms"`
+/// key deserializes as an ordinary ignored extra field (serde's default for
+/// a struct with no `deny_unknown_fields`), so every run already on disk
+/// stays readable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Event {
     pub tick: u64,
-    pub wall_ms: u64,
     #[serde(flatten)]
     pub kind: EventKind,
 }
@@ -377,7 +406,6 @@ pub struct RunRecorder {
     /// -- there is no ingestion step, because nothing produces this file but
     /// this recorder.
     map: File,
-    started: Instant,
     started_unix: u64,
     /// The game tick of the first event recorded, so a duration can be a
     /// duration. Absent until something has been recorded.
@@ -426,7 +454,6 @@ impl RunRecorder {
             run_id,
             events,
             map,
-            started: Instant::now(),
             start_tick: None,
             high_tick: 0,
             map_count: 0,
@@ -454,11 +481,7 @@ impl RunRecorder {
     /// record, and these are hundreds of events over minutes, not millions,
     /// so buffering buys nothing worth the loss.
     pub fn record(&mut self, tick: u64, kind: EventKind) -> io::Result<()> {
-        let event = Event {
-            tick,
-            wall_ms: self.started.elapsed().as_millis() as u64,
-            kind,
-        };
+        let event = Event { tick, kind };
         if self.start_tick.is_none() {
             self.start_tick = Some(tick);
         }
@@ -916,6 +939,53 @@ mod tests {
         assert_eq!(read.events.len(), 2);
         assert_eq!(read.events[0].kind, EventKind::Unknown);
         assert!(matches!(read.events[1].kind, EventKind::RunFinished { .. }));
+    }
+
+    /// Pins the removal of `wall_ms` (see [`Event`]'s doc comment for why):
+    /// a run already on disk with the old field must keep opening, and a
+    /// freshly written run must not resurrect it.
+    ///
+    /// This is also the test that would have failed under the batch-stamping
+    /// behaviour, had `wall_ms` been kept instead of removed: that behaviour
+    /// stamped every event `record()` wrote in one call with the *same*
+    /// `self.started.elapsed()` reading, so two events from the same
+    /// `record.actions()` batch could carry identical `wall_ms` despite
+    /// covering very different ticks -- the exact shape of the
+    /// `33780 -> 738866` / `10-tick` finding this fix responds to.
+    #[test]
+    fn wall_ms_is_gone_but_an_old_line_carrying_it_still_reads() {
+        let dir = tmpdir("wall_ms_removed");
+        let path = dir.join("events.jsonl");
+        fs::write(
+            &path,
+            r#"{"tick":1,"wall_ms":33780,"kind":"run_started","run_id":"r","bots":[1],"seed":null,"factorio":null,"git":null}
+{"tick":11,"wall_ms":738866,"kind":"run_finished","outcome":"done","elapsed_ticks":10}
+"#,
+        )
+        .unwrap();
+        let read = read_events(&path).unwrap();
+        assert_eq!(
+            read.skipped, 0,
+            "a leftover wall_ms key is not a parse failure"
+        );
+        assert_eq!(read.events.len(), 2);
+        assert_eq!(read.events[0].tick, 1);
+        assert_eq!(read.events[1].tick, 11);
+
+        let mut rec = RunRecorder::start(&dir.join("fresh"), "r-fresh").unwrap();
+        rec.record(
+            0,
+            EventKind::RunFinished {
+                outcome: "done".into(),
+                elapsed_ticks: 0,
+            },
+        )
+        .unwrap();
+        let text = fs::read_to_string(rec.dir().join("events.jsonl")).unwrap();
+        assert!(
+            !text.contains("wall_ms"),
+            "a freshly written event must not carry wall_ms: {text}"
+        );
     }
 
     #[test]

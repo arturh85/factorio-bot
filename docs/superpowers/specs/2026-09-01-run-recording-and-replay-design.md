@@ -38,8 +38,8 @@ from, and good enough to answer "why was this run slower than that one".
 
 ### D1 — Ticks are the clock; wall time is recorded but never compared
 
-Every event carries `tick` (Factorio's `game.tick`) and `wall_ms`. Comparison
-between runs is **always** on ticks.
+Every event carries `tick` (Factorio's `game.tick`) and, until 2026-09-02,
+`wall_ms`. Comparison between runs is **always** on ticks.
 
 Wall time measures the machine: a headless server and a graphical client with
 three cameras do not run at the same speed, and neither matches a run made
@@ -48,6 +48,27 @@ speedrun actually measures. Recording both costs nothing; comparing on wall
 time would silently compare hardware.
 
 Ticks are also already the join key: the mod names frames from `game.tick`.
+
+**Amendment, 2026-09-02: `wall_ms` was removed, not merely left uncompared.**
+"Recording both costs nothing" assumed the stamp reflected *when the event
+happened*. It didn't: `RunRecorder::record()` stamped it from
+`self.started.elapsed()` at the moment `record()` was *called*, and
+`record.actions()`/`record.teleports()`/`record.refusals()` are each called
+once per supervisor "ran" transition -- after an entire multi-bot plan has
+finished executing. Every event flushed by one such call got the wall clock
+reading from the moment that whole batch was written, not the moment each
+event actually happened, which is what
+`docs/superpowers/notes/2026-09-02-inventory-shortfall.md` caught as `wall_ms`
+jumping `33780 -> 738866` while `tick` moved `10`. Making it mean the latter
+would require the executor to capture a real timestamp at the point it
+dispatches/observes each action and carry that across the mlua boundary into
+`record.actions()` -- a cross-crate change to the executor's attempt/walk
+types, not a fix to a wrong stamp. Nothing read the field (not
+`app/src/lib/runTimeline.ts`, not `runDiff.ts`, not the analysis page), so it
+was removed rather than fixed. See `factorio_bot_core::record::Event`'s doc
+comment for the full account. An old `events.jsonl` line's leftover
+`"wall_ms"` key still reads fine -- it deserializes as an ordinary ignored
+extra field.
 
 ### D2 — The record is append-only JSONL
 

@@ -733,11 +733,21 @@ export type EventKind =
  *
  * Mirrors `factorio_bot_core::record::Event`: the `#[serde(flatten)]` of
  * `EventKind` into `Event` is why the server publishes this as an `allOf` of
- * `EventKind` and `{tick, wall_ms}` rather than a single flat object.
+ * `EventKind` and `{tick}` rather than a single flat object.
+ *
+ * There used to be a `wall_ms` here too. It was stamped when `record()` was
+ * *called*, but `record.actions()`/`record.teleports()`/`record.refusals()`
+ * are each called once per supervisor "ran" transition -- after an entire
+ * multi-bot plan has finished executing -- so every event written in one
+ * such call got the wall clock reading from the moment that whole batch was
+ * flushed, not the moment each event actually happened. See
+ * `factorio_bot_core::record::Event`'s doc comment for the full account and
+ * `docs/superpowers/notes/2026-09-02-inventory-shortfall.md` for the
+ * `33780 -> 738866` / `10-tick` finding that prompted the removal. Nothing
+ * here ever read it.
  */
 export type Event = EventKind & {
     tick: number;
-    wall_ms: number;
 };
 
 /** `GET /api/v1/runs/{id}/events` response. */

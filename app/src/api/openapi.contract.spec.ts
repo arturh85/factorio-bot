@@ -704,10 +704,11 @@ const SCHEMAS: Record<string, SchemaContract> = {
     }),
     // `EventKind` flattened into `Event`, the same shape `Sample` takes over
     // `SampleKind`: utoipa cannot fold a `#[serde(flatten)]` back into one
-    // flat object, so it publishes `allOf: [{$ref: EventKind}, {tick, wall_ms}]`.
+    // flat object, so it publishes `allOf: [{$ref: EventKind}, {tick}]`.
+    // There is no `wall_ms` any more -- see `Event`'s doc comment in
+    // `app/src/api/types.ts` for why it was removed rather than fixed.
     Event: mergeContract<Event>('EventKind', {
-        tick: {required: true, type: 'integer'},
-        wall_ms: {required: true, type: 'integer'}
+        tick: {required: true, type: 'integer'}
     }),
     // An internally tagged enum (`#[serde(tag = "kind")]`): one inline object
     // per variant, so `taggedUnionContract`, not `objectContract`.

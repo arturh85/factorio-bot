@@ -288,21 +288,15 @@
                 "format": "int64",
                 "minimum": 0,
                 "type": "integer"
-              },
-              "wall_ms": {
-                "format": "int64",
-                "minimum": 0,
-                "type": "integer"
               }
             },
             "required": [
-              "tick",
-              "wall_ms"
+              "tick"
             ],
             "type": "object"
           }
         ],
-        "description": "One line of `events.jsonl`.\n\n`tick` is *when this happened*; a duration is always `elapsed_ticks`. The\ntwo were briefly both called `ticks`, which reads fine until someone plots\nit."
+        "description": "One line of `events.jsonl`.\n\n`tick` is *when this happened*; a duration is always `elapsed_ticks`. The\ntwo were briefly both called `ticks`, which reads fine until someone plots\nit.\n\nThere used to be a `wall_ms` here too, and it is gone on purpose --\nsee [`RunRecorder::record`] for the full account. In short: it was\nstamped from `self.started.elapsed()` at the moment `record()` was\n*called*, but `record.actions()`/`record.teleports()`/`record.refusals()`\n(`crates/scripting_lua/src/globals/record.rs`) are each called once per\nsupervisor \"ran\" transition, i.e. once an entire multi-bot plan has\nfinished executing -- which can be minutes of real time and thousands of\nticks after the earliest event in that same call flushed. Every event in\nsuch a batch therefore got the wall clock reading from the moment the\n*batch* was written, not the moment each event actually happened, which\nis exactly the `docs/superpowers/notes/2026-09-02-inventory-shortfall.md`\nfinding of `wall_ms` jumping `33780 -> 738866` while `tick` moved only\n`10`. Making it mean \"real time this event happened\" would require the\nexecutor to capture `SystemTime::now()` at the point it actually\ndispatches/observes each action (`ExecutionLog::start`/`observe`/\n`start_walk`/`observe_walk` in `crates/executor/src/log.rs`, called from\n`crates/executor/src/run.rs`) and carry that across the mlua boundary\n(`build_observation` in `crates/scripting_lua/src/globals/goal/run.rs`)\ninto `record.actions()` -- a cross-crate change to the executor's public\nattempt/walk types and every test that asserts their shape, not a fix to\na wrong timestamp. Nothing reads the field today (`app/src/lib/\nrunTimeline.ts`, `runDiff.ts` and the analysis page never touch it; the\nonly Rust readers were test-fixture helpers), so there is no consumer to\npreserve, and a batch-stamped column that looks like a per-event\ntimestamp is worse than no column at all. `#[serde(default)]` is not\nneeded for removal -- an old `events.jsonl` line's leftover `\"wall_ms\"`\nkey deserializes as an ordinary ignored extra field (serde's default for\na struct with no `deny_unknown_fields`), so every run already on disk\nstays readable."
       },
       "EventKind": {
         "description": "What happened. Internally tagged as `kind`, so a line is one flat object.\n\n[`EventKind::Unknown`] is the `serde(other)` catch-all: a reader built\nbefore a kind existed must skip it rather than refuse the file, so an older\nviewer can still open a newer run.",

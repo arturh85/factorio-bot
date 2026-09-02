@@ -78,11 +78,7 @@ mod tests {
     use super::*;
 
     fn ev(tick: u64, kind: EventKind) -> Event {
-        Event {
-            tick,
-            wall_ms: tick,
-            kind,
-        }
+        Event { tick, kind }
     }
 
     fn dispatched(id: u32, bot: u32, action: &str, tick: u64) -> Event {

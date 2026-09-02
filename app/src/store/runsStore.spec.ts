@@ -2,6 +2,7 @@ import {beforeEach, describe, expect, it, vi} from 'vitest';
 import {createPinia, setActivePinia} from 'pinia';
 import {useRunsStore} from './runsStore';
 import * as client from '@/api/client';
+import {ApiError} from '@/api/http';
 import {ArchivedFrame, EntitySnapshot, MapRecord, RunDetail, RunSummary, Sample, Split} from '@/api/types';
 
 vi.mock('@/api/client');
@@ -120,6 +121,58 @@ describe('openRun', () => {
         // and with nothing drawn there is no lead-in to trim.
         expect(store.bounds).toEqual({from: 59375, to: 60246});
         expect(store.leadIn).toBe(0);
+    });
+
+    it('still opens the run when one enrichment 404s, degrading only that stream', async () => {
+        // This is the bug that made every run on an older server read as
+        // "not found": /samples and /map did not exist yet, and folding
+        // their failure into the run's own error hid the whole page behind
+        // one missing route.
+        vi.mocked(client.getRun).mockResolvedValue(DETAIL);
+        vi.mocked(client.getRunFrames).mockResolvedValue({frames: FRAMES});
+        vi.mocked(client.getRunSamples).mockRejectedValue(
+            new ApiError(404, '404 Not Found', null, null)
+        );
+        const store = useRunsStore();
+        await store.openRun('run-1');
+
+        // The run itself opened fine: detail, frames and the axis are intact.
+        expect(store.error).toBeNull();
+        expect(store.detail?.summary.run_id).toBe('run-1');
+        expect(store.frames).toEqual(FRAMES);
+        expect(store.bounds).toEqual({from: 59400, to: 60246});
+
+        // Only the failed stream is empty and flagged, distinctly from a run
+        // that simply recorded no samples.
+        expect(store.samples).toEqual([]);
+        expect(store.sampleError).not.toBeNull();
+    });
+
+    it('attributes an enrichment failure to the stream that actually failed', async () => {
+        vi.mocked(client.getRun).mockResolvedValue(DETAIL);
+        vi.mocked(client.getRunFrames).mockResolvedValue({frames: FRAMES});
+        vi.mocked(client.getRunSamples).mockRejectedValue(
+            new ApiError(404, '404 Not Found', null, null)
+        );
+        vi.mocked(client.getRunMap).mockRejectedValue(new Error('network down'));
+        const store = useRunsStore();
+        await store.openRun('run-1');
+
+        // Named for its own route, not a generic "not found" -- a 404 says
+        // the server predates the route rather than the run being missing.
+        expect(store.sampleError).toContain('world-state samples');
+        expect(store.sampleError).toContain('/samples');
+        expect(store.sampleError).toContain('this server does not provide');
+
+        // A different failure on a different stream gets its own message and
+        // does not bleed into the samples panel's.
+        expect(store.mapError).toContain('entity map');
+        expect(store.mapError).toContain('network down');
+        expect(store.mapError).not.toBe(store.sampleError);
+
+        // Streams that succeeded are untouched.
+        expect(store.lanesError).toBeNull();
+        expect(store.frameError).toBeNull();
     });
 });
 

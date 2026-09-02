@@ -290,7 +290,8 @@ function researchPct(progress: number): string {
                 </select>
             </label>
 
-            <div v-if="lanesByBot.length > 0 && store.bounds" class="lanes">
+            <p v-if="store.lanesError" class="stream-warning">{{ store.lanesError }}</p>
+            <div v-else-if="lanesByBot.length > 0 && store.bounds" class="lanes">
                 <div v-for="row in lanesByBot" :key="row.bot" class="lanes__row">
                     <span class="lanes__label">bot {{ row.bot }}</span>
                     <div class="lanes__track">
@@ -311,48 +312,53 @@ function researchPct(progress: number): string {
             </div>
 
             <div class="frame">
-                <div class="frame__picker">
-                    <label>
-                        view
-                        <!-- One list of the pairs that exist. Two selectors
-                             would offer combinations this run never captured,
-                             which is most of them: the mod writes each camera
-                             into whichever player rendered it, so the client
-                             folder says nothing about who is on screen. -->
-                        <select
-                            :value="currentViewKey"
-                            @change="pickView(($event.target as HTMLSelectElement).value)"
-                        >
-                            <option v-for="v in store.views" :key="viewKey(v)" :value="viewKey(v)">
-                                {{ v.camera }} — client {{ v.bot }} ({{ v.count }} frames)
-                            </option>
-                        </select>
-                    </label>
-                </div>
-                <img v-if="frameSrc" :src="frameSrc" :alt="`frame at tick ${current?.tick}`" />
-                <!-- Before the first frame is a real state: the run had begun
-                     and capture had not yet produced anything. -->
-                <!-- Say where the frames start rather than leaving a dead end:
-                     "none here" and "none at all" are different answers. -->
-                <p v-else class="frame__none">
-                    <template v-if="firstForSelection !== null">
-                        No frame yet at tick {{ store.cursor }} — this camera starts at
-                        <button type="button" class="linkish" @click="store.seek(firstForSelection)">
-                            tick {{ firstForSelection }}
-                        </button>.
-                    </template>
-                    <template v-else>
-                        This bot and camera captured no frames in this run.
-                    </template>
-                </p>
-                <p v-if="current" class="frame__caption num">
-                    frame tick {{ current.tick }} · {{ current.camera }}
-                </p>
+                <p v-if="store.frameError" class="stream-warning">{{ store.frameError }}</p>
+                <template v-else>
+                    <div class="frame__picker">
+                        <label>
+                            view
+                            <!-- One list of the pairs that exist. Two selectors
+                                 would offer combinations this run never captured,
+                                 which is most of them: the mod writes each camera
+                                 into whichever player rendered it, so the client
+                                 folder says nothing about who is on screen. -->
+                            <select
+                                :value="currentViewKey"
+                                @change="pickView(($event.target as HTMLSelectElement).value)"
+                            >
+                                <option v-for="v in store.views" :key="viewKey(v)" :value="viewKey(v)">
+                                    {{ v.camera }} — client {{ v.bot }} ({{ v.count }} frames)
+                                </option>
+                            </select>
+                        </label>
+                    </div>
+                    <img v-if="frameSrc" :src="frameSrc" :alt="`frame at tick ${current?.tick}`" />
+                    <!-- Before the first frame is a real state: the run had begun
+                         and capture had not yet produced anything. -->
+                    <!-- Say where the frames start rather than leaving a dead end:
+                         "none here" and "none at all" are different answers. -->
+                    <p v-else class="frame__none">
+                        <template v-if="firstForSelection !== null">
+                            No frame yet at tick {{ store.cursor }} — this camera starts at
+                            <button type="button" class="linkish" @click="store.seek(firstForSelection)">
+                                tick {{ firstForSelection }}
+                            </button>.
+                        </template>
+                        <template v-else>
+                            This bot and camera captured no frames in this run.
+                        </template>
+                    </p>
+                    <p v-if="current" class="frame__caption num">
+                        frame tick {{ current.tick }} · {{ current.camera }}
+                    </p>
+                </template>
             </div>
 
             <div class="map">
                 <h3>Map</h3>
+                <p v-if="store.mapError" class="stream-warning">{{ store.mapError }}</p>
                 <MapPanel
+                    v-else
                     :entities="store.entities"
                     :bots="store.mapBots"
                     :trail="store.trail"
@@ -363,9 +369,14 @@ function researchPct(progress: number): string {
             <div class="worldstate">
                 <div class="panel">
                     <h3>Research</h3>
+                    <!-- A fetch failure is neither "no samples yet" nor "no
+                         research queued" -- it means the stream never
+                         arrived, and saying so is the whole point of this
+                         defect fix, so it comes first. -->
+                    <p v-if="store.sampleError" class="stream-warning">{{ store.sampleError }}</p>
                     <!-- Three states, not two: no sample yet at this tick is
                          different from a sample that says nothing is queued. -->
-                    <p v-if="!store.forceState" class="worldstate__empty">
+                    <p v-else-if="!store.forceState" class="worldstate__empty">
                         no world-state samples recorded for this run
                     </p>
                     <p v-else-if="!store.forceState.research" class="worldstate__empty">
@@ -379,7 +390,8 @@ function researchPct(progress: number): string {
 
                 <div class="panel">
                     <h3>Production</h3>
-                    <p v-if="store.production.length === 0" class="worldstate__empty">
+                    <p v-if="store.sampleError" class="stream-warning">{{ store.sampleError }}</p>
+                    <p v-else-if="store.production.length === 0" class="worldstate__empty">
                         nothing tracked for this run
                     </p>
                     <ul v-else class="worldstate__list">
@@ -392,7 +404,8 @@ function researchPct(progress: number): string {
 
                 <div class="panel">
                     <h3>Inventory<template v-if="store.bot !== null"> — bot {{ store.bot }}</template></h3>
-                    <p v-if="!store.botState" class="worldstate__empty">
+                    <p v-if="store.sampleError" class="stream-warning">{{ store.sampleError }}</p>
+                    <p v-else-if="!store.botState" class="worldstate__empty">
                         {{
                             store.bot === null
                                 ? 'select a view to see its bot'
@@ -677,5 +690,19 @@ function researchPct(progress: number): string {
     margin: 0.4rem 0 0;
     font-size: 0.75rem;
     opacity: 0.7;
+}
+/*
+ * One enrichment stream failed to load but the run itself is fine -- distinct
+ * from `.runs__error`, which means the run could not be opened at all. Amber
+ * rather than red: this is a missing panel, not a broken page.
+ */
+.stream-warning {
+    font-size: 0.85rem;
+    color: #92400e;
+    background: rgba(217, 119, 6, 0.1);
+    border: 1px solid rgba(217, 119, 6, 0.3);
+    border-radius: 4px;
+    padding: 0.4rem 0.6rem;
+    margin: 0 0 0.5rem;
 }
 </style>

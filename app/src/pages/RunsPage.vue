@@ -11,7 +11,7 @@ import {computed, onBeforeUnmount, onMounted, ref, watch, watchEffect} from 'vue
 import {useRunsStore} from '@/store/runsStore';
 import {runFrameUrl} from '@/api/client';
 import MapPanel from '@/components/MapPanel.vue';
-import {parseVideoClock, tickToVideoSeconds} from '@/api/videoClock';
+import {clockTickRange, parseVideoClock, tickToVideoSeconds} from '@/api/videoClock';
 import {videoDefects} from '@/api/videoJoin';
 import {
     formatAgo,
@@ -109,6 +109,11 @@ const videoAt = computed(() =>
 );
 
 /** Anything the manifest itself says is wrong -- a zero-byte file, an unverified rate. */
+/** The ticks the recording actually covers; `null` when the clock observed nothing. */
+const videoRange = computed(() =>
+    videoClock.value === null ? null : clockTickRange(videoClock.value)
+);
+
 const videoIssues = computed(() => (store.video === null ? [] : videoDefects(store.video)));
 
 const videoEl = ref<HTMLVideoElement | null>(null);
@@ -384,11 +389,28 @@ function researchPct(progress: number): string {
                     {{ store.video.video.fps }} fps ·
                     {{ ((store.video.bytes ?? 0) / 1048576).toFixed(0) }} MB ·
                     <template v-if="videoAt">at {{ videoAt.seconds.toFixed(1) }}s</template>
+                    <template v-else-if="videoRange && store.cursor < videoRange.from">
+                        recording starts at
+                        <button type="button" class="linkish" @click="store.seek(videoRange.from)">
+                            tick {{ videoRange.from }}
+                        </button>
+                        — the run had already begun
+                    </template>
+                    <template v-else-if="videoRange && store.cursor > videoRange.to">
+                        recording ended at tick {{ videoRange.to }}
+                    </template>
                     <template v-else>the clock cannot place tick {{ store.cursor }}</template>
                 </p>
             </div>
 
-            <div class="frame">
+            <!-- Frames are the tick-addressable record and the video is the
+                 watchable one; showing both expanded is two answers to one
+                 question. When a video exists the frames fold away, and the
+                 summary line says what they are still for. -->
+            <details class="frame" :open="!store.video?.video">
+                <summary v-if="store.video?.video" class="frame__summary">
+                    per-camera screenshots ({{ store.frames.length }}) — exact at a tick, where the video interpolates
+                </summary>
                 <p v-if="store.frameError" class="stream-warning">{{ store.frameError }}</p>
                 <template v-else>
                     <div class="frame__picker">
@@ -429,7 +451,7 @@ function researchPct(progress: number): string {
                         frame tick {{ current.tick }} · {{ current.camera }}
                     </p>
                 </template>
-            </div>
+            </details>
 
             <div class="map">
                 <h3>Map</h3>
@@ -647,6 +669,12 @@ function researchPct(progress: number): string {
 }
 .video {
     margin-bottom: 1rem;
+}
+.frame__summary {
+    cursor: pointer;
+    font-size: 0.8rem;
+    color: var(--muted, #8b8b8b);
+    margin-bottom: 0.5rem;
 }
 .video__player {
     max-width: 100%;

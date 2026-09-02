@@ -689,3 +689,58 @@ layout manufactures the collision.
 
 That is now the top item, and it is the first blocker in days that is a design
 question rather than a bug.
+
+## Update (~15:50): every parked bot has been up to a tile wrong, always
+
+The parked-bot blocker is fixed (`c99e2ce2`), and the cause was one layer below
+where I had stopped looking.
+
+**`on_player_changed_position` fires once per tile crossed, not per position
+change.** Consecutive events for a walking bot are ~1.0 tiles and ~7 ticks apart.
+So a bot that enters a tile and comes to rest partway into it reports its
+*entry*, and nothing corrects it — no further event is possible while it stands
+still.
+
+In run 27, bot 3 sat at `(-23.5078125, 16.203125)` from tick 18240 to the end,
+13,000 ticks, while its last reported position was `(-23.19140625, 16.96484375)`.
+At the believed position its box clears the `[-23, 16]` furnace footprint by
+0.067 tiles; at the real one it is squarely inside. Bots 2 and 4 were 0.445 and
+0.297 tiles out the same way.
+
+**`PlanState`'s `characters` occupancy source was never broken.** It exists, it
+works, and probed directly with bot 3's *real* position it correctly reports
+`is_area_free("stone-furnace", [-23, 16]) == false`. It was being fed stale
+input. Every parked bot in every run has been up to a tile wrong.
+
+That is why the stand-point model was the wrong fix and was rejected: it models
+where a bot *will* park, when the planner already had a source for where one
+*had* parked and that source was lying. Adding a second model to compensate for a
+broken input buys two wrong answers.
+
+The fix reports `player.character.position` at every point the walker lets a
+character stop, and widens the mod's existing acting-player recovery — walk aside
+and retry — to any bot standing in a refused footprint. The same widening
+`537adf30` made to the classification, now made to the recovery.
+
+### A correction to what I told the project owner
+
+I said that recording a parked bot as a refusal "suppressed `recover`'s tier-1
+reschedule, which is exactly the recovery that fits". **`scripts/supervisor.lua`
+never calls `obs:recover()` at all.** It re-plans through `goal.plan` each
+iteration and stops after three non-improving plans. Tier 1 was never in this
+loop, so it was never the thing being suppressed. The classification fix in
+`537adf30` was still right — a character says nothing about the ground — but my
+account of what it saved was wrong.
+
+### Geometry, still deliberately unchanged
+
+Furnaces on a 2-tile grid still leave 0.2 tiles against a 0.4-wide character, so
+the layout still manufactures these collisions. This fix makes each one cost a
+short walk instead of a milestone — the right cost, not the absence of one.
+
+### Still open
+
+Milestone 6 gave every step to bot 1; bots 2, 3 and 4 received no dispatch after
+tick 18700, which is *why* they were parked in the first place. That is the
+"a lab is one craft, and no bot can hand an item to another" constraint again,
+and it remains a decision for the project owner rather than a bug.

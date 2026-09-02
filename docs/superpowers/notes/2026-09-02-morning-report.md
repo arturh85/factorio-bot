@@ -218,3 +218,97 @@ plan's events in one batch after execution finishes, so every event in a batch
 carried the batch-flush time — the `33780 → 738866` across 10 ticks. Making it
 truthful needs real timestamps captured in the executor and threaded across the
 mlua boundary. Nothing read it, so it went.
+
+## Update (~afternoon): the 2.1 audit closed, and rung 6 diagnosed
+
+The Factorio 2.1 API audit is now fully acted on except one item.
+
+- **A2 `build_mode`** — `force_build = true` maps to `defines.build_mode.forced`;
+  the inherited default was `normal`, the opposite of intent. `build_blueprint`
+  has no `force_build` parameter at all. Note that `forced` also deconstructs
+  obstructing nature entities, which 1.1's `force_build` did not — a real
+  behaviour change, not a rename.
+- **A3 placement destroyed materials** — `remove_item` returns how many it
+  *actually* removed and `create_entity` returns an *optional* entity; both
+  return values were discarded, so a failed placement ate the item and a no-op
+  removal built for free. Now create → charge → `destroy()` if the charge did not
+  take exactly one. The reverse order needs to refund through `insert`, which
+  also returns a count and can fall short: a refund that silently loses material
+  is the same bug with more steps.
+  `charge_item_to` did **not** fit — it spends from `get_main_inventory()` while
+  the affordability guard above uses `get_item_count`, which spans every
+  inventory. Pairing them would check one set and spend from another.
+  The new failure line is deliberately in the *material* family and does not
+  contain `can_place_entity said 'no'`, so the refusal memory added last night
+  will not fence the planner off ground the game never refused.
+- **B1 unfiltered entity queries** — the keyframe query is now filtered to the 16
+  types `EntityGraph` models. `attach_world`, `is_area_empty` and the placement
+  obstruction checks were deliberately left unfiltered: they feed `blocked_tree`,
+  and narrowing them would reintroduce the forest-siting bug. Both calls moved to
+  `remote_call_json`, closing a latent pool bug where a truncated reply left the
+  pooled connection holding an unread remainder.
+- **A6 `needs_destroy_to_reach`** — carried through the audit, still not acted on.
+
+**Rung 6 was a locked recipe, not a split inventory.** The leading hypothesis was
+that ingredients had landed on the wrong bot. `samples.jsonl` refuted it in one
+query: every bot held both ingredients in its own inventory, and bot 2's is
+byte-identical across the whole six-minute milestone — nothing needed moving and
+nothing consumed anything. `events.jsonl` named the real defect instead: of four
+`craft automation-science-pack` nodes, only one had `deps`.
+
+`automation-science-pack` is `enabled = false` in 2.1.17, unlocked by a 2.0
+trigger technology. The planner states that precondition for the *first* share
+and applies `Effect::Researched` to its own overlay; the other three then asked
+`recipe_gate`, which read the **union of world and overlay** and answered `Open`.
+`Open` means "nothing has to happen first", so they carried no condition,
+`infer_edges` had nothing to hang an edge on, and all three dispatched at tick 0.
+`Open` was doing double duty — "already true in the world" and "will be true by
+then" — and only the first is safe to skip an edge for.
+
+One existing test had encoded the bug, asserting `Open` for an
+overlay-researched unlocker. It is now split into an overlay case and a world
+case, so the fix cannot be satisfied by never reporting `Open` at all.
+
+## The next rung was never actually reachable
+
+Independent of rung 6, the mod-side-actions spec found that **research is
+durative and nobody waits for it**: `Actuator::research` reports success the
+instant it sends the command, and `on_research_finished` carries no action id to
+correlate a completion back. Rung 7 is "research automation" — so it could never
+have worked, and a green rung 7 would have been a false green. Being blocked at
+rung 6 hid that.
+
+The same spec falsified a premise I had been carrying: walk and mine are
+*already* mod-side `on_tick` state machines with push completion carrying a real
+`game.tick`. Polling would be a step backwards. The real remaining defect there
+is that the approach walk is a separate dispatch laundered through `move_player`
+→ `into_report` across five call sites — which is where run 9's three
+360-second plans went.
+
+## Video, and the clock it needs
+
+The question "can we just record a video?" is a good one, and the answer turns on
+the clock. `take_screenshot` renders **synchronously inside the game's main
+loop**, once per camera per capture; an external recorder captures the frame the
+GPU already drew. So video is strictly cheaper on the game thread.
+
+What it costs is the join. Everything in the viewer joins on `game.tick` —
+frames are literally named `tick-<digits>-<camera>.jpg`, and `frameJoin.ts`
+*verifies* the join rather than assuming it. Video frames are wall-clock, and UPS
+is not constant (it sagged to ~53 under capture, exactly the condition you would
+be recording in), so the two cannot be related by multiplying.
+
+Note the shape of that fix against `wall_ms` above. `wall_ms` was removed because
+it stamped the moment `record()` was *called*, and the supervisor flushes a whole
+plan's events in one batch — so a batch's events all carried the flush time. A
+tick↔wall sidecar written **by the mod, at a known `game.tick`** is a different
+source with none of that defect. The lesson from `wall_ms` is not "no
+timestamps"; it is "timestamp at the event, not at the flush".
+
+Frames have never once diagnosed a run — `samples.jsonl` and `map.jsonl` did,
+four times unaided. So moving frames to video costs the analysis path nothing and
+changes only the watchability path, which is the half video is better at.
+
+**Unmeasured, and load-bearing:** nobody has A/B'd what screenshot capture
+actually costs. The "~7 UPS from six cameras" figure is inference. Any argument
+for video that leans on it is leaning on an unrun experiment.

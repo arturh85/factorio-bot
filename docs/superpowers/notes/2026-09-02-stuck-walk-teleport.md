@@ -192,3 +192,149 @@ passed, 0 failed, exit 0**, at `f7b60f1c` plus only this change.
    not an observation. That is a separate defect in the record and was **not**
    fixed here — the mod stamps the real `event.tick` on the writeout and the
    flattening happens Rust-side, in `record.teleports()`.
+
+---
+
+# Follow-up: the collision check turned a brick into a spin
+
+`run-1788344167-58471`, the first run with the fix above. The stacking is gone
+and rungs 4 and 5 got faster; rung 6 span for 87,766 ticks and had to be killed.
+
+## What the record shows
+
+**The load-bearing unknown from §5.1 is settled: it works.**
+`find_non_colliding_position("character", ..)` does avoid other characters. No
+two bots shared a tile anywhere in this run.
+
+**And rungs 4 and 5 improved, confirmed:**
+
+| rung | before (`…-92036`) | after (`…-58471`) |
+|---|---|---|
+| 4 (copper) | 3 plan iterations, 15 teleports | **2 iterations, 0 teleports** |
+| 5 (gears) | 2 iterations | **1 iteration** |
+
+Every teleport in the new run is in rung 6. The collision check is doing its job
+wherever the walk can actually finish.
+
+**The regression:** 1414 teleport events, all bot 1, all `walk_stuck`, all to
+the identical destination `(-22.0, 19.0)`, from two alternating positions
+`(-21.09765625, 18.92578125)` and `(-21.203125, 19.0)`. Ticks 20385 → 108151.
+1408 of the 1413 gaps are exactly **61 ticks**. Four action ids — 105, 108, 111,
+116 — with 354, 353, 354 and 353 teleports each.
+
+## The coordinator's hypothesis: confirmed, with the cause named
+
+*"The teleport lands the bot at an adjusted position while arrival is still
+judged against the original waypoint."* **Correct.** Arrival is a 0.3-by-0.3 box
+around `w.waypoints[w.idx]`; `find_non_colliding_position` returns somewhere the
+character *fits*, which is 0.7–0.9 tiles away whenever the waypoint is inside
+something. The check never fires, the leg times out again, the search is
+deterministic and answers identically, forever.
+
+The 61 ticks are the arithmetic: `walk_leg_timeout_ticks` floors at 60 and the
+test is `>`, so a short leg re-fires on the 61st tick. 353 × 61 ≈ 21,533 ticks ≈
+**359 seconds** — each of the four walks ran out `ACTION_RESULT_DEADLINE`
+(360 s) exactly, then the next iteration re-planned the same walk.
+
+**What is in the way, from `map.jsonl`:** a `stone-furnace` at `(-22.0, 18.0)`,
+placed by this run at tick 15660 — 4,725 ticks before the spin began. A furnace
+is 2×2, so its collision box runs to x = −21.1, and the position the bot kept
+being pushed back to is **x = −21.09765625**. That is the furnace's edge to
+three decimal places, not a coincidence. The landing `(-22.0, 19.0)` is the free
+tile immediately south of it, on the 0.5 grid `WALK_STUCK_TELEPORT_PRECISION`
+implies. The waypoint is behind or inside a building the run put there itself.
+
+**So the old code was cheating, and the fix exposed it.**
+`player.teleport(waypoint)` ignores collision, so it put the character *inside*
+the furnace, the arrival check passed on the next tick, and the leg advanced.
+Refusing to do that is right. Re-aiming at the same unreachable waypoint
+afterwards is what was wrong.
+
+**One correction to the framing.** *"The walk never failed — it never terminated
+at all."* It did terminate: after 360 s each, four times, as `Status::Lost`
+(`lose_track_walk`, the `NoVerdict` arm). That matters, because
+`obs.walks_failed` from the previous commit counts only `Status::Failed` — so
+the diagnostic fix missed this run for a second, distinct reason, and that is
+fixed here too.
+
+## What changed
+
+**1. A successful teleport advances the leg.** The leg is spent; the follower
+aims at the next waypoint instead of the one it just proved it cannot reach.
+This is exactly the outcome the collision-blind code achieved illegally, and it
+makes "one teleport per leg" true **by construction**.
+
+That also answers the optional suggestion — *refuse to re-teleport to a
+destination already tried for this leg*. No such memory is needed: a leg is
+never asked twice, so a deterministic search is never given the same question
+twice. A second list would be a second thing to keep correct.
+
+Only intermediate legs reach this branch (the last waypoint aborts), so the
+walk's own destination is never claimed on the strength of a teleport.
+
+**2. A cap: `WALK_STUCK_TELEPORT_LIMIT = 8` per walk.** Advancing bounds this to
+one teleport per leg, but a long route could still hop its whole length, and
+after two runs lost to this branch a bound is worth having independently of the
+reasoning that says it cannot be reached.
+
+*Why 8.* From the three runs that recorded a **working** recovery
+(`…-41961`, `…-63794`, `…-92036`): 13 walks needed a teleport at all, they used
+between 1 and 5, and 5 was the worst case. 8 leaves every observed legitimate
+recovery untouched with 60% headroom, while bounding a runaway to roughly
+8 × 61 = 488 ticks — about 8 seconds against the 87,766 ticks this run spent, a
+180× reduction, and it turns a 24-minute burn into one failed walk the
+supervisor can replan.
+
+**3. `obs.walks_lost`, and `first_error` falls back to it.** A walk that never
+answered is `Lost`, not `Failed`, and was in neither `failed`, `lost` (actions
+only) nor `walks_failed`. `scripts/supervisor.lua` now adds both walk terms.
+
+## How a spin surfaces as an error now, at three independent layers
+
+1. **It cannot spin.** The leg advances, so the same waypoint is never retried.
+2. **If something still loops**, the cap fails the walk after 8 teleports with
+   `stuck while walking, gave up after 8 teleports on one walk` — a real
+   `action_failed`, in about 8 seconds.
+3. **If a walk somehow still runs out the executor's deadline**, it is `Lost`,
+   `walks_lost` counts it, `first_error` carries its message, and the supervisor
+   halts `stuck` with the reason instead of `stuck_silent` with `null`.
+
+Layers 2 and 3 are deliberately redundant: layer 1 is the same kind of reasoning
+that said the previous fix was complete.
+
+## Tests
+
+Red-first, all of them, against the code as committed in `b3ed1beb`:
+
+- `a_leg_is_never_teleported_more_than_once` — failed with **7 attempts** in 400
+  ticks, the live 61-tick cadence reproduced in a unit test.
+- `a_teleport_advances_the_leg_it_could_not_finish` — `left: 1, right: 2`.
+- `a_walk_that_keeps_needing_teleports_gives_up_at_the_cap` — failed with **15**
+  teleports, every one to an identical destination: the determinism, live.
+- `one_teleport_is_not_the_cap` — control.
+- `a_walk_the_run_lost_track_of_is_reported_too` and
+  `walks_the_run_lost_track_of_are_failures_too` — the latter failed
+  `left: "stuck_silent", right: "stuck"`, the misclassification reproduced.
+
+`cargo fmt --all --check` clean, `cargo clippy --workspace --all-features
+--all-targets -- --deny warnings` clean, `cargo test --workspace` **1273 passed,
+0 failed, exit 0**, at `5cbafdef` plus only this change.
+
+## Still unverified without another run
+
+1. **Whether advancing past an unreachable waypoint gets the bot anywhere
+   useful.** It resumes the route one waypoint further on, which is what the old
+   code effectively did — but the old code's bot was standing *on* the waypoint
+   and this one is up to 4 tiles off it. If the next leg is also blocked the walk
+   now hops rather than sticks, and the cap is what stops it.
+2. **Whether the real problem is upstream.** The pathfinder produced a waypoint
+   inside a furnace this run had placed 4,725 ticks earlier. Nothing here stops
+   it doing that again; the walk now fails honestly instead of spinning, and the
+   planner gets to see it. Why the path was routed through a building at all is
+   unexamined, and is the next thing to look at.
+3. **Whether `find_non_colliding_position` counts the *calling* character.** It
+   takes a prototype name, not an entity, so it has no way to exclude the bot
+   itself — meaning a bot standing next to its own waypoint may be what makes
+   that waypoint "occupied". The furnace evidence is strong enough that this is
+   not needed to explain this run, and the fix is identical either way, but the
+   test stub does exclude the owner and therefore cannot settle it.

@@ -306,6 +306,25 @@ end
 WALK_STUCK_TELEPORT_RADIUS = 4
 WALK_STUCK_TELEPORT_PRECISION = 0.5
 
+--- How many times one walk may be rescued by a teleport before it is failed
+--- instead.
+---
+--- Advancing the leg on a successful teleport (below) already bounds this to
+--- one per leg, so a walk can only reach this cap by needing help on leg after
+--- leg -- a route that is congested end to end, which the planner should be
+--- told about rather than hopped through.
+---
+--- 8, from the three runs that recorded a *working* recovery
+--- (run-1788334911-41961, run-1788338409-63794, run-1788341905-92036): 13
+--- walks needed a teleport at all, they used between 1 and 5, and 5 was the
+--- worst case. 8 leaves that untouched with room to spare while bounding a
+--- runaway to roughly 8 x 61 = 488 ticks. The alternative was no bound at all,
+--- which cost run-1788344167-58471 87,766 ticks -- four consecutive walks each
+--- spinning until the executor's 360-second ACTION_RESULT_DEADLINE
+--- (crates/core/src/factorio/rcon.rs) cut it off, about 24 minutes for one
+--- unreachable waypoint.
+WALK_STUCK_TELEPORT_LIMIT = 8
+
 --- How long the mining handler may fail to start mining before it gives the
 --- action a verdict.
 ---
@@ -834,6 +853,18 @@ function on_tick(event)
 							print("Player is stuck while moving to last waypoint, just stop moving")
 							w.stuck = "ERROR: stuck while walking, aborted before reaching last waypoint"
 							w.waypoints[w.idx] = nil
+						elseif (w.teleports or 0) >= WALK_STUCK_TELEPORT_LIMIT then
+							-- Out of budget. Nothing below bounded how often one
+							-- walk could be rescued, and a walk that never
+							-- finishes is invisible: it is not a failure, so it
+							-- reaches no error, and it ends only when the
+							-- executor's 360-second deadline calls it lost.
+							-- Failing here gives the supervisor something to
+							-- replan against, in seconds instead of minutes.
+							print("Player has been teleported "..WALK_STUCK_TELEPORT_LIMIT.." times on one walk, giving up")
+							w.stuck = "ERROR: stuck while walking, gave up after "
+								.. WALK_STUCK_TELEPORT_LIMIT .. " teleports on one walk"
+							w.waypoints[w.idx] = nil
 						else
 							-- This recovery used to teleport straight onto the
 							-- waypoint, and that MANUFACTURED the condition it
@@ -881,18 +912,51 @@ function on_tick(event)
 								-- intent asserts something untrue about where
 								-- the bot is.
 								teleport_writeout(event.tick, idx, "walk_stuck", pos, player.character.position, w.action_id)
-								-- The arrival check above normally re-stamps
-								-- idx_tick/leg_timeout on the very next tick once
-								-- it sees the character standing on the
-								-- destination, but stamp it here too rather than
-								-- rely on that: this is the site the teleport
-								-- actually happens, and a leg's timer must never
-								-- be left counting against where the walk used to
-								-- be. Measured from where the bot LANDED to the
-								-- waypoint, because an adjusted landing still has
-								-- the remaining offset to walk.
+								-- THE LEG IS SPENT. Advance, rather than aim at
+								-- the same waypoint again.
+								--
+								-- `find_non_colliding_position` answers with
+								-- somewhere the character FITS, which is not the
+								-- waypoint whenever the waypoint is inside
+								-- something. Arrival is judged against the
+								-- waypoint with a 0.3 box, so re-aiming at it
+								-- after landing further away than that is a leg
+								-- that can NEVER complete: it times out again 61
+								-- ticks later, the search is deterministic and
+								-- returns the identical spot, and it spins.
+								-- run-1788344167-58471 did that 1414 times --
+								-- every one of them bot 1 to (-22.0, 19.0),
+								-- 87,766 ticks across four dispatches -- against
+								-- a stone furnace the run had itself placed at
+								-- (-22, 18), whose collision edge is exactly the
+								-- x = -21.098 the bot kept being pushed back to.
+								--
+								-- Before the collision check existed this branch
+								-- teleported ONTO the waypoint, illegal position
+								-- and all, so the arrival check passed on the next
+								-- tick and the leg advanced. Advancing here is that
+								-- same outcome without the illegal position -- and
+								-- it makes "one teleport per leg" true by
+								-- construction, which is why no memory of
+								-- already-tried destinations is needed: a
+								-- deterministic search is never asked the same
+								-- question twice.
+								--
+								-- Only intermediate legs reach here; the last
+								-- waypoint aborts above. So the walk's own
+								-- destination is never claimed on the strength of
+								-- a teleport.
+								w.teleports = (w.teleports or 0) + 1
+								w.idx = w.idx + 1
 								w.idx_tick = event.tick
-								w.leg_timeout = walk_leg_timeout_ticks(player, player.character.position, target)
+								w.leg_timeout = walk_leg_timeout_ticks(player, player.character.position, w.waypoints[w.idx])
+								-- Do not steer this tick. `dx`, `dy` and
+								-- `direction` above were computed for the leg that
+								-- just ended, from a position the character has
+								-- since been moved off; the next tick recomputes
+								-- both against the new waypoint.
+								direction = ""
+								player.walking_state = {walking=false}
 							end
 						end
 					end

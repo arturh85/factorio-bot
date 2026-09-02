@@ -253,11 +253,24 @@ fn build_observation(
     // said nothing. `run-1788341905-92036` was recorded `stuck_silent,
     // last_error: null` that way while its console log carried the
     // pathfinder's refusal once per iteration.
+    //
+    // `Lost` is counted beside `Failed` and separately from it, because the two
+    // are different facts and the second one is the one that hides. A walk that
+    // ran until the executor's `ACTION_RESULT_DEADLINE` got no verdict at all,
+    // so it is not a failure -- and `run-1788344167-58471` produced four of
+    // them, 87,766 ticks between them, from a stuck-walk recovery that
+    // teleported to the same unreachable spot 1414 times. Counting only
+    // `Failed` would have left that run just as silent as the one before it.
     let mut walks_failed = 0u32;
+    let mut walks_lost = 0u32;
     let mut first_walk_error: Option<String> = None;
     for (i, (bot, step_index, w)) in log.walks().enumerate() {
-        if w.status == Status::Failed {
-            walks_failed += 1;
+        if w.status == Status::Failed || w.status == Status::Lost {
+            if w.status == Status::Failed {
+                walks_failed += 1;
+            } else {
+                walks_lost += 1;
+            }
             if first_walk_error.is_none() {
                 first_walk_error.clone_from(&w.error);
             }
@@ -296,8 +309,9 @@ fn build_observation(
     // Counted separately from `failed` rather than folded into it: `failed` is
     // a count of *actions*, every other field beside it is about actions, and
     // a caller that has been reading it as one must not silently start getting
-    // a different number. The supervisor adds the two itself.
+    // a different number. The supervisor adds them itself.
     obs.set("walks_failed", walks_failed)?;
+    obs.set("walks_lost", walks_lost)?;
     obs.set("first_error", first_error)?;
     obs.set("actions", actions)?;
     obs.set("walks", walks)?;
@@ -1258,8 +1272,39 @@ mod tests {
         .await;
     }
 
-    /// The control for the test above: a clean run counts no failed walks and
-    /// still reports no error, so `walks_failed` cannot be a constant.
+    /// **A walk that never terminated is not a walk that succeeded.**
+    ///
+    /// `walks_failed` counts `Status::Failed`. A walk that runs until the
+    /// executor's `ACTION_RESULT_DEADLINE` is `Status::Lost` — the game
+    /// acknowledged it and no verdict ever came — and that is exactly what a
+    /// teleport spin looks like from Rust. `run-1788344167-58471` produced four
+    /// of them, 87,766 ticks in total, and every one was invisible: no action
+    /// failed, no walk *failed*, and the run reported nothing wrong.
+    #[tokio::test]
+    async fn a_walk_the_run_lost_track_of_is_reported_too() {
+        let lua = lua_with_goal(Arc::new(
+            StubActuator::new(Failure::WithoutVerdict).with_failing_walks(),
+        ));
+        exec_bounded(
+            &lua,
+            r#"
+            local obs = goal.run(goal.plan(goal.have("iron-ore", 2)))
+            assert(obs.failed == 0, "no ACTION failed, got " .. obs.failed)
+            assert(obs.walks_failed == 0,
+                "and no walk got a verdict either, got " .. tostring(obs.walks_failed))
+            assert(obs.walks_lost > 0,
+                "the walks were lost and have to be counted, got " .. tostring(obs.walks_lost))
+            assert(type(obs.first_error) == "string",
+                "a run that lost track of every walk may not report nothing")
+            assert(obs.first_error:find("no action result", 1, true) ~= nil,
+                "and it has to be the walk's own words, got " .. tostring(obs.first_error))
+        "#,
+        )
+        .await;
+    }
+
+    /// The control for the two tests above: a clean run counts no failed and no
+    /// lost walks and still reports no error, so neither can be a constant.
     #[tokio::test]
     async fn a_clean_run_counts_no_failed_walks() {
         let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never)));
@@ -1269,6 +1314,8 @@ mod tests {
             local obs = goal.run(goal.plan(goal.have("iron-ore", 2)))
             assert(obs.walks_failed == 0,
                 "nothing failed, got " .. tostring(obs.walks_failed))
+            assert(obs.walks_lost == 0,
+                "nothing was lost, got " .. tostring(obs.walks_lost))
             assert(obs.first_error == nil, "no error on a clean run")
         "#,
         )

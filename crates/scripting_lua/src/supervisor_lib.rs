@@ -93,6 +93,7 @@ mod tests {
                 local o = __run_obs[__run_calls] or {}
                 return { failed = o.failed or 0, lost = o.lost or 0,
                          walks_failed = o.walks_failed or 0,
+                         walks_lost = o.walks_lost or 0,
                          pending = o.pending or 0, success = o.success or 0,
                          running = 0, done = true,
                          first_error = o.first_error }
@@ -238,6 +239,28 @@ mod tests {
         let report: String = lua.globals().get("__report").expect("__report");
         assert!(
             report.contains("the pathfinder returned no path"),
+            "the halt has to carry the reason, got {report}"
+        );
+    }
+
+    /// The lost-walk half of the same hole. A walk the run lost track of gets
+    /// no verdict at all, so it is in neither `failed` nor `walks_failed`; a
+    /// teleport spin is precisely that, and `run-1788344167-58471` spent four
+    /// executor deadlines on one before anybody could see a reason.
+    #[test]
+    fn walks_the_run_lost_track_of_are_failures_too() {
+        let lua = harness(
+            "{10, 10, 10, 10}",
+            "{{walks_lost=1, pending=10, first_error='no action result received in time'}}",
+        );
+        let (state, _, _) = drive(&lua, "{stall_limit = 3}");
+        assert_eq!(
+            state, "stuck",
+            "a walk that never answered is not a run that claimed success"
+        );
+        let report: String = lua.globals().get("__report").expect("__report");
+        assert!(
+            report.contains("no action result received in time"),
             "the halt has to carry the reason, got {report}"
         );
     }

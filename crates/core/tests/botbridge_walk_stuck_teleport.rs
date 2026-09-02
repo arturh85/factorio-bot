@@ -189,6 +189,15 @@ fn lua_for_mod_source() -> Lua {
 }
 
 fn run(setup: &str) -> Lua {
+    run_ticks(setup, 2)
+}
+
+/// [`run`], driving `ticks` consecutive `on_tick` calls from [`TICK`].
+///
+/// More than two is how a *spin* becomes visible: a leg that teleports and
+/// then keeps aiming at a waypoint it cannot reach times out again 61 ticks
+/// later, and again, and again.
+fn run_ticks(setup: &str, ticks: u64) -> Lua {
     let lua = lua_for_mod_source();
     lua.load(PRELUDE)
         .set_name("stub_game")
@@ -217,7 +226,7 @@ fn run(setup: &str) -> Lua {
     // reuse it rather than inventing a second way to fail. A leg that
     // teleported successfully re-stamps its timer, so the second tick adds no
     // further teleport.
-    for tick in [TICK, TICK + 1] {
+    for tick in TICK..TICK + ticks {
         lua.load(format!("on_tick({{ tick = {tick} }})"))
             .set_name("on_tick")
             .exec()
@@ -492,5 +501,135 @@ fn a_stuck_last_leg_still_aborts_without_teleporting() {
     assert!(
         teleports(&lua).is_empty(),
         "the last leg is aborted, never teleported"
+    );
+}
+
+/// A line of `count` waypoints one tile apart, every one of them occupied, so
+/// each leg's teleport has to be adjusted off the line.
+///
+/// One tile apart on purpose: `walk_leg_timeout_ticks` floors at 60 ticks, so
+/// short legs keep the whole fixture inside a few hundred ticks.
+fn blocked_corridor(count: u32, action_id: u32) -> String {
+    let (wx, wy) = WAYPOINT;
+    let mut out = String::new();
+    let mut waypoints = Vec::new();
+    for i in 0..count {
+        let x = wx - f64::from(i);
+        out.push_str(&bystander(20 + i, x, wy));
+        waypoints.push(format!("{{ x = {x}, y = {wy} }}"));
+    }
+    out.push_str(&format!(
+        r#"
+        make_player(1, {start}, {wy})
+        storage.p[1] = {{ walking = {{
+            idx = 1,
+            waypoints = {{ {waypoints} }},
+            action_id = {action_id},
+            idx_tick = 0,
+            leg_timeout = 1,
+        }} }}
+    "#,
+        start = wx + 6.0,
+        waypoints = waypoints.join(", "),
+    ));
+    out
+}
+
+/// **The regression, stated as a test.**
+///
+/// `find_non_colliding_position` answers with somewhere the character *fits*,
+/// which is not the waypoint whenever the waypoint is inside something.
+/// Arrival is judged against the waypoint with a 0.3 box, so a leg that
+/// re-aims at it after landing further away than that can never complete: it
+/// times out again 61 ticks later, the deterministic search returns the
+/// identical spot, and it spins.
+///
+/// `run-1788344167-58471` did exactly that — 1414 teleports, every one of them
+/// bot 1 to `(-22.0, 19.0)`, 87,766 ticks across four dispatches, against a
+/// stone furnace the run had placed at `(-22, 18)` itself.
+#[test]
+fn a_leg_is_never_teleported_more_than_once() {
+    let (wx, wy) = WAYPOINT;
+    let lua = run_ticks(
+        &format!(
+            "{INIT_STORAGE}{}{}",
+            bystander(3, wx, wy),
+            stuck_walker(1, wx + 6.0, wy, 110),
+        ),
+        400,
+    );
+    let moves = teleports(&lua);
+    assert_eq!(
+        moves.len(),
+        1,
+        "the leg is spent once it has been teleported; re-aiming at a waypoint \
+         the character cannot stand on is a spin, got {} attempts",
+        moves.len()
+    );
+}
+
+/// The other half of that: the leg must actually *advance*, not merely stop
+/// teleporting. Advancing is what the old collision-blind code achieved by
+/// teleporting onto the waypoint illegally, and it is what makes one teleport
+/// per leg true by construction — which is also why no memory of
+/// already-tried destinations is needed.
+#[test]
+fn a_teleport_advances_the_leg_it_could_not_finish() {
+    let (wx, wy) = WAYPOINT;
+    let lua = run(&format!(
+        "{INIT_STORAGE}{}{}",
+        bystander(3, wx, wy),
+        stuck_walker(1, wx + 6.0, wy, 110),
+    ));
+    let idx: u32 = lua
+        .load("return storage.p[1].walking and storage.p[1].walking.idx or 0")
+        .eval()
+        .expect("the walk's leg index");
+    assert_eq!(
+        idx, 2,
+        "the teleport ended leg 1, so the follower must be aiming at waypoint 2"
+    );
+}
+
+/// **A cap, so a spin costs seconds rather than the executor's whole
+/// deadline.**
+///
+/// Advancing bounds this branch to one teleport per *leg*, but a long enough
+/// route could still hop its whole length. The cap turns that into a named
+/// failure the supervisor can replan against.
+#[test]
+fn a_walk_that_keeps_needing_teleports_gives_up_at_the_cap() {
+    let lua = run_ticks(&format!("{INIT_STORAGE}{}", blocked_corridor(14, 110)), 900);
+    let moves = teleports(&lua);
+    assert_eq!(
+        moves.len(),
+        8,
+        "the cap is 8 teleports for one walk, got {moves:?}"
+    );
+    let failure = line_containing(&lua, "action_completed§fail 110")
+        .expect("hitting the cap has to end the walk, not quietly stop helping");
+    assert!(
+        failure.contains("8 teleports"),
+        "the failure has to name the cap, got {failure}"
+    );
+}
+
+/// The control: a walk that needs one teleport is nowhere near the cap and
+/// must not be failed by it.
+#[test]
+fn one_teleport_is_not_the_cap() {
+    let (wx, wy) = WAYPOINT;
+    let lua = run_ticks(
+        &format!(
+            "{INIT_STORAGE}{}{}",
+            bystander(3, wx, wy),
+            stuck_walker(1, wx + 6.0, wy, 110),
+        ),
+        400,
+    );
+    let failure = line_containing(&lua, "action_completed§fail 110").expect("this walk does end");
+    assert!(
+        !failure.contains("teleports"),
+        "one teleport is a working recovery, not an exhausted budget, got {failure}"
     );
 }

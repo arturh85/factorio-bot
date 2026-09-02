@@ -388,14 +388,15 @@ end
 -- Exactly `goal.start(plan):wait()`.
 -- @tparam PlanValue plan a plan returned by `goal.plan`
 -- @treturn table an observation: `{ done, pending, running, success, failed,
---   lost, walks_failed, first_error, actions, walks, failures, recover }` --
---   see `RunValue`'s own `:wait()` for the shape.
+--   lost, walks_failed, walks_lost, first_error, actions, walks, failures,
+--   recover }` -- see `RunValue`'s own `:wait()` for the shape.
 --
---   `walks_failed` counts walks the game refused. A walk has no action id, so
---   it is in none of the counts above; when one fails the rest of that bot's
---   slice is abandoned, so a run whose walking failed reports `failed = 0`
---   with everything `pending`. `first_error` falls back to the first failed
---   walk's error when no action failed, so such a run is never silent.
+--   `walks_failed` counts walks the game refused and `walks_lost` counts walks
+--   that never answered. A walk has no action id, so neither is in any of the
+--   counts above; when one does not succeed the rest of that bot's slice is
+--   abandoned, so a run whose walking went wrong reports `failed = 0` with
+--   everything `pending`. `first_error` falls back to the first such walk's
+--   error when no action failed, so such a run is never silent.
 --
 --   `lost` counts what was dispatched and never accounted for: the game
 --   answered with no readable outcome, or the run ended still waiting. Those
@@ -641,10 +642,13 @@ mod tests {
             }
         }
 
-        /// Refuses every walk. The run then dispatches nothing at all, which
-        /// is the case `workspace/runs/run-1788341905-92036` hit: 33 steps
-        /// planned, none dispatched, `failed = 0` for every action, and the
-        /// pathfinder's refusal reaching no record.
+        /// Every walk comes back not-succeeding, so the run dispatches nothing
+        /// at all. Two runs hit this: `run-1788341905-92036` with a refusal (33
+        /// steps planned, none dispatched, `failed = 0` for every action, and
+        /// the pathfinder's refusal reaching no record), and
+        /// `run-1788344167-58471` with the teleport spin, where each walk ran
+        /// until the executor's deadline and came back `Lost` instead. Which of
+        /// the two this produces follows `fails`.
         pub(crate) fn with_failing_walks(mut self) -> Self {
             self.fail_walks = true;
             self
@@ -713,6 +717,17 @@ mod tests {
             _radius: f64,
         ) -> Result<ActionTicks, ActuatorFailure> {
             if self.fail_walks {
+                // Which *kind* of not-succeeding follows `fails`, so one flag
+                // covers both walk outcomes a run actually produces: a refusal
+                // the game gave a verdict on, and a walk that ran until the
+                // executor stopped waiting. The second is what a teleport spin
+                // looks like from here, and it is `Lost`, not `Failed`.
+                if let Failure::WithoutVerdict = &self.fails {
+                    return Err(ActuatorError::NoVerdict(
+                        "no action result received in time".to_string(),
+                    )
+                    .into());
+                }
                 // The live wording, so a test asserting the error text is
                 // asserting something a run could actually produce.
                 return Err(ActuatorError::Rejected(

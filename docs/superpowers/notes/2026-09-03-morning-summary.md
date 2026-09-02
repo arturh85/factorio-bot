@@ -80,7 +80,16 @@ action name. Erring that way round is right, but the ratio is worth watching.
    `control.lua:945` gates the per-player tick behind a `TODO FIXME`.
 3. `crates/planner`'s own `BOT_FORCE` copy, and a third `"player"` spelling.
 4. `PLACEMENT_STEP_ASIDE_ACTION_ID = 4712` — a second magic id unknown to Rust.
-5. `pole_wire_reach("big-electric-pole")` says 30.0; the prototype says 32.
+5. ~~`pole_wire_reach("big-electric-pole")` says 30.0; the prototype says 32.~~
+   **Unverifiable here, and probably a false alarm.** We have Factorio 2.1.17's
+   *prototype API schema* (`workspace/factorio-api-docs/prototype-api.json`),
+   which documents `maximum_wire_distance` as a property but carries no values;
+   our own `entity-prototype-fixtures.json` has no wire field at all, which is
+   precisely why the hardcoded table exists. 30.0 matches vanilla as far as I can
+   establish. **Not changed** — altering a likely-correct constant on an
+   unverified claim is the mistake, not the fix. What would settle it: have the
+   mod send `LuaEntityPrototype.max_wire_distance`, which would retire the table
+   rather than correct one entry of it.
 
 ## One process finding worth keeping
 

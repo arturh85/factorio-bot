@@ -83,21 +83,52 @@ impl FlowGraph {
                         let target_node = entity_graph.node_weight(target_node_index).unwrap();
                         match source_node.entity_type {
                             EntityType::MiningDrill => {
-                                let miner_ore = entity_root.miner_ore.as_ref().unwrap();
+                                // The ore and the speed are *this* drill's, not
+                                // the root's. They are the same entity only in
+                                // the common case of a lone drill at the head of
+                                // the walk; a drill reached through a fuel
+                                // inserter is a different drill mining a
+                                // different ore, and reading `entity_root` here
+                                // reported it as producing the root's ore at the
+                                // root's rate.
+                                //
+                                // Reading the root also made the `unwrap` below
+                                // look safe -- the root filter guarantees a
+                                // `miner_ore` for a `MiningDrill` root -- while
+                                // an `OffshorePump` root, which the power-plant
+                                // work now places for real, carries `None` and
+                                // would have taken the whole process down:
+                                // `[profile.release]` sets `panic = "abort"`.
+                                let Some(miner_ore) = source_node.miner_ore.as_ref() else {
+                                    // Not an invariant violation. `EntityGraph::add`
+                                    // stores `None` for a drill with no resource
+                                    // under it and warns as it does so, and such a
+                                    // drill produces nothing -- so the honest edge
+                                    // is no edge, the same policy
+                                    // `get_or_create_flow_node` documents for a node
+                                    // it cannot build. Said again rather than
+                                    // inherited, because this is the walk that turns
+                                    // it into a missing flow.
+                                    warn!(
+                                        "no flow out of {} @ {}: no ore under it",
+                                        source_node.entity_name, source_node.position
+                                    );
+                                    return Control::Continue;
+                                };
                                 let mining_speed = self
                                     .entity_prototypes
-                                    .get(&entity_root.entity_name)
+                                    .get(&source_node.entity_name)
                                     .unwrap_or_else(|| {
                                         panic!(
                                             "entity '{}' not found in prototypes",
-                                            entity_root.entity_name
+                                            source_node.entity_name
                                         )
                                     })
                                     .mining_speed
                                     .unwrap_or_else(|| {
                                         panic!(
                                             "entity '{}' has no mining_speed",
-                                            entity_root.entity_name
+                                            source_node.entity_name
                                         )
                                     })
                                     .to_f64()
@@ -796,6 +827,111 @@ mod tests {
 "#,
         );
     }
+    /// A layout where a drill is *not* the root of the walk that reaches it:
+    /// an iron drill feeds a belt, an inserter takes coal fuel off that belt
+    /// into a burner drill, and the burner drill outputs onto a second belt.
+    ///
+    /// The second drill's output edge is computed from `entity_root` -- the
+    /// iron drill the walk started at -- rather than from the drill actually
+    /// producing on that edge, so it is labelled with the wrong ore at the
+    /// wrong rate.
+    #[test]
+    fn a_drill_downstream_of_another_drill_reports_its_own_ore() {
+        let entity_graph = entity_graph_from(vec![
+            FactorioEntity::new_resource(
+                &Position::new(0.5, -1.5),
+                Direction::South,
+                &EntityName::IronOre.to_string(),
+            ),
+            FactorioEntity::new_resource(
+                &Position::new(0.5, 2.5),
+                Direction::South,
+                &EntityName::Coal.to_string(),
+            ),
+            FactorioEntity::new_electric_mining_drill(&Position::new(0.5, -1.5), Direction::South),
+            FactorioEntity::new_transport_belt(&Position::new(0.5, 0.5), Direction::South),
+            FactorioEntity::new_inserter(&Position::new(0.5, 1.5), Direction::North),
+            FactorioEntity::new_burner_mining_drill(&Position::new(1., 3.), Direction::South),
+            FactorioEntity::new_transport_belt(&Position::new(1.5, 4.5), Direction::South),
+        ])
+        .unwrap();
+        assert_eq!(
+            entity_graph.graphviz_dot(),
+            r#"digraph {
+    0 [ label = "iron-ore: mining-drill at [0.5, -1.5]" ]
+    1 [ label = "transport-belt at [0.5, 0.5]" ]
+    2 [ label = "inserter at [0.5, 1.5]" ]
+    3 [ label = "coal: mining-drill at [1, 3]" ]
+    4 [ label = "transport-belt at [1.5, 4.5]" ]
+    0 -> 1 [ label = "1" ]
+    1 -> 2 [ label = "1" ]
+    2 -> 3 [ label = "1" ]
+    3 -> 4 [ label = "1" ]
+}
+"#
+        );
+        let flow_graph = FlowGraph::new(Arc::new(entity_graph));
+        flow_graph.update().unwrap();
+        assert_eq!(
+            flow_graph.graphviz_dot(),
+            r#"digraph {
+    0 [ label = "iron-ore electric-mining-drill at [0.5, -1.5]" ]
+    1 [ label = "transport-belt at [0.5, 0.5]" ]
+    2 [ label = "inserter at [0.5, 1.5]" ]
+    3 [ label = "coal burner-mining-drill at [1, 3]" ]
+    4 [ label = "transport-belt at [1.5, 4.5]" ]
+    0 -> 1 [ label = "Single([(\"iron-ore\", 0.5)])" ]
+    1 -> 2 [ label = "Single([(\"iron-ore\", 0.5)])" ]
+    2 -> 3 [ label = "Single([(\"iron-ore\", 0.5)])" ]
+    3 -> 4 [ label = "Single([(\"coal\", 0.25)])" ]
+}
+"#,
+            "the burner drill mines the coal underneath it at its own speed, \
+             not the iron the walk started from at the electric drill's speed"
+        );
+    }
+
+    /// The same shape with nothing under the second drill.
+    ///
+    /// `EntityGraph::add` stores `None` for a drill it finds no resource
+    /// beneath and warns as it does so, so this is an expected world, not a
+    /// corrupt one. Reading the root's ore reported the drill as producing
+    /// iron; reading the drill's own ore and unwrapping it would abort the
+    /// process, which under `panic = "abort"` is not recoverable.
+    #[test]
+    fn a_drill_with_no_ore_under_it_produces_nothing() {
+        let entity_graph = entity_graph_from(vec![
+            FactorioEntity::new_resource(
+                &Position::new(0.5, -1.5),
+                Direction::South,
+                &EntityName::IronOre.to_string(),
+            ),
+            FactorioEntity::new_electric_mining_drill(&Position::new(0.5, -1.5), Direction::South),
+            FactorioEntity::new_transport_belt(&Position::new(0.5, 0.5), Direction::South),
+            FactorioEntity::new_inserter(&Position::new(0.5, 1.5), Direction::North),
+            FactorioEntity::new_burner_mining_drill(&Position::new(1., 3.), Direction::South),
+            FactorioEntity::new_transport_belt(&Position::new(1.5, 4.5), Direction::South),
+        ])
+        .unwrap();
+        let flow_graph = FlowGraph::new(Arc::new(entity_graph));
+        flow_graph.update().unwrap();
+        assert_eq!(
+            flow_graph.graphviz_dot(),
+            r#"digraph {
+    0 [ label = "iron-ore electric-mining-drill at [0.5, -1.5]" ]
+    1 [ label = "transport-belt at [0.5, 0.5]" ]
+    2 [ label = "inserter at [0.5, 1.5]" ]
+    3 [ label = "burner-mining-drill at [1, 3]" ]
+    0 -> 1 [ label = "Single([(\"iron-ore\", 0.5)])" ]
+    1 -> 2 [ label = "Single([(\"iron-ore\", 0.5)])" ]
+    2 -> 3 [ label = "Single([(\"iron-ore\", 0.5)])" ]
+}
+"#,
+            "the drill mines nothing, so the belt it drops onto gets no flow \
+             edge -- and the walk neither aborts nor invents one"
+        );
+    }
+
     #[test]
     fn test_furnace() {
         let entity_graph = entity_graph_from(vec![

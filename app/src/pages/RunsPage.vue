@@ -11,7 +11,7 @@ import {computed, onBeforeUnmount, onMounted, ref, watch, watchEffect} from 'vue
 import {useRunsStore} from '@/store/runsStore';
 import {runFrameUrl} from '@/api/client';
 import MapPanel from '@/components/MapPanel.vue';
-import {clockTickRange, parseVideoClock, tickToVideoSeconds} from '@/api/videoClock';
+import {parseVideoClock, tickToVideoSeconds} from '@/api/videoClock';
 import {videoDefects} from '@/api/videoJoin';
 import {
     formatAgo,
@@ -110,9 +110,18 @@ const videoAt = computed(() =>
 
 /** Anything the manifest itself says is wrong -- a zero-byte file, an unverified rate. */
 /** The ticks the recording actually covers; `null` when the clock observed nothing. */
-const videoRange = computed(() =>
-    videoClock.value === null ? null : clockTickRange(videoClock.value)
-);
+/**
+ * One derivation, deliberately.
+ *
+ * `clockTickRange(videoClock)` and `store.video.tick_range` describe the same
+ * span from two sources, and the timeline axis is fed from the manifest's. If
+ * they ever disagreed, the "recording starts at tick N" button below would seek
+ * to a tick outside the axis it is drawn on -- a control that moves you somewhere
+ * the page cannot show. So this reads the manifest, the same value the axis uses,
+ * and the clock's own refusal (`videoAt === null`) still covers the case where it
+ * cannot place a tick inside that span.
+ */
+const videoRange = computed(() => store.video?.tick_range ?? null);
 
 const videoIssues = computed(() => (store.video === null ? [] : videoDefects(store.video)));
 

@@ -522,7 +522,24 @@ function researchPct(progress: number): string {
     opacity: 0.6;
 }
 .timeline {
+    /* Sticky, because the scrubber is what you steer the rest of the page with:
+     * the splits table, the frames and the map all answer "what was happening at
+     * this tick", and scrolling to any of them used to take the control that sets
+     * the tick off-screen.
+     *
+     * `top` clears the fixed 50px topbar rather than 0, or the track hides behind
+     * it. `z-index` stays *below* the topbar's z-30 so it slides under, not over.
+     *
+     * The opaque background is load-bearing, not decoration -- without it the
+     * content scrolling underneath shows straight through the 6px track and its
+     * markers, which is worse than not being sticky at all. */
+    position: sticky;
+    top: var(--spacing-topbar, 50px);
+    z-index: 10;
     margin-bottom: 1rem;
+    padding: 0.5rem 0;
+    background: var(--color-surface, #edf0f5);
+    border-bottom: 1px solid var(--surface-border, #ddd);
 }
 .timeline__leadin {
     margin: 0 0 0.35rem;

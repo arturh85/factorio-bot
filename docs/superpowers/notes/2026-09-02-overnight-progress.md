@@ -535,3 +535,22 @@ failures have become steadily more specific:
 
 Rungs 1-3 are now routine — one iteration each, no retries. Rung 4 is a
 99-step plan that gets further every attempt.
+
+## The epoch fix, validated on real data (~09:45)
+
+Run 14 is the first record deep enough to test the analysis view's plan-epoch
+scoping against something other than fixtures. Measured from its `events.jsonl`:
+
+- **8 `plan_created` events**, each opening an epoch;
+- **143 `action_settled` events across only 78 distinct ids**;
+- **50 ids appear more than once.**
+
+A join keyed on `id` alone — which is what the analysis page originally did —
+would have collapsed 143 outcomes into 78 rows, pairing one milestone's planned
+step with another milestone's settle and reporting the difference as an overrun.
+The reviewer flagged it as unverifiable from the diff; checking the real run's
+dispatched ids showed the collision was total, not occasional.
+
+Worth noting the shape: the fixture tests could not have caught this, because a
+fixture with two epochs is something you only write once you already believe the
+problem exists.

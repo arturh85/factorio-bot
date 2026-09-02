@@ -20,12 +20,20 @@ use std::sync::Arc;
 use std::{fmt, fs};
 use tokio::sync::Mutex;
 
-/// The payload of a `"teleport"` writeout, emitted by all three of
-/// `mods/BotBridge/control.lua`'s `player.teleport` call sites (see
-/// `teleport_writeout` there): the stuck-walk timeout, and the two sites that
-/// move a bot out of a ghost's or a blueprint's bounding box before reviving
-/// it. `action_id` is only ever present for the stuck-walk site -- the other
-/// two are synchronous RCON calls with no dispatched action to attach to.
+/// The payload of a `"teleport"` writeout, emitted by both of
+/// `mods/BotBridge/control.lua`'s remaining `player.teleport` call sites (see
+/// `teleport_writeout` there): the two that move a bot out of a ghost's or a
+/// blueprint's bounding box before reviving it.
+///
+/// There used to be a third, the stuck-walk timeout, and it was the only one
+/// that carried an `action_id`. It was removed in favour of re-pathing, because
+/// teleporting a stalled walk reports *arrival* at a destination the character
+/// could not reach -- so the planner never learned a site was unreachable and
+/// kept choosing it. `action_id` is therefore always absent now: both remaining
+/// sites are synchronous RCON calls with no dispatched action to attach to.
+///
+/// The field stays because 1,619 archived teleport events carry it and must
+/// remain readable.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TeleportEvent {
     pub player_id: PlayerId,

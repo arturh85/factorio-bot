@@ -404,7 +404,8 @@ impl OutputParser {
             "sample_error" => {
                 error!("<red>BotBridge sampler failure</>: {}", rest);
             }
-            // One of `control.lua`'s three `player.teleport` sites fired.
+            // One of `control.lua`'s two remaining `player.teleport` sites
+            // fired (the stuck-walk site was replaced by re-pathing).
             // Before this arm existed none of them were observable at all:
             // `on_player_changed_position` fires identically for a teleport
             // and a walked step, so a run whose bots teleported repeatedly

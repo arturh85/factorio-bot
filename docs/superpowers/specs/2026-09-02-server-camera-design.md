@@ -1,7 +1,33 @@
 # One camera, one renderer: replacing per-client screenshots
 
-Design only. Nothing here has been implemented, and the two experiments named
-in "What could not be determined" have not been run.
+**Status, corrected 2026-09-02 evening. Read this before the rest.**
+
+**Step 2 is dead.** One of the two experiments named in "What could not be
+determined" *was* run, and it killed the graphical-server half permanently: a
+`--host` server **renders but cannot do RCON**. It opens two UDP sockets and no
+TCP listener, and it silently accepts and ignores `--rcon-port`, `--rcon-bind`,
+`--rcon-password` and even `--port`. The control is conclusive — same binary,
+same instance, same config, with `--start-server` instead: RCON starts and
+authenticates. RCON is this codebase's only control channel, so a server without
+it is unreachable. Two further findings would each have sunk it independently:
+the host **gets a character** and would be counted as a bot by `rcon_players()`,
+and `--host` blocks on a LAN-username GUI modal, failing as a *hang*.
+
+Full evidence: `notes/2026-09-02-graphical-host-probe.md`.
+
+**Step 1 survives, reshaped.** Nothing in "one renderer, one director camera"
+required the renderer to be the *server*. The version that lives keeps the
+headless `--start-server` for RCON and designates an existing graphical
+**client** as the renderer. The `source: "server"` axis simply goes away.
+
+**Step 1 has no code.** Read the rest of this document with the above applied;
+its unqualified references to a graphical server describe something that has
+been proven impossible.
+
+Overtaken separately: per-client screenshots were **retired** on
+2026-09-02 (video is the visual record), so the cost this design set out to
+remove is largely gone. What remains of step 1's value is a steered camera,
+not a saving.
 
 ## The recommendation in one paragraph
 

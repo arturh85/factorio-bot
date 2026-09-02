@@ -375,9 +375,9 @@ scrubs the video, the timeline follows) and obeys the same three rules.
 ## 5. Encode and random access
 
 ```
-ffmpeg -hide_banner -nostdin
+ffmpeg -hide_banner
   -f x11grab -framerate 15 -window_id 0x<id> -i :0
-  -vf scale=1280:-2 -pix_fmt yuv420p
+  -pix_fmt yuv420p
   -c:v libx264 -preset veryfast -crf 28 -tune zerolatency
   -x264-params keyint=30:min-keyint=30:scenecut=0
   -movflags +frag_keyframe+empty_moov+default_base_moof
@@ -394,9 +394,24 @@ Each choice, and what it is for:
   capture density at roughly the current one-camera storage cost (§2). 30 fps
   doubles the bytes for a smoothness nobody has asked for in a diagnostic
   artefact.
-- **`scale=1280:-2`** — encode at 720p even if the window is 1080p. Most of the
-  cost is pixels and Factorio at 720p is entirely legible. `-2` keeps the height
-  even, which yuv420p requires.
+- **No `-vf scale`, and no `-nostdin`** — both were in this document and both
+  were wrong, corrected after implementation.
+
+  `-nostdin` contradicts §8's "send `q` on ffmpeg's stdin": it is precisely the
+  flag that makes ffmpeg ignore stdin, so the clean stop could never have fired.
+  Dropped from the recording command (the child's stdin is a private pipe, not
+  an inherited terminal); kept on the probe, where it is true.
+
+  `-vf scale=1280:-2` contradicts the approved decision section, which says to
+  reach 720p by **sizing the window**, never by downscaling in the encoder —
+  sizing makes the game render fewer pixels, so it is cheaper on GPU *and*
+  encoder and resamples nothing. Removed; `-video_size` carries the observed
+  geometry instead.
+
+  Note the window sizing has not actually worked yet: `xdotool windowsize` was
+  refused by the tiling compositor, and Factorio's own `window-size` config key
+  was ignored too. The recorder records the geometry it **observes**, so the file
+  stays honestly described either way.
 - **`-pix_fmt yuv420p`** and H.264 — the only combination every browser plays.
   A `<video>` that decodes on one machine and not another is worse than no
   video.

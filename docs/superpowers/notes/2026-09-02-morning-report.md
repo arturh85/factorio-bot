@@ -132,3 +132,48 @@ fix is upstream. Run 16 had all four connect and did not have it.
 `plan_created.bots` is derived from the **steps**, not the roster. `bots: [2]`
 does not mean the roster was one bot. Anyone reading that field as a roster —
 including a future diagnosis — will be wrong.
+
+
+---
+
+## Update (~11:30): run 17, the deepest run yet
+
+`run-1788325660-10154`:
+
+```
+mine 128 · craft 57 · place 44 · fuel 42 · insert 16 · take 12 · research 1
+```
+
+**300 actions dispatched, 297 succeeded, 3 failed.** 157,080 ticks — about 44
+minutes of game time — 2.5 MB of samples, 68 recorded teleports, 2 recorded
+placement refusals. Rungs 1-3 each satisfied in one iteration.
+
+**The refusal memory worked exactly as designed.** Iteration by iteration:
+
+```
+success=4  failed=0  (+0 refusals)
+success=4  failed=0  (+0 refusals)
+success=40 failed=1  (+1 refusals)   <- learned here
+success=51 failed=0  (+0 refusals)
+success=43 failed=1  (+0 refusals)
+success=38 failed=0  (+0 refusals)
+```
+
+One refusal, then none across three further iterations. Every earlier run
+re-chose the same refused ground until it ran out of attempts.
+
+Rung 4 then crashed on something new:
+
+```
+bot 1 owns chain ChainId(2) because its bill was sized against it,
+but between 1.2705824974445776 and 10 of [-16, 18] does not hold there
+```
+
+A **fractional lower bound on a resource count**. Counts are integers; a float
+with that many digits is arithmetic, not a quantity. Under diagnosis, with the
+already-twice-reported exhausted-tile gap as the leading suspect — this run
+mined 128 times, which is exactly where a belief that mined-out tiles still hold
+ore would surface.
+
+Note the error message itself is one this work rewrote to be truthful: it says
+*why* the chain is bound to that bot rather than claiming a caller named it.

@@ -865,3 +865,71 @@ proved x11grab worked and proved nothing about the command that actually runs.
 One thing that did work: Hyprland refused the 1280x720 resize, and because the
 recorder records the geometry it *observes* rather than the one it requested, the
 file is honestly described as 706x854 instead of silently mislabelled.
+
+## Update (~18:55): run 30 — video works, and rung 7 names its blocker
+
+Run 30 (`run-1788365280-15443`), built at `86c2d28e`. **6 of 7**, and the
+best-behaved run there has been:
+
+```
+milestone 1  satisfied  1 iteration   4 steps
+milestone 2  satisfied  1 iteration   2 steps
+milestone 3  satisfied  1 iteration  11 steps
+milestone 4  satisfied  1 iteration  12 steps
+milestone 5  satisfied  1 iteration   1 step
+milestone 6  satisfied  2 iterations 31 steps
+milestone 7  stuck after 6           39 steps
+```
+
+Rungs 1-5 each in a single iteration, against run 29's 6/6/27/30/3 steps and run
+28's 8/8/37/40/16. The plans are collapsing as the world model stops lying to the
+planner.
+
+### Video capture works, and the join is verified rather than assumed
+
+```
+290 MB · h264 · 700x854 · 45 min 16 s
+ffmpeg_exit: 0   status: stopped   rate_ok: true
+calibration points: 2   ticks.jsonl: 5,226 lines
+measured: 6.4 MB/min
+```
+
+`rate_ok: true` is the important field: the two-point calibration read ffmpeg's
+`-progress` stream and **confirmed the playback rate is 1.0**, so the video/tick
+join is checked, not trusted — the same discipline `frameJoin.ts` applies to
+frames.
+
+**First real measurements**, replacing estimates that have been carried since the
+spec was written: **6.4 MB/min at 700x854@15fps**. Still unmeasured: the
+encoder's UPS cost, and the screenshot cost it would be compared against. No
+claim that video is cheaper than screenshots.
+
+### Rung 7's blocker is now a sentence instead of a mystery
+
+```
+ERROR: stuck while walking, the destination is unreachable:
+the game's pathfinder found no path from (6.90234375/30.09765625)
+                                      to (-22.30078125/18.22265625)
+```
+
+Three runs ago this was a silent teleport that told the planner the bot had
+arrived. Two runs ago it was `stuck while walking, aborted before reaching last
+waypoint`. Now it names both endpoints and attributes the verdict to the game's
+own pathfinder. That is the entire value of failing honestly: the next question
+is answerable.
+
+The next question being: **why is that route unreachable?** The bots are at
+`(6.9, 30.1)` — the eastern furnace cluster — and the target is `(-22.3, 18.2)`,
+the western ore field both earlier runs died near. Something between them is
+impassable, and the candidates are water, cliffs, or a wall of our own furnaces.
+
+### Also seen, and not yet explained
+
+```
+milestone 6: last error: Error: recipe automation-science-pack
+             is not enabled for this force
+```
+
+Milestone 6 satisfied anyway on the next iteration, but that message is the
+recipe-gate defect's fingerprint (`21a1228a`) appearing at execution time rather
+than plan time. Worth a look before assuming it is benign.

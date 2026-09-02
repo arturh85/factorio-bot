@@ -502,3 +502,36 @@ when choosing *resource* tiles. Under fix, with one question asked beyond it —
 **does anything remove a mined-out tile from the model?** If not, this failure
 recurs with no debris involved, because the planner will keep sending bots to
 ore that has been exhausted.
+
+## Runs 13 and 14 — the deepest yet (~09:30)
+
+**Run 13** (`run-1788319014-01846`): rungs 1-3 satisfied, rung 4 at 92 steps,
+stuck on `can_place_entity said 'no'`. **The record diagnosed it** — the first
+time tonight that worked, and it took all three streams in sequence:
+`events.jsonl` gave the exact tile from the `target` field wired hours earlier,
+`map.jsonl` ruled out the model because `game` and `model` agree there, and
+`samples.jsonl` named the cause — bot 2 motionless from tick 7200 inside the
+furnace footprint. `is_area_clear` had four occupancy sources and characters
+were in none of them; our own split-capacity fix had sized rung 4 to a roster of
+one, leaving two bots parked, unmodelled and unmovable.
+
+**Run 14** (`run-1788320177-77989`): rungs 1-3 in **one iteration each**, rung 4
+at **99 steps over 7 iterations**, stuck on
+`["tried to remove 20 iron-plate but removed 18"]` — an inventory accounting
+mismatch, and a class we had not reached before.
+
+## The pattern worth keeping
+
+Each fix has exposed the next layer rather than ending the search, and the
+failures have become steadily more specific:
+
+| run | how it failed |
+|---|---|
+| 9 | silent 18-minute hang, no explanation |
+| 10 | `another character is standing on the iron-ore`, in 40 seconds |
+| 12 | `expected coal at (-37.5/5.5), found crash-site-spaceship-wreck-medium-3` |
+| 13 | diagnosed from the record without touching the code |
+| 14 | `tried to remove 20 iron-plate but removed 18` |
+
+Rungs 1-3 are now routine — one iteration each, no retries. Rung 4 is a
+99-step plan that gets further every attempt.

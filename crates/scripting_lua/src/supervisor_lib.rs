@@ -592,7 +592,12 @@ mod tests {
     /// `Sup:step()` itself never calls `record.*` (see the module comment on
     /// `supervisor.lua`), so playing the driver's part is the only way to see
     /// the reason a run's log would actually carry.
-    fn reason_for_an_empty_plan(holds: &str) -> String {
+    ///
+    /// `None` when nothing was recorded as satisfied at all, which is a real
+    /// answer and not a missing one: a milestone that closed some other way
+    /// records no `milestone_satisfied` line, and a helper that returned a
+    /// string for that case would have to invent one.
+    fn reason_for_an_empty_plan(holds: &str) -> Option<String> {
         let lua = harness("{0}", "{}");
         lua.load(
             r#"
@@ -613,29 +618,36 @@ mod tests {
         )
         .exec()
         .expect("driver runs");
-        lua.load("return __satisfied[1].reason")
+        lua.load("return __satisfied[1] and __satisfied[1].reason")
             .eval()
-            .expect("reason recorded")
+            .expect("the driver's own record calls run")
     }
 
     /// "Already done" and "the planner produced nothing and cannot say why"
     /// must not collapse into the same recorded line -- that is the whole of
     /// `SatisfiedReason`. The supervisor used to report `plan_empty` for both
     /// because it could not tell them apart; `goal.holds` is what tells them
-    /// apart, and each of its three answers has to reach the record as itself.
+    /// apart.
+    ///
+    /// Only one of the three answers is a satisfaction now. `nil` used to be
+    /// recorded as `plan_empty` -- a *satisfied* line, carrying the one fact
+    /// actually observed -- and that was the defect: `plan_empty` is a
+    /// `SatisfiedReason`, so a goal nothing could answer closed the milestone
+    /// as done. See
+    /// `an_unanswerable_goal_with_an_empty_plan_is_not_a_satisfaction`.
     #[test]
     fn a_milestone_satisfied_by_an_empty_plan_records_which_it_was() {
         assert_eq!(
-            reason_for_an_empty_plan("true"),
-            "already_satisfied",
+            reason_for_an_empty_plan("true").as_deref(),
+            Some("already_satisfied"),
             "the goal was checked and holds; saying only `plan_empty` here \
              would throw away the fact the check established"
         );
         assert_eq!(
             reason_for_an_empty_plan("nil"),
-            "plan_empty",
-            "a goal possession cannot settle leaves the one observed fact: \
-             the plan came back with nothing in it"
+            None,
+            "a goal possession cannot settle was never satisfied by anything, \
+             so no satisfaction may be recorded for it"
         );
     }
 
@@ -992,6 +1004,158 @@ mod tests {
         assert!(
             report.contains("refused: automation needs a lab"),
             "the halt's own reason is what the summary leads with: {report}"
+        );
+    }
+
+    // ---- Layer 5: a goal nothing can answer is not a goal that is done ----
+
+    /// **D0 of `docs/superpowers/specs/2026-09-03-starter-factory-design.md`.**
+    ///
+    /// `goal.holds` has three answers and only one of them is a satisfaction.
+    /// `nil` -- "no method here can answer this goal at all" -- used to close
+    /// the milestone `satisfied` with reason `plan_empty`, which is a
+    /// `SatisfiedReason`: the absence of a verdict recorded as success. That
+    /// is the failure this project spent a day removing everywhere else, and
+    /// it was still wired into the one branch of this loop that had no other
+    /// signal.
+    ///
+    /// It was harmless only because every goal a script could build was a
+    /// `have` or a `researched`, both of which `holds` answers. The moment a
+    /// goal kind it answers `nil` for (`Produced`, `Producing`) reaches a
+    /// method that emits no steps -- for any reason at all -- the milestone
+    /// reports a factory built on nothing.
+    #[test]
+    fn an_unanswerable_goal_with_an_empty_plan_is_not_a_satisfaction() {
+        let lua = harness("{0}", "{}");
+        lua.load("__holds = nil").exec().expect("stub set");
+        let (state, plans, runs) = drive(&lua, "{}");
+        assert_eq!(
+            state, "stuck",
+            "nothing established that this goal is met, so the loop must not \
+             say it is"
+        );
+        assert_eq!(
+            plans, 1,
+            "re-planning asks the same question of the same world -- nothing \
+             ran, so nothing changed -- and must not burn the cap first"
+        );
+        assert_eq!(runs, 0, "nothing was planned, so nothing can be run");
+
+        let report: String = lua.globals().get("__report").expect("__report");
+        assert!(
+            report.contains("milestone 1: stuck"),
+            "the milestone must appear in the summary as what it was: {report}"
+        );
+        assert!(
+            report.contains("cannot say whether the goal holds"),
+            "and must say why it stopped, in the loop's own words: {report}"
+        );
+        assert!(
+            !report.contains("last error"),
+            "no action was dispatched, so there is no error to name: {report}"
+        );
+    }
+
+    /// What the driver sees. `scripts/research_run.lua` reads `t.refusal`
+    /// and hands its message to `record.milestone_stuck`, so an unanswerable
+    /// halt that carried its reason anywhere else would reach the record with
+    /// no reason at all.
+    ///
+    /// The `code` is what keeps this apart from a planner refusal for a reader
+    /// of that record: a planner refusal carries the planner's own miette code
+    /// and this carries `supervisor::unanswerable`, which no `PlannerError`
+    /// can produce.
+    #[test]
+    fn an_unanswerable_halt_carries_its_own_code_not_the_planners() {
+        let lua = harness("{0}", "{}");
+        lua.load(
+            r#"
+            __holds = nil
+            local sup = supervisor.new(supervisor.list {"a"}, {})
+            local seen
+            repeat
+                local t = sup:step()
+                if t.action == "halted" then seen = t end
+            until sup:finished()
+            __action, __state = seen.action, seen.state
+            __reason = seen.reason
+            __code = seen.refusal and seen.refusal.code
+            __message = seen.refusal and seen.refusal.message
+            __history_refusal = sup:history()[1].refusal
+                and sup:history()[1].refusal.code
+            __outcome = sup:history()[1].outcome
+            "#,
+        )
+        .exec()
+        .expect("driver runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__action").unwrap(), "halted");
+        assert_eq!(g.get::<String>("__state").unwrap(), "stuck");
+        assert_eq!(g.get::<String>("__outcome").unwrap(), "stuck");
+        assert_eq!(
+            g.get::<String>("__code").unwrap(),
+            "supervisor::unanswerable",
+            "this halt is the supervisor's own verdict, not the planner's, and \
+             the code is the only thing that says so without reading the \
+             sentence"
+        );
+        assert_eq!(
+            g.get::<String>("__history_refusal").unwrap(),
+            "supervisor::unanswerable",
+            "and it must be on the history entry too, or `sup:report()` and \
+             any caller reading the history lose it"
+        );
+        assert!(
+            g.get::<String>("__message")
+                .unwrap()
+                .contains("milestone 1"),
+            "the sentence names the milestone it is about"
+        );
+        assert_eq!(
+            g.get::<Option<String>>("__reason").unwrap(),
+            None,
+            "`reason` is a `SatisfiedReason` and nothing here was satisfied; \
+             carrying one would put the old `plan_empty` line back on the \
+             record through a different field"
+        );
+    }
+
+    /// The negative control from the other side: `holds` answering `true`
+    /// still closes the milestone as satisfied and the loop still moves on.
+    ///
+    /// Without this, the change could be "always halt on an empty plan", which
+    /// would pass every assertion above and break every run that finishes.
+    #[test]
+    fn an_empty_plan_for_a_goal_that_does_hold_is_still_satisfied() {
+        let lua = harness("{0}", "{}");
+        let (state, _, runs) = drive(&lua, "{}");
+        assert_eq!(
+            state, "done",
+            "the default stub answers `true`; a met goal closes and the source \
+             runs out"
+        );
+        assert_eq!(runs, 0);
+    }
+
+    /// And the control that this costs a milestone with work to do nothing.
+    ///
+    /// `holds` is `nil` for the whole run, but the first plan has three steps,
+    /// so the loop plans, runs, and only the empty re-plan reaches the new
+    /// branch. A change that consulted `holds` earlier -- or halted on the
+    /// answer rather than on the answer *plus* an empty plan -- would stop this
+    /// run before it did anything.
+    #[test]
+    fn an_unanswerable_goal_still_gets_its_work_done_first() {
+        let lua = harness("{3, 0}", "{}");
+        lua.load("__holds = nil").exec().expect("stub set");
+        let (state, plans, runs) = drive(&lua, "{}");
+        assert_eq!(state, "stuck");
+        assert_eq!(plans, 2, "the first plan had work in it and was planned");
+        assert_eq!(runs, 1, "and it was run");
+        assert_eq!(
+            lua.globals().get::<i64>("__holds_calls").unwrap(),
+            1,
+            "only the empty re-plan asks"
         );
     }
 }

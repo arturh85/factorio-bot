@@ -298,21 +298,88 @@ function Sup:step()
             -- making, because the run it would have caught reported `done` for
             -- a milestone nothing was done for.
             --
-            -- Three answers. `true` is satisfaction, and now says so. `nil` is
-            -- "possession cannot settle this goal" -- a production is an event,
-            -- not a state -- which is still `plan_empty`, the one fact
-            -- actually observed. `false` is a contradiction between the
-            -- planner and the world, and there is nothing sensible to do with
-            -- it but stop: it is a defect in the planner, not a condition of
-            -- the world, so it raises for the same reason `goal.plan`'s own
-            -- construction errors are left unwrapped above. Retrying it would
-            -- burn the iteration cap and then report "stuck", which would
-            -- blame the world for a bug.
+            -- Three answers, and only one of them is a satisfaction.
+            --
+            -- `true` is satisfaction, and says so.
+            --
+            -- `false` is a contradiction between the planner and the world,
+            -- and there is nothing sensible to do with it but stop: it is a
+            -- defect in the planner, not a condition of the world, so it
+            -- raises for the same reason `goal.plan`'s own construction errors
+            -- are left unwrapped above. Retrying it would burn the iteration
+            -- cap and then report "stuck", which would blame the world for a
+            -- bug.
+            --
+            -- `nil` is "no method here can answer this goal at all" -- and it
+            -- used to be reported as `satisfied`, reason `plan_empty`. That
+            -- was the one branch of this loop that could still report a
+            -- milestone done on no evidence whatsoever, and `plan_empty` is a
+            -- `SatisfiedReason` (`crates/core/src/record/splits.rs`,
+            -- `record/mod.rs`), so the absence of a verdict was recorded as
+            -- success. It cost nothing while every goal a script could build
+            -- was a `have` or a `researched` -- both of which `goal.holds`
+            -- answers -- and it becomes a factory reported built on nothing
+            -- the moment a goal kind `holds` returns `nil` for (today
+            -- `Produced` and `Producing`, `crates/planner/src/method/have.rs`)
+            -- can reach a method that emits no steps, for ANY reason: a site
+            -- it believes is already built, a shortfall it computed as zero, a
+            -- refusal it swallowed.
+            --
+            -- So `nil` closes the milestone `stuck`, and it is deliberately
+            -- the same shape a planner refusal takes two branches up -- a
+            -- verdict that halts cleanly, carrying its reason as data on
+            -- `t.refusal` rather than earning a word of its own. Three reasons
+            -- it belongs in that family rather than beside it:
+            --
+            --   * The outcome vocabulary says how FAR a milestone got, not
+            --     what kind of stop it was (`record/splits.rs` argues exactly
+            --     this for refusals, and a word nothing consumes is a word the
+            --     viewer has no style for). "As far as this loop can
+            --     establish" is `stuck`; not `stuck_silent`, which means "no
+            --     progress and nothing to show for it", and this has a
+            --     sentence to show.
+            --   * `t.refusal` is already the channel a driver reads for "why
+            --     the milestone closed with no action dispatched"
+            --     (`scripts/research_run.lua` hands `t.refusal.message` to
+            --     `record.milestone_stuck`). A second field would have to be
+            --     taught to every driver, and a driver that had not learnt it
+            --     would record this halt with no reason at all.
+            --   * `code` is what keeps the two apart for a reader: a planner
+            --     refusal carries the planner's own miette code
+            --     (`planner::research_needs_power`), and this carries
+            --     `supervisor::unanswerable`, which no planner error can
+            --     produce.
+            --
+            -- It does NOT raise, unlike `false`: nothing is broken. `holds`
+            -- answering `nil` is the planner correctly declining to model
+            -- something, and a run must be able to end on that with its record
+            -- intact -- which is the lesson run 31 paid for.
+            --
+            -- Nor is it retried, for the refusal's own reason: re-planning
+            -- asks the same question of the same world -- nothing ran, so
+            -- nothing changed -- and would get the same answer until the cap
+            -- turned a stated reason into `exhausted`.
             local held = goal.holds(self.milestone, { bots = self.bots })
             if held == false then
                 error("supervisor: the planner returned no steps for milestone "
                     .. tostring(self.index) .. " (" .. tostring(self.milestone)
                     .. "), but the goal does not hold; refusing to report it satisfied")
+            end
+            if held ~= true then
+                self.refusal = {
+                    code = "supervisor::unanswerable",
+                    message = "the planner returned no steps for milestone "
+                        .. tostring(self.index) .. " (" .. tostring(self.milestone)
+                        .. ") and cannot say whether the goal holds; an "
+                        .. "unanswerable goal is not a satisfied one",
+                }
+                self:_close("stuck")
+                self.state = "stuck"
+                return { action = "halted", state = "stuck",
+                         milestone_index = self.index, steps = 0,
+                         iteration = self.iterations,
+                         plan = plan_for_recording,
+                         refusal = self.refusal }
             end
             self:_close("satisfied")
             self.state = "acquiring"
@@ -320,7 +387,7 @@ function Sup:step()
                      milestone_index = self.index, steps = 0,
                      iteration = self.iterations,
                      plan = plan_for_recording,
-                     reason = held == true and "already_satisfied" or "plan_empty" }
+                     reason = "already_satisfied" }
         end
 
         self.plan = plan

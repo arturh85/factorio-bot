@@ -235,6 +235,10 @@ function on_init()
 	storage.p = {} -- player-private data
 	storage.pathfinding = {}
 	storage.pathfinding.map = {}
+	-- Handles of the path requests the mod makes for its own stalled walks;
+	-- see `walk_repath_registry`, which also creates this lazily for a save
+	-- written before it existed.
+	storage.pathfinding.walk_repaths = {}
 	storage.n_clients = 1
 end
 
@@ -291,40 +295,73 @@ function walk_leg_timeout_ticks(player, from_pos, to_pos)
 	return math.max(60, math.ceil((leg_length / speed) * 3))
 end
 
---- How far from a waypoint the stuck-walk recovery may look for somewhere the
---- character actually fits, and how finely it steps while looking.
+--- How close the pathfinder has to get to the destination for a re-path to
+--- count as having found one.
 ---
---- Small on purpose. The point of the teleport is to put the bot *on its
---- route*; a recovery free to move it several tiles sideways is no longer
---- recovering the walk, it is inventing a different one. 4 tiles is room for
---- a handful of stacked bots and no more.
----
---- The precision is half a tile because a character's collision box is about
---- 0.4 tiles across, so half a tile is the coarsest step that can always find
---- the gap beside an occupied position. `find_non_colliding_position` requires
---- at least 0.01 and a radius of 0 would search forever, so neither may be
---- zero.
-WALK_STUCK_TELEPORT_RADIUS = 4
-WALK_STUCK_TELEPORT_PRECISION = 0.5
+--- 0.5 is the smallest radius that does not collapse onto the goal's own tile,
+--- which is the request shape that makes `request_path` fail outright --- the
+--- same floor `approach_radius` clamps to on the Rust side
+--- (crates/core/src/factorio/rcon.rs). Asking for less would report a
+--- reachable destination as unreachable; asking for Factorio's default of 1
+--- would let the pathfinder stop a tile short, and a re-path that ends
+--- somewhere else is the "reported arrival" the teleport used to manufacture.
+WALK_REPATH_RADIUS = 0.5
 
---- How many times one walk may be rescued by a teleport before it is failed
---- instead.
+--- How many times one walk may be re-pathed before it is failed instead.
 ---
---- Advancing the leg on a successful teleport (below) already bounds this to
---- one per leg, so a walk can only reach this cap by needing help on leg after
---- leg -- a route that is congested end to end, which the planner should be
---- told about rather than hopped through.
+--- **This bound is not the thing that makes a bad walk fail fast.** The common
+--- case --- the destination is behind something we built --- is answered on the
+--- FIRST re-path, because the pathfinder says there is no path and the walk
+--- fails immediately. What this bounds is only the pathological case where the
+--- pathfinder keeps finding a route and the bot keeps not arriving.
 ---
---- 8, from the three runs that recorded a *working* recovery
---- (run-1788334911-41961, run-1788338409-63794, run-1788341905-92036): 13
---- walks needed a teleport at all, they used between 1 and 5, and 5 was the
---- worst case. 8 leaves that untouched with room to spare while bounding a
---- runaway to roughly 8 x 61 = 488 ticks. The alternative was no bound at all,
---- which cost run-1788344167-58471 87,766 ticks -- four consecutive walks each
---- spinning until the executor's 360-second ACTION_RESULT_DEADLINE
---- (crates/core/src/factorio/rcon.rs) cut it off, about 24 minutes for one
---- unreachable waypoint.
-WALK_STUCK_TELEPORT_LIMIT = 8
+--- A re-path is strictly stronger than the teleport it replaces: the teleport
+--- hopped one leg, so a route blocked for its whole length needed one teleport
+--- per tile, while a re-path replaces every remaining leg at once. That shows
+--- up directly in the archive. Across the 23 runs in `workspace/runs`, 151
+--- stuck-walk episodes were recorded, and in every single one the teleport
+--- destinations march tile by tile along one route: run-1788325660-10154's
+--- walk 234 was conveyed across 16 consecutive tiles of the corridor at
+--- y = 18.5, walk 312 across 17, and run-1788315106-86443's walk 255 across 9
+--- tiles of a straight line at y = -6.5. Not one episode shows two separate
+--- blockages. One re-path covers all 151.
+---
+--- 4 is that observed need (1) with headroom for the case re-pathing has that
+--- teleporting did not: the world changing again *while* the new route is
+--- being walked. It can --- `place` actions are dispatched in bursts, with a
+--- 25th-percentile gap between consecutive placements of 18 ticks across those
+--- same runs --- so a second and third re-path are real, and a fourth is
+--- slack.
+---
+--- The cost side agrees. One re-path cycle costs the leg timeout that detects
+--- the stall (>= 60 ticks) plus one pathfinder round trip, so four of them
+--- bound a walk that keeps re-pathing without arriving to a few hundred ticks
+--- --- the same order as the 488 ticks the old teleport cap bounded, and two
+--- orders of magnitude below the executor's 360-second ACTION_RESULT_DEADLINE
+--- (crates/core/src/factorio/rcon.rs). Being told in seconds is the whole
+--- point: run-1788358260-07659 stuck on milestone 7 with plans of 84, 55, 119
+--- and 118 steps that completed 46, 19, 1 and 0 of them --- 78 steps pending
+--- behind one walk --- while 25 teleports across 10 walks rescued none of
+--- them. Four of those teleports went to (-22.0, 19.0) in four DIFFERENT
+--- walks, which is the whole argument in one number: reporting arrival at a
+--- tile nothing can reach is what let the planner keep choosing it.
+WALK_REPATH_LIMIT = 4
+
+--- How long a walk may wait for an answer to a re-path request.
+---
+--- The pathfinder has two failure modes and they are not the same
+--- (`on_script_path_request_finished` below): `try again later` means the
+--- request queue was full, which is worth repeating, and `failed to path find`
+--- means it searched and found nothing, which is not. So a busy pathfinder is
+--- retried rather than counted against WALK_REPATH_LIMIT --- and something has
+--- to stop *that* being forever.
+---
+--- A tick budget rather than a retry count, because "worth repeating" is a
+--- statement about the queue draining, not about how many times we asked. 300
+--- ticks (5s) is the same bound MINE_BLOCKED_TIMEOUT_TICKS puts on the other
+--- place this mod waits for the world to become workable, and it is far longer
+--- than a path request takes when the queue is not saturated.
+WALK_REPATH_PENDING_TIMEOUT_TICKS = 300
 
 --- Where a bot standing in a refused footprint is asked to stand instead, and
 --- how hard the game is asked to find it somewhere.
@@ -338,11 +375,11 @@ WALK_STUCK_TELEPORT_LIMIT = 8
 PLACEMENT_STEP_ASIDE_MARGIN = 0.4
 
 --- The search radius and precision handed to `find_non_colliding_position`
---- when placing that target. Same values, and the same reasoning, as
---- WALK_STUCK_TELEPORT_RADIUS/PRECISION: half a tile is the coarsest step that
---- can always find the gap beside an occupied position, and a few tiles is
---- room for a handful of stacked bots and no more. A radius of 0 would search
---- forever **[V]**, so it may not be zero.
+--- when placing that target. Half a tile is the coarsest step that can always
+--- find the gap beside an occupied position -- a character's collision box is
+--- about 0.4 tiles across -- and a few tiles is room for a handful of stacked
+--- bots and no more. A radius of 0 would search forever **[V]**, so it may not
+--- be zero.
 PLACEMENT_STEP_ASIDE_RADIUS = 4
 PLACEMENT_STEP_ASIDE_PRECISION = 0.5
 
@@ -437,11 +474,16 @@ function writeout_player_position(tick, player_id, player)
 	}))
 end
 
--- Emits a machine-readable record of a `player.teleport` call, since none of
--- the three call sites are otherwise distinguishable from ordinary walking
--- to the Rust side: `on_player_changed_position` fires identically for a
--- teleport and a walked step. `action_id` is nil for the two blueprint/ghost
--- sites, which are synchronous RCON calls with no action to attach to.
+-- Emits a machine-readable record of a `player.teleport` call, since neither
+-- call site is otherwise distinguishable from ordinary walking to the Rust
+-- side: `on_player_changed_position` fires identically for a teleport and a
+-- walked step. `action_id` is nil for both, which are the blueprint and ghost
+-- sites -- synchronous RCON calls with no action to attach to.
+--
+-- There used to be a third site, the stuck-walk recovery, and it was the only
+-- one that moved a bot the executor had asked to *walk*. It is gone: a stalled
+-- leg is re-pathed now (see WALK_REPATH_LIMIT), because teleporting turned an
+-- unreachable destination into a reported arrival.
 function teleport_writeout(tick, player_id, reason, from, to, action_id)
 	writeout(tick, "teleport", helpers.table_to_json({
 		player_id = player_id,
@@ -865,6 +907,26 @@ function on_tick(event)
 					else
 						action_completed(event.tick, w.action_id)
 					end
+				elseif w.repath ~= nil then
+					-- A re-path is outstanding. Hold still and steer nothing:
+					-- the waypoints this walk is following are about to be
+					-- replaced wholesale, and a character that keeps walking
+					-- into whatever stopped it is walking away from the
+					-- position the new path will be computed from.
+					--
+					-- The leg timer is deliberately NOT consulted here, so a
+					-- walk cannot stack a second request on top of the first.
+					-- What bounds the wait instead is the pathfinder's own
+					-- budget: `try again later` is retried without restamping
+					-- `since`, and this is where that budget runs out.
+					player.walking_state = {walking=false}
+					if event.tick - w.repath.since > WALK_REPATH_PENDING_TIMEOUT_TICKS then
+						print("Player is stuck and the pathfinder never answered the re-path, aborting the walk")
+						w.stuck = "ERROR: stuck while walking, the pathfinder did not answer a re-path within "
+							.. WALK_REPATH_PENDING_TIMEOUT_TICKS .. " ticks"
+						w.repath = nil
+						w.waypoints[w.idx] = nil
+					end
 				else
 					local dx = dest.x - pos.x
 					local dy = dest.y - pos.y
@@ -921,120 +983,49 @@ function on_tick(event)
 
 --					print("waypoint "..w.idx.." of "..#w.waypoints..", pos = "..coord(pos)..", dest = "..coord(dest).. ", dx/dy="..dx.."/"..dy..", dir="..direction)
 					if w.idx_tick ~= nil and event.tick - w.idx_tick > (w.leg_timeout or 60) then
-						if w.idx > #w.waypoints - 1 then -- if last waypoint just abort
-							print("Player is stuck while moving to last waypoint, just stop moving")
-							w.stuck = "ERROR: stuck while walking, aborted before reaching last waypoint"
-							w.waypoints[w.idx] = nil
-						elseif (w.teleports or 0) >= WALK_STUCK_TELEPORT_LIMIT then
-							-- Out of budget. Nothing below bounded how often one
-							-- walk could be rescued, and a walk that never
-							-- finishes is invisible: it is not a failure, so it
-							-- reaches no error, and it ends only when the
-							-- executor's 360-second deadline calls it lost.
-							-- Failing here gives the supervisor something to
-							-- replan against, in seconds instead of minutes.
-							print("Player has been teleported "..WALK_STUCK_TELEPORT_LIMIT.." times on one walk, giving up")
+						-- **The leg has stopped progressing, and the reason is almost
+						-- always that the path is stale.** This mod steers along
+						-- waypoints the game's pathfinder chose once, at dispatch time,
+						-- and the run that dispatched them is *building things*. In
+						-- run-1788344167-58471 bot 1 kept walking at an ore tile at
+						-- (-23.5, 18.5) behind a stone furnace at (-22.0, 18.0) that the
+						-- same run had placed 4,400 ticks earlier -- a 2x2 furnace
+						-- spanning x in [-23, -21], squarely across the route. We are the
+						-- thing changing the world, so a stale path is the normal case.
+						--
+						-- This used to TELEPORT the character onto the next waypoint,
+						-- and that was worse than useless: it turned an unreachable
+						-- destination into a reported arrival. The planner never learned
+						-- a site was unreachable, so it kept choosing it, and the one
+						-- piece of information the system needed -- "there is no way
+						-- there" -- was destroyed at the exact moment the game had
+						-- offered it. Asking for a fresh path from where the character
+						-- actually stands answers the same question honestly: either
+						-- there is a way round, or there is not and the walk says so.
+						--
+						-- The last leg is not special any more. It used to abort here
+						-- without saying why; it is the leg most likely to be blocked by
+						-- something the run built at the destination, and it is exactly
+						-- the leg whose failure the planner most needs to be honest.
+						if (w.repaths or 0) >= WALK_REPATH_LIMIT then
+							-- A re-path that keeps succeeding but never arrives has to
+							-- terminate. Failing here gives the supervisor something to
+							-- replan against, in seconds instead of the executor's
+							-- 360-second deadline.
+							print("Player has been re-pathed "..WALK_REPATH_LIMIT.." times on one walk, giving up")
 							w.stuck = "ERROR: stuck while walking, gave up after "
-								.. WALK_STUCK_TELEPORT_LIMIT .. " teleports on one walk"
+								.. WALK_REPATH_LIMIT .. " re-paths on one walk"
 							w.waypoints[w.idx] = nil
+						elseif start_walk_repath(event.tick, idx, player, w) then
+							print("Player is stuck on leg "..w.idx.." of "..#w.waypoints..", asking for a fresh path from "..coord(pos))
+							-- Do not steer this tick. `dx`, `dy` and `direction` above
+							-- were computed for a leg that is about to be replaced.
+							direction = ""
+							player.walking_state = {walking=false}
 						else
-							-- This recovery used to teleport straight onto the
-							-- waypoint, and that MANUFACTURED the condition it
-							-- exists to fix. `LuaControl.teleport` does not
-							-- respect collisions and characters do collide, so
-							-- two bots stuck near the same tile were both put
-							-- on it; the pathfinder then correctly reported no
-							-- path for either of them, and every retry stacked
-							-- them further. Run run-1788341905-92036 ended
-							-- exactly that way: bots 1 and 3 frozen at the same
-							-- coordinates, 33 steps planned and none
-							-- dispatched.
-							--
-							-- `find_non_colliding_position` is asked with the
-							-- *character* prototype, so the answer accounts for
-							-- whoever is already standing there -- including a
-							-- bot this same pass teleported a moment ago, since
-							-- a teleport takes effect immediately and this loop
-							-- handles one player at a time.
-							local target = w.waypoints[w.idx]
-							local landing = player.surface.find_non_colliding_position(
-								"character", target,
-								WALK_STUCK_TELEPORT_RADIUS, WALK_STUCK_TELEPORT_PRECISION)
-							if landing == nil then
-								-- Nothing free near the waypoint. Failing costs
-								-- this walk; stacking would cost both bots for
-								-- the rest of the run.
-								print("Player is stuck and nothing is free near the next waypoint, aborting the walk")
-								w.stuck = "ERROR: stuck while walking, no free position within "
-									.. WALK_STUCK_TELEPORT_RADIUS .. " tiles of the next waypoint"
-								w.waypoints[w.idx] = nil
-							elseif not player.teleport(landing) then
-								-- `teleport` returns whether it happened. That
-								-- return used to be discarded, so a recovery
-								-- that moved nothing was indistinguishable from
-								-- one that worked.
-								print("Player is stuck and the game refused to teleport it, aborting the walk")
-								w.stuck = "ERROR: stuck while walking, the game refused to teleport the character"
-								w.waypoints[w.idx] = nil
-							else
-								-- Recorded AFTER the teleport, and from the
-								-- character's own position rather than from the
-								-- waypoint we aimed at. The two differ whenever
-								-- the landing was adjusted, and a record of the
-								-- intent asserts something untrue about where
-								-- the bot is.
-								teleport_writeout(event.tick, idx, "walk_stuck", pos, player.character.position, w.action_id)
-								-- A teleport that lands inside the tile it
-								-- started in raises no movement event either,
-								-- and this one is aimed at a waypoint the
-								-- character was already next to.
-								writeout_player_position(event.tick, idx, player)
-								-- THE LEG IS SPENT. Advance, rather than aim at
-								-- the same waypoint again.
-								--
-								-- `find_non_colliding_position` answers with
-								-- somewhere the character FITS, which is not the
-								-- waypoint whenever the waypoint is inside
-								-- something. Arrival is judged against the
-								-- waypoint with a 0.3 box, so re-aiming at it
-								-- after landing further away than that is a leg
-								-- that can NEVER complete: it times out again 61
-								-- ticks later, the search is deterministic and
-								-- returns the identical spot, and it spins.
-								-- run-1788344167-58471 did that 1414 times --
-								-- every one of them bot 1 to (-22.0, 19.0),
-								-- 87,766 ticks across four dispatches -- against
-								-- a stone furnace the run had itself placed at
-								-- (-22, 18), whose collision edge is exactly the
-								-- x = -21.098 the bot kept being pushed back to.
-								--
-								-- Before the collision check existed this branch
-								-- teleported ONTO the waypoint, illegal position
-								-- and all, so the arrival check passed on the next
-								-- tick and the leg advanced. Advancing here is that
-								-- same outcome without the illegal position -- and
-								-- it makes "one teleport per leg" true by
-								-- construction, which is why no memory of
-								-- already-tried destinations is needed: a
-								-- deterministic search is never asked the same
-								-- question twice.
-								--
-								-- Only intermediate legs reach here; the last
-								-- waypoint aborts above. So the walk's own
-								-- destination is never claimed on the strength of
-								-- a teleport.
-								w.teleports = (w.teleports or 0) + 1
-								w.idx = w.idx + 1
-								w.idx_tick = event.tick
-								w.leg_timeout = walk_leg_timeout_ticks(player, player.character.position, w.waypoints[w.idx])
-								-- Do not steer this tick. `dx`, `dy` and
-								-- `direction` above were computed for the leg that
-								-- just ended, from a position the character has
-								-- since been moved off; the next tick recomputes
-								-- both against the new waypoint.
-								direction = ""
-								player.walking_state = {walking=false}
-							end
+							print("Player is stuck and the game would not accept a re-path request, aborting the walk")
+							w.stuck = "ERROR: stuck while walking, the game refused a re-path request"
+							w.waypoints[w.idx] = nil
 						end
 					end
 
@@ -2431,6 +2422,14 @@ end
 -- id :: uint: Handle to associate the callback with a particular call to LuaSurface::request_path.
 -- try_again_later :: boolean: Indicates that the pathfinder failed because it is too busy, and you can retry later.
 function on_script_path_request_finished(event)
+	-- The mod asks for paths of its own now (a stalled walk leg re-paths), and
+	-- those answers belong to `walk_repath_finished`, not to a Rust caller.
+	-- Writing them out anyway would leave an entry in `world.path_requests`
+	-- (`sleep_for_path_request_result`, crates/core/src/factorio/rcon.rs) keyed
+	-- by a handle nobody is waiting on, which nothing ever removes.
+	if walk_repath_finished(event) then
+		return
+	end
 	local result = "Error: failed to path find"
 	if event.path ~= nil then
 		local positions = {}
@@ -2439,7 +2438,7 @@ function on_script_path_request_finished(event)
 			-- waypoint to this one goes through an entity that must be
 			-- destroyed" -- used to be dropped here, so the Rust side never
 			-- learned a leg was blocked and the bot walked into the
-			-- obstruction until the stuck-teleport fired. Flattened onto the
+			-- obstruction until the leg timed out. Flattened onto the
 			-- position rather than sent as a separate structure: the field
 			-- is additive over the previous `{x=.., y=..}` shape, so an
 			-- older Rust build parsing this as a plain position still works.
@@ -2665,6 +2664,134 @@ function start_walk_waypoints(action_id, player_id, waypoints, step_aside)
 		leg_timeout = leg_timeout,
 		step_aside = step_aside,
 	}
+	return true
+end
+
+--- The path requests this mod made for its own walks, keyed by handle.
+---
+--- `storage.pathfinding` predates this and a save made before it existed will
+--- not have it, so this creates what it needs rather than assuming `on_init`
+--- ran in this version of the mod.
+function walk_repath_registry()
+	if storage.pathfinding == nil then storage.pathfinding = { map = {} } end
+	if storage.pathfinding.walk_repaths == nil then storage.pathfinding.walk_repaths = {} end
+	return storage.pathfinding.walk_repaths
+end
+
+--- Asks for a fresh path from where a stalled character actually stands to
+--- where its walk is going, and remembers the handle so the answer can be
+--- routed back to this walk.
+---
+--- Answers whether the game accepted the request. It does not wait: the answer
+--- arrives on `on_script_path_request_finished`, which is pushed with a real
+--- `game.tick`, so nothing here polls.
+function start_walk_repath(tick, player_id, player, w)
+	local goal = w.waypoints[#w.waypoints]
+	if goal == nil then
+		return false
+	end
+	local handle = request_player_path(player, goal, WALK_REPATH_RADIUS)
+	if handle == nil then
+		return false
+	end
+	walk_repath_registry()[handle] = player_id
+	w.repath = { id = handle, since = tick, goal = { x = goal.x, y = goal.y } }
+	return true
+end
+
+--- Consumes a path request answer that belongs to a stalled walk.
+---
+--- Answers whether the request was one of ours; a `false` sends the event on
+--- to the ordinary writeout for whoever asked over RCON.
+---
+--- **The pathfinder's two failures are not the same failure.** `try again
+--- later` means the request queue was full and the question was never asked,
+--- so it is asked again. `failed to path find` means it searched and found
+--- nothing, which is the answer the teleport used to throw away and the answer
+--- the planner needs: this destination is unreachable from here.
+function walk_repath_finished(event)
+	local reg = storage.pathfinding and storage.pathfinding.walk_repaths
+	if reg == nil then
+		return false
+	end
+	local player_id = reg[event.id]
+	if player_id == nil then
+		return false
+	end
+	reg[event.id] = nil
+
+	local p = storage.p and storage.p[player_id]
+	local w = p and p.walking
+	if w == nil or w.repath == nil or w.repath.id ~= event.id then
+		-- The walk this answer belongs to has already ended -- it ran out of
+		-- pending budget, or its action was settled some other way. Adopting
+		-- the answer would restart a walk whose verdict has been reported.
+		return true
+	end
+
+	local player = game.players[player_id]
+	if player == nil or not player.connected or player.character == nil then
+		-- Nothing to steer. Dropping the pending marker lets the leg timer
+		-- run again if the player comes back, on the same re-path budget.
+		w.repath = nil
+		return true
+	end
+
+	if event.path ~= nil then
+		local waypoints = {}
+		for _, wp in pairs(event.path) do
+			waypoints[#waypoints + 1] = { x = wp.position.x, y = wp.position.y }
+		end
+		-- **The walk's destination is not negotiable.** WALK_REPATH_RADIUS
+		-- lets the pathfinder stop short of it, and the Rust side checked the
+		-- *dispatched* path's last waypoint against what the caller asked for
+		-- before any of this began (`move_player_timed`,
+		-- crates/core/src/factorio/rcon.rs) -- nothing re-checks it
+		-- afterwards. Keeping that same waypoint as the terminal one keeps
+		-- "the walk completed" meaning what it has always meant: the
+		-- character stood inside the 0.3 arrival box of it. A final leg that
+		-- then cannot be walked stalls, re-paths, and eventually fails, which
+		-- is the honest outcome; substituting a nearby endpoint instead would
+		-- be the teleport's reported-arrival lie wearing a different hat.
+		local goal = w.repath.goal
+		local last = waypoints[#waypoints]
+		if last == nil or math.abs(last.x - goal.x) >= 0.3 or math.abs(last.y - goal.y) >= 0.3 then
+			waypoints[#waypoints + 1] = { x = goal.x, y = goal.y }
+		end
+		w.waypoints = waypoints
+		w.idx = 1
+		w.idx_tick = event.tick
+		w.leg_timeout = walk_leg_timeout_ticks(player, player.character.position, waypoints[1])
+		w.repaths = (w.repaths or 0) + 1
+		w.repath = nil
+		print("Player re-pathed ("..w.repaths.." of "..WALK_REPATH_LIMIT.."), "..#waypoints.." waypoints from "..coord(player.character.position).." to "..coord(goal))
+	elseif event.try_again_later then
+		-- The queue was full, not "there is no way there". Ask again on the
+		-- same budget: `since` is deliberately not restamped, so
+		-- WALK_REPATH_PENDING_TIMEOUT_TICKS bounds the retrying even though
+		-- retrying is the right thing to do. This does not count against
+		-- WALK_REPATH_LIMIT either -- nothing was searched.
+		local handle = request_player_path(player, w.repath.goal, WALK_REPATH_RADIUS)
+		if handle == nil then
+			print("Player is stuck and the game would not accept a re-path request, aborting the walk")
+			w.stuck = "ERROR: stuck while walking, the game refused a re-path request"
+			w.repath = nil
+			w.waypoints[w.idx] = nil
+		else
+			walk_repath_registry()[handle] = player_id
+			w.repath.id = handle
+		end
+	else
+		-- The pathfinder searched and found nothing. This is the fact the
+		-- teleport used to destroy by hopping over it.
+		local why = "ERROR: stuck while walking, the destination is unreachable: "
+			.. "the game's pathfinder found no path from "
+			.. coord(player.character.position) .. " to " .. coord(w.repath.goal)
+		print("Player cannot reach its destination, the pathfinder found no path")
+		w.stuck = why
+		w.repath = nil
+		w.waypoints[w.idx] = nil
+	end
 	return true
 end
 
@@ -3939,12 +4066,22 @@ function rcon_parse_map_exchange_string(name, map_exchange_str)
 	helpers.write_file(name, helpers.table_to_json(helpers.parse_map_exchange_string(map_exchange_str)))
 end
 
-function rcon_async_request_player_path(player_id, goal, radius)
-	local player = get_player(player_id)
-	if player == nil then
-		return
+-- Asks the game for a path a *character* can walk, from where that character
+-- stands to `goal`, and answers with the request handle.
+--
+-- Split out of `rcon_async_request_player_path` so the stuck-walk re-path can
+-- reuse it instead of building a second request. The bounding box, the
+-- collision mask and `entity_to_ignore` are what make this a character's path
+-- rather than a generic one, and two copies of that would drift.
+--
+-- **No RCON output of any kind**, for the same reason `start_walk_waypoints`
+-- has none: this is called from `on_tick`, where there is no calling RCON
+-- interface, and from inside a reply body that a caller reads as a verdict.
+function request_player_path(player, goal, radius)
+	if player == nil or player.character == nil then
+		return nil
 	end
-	local handle = player.surface.request_path({
+	return player.surface.request_path({
 		bounding_box = player.character.prototype.collision_box,
 		collision_mask = player.character.prototype.collision_mask,
 		start = player.position,
@@ -3957,7 +4094,14 @@ function rcon_async_request_player_path(player_id, goal, radius)
 		},
 		entity_to_ignore = player.character,
 	})
-	rcon.print(handle)
+end
+
+function rcon_async_request_player_path(player_id, goal, radius)
+	local player = get_player(player_id)
+	if player == nil then
+		return
+	end
+	rcon.print(request_player_path(player, goal, radius))
 end
 
 function rcon_async_request_path(start, goal, radius)

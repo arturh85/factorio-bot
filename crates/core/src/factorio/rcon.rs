@@ -576,6 +576,64 @@ pub fn mine_reports_target_gone(message: &str) -> bool {
     message.contains(MINE_TARGET_GONE)
 }
 
+/// The mod's wording for a pathfinder that never searched.
+///
+/// Owned by `mods/BotBridge/control.lua`'s `on_script_path_request_finished`,
+/// which answers `Error: try again later!` when `request_path` reports
+/// `try_again_later` -- the request queue was full, so the question was never
+/// put. Its sibling, `Error: failed to path find`, means the search happened
+/// and there is no way there.
+const PATHFINDER_BUSY: &str = "try again later";
+
+/// Whether a refused path request says the queue was full rather than that
+/// there is no path.
+///
+/// Matched on the mod's text because there is nothing else to match on, the
+/// same way [`mine_reports_target_gone`] is, and split out as a free function
+/// so a reword fails a test in this crate instead of quietly turning every
+/// busy pathfinder into an unreachable goal.
+pub fn path_request_was_busy(message: &str) -> bool {
+    message.contains(PATHFINDER_BUSY)
+}
+
+/// [`path_request_was_busy`] against the error a path request actually fails
+/// with.
+///
+/// The downcast is deliberate: a timeout, a dropped connection or a malformed
+/// reply are not full queues, and retrying one of those as if it were would
+/// hide it behind a delay.
+fn is_busy_path_request(err: &Report) -> bool {
+    err.downcast_ref::<RconPathRequestFailed>()
+        .is_some_and(|failed| path_request_was_busy(&failed.reason))
+}
+
+/// Whether the pathfinder actually searched and reported that there is no way
+/// there.
+///
+/// This, and only this, is what the offset-goal fallback in
+/// [`FactorioRcon::player_path`] is an answer to. A request the game never
+/// accepted, a queue that stayed full, a reply that never came and a reply that
+/// would not parse are all "we do not know", and substituting a different goal
+/// on the strength of not knowing is how a caller ends up walked somewhere it
+/// never asked for.
+fn path_search_found_nothing(err: &Report) -> bool {
+    err.downcast_ref::<RconPathRequestFailed>()
+        .is_some_and(|failed| !path_request_was_busy(&failed.reason))
+}
+
+/// How many times one path request is put to a pathfinder that keeps saying its
+/// queue is full.
+///
+/// Three, because the cost of asking again is a few hundred milliseconds and
+/// the cost of *not* asking again is a walk refused for a reason that was never
+/// about the walk. The alternative this replaces was worse than a plain
+/// failure: a full queue fell into the offset-goal search below, which answers
+/// a question nobody asked and hands back a path to somewhere else.
+const PATH_REQUEST_BUSY_ATTEMPTS: u32 = 3;
+
+/// How long to wait before putting the same question to a full queue again.
+const PATH_REQUEST_BUSY_BACKOFF: Duration = Duration::from_millis(200);
+
 /// How far a dispatch got before it failed.
 ///
 /// # The distinction a timeout cannot make on its own
@@ -2501,6 +2559,66 @@ impl FactorioRcon {
        path_resolution_modifier :: int (optional): The resolution modifier of the pathing. Defaults to 0.
        entity_to_ignore :: LuaEntity (optional): If given, the pathfind will ignore collisions with this entity.
     */
+    /// One character path request, put again while the game says its queue was
+    /// full.
+    ///
+    /// **`try again later` is not `failed to path find`.** The first says the
+    /// request was never searched, which is worth repeating; the second says it
+    /// was searched and there is no way there, which is not. Everything above
+    /// this line used to treat both the same.
+    async fn player_path_attempt(
+        &self,
+        world: &Arc<FactorioWorld>,
+        player_id: PlayerId,
+        goal: &Position,
+        radius: Option<f64>,
+    ) -> Result<Vec<PathWaypoint>> {
+        let mut attempts_left = PATH_REQUEST_BUSY_ATTEMPTS;
+        loop {
+            let id = self
+                .async_request_player_path(player_id, goal, radius)
+                .await?;
+            match self.sleep_for_path_request_result(world, id).await {
+                Err(err) if attempts_left > 1 && is_busy_path_request(&err) => {
+                    attempts_left -= 1;
+                    warn!(
+                        "the pathfinder queue was full for #{}, asking again ({} left)",
+                        player_id, attempts_left
+                    );
+                    sleep(PATH_REQUEST_BUSY_BACKOFF).await;
+                }
+                other => return other,
+            }
+        }
+    }
+
+    /// [`FactorioRcon::player_path_attempt`] for a path between two positions.
+    async fn path_attempt(
+        &self,
+        world: &Arc<FactorioWorld>,
+        start: &Position,
+        goal: &Position,
+        radius: Option<f64>,
+    ) -> Result<Vec<PathWaypoint>> {
+        let mut attempts_left = PATH_REQUEST_BUSY_ATTEMPTS;
+        loop {
+            let id = self.async_request_path(start, goal, radius).await?;
+            match self.sleep_for_path_request_result(world, id).await {
+                Err(err) if attempts_left > 1 && is_busy_path_request(&err) => {
+                    attempts_left -= 1;
+                    warn!(
+                        "the pathfinder queue was full for a path from {}/{}, asking again ({} left)",
+                        start.x(),
+                        start.y(),
+                        attempts_left
+                    );
+                    sleep(PATH_REQUEST_BUSY_BACKOFF).await;
+                }
+                other => return other,
+            }
+        }
+    }
+
     pub async fn player_path(
         &self,
         world: &Arc<FactorioWorld>,
@@ -2509,11 +2627,18 @@ impl FactorioRcon {
         radius: Option<f64>,
     ) -> Result<Vec<Position>> {
         let context = format!("player_path for #{player_id}");
-        let id = self
-            .async_request_player_path(player_id, goal, radius)
-            .await?;
-        match self.sleep_for_path_request_result(world, id).await {
+        match self
+            .player_path_attempt(world, player_id, goal, radius)
+            .await
+        {
             Ok(path) => Ok(waypoint_positions(path, &context)),
+            // The offset-goal fallback below answers exactly one question:
+            // "this goal cannot be reached, is anywhere near it?". Every other
+            // failure -- a full queue, a request the game never took, a reply
+            // that never came -- is "we do not know", and substituting a goal
+            // on the strength of not knowing is how a walk that was fine ends
+            // up refused for falling short somewhere it never asked to be.
+            Err(err) if !path_search_found_nothing(&err) => Err(err),
             Err(err) => {
                 warn!(
                     "failed to find player_path() for #{} to {}/{}: {:?}",
@@ -2522,7 +2647,12 @@ impl FactorioRcon {
                     goal.y(),
                     err
                 );
-                let player = world.players.get(&player_id).unwrap();
+                let Some(player) = world.players.get(&player_id) else {
+                    // Nowhere to search *from*. The fallback needs the
+                    // player's position to pick a direction, and inventing one
+                    // would aim the substituted goal at random.
+                    return Err(err);
+                };
                 let mut direction = vector_normalize(&vector_substract(&player.position, goal));
                 drop(player);
                 for _ in 0..4 {
@@ -2552,9 +2682,9 @@ impl FactorioRcon {
         radius: Option<f64>,
     ) -> Result<Vec<Position>> {
         let context = format!("path from {}/{}", start.x(), start.y());
-        let id = self.async_request_path(start, goal, radius).await?;
-        match self.sleep_for_path_request_result(world, id).await {
+        match self.path_attempt(world, start, goal, radius).await {
             Ok(path) => Ok(waypoint_positions(path, &context)),
+            Err(err) if !path_search_found_nothing(&err) => Err(err),
             Err(err) => {
                 warn!(
                     "failed to find path() from {}/{} to {}/{}: {:?}",
@@ -3511,6 +3641,66 @@ mod positioning_tests {
         }
         .into();
         assert!(!mine_reports_target_gone(&out_of_reach.to_string()));
+    }
+
+    /// **The pathfinder's two failures are not the same failure**, and the
+    /// wording that tells them apart is the mod's, not ours.
+    ///
+    /// `try again later` means the request queue was full and the search never
+    /// happened; `failed to path find` means it searched and found nothing.
+    /// Read out of `control.lua` for the same reason the mining verdict is: a
+    /// cross-language contract with nothing but a string on either side, and a
+    /// reword that went unnoticed would turn every busy pathfinder into an
+    /// unreachable goal.
+    #[test]
+    fn a_busy_pathfinder_is_recognised_from_the_mods_own_wording() {
+        use crate::process::instance_setup::repo_mods_path;
+        const CONTROL_LUA: &str = include_str!(repo_mods_path!("/BotBridge/control.lua"));
+        assert!(
+            CONTROL_LUA.contains(PATHFINDER_BUSY),
+            "the mod no longer says {PATHFINDER_BUSY:?}, so a full queue now reads \
+             as an unreachable goal"
+        );
+        assert!(path_request_was_busy("Error: try again later!"));
+        assert!(
+            !path_request_was_busy("Error: failed to path find"),
+            "a search that found nothing is an answer, not a full queue"
+        );
+    }
+
+    /// And the same distinction survives the error type it travels in, which is
+    /// the only form `player_path` ever sees it in.
+    #[test]
+    fn a_full_queue_and_a_missing_path_are_told_apart_as_errors() {
+        let busy: Report = RconPathRequestFailed {
+            reason: "Error: try again later!".to_string(),
+        }
+        .into();
+        let missing: Report = RconPathRequestFailed {
+            reason: "Error: failed to path find".to_string(),
+        }
+        .into();
+        assert!(is_busy_path_request(&busy));
+        assert!(
+            !is_busy_path_request(&missing),
+            "substituting a different goal for this one would answer a question \
+             nobody asked"
+        );
+        // A failure that is not a path failure at all -- a timeout, say -- is
+        // not a full queue either, and must not be retried as one.
+        let timeout: Report = RconTimeout {}.into();
+        assert!(!is_busy_path_request(&timeout));
+
+        // And the offset-goal fallback is reserved for the one failure that is
+        // actually an answer. Letting a full queue or a silence through it
+        // hands the caller a path to a goal it never asked for -- the same
+        // reported-arrival shape the stuck-walk teleport had.
+        assert!(path_search_found_nothing(&missing));
+        assert!(!path_search_found_nothing(&busy));
+        assert!(
+            !path_search_found_nothing(&timeout),
+            "a reply that never came is not a search that found nothing"
+        );
     }
 }
 

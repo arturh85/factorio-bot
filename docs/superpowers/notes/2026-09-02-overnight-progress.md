@@ -249,3 +249,43 @@ reach radius is a disc, so a bot already standing on the target satisfies it
 with `travel == 0`, no `Walk` is emitted, and the placement is refused because
 the bot is inside the new entity's own footprint — bot 1 at `(38.30, 16.48)`
 placing a furnace at `[38, 16]`. Being fixed as an annulus.
+
+## Run 7 — the bots build (~03:50)
+
+`run-1788307982-79011`, with the annulus, teleport writer and RCON reply work in.
+
+**107 actions dispatched, 99 succeeded.** By verb:
+
+```
+mine 60 · craft 14 · place 14 · fuel 14 · insert 3 · take 2
+```
+
+That is the first run in which this system does anything beyond mining: it
+places furnaces, fuels them, inserts ore, takes plates, and crafts. `map.jsonl`
+carries **156 KB** — the entity map has real content for the first time,
+because entities are genuinely being placed. 544 KB of samples beside it.
+
+Rung 4 reached **73 steps across 5 iterations** before sticking on:
+
+```
+ERROR: the target stone was gone before mining finished -- something else mined it first
+```
+
+Two things about that message. It is the next defect — the planner assigns two
+bots the same resource tile, exactly as the mine-completion diagnosis predicted
+("`nearest_resource_tile`/`resource_tiles_for` reserve nothing between bots
+planned in the same pass"). That fix stopped two bots decrementing each other's
+counters; it did not stop them being sent to the same tile.
+
+And it is legible at all only because of the reply work a few hours earlier. The
+same failure would have read `expected value at line 1 column 1`.
+
+## Rung status
+
+| rung | state |
+|---|---|
+| 1 gather iron ore | satisfied, 3 iterations |
+| 2 gather copper ore | satisfied, **1 iteration** |
+| 3 smelt iron plates | satisfied (`already_satisfied`) |
+| 4 research automation | 73 steps, stuck on resource-tile contention |
+| 5-7 power, belts, oil | not reached |

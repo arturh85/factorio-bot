@@ -196,3 +196,19 @@ mine empties it") swept up this change's uncommitted `rcon.rs` edits from the
 shared checkout. The content is correct and present; it simply landed under
 another commit's message. This is the failure mode CLAUDE.md's committing rules
 exist to prevent, and it has now happened twice.
+
+---
+
+## Correction, same day
+
+Lines above cite `crafting_queue` as a live module local and use its positional
+match as a contrast. Both are now historical: `d0a5e094` removed the module local
+in favour of `storage.craft_actions[player][recipe]`.
+
+The contrast drawn here was right for the wrong reason. This note says the
+positional match "would settle the wrong action". It does something worse — a
+non-matching craft was ignored **while leaving the head in place**, so a single
+entry that will never be crafted silenced every later craft for that bot
+permanently. The research fix's choice to key by name avoided that, so the
+decision recorded here stands; only the description of what it was avoiding was
+too mild.

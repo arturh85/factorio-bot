@@ -603,3 +603,36 @@ Listed because each one would change a decision above, not as hedging.
    `on_script_path_request_finished` (`control.lua:2211`), which today writes the
    result out for Rust to consume. Step 5 needs the mod to consume its own
    answer. Nothing forbids it; nothing in this repo does it yet.
+
+---
+
+## Superseded: the craft rows, 2026-09-02 afternoon
+
+Everything this spec says about **craft** describes code that no longer exists.
+Kept rather than edited in place, because the spec's argument is why the fix
+happened and rewriting it would erase the reasoning. Read the craft entries in
+§1.1, §1.2, §3.3, §5 and open question §8.5 as *historical*.
+
+What changed, in `d0a5e094`:
+
+- The module-local `crafting_queue` is gone. State lives in
+  `storage.craft_actions[player][recipe]`, an array of `{id, remaining}` — so it
+  survives save/load, which the spec correctly flagged as the smell.
+- The spec assumed the defect was the module local. **It was not.** The join was
+  **positional** — `queue[1].recipe == event.recipe.name` — and a non-matching
+  craft was ignored *while leaving the head in place*. That head-of-line entry
+  blocks permanently: one craft that will never complete silences every later
+  craft for that bot, with no timeout and no log line. Two live ways to create
+  one, both now closed: a partial `begin_crafting` (which complained, refused the
+  action, **and pushed all `count` entries anyway**), and cancellation
+  (`on_player_cancelled_crafting` was never registered at all).
+- Matching is now **counted per recipe bucket**, not positional, because
+  `on_player_crafted_item` carries no request id and cannot tell two requests for
+  one recipe apart. Crafts are attributed FIFO, which the code states is an
+  *attribution*, not a measurement.
+
+The evidence that made this findable: in `run-1788347034-00981` the eleven
+unsettled actions were all crafts, **and every one of those crafts had
+succeeded** — `samples.jsonl` shows bot 1 at 19 stone / 0 furnaces on one sample
+and 15 stone / 1 furnace on the next. The game did the work and raised its event.
+Only the join failed.

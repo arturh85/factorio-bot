@@ -246,8 +246,50 @@ function inventory_to_dict(inventory) -- input: LuaInventory, output: dict["item
 	return result
 end
 
+-- Turn freeplay's crash site off, before the first player exists.
+--
+-- Freeplay's `on_player_created` runs one block for the first player only,
+-- and it does three things this project does not want: it creates the crash
+-- site, it takes that player's `iron-plate 8` and `firearm-magazine 8` back
+-- out of its inventory into the debris, and it puts that player into a
+-- 750-tick cutscene. During a cutscene `LuaPlayer::character` is nil, and
+-- `rcon_players()` filters on `player.connected and player.character` -- so
+-- for 12.5 seconds after joining, **player 1 does not exist** as far as any
+-- caller of `rcon.players()` is concerned, and only ever player 1. Four of
+-- the nineteen archived runs with samples froze a roster inside that window;
+-- run 30 planned the whole run for `[2]` and left three bots idle for 162,158
+-- ticks.
+--
+-- The inventory half matters just as much and for longer. A first player that
+-- has had its iron plates removed sits at `(0, 0)` holding
+-- `{burner-mining-drill, stone-furnace, wood}`, which is *exactly* the
+-- invented phantom bot `initiate_missing_players_with_default_inventory`
+-- seeds -- neither position nor inventory can tell a healthy bot 1 from a
+-- phantom, and that ambiguity has already produced one wrong diagnosis.
+-- Leaving the plates where they are makes bot 1 look like every other bot.
+--
+-- `on_init` is the right moment: it runs when the map is created, tens of
+-- seconds before any client connects, and freeplay asks for exactly this in
+-- as many words -- "This is so that other mods and scripts have a chance to
+-- do remote calls before we do things like charting the starting area,
+-- creating the crash site". It is best effort: a scenario that is not
+-- freeplay has no such interface and `remote.call` would raise, so the
+-- interface is checked first and the outcome printed rather than assumed.
+-- The cutscene exit in `on_player_joined_game` is what covers the case this
+-- cannot reach -- a save that already existed when this landed.
+function disable_crashsite()
+	if remote.interfaces["freeplay"] == nil then
+		print("no freeplay interface; leaving the crash site alone")
+		return false
+	end
+	remote.call("freeplay", "set_disable_crashsite", true)
+	print("crash site disabled: no cutscene, and player 1 keeps its iron plates")
+	return true
+end
+
 function on_init()
 	print("on_init!")
+	disable_crashsite()
 	storage.resources = {}
 	storage.resources.last_index = 0
 	storage.resources.list = {} -- might be sparse, so the #-operator won't work
@@ -2394,10 +2436,36 @@ function on_load()
 	my_client_id = storage.n_clients
 end
 
+-- End a cutscene the player is in, so it has a character to be seen by.
+--
+-- The safety net behind `disable_crashsite`, and the only one of the two that
+-- works on a save created before this landed: `set_disable_crashsite` prevents
+-- a cutscene, `exit_cutscene` ends one. See `disable_crashsite` for what the
+-- cutscene costs.
+--
+-- Guarded on `controller_type`, and that guard is load-bearing rather than
+-- defensive: `LuaPlayer::exit_cutscene` "Errors if not in a cutscene", so an
+-- unguarded call would raise on every join of every bot on every run.
+-- Freeplay's own `skip_crash_site_cutscene` guards it the same way. Exiting
+-- raises `on_cutscene_cancelled`, which is where freeplay restores the
+-- character's destructibility and clears the skip label, so this ends the
+-- cutscene the same way pressing the skip button does.
+function exit_cutscene_if_any(player_index)
+	local player = game.players[player_index]
+	if player == nil then
+		return
+	end
+	if player.controller_type == defines.controllers.cutscene then
+		print("ending the crash-site cutscene for player " .. tostring(player_index))
+		player.exit_cutscene()
+	end
+end
+
 function on_player_joined_game(event)
 --	print("player '"..game.players[event.player_index].name.."' joined")
 --	game.write_file("players_connected.txt", game.players[event.player_index].name..'\n', true, 0) -- only on server
 	storage.n_clients = storage.n_clients + 1
+	exit_cutscene_if_any(event.player_index)
 	wait_for_player_inventory(event)
 	frame_capture_on_player_joined(event.player_index)
 

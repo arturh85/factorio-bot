@@ -463,3 +463,58 @@ causes. The refusal memory added last night keeps a replan from re-choosing the
 same refused site, but nothing yet asks the game *before* committing — the
 pre-check the refusal-memory note argued had to come second, because the planner
 is pure and needs somewhere to put the answer. That somewhere now exists.
+
+## Update (~14:15): run 24 ended at rung 7, and cause six is ours
+
+Run 24 (`run-1788347034-00981`) reached rung 7 and ground at it: plan size fell
+114 → 113 → 103 → 102 → 100 → 99 → 97 across seven iterations, which **alternated**
+between roughly fifteen successful actions and *zero*. I stopped it 17 minutes
+short of its timeout once the pattern was established and its cause fixed.
+
+**Six rungs of seven, and rung 7 reached for the first time.**
+
+### The alternating dead iterations
+
+Every zero-success iteration contributed exactly `+1 events` — one dispatch, no
+settlement. The cause is now understood, and it is our own:
+
+The planner sites furnaces on a **2-tile grid**, which leaves a **0.2-tile gap**
+against a **0.4-wide character**. A bot servicing its own furnace therefore
+cannot stand between them. At tick 11520 bot 3 sat at `(-21.47, 23.73)` — inside
+the footprint bot 4 was about to build on, parked since servicing its own
+furnace. **The plan manufactured its own blocker, 2,400 ticks after the
+pre-check passed on that ground.**
+
+### Why a transient became permanent
+
+`rcon_place_entity` recognised only the **acting** player standing in a
+footprint. Any *other* character fell through to the generic
+`can_place_entity said 'no'` — which is exactly the wording
+`note_placement_refusal` matches. So good ground entered the never-expiring
+refusal ledger.
+
+The worse half: **recording the refusal suppressed the one recovery that fits.**
+`recover`'s tier-1 reschedule is skipped for a refused footprint, and "wait, the
+bot will walk away" is precisely what tier 1 is *for*. A refusal that disables
+the correct recovery is worse than no refusal at all.
+
+The pre-check path had this right all along (`rec.character` /
+`is_durable_refusal`); the dispatch path drew a narrower line. **Two call sites,
+one concept, different answers** — cause six lived in the gap. Now three
+branches: acting player (walk aside and retry), any other character (transient),
+anything else (a real verdict about the ground).
+
+### What the fix does not do
+
+It makes each occurrence cost a **reschedule** instead of a **site**. It does not
+make occurrences rarer — the 2-tile grid still manufactures them. The honest fix
+for that is a stand-point model, not a wider spacing constant, and it is not
+written.
+
+### The pre-check was already built
+
+I dispatched an agent to build it. It had been committed at 09:32 (`d0db355c`)
+and was live in run 24 — it answered correctly and the failure happened
+downstream of it. I did not check the log before dispatching. The agent verified
+rather than rebuilt, which is the only reason that cost an hour of one agent
+instead of a duplicate implementation.

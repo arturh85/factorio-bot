@@ -384,10 +384,33 @@ impl EntityGraph {
     /// `resources` map itself, and a caller reading that origin back out
     /// without restoring the half tile would put every resource 0.5 off from
     /// where the game actually has it.
+    ///
+    /// # The quad tree answers a slightly wider question than it was asked
+    ///
+    /// Both queries are re-checked against `bounds` with [`overlaps_bounds`]
+    /// before anything is reported. `my_intersects` (`crate::aabb_quadtree`)
+    /// falls back on `euclid`'s `Rect::contains`, which is half-open --
+    /// `min <= p < max` -- so a box whose *maximum* corner lands exactly on the
+    /// query's left or top edge is returned, while one whose minimum corner
+    /// lands on the right or bottom edge is not. A resource is stored under a
+    /// full 1x1 tile box, so the tile immediately left of `bounds.left` abuts
+    /// the boundary line and came back from a query it is entirely outside of.
+    ///
+    /// That is not a rounding question and not a resource-specific one: it was
+    /// worth 691 spurious `only_in: "model"` entries across the archived runs
+    /// in `workspace/runs/`, every single one of them on the left or top edge
+    /// and none on the right or bottom -- exactly the asymmetry the half-open
+    /// `contains` predicts. The keyframe is the only caller, so this clip
+    /// changes what the *diagnostic* claims and nothing the planner reads;
+    /// leaving it would go on reporting a divergence that is not one, and a
+    /// diagnostic nobody believes is worse than no diagnostic.
     pub fn snapshot_within(&self, bounds: &Rect) -> Vec<EntitySnapshot> {
         let mut out = Vec::new();
         let entity_query: QuadTreeRect = bounds.clone().into();
-        for (entity, _rect, _id) in self.entity_tree.read().query(entity_query) {
+        for (entity, rect, _id) in self.entity_tree.read().query(entity_query) {
+            if !overlaps_bounds(bounds, &rect) {
+                continue;
+            }
             out.push(EntitySnapshot {
                 name: entity.name.clone(),
                 position: entity.position.clone(),
@@ -396,6 +419,9 @@ impl EntityGraph {
         }
         let resource_query: QuadTreeRect = bounds.clone().into();
         for (name, rect, _id) in self.resource_tree.read().query(resource_query) {
+            if !overlaps_bounds(bounds, &rect) {
+                continue;
+            }
             let pos = Pos(rect.origin.x as i32, rect.origin.y as i32);
             out.push(EntitySnapshot {
                 name: name.clone(),
@@ -839,7 +865,44 @@ impl EntityGraph {
         graph
     }
 
+    /// Takes an entity the game says is gone out of every structure that
+    /// tracks it.
+    ///
+    /// # A mined resource that still holds ore is not gone
+    ///
+    /// The mod raises this for a resource on **every mining swing**, not on
+    /// depletion: `on_player_mined_entity` is wired to both `on_mined_entity`
+    /// and `on_some_entity_deleted` (`control.lua`), and the first of those
+    /// counts one swing's delivery against the action's remaining need -- so a
+    /// `mine 5` on a tile holding hundreds raises it five times and the tile
+    /// survives all five.
+    ///
+    /// Deleting on the first swing is what the archive caught: across the runs
+    /// in `workspace/runs/`, **every** ore tile a keyframe found in the game and
+    /// not in the model was a tile a bot had mined at -- 583 of them, none
+    /// unexplained -- while the game still had ore there. It also made
+    /// `resource_mined`'s retirement unreachable, because by the time an action
+    /// settled the tile it was about to debit had already left the model.
+    ///
+    /// So a resource payload carrying a **positive `amount`** is an amount
+    /// report, not a removal, and the tile stays. The paths that mean the tile
+    /// is really gone still delete: `on_resource_depleted` writes the same line
+    /// for an emptied entity, and [`EntityGraph::retire_resource`] builds its
+    /// entity through `FactorioEntity::new_resource`, which carries no amount
+    /// at all.
+    ///
+    /// The reported amount is deliberately *not* written into the model.
+    /// [`EntityGraph::resource_mined`] is the debit authority; applying the
+    /// game's reading here as well would take the same ore out twice and could
+    /// retire a tile that still holds a few units -- the same defect in a
+    /// smaller costume.
     pub fn remove(&self, entity: &FactorioEntity) -> Result<()> {
+        if entity.entity_type == EntityType::Resource.to_string()
+            && let Some(amount) = entity.amount
+            && amount > 0
+        {
+            return Ok(());
+        }
         let mut nodes_to_remove: Vec<NodeIndex> = vec![];
         let mut edges_to_remove: Vec<EdgeIndex> = vec![];
         let mut entities_to_remove: Vec<ItemId> = vec![];
@@ -1606,6 +1669,33 @@ pub type EntityQuadTree = QuadTree<FactorioEntity, Rect, [(ItemId, QuadTreeRect)
 pub type TileQuadTree = QuadTree<FactorioTile, Rect, [(ItemId, QuadTreeRect); 4]>;
 pub type ResourceQuadTree = QuadTree<String, Rect, [(ItemId, QuadTreeRect); 4]>;
 
+/// Whether a box the quad tree handed back genuinely overlaps `bounds`, rather
+/// than merely abutting one of its edges.
+///
+/// Strict on every side, deliberately. The quad tree's own predicate is not:
+/// `my_intersects` (`crate::aabb_quadtree`) falls back on `euclid`'s
+/// `Rect::contains`, which is half-open (`min <= p < max`), so it admits a box
+/// touching the query's left or top edge and rejects the mirror image on the
+/// right or bottom. Touching is not overlapping in either direction, and a
+/// predicate that says so on two sides and not the other two cannot be
+/// compared against anything.
+///
+/// `bounds` is `f64` and the tree is `f32`; the comparison happens in `f32`,
+/// which is the precision the boxes were stored at, so a coordinate is never
+/// widened into a difference that was not in the tree to begin with.
+#[allow(clippy::cast_possible_truncation)]
+fn overlaps_bounds(bounds: &Rect, rect: &QuadTreeRect) -> bool {
+    let left = bounds.left_top.x() as f32;
+    let top = bounds.left_top.y() as f32;
+    let right = bounds.right_bottom.x() as f32;
+    let bottom = bounds.right_bottom.y() as f32;
+    let min_x = rect.origin.x;
+    let min_y = rect.origin.y;
+    let max_x = min_x + rect.size.width;
+    let max_y = min_y + rect.size.height;
+    min_x < right && left < max_x && min_y < bottom && top < max_y
+}
+
 #[cfg(test)]
 mod tests {
     use crate::factorio::util::rect_fields;
@@ -2275,6 +2365,118 @@ mod tests {
         );
         assert!(graph.resource_contains(&iron, Pos(-41, -49)));
         assert_eq!(graph.resource_amount(&iron, &Pos(-41, -49)), None);
+    }
+
+    /// The mod raises `on_some_entity_deleted` for a resource on **every
+    /// mining swing**, not on depletion, and the payload carries the amount
+    /// still in the ground. Deleting on that is what emptied the model of ore
+    /// the game still had: across `workspace/runs/`, every one of 583 ore tiles
+    /// a keyframe found in the game and not in the model was a tile a bot had
+    /// mined at, none of them exhausted.
+    ///
+    /// It also made `resource_mined`'s retirement unreachable -- the tile was
+    /// gone before the action that mined it settled -- so the assertion at the
+    /// end is not decoration: the debit must still find something to debit.
+    #[test]
+    fn a_mined_resource_that_still_holds_ore_is_not_removed() {
+        let iron = EntityName::IronOre.to_string();
+        let at = Position::new(-40.5, -48.5);
+        let mut ore = FactorioEntity::new_resource(&at, Direction::North, &iron);
+        ore.amount = Some(500);
+        let graph = entity_graph_from(vec![ore]).unwrap();
+
+        // One swing's worth: the game took an ore and says 499 are left.
+        let mut mined = FactorioEntity::new_resource(&at, Direction::North, &iron);
+        mined.amount = Some(499);
+        graph.remove(&mined).unwrap();
+
+        assert!(
+            graph.resource_contains(&iron, Pos(-41, -49)),
+            "a tile the game still holds ore in must stay in the model"
+        );
+        assert_eq!(
+            graph.resource_patches(&iron).len(),
+            1,
+            "and must stay in the patches the planner picks from"
+        );
+        let bounds = Rect::new(&Position::new(-50., -58.), &Position::new(-30., -38.));
+        assert_eq!(graph.snapshot_within(&bounds).len(), 1);
+
+        // The reported amount is not written through: `resource_mined` is the
+        // debit authority, and applying both would take the same ore out twice.
+        assert_eq!(graph.resource_amount(&iron, &Pos(-41, -49)), Some(500));
+        assert_eq!(
+            graph.resource_mined(&iron, &at, 1),
+            ResourceDepletion::Remaining(499),
+            "the retirement arithmetic must still have a tile to work on"
+        );
+    }
+
+    /// The negative control for `a_mined_resource_that_still_holds_ore_is_not_removed`.
+    ///
+    /// `on_resource_depleted` is wired to the same writeout, and the entity it
+    /// names is empty. Nothing about the swing-by-swing case may stop that
+    /// deleting the tile, or a mined-out tile lives forever.
+    #[test]
+    fn an_emptied_resource_is_still_removed() {
+        let iron = EntityName::IronOre.to_string();
+        let at = Position::new(-40.5, -48.5);
+        let mut ore = FactorioEntity::new_resource(&at, Direction::North, &iron);
+        ore.amount = Some(500);
+        let graph = entity_graph_from(vec![ore]).unwrap();
+
+        let mut depleted = FactorioEntity::new_resource(&at, Direction::North, &iron);
+        depleted.amount = Some(0);
+        graph.remove(&depleted).unwrap();
+
+        assert!(!graph.resource_contains(&iron, Pos(-41, -49)));
+        assert!(graph.resource_patches(&iron).is_empty());
+        let bounds = Rect::new(&Position::new(-50., -58.), &Position::new(-30., -38.));
+        assert!(graph.snapshot_within(&bounds).is_empty());
+    }
+
+    /// A tile that only *abuts* the bounds is outside them.
+    ///
+    /// The quad tree disagrees, on two of four sides: `my_intersects` falls
+    /// back on `euclid`'s half-open `Rect::contains`, so a box whose maximum
+    /// corner sits on the query's left or top edge comes back, while the mirror
+    /// image on the right or bottom does not. A resource is stored under a full
+    /// 1x1 tile box, so the column immediately left of `bounds.left` was
+    /// reported as modelled -- 691 spurious `only_in: "model"` entries across
+    /// the archived runs, 443 on the left edge, 248 on the top, none anywhere
+    /// else.
+    ///
+    /// The four outside tiles are all four sides on purpose: two of them were
+    /// already excluded, and a test that only checks the two broken sides
+    /// cannot tell a fix from an over-correction that drops the interior tile
+    /// as well.
+    #[test]
+    fn snapshot_within_excludes_a_tile_that_only_abuts_the_bounds() {
+        let iron = EntityName::IronOre.to_string();
+        let tile = |x: f64, y: f64| {
+            FactorioEntity::new_resource(&Position::new(x, y), Direction::North, &iron)
+        };
+        // Bounds as a live run had them, on whole tiles.
+        let bounds = Rect::new(&Position::new(-42., -2.), &Position::new(25., 51.));
+        let graph = entity_graph_from(vec![
+            tile(-42.5, 12.5), // outside the left edge, touching it
+            tile(12.5, -2.5),  // outside the top edge, touching it
+            tile(25.5, 12.5),  // outside the right edge, touching it
+            tile(12.5, 51.5),  // outside the bottom edge, touching it
+            tile(-41.5, 12.5), // inside, one tile in from the left edge
+        ])
+        .unwrap();
+
+        let modelled: Vec<Position> = graph
+            .snapshot_within(&bounds)
+            .into_iter()
+            .map(|entity| entity.position)
+            .collect();
+        assert_eq!(
+            modelled,
+            vec![Position::new(-41.5, 12.5)],
+            "only the tile actually inside the bounds is inside the bounds"
+        );
     }
 
     /// The game destroyed the entity mid-mine. The model has to believe it

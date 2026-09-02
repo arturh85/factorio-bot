@@ -420,3 +420,19 @@ doing this by hand with `cp` and `rm -rf`, badly, and missing a copy.
 There is also a **third** copy, `workspace/plans`, holding the same 15 script
 files, and it has been stale all night. Whether anything reads it is unchecked —
 worth establishing rather than assuming it is vestigial.
+
+## Why I ignored a real warning (~06:05)
+
+`workspace/plans` is referenced only by `crates/core/examples/asset_staleness_demo.rs`
+— an example. `grep` finds no production reader: not `paths.rs`, not
+`settings.rs`, not `scripts.rs`. Yet the CLI prints a STALE warning about it on
+every single run, listing 15 files.
+
+That warning sits immediately beside the `scripts` STALE warning, which is real
+and which I scrolled past all night — the one that made a reported
+`teleports: 0` meaningless. A warning that never matters trained me to skip the
+line under it.
+
+Worth fixing at the source: either drop the `plans` warning if the directory is
+vestigial, or find its reader and say what it is. A diagnostic that cries wolf
+is worse than none, because it degrades the ones beside it.

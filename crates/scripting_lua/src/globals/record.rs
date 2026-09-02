@@ -326,6 +326,13 @@ local record = {}
         .parent()
         .map(|workspace| workspace.join("runs"))
         .ok_or_else(|| record_error("scripts directory has no parent workspace"))?;
+    // Shared by `record.keyframe()` and `record.finish()`: both ingest
+    // samples out of this same workspace, alongside the frame/keyframe work
+    // each already does at exactly these two moments.
+    let workspace = scripts_root
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| record_error("scripts directory has no parent workspace"))?;
 
     map_table.set(
         "__doc_entry_start",
@@ -820,16 +827,23 @@ end
 -- everything inside it and records where they diverge. Call this at
 -- milestone boundaries -- there is deliberately no tick timer driving it.
 --
--- Returns `false`, and writes nothing, for either of two unremarkable cases:
--- no recording is running, or one is but nothing has been placed yet (a
--- keyframe over a box nothing has ever occupied is not a fact worth
--- recording). Both are expected outcomes of calling this from a place that
--- does not know whether recording is active, so both are a return value, not
--- an error -- a caller that wants to tell them apart still can, since only
--- the second follows a successful `record.start()`. Anything else going
--- wrong (the game cannot be reached, a malformed response) still raises,
--- because that is not a "nothing to do here" outcome and must not look like
--- one.
+-- Also ingests whatever the mod has written to `samples.jsonl` since the last
+-- time this (or `record.finish()`) ran, the same way `record.finish()` does --
+-- this is the other of the two moments the design calls for, so a run killed
+-- before it ever reaches `record.finish()` still keeps everything through its
+-- last closed milestone instead of losing the whole sample stream.
+--
+-- Returns `false`, and writes no keyframe, for either of two unremarkable
+-- cases: no recording is running, or one is but nothing has been placed yet
+-- (a keyframe over a box nothing has ever occupied is not a fact worth
+-- recording) -- sample ingestion still runs in the second case, since it does
+-- not depend on anything having been placed. Both are expected outcomes of
+-- calling this from a place that does not know whether recording is active,
+-- so both are a return value, not an error -- a caller that wants to tell
+-- them apart still can, since only the second follows a successful
+-- `record.start()`. Anything else going wrong (the game cannot be reached, a
+-- malformed response, an unrecognised sample schema) still raises, because
+-- that is not a "nothing to do here" outcome and must not look like one.
 -- @treturn boolean whether a keyframe was written
 -- @raise if the attempt to read the game or the world model itself fails
 function record.keyframe()
@@ -841,12 +855,14 @@ end
         let slot = slot.clone();
         let rcon = rcon.clone();
         let world = world.clone();
+        let workspace = workspace.clone();
         map_table.set(
             "keyframe",
             lua.create_async_function(move |_lua, ()| {
                 let slot = slot.clone();
                 let rcon = rcon.clone();
                 let world = world.clone();
+                let workspace = workspace.clone();
                 async move {
                     // The bounds are read and released before the `.await`
                     // below: nothing here needs the lock held across it, and
@@ -861,11 +877,20 @@ end
                     // whatever loop called it. `false` carries the same fact
                     // an error would, just as a value instead of a raise.
                     let bounds = {
-                        let guard = slot.lock();
-                        match guard.as_ref() {
-                            Some(recorder) => recorder.placed_bounds(16.0),
-                            None => return Ok(false),
-                        }
+                        let mut guard = slot.lock();
+                        let Some(recorder) = guard.as_mut() else {
+                            return Ok(false);
+                        };
+                        // Ingested here, ahead of the placed-bounds check
+                        // below: unlike a keyframe, a sample line does not
+                        // depend on anything having been placed, so a
+                        // milestone with no placements yet (a pure-research
+                        // one, say) still gets this boundary's samples
+                        // archived even though it writes no keyframe.
+                        recorder
+                            .ingest_samples(Some(&workspace))
+                            .map_err(record_error)?;
+                        recorder.placed_bounds(16.0)
                     };
                     let Some(bounds) = bounds else {
                         return Ok(false);
@@ -906,7 +931,10 @@ end
 --- closes the recording
 -- Writes the manifest and the derived splits, and copies this run's frames out
 -- of the workspace before the next run wipes them. Frames belonging to another
--- run are left where they are.
+-- run are left where they are. Also catches up on any samples the mod wrote
+-- since the last `record.keyframe()` call (or all of them, if this run never
+-- reached one) -- the same incremental ingestion `record.keyframe()` runs at
+-- every milestone boundary, so nothing is read or archived twice.
 -- @string outcome how the run ended, e.g. "done" or "stuck"
 -- @treturn string the run id
 -- @raise if no recording is running
@@ -918,10 +946,7 @@ end
     {
         let slot = slot.clone();
         let rcon = rcon.clone();
-        let workspace = runs_root
-            .parent()
-            .map(std::path::Path::to_path_buf)
-            .ok_or_else(|| record_error("runs directory has no parent workspace"))?;
+        let workspace = workspace.clone();
         map_table.set(
             "finish",
             lua.create_function(move |_lua, outcome: String| {

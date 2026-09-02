@@ -26,8 +26,8 @@ pub use frames::{ArchivedFrame, archive_frames, parse_frame_name};
 pub use lanes::{Lane, derive_lanes};
 pub use retention::{DEFAULT_KEEP, KEEP_MARKER, Reaped, reap};
 pub use samples::{
-    BotSample, PowerSample, ProductionSample, ReadSamples, ResearchSample, Sample, SampleKind,
-    ingest_samples, read_samples,
+    BotSample, IngestProgress, PowerSample, ProductionSample, ReadSamples, ResearchSample, Sample,
+    SampleKind, ingest_samples_incremental, read_samples,
 };
 pub use splits::{Split, derive_splits};
 
@@ -349,6 +349,18 @@ pub struct RunRecorder {
     /// exactly the signal [`RunRecorder::placed_bounds`] uses to write no
     /// keyframe at all rather than one over a zero-area box.
     placed_bounds: Option<map::Bounds>,
+    /// Byte offset already consumed from the mod's
+    /// `script-output/botbridge/samples.jsonl`. [`RunRecorder::ingest_samples`]
+    /// is called from more than one place -- a milestone boundary and
+    /// `finish` -- and this is what makes each call pick up only what the mod
+    /// wrote since the last one, rather than re-reading and re-archiving the
+    /// whole source every time.
+    samples_offset: u64,
+    /// How many sample lines have been archived into this run's
+    /// `samples.jsonl` so far. Kept incrementally, like `map_count`, rather
+    /// than reread from disk at `finish`: this recorder is the only writer of
+    /// that file, so it cannot disagree with what it just wrote.
+    samples_count: usize,
 }
 
 impl RunRecorder {
@@ -373,6 +385,8 @@ impl RunRecorder {
             high_tick: 0,
             map_count: 0,
             placed_bounds: None,
+            samples_offset: 0,
+            samples_count: 0,
             started_unix: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -456,6 +470,51 @@ impl RunRecorder {
             bottom: b.bottom + margin,
         })
     }
+
+    /// Copies whatever the mod has written to
+    /// `script-output/botbridge/samples.jsonl` since the last call into this
+    /// run's `samples.jsonl`.
+    ///
+    /// Meant to be called at every milestone boundary *and* at `finish` --
+    /// the two moments `archive_frames`/keyframes already run at -- so that a
+    /// run killed mid-milestone (no `finish()` ever reached) still has
+    /// everything up through its last closed milestone on disk, instead of
+    /// losing the entire stream. Cheap to call often: it resumes from
+    /// [`RunRecorder::samples_offset`] rather than re-reading the source from
+    /// the top, so a long run does not pay to re-ingest what an earlier call
+    /// already archived, and nothing gets archived twice.
+    ///
+    /// `workspace` is where `server/script-output/botbridge/samples.jsonl`
+    /// lives; `None` for a planning-only run that captured no samples, in
+    /// which case this is a no-op returning `0`.
+    pub fn ingest_samples(&mut self, workspace: Option<&Path>) -> io::Result<usize> {
+        let Some(workspace) = workspace else {
+            return Ok(0);
+        };
+        // The lower bound for an un-attributed sample (one written before the
+        // `run` field existed) must be the run's *start*, not wherever
+        // `high_tick` has climbed to by the time this is called: such a
+        // sample has no other way to prove it belongs to this run, and a
+        // cutoff drawn from a later moment would discard samples recorded
+        // earlier in a run that is still legitimately in progress.
+        let cutoff = self.start_tick.unwrap_or(0);
+        let progress = samples::ingest_samples_incremental(
+            workspace,
+            &self.dir,
+            &self.run_id,
+            cutoff,
+            self.samples_offset,
+        )?;
+        if progress.skipped > 0 {
+            tracing::warn!(
+                skipped = progress.skipped,
+                "some sample lines did not parse and were skipped"
+            );
+        }
+        self.samples_offset = progress.offset;
+        self.samples_count += progress.appended;
+        Ok(progress.appended)
+    }
 }
 
 impl RunRecorder {
@@ -506,17 +565,6 @@ impl RunRecorder {
         workspace: Option<&Path>,
         keep: usize,
     ) -> io::Result<(Manifest, retention::Reaped)> {
-        // The lower bound for an un-attributed sample (one written before the
-        // `run` field existed) must be the run's *start*, not its end: such a
-        // sample has no other way to prove it belongs to this run, and a
-        // cutoff drawn from the run's last moment would discard essentially
-        // every sample recorded while the run was actually in progress.
-        // `high_tick` -- the latest tick recorded so far -- is exactly the
-        // wrong value here; `start_tick` is the first tick this recorder ever
-        // saw, defaulting to 0 for a recorder that logged nothing before
-        // finishing.
-        let sample_cutoff = self.start_tick.unwrap_or(0);
-
         self.record(
             tick,
             EventKind::RunFinished {
@@ -537,12 +585,12 @@ impl RunRecorder {
             None => 0,
         };
 
-        let samples = match workspace {
-            Some(workspace) => {
-                samples::ingest_samples(workspace, &self.dir, &self.run_id, sample_cutoff)?
-            }
-            None => 0,
-        };
+        // Catches up on anything the mod wrote since the last milestone
+        // boundary (or everything, if this run never reached one). Cheap
+        // even on a long run: it resumes from `samples_offset` rather than
+        // re-reading the source from the top.
+        self.ingest_samples(workspace)?;
+        let samples = self.samples_count;
 
         let manifest = Manifest {
             run_id: self.run_id.clone(),
@@ -1133,6 +1181,115 @@ mod finish_tests {
         );
         let read = read_events(&rec.dir().join("events.jsonl")).unwrap();
         assert_eq!(read.events.len(), 1, "its events are still readable");
+    }
+
+    #[test]
+    fn a_recorder_killed_before_finish_still_has_samples_on_disk() {
+        // The gap this closes: run-1788315106-86443 was killed by a
+        // wall-clock timeout mid-execution and left no `samples.jsonl` at
+        // all, because ingestion only ever ran inside `finish()`. Calling
+        // `ingest_samples` at a milestone boundary -- as this test stands in
+        // for -- means a run that dies before `finish()` still keeps
+        // everything through its last closed milestone.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let out = workspace.join("server/script-output/botbridge");
+        fs::create_dir_all(&out).unwrap();
+        fs::write(
+            out.join("samples.jsonl"),
+            "{\"kind\":\"bots\",\"schema\":1,\"tick\":100,\"run\":\"r5\",\"bots\":[]}\n",
+        )
+        .unwrap();
+
+        let root = tmpdir("killed");
+        let mut rec = RunRecorder::start(&root, "r5").unwrap();
+        rec.record(
+            100,
+            EventKind::MilestoneStarted {
+                index: 0,
+                goal: "g".into(),
+            },
+        )
+        .unwrap();
+        // Stands in for the milestone-boundary keyframe call
+        // (`record.keyframe()` in the Lua supervisor), which also ingests
+        // samples now.
+        let appended = rec.ingest_samples(Some(&workspace)).unwrap();
+        assert_eq!(appended, 1);
+        // No finish() -- the process died here, exactly like run 11.
+
+        assert!(
+            !rec.dir().join("manifest.json").exists(),
+            "a crashed run still has no verdict"
+        );
+        let samples_path = rec.dir().join("samples.jsonl");
+        assert!(
+            samples_path.exists(),
+            "samples.jsonl must survive a run that never reached finish()"
+        );
+        let archived = read_samples(&samples_path).unwrap();
+        assert_eq!(archived.samples.len(), 1);
+        assert_eq!(archived.samples[0].tick, 100);
+    }
+
+    #[test]
+    fn ingesting_samples_twice_before_finish_does_not_duplicate_lines() {
+        // A long run may close many milestones, each calling
+        // `ingest_samples`. The source only grows between calls (the mod
+        // appends), and each call must pick up only what is new.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let out = workspace.join("server/script-output/botbridge");
+        fs::create_dir_all(&out).unwrap();
+        let source = out.join("samples.jsonl");
+        fs::write(
+            &source,
+            "{\"kind\":\"bots\",\"schema\":1,\"tick\":100,\"run\":\"r6\",\"bots\":[]}\n",
+        )
+        .unwrap();
+
+        let root = tmpdir("dedup");
+        let mut rec = RunRecorder::start(&root, "r6").unwrap();
+        rec.record(
+            100,
+            EventKind::MilestoneStarted {
+                index: 0,
+                goal: "g".into(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(rec.ingest_samples(Some(&workspace)).unwrap(), 1);
+        // Nothing new written yet: a second call at the next milestone must
+        // append nothing further.
+        assert_eq!(rec.ingest_samples(Some(&workspace)).unwrap(), 0);
+
+        // The mod appends one more sample before the run finishes.
+        {
+            use std::io::Write as _;
+            let mut f = fs::OpenOptions::new().append(true).open(&source).unwrap();
+            writeln!(
+                f,
+                "{{\"kind\":\"bots\",\"schema\":1,\"tick\":200,\"run\":\"r6\",\"bots\":[]}}"
+            )
+            .unwrap();
+        }
+
+        let (manifest, _) = rec
+            .finish(300, "done", Some(&workspace), DEFAULT_KEEP)
+            .unwrap();
+        assert_eq!(
+            manifest.samples, 2,
+            "finish() must pick up only the newly-appended sample, on top of the one already archived"
+        );
+
+        let archived = read_samples(&root.join("r6").join("samples.jsonl")).unwrap();
+        assert_eq!(
+            archived.samples.len(),
+            2,
+            "no sample line may be archived twice: {:?}",
+            archived.samples
+        );
     }
 }
 

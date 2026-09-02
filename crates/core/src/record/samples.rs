@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use crate::types::Position;
@@ -169,7 +169,35 @@ pub fn read_samples(path: &Path) -> io::Result<ReadSamples> {
     Ok(ReadSamples { samples, skipped })
 }
 
-/// Copies the run's samples out of the server's `script-output`.
+/// What one call to [`ingest_samples_incremental`] found and consumed.
+#[derive(Debug, PartialEq, Eq)]
+pub struct IngestProgress {
+    /// Byte offset into the *source* file this call read up to. The next
+    /// call should resume from here, not from 0 -- that is what makes
+    /// repeated ingestion append-only rather than a rewrite.
+    pub offset: u64,
+    /// Sample lines appended to the run's `samples.jsonl` by this call.
+    pub appended: usize,
+    /// Lines in the newly-read portion that did not parse as a [`Sample`].
+    pub skipped: usize,
+}
+
+/// Copies whatever is new in the run's samples source since `offset`,
+/// appending it to `run_dir/samples.jsonl` rather than rewriting the file.
+///
+/// This is what lets [`crate::record::RunRecorder`] call ingestion at every
+/// milestone boundary *and* at `finish` without re-reading and re-writing
+/// however much has already accumulated on a long run, and without archiving
+/// any line twice: each call only looks past the byte offset the previous
+/// call returned, and the caller is expected to persist that offset (see
+/// `RunRecorder::samples_offset`) and pass it back in.
+///
+/// Only *complete* lines are consumed. The mod appends a line and the OS may
+/// still be mid-write when this reads the file, so the last chunk since the
+/// final `\n` is left for the next call rather than treated as gospel --
+/// consuming a partial line would advance the offset past bytes that have
+/// not finished landing on disk, silently dropping the rest of that sample
+/// forever.
 ///
 /// Filtered on the run id *first*, tick second -- not on tick alone. Unlike
 /// frames, sample lines carry no per-run sidecar file to gate a whole
@@ -185,43 +213,114 @@ pub fn read_samples(path: &Path) -> io::Result<ReadSamples> {
 /// A line with no `run` at all -- written before this field existed -- falls
 /// back to `not_before`, the recorder's high-water mark, because that is the
 /// only signal such a line can carry.
-pub fn ingest_samples(
+///
+/// An unrecognised `schema` still fails the whole call loudly, exactly like
+/// [`read_samples`] -- and nothing is appended to the archive on that path:
+/// validation happens before any line is written, so a call that errors
+/// leaves both the output file and `offset` untouched, and retrying it later
+/// (say, at the next milestone) reports the same error instead of silently
+/// re-admitting lines a prior partial write already archived.
+pub fn ingest_samples_incremental(
     workspace: &Path,
     run_dir: &Path,
     run_id: &str,
     not_before: u64,
-) -> io::Result<usize> {
+    offset: u64,
+) -> io::Result<IngestProgress> {
     let source = workspace
         .join("server")
         .join("script-output")
         .join("botbridge")
         .join("samples.jsonl");
     if !source.exists() {
-        return Ok(0);
+        return Ok(IngestProgress {
+            offset,
+            appended: 0,
+            skipped: 0,
+        });
     }
-    let read = read_samples(&source)?;
-    if read.skipped > 0 {
-        // Counted rather than swallowed in `read_samples`, and it must not be
-        // thrown away again here. Concrete case: the mod writes `bots = {}`
-        // when no player is connected, and `helpers.table_to_json({})` yields
-        // `"{}"` rather than `"[]"`, so that line fails to deserialise as a
-        // `Sample` and would otherwise vanish with nothing to show for it.
-        tracing::warn!(
-            skipped = read.skipped,
-            source = %source.display(),
-            "some sample lines did not parse and were skipped"
-        );
+
+    let mut file = File::open(&source)?;
+    let len = file.metadata()?.len();
+    // The mod truncates this file when a *new* run's frame capture starts.
+    // That should never happen while this run is still going -- but if it
+    // does, the remembered offset now points past the end of a shorter file,
+    // and seeking there would read nothing forever rather than catching up.
+    // Restarting from the top is safe: the run-id filter below still keeps
+    // any line belonging to the run that did the truncating out of this
+    // run's archive.
+    let start = if offset > len { 0 } else { offset };
+    file.seek(SeekFrom::Start(start))?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+
+    let complete_len = match buf.iter().rposition(|&b| b == b'\n') {
+        Some(pos) => pos + 1,
+        None => 0,
+    };
+    if complete_len == 0 {
+        // Nothing new, or only an in-progress line since last time.
+        return Ok(IngestProgress {
+            offset: start,
+            appended: 0,
+            skipped: 0,
+        });
     }
-    let mut out = File::create(run_dir.join("samples.jsonl"))?;
-    let mut count = 0usize;
-    for sample in read.samples.iter().filter(|s| match &s.run {
+
+    // Parsed fully before anything is written -- see the doc comment above
+    // on why a schema failure must not leave a partial append behind.
+    let mut parsed = Vec::new();
+    let mut skipped = 0usize;
+    for line in buf[..complete_len].split(|&b| b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(line) else {
+            skipped += 1;
+            continue;
+        };
+        if let Ok(probe) = serde_json::from_str::<SchemaProbe>(text)
+            && probe.schema != SAMPLE_SCHEMA
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "sample schema {} is not the {} this build understands \
+                     -- workspace/mods is probably stale",
+                    probe.schema, SAMPLE_SCHEMA
+                ),
+            ));
+        }
+        match serde_json::from_str::<Sample>(text) {
+            Ok(sample) => parsed.push(sample),
+            Err(_) => {
+                // Concrete case: the mod writes `bots = {}` when no player is
+                // connected, and `helpers.table_to_json({})` yields `"{}"`
+                // rather than `"[]"`, so that line fails to deserialise as a
+                // `Sample`. Counted, not silently dropped.
+                skipped += 1
+            }
+        }
+    }
+
+    let mut out = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(run_dir.join("samples.jsonl"))?;
+    let mut appended = 0usize;
+    for sample in parsed.iter().filter(|s| match &s.run {
         Some(run) => run == run_id,
         None => s.tick >= not_before,
     }) {
         writeln!(out, "{}", serde_json::to_string(sample)?)?;
-        count += 1;
+        appended += 1;
     }
-    Ok(count)
+
+    Ok(IngestProgress {
+        offset: start + complete_len as u64,
+        appended,
+        skipped,
+    })
 }
 
 #[cfg(test)]
@@ -332,10 +431,10 @@ mod tests {
         let run_dir = tmp.path().join("run");
         std::fs::create_dir_all(&run_dir).unwrap();
 
-        let count = ingest_samples(&workspace, &run_dir, "ours", 61269).unwrap();
+        let progress = ingest_samples_incremental(&workspace, &run_dir, "ours", 61269, 0).unwrap();
 
         // A previous run's leftover file cannot leak into this one.
-        assert_eq!(count, 1);
+        assert_eq!(progress.appended, 1);
         let written = std::fs::read_to_string(run_dir.join("samples.jsonl")).unwrap();
         assert!(written.contains("61500"));
         assert!(!written.contains(r#""tick":100"#));
@@ -358,10 +457,10 @@ mod tests {
         let run_dir = tmp.path().join("run");
         std::fs::create_dir_all(&run_dir).unwrap();
 
-        let count = ingest_samples(&workspace, &run_dir, "ours", 100).unwrap();
+        let progress = ingest_samples_incremental(&workspace, &run_dir, "ours", 100, 0).unwrap();
 
         assert_eq!(
-            count, 0,
+            progress.appended, 0,
             "a line naming another run is excluded regardless of tick"
         );
     }
@@ -382,10 +481,10 @@ mod tests {
         let run_dir = tmp.path().join("run");
         std::fs::create_dir_all(&run_dir).unwrap();
 
-        let count = ingest_samples(&workspace, &run_dir, "ours", 61269).unwrap();
+        let progress = ingest_samples_incremental(&workspace, &run_dir, "ours", 61269, 0).unwrap();
 
         assert_eq!(
-            count, 1,
+            progress.appended, 1,
             "a line naming this run is kept regardless of tick"
         );
     }
@@ -408,8 +507,8 @@ mod tests {
         let run_dir = tmp.path().join("run");
         std::fs::create_dir_all(&run_dir).unwrap();
 
-        let count = ingest_samples(&workspace, &run_dir, "ours", 0).unwrap();
-        assert_eq!(count, 1);
+        let progress = ingest_samples_incremental(&workspace, &run_dir, "ours", 0, 0).unwrap();
+        assert_eq!(progress.appended, 1);
 
         let archived = read_samples(&run_dir.join("samples.jsonl")).unwrap();
         assert_eq!(archived.samples.len(), 1);
@@ -417,5 +516,100 @@ mod tests {
             archived.samples[0].schema, SAMPLE_SCHEMA,
             "the archived line must still carry the schema stamp after a round trip"
         );
+    }
+
+    #[test]
+    fn repeated_ingestion_from_the_returned_offset_does_not_duplicate_lines() {
+        // Simulates what `RunRecorder::ingest_samples` does across a
+        // milestone boundary and then `finish`: call once, let the mod append
+        // more, call again with the offset the first call returned.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let out = workspace.join("server/script-output/botbridge");
+        std::fs::create_dir_all(&out).unwrap();
+        let path = write(
+            &out,
+            &[r#"{"kind":"bots","schema":1,"tick":100,"run":"ours","bots":[]}"#],
+        );
+        let run_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+
+        let first = ingest_samples_incremental(&workspace, &run_dir, "ours", 0, 0).unwrap();
+        assert_eq!(first.appended, 1);
+
+        // The mod appends -- never rewrites -- while the run is live.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(
+            f,
+            r#"{{"kind":"bots","schema":1,"tick":200,"run":"ours","bots":[]}}"#
+        )
+        .unwrap();
+        drop(f);
+
+        // Resuming from `first.offset` must only pick up the new line, not
+        // re-read the one already archived.
+        let second =
+            ingest_samples_incremental(&workspace, &run_dir, "ours", 0, first.offset).unwrap();
+        assert_eq!(
+            second.appended, 1,
+            "only the newly-appended line is picked up"
+        );
+
+        // Calling again from the same (now current) offset with nothing new
+        // written must append nothing further.
+        let third =
+            ingest_samples_incremental(&workspace, &run_dir, "ours", 0, second.offset).unwrap();
+        assert_eq!(third.appended, 0);
+
+        let lines: Vec<_> = std::fs::read_to_string(run_dir.join("samples.jsonl"))
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "each source line must be archived exactly once: {lines:?}"
+        );
+        assert!(lines[0].contains(r#""tick":100"#));
+        assert!(lines[1].contains(r#""tick":200"#));
+    }
+
+    #[test]
+    fn an_in_progress_final_line_is_left_for_the_next_call() {
+        // A write racing a read can leave the last line incomplete. Consuming
+        // it anyway would advance the offset past bytes that have not
+        // actually landed yet, silently losing the rest of that sample.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let out = workspace.join("server/script-output/botbridge");
+        std::fs::create_dir_all(&out).unwrap();
+        let path = out.join("samples.jsonl");
+        // No trailing newline: this line is "in progress".
+        std::fs::write(
+            &path,
+            r#"{"kind":"bots","schema":1,"tick":100,"run":"ours","bots":[]}"#,
+        )
+        .unwrap();
+        let run_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+
+        let progress = ingest_samples_incremental(&workspace, &run_dir, "ours", 0, 0).unwrap();
+        assert_eq!(progress.appended, 0, "an incomplete line is not consumed");
+        assert_eq!(progress.offset, 0, "the offset must not advance past it");
+        assert!(!run_dir.join("samples.jsonl").exists());
+
+        // Once the writer finishes the line, the next call picks it up.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(f).unwrap();
+        drop(f);
+        let progress = ingest_samples_incremental(&workspace, &run_dir, "ours", 0, 0).unwrap();
+        assert_eq!(progress.appended, 1);
     }
 }

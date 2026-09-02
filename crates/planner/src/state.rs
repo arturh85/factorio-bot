@@ -132,6 +132,35 @@ pub struct PlanState {
     removed: BTreeSet<Pos>,
     /// Ore taken from a tile by the plan, subtracted from the base amount.
     consumed: BTreeMap<Pos, u32>,
+    /// Tiles this plan has already committed to a mining action.
+    ///
+    /// `consumed` says *how much* the plan has taken from a tile; this says
+    /// *that the tile is spoken for*, and the two answer different questions.
+    /// Counting alone was not enough: [`DEFAULT_RESOURCE_PER_TILE`] is 500, so
+    /// four bots each asked to mine ten iron ore all found the same nearest
+    /// tile still holding hundreds and all four were sent to it. That is the
+    /// defect this field exists for — the run that reached milestone 4 died on
+    /// `the target stone was gone before mining finished, something else mined
+    /// it first`, which is two bots on one tile seen from the game's side.
+    ///
+    /// So a tile is committed **whole**, not by the amount taken from it. The
+    /// planner cannot know what a tile really holds (see
+    /// [`DEFAULT_RESOURCE_PER_TILE`]), so "500 covers both shares" is a
+    /// modelling assumption, not a fact, and it is exactly the assumption that
+    /// failed. Whole-tile commitment needs no such assumption: one tile, one
+    /// mining action, and the finite-amount question stops mattering between
+    /// actions because there is only ever one.
+    ///
+    /// It costs almost nothing in locality. Candidate tiles are ordered by
+    /// distance, so the second claimant takes the *next* nearest tile — one
+    /// tile further on, inside the same patch — rather than a different patch.
+    ///
+    /// Read through [`PlanState::resource_unclaimed`], never by the physical
+    /// queries: [`PlanState::resource_available`] and
+    /// `Condition::ResourceAvailable` still report what the ground holds,
+    /// because a claim is a fact about *this plan*, not about the world the
+    /// executor will meet.
+    claimed: BTreeSet<Pos>,
     /// The one force this plan acts for, or `None` if `base` carries no forces.
     ///
     /// Chosen once, here, and read by everything that asks a question about
@@ -231,6 +260,7 @@ impl PlanState {
             added: Default::default(),
             removed: Default::default(),
             consumed: Default::default(),
+            claimed: Default::default(),
             force,
             researched: Default::default(),
             reserved: Default::default(),
@@ -657,6 +687,47 @@ impl PlanState {
         DEFAULT_RESOURCE_PER_TILE.saturating_sub(self.consumed.get(&key).copied().unwrap_or(0))
     }
 
+    /// Has this plan already committed `position` to a mining action?
+    ///
+    /// See the [`claimed`](PlanState#structfield.claimed) field for why a
+    /// commitment is whole-tile rather than by amount.
+    pub fn is_resource_claimed(&self, position: &Position) -> bool {
+        self.claimed.contains(&Pos::from(position))
+    }
+
+    /// Ore at a tile that is still *available to plan against*: what
+    /// [`PlanState::resource_available`] reports, or zero once the tile has
+    /// been committed to a mining action.
+    ///
+    /// This — not `resource_available` — is what tile *selection* must ask.
+    /// The physical reading answers "will the ore be there when the bot
+    /// swings", which is what `Condition::ResourceAvailable` needs and which a
+    /// claim must not distort; this one answers "may I send another bot here",
+    /// and the answer is no.
+    pub fn resource_unclaimed(&self, position: &Position, item: &str) -> u32 {
+        if self.is_resource_claimed(position) {
+            return 0;
+        }
+        self.resource_available(position, item)
+    }
+
+    /// Commit `position` to a mining action without taking anything from it.
+    ///
+    /// Separate from [`PlanState::consume_resource`] so a caller can say which
+    /// of the two it means; `consume_resource` calls this, because taking ore
+    /// out of a tile in a plan is also the plan committing to that tile.
+    pub fn claim_resource(&mut self, position: &Position) {
+        self.claimed.insert(Pos::from(position));
+    }
+
+    /// Take `count` of `item` out of a tile, and commit the tile to the action
+    /// that took it.
+    ///
+    /// The bound checked is the *physical* one, so a tile can still be drawn
+    /// from twice by anything that deliberately does so (the schedule's replay
+    /// re-applies each effect once, and the executor's recovery re-plans from
+    /// a fresh state). Selection is what claims exclude, via
+    /// [`PlanState::resource_unclaimed`].
     pub fn consume_resource(
         &mut self,
         position: &Position,
@@ -673,6 +744,7 @@ impl PlanState {
             });
         }
         *self.consumed.entry(Pos::from(position)).or_insert(0) += count;
+        self.claim_resource(position);
         Ok(())
     }
 

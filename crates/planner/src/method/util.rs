@@ -87,12 +87,18 @@ pub fn mining_ticks(state: &PlanState, item: &str) -> Ticks {
     seconds_to_ticks(seconds / character_mining_speed(state))
 }
 
-/// The tile of `item` nearest `from` that still holds at least `need`.
+/// The tile of `item` nearest `from` that still holds at least `need` and has
+/// not already been committed to a mining action by this plan.
 ///
 /// Ties on distance are broken by `(x, y)`, so the result depends only on the
 /// tile set and the origin — never on the order `resource_patches` happens to
 /// return patches in, which is not stable across processes for patches of
 /// equal size.
+///
+/// Reads [`PlanState::resource_unclaimed`], not `resource_available`: this is
+/// tile *selection*, and every selector in this module has to see the same
+/// commitments or two of them will pick the same tile. See the `claimed` field
+/// on [`PlanState`] for why a commitment is whole-tile.
 pub fn nearest_resource_tile(
     state: &PlanState,
     item: &str,
@@ -102,7 +108,7 @@ pub fn nearest_resource_tile(
     let mut best: Option<(f64, Position)> = None;
     for patch in state.resource_patches(item) {
         for tile in patch.elements {
-            if state.resource_available(&tile, item) < need {
+            if state.resource_unclaimed(&tile, item) < need {
                 continue;
             }
             let distance = calculate_distance(from, &tile);
@@ -125,10 +131,24 @@ pub fn nearest_resource_tile(
 }
 
 /// Tiles of `item` to draw `need` from, nearest first, with how much to take
-/// from each. Empty when the patches cannot supply `need` in total.
+/// from each. Empty when the *uncommitted* tiles cannot supply `need` in
+/// total.
 ///
 /// Ties on distance break on `(x, y)`, like `nearest_resource_tile`, so the
 /// result depends only on the tile set and the origin.
+///
+/// **Each tile appears at most once, here and across the whole plan.** Within
+/// one call that was always true; across calls it was not, and four bots each
+/// asked for ten iron ore were all sent to the one nearest tile, because
+/// `DEFAULT_RESOURCE_PER_TILE` left it looking like it had hundreds to spare.
+/// Emitting a mining action claims its tile (`Effect::ConsumeResource` ->
+/// `PlanState::consume_resource`), and [`PlanState::resource_unclaimed`] —
+/// which this reads — then reports it as empty, so the next caller walks on to
+/// the next-nearest tile.
+///
+/// A tile's take is still capped at what the tile holds, so one action never
+/// over-commits one tile either; with exclusivity, that is the only
+/// over-commitment left to prevent.
 pub fn resource_tiles_for(
     state: &PlanState,
     item: &str,
@@ -138,7 +158,7 @@ pub fn resource_tiles_for(
     let mut candidates: Vec<(f64, Position, u32)> = Vec::new();
     for patch in state.resource_patches(item) {
         for tile in patch.elements {
-            let available = state.resource_available(&tile, item);
+            let available = state.resource_unclaimed(&tile, item);
             if available == 0 {
                 continue;
             }
@@ -167,13 +187,22 @@ pub fn resource_tiles_for(
     out
 }
 
-/// Can the map's remaining tiles of `item` supply `need` in total?
+/// Can the map's remaining *uncommitted* tiles of `item` supply `need` in
+/// total?
 ///
 /// The same question `!resource_tiles_for(..).is_empty()` answers, without
 /// building the answer: applicability asks only whether enough exists
 /// anywhere, never which tiles are nearest, so there is nothing to collect,
 /// nothing to sort and no origin to measure from. Stops at the first tile that
 /// brings the running total up to `need`.
+///
+/// The two must keep agreeing — there is a test that says so — so this reads
+/// the same claim-aware ledger `resource_tiles_for` does. That is also what
+/// makes a patch the plan has used up refuse the plan instead of
+/// over-committing it: `Mine::applicable` goes false, no other method can
+/// satisfy a raw ore goal, and expansion fails with `NoApplicableMethod`
+/// naming that goal. Fewer bots on a smaller patch is a plan; two bots on one
+/// tile is not.
 ///
 /// `need == 0` is trivially satisfiable and returns `true` — where
 /// `resource_tiles_for` returns an empty vector for it, because there is no
@@ -186,7 +215,7 @@ pub fn resource_supply_at_least(state: &PlanState, item: &str, need: u32) -> boo
     }
     for patch in state.resource_patches(item) {
         for tile in patch.elements {
-            total = total.saturating_add(state.resource_available(&tile, item));
+            total = total.saturating_add(state.resource_unclaimed(&tile, item));
             if total >= need {
                 return true;
             }
@@ -693,6 +722,75 @@ mod tests {
         // The rest of the field still holds plenty, so the emptied tile must
         // not be counted and must not stop the walk either.
         assert!(resource_supply_at_least(&s, "iron-ore", available));
+    }
+
+    /// A tile committed to a mining action is gone from *selection* while
+    /// still holding what it holds. This is the difference between the two
+    /// ledgers, at the level of one call.
+    #[test]
+    fn a_claimed_tile_is_not_offered_to_the_next_caller() {
+        let mut s = state();
+        let origin = Position::new(0., 0.);
+        let first = nearest_resource_tile(&s, "iron-ore", &origin, 5).expect("iron ore");
+        s.claim_resource(&first);
+
+        let second = nearest_resource_tile(&s, "iron-ore", &origin, 5).expect("the patch is big");
+        assert_ne!(first, second, "two callers must not get the same tile");
+
+        let tiles = resource_tiles_for(&s, "iron-ore", &origin, 5);
+        assert_eq!(tiles.len(), 1);
+        assert_ne!(tiles[0].0, first);
+
+        // The claim is a fact about the plan, not about the ground: the tile
+        // still holds a full 500, which is what `Condition::ResourceAvailable`
+        // has to see when the bot that claimed it actually swings.
+        assert_eq!(s.resource_available(&first, "iron-ore"), 500);
+        assert_eq!(s.resource_unclaimed(&first, "iron-ore"), 0);
+    }
+
+    /// Emitting a mining action is what claims its tile, and the two ledgers
+    /// move together: `consume_resource` is the only thing `Effect::Mine`
+    /// applies.
+    #[test]
+    fn consuming_from_a_tile_also_commits_it() {
+        let mut s = state();
+        let origin = Position::new(0., 0.);
+        let tile = nearest_resource_tile(&s, "iron-ore", &origin, 1).expect("iron ore");
+        s.consume_resource(&tile, "iron-ore", 1).unwrap();
+        assert_eq!(s.resource_available(&tile, "iron-ore"), 499);
+        assert_eq!(s.resource_unclaimed(&tile, "iron-ore"), 0);
+        assert_ne!(
+            nearest_resource_tile(&s, "iron-ore", &origin, 1).expect("iron ore"),
+            tile,
+            "the 499 left over must not attract a second bot"
+        );
+    }
+
+    /// The supply test and the tile walk have to agree on claims too, or
+    /// `Mine::applicable` would claim a goal `Mine::expand` cannot satisfy.
+    #[test]
+    fn a_supply_test_follows_what_has_been_claimed() {
+        let mut s = state();
+        let origin = Position::new(0., 0.);
+        let mut tiles: Vec<Position> = s
+            .resource_patches("iron-ore")
+            .into_iter()
+            .flat_map(|patch| patch.elements)
+            .collect();
+        tiles.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+        tiles.dedup_by(|a, b| a.x.total_cmp(&b.x).is_eq() && a.y.total_cmp(&b.y).is_eq());
+        for tile in &tiles {
+            s.claim_resource(tile);
+        }
+        assert!(
+            !resource_supply_at_least(&s, "iron-ore", 1),
+            "a fully committed patch supplies nothing more"
+        );
+        assert_eq!(
+            resource_supply_at_least(&s, "iron-ore", 1),
+            !resource_tiles_for(&s, "iron-ore", &origin, 1).is_empty(),
+            "the two must agree on claims, not only on consumption"
+        );
     }
 
     #[test]

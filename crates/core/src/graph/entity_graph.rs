@@ -20,7 +20,7 @@ use petgraph::visit::{Bfs, EdgeRef};
 use serde::de::{MapAccess, Visitor};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::ops::Deref;
 use std::str::FromStr;
@@ -36,7 +36,18 @@ pub struct EntityGraph {
     entity_nodes: DashMap<ItemId, NodeIndex>,
     entity_prototypes: Arc<DashMap<String, FactorioEntityPrototype>>,
     recipes: Arc<DashMap<String, FactorioRecipe>>,
-    resources: DashMap<String, Vec<Pos>>,
+    /// Every tile each named resource covers, keyed by the *floored* tile so
+    /// one tile is one entry.
+    ///
+    /// A `BTreeSet`, not a `Vec`, and that is a correctness choice rather than
+    /// a performance one: the same ore tile reaches [`EntityGraph::add`] more
+    /// than once (a chunk's entities are written out by both
+    /// `on_chunk_generated` and the mod's `initial_discovery` replay of the
+    /// chunks that already exist), and a `Vec` grew a second copy each time.
+    /// The recorded run at `workspace/runs/run-1788319014-01846` held every
+    /// resource exactly twice -- 900 `iron-ore` tiles against the game's 417.
+    /// See `add`.
+    resources: DashMap<String, BTreeSet<Pos>>,
     resource_tree: RwLock<ResourceQuadTree>,
 }
 
@@ -347,14 +358,34 @@ impl EntityGraph {
         let mut resource_tree = self.resource_tree.write();
         for entity in &entities {
             if entity.entity_type == EntityType::Resource.to_string() {
-                match self.resources.get_mut(&entity.name) {
-                    Some(mut positions) => {
-                        positions.push((&entity.position).into());
-                    }
-                    None => {
-                        self.resources
-                            .insert(entity.name.clone(), vec![(&entity.position).into()]);
-                    }
+                // One tile, one entry -- however many times the tile is
+                // delivered.
+                //
+                // Resources arrive here more than once by design of the
+                // transport, not by accident: `writeout_entities` runs from
+                // both arms of the mod's `on_chunk_generated`, the real event
+                // and the `initial_discovery` replay, and only the *tiles*
+                // writeout next to it is guarded against emitting a chunk
+                // twice. Guarding the entities writeout the same way would
+                // lose data instead -- discovery emits `{}` for a chunk that
+                // is listed but not yet generated, and the real event that
+                // follows carries the contents -- so the deduplication belongs
+                // here, at the one insertion point every reader is behind.
+                //
+                // Left unhandled it inflated the resource half of this graph
+                // ~2x. `resource_patches` happened to hide that from the
+                // planner (it keys tiles into a `HashMap`, which collapses the
+                // copies), but `snapshot_within` reported them all, and
+                // `remove` deleted only one copy from this map -- so a mined
+                // tile stayed in the model as ore.
+                let pos: Pos = (&entity.position).into();
+                if !self
+                    .resources
+                    .entry(entity.name.clone())
+                    .or_default()
+                    .insert(pos)
+                {
+                    continue;
                 }
                 let rect: QuadTreeRect = add_to_rect(
                     &Rect::from_wh(1., 1.),
@@ -693,9 +724,11 @@ impl EntityGraph {
             drop(resource_tree);
             if let Some(mut positions) = self.resources.get_mut(&entity.name) {
                 let entity_pos: Pos = (&entity.position).into();
-                if let Some(i) = positions.iter().position(|pos| *pos == entity_pos) {
-                    positions.remove(i);
-                }
+                // One removal empties the tile, because `add` only ever put it
+                // in once. While duplicates were kept this removed a single
+                // copy and left the others, so a tile the game had just been
+                // mined out of stayed in `resource_patches` as ore.
+                positions.remove(&entity_pos);
             }
         }
 
@@ -1727,6 +1760,103 @@ mod tests {
         // The game agrees exactly: no divergence.
         let game = vec![iron.clone()];
         assert!(divergence_between(&game, &model).is_empty());
+    }
+
+    /// The mod writes a chunk's entities out from both arms of
+    /// `on_chunk_generated` -- the real event and the `initial_discovery`
+    /// replay -- so the same ore tile reaches `add` twice. It must land in the
+    /// graph once.
+    ///
+    /// Two `add` calls rather than one call with a repeated entity, because
+    /// that is the shape the transport actually delivers: two chunk writeouts,
+    /// parsed independently.
+    ///
+    /// The positions are tile *centres* on purpose. `resources` keys by a
+    /// flooring `Pos`, so a fixture built on integers would round-trip
+    /// losslessly and could not tell a genuine second tile from a second copy
+    /// of the first.
+    #[test]
+    fn a_resource_delivered_twice_occupies_one_tile() {
+        let ore = || {
+            FactorioEntity::new_resource(
+                &Position::new(-40.5, -48.5),
+                Direction::North,
+                &EntityName::IronOre.to_string(),
+            )
+        };
+        let graph = entity_graph_from(vec![ore()]).unwrap();
+        graph.add(vec![ore()], None).unwrap();
+
+        let bounds = Rect::new(&Position::new(-50., -58.), &Position::new(-30., -38.));
+        assert_eq!(
+            graph.snapshot_within(&bounds).len(),
+            1,
+            "the same tile delivered twice must be modelled once"
+        );
+
+        let patches = graph.resource_patches(&EntityName::IronOre.to_string());
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0].elements, vec![Position::new(-40.5, -48.5)]);
+    }
+
+    /// The negative control for `a_resource_delivered_twice_occupies_one_tile`:
+    /// deduplication must collapse a repeat, never two neighbours. Adjacent
+    /// tiles are the hard case -- their 0.8-wide boxes sit inside the same
+    /// query rectangle and differ only in the key the dedup compares.
+    #[test]
+    fn two_adjacent_resource_tiles_both_survive() {
+        let iron = EntityName::IronOre.to_string();
+        let graph = entity_graph_from(vec![FactorioEntity::new_resource(
+            &Position::new(-40.5, -48.5),
+            Direction::North,
+            &iron,
+        )])
+        .unwrap();
+        graph
+            .add(
+                vec![FactorioEntity::new_resource(
+                    &Position::new(-39.5, -48.5),
+                    Direction::North,
+                    &iron,
+                )],
+                None,
+            )
+            .unwrap();
+
+        let bounds = Rect::new(&Position::new(-50., -58.), &Position::new(-30., -38.));
+        let mut modelled: Vec<Position> = graph
+            .snapshot_within(&bounds)
+            .into_iter()
+            .map(|entity| entity.position)
+            .collect();
+        modelled.sort_by(|a, b| a.x().total_cmp(&b.x()));
+        assert_eq!(
+            modelled,
+            vec![Position::new(-40.5, -48.5), Position::new(-39.5, -48.5)]
+        );
+
+        let patches = graph.resource_patches(&iron);
+        assert_eq!(patches.len(), 1, "the two tiles touch, so it is one patch");
+        assert_eq!(patches[0].elements.len(), 2);
+    }
+
+    /// What the duplicates cost beyond the count: `remove` takes the tile out
+    /// once, so a second copy would keep a mined-out tile in the model as ore
+    /// and the planner would keep sizing work against it.
+    #[test]
+    fn removing_a_resource_delivered_twice_empties_the_tile() {
+        let iron = EntityName::IronOre.to_string();
+        let ore =
+            || FactorioEntity::new_resource(&Position::new(-40.5, -48.5), Direction::North, &iron);
+        let graph = entity_graph_from(vec![ore()]).unwrap();
+        graph.add(vec![ore()], None).unwrap();
+
+        graph.remove(&ore()).unwrap();
+
+        assert!(!graph.resource_contains(&iron, Pos(-41, -49)));
+        assert!(graph.resource_patches(&iron).is_empty());
+        let bounds = Rect::new(&Position::new(-50., -58.), &Position::new(-30., -38.));
+        assert!(graph.snapshot_within(&bounds).is_empty());
     }
 
     #[test]

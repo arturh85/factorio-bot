@@ -452,3 +452,29 @@ yours, build in a scratch worktree (`git worktree add`) or check out the
 specific paths, never stash the tree.
 
 Nothing was lost this time.
+
+## Run 11 — rung 4 executes (~07:15)
+
+`run-1788315106-86443`. **241 actions dispatched, 239 succeeded, 2 failed.**
+
+```
+mine 97 · craft 44 · place 31 · fuel 30 · insert 21 · take 17 · research 1
+```
+
+A `research` action was dispatched for the first time in this project's history.
+Rungs 1-3 each satisfied in **one iteration**. Plans ran 75-95 steps with
+iterations of `success=67 failed=1 lost=0`.
+
+Both fields wired tonight are live on real data: **27 teleports recorded** (so
+the stuck-walk still fires and is now visible rather than silently inflating
+walk durations), and **196 dispatched actions carrying targets**, which makes
+"which tile was this bot sent to" answerable for the first time.
+
+It did not finish — the 2400 s budget expired mid-rung-4. That is now the only
+thing between this and a completed research milestone.
+
+**A gap the timeout exposed:** `samples.jsonl` is absent from this run. Samples
+are ingested at `finish()`, so a run killed by a timeout loses its entire
+world-state stream — precisely when it is most wanted. `events.jsonl` and
+`map.jsonl` survive because they are written live. Worth ingesting samples at
+milestone boundaries too, as the spec's own text implies.

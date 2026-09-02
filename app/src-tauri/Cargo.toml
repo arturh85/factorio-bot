@@ -84,3 +84,13 @@ restapi = ["dep:factorio-bot-server"]
 lua = ["dep:factorio-bot-scripting-lua", "factorio-bot-server?/lua"]
 repl = ["reedline-repl-rs/async"]
 tokio-console = ["dep:console-subscriber"]
+# What `just serve` builds: the axum server plus Lua scripting and the CLI to
+# drive it, and nothing else -- no `repl` (irrelevant to serving), and
+# deliberately not `tokio-console`, whose debug instrumentation binds a fixed
+# port that a second build-of-this-binary (e.g. a game run started alongside
+# the viewer) would otherwise contend over. `--all-features` gets `restapi`
+# too, but also drags `tokio-console` in with it, which is the trap this
+# alias exists so nobody has to rediscover: build the viewer with
+# `--no-default-features --features viewer` (or just `just serve`), not
+# `--all-features`.
+viewer = ["cli", "lua", "restapi"]

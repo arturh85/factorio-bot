@@ -3,8 +3,14 @@ start:
     cd app; pnpm run start
 
 # the real thing: axum serving the built SPA and the API on :7492
+#
+# `viewer` is the `factorio-bot` feature alias for exactly this combination
+# (cli, lua, restapi -- no repl, and deliberately no tokio-console, whose
+# fixed debug port would otherwise contend with a game run started
+# alongside this). `--all-features` also builds this but drags tokio-console
+# in with it -- use this recipe or `--features viewer` instead.
 serve *ARGS:
-    cargo run --release --no-default-features --features cli,lua,restapi -- serve --web-root app/dist {{ARGS}}
+    cargo run --release --no-default-features --features viewer -- serve --web-root app/dist {{ARGS}}
 
 repl *ARGS:
     cargo repl {{ARGS}}

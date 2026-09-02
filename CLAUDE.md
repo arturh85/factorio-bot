@@ -24,7 +24,13 @@ just factorio
 # Frontend dev server on :8080, proxying /api to a `just serve` on :7492
 just start          # or: cd app && pnpm start
 
-# The real thing: axum serving the built SPA and the API on :7492
+# The real thing: axum serving the built SPA and the API on :7492 -- this is
+# "the viewer". It builds `factorio-bot`'s `viewer` feature alias (cli, lua,
+# restapi -- no repl, no tokio-console), equivalent to
+# `cargo run --release --no-default-features --features viewer -- serve --web-root app/dist`.
+# Do NOT reach for `--all-features` to get `restapi`: it also builds
+# `tokio-console`, whose fixed debug port then contends with any other build
+# of this binary run alongside it (see the tokio-console note below).
 just serve
 
 # REPL mode (faster build, no GUI, for testing scripting)
@@ -48,13 +54,31 @@ cargo clippy --workspace --all-features --all-targets -- --deny warnings
 cd app && pnpm run precommit:check
 
 # Production build
-cargo build --release --all-features   # the binary IS the deliverable now
-cd app && pnpm run build:web           # and the SPA it serves
+cargo build --release           # the binary IS the deliverable now; default
+                                 # features (restapi, repl, cli, lua) already
+                                 # cover it -- no flag needed, and specifically
+                                 # not --all-features (see below)
+cd app && pnpm run build:web    # and the SPA it serves
 
 # Build with/without default features
 cargo build --all-features
 cargo build --no-default-features
 ```
+
+**Do not build with `--all-features` to "get restapi".** Default features
+already include it (`default = ["restapi", "repl", "cli", "lua"]`); the only
+feature `--all-features` adds beyond that is `tokio-console`, opt-in debug
+instrumentation that binds a fixed TCP port (`127.0.0.1:6669` unless
+`TOKIO_CONSOLE_BIND` says otherwise). A viewer build and a game-run build both
+started with `--all-features` both try to bind it, so the second one either
+loses tokio-console (current behavior: `Context::new` probes the port first
+and warns instead of installing the console layer when it is taken -- see
+`app/src-tauri/src/context.rs`) or, before that fix existed, panicked the
+whole process, because `[profile.release]` sets `panic = "abort"` and the
+crash came from `console-subscriber`'s own background thread with no mention
+of Factorio. For the viewer specifically, use `just serve` or
+`--features viewer` (an alias for `cli,lua,restapi`, deliberately excluding
+`tokio-console`) rather than `--all-features`.
 
 *LSP tools**: Prefer `mcp__rust__lsp_*` tools for refactoring (rename_symbol, find_references, get_definitions)
 These leverage rust-analyzer for accuracy with macros and trait implementations

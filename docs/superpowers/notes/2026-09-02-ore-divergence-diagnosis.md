@@ -12,8 +12,9 @@ The short version:
 | game has ore the model lacks (`iron-ore` short by 9) | the model deletes an ore tile on the **first mining swing**, while the game still holds hundreds of ore in it | **defect**, and it predates `e562847a` |
 | model has ore the game lacks (`copper-ore` over by 10) | the model reports a row of tiles lying **wholly outside** the keyframe bounds, touching the left or top edge | **artefact** of the comparison |
 
-Neither is retirement failing. Retirement has in fact **never run in a live
-run** — see "What this means for `e562847a`" below.
+Neither is retirement failing. **`e562847a` has never once executed against a
+live game**, and was reported as landed and working; that is a correction to
+something on the record, and it has its own section below.
 
 ## The two objections first: ruled in and ruled out
 
@@ -107,17 +108,25 @@ The mod even sends the remaining amount and it is thrown away:
 (`types.lua:391-392`), so the payload that deletes the tile is carrying the
 proof that the tile still exists.
 
-### What this means for `e562847a`
+### Correction to the record: `e562847a` has never fired in a live run
 
-`e562847a` ("retire an ore tile the moment a mine empties it") is correct and
-its tests are sound. It has also **never fired in a live run**, and could not
-have: `player_mine_timed` calls `resource_mined(name, position, count)` after
-the action settles, by which time the delete events from that action's own
-swings have already removed the tile — so `resource_mined` returns
-`ResourceDepletion::Absent` and there is nothing to debit. The keyframes agree:
-the surplus direction that would have been retirement's signature is entirely
-accounted for by the bounds artefact below, and the deficit direction is present
-in runs built *hours before* `e562847a` landed (11:42):
+**This is a correction, not a footnote.** `e562847a` was reported to the project
+owner as landed and working. It was neither — it is *committed*, its unit tests
+are sound, and it has **never once executed against a live game**. Anything said
+on the strength of "retirement is in place" needs re-checking against that.
+
+It could not have fired. `player_mine_timed` calls
+`resource_mined(name, position, count)` after the action settles, by which time
+the delete events from that action's own swings have already removed the tile —
+so `resource_mined` returns `ResourceDepletion::Absent` and there is nothing to
+debit. Its own tests could not catch this and are not at fault for missing it:
+they call `resource_mined` directly, which is exactly the call the live path
+never reaches with a tile still in the model.
+
+The keyframes agree. The surplus direction that would have been retirement's
+signature is entirely accounted for by the bounds artefact below, and the
+deficit direction is present in runs built *hours before* `e562847a` landed
+(11:42):
 
 ```
 run-1788317597-64759  04:53   game-only ore  5   all 5 mined
@@ -128,7 +137,9 @@ run-1788323755-24892  06:35                 25   all 25 mined
 The original note's worry — "the fix is on the verified pile and the evidence
 does not obviously agree" — was right to be raised and wrong in its guess. The
 fix is not broken. It is unreachable, because something older removes the tile
-first.
+first. It becomes reachable for the first time with the change below, which is
+the point at which `e562847a` starts to deserve the description it was already
+given.
 
 ### The fix
 
@@ -147,10 +158,31 @@ costume.
 
 ## Direction 2 — the model reports ore the game does not. An artefact.
 
-**Every model-only ore tile in every run lies wholly outside the keyframe
-bounds, touching the left or top edge. Not one is interior.** 691 of 691,
-across 30 keyframes. There has never been a model-only divergence that was not
-ore:
+### The fingerprint
+
+**Learn this signature; it identifies the cause without redoing the analysis.**
+
+```
+model-only ore tiles, by the bound they abut:
+
+    left    443
+    top     248
+    right     0
+    bottom    0
+    interior  0
+                     total 691 of 691, across 30 keyframes
+```
+
+Left and top leak, right and bottom do not, and nothing is ever interior. **A
+half-open containment test — `min <= p < max` — produces exactly that, and
+nothing else does.** Inclusive-on-all-sides would leak all four bounds about
+equally. A rounding or half-tile error would scatter and would hit interior
+tiles too. A population difference between the two sides would not respect the
+bounds at all. Two edges leaking while their mirror images do not is the
+fingerprint of a containment predicate closed at its minimum corner and open at
+its maximum one.
+
+There has never been a model-only divergence that was not ore:
 
 ```
 run-1788344167-58471  t=19835  bounds left=-42.0
@@ -161,7 +193,9 @@ A tile centred at `-42.5` occupies `[-43, -42]`. The bounds start at `-42`. The
 tile is outside and merely abuts the boundary line. The game does not return it,
 correctly. The model does.
 
-The reason is in `crates/core/src/aabb_quadtree.rs`:
+### Where that predicate is
+
+`crates/core/src/aabb_quadtree.rs`:
 
 ```rust
 fn my_intersects<S>(a: Rect<S>, b: Rect<S>) -> bool {
@@ -172,10 +206,20 @@ fn my_intersects<S>(a: Rect<S>, b: Rect<S>) -> bool {
 `euclid`'s `Rect::contains` is half-open — `min <= p < max`. So the query
 rectangle **includes** a box whose maximum corner lands exactly on the query's
 left or top edge, and **excludes** one whose minimum corner lands on the right
-or bottom edge. That asymmetry is exactly what the archive shows: 421 model-only
-tiles on the left and top edges (443 left, 248 top), **zero** on the right and
-bottom. It is not a resource-specific bug and it is not `resource_position_from_pos`; it is the
+or bottom edge — the fingerprint above, derived rather than fitted. It is not a
+resource-specific bug and it is not `resource_position_from_pos`; it is the
 query being inclusive at two of its four edges.
+
+The unit test reproduces the fingerprint in miniature. With the clip reverted,
+`snapshot_within_excludes_a_tile_that_only_abuts_the_bounds` reports the tile
+outside the left edge and the tile outside the top edge, and *not* the ones
+outside the right and bottom edges:
+
+```
+  left: [Position { x: -42.5, y: 12.5 }, Position { x: 12.5, y: -2.5 },
+         Position { x: -41.5, y: 12.5 }]
+ right: [Position { x: -41.5, y: 12.5 }]
+```
 
 This is an artefact of the comparison, and a diagnostic that cries wolf is worse
 than none — this project spent today being trained past a permanently-true STALE
@@ -202,3 +246,52 @@ every keyframe until then.
 guard in `add` was written for, visible in the archive and absent from every run
 after it. Recorded so a later reader does not mistake those two runs for the
 same phenomenon as this note's.
+
+## Verification
+
+Both guards were reverted by hand and the tests re-run, to check that they fail
+for the reason claimed rather than passing by luck. `cargo test -p
+factorio-bot-core --lib graph::entity_graph`:
+
+```
+snapshot_within_excludes_a_tile_that_only_abuts_the_bounds ... FAILED
+a_mined_resource_that_still_holds_ore_is_not_removed ... FAILED
+
+---- a_mined_resource_that_still_holds_ore_is_not_removed ----
+a tile the game still holds ore in must stay in the model
+
+---- snapshot_within_excludes_a_tile_that_only_abuts_the_bounds ----
+assertion `left == right` failed: only the tile actually inside the bounds is
+inside the bounds
+  left: [Position { x: -42.5, y: 12.5 }, Position { x: 12.5, y: -2.5 },
+         Position { x: -41.5, y: 12.5 }]
+ right: [Position { x: -41.5, y: 12.5 }]
+```
+
+**The third test, `an_emptied_resource_is_still_removed`, passes with the guard
+reverted, and that is what it is for.** It is the negative control: before the
+guard existed, removal was unconditional, so it could not possibly have gone
+red. Saying "all three fail" would have been the comfortable claim and the false
+one. What it actually pins was checked separately, by mutating the guard to the
+over-broad form a careless fix would produce —
+
+```rust
+if entity.entity_type == EntityType::Resource.to_string() {
+    return Ok(());   // no amount check at all
+}
+```
+
+— against which it fails, along with four existing tests that would otherwise
+have been the only thing standing between this fix and a model that never
+retires a tile at all:
+
+```
+an_emptied_resource_is_still_removed ... FAILED
+mining_a_tile_dry_retires_it ... FAILED
+a_vanished_target_is_retired_whatever_the_model_believed ... FAILED
+removing_a_resource_delivered_twice_empties_the_tile ... FAILED
+retiring_a_tile_leaves_its_neighbour_alone ... FAILED
+```
+
+With both guards restored the file is byte-identical to the committed version
+(`git diff` is empty), and the suite is green: 30 passed, 0 failed.

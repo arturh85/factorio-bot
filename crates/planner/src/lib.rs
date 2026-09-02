@@ -27,4 +27,4 @@ pub use render::{graphviz, mermaid_gantt, ticks_to_timestamp};
 pub use schedule::{
     Schedule, ScheduledStep, StepKind, WALK_TILES_PER_TICK, schedule, travel_ticks,
 };
-pub use state::{BotState, PlanState};
+pub use state::{BotState, Buffer, PlanState};

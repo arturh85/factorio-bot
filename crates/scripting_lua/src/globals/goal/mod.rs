@@ -173,6 +173,13 @@ impl std::error::Error for PlanRefusal {}
 ///   that wrote the step".
 /// - [`ExpansionTooDeep`](PlannerError::ExpansionTooDeep) -- the depth guard,
 ///   which fires on a method expanding into itself.
+/// - [`BufferShort`](PlannerError::BufferShort) -- a plan that tried to take
+///   more out of a container than the plan itself believes is in there. That
+///   is two parts of one expansion counting the same items, which is
+///   `InsufficientItems`' defect in the buffer ledger; it says nothing about
+///   the world. Somebody *else* emptying the container between planning and
+///   dispatch is a different and real failure, and it surfaces as a refused
+///   `Remove` at the game, not here.
 /// - [`UnknownTechnology`](PlannerError::UnknownTechnology) -- the borderline
 ///   one, and a fault. The name refers to nothing, so no state of the world
 ///   makes the goal meaningful: either the script has a typo or the world was
@@ -211,6 +218,7 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::ChainConflict { .. }
         | PlannerError::UnownedHandover { .. }
         | PlannerError::ExpansionTooDeep { .. }
+        | PlannerError::BufferShort { .. }
         | PlannerError::UnknownTechnology { .. } => false,
     };
     verdict.then(|| PlanRefusal {

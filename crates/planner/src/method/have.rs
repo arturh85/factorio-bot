@@ -807,6 +807,204 @@ fn smelt_steps(
     Ok(steps)
 }
 
+/// Take what a previous plan left in a buffer, rather than making it again.
+///
+/// # The gate this closes
+///
+/// A convergence hands materials over through a machine: `smelt_steps` has one
+/// bot load a furnace and another unload it. If the second bot never arrives
+/// and the plan is remade, the plates are sitting in that furnace **and the
+/// ore they were smelted from is gone from the ground**. Before this method,
+/// the replan could not see them: `PlanState` modelled no container contents,
+/// `FactorioWorld::on_some_entity_updated` was a no-op, and the only path that
+/// could read contents at all (`rcon_inventory_contents_at`) was reached only
+/// by the HTTP handler and the Lua binding, never by anything that plans. So
+/// the replan asked for the whole bill again, out of ore that no longer
+/// existed, and each iteration was slower than the last into
+/// `scripts/supervisor.lua`'s `stall_limit = 3`.
+///
+/// # Registered ahead of `SharedSmelt`, `Smelt`, `HandCraft` and `Mine`
+///
+/// A plate in a furnace beats a plate in the ground: it is already made, and
+/// the ground may not have the ore any more. It is registered *after*
+/// `SplitAcrossBots`, so a top-level goal is still scattered across the roster
+/// first and each share then asks this question for itself -- splitting costs
+/// nothing and is strictly better than one bot collecting everything.
+///
+/// # What it refuses, and why each refusal is narrow rather than cautious
+///
+/// * **`Goal::Produced`.** A withdrawal is not production. A `craft-item`
+///   trigger fires on the *act of producing*, so satisfying a `Produced` goal
+///   by taking finished items out of a chest would plan a technology that
+///   never unlocks. `Goal::Produced`'s own doc already says possession is not
+///   production; this is the method that would have broken that promise.
+/// * **`Holder::Anyone`.** A withdrawal is one bot walking to one entity, so
+///   it needs a bot to measure the walk from and a bot to put the items into.
+///   `Holder::Anyone` names neither. In practice nothing is lost: every
+///   `Anyone` goal a caller states is top-level, `SplitAcrossBots` claims it
+///   first, and the `Holder::Share` subgoals it emits arrive here named.
+///
+/// # Partial withdrawal, and why it terminates
+///
+/// A buffer that covers only part of the shortfall is still worth emptying, so
+/// the removes are emitted nearest-first until either the need is met or every
+/// buffer holding the item is empty, and whatever is left becomes an ordinary
+/// `Have` subgoal for `Smelt` or `Mine` to satisfy. That subgoal cannot come
+/// back here: `run_steps` applies each `Step::Act`'s effects as it emits it,
+/// so every `Effect::BufferLose` has already landed by the time the subgoal
+/// expands, and `applicable` then finds nothing left to take.
+pub struct Withdraw;
+
+/// Whose hands a goal's items end up in, and so where a withdrawal walks from.
+///
+/// `None` for [`Holder::Anyone`] and for a bot the state does not know -- both
+/// mean there is no position to measure from, and guessing one would site the
+/// walk against a bot standing at the origin.
+fn withdrawer(state: &PlanState, whose: &Holder) -> Option<(BotId, Position)> {
+    let (Holder::Bot(bot) | Holder::Share(bot)) = whose else {
+        return None;
+    };
+    state.bot(*bot).map(|b| (*bot, b.position.clone()))
+}
+
+impl Method for Withdraw {
+    fn name(&self) -> &'static str {
+        "withdraw"
+    }
+
+    fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
+        // The cheap guard first. Nothing writes container contents into a
+        // world unless a caller pulls them over RCON, so every fixture and
+        // every un-refreshed run answers `false` here and pays one
+        // `BTreeMap::is_empty` for the whole withdrawal path.
+        if !state.has_buffers() {
+            return false;
+        }
+        // Possession is not production -- see the type's doc.
+        if matches!(goal, Goal::Produced { .. }) {
+            return false;
+        }
+        let Some(Demand {
+            item, need, whose, ..
+        }) = demand(goal, state)
+        else {
+            return false;
+        };
+        if need == 0 {
+            return false;
+        }
+        let Some((_, from)) = withdrawer(state, whose) else {
+            return false;
+        };
+        !state.buffers_holding(&from, item).is_empty()
+    }
+
+    fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+        let Some(Demand {
+            item, need, whose, ..
+        }) = demand(goal, &ctx.state)
+        else {
+            return Err(PlannerError::NoApplicableMethod {
+                goal: goal.to_string(),
+            });
+        };
+        // One helper for both halves, so `applicable` and `expand` cannot
+        // answer differently -- which is how a method comes to claim a goal it
+        // then refuses.
+        let Some((bot, from)) = withdrawer(&ctx.state, whose) else {
+            return Err(PlannerError::NoApplicableMethod {
+                goal: goal.to_string(),
+            });
+        };
+        let reach = ctx.state.bot(bot).map(|b| b.reach_distance).unwrap_or(10.0);
+        let item = item.clone();
+        let whose = whose.clone();
+        let count = match goal {
+            Goal::Have { count, .. } => *count,
+            // Unreachable: `applicable` refuses everything else, and
+            // `demand` above already returned for anything that is not a
+            // `Have` or a `Produced`.
+            _ => need,
+        };
+
+        let mut steps: Vec<Step> = Vec::new();
+        let mut remaining = need;
+        // Nearest first, and the order is a total one -- see
+        // `PlanState::buffers_holding`. Emission order fixes `ActionId`
+        // allocation and therefore `schedule`'s `(end, ActionId, BotId)`
+        // tie-break, so a buffer overlay iterated in hash order would be a
+        // correctness bug rather than a style one.
+        for buffer in ctx.state.buffers_holding(&from, &item) {
+            if remaining == 0 {
+                break;
+            }
+            let held = buffer.contents.get(&item).copied().unwrap_or(0);
+            let take = held.min(remaining);
+            if take == 0 {
+                continue;
+            }
+            remaining -= take;
+            steps.push(Step::Act(Box::new(Action {
+                id: ctx.ids.next(),
+                kind: ActionKind::Remove {
+                    pos: buffer.position.clone(),
+                    entity: buffer.name.clone(),
+                    slot: buffer.slot,
+                    item: item.clone(),
+                    count: take,
+                },
+                pre: vec![
+                    Condition::AtPosition {
+                        who: Actor::Role,
+                        pos: buffer.position.clone(),
+                        radius: reach,
+                        min_radius: 0.0,
+                    },
+                    // The entity is still standing there. `BufferHas` below
+                    // says how much is in it; this says there is an *it*, and
+                    // the two are separate because a buffer can be mined away
+                    // between planning and dispatch without anything having
+                    // taken its contents first.
+                    Condition::EntityAt {
+                        pos: buffer.position.clone(),
+                        name: buffer.name.clone(),
+                    },
+                    Condition::BufferHas {
+                        pos: buffer.position.clone(),
+                        item: item.clone(),
+                        count: take,
+                    },
+                ],
+                eff: vec![
+                    Effect::BufferLose {
+                        pos: buffer.position.clone(),
+                        item: item.clone(),
+                        count: take,
+                    },
+                    Effect::GainItem {
+                        who: Actor::Role,
+                        item: item.clone(),
+                        count: take,
+                    },
+                ],
+                duration: TRANSFER_TICKS,
+                pinned: None,
+                label: format!("take {} {} from the {}", take, item, buffer.name),
+            })));
+        }
+
+        // Whatever the buffers could not cover is ordinary work. Stated with
+        // the goal's own `count` rather than with `remaining`: the removes
+        // above have already been simulated into the inventory by `run_steps`,
+        // so `shortfall` recomputes the difference itself, and handing it a
+        // pre-subtracted number would subtract twice.
+        if remaining > 0 {
+            steps.push(Step::Subgoal(Goal::Have { item, count, whose }));
+        }
+        Ok(steps)
+    }
+}
+
 /// Mine the shortfall straight out of the ground.
 pub struct Mine;
 
@@ -1590,9 +1788,17 @@ impl Method for Researched {
     }
 }
 
+/// The roster-free registry: no `SplitAcrossBots`, no `SharedSmelt`.
+///
+/// `Withdraw` **is** here, unlike the two roster-aware methods, because
+/// picking items up out of a furnace is not a multi-bot idea. One bot can
+/// leave a smelt half-unloaded and be replanned just as easily as four can,
+/// and the ore is just as gone either way -- the cross-bot handover only makes
+/// the window wider, it does not create it.
 pub fn default_registry() -> MethodRegistry {
     MethodRegistry::new()
         .with(Box::new(AlreadySatisfied))
+        .with(Box::new(Withdraw))
         .with(Box::new(Smelt))
         .with(Box::new(HandCraft))
         .with(Box::new(Mine))
@@ -2166,6 +2372,11 @@ pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
         .with(Box::new(SplitAcrossBots {
             bots: bots.to_vec(),
         }))
+        // Ahead of every producing method: a plate already sitting in a
+        // furnace beats a plate in the ground, and the ground may no longer
+        // have the ore. Behind `SplitAcrossBots`, so a top-level goal is still
+        // scattered first and each share asks this for itself.
+        .with(Box::new(Withdraw))
         .with(Box::new(SharedSmelt {
             bots: bots.to_vec(),
         }))

@@ -116,6 +116,37 @@ pub enum Condition {
         item: ItemId,
         count: u32,
     },
+    /// A container or machine standing at `pos` holds at least `count` of
+    /// `item`, as far as this plan is concerned.
+    ///
+    /// The precondition of a withdrawal. It is checked against
+    /// [`crate::state::PlanState::buffered`], which is the world's last
+    /// reading of that entity minus whatever this plan has already taken out
+    /// of it -- so two withdrawals in one plan cannot both spend the same
+    /// plates, and the second one fails here rather than at the game.
+    ///
+    /// # No `slot`, deliberately
+    ///
+    /// The `ActionKind::Remove` this sits on carries the slot, because the
+    /// executor needs it. The condition does not, because a buffer has exactly
+    /// one withdrawable inventory by construction: `PlanState::from_world`
+    /// records one slot per entity, the one
+    /// `LuaEntity::get_output_inventory()` answered for. A slot here would be
+    /// a second copy of that decision, able to disagree with the first.
+    ///
+    /// # Nothing produces it, so it orders nothing
+    ///
+    /// No `Effect` satisfies this -- see [`Effect::satisfies`] -- exactly as
+    /// nothing satisfies [`Condition::ResourceAvailable`], and for the same
+    /// reason: items already sitting in a chest are not made by an action in
+    /// this plan, any more than ore in the ground is. `infer_edges` therefore
+    /// draws no edge to a withdrawal, which is correct; the withdrawal is a
+    /// *root*.
+    BufferHas {
+        pos: Position,
+        item: ItemId,
+        count: u32,
+    },
 }
 
 impl Condition {
@@ -164,6 +195,7 @@ impl Condition {
             Condition::ResourceAvailable { pos, item, count } => {
                 state.resource_available(pos, item) >= *count
             }
+            Condition::BufferHas { pos, item, count } => state.buffered(pos, item) >= *count,
         }
     }
 
@@ -220,6 +252,9 @@ impl std::fmt::Display for Condition {
             Condition::ResourceAvailable { pos, item, count } => {
                 write!(f, "{} {} available at {}", count, item, pos)
             }
+            Condition::BufferHas { pos, item, count } => {
+                write!(f, "{} {} in the buffer at {}", count, item, pos)
+            }
         }
     }
 }
@@ -241,6 +276,30 @@ pub enum Effect {
         pos: Position,
     },
     ConsumeResource {
+        pos: Position,
+        item: ItemId,
+        count: u32,
+    },
+    /// `count` of `item` leave the buffer at `pos`.
+    ///
+    /// The other half of [`Condition::BufferHas`], and the thing that stops a
+    /// plan withdrawing the same plates twice: applying it decrements
+    /// [`crate::state::PlanState`]'s overlay, so the next
+    /// `Condition::BufferHas` against that tile sees what is really left. It
+    /// is also what makes a partial withdrawal *terminate* -- the leftover
+    /// `Have` subgoal `Withdraw` emits would otherwise come straight back to
+    /// `Withdraw`, find the buffer still full, and expand into itself until
+    /// the depth guard fired.
+    ///
+    /// **There is no `BufferGain`.** Nothing this planner emits puts items
+    /// into a buffer *and expects a later goal to count them* -- `smelt_steps`
+    /// inserts ore and takes plates inside one method, holding both action ids
+    /// and stating the edge itself. A `BufferGain` would exist only to make
+    /// that edge inferable, which it already is by other means, and would then
+    /// sit in the enum unpaired with anything. Stage 2's chest handover is
+    /// where it earns its place; it can be added then, with the method that
+    /// needs it.
+    BufferLose {
         pos: Position,
         item: ItemId,
         count: u32,
@@ -267,6 +326,7 @@ impl Effect {
             Effect::ConsumeResource { pos, item, count } => {
                 state.consume_resource(pos, item, *count)
             }
+            Effect::BufferLose { pos, item, count } => state.take_from_buffer(pos, item, *count),
             Effect::Researched(tech) => {
                 state.set_researched(tech);
                 Ok(())

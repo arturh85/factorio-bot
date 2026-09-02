@@ -13,6 +13,26 @@ pub enum PlannerError {
         available: u32,
     },
 
+    /// A plan tried to take more out of a buffer than the plan itself believes
+    /// is in there.
+    ///
+    /// **A fault, not a verdict.** It says nothing about the world: it says
+    /// two parts of one expansion counted the same items towards themselves,
+    /// which is `InsufficientItems`' defect in the other ledger. The game
+    /// catching the same thing at dispatch is a *different*, real failure --
+    /// somebody emptied the chest between planning and walking there -- and
+    /// that one surfaces as a refused `Remove`, because the mod complains when
+    /// it moves fewer items than asked and `judge_transfer_reply` reads any
+    /// complaint as failure.
+    #[error("the buffer at {position} holds {available} {item}, and the plan wants {required}")]
+    #[diagnostic(code(planner::buffer_short))]
+    BufferShort {
+        item: ItemId,
+        position: String,
+        required: u32,
+        available: u32,
+    },
+
     #[error("no bot {0:?} in this plan state")]
     #[diagnostic(code(planner::unknown_bot))]
     UnknownBot(BotId),

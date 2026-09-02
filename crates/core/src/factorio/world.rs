@@ -4,9 +4,9 @@ use crate::graph::entity_graph::EntityGraph;
 use crate::graph::flow_graph::FlowGraph;
 use crate::types::{
     ActionId, FactorioEntity, FactorioEntityPrototype, FactorioForce, FactorioGraphic,
-    FactorioItemPrototype, FactorioPlayer, FactorioRecipe, FactorioTile,
+    FactorioItemPrototype, FactorioPlayer, FactorioRecipe, FactorioTile, InventoryResponse,
     PlayerChangedDistanceEvent, PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent,
-    PlayerId, Position,
+    PlayerId, Pos, Position,
 };
 use dashmap::DashMap;
 use image::RgbaImage;
@@ -203,6 +203,73 @@ impl PlacementRefusals {
     }
 }
 
+/// What a container or machine was last observed to be holding.
+///
+/// # Why this is not a field on the stored [`FactorioEntity`]
+///
+/// `FactorioEntity` already carries `output_inventory` and `fuel_inventory`,
+/// and the entity graph already stores a `FactorioEntity` per entity — so the
+/// obvious place for this is "refresh the stored entity". It is the wrong
+/// place, for two reasons that are both about
+/// [`EntityGraph`](crate::graph::entity_graph::EntityGraph) rather than about
+/// inventories:
+///
+/// * `EntityGraph::add` **refuses** an entity when something is already at
+///   that position (it warns `failed to add ... blocked by ...` and skips), so
+///   a refresh cannot simply re-add. It would have to remove first.
+/// * `EntityGraph::remove` clears every `blocked_tree` box that *intersects*
+///   the entity's bounding box, not only the entity's own, and every
+///   `entity_tree` entry of the same name in that box. That over-removal is
+///   tolerable once, when the game really did destroy something; paid on
+///   every replan by a refresh loop it would quietly erode the planner's
+///   model of what ground is occupied.
+///
+/// So contents live beside the graph rather than inside it. The split is also
+/// the honest one: the graph models **geometry**, which changes when something
+/// is built or destroyed, and this models **contents**, which change
+/// continuously. They have different refresh rates and different truth
+/// horizons, and giving them one home would give them one staleness story.
+///
+/// # Snake-cased counts, not the wire shape
+///
+/// The game reports `Vec<InventoryItemWithQuality>`; this keeps a
+/// `BTreeMap<item, count>` with quality summed away, exactly as
+/// [`FactorioWorld::player_changed_main_inventory`] does for a player. Both
+/// readers ask "how much of X is in there", nothing here reasons about
+/// quality, and a map answers that without a linear scan. Ordered, so a
+/// caller that iterates gets the same order every time.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ObservedInventory {
+    /// The entity's name, as the query named it. Kept so a reader can check
+    /// that the thing standing here now is still the thing these contents
+    /// were read out of — a position alone cannot say that.
+    pub name: String,
+    /// The centre the contents were read at, unrounded. [`Pos`] is the key and
+    /// floors; this is what the reading was actually taken at.
+    pub position: Position,
+    /// `LuaEntity::get_output_inventory()`: a chest's whole inventory, a
+    /// furnace's result slot, an assembler's output slot.
+    pub output: BTreeMap<String, u32>,
+    /// `LuaEntity::get_fuel_inventory()`.
+    pub fuel: BTreeMap<String, u32>,
+}
+
+impl ObservedInventory {
+    /// Sums an inventory reply's item list by name, discarding quality.
+    fn fold(items: &Option<Vec<crate::types::InventoryItemWithQuality>>) -> BTreeMap<String, u32> {
+        let mut out: BTreeMap<String, u32> = BTreeMap::new();
+        for item in items.iter().flatten() {
+            *out.entry(item.name.clone()).or_insert(0) += item.count;
+        }
+        out
+    }
+
+    /// True when the entity holds nothing at all in either inventory.
+    pub fn is_empty(&self) -> bool {
+        self.output.is_empty() && self.fuel.is_empty()
+    }
+}
+
 pub struct FactorioWorld {
     pub players: DashMap<PlayerId, FactorioPlayer>,
     pub forces: DashMap<String, FactorioForce>,
@@ -256,6 +323,42 @@ pub struct FactorioWorld {
     /// ever carries what the model cannot see, and an unexplained obstruction
     /// is not something a clock can talk us out of. Forgetting it immediately
     /// is the behaviour that cost four runs.
+    /// What each container and machine was last observed to be holding,
+    /// keyed by the tile its centre sits on.
+    ///
+    /// # Pull, not push, and why there is no event to listen to
+    ///
+    /// Nothing writes here on its own. Factorio raises no event for "a
+    /// chest's contents changed" that a mod could cheaply subscribe to, and
+    /// the one event this crate does receive that carries an inventory —
+    /// `on_some_entity_created`, through
+    /// [`FactorioWorld::on_some_entity_created`] — describes an entity at the
+    /// instant it was built, which for a chest or a furnace means an empty
+    /// one. `on_some_entity_updated` is not the missing channel either: the
+    /// mod raises it from exactly one subscription,
+    /// `defines.events.on_player_rotated_entity`, so it fires when something
+    /// turns and never when something is filled.
+    ///
+    /// So contents are **asked for** — one `inventory_contents_at` RCON call
+    /// naming the entities a caller cares about — and the answer is written
+    /// here. That makes staleness bounded by the caller's own choice of when
+    /// to ask, rather than by an event that may never come.
+    ///
+    /// # Deterministic to read
+    ///
+    /// A `DashMap` iterates in hash order, which moves with the hash seed.
+    /// Every reader must go through [`FactorioWorld::observed_inventories`],
+    /// which sorts by [`Pos`]; `crates/planner` reads it exactly once per
+    /// plan, in [`PlanState::from_world`], and keys it into a `BTreeMap`.
+    ///
+    /// # Forgotten when the entity goes
+    ///
+    /// [`FactorioWorld::on_some_entity_deleted`] clears the entry. A mined
+    /// furnace hands its contents to whoever mined it, so leaving the reading
+    /// standing would report items that are now in a player's pocket as
+    /// still sitting on the ground — and a later build on that same tile
+    /// would inherit them.
+    pub inventories: DashMap<Pos, ObservedInventory>,
     pub placement_refusals: SyncMutex<PlacementRefusals>,
 }
 
@@ -348,9 +451,84 @@ impl FactorioWorld {
         Ok(())
     }
 
+    /// Still a no-op, and **deliberately not the channel container contents
+    /// arrive on**.
+    ///
+    /// The mod raises this from exactly one subscription --
+    /// `script.on_event(defines.events.on_player_rotated_entity,
+    /// on_some_entity_updated)` in `mods/BotBridge/control.lua` -- so it fires
+    /// when a player turns an entity and at no other time. Its payload does
+    /// carry `output_inventory` and `fuel_inventory` (`serialize_entity`
+    /// includes both for every entity), which makes it look like the place to
+    /// learn what a chest holds; it is not, because a chest nobody rotates
+    /// never produces one.
+    ///
+    /// Buffer contents are pulled instead, into
+    /// [`FactorioWorld::inventories`]. See that field for why there is no
+    /// event to push them.
+    ///
+    /// The direction the original TODO names is still not applied. Doing so
+    /// means replacing the stored entity, which
+    /// [`FactorioWorld::observe_inventories`]'s own doc explains is not free
+    /// on this `EntityGraph`; it is left as it was rather than half-done.
     pub fn on_some_entity_updated(&self, _entity: FactorioEntity) -> Result<()> {
         // TODO: update entity direction
         Ok(())
+    }
+
+    /// Records what the game just said each of these entities is holding.
+    ///
+    /// The argument is the reply shape of
+    /// [`FactorioRcon::inventory_contents_at`](crate::factorio::rcon::FactorioRcon::inventory_contents_at)
+    /// verbatim, so a caller hands the answer straight over without
+    /// reshaping it -- and so nothing between the game and this map can
+    /// disagree about what was asked for.
+    ///
+    /// **An entity the game did not answer for is not overwritten here.** The
+    /// mod's `rcon_inventory_contents_at` skips a position where
+    /// `surface.find_entity(name, position)` finds nothing, so a query for
+    /// five entities can come back with three, and the two missing ones say
+    /// "not found", not "empty". Erasing them would turn a failed *lookup*
+    /// into an observation of emptiness -- exactly the confusion this
+    /// codebase has paid for elsewhere. A caller that knows an entity is gone
+    /// says so through [`FactorioWorld::forget_inventory`] or by deleting the
+    /// entity.
+    ///
+    /// An entity that answers with *empty* inventories is recorded as empty,
+    /// which is a real observation and different from silence.
+    pub fn observe_inventories(&self, replies: Vec<InventoryResponse>) {
+        for reply in replies {
+            let observed = ObservedInventory {
+                name: reply.name,
+                position: reply.position,
+                output: ObservedInventory::fold(&reply.output_inventory),
+                fuel: ObservedInventory::fold(&reply.fuel_inventory),
+            };
+            self.inventories
+                .insert(Pos::from(&observed.position), observed);
+        }
+    }
+
+    /// Every inventory reading this world holds, ordered by tile.
+    ///
+    /// The only way to read [`FactorioWorld::inventories`] -- the map itself
+    /// iterates in hash order, and `crates/planner` is required to be
+    /// deterministic, so the sort belongs here where every reader gets it
+    /// rather than in each reader.
+    pub fn observed_inventories(&self) -> Vec<(Pos, ObservedInventory)> {
+        let mut out: Vec<(Pos, ObservedInventory)> = self
+            .inventories
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// Drops the reading for whatever stood on this tile. Returns whether
+    /// there was one.
+    pub fn forget_inventory(&self, position: &Position) -> bool {
+        self.inventories.remove(&Pos::from(position)).is_some()
     }
 
     pub fn on_some_entity_created(&self, entity: FactorioEntity) -> Result<()> {
@@ -365,6 +543,11 @@ impl FactorioWorld {
     }
 
     pub fn on_some_entity_deleted(&self, entity: FactorioEntity) -> Result<()> {
+        // Whatever it was holding went with it. A mined furnace hands its
+        // contents to whoever mined it, so a reading left standing here would
+        // report items now in a player's pocket as still sitting on the
+        // ground -- and the next thing built on this tile would inherit them.
+        self.forget_inventory(&entity.position);
         self.entity_graph.remove(&entity)?;
         Ok(())
     }
@@ -501,6 +684,7 @@ impl FactorioWorld {
             entity_graph,
             flow_graph,
             teleports: SyncMutex::new(Vec::new()),
+            inventories: DashMap::new(),
             placement_refusals: SyncMutex::new(PlacementRefusals::default()),
         }
     }
@@ -773,6 +957,7 @@ impl<'de> Deserialize<'de> for FactorioWorld {
                     entity_graph,
                     flow_graph,
                     teleports: Default::default(),
+                    inventories: Default::default(),
                     placement_refusals: Default::default(),
                 })
             }
@@ -815,6 +1000,11 @@ impl Clone for FactorioWorld {
             // empty queue rather than duplicating in-flight teleports across
             // two independent recorders.
             teleports: SyncMutex::new(Vec::new()),
+            // Knowledge, like `placement_refusals` below and for the same
+            // reason: what a chest was last seen holding does not stop being
+            // our best reading because the world was cloned. Stale in exactly
+            // the same way and to exactly the same degree as the original.
+            inventories: self.inventories.clone(),
             // Knowledge, not a queue -- and knowledge about the *game*, which
             // a clone of our belief about it does not stop being true of. A
             // clone that started blank would hand the planner back exactly
@@ -854,6 +1044,7 @@ mod tests {
             path_requests: Default::default(),
             next_action_id: Default::default(),
             teleports: Default::default(),
+            inventories: Default::default(),
             placement_refusals: Default::default(),
             entity_graph: Arc::new(EntityGraph::new(
                 Arc::new(DashMap::new()),
@@ -866,5 +1057,174 @@ mod tests {
         };
 
         let _cloned = world.clone();
+    }
+
+    fn reply(name: &str, position: Position, output: &[(&str, u32)]) -> InventoryResponse {
+        InventoryResponse {
+            name: name.into(),
+            position,
+            output_inventory: Box::new(Some(
+                output
+                    .iter()
+                    .map(|(item, count)| crate::types::InventoryItemWithQuality {
+                        name: (*item).into(),
+                        quality: "normal".into(),
+                        count: *count,
+                    })
+                    .collect(),
+            )),
+            fuel_inventory: Box::new(None),
+        }
+    }
+
+    #[test]
+    fn an_observed_inventory_sums_quality_away_and_reads_back_by_tile() {
+        let world = FactorioWorld::new();
+        world.observe_inventories(vec![InventoryResponse {
+            name: "stone-furnace".into(),
+            position: Position::new(-40.5, 12.5),
+            output_inventory: Box::new(Some(vec![
+                crate::types::InventoryItemWithQuality {
+                    name: "iron-plate".into(),
+                    quality: "normal".into(),
+                    count: 4,
+                },
+                // The same item at another quality. Nothing here reasons about
+                // quality, so four and three plates are seven plates.
+                crate::types::InventoryItemWithQuality {
+                    name: "iron-plate".into(),
+                    quality: "uncommon".into(),
+                    count: 3,
+                },
+            ])),
+            fuel_inventory: Box::new(None),
+        }]);
+
+        let observed = world.observed_inventories();
+        assert_eq!(observed.len(), 1);
+        // `Pos` floors, and the reading keeps the unrounded centre alongside
+        // it -- a resource-position bug in miniature, and the reason
+        // `ObservedInventory::position` exists at all.
+        assert_eq!(observed[0].0, Pos(-41, 12));
+        assert_eq!(observed[0].1.position, Position::new(-40.5, 12.5));
+        assert_eq!(observed[0].1.output.get("iron-plate").copied(), Some(7));
+    }
+
+    #[test]
+    fn observed_inventories_come_back_in_tile_order() {
+        let world = FactorioWorld::new();
+        // Inserted in an order that is neither sorted nor reverse-sorted, so a
+        // `DashMap` iteration that happened to be right once cannot pass this.
+        for (x, y) in [(5., 5.), (-3., 9.), (5., -1.), (-3., -1.)] {
+            world.observe_inventories(vec![reply(
+                "stone-furnace",
+                Position::new(x, y),
+                &[("iron-plate", 1)],
+            )]);
+        }
+        let keys: Vec<Pos> = world
+            .observed_inventories()
+            .into_iter()
+            .map(|(pos, _)| pos)
+            .collect();
+        assert_eq!(keys, vec![Pos(-3, -1), Pos(-3, 9), Pos(5, -1), Pos(5, 5)]);
+        for _ in 0..20 {
+            let again: Vec<Pos> = world
+                .observed_inventories()
+                .into_iter()
+                .map(|(pos, _)| pos)
+                .collect();
+            assert_eq!(keys, again, "the order is the tile order, every time");
+        }
+    }
+
+    #[test]
+    fn a_second_reading_replaces_the_first() {
+        let world = FactorioWorld::new();
+        let at = Position::new(3., 4.);
+        world.observe_inventories(vec![reply(
+            "stone-furnace",
+            at.clone(),
+            &[("iron-plate", 9)],
+        )]);
+        world.observe_inventories(vec![reply(
+            "stone-furnace",
+            at.clone(),
+            &[("iron-plate", 2)],
+        )]);
+        assert_eq!(
+            world.observed_inventories()[0]
+                .1
+                .output
+                .get("iron-plate")
+                .copied(),
+            Some(2),
+            "a reading is what the game last said, not a running total"
+        );
+    }
+
+    #[test]
+    fn an_entity_that_answered_empty_is_recorded_as_empty() {
+        let world = FactorioWorld::new();
+        world.observe_inventories(vec![InventoryResponse {
+            name: "stone-furnace".into(),
+            position: Position::new(0., 0.),
+            output_inventory: Box::new(Some(vec![])),
+            fuel_inventory: Box::new(None),
+        }]);
+        let observed = world.observed_inventories();
+        assert_eq!(observed.len(), 1, "an empty answer is still an answer");
+        assert!(observed[0].1.is_empty());
+    }
+
+    /// Deleting the entity forgets what was in it.
+    ///
+    /// A mined furnace hands its contents to whoever mined it. A reading left
+    /// standing would report items now in a player's pocket as still sitting
+    /// on the ground -- and the next thing built on that tile would inherit
+    /// them.
+    #[test]
+    fn deleting_an_entity_forgets_its_contents() {
+        let world = FactorioWorld::new();
+        let at = Position::new(6., 6.);
+        let furnace = FactorioEntity::new_stone_furnace(&at, crate::types::Direction::North);
+        world
+            .on_some_entity_created(furnace.clone())
+            .expect("a furnace");
+        world.observe_inventories(vec![reply(
+            "stone-furnace",
+            at.clone(),
+            &[("iron-plate", 5)],
+        )]);
+        assert_eq!(world.observed_inventories().len(), 1);
+
+        world.on_some_entity_deleted(furnace).expect("mined away");
+        assert!(
+            world.observed_inventories().is_empty(),
+            "the contents went with the entity"
+        );
+    }
+
+    /// A clone carries the readings, like `placement_refusals` and unlike
+    /// `teleports`.
+    #[test]
+    fn a_clone_keeps_what_it_last_saw_in_a_buffer() {
+        let world = FactorioWorld::new();
+        world.observe_inventories(vec![reply(
+            "stone-furnace",
+            Position::new(1., 1.),
+            &[("copper-plate", 3)],
+        )]);
+        let cloned = world.clone();
+        assert_eq!(
+            cloned.observed_inventories()[0]
+                .1
+                .output
+                .get("copper-plate")
+                .copied(),
+            Some(3),
+            "a reading is knowledge about the game, and cloning our belief \
+             about the game does not make it untrue"
+        );
     }
 }

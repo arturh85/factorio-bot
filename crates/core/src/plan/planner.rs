@@ -1,7 +1,8 @@
 #[cfg_attr(test, mockall_double::double)]
 use crate::factorio::rcon::FactorioRcon;
 use crate::factorio::world::FactorioWorld;
-use crate::types::{EntityName, PlayerChangedMainInventoryEvent};
+use crate::types::{EntityName, PlayerChangedMainInventoryEvent, Pos, Position, RequestEntity};
+use miette::Result;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -35,8 +36,34 @@ use std::sync::Arc;
 /// [`Planner::update_plan_world`] are kept only because `lua_runner` still
 /// names them (see the tests below, which pin the aliasing so the deep copy
 /// cannot creep back); they are a rename away from being retired.
+/// The entity names a plan may take materials back out of.
+///
+/// # Why a whitelist, and why it is here rather than in the planner
+///
+/// This is the answer to "what counts as a buffer", and it is the whole of it:
+/// `crates/planner` believes whatever contents this world holds, so the set of
+/// entities the game is ever *asked* about is the set the planner can ever
+/// withdraw from. One list, in the code that issues the query.
+///
+/// It is not "every container in the world", which would be more useful and
+/// would also invite the roster to empty a chest a person put there on
+/// purpose. It is not "containers this plan filled" either -- that is
+/// unimplementable across the boundary that matters, because a replan builds a
+/// fresh `PlanState` with no memory of the plan before it, and the stranded
+/// items this exists to recover are stranded by exactly that discontinuity.
+///
+/// What it is: **the entities this planner builds and unloads itself**. Today
+/// that is one, `stone-furnace`, because `method::have::smelt_steps` is the
+/// only thing that places a container-like entity and takes items back out of
+/// it. A furnace's *result* slot is also the least ambiguous inventory in the
+/// game to help yourself from: nobody stores things there, so anything in it
+/// was smelted by whoever's plan put the ore in.
+///
+/// Add `iron-chest` here when the chest handover lands, and nothing else
+/// without saying why.
+pub const BUFFER_ENTITIES: [&str; 1] = ["stone-furnace"];
+
 pub struct Planner {
-    #[allow(dead_code)]
     pub rcon: Option<Arc<FactorioRcon>>,
     pub real_world: Arc<FactorioWorld>,
     /// The same world as [`Planner::real_world`], not a copy of it. See the
@@ -69,6 +96,100 @@ impl Planner {
     /// The world to query. Live, and the only one.
     pub fn world(&self) -> Arc<FactorioWorld> {
         self.real_world.clone()
+    }
+
+    /// Ask the game what is standing in every buffer it knows about, and put
+    /// the answers where the planner will read them.
+    ///
+    /// Answers how many entities were asked about, which is `0` when there is
+    /// no RCON connection (the `--clients 0` planning mode) or when the world
+    /// knows of no buffer yet.
+    ///
+    /// # Why this is a pull, and when to pull
+    ///
+    /// There is no event to subscribe to. Factorio raises none for "a chest's
+    /// contents changed"; the mod's `on_some_entity_updated` fires only on
+    /// `on_player_rotated_entity`, and `on_some_entity_created` describes a
+    /// container at the instant it was built, which is an empty one. So
+    /// contents are asked for, and the right moment to ask is **immediately
+    /// before planning**: staleness is then bounded by the plan's own
+    /// dispatch delay rather than by an event that may never come.
+    ///
+    /// One RCON round trip per call, naming only the entities in
+    /// [`BUFFER_ENTITIES`] that the entity graph already knows about --
+    /// typically a few dozen furnaces over a whole run.
+    ///
+    /// # Staleness is not eliminated, and is not pretended away
+    ///
+    /// A reading taken now is stale by the time a bot has walked there. The
+    /// planner's overlay stops *this* plan double-counting a buffer
+    /// (`PlanState::take_from_buffer`), and nothing can stop somebody else
+    /// emptying it in the meantime. That case fails honestly, at the game and
+    /// by an existing mechanism: `rcon_remove_from_inventory` complains when
+    /// it moves fewer items than asked, `complain` writes into the RCON reply
+    /// body, and `judge_transfer_reply` reads a non-empty body as a failed
+    /// action. A short withdrawal is therefore a failed action with the
+    /// numbers in it, not a silently short one.
+    ///
+    /// # An entity the game does not answer for keeps its old reading
+    ///
+    /// See [`FactorioWorld::observe_inventories`]. The mod skips a position
+    /// where `surface.find_entity` finds nothing, so a query for five can come
+    /// back with three, and the two missing ones mean "not found" rather than
+    /// "empty". `PlanState::from_world` is what notices that the entity is
+    /// gone, by checking the entity graph -- which is fed by
+    /// `on_some_entity_deleted`, and which also clears the reading.
+    ///
+    /// # Failure
+    ///
+    /// The error is returned rather than swallowed, because a caller that
+    /// wants to plan anyway can, and one that wants to stop can too. Planning
+    /// against readings that failed to refresh is *not* unsafe -- it is the
+    /// same staleness the paragraph above describes, one round trip further
+    /// out -- so warn and carry on is a defensible choice; making it here for
+    /// everybody is not.
+    pub async fn refresh_buffers(&self) -> Result<usize> {
+        let Some(rcon) = self.rcon.as_ref() else {
+            return Ok(0);
+        };
+        // Deduplicated by tile and ordered by it. The entity graph is a
+        // petgraph whose node order is an artefact of insertion, and while
+        // nothing downstream reads the request order today, a request built in
+        // a different order every call is the kind of thing that makes a
+        // difference show up somewhere else later.
+        let mut wanted: BTreeMap<Pos, RequestEntity> = BTreeMap::new();
+        for node in self.real_world.entity_graph.inner_graph().node_weights() {
+            if !BUFFER_ENTITIES.contains(&node.entity_name.as_str()) {
+                continue;
+            }
+            wanted.insert(
+                Pos::from(&node.position),
+                RequestEntity {
+                    name: node.entity_name.clone(),
+                    position: node.position.clone(),
+                },
+            );
+        }
+        if wanted.is_empty() {
+            return Ok(0);
+        }
+        let asked = wanted.len();
+        let replies = rcon
+            .inventory_contents_at(wanted.into_values().collect())
+            .await?;
+        self.real_world
+            .observe_inventories(replies.into_iter().flatten().collect());
+        Ok(asked)
+    }
+
+    /// Forget what was in whatever stood at `position`.
+    ///
+    /// For a caller that knows an entity is gone without the game having said
+    /// so through `on_some_entity_deleted` -- a bot that mined it, above all.
+    /// Kept beside [`Planner::refresh_buffers`] so that both halves of "what
+    /// the planner believes about containers" are reachable from one place.
+    pub fn forget_buffer(&self, position: &Position) -> bool {
+        self.real_world.forget_inventory(position)
     }
 
     /// The bots a run may actually plan for: the ids in `1..=bot_count` the
@@ -168,7 +289,7 @@ impl Planner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{PlayerChangedPositionEvent, Position};
+    use crate::types::{InventoryResponse, PlayerChangedPositionEvent, Position};
 
     fn moved_to(player_id: u8, x: f64, y: f64) -> PlayerChangedPositionEvent {
         PlayerChangedPositionEvent {
@@ -357,5 +478,137 @@ mod tests {
                 .copied(),
             Some(1)
         );
+    }
+
+    fn furnace_at(x: f64, y: f64) -> crate::types::FactorioEntity {
+        crate::types::FactorioEntity::new_stone_furnace(
+            &Position::new(x, y),
+            crate::types::Direction::North,
+        )
+    }
+
+    fn reply(name: &str, position: Position, item: &str, count: u32) -> InventoryResponse {
+        InventoryResponse {
+            name: name.into(),
+            position,
+            output_inventory: Box::new(Some(vec![crate::types::InventoryItemWithQuality {
+                name: item.into(),
+                quality: "normal".into(),
+                count,
+            }])),
+            fuel_inventory: Box::new(None),
+        }
+    }
+
+    /// The refresh asks the game about the buffers the world knows, and puts
+    /// the answers where the planner reads them.
+    #[tokio::test]
+    async fn refreshing_buffers_asks_about_every_known_furnace_and_stores_the_reply() {
+        let world = Arc::new(FactorioWorld::new());
+        world
+            .on_some_entity_created(furnace_at(10., 10.))
+            .expect("a furnace");
+        world
+            .on_some_entity_created(furnace_at(20., 20.))
+            .expect("another furnace");
+
+        let mut rcon = FactorioRcon::default();
+        rcon.expect_inventory_contents_at()
+            .times(1)
+            .returning(|entities| {
+                // Ordered by tile, deduplicated, and carrying exactly the two
+                // furnaces the graph knows about.
+                assert_eq!(
+                    entities
+                        .iter()
+                        .map(|e| (e.name.clone(), e.position.x, e.position.y))
+                        .collect::<Vec<_>>(),
+                    vec![
+                        ("stone-furnace".to_string(), 10., 10.),
+                        ("stone-furnace".to_string(), 20., 20.),
+                    ]
+                );
+                Ok(vec![Some(reply(
+                    "stone-furnace",
+                    Position::new(10., 10.),
+                    "iron-plate",
+                    7,
+                ))])
+            });
+
+        let planner = Planner::new(world.clone(), Some(Arc::new(rcon)));
+        assert_eq!(planner.refresh_buffers().await.expect("the query runs"), 2);
+
+        let observed = world.observed_inventories();
+        assert_eq!(observed.len(), 1, "only the entity that answered is stored");
+        assert_eq!(observed[0].1.output.get("iron-plate").copied(), Some(7));
+        // The furnace that did not answer is *not* recorded as empty: a
+        // missing reply is a failed lookup, not an observation of nothing.
+        assert!(world.inventories.get(&Pos(20, 20)).is_none());
+    }
+
+    /// A run with no game behind it asks nothing and reports so.
+    ///
+    /// `--clients 0` plans against invented players and has no RCON. Returning
+    /// an error there would make the planning-only mode unusable; returning
+    /// zero says truthfully that nothing was refreshed.
+    #[tokio::test]
+    async fn refreshing_buffers_without_rcon_asks_nothing() {
+        let world = Arc::new(FactorioWorld::new());
+        world
+            .on_some_entity_created(furnace_at(10., 10.))
+            .expect("a furnace");
+        let planner = Planner::new(world, None);
+        assert_eq!(
+            planner.refresh_buffers().await.expect("no rcon, no error"),
+            0
+        );
+    }
+
+    /// Only [`BUFFER_ENTITIES`] are asked about.
+    ///
+    /// This is the whole of the "what counts as a buffer" decision, so it is
+    /// pinned rather than left to the constant's doc comment: a chest a person
+    /// placed is never asked about, so the planner can never withdraw from it.
+    #[tokio::test]
+    async fn a_container_that_is_not_a_buffer_entity_is_never_asked_about() {
+        let world = Arc::new(FactorioWorld::new());
+        world
+            .on_some_entity_created(crate::types::FactorioEntity {
+                name: "wooden-chest".into(),
+                entity_type: "container".into(),
+                position: Position::new(5., 5.),
+                bounding_box: crate::factorio::util::add_to_rect(
+                    &crate::types::Rect::from_wh(0.7, 0.7),
+                    &Position::new(5., 5.),
+                ),
+                ..Default::default()
+            })
+            .expect("somebody put a chest down");
+        // With RCON present, so that the whitelist is really what stops the
+        // query rather than the absence of a connection. `times(0)` is the
+        // assertion: a chest a person put down is never even asked about.
+        let mut rcon = FactorioRcon::default();
+        rcon.expect_inventory_contents_at().times(0);
+        let planner = Planner::new(world, Some(Arc::new(rcon)));
+        assert_eq!(
+            planner.refresh_buffers().await.expect("nothing to ask"),
+            0,
+            "a wooden chest is not a buffer, so there is nothing to ask about"
+        );
+
+        // The discriminating half: with a furnace present the same world
+        // *would* have something to ask about, so the zero above is really
+        // about the chest and not about the graph being empty.
+        let world = Arc::new(FactorioWorld::new());
+        world
+            .on_some_entity_created(furnace_at(5., 5.))
+            .expect("a furnace");
+        let mut rcon = FactorioRcon::default();
+        rcon.expect_inventory_contents_at()
+            .times(1)
+            .returning(|_| Ok(vec![]));
+        let planner = Planner::new(world, Some(Arc::new(rcon)));
+        assert_eq!(planner.refresh_buffers().await.expect("the query runs"), 1);
     }
 }

@@ -1,3 +1,4 @@
+use crate::action::InventorySlot;
 use crate::error::PlannerError;
 use crate::goal::Holder;
 use crate::ids::{BotId, ChainId, ItemId};
@@ -352,6 +353,74 @@ fn same_runner(a: Option<ClaimRunner>, b: Option<ClaimRunner>) -> bool {
     matches!((a, b), (Some(x), Some(y)) if x == y)
 }
 
+/// A container or machine the world has reported contents for, and which the
+/// plan may therefore take those contents out of.
+///
+/// # What counts as a buffer, and where that is decided
+///
+/// **Not here.** This crate believes whatever
+/// [`FactorioWorld::observed_inventories`] tells it, minus two checks it can
+/// make locally (below). The decision about *which* containers the game is
+/// ever asked about belongs to whoever issues the RCON query --
+/// `crates/core`'s `Planner::refresh_buffers` -- because that is the code that
+/// knows whether an entity is one the bots built or one a person put there.
+/// Putting a whitelist in the planner as well would be two policies that can
+/// disagree, and the planner's copy would be the one nobody updates.
+///
+/// The two checks that *are* local, because they are about consistency rather
+/// than policy:
+///
+/// * **The entity is still there, under the same name.** A reading is keyed by
+///   tile, and a tile can be cleared and rebuilt. `from_world` drops a reading
+///   whose position no longer holds an entity of the name the reading was
+///   taken from.
+/// * **The entity has a withdrawable output slot** ([`withdraw_slot`]). A
+///   reading for something with no such slot describes an inventory no
+///   `ActionKind::Remove` this planner emits can address.
+///
+/// # Output only, never fuel
+///
+/// [`ObservedInventory`](factorio_bot_core::factorio::world::ObservedInventory)
+/// carries both `output` and `fuel`, and only `output` reaches here. Coal in a
+/// burning furnace is not a buffer, it is a machine's consumable: taking it
+/// out stalls the furnace the plan may still be waiting on, and the amount
+/// recoverable is a partially-burnt fuel slot rather than a count anybody
+/// planned. The fuel reading is kept in `crates/core` because it is what the
+/// game answered, and dropping data at the boundary is worse than carrying it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Buffer {
+    /// The entity's name, as both the reading and the world agree it is.
+    pub name: String,
+    /// The entity's centre, unrounded -- what an `ActionKind::Remove` must
+    /// name and what a distance is measured to. The `Pos` key floors.
+    pub position: Position,
+    /// Which of the entity's inventories the contents were read out of, and
+    /// so which one a `Remove` has to address.
+    pub slot: InventorySlot,
+    /// What is in it, less whatever this plan has already taken.
+    pub contents: BTreeMap<ItemId, u32>,
+}
+
+/// Which inventory of an entity of this type a plan may withdraw from, if any.
+///
+/// Keyed on the *type* rather than the name, because the type is what decides
+/// which inventory `LuaEntity::get_output_inventory()` returned -- a chest's
+/// whole inventory, a furnace's result slot, an assembler's output slot -- and
+/// the reading in `ObservedInventory::output` came from exactly that call.
+/// Keying on the name would need a table of every container in the game.
+///
+/// `None` for everything else, which is the honest answer rather than a
+/// default: an entity type this does not name is one whose contents no
+/// `ActionKind::Remove` the planner emits knows how to address.
+fn withdraw_slot(entity_type: &str) -> Option<InventorySlot> {
+    match entity_type {
+        "furnace" => Some(InventorySlot::FurnaceResult),
+        "container" | "logistic-container" => Some(InventorySlot::Chest),
+        "assembling-machine" => Some(InventorySlot::AssemblerOutput),
+        _ => None,
+    }
+}
+
 /// The world at a point in a hypothetical plan.
 ///
 /// `base` is shared and never mutated; every difference lives in the overlay
@@ -645,6 +714,42 @@ pub struct PlanState {
     /// Sorted by geometry rather than kept in arrival order, so the field
     /// does not depend on the sequence the game happened to refuse things in.
     refused: Vec<Rect>,
+    /// What the world last saw in each container and machine, **less whatever
+    /// this plan has already taken out of it**, keyed by tile.
+    ///
+    /// The other half of a handover. `smelt_steps` has one bot load a furnace
+    /// and another unload it; if the second bot never arrives and the plan is
+    /// remade, the plates are sitting in that furnace and the ore they came
+    /// from is gone from the ground. Without this field the replan sees an
+    /// empty-handed roster and asks the world to mine ore that no longer
+    /// exists. See [`crate::method::have::Withdraw`], which is the method that
+    /// spends it.
+    ///
+    /// # It is an overlay, and the subtraction is what makes it one
+    ///
+    /// Read once in [`PlanState::from_world`], exactly like `refused` and
+    /// every other field, so purity holds: two `PlanState`s built from the
+    /// same world expand identically. [`PlanState::take_from_buffer`] then
+    /// decrements it as each `Remove` is emitted, so a second goal in the same
+    /// plan cannot count the same plates towards itself -- the shared-
+    /// intermediate defect `reserved` exists for, in a different ledger.
+    ///
+    /// # Ordered, because the order is load-bearing
+    ///
+    /// A `BTreeMap<Pos, _>`, filled from
+    /// [`FactorioWorld::observed_inventories`], which sorts before it hands
+    /// anything over. A buffer overlay iterated in hash order would move
+    /// emission order, which fixes `ActionId` allocation, which fixes
+    /// `schedule`'s `(end, ActionId, BotId)` tie-break -- a correctness bug,
+    /// not a style one.
+    ///
+    /// # Empty in every fixture, and that is the inertness proof
+    ///
+    /// Nothing writes to `FactorioWorld::inventories` unless a caller pulls
+    /// contents over RCON, so every existing test world has none of these and
+    /// `Withdraw` claims nothing. That is why registering a new method ahead
+    /// of `Smelt` and `Mine` moved no makespan.
+    buffers: BTreeMap<Pos, Buffer>,
 }
 
 impl PlanState {
@@ -750,6 +855,43 @@ impl PlanState {
                 .then(a.right_bottom.x.total_cmp(&b.right_bottom.x))
                 .then(a.right_bottom.y.total_cmp(&b.right_bottom.y))
         });
+        // What the world last saw inside each container and machine, kept only
+        // where the reading and the world still agree about what is standing
+        // there. See the `buffers` field for what a buffer is and where the
+        // decision about which ones to observe actually lives.
+        let mut buffers: BTreeMap<Pos, Buffer> = BTreeMap::new();
+        for (tile, observed) in base.observed_inventories() {
+            if observed.output.is_empty() {
+                continue;
+            }
+            // A reading is keyed by tile, and a tile can be cleared and
+            // rebuilt. Believing a reading whose entity is gone -- or whose
+            // entity is now something else -- would plan a `Remove` against
+            // an entity the game will not find, and `EntityAt` would only
+            // catch the first of those two.
+            let Some(entity) = base
+                .entity_graph
+                .entity_at(&observed.position)
+                .and_then(|id| base.entity_graph.entity_by_id(id))
+            else {
+                continue;
+            };
+            if entity.name != observed.name {
+                continue;
+            }
+            let Some(slot) = withdraw_slot(&entity.entity_type) else {
+                continue;
+            };
+            buffers.insert(
+                tile,
+                Buffer {
+                    name: observed.name,
+                    position: observed.position,
+                    slot,
+                    contents: observed.output,
+                },
+            );
+        }
         PlanState {
             base,
             bots: map,
@@ -767,6 +909,7 @@ impl PlanState {
             mining_tile_separation,
             characters,
             refused,
+            buffers,
         }
     }
 
@@ -974,6 +1117,108 @@ impl PlanState {
 
     pub fn set_position(&mut self, id: BotId, position: Position) {
         self.bots.entry(id).or_default().position = position;
+    }
+
+    /// Does this plan know of any buffer at all?
+    ///
+    /// The cheap guard [`crate::method::have::Withdraw::applicable`] asks
+    /// first. Every fixture in this crate, and every world nobody has pulled
+    /// container contents into, answers `false` here -- so the whole
+    /// withdrawal path costs one `BTreeMap::is_empty` on the plans that have
+    /// nothing to withdraw, which is all of them until a caller refreshes.
+    pub fn has_buffers(&self) -> bool {
+        !self.buffers.is_empty()
+    }
+
+    /// How much of `item` the buffer standing on `position`'s tile still
+    /// holds, as far as this plan is concerned.
+    ///
+    /// Zero for a tile with no buffer, which is the same answer as a buffer
+    /// holding none of it -- deliberately, because both mean "nothing to take
+    /// from here" and a caller has `entity_at` if it needs to tell them apart.
+    pub fn buffered(&self, position: &Position, item: &str) -> u32 {
+        self.buffers
+            .get(&Pos::from(position))
+            .and_then(|buffer| buffer.contents.get(item))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Every buffer holding at least one `item`, nearest `from` first.
+    ///
+    /// Ordered by `(distance, x, y, name)` with `total_cmp`, the same total
+    /// order [`PlanState::nearest_supply_anchor`] uses and for the same
+    /// reason: emission order fixes `ActionId` allocation, which fixes
+    /// `schedule`'s `(end, ActionId, BotId)` tie-break. Two buffers equally
+    /// far away must resolve the same way on every run, and a distance alone
+    /// does not do that.
+    ///
+    /// **No radius.** A distant buffer is a longer walk, and `schedule`
+    /// already prices a walk at `WALK_TILES_PER_TICK`; refusing one would
+    /// charge the same distance twice, once as ticks and once as a veto. It
+    /// would also be the more dangerous error: the alternative to withdrawing
+    /// is making the items again, and the whole reason this overlay exists is
+    /// that making them again may be *impossible* -- the ore they came from is
+    /// gone from the ground. Under-withdrawing strands materials permanently;
+    /// over-withdrawing costs a walk. The bound that does exist is which
+    /// containers a caller asked the game about in the first place, and it
+    /// lives there rather than here (see the [`Buffer`] type).
+    pub fn buffers_holding(&self, from: &Position, item: &str) -> Vec<Buffer> {
+        let mut out: Vec<(f64, Buffer)> = self
+            .buffers
+            .values()
+            .filter(|buffer| buffer.contents.get(item).copied().unwrap_or(0) > 0)
+            .map(|buffer| (calculate_distance(&buffer.position, from), buffer.clone()))
+            .collect();
+        out.sort_by(|a, b| {
+            a.0.total_cmp(&b.0)
+                .then(a.1.position.x.total_cmp(&b.1.position.x))
+                .then(a.1.position.y.total_cmp(&b.1.position.y))
+                .then(a.1.name.cmp(&b.1.name))
+        });
+        out.into_iter().map(|(_, buffer)| buffer).collect()
+    }
+
+    /// Spend `count` of `item` out of the buffer on `position`'s tile.
+    ///
+    /// **Fallible, and it must stay fallible.** Taking more than a buffer
+    /// holds is not a rounding question, it is the plan having counted the
+    /// same plates twice -- so it is an error with the numbers in it rather
+    /// than a saturating subtraction that would leave the second `Remove`
+    /// standing in the plan and let the *game* discover the shortfall. The
+    /// game does discover it, and loudly (`rcon_remove_from_inventory`
+    /// complains when it moves fewer items than asked, and
+    /// `judge_transfer_reply` reads any complaint as a failed action) -- but a
+    /// plan that is arithmetically wrong should fail at the planner, not four
+    /// minutes later on a bot that has walked there.
+    pub fn take_from_buffer(
+        &mut self,
+        position: &Position,
+        item: &str,
+        count: u32,
+    ) -> Result<(), PlannerError> {
+        let key = Pos::from(position);
+        let available = self.buffered(position, item);
+        if available < count {
+            return Err(PlannerError::BufferShort {
+                item: item.to_string(),
+                position: position.to_string(),
+                required: count,
+                available,
+            });
+        }
+        let Some(buffer) = self.buffers.get_mut(&key) else {
+            // Unreachable while `available >= count` and `count > 0`; a
+            // zero-count take of a tile with no buffer lands here and is a
+            // no-op, which is the right answer for it.
+            return Ok(());
+        };
+        let entry = buffer.contents.entry(item.to_string()).or_insert(0);
+        *entry -= count;
+        if *entry == 0 {
+            buffer.contents.remove(item);
+        }
+        Ok(())
     }
 
     pub fn entity_at(&self, position: &Position) -> Option<FactorioEntity> {

@@ -356,12 +356,25 @@ export interface RunFramesResponse {
 export interface Lane {
     bot: number;
     /**
-     * The action id. **Not unique across a run** -- ids restart with every
+     * The action id, or `null` for a lane that is not an action.
+     *
+     * **Not unique across a run** when present -- ids restart with every
      * plan, so this identifies an entry only together with `bot` and
      * `from_tick`.
+     *
+     * `null` means the lane has no action id, which today means it is a
+     * **walk**: the scheduler emits a walk as its own step with no action id.
+     * Borrowing the walk's step index for this field would put a number from
+     * a different id space under a name that means action id.
      */
-    id: number;
-    /** What the plan called it, e.g. `mine 4 iron-ore`. */
+    id: number | null;
+    /**
+     * What the plan called it, e.g. `mine 4 iron-ore`.
+     *
+     * A walk has no label anywhere in the plan, so its lane's label is
+     * composed by the server from the destination the schedule asked for --
+     * `walk to (-23.5, 18.5)`.
+     */
     action: string;
     from_tick: number;
     /**
@@ -619,6 +632,58 @@ export interface ActionFailure {
 }
 
 /**
+ * Why a walk did not arrive.
+ *
+ * A separate vocabulary from `FailureKind`: every distinction here is about
+ * the pathfinder, and none of `FailureKind`'s substantive members means
+ * anything for a walk.
+ *
+ * `no_path` against `pathfinder_busy` is the distinction the record exists to
+ * keep. `no_path` means the pathfinder searched and found nothing -- a fact
+ * about the destination that repeating the walk will not change.
+ * `pathfinder_busy` means it never searched (the request queue was full, or
+ * the answer never came), so nothing was learned and asking again is the
+ * right move.
+ */
+export type WalkFailureKind =
+    | 'no_path'
+    | 'pathfinder_busy'
+    /** Re-paths kept succeeding and the bot kept not arriving, until the mod gave up. */
+    | 'repath_limit'
+    /** A leg timed out and the walk was abandoned with no re-path answer to blame. */
+    | 'stalled'
+    /** No verdict ever arrived -- pairs with `status: 'lost'`. */
+    | 'timeout'
+    | 'other';
+
+/**
+ * A structured walk failure, carried *beside* `walk_settled.error` rather
+ * than instead of it: the string is what a person reads, `kind` is what a
+ * query groups by.
+ *
+ * Both positions are **observed**, taken from the message the mod wrote at
+ * the instant it gave up -- not from `on_player_changed_position`, which
+ * fires per tile crossed and so leaves a parked bot's position up to a tile
+ * stale.
+ */
+export interface WalkFailure {
+    kind: WalkFailureKind;
+    /** Where the character actually stood when the mod gave up. `null` when the wording named no position. */
+    from: Position | null;
+    /**
+     * The destination the walk was really steering at: the last waypoint of
+     * the path the *game* returned.
+     *
+     * **Not the same as `walk_settled.to`**, which is what the schedule asked
+     * for. The difference is the whole point of recording it -- an archived
+     * run's three walk failures all have this land strictly inside the
+     * collision box of a furnace the same run had built, up to 1.2 tiles from
+     * the destination that was requested.
+     */
+    destination: Position | null;
+}
+
+/**
  * What happened, tagged by `kind`.
  *
  * Mirrors `factorio_bot_core::record::EventKind`, an internally tagged Rust
@@ -661,7 +726,19 @@ export type EventKind =
           milestone_index: number;
           steps: number;
           makespan: number;
-          bots: number[];
+          /**
+           * The roster the planner expanded this plan against -- every bot it
+           * was allowed to give work to, not the bots it happened to use.
+           * `null` when the caller did not state one.
+           *
+           * Never the bots in the steps (that hides the bot a reader is
+           * asking about) and never the roster the *process* was started with
+           * (that names bots the plan was never made for -- one archived run
+           * says `[1, 2]` for a plan made for `[2]` alone). Only whatever
+           * called the planner knows, so a run whose driver did not say gets
+           * `null` rather than a plausible substitute.
+           */
+          bots: number[] | null;
           /** The steps the planner actually produced, in enough detail to draw the DAG. */
           plan: PlannedStep[];
       }
@@ -685,6 +762,74 @@ export type EventKind =
           error: string | null;
           /** The same failure, classified. `null` on success. */
           failure: ActionFailure | null;
+      }
+    | {
+          /**
+           * A bot was sent walking -- the walking half of
+           * `action_dispatched`, and written only when the game stamped a
+           * dispatch tick for it.
+           *
+           * Walking is most of a run's wall clock, and no walk reached the
+           * event log at all before this variant existed: a run could fail
+           * three walks and leave one `milestone_stuck.last_error` behind,
+           * with the rest only in a server log the next run overwrites.
+           */
+          kind: 'walk_dispatched';
+          bot: number;
+          /**
+           * Which walk this is: its index in **this bot's own slice** of the
+           * schedule, in schedule order.
+           *
+           * A walk has no action id, so `(bot, step_index)` is the only thing
+           * that names one. It is neither an action id nor an index into
+           * `plan_created.plan` (which is indexed over every bot's steps and
+           * omits walks entirely) -- joining it to either produces confident
+           * nonsense.
+           */
+          step_index: number;
+          /**
+           * Where the **schedule** sent the bot. An intent, not an arrival:
+           * no arrival position is recorded, because the only observation of
+           * one is up to a tile stale. It is also routinely a position the
+           * bot cannot stand on -- arrival means within the step's radius of
+           * it, never on it.
+           */
+          to: Position;
+          /**
+           * Plan-relative ticks, **not** a `game.tick` -- the same two clocks
+           * `PlannedStep.planned_start` keeps apart, converted in exactly one
+           * place (`observedOrigin()`).
+           */
+          planned_start: number;
+          /** How long the scheduler expected the walk to take. Carried nowhere else: `plan_created.plan` holds only steps that have an action id. */
+          planned_duration: number;
+      }
+    | {
+          /**
+           * A walk reached a verdict. Every walk that reached one gets
+           * exactly one of these, whether or not the game stamped a tick.
+           *
+           * `failed` and `lost` are never collapsed: `failed` is the game
+           * refusing the walk, `lost` is the game acknowledging it and never
+           * answering -- a bot that may still be walking as far as anyone
+           * knows.
+           */
+          kind: 'walk_settled';
+          bot: number;
+          /** The same `(bot, step_index)` identity as `walk_dispatched`. */
+          step_index: number;
+          /**
+           * Where the schedule sent the bot, repeated here because a walk the
+           * game never acknowledged has no `walk_dispatched` line and a walk
+           * has no label anywhere in the record.
+           */
+          to: Position;
+          status: string;
+          /** `null` when the walk was not timed at both ends -- a duration nobody measured, not a duration of zero. */
+          elapsed_ticks: number | null;
+          error: string | null;
+          /** The same failure, classified. `null` on success. */
+          failure: WalkFailure | null;
       }
     | {kind: 'frame'; bot: number; camera: string; file: string}
     | {

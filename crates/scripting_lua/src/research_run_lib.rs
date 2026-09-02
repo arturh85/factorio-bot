@@ -87,8 +87,19 @@ mod tests {
                 return { steps = steps }
             end
             goal.run = function(_plan)
+                -- `walks` is shaped like the real `obs.walks`
+                -- (`build_observation`, `globals/goal/run.rs`): an array
+                -- keyed by nothing, each entry naming its own
+                -- `(bot, step_index)`, because a walk has no action id to be
+                -- keyed by. One is enough to prove the driver forwards them.
                 return { failed = 0, lost = 0, pending = 0, success = 0,
-                         running = 0, done = true, actions = {} }
+                         running = 0, done = true, actions = {},
+                         walks = { { bot = 1, step_index = 0,
+                                     to = { x = 4.5, y = -2.5 },
+                                     status = "success",
+                                     planned_start = 0, planned_end = 60,
+                                     dispatched_tick = 1000,
+                                     replied_tick = 1180 } } }
             end
 
             __plan_created_calls = {}
@@ -106,6 +117,15 @@ mod tests {
                     { index = index, iterations = iterations, reason = reason })
             end
             record.actions = function(_steps, _actions) return 0 end
+            -- Counts *and keeps* what it was handed: the point of the wiring
+            -- is that the walks of the batch reach the record, so a stub that
+            -- only counted calls would pass against a driver that flushed an
+            -- empty table.
+            __walks_calls = {}
+            record.walks = function(walks)
+                table.insert(__walks_calls, walks)
+                return #walks
+            end
             record.teleports = function() return 0 end
             record.refusals = function() return 0 end
             record.milestone_stuck = function(index, outcome, last_error, best_steps)
@@ -256,6 +276,49 @@ mod tests {
             "record.finish is still called after a raise"
         );
         assert_eq!(finish.get::<String>(1).unwrap(), "crashed");
+    }
+
+    /// **The batch's walks reach the record.**
+    ///
+    /// The driver flushes actions, teleports and refusals once per "ran"
+    /// transition; walks are the fourth, and were missing entirely until
+    /// 2026-09-02 -- a run could fail three walks and leave one `last_error`
+    /// string in its record, with the other two only in
+    /// `workspace/server-log.txt`, which the next run overwrites.
+    ///
+    /// A walk is not an action and is not in `t.actions`: it has no action id,
+    /// so it travels as its own array and gets its own call. This asserts the
+    /// call happened *and* that it carried the walk, because a driver that
+    /// flushed an empty table would satisfy a call count and record nothing.
+    #[test]
+    fn the_batchs_walks_are_flushed_to_the_record_on_every_ran_transition() {
+        // Milestone 1 plans two steps, runs them, then re-plans empty; the
+        // remaining six rungs are satisfied on their first attempt. Exactly
+        // one "ran" transition, so exactly one walk flush.
+        let lua = harness("{2, 0, 0, 0, 0, 0, 0, 0}", "{1, 2}");
+        lua.load(RESEARCH_RUN_LUA)
+            .exec()
+            .expect("research_run.lua runs to completion");
+        let calls: mlua::Table = lua.globals().get("__walks_calls").unwrap();
+        assert_eq!(
+            calls.raw_len(),
+            1,
+            "one executed plan, one flush of its walks"
+        );
+        let walks: mlua::Table = calls.get(1).unwrap();
+        assert_eq!(
+            walks.raw_len(),
+            1,
+            "and the flush carried the observation's walk, not an empty table"
+        );
+        let walk: mlua::Table = walks.get(1).unwrap();
+        assert_eq!(walk.get::<u32>("bot").unwrap(), 1);
+        assert_eq!(
+            walk.get::<u32>("step_index").unwrap(),
+            0,
+            "`(bot, step_index)` is the only thing that names a walk, so both \
+             halves have to survive the hand-off"
+        );
     }
 
     // ---- the roster the run is built with --------------------------------

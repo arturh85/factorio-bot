@@ -96,7 +96,9 @@ import type {
     VideoManifest,
     VideoRecord,
     VideoStatus,
-    VideoTicksResponse
+    VideoTicksResponse,
+    WalkFailure,
+    WalkFailureKind
 } from './types';
 
 interface SchemaObject {
@@ -676,7 +678,9 @@ const SCHEMAS: Record<string, SchemaContract> = {
     }),
     Lane: objectContract<Lane>({
         bot: {required: true, type: 'integer'},
-        id: {required: true, type: 'integer'},
+        // Null for a lane that is not an action -- today, a walk, which the
+        // scheduler emits with no action id at all.
+        id: {required: false, type: 'integer', nullable: true},
         action: {required: true, type: 'string'},
         from_tick: {required: true, type: 'integer'},
         // Null for an action dispatched and never settled -- an unterminated
@@ -801,7 +805,12 @@ const SCHEMAS: Record<string, SchemaContract> = {
             milestone_index: {required: true, type: 'integer'},
             steps: {required: true, type: 'integer'},
             makespan: {required: true, type: 'integer'},
-            bots: {required: true, type: 'array'},
+            // Null when the caller did not state the roster the plan was
+            // expanded against. Nullable rather than always-present because
+            // the two substitutes the field used to carry -- the bots in the
+            // steps, and the roster the process was started with -- were both
+            // wrong, in opposite directions.
+            bots: {required: false, type: 'array', nullable: true},
             plan: {required: false, arrayOf: 'PlannedStep'}
         },
         action_dispatched: {
@@ -817,6 +826,28 @@ const SCHEMAS: Record<string, SchemaContract> = {
             elapsed_ticks: {required: false, type: 'integer', nullable: true},
             error: {required: false, type: 'string', nullable: true},
             failure: {required: false, ref: 'ActionFailure', nullable: true}
+        },
+        // A walk. Two events, on the same terms as the action pair: the
+        // dispatch needs a tick from the game, the settle needs only a
+        // verdict -- a lost walk never has a reply tick, so gating the settle
+        // on one would make `status: 'lost'` unrecordable.
+        walk_dispatched: {
+            bot: {required: true, type: 'integer'},
+            step_index: {required: true, type: 'integer'},
+            to: {required: true, ref: 'Position'},
+            planned_start: {required: true, type: 'integer'},
+            planned_duration: {required: true, type: 'integer'}
+        },
+        walk_settled: {
+            bot: {required: true, type: 'integer'},
+            step_index: {required: true, type: 'integer'},
+            // Repeated from the dispatch: a walk the game never acknowledged
+            // has no dispatch line, and a walk has no label anywhere.
+            to: {required: true, ref: 'Position'},
+            status: {required: true, type: 'string'},
+            elapsed_ticks: {required: false, type: 'integer', nullable: true},
+            error: {required: false, type: 'string', nullable: true},
+            failure: {required: false, ref: 'WalkFailure', nullable: true}
         },
         frame: {
             bot: {required: true, type: 'integer'},
@@ -871,6 +902,28 @@ const SCHEMAS: Record<string, SchemaContract> = {
     ActionFailure: objectContract<ActionFailure>({
         kind: {required: true, ref: 'FailureKind'},
         detail: {required: false, type: 'string', nullable: true}
+    }),
+    // A walk's own failure vocabulary, deliberately not more members on
+    // `FailureKind`: every distinction here is about the pathfinder.
+    // `no_path` (it searched, and there is no way there) and
+    // `pathfinder_busy` (it never searched, so nothing was learned) are the
+    // pair the whole type exists to keep apart.
+    WalkFailureKind: enumContract<WalkFailureKind>({
+        no_path: true,
+        pathfinder_busy: true,
+        repath_limit: true,
+        stalled: true,
+        timeout: true,
+        other: true
+    }),
+    WalkFailure: objectContract<WalkFailure>({
+        kind: {required: true, ref: 'WalkFailureKind'},
+        // Both observed, and both null when the mod's wording named no
+        // position. `destination` is NOT `walk_settled.to`: it is the last
+        // waypoint of the path the game returned, which is what the walk was
+        // really steering at.
+        from: {required: false, ref: 'Position', nullable: true},
+        destination: {required: false, ref: 'Position', nullable: true}
     }),
 
     // -- world-state samples (crates/core/src/record/samples.rs) ----------

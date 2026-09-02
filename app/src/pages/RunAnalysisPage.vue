@@ -13,16 +13,18 @@
 import {computed, onMounted, ref} from 'vue';
 import {useRoute} from 'vue-router';
 import {getRun, getRunEvents, getRunMap, getRunSamples} from '@/api/client';
-import {Event, MapRecord, RunDetail, Sample} from '@/api/types';
+import {Event, MapRecord, Position, RunDetail, Sample} from '@/api/types';
 import {
     DivergenceRow,
     FailureInventory,
     MilestoneRow,
     OutcomeRow,
+    WalkRow,
     divergencesOf,
     inventoryAtFailure,
     joinRunOutcome,
-    milestonesOf
+    milestonesOf,
+    walksOf
 } from '@/lib/runDiff';
 import {boundsAt, entitiesAt} from '@/lib/runMap';
 import {formatTicks} from '@/lib/runTimeline';
@@ -73,6 +75,13 @@ async function load() {
  */
 const outcomes = computed<OutcomeRow[]>(() => joinRunOutcome(events.value));
 
+/**
+ * The walk table. Walking is most of a run's wall clock and none of it was
+ * recorded until 2026-09-02, so this is the half of the schedule the overrun
+ * table above has never been able to cover.
+ */
+const walks = computed<WalkRow[]>(() => walksOf(events.value));
+
 const divergences = computed<DivergenceRow[]>(() => divergencesOf(map.value));
 
 /** Per milestone: its plan, what ran under it (already epoch-scoped), and how it closed. */
@@ -86,6 +95,12 @@ function seekMap(tick: number) {
 
 const mapEntities = computed(() => entitiesAt(map.value, cursor.value));
 const mapBounds = computed(() => boundsAt(map.value, cursor.value));
+
+/** A position as the record states it, at full precision. */
+function formatPosition(position: Position | null): string {
+    if (position === null) return '—';
+    return `(${position.x}, ${position.y})`;
+}
 
 /** A tick delta, signed, or an em dash when there is none to show. */
 function formatDelta(delta: number | null): string {
@@ -135,6 +150,50 @@ function formatDelta(delta: number | null): string {
                             <td class="num">{{ formatDelta(row.delta) }}</td>
                             <td>{{ row.status }}</td>
                             <td>{{ row.failure ? `${row.failure.kind}${row.failure.detail ? ` — ${row.failure.detail}` : ''}` : '—' }}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </section>
+
+            <section class="analysis__section">
+                <h3>Walks</h3>
+                <p v-if="walks.length === 0" class="analysis__empty">
+                    no walks recorded for this run -- a run archived before walk events
+                    existed says nothing here, which is not the same as a run whose bots
+                    never moved
+                </p>
+                <table v-else class="analysis__table">
+                    <thead>
+                        <tr>
+                            <th>milestone</th><th>bot</th><th>step</th><th>destination</th>
+                            <th>planned</th><th>actual</th><th>delta</th><th>status</th>
+                            <th>why</th><th>steered at</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr
+                            v-for="(row, i) in walks"
+                            :key="`${row.milestoneIndex}-${row.bot}-${row.stepIndex}-${i}`"
+                            :class="{'is-never-ran': row.observedDuration === null}"
+                        >
+                            <td class="num">{{ row.milestoneIndex ?? '—' }}</td>
+                            <td class="num">{{ row.bot }}</td>
+                            <!-- The walk's index in this bot's own slice of the
+                                 schedule. NOT an action id and not an index into
+                                 the plan above: joining it to either is nonsense. -->
+                            <td class="num">{{ row.stepIndex }}</td>
+                            <td class="num">{{ formatPosition(row.to) }}</td>
+                            <td class="num">{{ formatTicks(row.plannedDuration) }}</td>
+                            <td class="num">{{ formatTicks(row.observedDuration) }}</td>
+                            <td class="num">{{ formatDelta(row.delta) }}</td>
+                            <td>{{ row.status }}</td>
+                            <td>{{ row.failure ? row.failure.kind : '—' }}</td>
+                            <!-- Where the walk was REALLY steering: the last waypoint
+                                 of the path the game returned, which is not the
+                                 destination the schedule asked for. That difference is
+                                 what three walk failures in one archived run turned out
+                                 to be, and it could only be found in a server log. -->
+                            <td class="num">{{ formatPosition(row.failure?.destination ?? null) }}</td>
                         </tr>
                     </tbody>
                 </table>

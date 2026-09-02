@@ -333,6 +333,14 @@ function Sup:step()
             best = self.tracker.best, stall = self.tracker.stall,
             iteration = self.iterations,
             plan = plan_for_recording,
+            -- The roster the planner actually expanded against, read off the
+            -- plan itself rather than from `self.bots`. It is the field
+            -- `record.plan_created` records, and nothing downstream of here
+            -- can work it out: a driver that left it out got the roster the
+            -- *process* was started with, which is a different set whenever
+            -- fewer bots connected than were asked for. Run 30 recorded
+            -- `bots: [1, 2]` for a plan made for `[2]` alone that way.
+            bots = plan.bots,
         }
 
         -- The stall and the cap mean opposite things and must not share a

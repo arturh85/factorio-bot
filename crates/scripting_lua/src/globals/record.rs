@@ -25,7 +25,7 @@ use factorio_bot_core::record::map::{
 use factorio_bot_core::record::video::Resolution;
 use factorio_bot_core::record::{
     ActionFailure, EventKind, FailureKind, PlannedStep, RunRecorder, SatisfiedReason, VideoOptions,
-    VideoRecorder,
+    VideoRecorder, WalkFailure, WalkFailureKind,
 };
 use factorio_bot_core::types::{AreaFilter, EntityType, PlayerId, Position, Rect};
 use std::collections::BTreeSet;
@@ -395,6 +395,137 @@ fn classify_failure(error: &str) -> ActionFailure {
         .flatten()
         .map(str::to_string);
     ActionFailure { kind, detail }
+}
+
+/// One `(x/y)` pair out of the mod's own `coord()` formatting.
+///
+/// Declines rather than guessing: either both halves parse as numbers or this
+/// returns `None` and the whole message is still in `error` for a person to
+/// read. Nothing here rounds -- a walk destination is routinely a tile centre
+/// like `-22.30078125`, and a position read back at lower precision would land
+/// in a different collision box than the one the walk actually failed against.
+fn parse_coord(text: &str) -> Option<Position> {
+    let (x, y) = text.split_once('/')?;
+    Some(Position::new(
+        x.trim().parse().ok()?,
+        y.trim().parse().ok()?,
+    ))
+}
+
+/// The two **observed** positions BotBridge names when the pathfinder finds no
+/// path: `... found no path from (<x>/<y>) to (<x>/<y>)`.
+///
+/// The first is the character's real position at the instant the mod gave up
+/// (`player.character.position`, not an inference from the last tile boundary
+/// crossed), and the second is the destination the mod was actually steering
+/// to -- the terminal waypoint of the path *the game returned*, which is not
+/// necessarily the `to` the schedule asked for. Both were reconstructed by hand
+/// from `workspace/server-log.txt` to diagnose run 30; this is what puts them
+/// in the run directory instead.
+fn walk_endpoints(error: &str) -> (Option<Position>, Option<Position>) {
+    let Some((_, tail)) = error.split_once("found no path from ") else {
+        return (None, None);
+    };
+    let Some((from, rest)) = tail.strip_prefix('(').and_then(|t| t.split_once(')')) else {
+        return (None, None);
+    };
+    let destination = rest
+        .strip_prefix(" to (")
+        .and_then(|t| t.split_once(')'))
+        .and_then(|(coord, _)| parse_coord(coord));
+    (parse_coord(from), destination)
+}
+
+/// Classifies a settled walk's error text into a [`WalkFailure`].
+///
+/// Matched as plain substrings against BotBridge's `w.stuck` wordings
+/// (`mods/BotBridge/control.lua`) and the outer `ActuatorError` that wraps
+/// them, for the same reason [`classify_failure`] does it that way: this only
+/// ever sees a `String` that already crossed the Lua boundary, and a substring
+/// match degrades to [`WalkFailureKind::Other`] when a wording moves instead of
+/// failing outright.
+///
+/// **The order of the arms is load-bearing between the first two.** A lost walk
+/// is wrapped in `the game reported no readable outcome`, and nothing about the
+/// walk itself is known -- so the timeout is tested before any wording that
+/// would claim knowledge the run does not have.
+fn classify_walk_failure(error: &str) -> WalkFailure {
+    let kind = if error.contains("no action result received in time")
+        || error.contains("no readable outcome")
+    {
+        WalkFailureKind::Timeout
+    } else if error.contains("the destination is unreachable") || error.contains("found no path") {
+        // The pathfinder searched. This is the fact the stuck-walk teleport
+        // used to destroy by hopping over it.
+        WalkFailureKind::NoPath
+    } else if error.contains("refused a re-path request")
+        || error.contains("did not answer a re-path")
+    {
+        // It never searched: `try again later` on a full request queue, or a
+        // request accepted and never answered. Nothing was learned about the
+        // destination, which is the whole reason this is not `NoPath`.
+        WalkFailureKind::PathfinderBusy
+    } else if error.contains("re-paths on one walk") {
+        WalkFailureKind::RepathLimit
+    } else if error.contains("aborted before reaching last waypoint") {
+        WalkFailureKind::Stalled
+    } else {
+        WalkFailureKind::Other
+    };
+    let (from, destination) = walk_endpoints(error);
+    WalkFailure {
+        kind,
+        from,
+        destination,
+    }
+}
+
+/// Reads `record.plan_created`'s optional roster argument.
+///
+/// Three answers, and they are three different things:
+///
+/// - **Absent or `nil`** -> `None`. Nobody said which roster the plan was made
+///   for, so the record says so. It does NOT fall back to the run's own
+///   roster: that fallback is precisely the bug this argument exists to fix,
+///   and a plausible-looking substitute is worse than a null, because a reader
+///   cannot tell it apart from a stated fact.
+/// - **A list of positive integers** -> `Some`, deduplicated and ascending, so
+///   the field's shape does not depend on the order the caller happened to
+///   build its table in.
+/// - **Anything else** -> refused. A roster this cannot read is a construction
+///   error in the caller, and recording `[]` for it would put "this plan was
+///   made for no bots" into the one part of the archive that stays trustworthy
+///   when outcomes do not. `mlua`'s null sentinel is light userdata and
+///   therefore truthy, so the match is on the *value*, never on truthiness.
+fn roster_from_lua(bots: Option<LuaValue>) -> LuaResult<Option<Vec<u32>>> {
+    let value = match bots {
+        None | Some(LuaValue::Nil) => return Ok(None),
+        Some(value) => value,
+    };
+    let LuaValue::Table(table) = value else {
+        return Err(record_error(format!(
+            "record.plan_created: bots must be a table of bot ids, got a {}",
+            value.type_name()
+        )));
+    };
+    let mut roster = BTreeSet::new();
+    for id in table.sequence_values::<LuaValue>() {
+        let id = id?;
+        let id = id
+            .as_integer()
+            .filter(|id| *id > 0)
+            .and_then(|id| u32::try_from(id).ok())
+            .ok_or_else(|| {
+                record_error("record.plan_created: bots must be a list of positive bot ids")
+            })?;
+        roster.insert(id);
+    }
+    if roster.is_empty() {
+        return Err(record_error(
+            "record.plan_created: bots is empty; a plan is always made for at least one bot",
+        ));
+    }
+    Ok(Some(roster.into_iter().collect()))
 }
 
 /// Reads `record.start`'s `video` option.
@@ -812,17 +943,31 @@ end
 -- is `plan`'s length and `makespan` the latest
 -- `planned_start + planned_duration` across every entry (0 for an empty plan).
 --
--- `bots` is the **run's roster**, not the bots the plan happens to name. It
--- was derived from the steps, which made a bot that got no work invisible in
--- the record -- a plan covering one bot out of four recorded `bots: [2]` and
--- read exactly like a run of one bot. "Why did bot 4 do nothing" is a question
--- the record has to be able to answer, and it cannot be asked of a field that
--- omits every bot it is about. The roster comes from the run itself, so a
--- script cannot pass a wrong one.
+-- `bots` is the **roster the plan was expanded against** -- every bot the
+-- planner was allowed to give work to -- and it is the third argument because
+-- nothing else knows it. Pass `plan.bots`.
+--
+-- Two wrong answers have been recorded in this field already, in opposite
+-- directions. Derived from the steps, it made a bot that got no work invisible:
+-- a plan covering one bot out of four recorded `bots: [2]` and read exactly
+-- like a run of one bot, so "why did bot 4 do nothing" could not be asked of
+-- the record at all. Taken from the run's process roster instead, it lies the
+-- other way whenever a script plans with `goal.plan{bots = ...}`: run 30
+-- recorded `bots: [1, 2]` for a plan made for `[2]` alone, claiming a bot had
+-- been offered work it was never offered.
+--
+-- Omit it and the field is recorded as `nil` -- present and null, never
+-- absent, and never quietly replaced by the run's roster. A plan whose roster
+-- nobody stated is a plan whose roster the record does not know, and the
+-- ambient value is a plausible-looking substitute for that rather than a
+-- weaker version of it. A `bots` that is not a list of positive bot ids is
+-- refused outright, for the same reason `record.milestone_satisfied` refuses a
+-- reason it does not recognise.
 -- @number index the milestone's position in the run, from 1
 -- @tparam table plan an array of step tables
--- @raise if no recording is running
-function record.plan_created(index, plan)
+-- @tparam[opt] table bots the roster the plan was made for, i.e. `plan.bots`
+-- @raise if no recording is running, or if `bots` is not a list of bot ids
+function record.plan_created(index, plan, bots)
 end
     "#,
         ),
@@ -830,43 +975,35 @@ end
     {
         let slot = slot.clone();
         let rcon = rcon.clone();
-        // The run's roster, closed over rather than read off the plan. A bot
-        // that got no step is exactly the bot a reader of this record is
-        // asking about, and deriving the field from the steps deleted it.
-        // Ascending and distinct, so the field's shape is unchanged.
-        let roster: Vec<u32> = all_bots
-            .iter()
-            .map(|id| u32::from(*id))
-            .collect::<BTreeSet<u32>>()
-            .into_iter()
-            .collect();
         map_table.set(
             "plan_created",
-            lua.create_function(move |_lua, (index, plan): (u32, LuaTable)| {
-                let mut steps: Vec<PlannedStep> = Vec::new();
-                let mut makespan: u64 = 0;
-                for step in plan.sequence_values::<LuaTable>() {
-                    let planned = planned_step_from_lua(&step?)?;
-                    makespan = makespan.max(
-                        planned
-                            .planned_start
-                            .saturating_add(planned.planned_duration),
-                    );
-                    steps.push(planned);
-                }
-                let step_count = u32::try_from(steps.len()).unwrap_or(u32::MAX);
-                record_live(
-                    &slot,
-                    &rcon,
-                    EventKind::PlanCreated {
-                        milestone_index: index,
-                        steps: step_count,
-                        makespan,
-                        bots: roster.clone(),
-                        plan: steps,
-                    },
-                )
-            })?,
+            lua.create_function(
+                move |_lua, (index, plan, bots): (u32, LuaTable, Option<LuaValue>)| {
+                    let mut steps: Vec<PlannedStep> = Vec::new();
+                    let mut makespan: u64 = 0;
+                    for step in plan.sequence_values::<LuaTable>() {
+                        let planned = planned_step_from_lua(&step?)?;
+                        makespan = makespan.max(
+                            planned
+                                .planned_start
+                                .saturating_add(planned.planned_duration),
+                        );
+                        steps.push(planned);
+                    }
+                    let step_count = u32::try_from(steps.len()).unwrap_or(u32::MAX);
+                    record_live(
+                        &slot,
+                        &rcon,
+                        EventKind::PlanCreated {
+                            milestone_index: index,
+                            steps: step_count,
+                            makespan,
+                            bots: roster_from_lua(bots)?,
+                            plan: steps,
+                        },
+                    )
+                },
+            )?,
         )?;
     }
 
@@ -1103,6 +1240,149 @@ end
                                 })
                                 .map_err(record_error)?;
                         }
+                    }
+                }
+                Ok(written)
+            })?,
+        )?;
+    }
+
+    map_table.set(
+        "__doc_entry_walks",
+        String::from(
+            r#"
+--- records where each bot walked during one executed plan
+-- Takes `observation.walks` -- the array `record.actions` has no room for,
+-- because a walk is not an action: the scheduler emits it as its own step
+-- with no action id, so `(bot, step_index)` is the only thing that names one.
+--
+-- Walking is most of the wall clock in these plans, and until this existed no
+-- walk reached `events.jsonl` at all: a run whose walks failed left one
+-- `last_error` string in the record and everything else only in the server
+-- log, which the next run overwrites.
+--
+-- Two events per walk, on exactly the same terms as `record.actions` writes
+-- its two. A `walk_dispatched` needs a dispatch tick from the game, because a
+-- walk the game never acknowledged was never dispatched. A `walk_settled`
+-- needs only a verdict -- `success`, `failed` or `lost` -- and every walk that
+-- reached one gets exactly one settle, whether or not a reply tick was ever
+-- stamped: a lost walk never has one, which is precisely why it must not be
+-- what the settle is gated on. `pending` and `running` write nothing.
+--
+-- `failed` and `lost` stay apart. The game refusing a walk and the game never
+-- answering are different facts with different fixes, and the classified
+-- `failure` keeps the distinction the mod's own re-path logic makes: a request
+-- queue that would not take the search (`pathfinder_busy`, worth repeating)
+-- against a search that came back empty (`no_path`, a fact about the
+-- destination). Where the mod named positions, the failure carries them --
+-- observed ones, taken at the instant it gave up.
+--
+-- Call it once per loop iteration, alongside `record.actions`.
+-- @tparam table walks `observation.walks`
+-- @treturn number how many events were written
+-- @raise if no recording is running
+function record.walks(walks)
+end
+    "#,
+        ),
+    )?;
+    {
+        let slot = slot.clone();
+        map_table.set(
+            "walks",
+            lua.create_function(move |_lua, walks: LuaTable| {
+                let mut written = 0u32;
+                let mut guard = slot.lock();
+                let recorder = guard.as_mut().ok_or_else(|| {
+                    record_error("no recording is running -- call record.start() first")
+                })?;
+
+                for walk in walks.sequence_values::<LuaTable>() {
+                    let walk = walk?;
+                    let bot: u32 = walk.get("bot")?;
+                    let step_index: u32 = walk.get("step_index")?;
+                    // Read field-by-field rather than through a serde bridge,
+                    // for the reason `record.actions` reads `target` that way:
+                    // a walk destination is routinely a tile centre and must
+                    // pass through exactly as the schedule set it.
+                    let to: LuaTable = walk.get("to")?;
+                    let to = position_from_lua(&to, "to")?;
+                    let status: String = walk
+                        .get::<Option<String>>("status")?
+                        .unwrap_or_else(|| "unknown".into());
+                    // A walk's planned span is known the moment the step
+                    // exists -- unlike an action's, which is discovered by
+                    // finishing -- so both ends are always present. The
+                    // fallbacks are for a caller that passes neither, and
+                    // produce a zero-length prediction rather than a
+                    // fabricated one.
+                    let planned_start: u64 = walk.get::<Option<u64>>("planned_start")?.unwrap_or(0);
+                    let planned_end: u64 = walk
+                        .get::<Option<u64>>("planned_end")?
+                        .unwrap_or(planned_start);
+                    let dispatched: Option<u64> = walk.get("dispatched_tick")?;
+                    let replied: Option<u64> = walk.get("replied_tick")?;
+                    let error: Option<String> = walk.get("error")?;
+
+                    if let Some(dispatched) = dispatched {
+                        recorder
+                            .record(
+                                dispatched,
+                                EventKind::WalkDispatched {
+                                    bot,
+                                    step_index,
+                                    to: to.clone(),
+                                    planned_start,
+                                    planned_duration: planned_end.saturating_sub(planned_start),
+                                },
+                            )
+                            .map_err(record_error)?;
+                        written += 1;
+                    }
+                    // Keyed on the **verdict**, never on a measured reply
+                    // tick. `record.actions` reached that rule the expensive
+                    // way -- its settle used to live inside `if let
+                    // Some(replied)`, which made `status: "lost"` structurally
+                    // unrecordable, since a lost attempt is *defined* by no
+                    // reply ever arriving. This is built with that already
+                    // known, and `a_lost_walk_settles_even_though_the_game_never_replied`
+                    // pins it so it cannot be rebuilt.
+                    if matches!(status.as_str(), "success" | "failed" | "lost") {
+                        // `None` only on a genuine success. Anything else is a
+                        // failure of some kind, even one the classifier cannot
+                        // name, and `WalkFailureKind::Other` says so rather
+                        // than leaving the field null.
+                        let failure = (status != "success")
+                            .then(|| classify_walk_failure(error.as_deref().unwrap_or("")));
+                        // The game's own tick when it gave one; otherwise the
+                        // record's high-water mark, which is the honest "no
+                        // earlier than everything already written" -- never
+                        // the dispatch tick, which would report a real
+                        // instant and a duration of zero.
+                        let settled_tick = match replied {
+                            Some(replied) => replied,
+                            None => recorder.not_before(dispatched.unwrap_or(0)),
+                        };
+                        // `Some` only when both ends were measured, so a
+                        // synthesized stamp always carries a null duration and
+                        // can never be mistaken for a timed span.
+                        let elapsed_ticks =
+                            dispatched.zip(replied).map(|(d, r)| r.saturating_sub(d));
+                        recorder
+                            .record(
+                                settled_tick,
+                                EventKind::WalkSettled {
+                                    bot,
+                                    step_index,
+                                    to,
+                                    status,
+                                    elapsed_ticks,
+                                    error,
+                                    failure,
+                                },
+                            )
+                            .map_err(record_error)?;
+                        written += 1;
                     }
                 }
                 Ok(written)
@@ -1500,14 +1780,21 @@ mod tests {
 
     /// `bots` is the roster the plan was made for, not the bots it used.
     ///
-    /// The plan below gives work to 1 and 2 out of a run of four. Derived from
-    /// the steps -- which is what this did -- the record said `bots: [1, 2]`
-    /// and a live run said `bots: [2]`, which reads exactly like a run of one
-    /// bot and makes "why did bot 4 do nothing" unanswerable from the record.
-    /// The bots that got nothing are the whole question.
+    /// The plan below gives work to 1 and 2 out of a roster of four. Derived
+    /// from the steps -- which is what this did -- the record said
+    /// `bots: [1, 2]` and a live run said `bots: [2]`, which reads exactly
+    /// like a run of one bot and makes "why did bot 4 do nothing"
+    /// unanswerable from the record. The bots that got nothing are the whole
+    /// question.
+    ///
+    /// The roster is now the caller's to state, and this passes one that
+    /// differs from the binding's ambient roster in *both* directions -- it
+    /// omits a process bot and includes one the process never had -- so
+    /// neither a fallback to the ambient value nor an intersection with it
+    /// could pass.
     #[test]
     fn plan_created_reports_the_runs_roster_and_not_the_bots_in_the_plan() {
-        let (lua, _tmp, run_dir) = recording_lua_for(vec![1, 2, 3, 4]);
+        let (lua, _tmp, run_dir) = recording_lua_for(vec![1, 2, 3, 9]);
         lua.load(
             r#"
             record.plan_created(1, {
@@ -1515,7 +1802,7 @@ mod tests {
                   planned_start = 0, planned_duration = 300 },
                 { id = 2, bot = 1, action = "smelt 10 iron-plate", deps = { 1 },
                   planned_start = 300, planned_duration = 600 },
-            })
+            }, { 4, 1, 2, 3 })
             "#,
         )
         .exec()
@@ -1539,8 +1826,9 @@ mod tests {
                 );
                 assert_eq!(
                     *bots,
-                    vec![1, 2, 3, 4],
-                    "the roster, including the two bots this plan gave no work to"
+                    Some(vec![1, 2, 3, 4]),
+                    "the roster the plan was made for, ascending, including the \
+                     two bots this plan gave no work to"
                 );
                 assert_eq!(plan[0].id, 1);
                 assert_eq!(plan[0].deps, Vec::<u32>::new());
@@ -1583,7 +1871,7 @@ mod tests {
     #[test]
     fn plan_created_of_an_empty_plan_is_zero_steps_and_zero_makespan() {
         let (lua, _tmp, run_dir) = recording_lua_for(vec![1, 2]);
-        lua.load("record.plan_created(3, {})")
+        lua.load("record.plan_created(3, {}, { 1, 2 })")
             .exec()
             .expect("plan_created runs");
         let events = read_events(&run_dir);
@@ -1598,7 +1886,11 @@ mod tests {
                 assert_eq!(*milestone_index, 3);
                 assert_eq!(*steps, 0);
                 assert_eq!(*makespan, 0);
-                assert_eq!(*bots, vec![1, 2], "the roster, even with nothing planned");
+                assert_eq!(
+                    *bots,
+                    Some(vec![1, 2]),
+                    "the roster, even with nothing planned"
+                );
                 assert!(plan.is_empty());
             }
             other => panic!("expected plan_created, got {other:?}"),
@@ -2886,5 +3178,461 @@ mod tests {
             !text.contains("already running"),
             "the option is read before the slot is even looked at: {text}"
         );
+    }
+
+    // --------------------------------------------------------------- walks
+
+    /// **A walk reached the record for the first time here.**
+    ///
+    /// `docs/superpowers/notes/2026-09-02-rung-7-unreachable.md` diagnosed
+    /// three failed walks in run 30 that left no line in `events.jsonl` at
+    /// all: the only trace in the run directory was one `last_error` string,
+    /// and the other two existed solely in `workspace/server-log.txt`, which
+    /// the next run overwrites. Walking is most of a run's wall clock, so
+    /// this was the largest thing the record could not see.
+    ///
+    /// Asserted against the raw JSONL rather than the parsed enum on purpose:
+    /// this is the test that went red before any of the Rust types existed.
+    #[test]
+    fn a_walk_reaches_the_event_log() {
+        let (lua, _tmp, run_dir) = recording_lua();
+        let written: u32 = lua
+            .load(
+                r#"
+                return record.walks({
+                    { bot = 2, step_index = 4, to = { x = -23.5, y = 18.5 },
+                      status = "success", planned_start = 0, planned_end = 240,
+                      dispatched_tick = 81000, replied_tick = 81400 },
+                })
+                "#,
+            )
+            .eval()
+            .expect("record.walks runs");
+        assert_eq!(written, 2, "one dispatch and one settle");
+        let text = std::fs::read_to_string(run_dir.join("events.jsonl")).expect("events.jsonl");
+        assert!(
+            text.contains(r#""kind":"walk_settled""#),
+            "the walk has to be in the log, got {text}"
+        );
+    }
+
+    /// **A lost walk settles, and it settles as `lost`.**
+    ///
+    /// A walk the executor stopped waiting for never has a reply tick -- that
+    /// is what "lost" means -- so a settle gated on one is a settle that can
+    /// never be written for it. That gate is exactly the bug `record.actions`
+    /// had (`run-1788347034-00981`: 179 dispatches, 170 settles, nine lost
+    /// crafts with a dispatch and nothing after it), and this pins that the
+    /// walk half was never built with it.
+    ///
+    /// `lost` is also not `failed`. The game refusing a walk and the game
+    /// never answering are different facts: only the first is a verdict, and
+    /// only the second leaves a bot that may still be walking.
+    #[test]
+    fn a_lost_walk_settles_even_though_the_game_never_replied() {
+        let (lua, _tmp, run_dir) = recording_lua();
+        let written: u32 = lua
+            .load(
+                r#"
+                return record.walks({
+                    { bot = 2, step_index = 3, to = { x = -22.5, y = 21.5 },
+                      status = "lost", planned_start = 0, planned_end = 300,
+                      dispatched_tick = 105028,
+                      error = "the game reported no readable outcome: no action result received in time" },
+                })
+                "#,
+            )
+            .eval()
+            .expect("record.walks runs");
+        assert_eq!(
+            written, 2,
+            "one dispatch and one settle, not just a dispatch"
+        );
+
+        let events = read_events(&run_dir);
+        let ticks = read_event_ticks(&run_dir);
+        match &events[1] {
+            EventKind::WalkSettled {
+                bot,
+                step_index,
+                status,
+                elapsed_ticks,
+                failure,
+                ..
+            } => {
+                assert_eq!((*bot, *step_index), (2, 3));
+                assert_eq!(status, "lost", "the game said nothing; it did not say no");
+                assert_ne!(status, "failed");
+                assert_eq!(
+                    *elapsed_ticks, None,
+                    "no reply tick was measured, so no duration may be claimed"
+                );
+                assert_eq!(
+                    failure.as_ref().map(|f| f.kind),
+                    Some(WalkFailureKind::Timeout),
+                    "classified as a timeout, which says nothing about the walk itself"
+                );
+            }
+            other => panic!("expected walk_settled, got {other:?}"),
+        }
+        assert!(
+            ticks[1] >= ticks[0],
+            "a synthesized settle stamp is never earlier than its own dispatch, got {ticks:?}"
+        );
+    }
+
+    /// **`no_path` and `pathfinder_busy` are not the same failure.**
+    ///
+    /// BotBridge's `walk_repath_finished` branches on exactly this and so must
+    /// the record: `try again later` means the request queue was full and
+    /// nothing was searched, so repeating the walk is the right move; `failed
+    /// to path find` means the pathfinder searched and came back empty, which
+    /// is a fact about the destination that repeating will not change.
+    /// Collapsing them into one "the walk failed" leaves the reader to guess
+    /// which of two opposite responses applies.
+    #[test]
+    fn a_queue_that_would_not_search_is_not_a_search_that_found_nothing() {
+        let cases = [
+            (
+                "game rejected the command: Unexpected Response: ERROR: stuck while walking, \
+                 the destination is unreachable: the game's pathfinder found no path from \
+                 (6.90234375/30.09765625) to (-22.30078125/18.22265625)",
+                WalkFailureKind::NoPath,
+            ),
+            (
+                "game rejected the command: Unexpected Response: ERROR: stuck while walking, \
+                 the game refused a re-path request",
+                WalkFailureKind::PathfinderBusy,
+            ),
+            (
+                "game rejected the command: Unexpected Response: ERROR: stuck while walking, \
+                 the pathfinder did not answer a re-path within 600 ticks",
+                WalkFailureKind::PathfinderBusy,
+            ),
+            (
+                "game rejected the command: Unexpected Response: ERROR: stuck while walking, \
+                 gave up after 4 re-paths on one walk",
+                WalkFailureKind::RepathLimit,
+            ),
+            (
+                "game rejected the command: Unexpected Response: ERROR: stuck while walking, \
+                 aborted before reaching last waypoint",
+                WalkFailureKind::Stalled,
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(classify_walk_failure(error).kind, expected, "{error}");
+        }
+    }
+
+    /// The positions a `no_path` failure names are **observed**, and they are
+    /// not the destination the schedule asked for.
+    ///
+    /// Run 30's walk 72 asked to stand near `(-23.5, 18.5)` and died steering
+    /// at `(-22.30078125, 18.22265625)` -- a point strictly inside the
+    /// collision box of a stone furnace the same run had placed. Recording
+    /// only the schedule's `to` would hide exactly the fact that had to be
+    /// reconstructed by hand from a server log the next run overwrites.
+    #[test]
+    fn a_no_path_failure_carries_the_two_positions_the_game_named() {
+        let (lua, _tmp, run_dir) = recording_lua();
+        lua.load(
+            r#"
+            record.walks({
+                { bot = 2, step_index = 7, to = { x = -23.5, y = 18.5 },
+                  status = "failed", planned_start = 0, planned_end = 240,
+                  dispatched_tick = 81381, replied_tick = 81661,
+                  error = "game rejected the command: Unexpected Response: ERROR: stuck while walking, the destination is unreachable: the game's pathfinder found no path from (6.90234375/30.09765625) to (-22.30078125/18.22265625)" },
+            })
+            "#,
+        )
+        .exec()
+        .expect("record.walks runs");
+
+        let events = read_events(&run_dir);
+        match &events[1] {
+            EventKind::WalkSettled {
+                to,
+                elapsed_ticks,
+                failure,
+                ..
+            } => {
+                let failure = failure.as_ref().expect("a failed walk is classified");
+                assert_eq!(failure.kind, WalkFailureKind::NoPath);
+                assert_eq!(
+                    failure.from,
+                    Some(Position::new(6.902_343_75, 30.097_656_25)),
+                    "where the character actually stood when the mod gave up"
+                );
+                assert_eq!(
+                    failure.destination,
+                    Some(Position::new(-22.300_781_25, 18.222_656_25)),
+                    "the waypoint the walk was really steering at, exact to the \
+                     position unit -- a rounded copy lands in a different \
+                     collision box than the one it failed against"
+                );
+                assert_ne!(
+                    failure.destination.as_ref(),
+                    Some(to),
+                    "and it is NOT what the schedule asked for; that difference \
+                     is the finding"
+                );
+                assert_eq!(*elapsed_ticks, Some(280));
+            }
+            other => panic!("expected walk_settled, got {other:?}"),
+        }
+    }
+
+    /// A walk that arrived carries no failure, and a wording nothing
+    /// recognises still carries one.
+    ///
+    /// `Other` rather than `None`: a settle this codebase does not spell
+    /// `success` went wrong somehow, and leaving the field null would make an
+    /// unclassifiable failure indistinguishable from an arrival in any query
+    /// that groups by it.
+    #[test]
+    fn a_successful_walk_has_no_failure_and_an_unknown_wording_still_has_one() {
+        let (lua, _tmp, run_dir) = recording_lua();
+        lua.load(
+            r#"
+            record.walks({
+                { bot = 1, step_index = 0, to = { x = 1, y = 2 }, status = "success",
+                  planned_start = 0, planned_end = 60,
+                  dispatched_tick = 100, replied_tick = 160 },
+                { bot = 1, step_index = 1, to = { x = 3, y = 4 }, status = "failed",
+                  planned_start = 60, planned_end = 120,
+                  dispatched_tick = 200, replied_tick = 260,
+                  error = "something nobody has seen before" },
+            })
+            "#,
+        )
+        .exec()
+        .expect("record.walks runs");
+
+        let events = read_events(&run_dir);
+        let failures: Vec<Option<WalkFailureKind>> = events
+            .iter()
+            .filter_map(|e| match e {
+                EventKind::WalkSettled { failure, .. } => Some(failure.as_ref().map(|f| f.kind)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            failures,
+            vec![None, Some(WalkFailureKind::Other)],
+            "success carries none; an unrecognised failure carries `other`"
+        );
+    }
+
+    /// A walk still in flight is not a verdict and writes no settle.
+    ///
+    /// The same rule `record.actions` applies to `pending`/`running` actions,
+    /// and for the same reason: a walk the run never finished has no outcome
+    /// to report, and inventing one is the failure mode that gating on the
+    /// verdict rather than on a tick has to avoid.
+    #[test]
+    fn a_walk_still_running_writes_a_dispatch_and_no_settle() {
+        let (lua, _tmp, run_dir) = recording_lua();
+        let written: u32 = lua
+            .load(
+                r#"
+                return record.walks({
+                    { bot = 1, step_index = 0, to = { x = 1, y = 2 },
+                      status = "running", planned_start = 0, planned_end = 60,
+                      dispatched_tick = 100 },
+                })
+                "#,
+            )
+            .eval()
+            .expect("record.walks runs");
+        assert_eq!(written, 1);
+        let events = read_events(&run_dir);
+        assert!(matches!(&events[0], EventKind::WalkDispatched { .. }));
+        assert_eq!(events.len(), 1, "no verdict, no settle: {events:?}");
+    }
+
+    /// A walk the game never acknowledged gets no dispatch line, and still
+    /// settles.
+    ///
+    /// The mirror of `record.actions`' rule: inventing a dispatch tick for a
+    /// walk the game never saw would be a fabrication, but dropping the
+    /// verdict as well is how a failure comes to exist nowhere at all. The
+    /// settle then names its own destination, which is the reason `to` is
+    /// repeated on it -- without it this line would name a bot and an index
+    /// and nothing else.
+    #[test]
+    fn a_walk_the_game_never_stamped_a_tick_for_still_settles() {
+        let (lua, _tmp, run_dir) = recording_lua();
+        let written: u32 = lua
+            .load(
+                r#"
+                return record.walks({
+                    { bot = 4, step_index = 2, to = { x = -19.5, y = 19.5 },
+                      status = "failed", planned_start = 0, planned_end = 60,
+                      error = "game rejected the command: rcon connection lost" },
+                })
+                "#,
+            )
+            .eval()
+            .expect("record.walks runs");
+        assert_eq!(written, 1, "a settle, and deliberately no dispatch");
+        let events = read_events(&run_dir);
+        match &events[0] {
+            EventKind::WalkSettled { to, status, .. } => {
+                assert_eq!(status, "failed");
+                assert_eq!(
+                    *to,
+                    Position::new(-19.5, 19.5),
+                    "the settle names where the walk was going even with no \
+                     dispatch line beside it"
+                );
+            }
+            other => panic!("expected walk_settled, got {other:?}"),
+        }
+    }
+
+    /// The dispatch carries the scheduler's prediction, as a **duration**.
+    ///
+    /// `planned_start` and `planned_end` are plan-relative ticks; the record
+    /// keeps the start and turns the pair into a duration, exactly as
+    /// `PlannedStep` does for an action. A walk's prediction is in the record
+    /// nowhere else -- `plan_created` carries only steps that have an action
+    /// id -- so without this a measured walk has nothing to be compared
+    /// against, which is the whole point of measuring it.
+    #[test]
+    fn the_dispatch_carries_the_planned_span_as_a_duration() {
+        let (lua, _tmp, run_dir) = recording_lua();
+        lua.load(
+            r#"
+            record.walks({
+                { bot = 1, step_index = 0, to = { x = 1, y = 2 }, status = "success",
+                  planned_start = 300, planned_end = 540,
+                  dispatched_tick = 1000, replied_tick = 1900 },
+            })
+            "#,
+        )
+        .exec()
+        .expect("record.walks runs");
+        let events = read_events(&run_dir);
+        match &events[0] {
+            EventKind::WalkDispatched {
+                planned_start,
+                planned_duration,
+                ..
+            } => {
+                assert_eq!(*planned_start, 300);
+                assert_eq!(*planned_duration, 240, "540 - 300, not 540");
+            }
+            other => panic!("expected walk_dispatched, got {other:?}"),
+        }
+        let ticks = read_event_ticks(&run_dir);
+        assert_eq!(
+            ticks,
+            vec![1000, 1900],
+            "the events themselves sit on the game's clock, not the plan's"
+        );
+    }
+
+    /// **The roster a plan was made for is the caller's fact, not the
+    /// binding's.**
+    ///
+    /// `plan_created.bots` used to be derived from the plan's own steps, which
+    /// deleted exactly the bots a reader is asking about; it was then changed
+    /// to the roster `create_lua_record` closes over, and that is wrong in a
+    /// different direction. A script that plans with `goal.plan{bots = ...}`
+    /// -- which `research_run.lua` does, from `rcon.players()` -- expands
+    /// against *that* roster, and the binding's ambient one is neither it nor
+    /// the step bots. Run 30 recorded `bots: [1, 2]` for a plan made for `[2]`
+    /// alone, because bot 1 was invisible to `rcon.players()` during
+    /// freeplay's crash-site cutscene: the record claimed a bot had been
+    /// offered work it was never offered.
+    ///
+    /// That matters more here than in most fields. `plan_created` is written
+    /// at planning time and carries the whole DAG, which makes it the part of
+    /// an archived run that stays trustworthy even where outcomes do not -- a
+    /// lie inside the reliable record is worse than one inside a suspect one.
+    #[test]
+    fn plan_created_reports_the_roster_the_plan_was_expanded_against() {
+        // The *process* roster is four bots; the plan was made for one.
+        let (lua, _tmp, run_dir) = recording_lua_for(vec![1, 2, 3, 4]);
+        lua.load(
+            r#"
+            record.plan_created(1, {
+                { id = 1, bot = 2, action = "mine 10 iron-ore", deps = {},
+                  planned_start = 0, planned_duration = 300 },
+            }, { 2 })
+            "#,
+        )
+        .exec()
+        .expect("plan_created runs");
+
+        match &read_events(&run_dir)[0] {
+            EventKind::PlanCreated { bots, .. } => assert_eq!(
+                *bots,
+                Some(vec![2]),
+                "the roster `goal.plan` was given, not the four the process was \
+                 started with"
+            ),
+            other => panic!("expected plan_created, got {other:?}"),
+        }
+    }
+
+    /// A caller that does not say which roster gets a null, not a guess.
+    ///
+    /// Present-and-null, the same shape `run_started.seed` uses: a key that is
+    /// always there says "we looked", where a plausible-looking substitute
+    /// says something nobody established. The ambient roster is exactly such a
+    /// substitute, which is why it is no longer the fallback.
+    #[test]
+    fn plan_created_with_no_roster_records_null_rather_than_the_ambient_one() {
+        let (lua, _tmp, run_dir) = recording_lua_for(vec![1, 2, 3, 4]);
+        lua.load(
+            r#"
+            record.plan_created(1, {
+                { id = 1, bot = 2, action = "mine 10 iron-ore", deps = {},
+                  planned_start = 0, planned_duration = 300 },
+            })
+            "#,
+        )
+        .exec()
+        .expect("plan_created runs");
+
+        match &read_events(&run_dir)[0] {
+            EventKind::PlanCreated { bots, .. } => assert_eq!(
+                *bots, None,
+                "nobody said which roster, so the record must not name one"
+            ),
+            other => panic!("expected plan_created, got {other:?}"),
+        }
+        let text = std::fs::read_to_string(run_dir.join("events.jsonl")).expect("events.jsonl");
+        assert!(
+            text.contains(r#""bots":null"#),
+            "present-and-null, never absent: {text}"
+        );
+    }
+
+    /// A roster that is not a list of bot ids is refused, rather than written
+    /// as an empty one.
+    ///
+    /// The same rule `record.milestone_satisfied` applies to an unrecognised
+    /// reason: a value this binding cannot read is a construction error in the
+    /// caller, and quietly recording `[]` for it would put "this plan was made
+    /// for no bots" into the one record that is supposed to be trustworthy.
+    #[test]
+    fn plan_created_refuses_a_roster_it_cannot_read() {
+        for roster in ["\"1,2\"", "{}", "{ 0 }", "{ \"two\" }"] {
+            let (lua, _tmp, _run_dir) = recording_lua_for(vec![1, 2]);
+            let err = lua
+                .load(format!(
+                    r#"record.plan_created(1, {{ {{ id = 1, bot = 2, action = "a", deps = {{}},
+                        planned_start = 0, planned_duration = 1 }} }}, {roster})"#
+                ))
+                .exec()
+                .expect_err(roster);
+            assert!(
+                err.to_string().contains("bots"),
+                "the refusal names the argument: {err}"
+            );
+        }
     }
 }

@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
-import {Event, PlannedStep, Sample} from '@/api/types';
-import {divergencesOf, inventoryAtFailure, joinPlanToOutcome, joinRunOutcome, milestonesOf, planEpochs} from './runDiff';
+import {Event, PlannedStep, Sample, WalkFailure} from '@/api/types';
+import {divergencesOf, inventoryAtFailure, joinPlanToOutcome, joinRunOutcome, milestonesOf, planEpochs, walksOf} from './runDiff';
 
 function step(id: number, bot: number, action: string, plannedDuration: number, deps: number[] = []): PlannedStep {
     return {id, bot, action, deps, planned_start: 0, planned_duration: plannedDuration};
@@ -352,5 +352,141 @@ describe('inventoryAtFailure', () => {
         };
         const rows = inventoryAtFailure([failedSettle(0, 1, 50)], [force]);
         expect(rows[0].inventory).toBeNull();
+    });
+});
+
+describe('walksOf', () => {
+    const dispatched = (
+        bot: number,
+        stepIndex: number,
+        tick: number,
+        to = {x: -23.5, y: 18.5}
+    ): Event => ({
+        tick,
+        kind: 'walk_dispatched',
+        bot,
+        step_index: stepIndex,
+        to,
+        planned_start: 0,
+        planned_duration: 240
+    });
+
+    const settled = (
+        bot: number,
+        stepIndex: number,
+        tick: number,
+        status: string,
+        elapsed: number | null,
+        failure: WalkFailure | null = null,
+        to = {x: -23.5, y: 18.5}
+    ): Event => ({
+        tick,
+        kind: 'walk_settled',
+        bot,
+        step_index: stepIndex,
+        to,
+        status,
+        elapsed_ticks: elapsed,
+        error: failure === null ? null : 'ERROR: stuck while walking',
+        failure
+    });
+
+    it('joins a walk to its own dispatch and reports the overrun', () => {
+        const rows = walksOf([
+            {tick: 80931, kind: 'plan_created', milestone_index: 7, steps: 2, makespan: 900, bots: [2], plan: []},
+            dispatched(2, 4, 81381),
+            settled(2, 4, 81661, 'success', 280)
+        ]);
+        expect(rows).toHaveLength(1);
+        expect(rows[0].milestoneIndex).toBe(7);
+        expect(rows[0].bot).toBe(2);
+        expect(rows[0].stepIndex).toBe(4);
+        expect(rows[0].plannedDuration).toBe(240);
+        expect(rows[0].observedDuration).toBe(280);
+        expect(rows[0].delta).toBe(40);
+    });
+
+    // A walk the game never acknowledged has no dispatch line at all. Dropping
+    // it would put the failure back where it was before walks were recorded --
+    // nowhere -- so the row exists with a null planned duration, which is the
+    // honest "the record never said" rather than a zero.
+    it('keeps a settle that has no dispatch beside it', () => {
+        const rows = walksOf([settled(4, 2, 165964, 'failed', null)]);
+        expect(rows).toHaveLength(1);
+        expect(rows[0].plannedDuration).toBeNull();
+        expect(rows[0].observedDuration).toBeNull();
+        expect(rows[0].delta).toBeNull();
+        expect(rows[0].status).toBe('failed');
+    });
+
+    // Lost is not failed. The game refusing a walk and the game never
+    // answering are different facts, and the row must not merge them.
+    it('reports a lost walk as lost, not as failed', () => {
+        const rows = walksOf([
+            dispatched(2, 3, 105028),
+            settled(2, 3, 126628, 'lost', null, {kind: 'timeout', from: null, destination: null})
+        ]);
+        expect(rows[0].status).toBe('lost');
+        expect(rows[0].failure?.kind).toBe('timeout');
+    });
+
+    // The destination the walk was really steering at is not the one the
+    // schedule asked for, and the row keeps both so the difference is visible
+    // rather than reconstructed.
+    it('keeps the requested destination and the observed one apart', () => {
+        const rows = walksOf([
+            dispatched(2, 7, 81381),
+            settled(2, 7, 81661, 'failed', 280, {
+                kind: 'no_path',
+                from: {x: 6.90234375, y: 30.09765625},
+                destination: {x: -22.30078125, y: 18.22265625}
+            })
+        ]);
+        expect(rows[0].to).toEqual({x: -23.5, y: 18.5});
+        expect(rows[0].failure?.destination).toEqual({x: -22.30078125, y: 18.22265625});
+        expect(rows[0].failure?.from).toEqual({x: 6.90234375, y: 30.09765625});
+    });
+
+    // A dispatch with no settle is a walk the run never finished -- the bot
+    // was last seen walking. It must not be dropped and must not claim a
+    // verdict nobody gave.
+    it('keeps a dispatch that never settled, with no status invented', () => {
+        const rows = walksOf([dispatched(1, 0, 100)]);
+        expect(rows).toHaveLength(1);
+        expect(rows[0].status).toBe('never settled');
+        expect(rows[0].settledTick).toBeNull();
+    });
+
+    // Worst overrun first, and a walk with no delta must not sort as if it
+    // were exactly on time -- the same rule the overrun table follows.
+    it('sorts by overrun with the unmeasured walks last', () => {
+        const rows = walksOf([
+            dispatched(1, 0, 100),
+            settled(1, 0, 200, 'success', 100),
+            dispatched(1, 1, 300),
+            settled(1, 1, 900, 'success', 600),
+            settled(1, 2, 1000, 'failed', null)
+        ]);
+        expect(rows.map((r) => r.delta)).toEqual([360, -140, null]);
+    });
+
+    // Two bots walking at once are two rows, and a settle never closes the
+    // other bot's walk. Both bots use step index 0 -- they each index their
+    // OWN slice of the schedule -- and the settle belongs to the walk opened
+    // first, so a key that dropped the bot would close the wrong row while
+    // still producing two plausible-looking rows.
+    it('never closes one bot walk with another bot settle', () => {
+        const rows = walksOf([
+            dispatched(1, 0, 100),
+            dispatched(2, 0, 110),
+            settled(1, 0, 400, 'success', 300)
+        ]);
+        expect(rows).toHaveLength(2);
+        const bot1 = rows.find((r) => r.bot === 1);
+        const bot2 = rows.find((r) => r.bot === 2);
+        expect(bot1?.settledTick).toBe(400);
+        expect(bot1?.status).toBe('success');
+        expect(bot2?.settledTick).toBeNull();
+        expect(bot2?.status).toBe('never settled');
     });
 });

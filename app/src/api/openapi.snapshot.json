@@ -467,13 +467,16 @@
           {
             "properties": {
               "bots": {
-                "description": "The **roster** the plan was made for, ascending -- every bot the run\nhad, not the bots the plan happens to give work to.\n\nIt used to be the latter, derived from `plan`'s steps, which deleted\nfrom the record exactly the bots a reader of it is asking about: a\nlive run with four bots recorded `bots: [2]`, indistinguishable from\na run of one bot, and \"why did bot 4 do nothing\" could not be asked\nof it at all. `record.plan_created`'s Lua binding takes this from\nthe run's own roster rather than from an argument, so a script\ncannot pass one that disagrees with the run.",
+                "description": "The **roster the planner expanded this plan against**, ascending --\nevery bot it was allowed to give work to, not the bots it happened\nto use. Present-and-null when the caller did not say, never absent.\n\nTwo wrong answers have been recorded here, in opposite directions,\nand the field's history is the reason it now comes from the caller:\n\n1. **The bots in the steps.** That deleted exactly the bots a reader\n   is asking about -- a live run of four recorded `bots: [2]`,\n   indistinguishable from a run of one, and \"why did bot 4 do\n   nothing\" could not be asked of it at all.\n2. **The binding's ambient roster**, i.e. the bots the *process* was\n   started with. That is not the roster either, whenever a script\n   plans with `goal.plan{bots = ...}` -- which the shipped driver\n   does, from `rcon.players()`. Run 30 recorded `bots: [1, 2]` for a\n   plan made for `[2]` alone (bot 1 was invisible to\n   `rcon.players()` for the 750 ticks of freeplay's crash-site\n   cutscene, during which `LuaPlayer::character` is nil), so the\n   record asserted that a bot had been offered work it was never\n   offered. See `docs/superpowers/notes/2026-09-02-bot-one-idle.md`.\n\nThe only thing that knows the answer is whatever called\n`goal.plan`, and `plan.bots` is where it reads it. So the Lua\nbinding takes it as an argument and writes `null` when it is not\ngiven: a plan whose roster nobody stated is a plan whose roster this\nrecord does not know, and the ambient value is a plausible-looking\nsubstitute for it rather than a weaker version of it.\n\nThis is also the field to be most careful with. `plan_created` is\nwritten at planning time and carries the whole DAG, which makes it\nthe part of an archived run that stays trustworthy where outcomes do\nnot -- a lie here is worse than a lie in a record already known to\nbe suspect.",
                 "items": {
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
                 },
-                "type": "array"
+                "type": [
+                  "array",
+                  "null"
+                ]
               },
               "kind": {
                 "enum": [
@@ -508,7 +511,6 @@
               "milestone_index",
               "steps",
               "makespan",
-              "bots",
               "kind"
             ],
             "type": "object"
@@ -606,6 +608,116 @@
             "required": [
               "id",
               "bot",
+              "status",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A bot was sent walking.\n\nThe walking half of [`EventKind::ActionDispatched`], and it exists for\nthe same reason that one does: without it the record shows a bot at one\nplace and then at another with nothing in between. Walking is most of a\nrun's wall clock, and until this variant existed **no walk reached\n`events.jsonl` at all** -- run 30 failed three of them and left exactly\none `last_error` string behind, the other two surviving only in\n`workspace/server-log.txt`, which the next run overwrites. See\n`docs/superpowers/notes/2026-09-02-walks-in-the-record.md`.\n\nWritten only when the game stamped a dispatch tick, exactly as\n`action_dispatched` is: a walk the game never acknowledged was never\ndispatched, and saying otherwise would be an invention.",
+            "properties": {
+              "bot": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "enum": [
+                  "walk_dispatched"
+                ],
+                "type": "string"
+              },
+              "planned_duration": {
+                "description": "How long the scheduler expected the walk to take, in ticks.\n\nCarried here because it is carried nowhere else:\n[`EventKind::PlanCreated`]'s `plan` holds only the steps that have\nan `ActionId`, so a walk's prediction has never been in the record\nand a measured walk had nothing to be compared against.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "planned_start": {
+                "description": "The tick the *scheduler* placed this walk's start at, counted from\nthe plan's start. **Not a `game.tick`**, and not comparable with\nthis event's own `tick` -- the same two clocks\n[`PlannedStep::planned_start`] keeps apart, for the same reason.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "step_index": {
+                "description": "Which walk this is: its index in **this bot's own slice** of the\nschedule, in schedule order (`run_bot_signalled`,\n`crates/executor/src/run.rs`).\n\nA walk has no `ActionId` -- the scheduler emits it as its own\n`StepKind::Walk`, which names no action -- so `(bot, step_index)`\nis the only thing that identifies one. **It is neither an\n`ActionId` nor an index into [`EventKind::PlanCreated`]'s `plan`**,\nwhich is indexed over every step of every bot and omits walks\nentirely. Joining it to either produces confident nonsense, the\nsame trap [`EventKind::Teleport`]'s `action_id` documents.",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "to": {
+                "$ref": "#/components/schemas/Position",
+                "description": "Where the **schedule** sent the bot, straight from\n`StepKind::Walk`'s own `to`.\n\nAn intent, and the only endpoint this pair records. No *arrival*\nposition is recorded anywhere here, on purpose:\n`on_player_changed_position` fires once per **tile crossed**, so a\nbot that comes to rest partway into a tile reports its entry and\nnothing corrects it. Every parked bot's observed position is\ntherefore up to a tile stale -- enough to produce a wrong\ndiagnosis, and it did. The only *observed* positions in the walk\nrecord are [`WalkFailure`]'s, which the mod wrote at the instant it\ngave up.\n\nThis is also routinely a position the bot **cannot stand on**: `to`\ncomes from the `Condition::AtPosition` the walk exists to satisfy,\nso it is often the tile a furnace occupies. Arrival means within\nthe step's radius of it, never on it."
+              }
+            },
+            "required": [
+              "bot",
+              "step_index",
+              "to",
+              "planned_start",
+              "planned_duration",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A walk reached a verdict.\n\nEVERY WALK THAT REACHED A VERDICT GETS EXACTLY ONE OF THESE, whether or\nnot the game stamped a tick for it -- the rule\n[`EventKind::ActionSettled`] already states, applied to the other half\nof the schedule. It is stated again rather than assumed because the\naction side reached it the expensive way: the settle used to be written\ninside `if let Some(replied) = replied`, and a lost attempt never has a\nreply tick, so `status: \"lost\"` was structurally unrecordable. This\nvariant was built with that already fixed.\n\n`status` is `\"success\"`, `\"failed\"` or `\"lost\"`, straight from the\nexecutor's `Status`. `failed` and `lost` are different facts and are\nnever collapsed: `failed` is the game refusing the walk, `lost` is the\ngame acknowledging it and never answering -- a bot that may still be\nwalking as far as anyone here knows. `pending` and `running` are not\nverdicts and write nothing.\n\n`elapsed_ticks` is null when the walk was not timed at both ends, which\nis a duration nobody measured rather than a duration of zero, and is\nalso what marks this event's `tick` as the record's high-water mark\nrather than the game's clock (see [`RunRecorder::not_before`]).",
+            "properties": {
+              "bot": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "elapsed_ticks": {
+                "format": "int64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "error": {
+                "description": "The verdict as the game or the executor worded it, kept beside\n`failure` and never replaced by it: this is what a person reads,\n`failure` is what a query groups by.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "failure": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/WalkFailure",
+                    "description": "The same failure, classified. `None` on success."
+                  }
+                ]
+              },
+              "kind": {
+                "enum": [
+                  "walk_settled"
+                ],
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "step_index": {
+                "description": "The same `(bot, step_index)` identity as\n[`EventKind::WalkDispatched`] -- see its documentation.",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "to": {
+                "$ref": "#/components/schemas/Position",
+                "description": "Where the schedule sent the bot.\n\nRepeated from [`EventKind::WalkDispatched`] rather than looked up\nthere, because a walk the game never acknowledged has no dispatch\nline at all and a settle carrying only a bot and an index would\nname nothing: unlike an action, a walk has no label anywhere in the\nrecord. It is the schedule's destination, with all the caveats\nstated on the dispatch -- in particular it is **not** where the bot\nended up."
+              }
+            },
+            "required": [
+              "bot",
+              "step_index",
+              "to",
               "status",
               "kind"
             ],
@@ -1573,7 +1685,7 @@
         "description": "One thing a bot did, placed on the tick axis.",
         "properties": {
           "action": {
-            "description": "What the plan called it, e.g. `mine 4 iron-ore`.",
+            "description": "What the plan called it, e.g. `mine 4 iron-ore`.\n\nA walk has no label anywhere -- `StepKind::Walk` carries a destination\nand a radius and no text -- so its lane's label is composed here, from\nthe destination the schedule asked for. It is the one string in this\ntype that the plan did not write.",
             "type": "string"
           },
           "bot": {
@@ -1593,10 +1705,13 @@
             "type": "integer"
           },
           "id": {
-            "description": "The action id. Not unique across a run: ids restart per plan, so this\nidentifies an entry only together with `bot` and `from_tick`.",
+            "description": "The action id, or `null` for a lane that is not an action.\n\nNot unique across a run when it is present: ids restart per plan, so it\nidentifies an entry only together with `bot` and `from_tick`.\n\n`null` means **this lane has no action id**, which today means it is a\nwalk -- the scheduler emits a walk as its own `StepKind` with no\n`ActionId`, and there is nothing to put here. Borrowing the walk's\n`step_index` for the field would put a number from a different id space\nunder a name that means action id, which is the trap\n[`super::EventKind::Teleport`]'s `action_id` already documents from the\nother direction.",
             "format": "int32",
             "minimum": 0,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "status": {
             "description": "`null` while unterminated, otherwise the verdict the game gave.",
@@ -1617,7 +1732,6 @@
         },
         "required": [
           "bot",
-          "id",
           "action",
           "from_tick"
         ],
@@ -2719,6 +2833,52 @@
           "skipped"
         ],
         "type": "object"
+      },
+      "WalkFailure": {
+        "description": "A structured walk failure, carried *beside* [`EventKind::WalkSettled`]'s\n`error` string rather than instead of it, for the same reason\n[`ActionFailure`] is: the string is what a person reads, the kind is what a\nquery groups by, and replacing one with the other loses an audience.",
+        "properties": {
+          "destination": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Position",
+                "description": "**Observed.** The destination the mod was actually steering to: the\nlast waypoint of the path the *game* returned.\n\nNot the same thing as [`EventKind::WalkSettled`]'s `to`, and the\ndifference is the finding. `to` is what the schedule asked for; this is\nwhat the walk was really trying to reach after Factorio answered the\npath request, and in run 30 all three failures had this land strictly\ninside the collision box of a furnace the run had placed, up to 1.2\ntiles from the `to` that was requested. Recording only `to` would have\nhidden exactly the fact that had to be reconstructed by hand from\n`workspace/server-log.txt`."
+              }
+            ]
+          },
+          "from": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Position",
+                "description": "**Observed.** Where the character actually stood when the mod gave up,\nas the mod's own message named it. `None` for every failure whose\nwording carries no position.\n\nThis is the one place the walk record states a real position of a bot,\nand it is trustworthy in a way `on_player_changed_position` is not: the\nmod read `player.character.position` at that instant rather than\ninferring it from the last tile boundary crossed."
+              }
+            ]
+          },
+          "kind": {
+            "$ref": "#/components/schemas/WalkFailureKind"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "WalkFailureKind": {
+        "description": "Why a walk did not arrive.\n\nA separate enum from [`FailureKind`] rather than more variants on it,\nbecause the two classify different things and share only the word\n\"failure\": every distinction here is about the *pathfinder*, and none of\n[`FailureKind`]'s five substantive variants has any meaning for a walk.\nMerging them would produce one enum where two thirds of the variants are\ninapplicable to whichever event you are holding.\n\nThe distinction the run record exists to preserve is\n[`WalkFailureKind::NoPath`] against [`WalkFailureKind::PathfinderBusy`].\nBotBridge's `walk_repath_finished` (`mods/BotBridge/control.lua`) branches\non exactly that: `try again later` means the request queue was full and\n**nothing was searched**, so asking again is the right thing to do and the\nmod does; `failed to path find` means the pathfinder searched and found\nnothing, which is a fact about the destination that no amount of repeating\nwill change. A record that collapsed them would say \"the walk failed\" for\nboth and leave the reader to guess which of \"try again\" and \"this place is\nunreachable\" applies.",
+        "enum": [
+          "no_path",
+          "pathfinder_busy",
+          "repath_limit",
+          "stalled",
+          "timeout",
+          "other"
+        ],
+        "type": "string"
       },
       "u8": {
         "format": "int32",

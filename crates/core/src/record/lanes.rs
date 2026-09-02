@@ -7,15 +7,42 @@
 use serde::{Deserialize, Serialize};
 
 use super::{Event, EventKind};
+use crate::types::Position;
+
+/// The label a walk lane carries.
+///
+/// Composed here because the schedule gives a walk no text of its own, and
+/// full precision because a walk destination is routinely a tile centre --
+/// `-22.30078125` and `-22.3` are inside different collision boxes, and this
+/// string is what a reader compares against a `walk_settled` failure's
+/// `destination`.
+fn walk_label(to: &Position) -> String {
+    format!("walk to ({}, {})", to.x, to.y)
+}
 
 /// One thing a bot did, placed on the tick axis.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Lane {
     pub bot: u32,
-    /// The action id. Not unique across a run: ids restart per plan, so this
+    /// The action id, or `null` for a lane that is not an action.
+    ///
+    /// Not unique across a run when it is present: ids restart per plan, so it
     /// identifies an entry only together with `bot` and `from_tick`.
-    pub id: u32,
+    ///
+    /// `null` means **this lane has no action id**, which today means it is a
+    /// walk -- the scheduler emits a walk as its own `StepKind` with no
+    /// `ActionId`, and there is nothing to put here. Borrowing the walk's
+    /// `step_index` for the field would put a number from a different id space
+    /// under a name that means action id, which is the trap
+    /// [`super::EventKind::Teleport`]'s `action_id` already documents from the
+    /// other direction.
+    pub id: Option<u32>,
     /// What the plan called it, e.g. `mine 4 iron-ore`.
+    ///
+    /// A walk has no label anywhere -- `StepKind::Walk` carries a destination
+    /// and a radius and no text -- so its lane's label is composed here, from
+    /// the destination the schedule asked for. It is the one string in this
+    /// type that the plan did not write.
     pub action: String,
     pub from_tick: u64,
     /// `null` for an action that was dispatched and never settled.
@@ -46,7 +73,7 @@ pub fn derive_lanes(events: &[Event]) -> Vec<Lane> {
                 id, bot, action, ..
             } => lanes.push(Lane {
                 bot: *bot,
-                id: *id,
+                id: Some(*id),
                 action: action.clone(),
                 from_tick: event.tick,
                 to_tick: None,
@@ -67,11 +94,67 @@ pub fn derive_lanes(events: &[Event]) -> Vec<Lane> {
                 if let Some(open) = lanes
                     .iter_mut()
                     .rev()
-                    .find(|l| l.id == *id && l.bot == *bot && l.to_tick.is_none())
+                    .find(|l| l.id == Some(*id) && l.bot == *bot && l.to_tick.is_none())
                 {
                     open.to_tick = Some(event.tick);
                     open.status = Some(status.clone());
                     open.error = error.clone();
+                }
+            }
+            // A walk opens a lane exactly as an action does. Without this the
+            // viewer answered "what was this bot doing at tick T" with nothing
+            // for the largest stretch of every run: walking is most of the
+            // wall clock, and none of it was drawn.
+            EventKind::WalkDispatched { bot, to, .. } => lanes.push(Lane {
+                bot: *bot,
+                // Not the `step_index`. It is a real identifier for the walk,
+                // but it is not an action id, and this field is named for one.
+                id: None,
+                action: walk_label(to),
+                from_tick: event.tick,
+                to_tick: None,
+                status: None,
+                error: None,
+            }),
+            EventKind::WalkSettled {
+                bot,
+                to,
+                status,
+                error,
+                ..
+            } => {
+                // Matched on `id.is_none()` and the bot, not on `step_index`,
+                // which this type does not carry -- and it does not need to:
+                // `run_bot_signalled` walks ONE bot's steps in schedule order,
+                // so a bot has at most one walk in flight and there is only
+                // ever one open walk lane of its to close. Most recently
+                // opened, for the reason the action arm gives.
+                if let Some(open) = lanes
+                    .iter_mut()
+                    .rev()
+                    .find(|l| l.id.is_none() && l.bot == *bot && l.to_tick.is_none())
+                {
+                    open.to_tick = Some(event.tick);
+                    open.status = Some(status.clone());
+                    open.error = error.clone();
+                } else {
+                    // A settle with no dispatch beside it. An action's is
+                    // dropped -- there is no span, and `events.jsonl` carries
+                    // the settle anyway for anyone who wants it. A walk's is
+                    // kept, as a zero-length lane at its own tick, because a
+                    // walk the game never acknowledged has no other line in
+                    // any view: dropping it puts the failure back exactly
+                    // where it was before walks were recorded at all, which
+                    // is nowhere.
+                    lanes.push(Lane {
+                        bot: *bot,
+                        id: None,
+                        action: walk_label(to),
+                        from_tick: event.tick,
+                        to_tick: Some(event.tick),
+                        status: Some(status.clone()),
+                        error: error.clone(),
+                    });
                 }
             }
             _ => {}
@@ -83,6 +166,7 @@ pub fn derive_lanes(events: &[Event]) -> Vec<Lane> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::Position;
 
     fn ev(tick: u64, kind: EventKind) -> Event {
         Event { tick, kind }
@@ -228,5 +312,127 @@ mod tests {
             ),
         ]);
         assert_eq!(lanes[0].error.as_deref(), Some("no entity to mine"));
+    }
+
+    // ---------------------------------------------------------------- walks
+
+    fn walk_dispatched(bot: u32, step_index: u32, to: (f64, f64), tick: u64) -> Event {
+        ev(
+            tick,
+            EventKind::WalkDispatched {
+                bot,
+                step_index,
+                to: Position::new(to.0, to.1),
+                planned_start: 0,
+                planned_duration: 240,
+            },
+        )
+    }
+
+    fn walk_settled(bot: u32, step_index: u32, to: (f64, f64), status: &str, tick: u64) -> Event {
+        ev(
+            tick,
+            EventKind::WalkSettled {
+                bot,
+                step_index,
+                to: Position::new(to.0, to.1),
+                status: status.into(),
+                elapsed_ticks: None,
+                error: None,
+                failure: None,
+            },
+        )
+    }
+
+    /// **A walking bot is not an idle bot.**
+    ///
+    /// Lanes are what the viewer asks "what was this bot doing at tick T", and
+    /// walking is most of a run's wall clock. With only action spans in here
+    /// the answer during every walk was nothing at all -- the largest stretch
+    /// of a run drawn as a gap.
+    #[test]
+    fn a_walk_becomes_a_lane_so_a_walking_bot_is_not_drawn_idle() {
+        let lanes = derive_lanes(&[
+            walk_dispatched(2, 4, (-23.5, 18.5), 81_381),
+            walk_settled(2, 4, (-23.5, 18.5), "failed", 81_661),
+        ]);
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].bot, 2);
+        assert_eq!(lanes[0].from_tick, 81_381);
+        assert_eq!(lanes[0].to_tick, Some(81_661));
+        assert_eq!(lanes[0].status.as_deref(), Some("failed"));
+        assert_eq!(
+            lanes[0].id, None,
+            "a walk has no action id, and borrowing one would be a lie about \
+             which id space it lives in"
+        );
+        assert!(
+            lanes[0].action.contains("-23.5"),
+            "the label names where the bot was going, got {}",
+            lanes[0].action
+        );
+    }
+
+    /// A walk and an action never close each other.
+    ///
+    /// Both are keyed by bot, and the walk's key is `(bot, step_index)` while
+    /// the action's is `(bot, id)` -- two different id spaces that happen to
+    /// hold small integers. Closing across them is exactly the confident
+    /// nonsense `EventKind::Teleport`'s `action_id` warns about.
+    #[test]
+    fn a_walk_lane_and_an_action_lane_do_not_close_each_other() {
+        let lanes = derive_lanes(&[
+            walk_dispatched(1, 0, (5.0, 5.0), 100),
+            dispatched(0, 1, "mine 4 iron-ore", 110),
+            settled(0, 1, "success", 400),
+        ]);
+        assert_eq!(lanes.len(), 2);
+        assert_eq!(
+            lanes[0].to_tick, None,
+            "the action's settle must not close the walk"
+        );
+        assert_eq!(lanes[1].to_tick, Some(400));
+
+        let lanes = derive_lanes(&[
+            dispatched(0, 1, "mine 4 iron-ore", 100),
+            walk_dispatched(1, 0, (5.0, 5.0), 110),
+            walk_settled(1, 0, (5.0, 5.0), "success", 400),
+        ]);
+        assert_eq!(
+            lanes[0].to_tick, None,
+            "and the walk's settle must not close the action"
+        );
+        assert_eq!(lanes[1].to_tick, Some(400));
+    }
+
+    /// A settle with no dispatch still draws, because a walk the game never
+    /// acknowledged is exactly the one worth seeing.
+    ///
+    /// An action's settle with no dispatch is dropped here -- there is no span
+    /// to draw and the action log carries it anyway. A walk has no other line
+    /// anywhere: dropping it would put the failure back where it was before
+    /// this record existed, which is nowhere.
+    #[test]
+    fn a_walk_that_was_never_dispatched_still_draws_at_its_settle() {
+        let lanes = derive_lanes(&[walk_settled(3, 1, (-19.5, 19.5), "failed", 165_964)]);
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].from_tick, 165_964);
+        assert_eq!(lanes[0].to_tick, Some(165_964));
+        assert_eq!(lanes[0].status.as_deref(), Some("failed"));
+    }
+
+    /// A lost walk closes its lane as `lost`, never as `failed` and never by
+    /// being left open -- the rule
+    /// `a_lost_action_closes_its_lane_as_lost_and_not_as_failed` states for
+    /// actions, applied to the half of the schedule that had no lanes at all.
+    #[test]
+    fn a_lost_walk_closes_its_lane_as_lost() {
+        let lanes = derive_lanes(&[
+            walk_dispatched(2, 3, (-22.5, 21.5), 105_028),
+            walk_settled(2, 3, (-22.5, 21.5), "lost", 126_628),
+        ]);
+        assert_eq!(lanes[0].to_tick, Some(126_628));
+        assert_eq!(lanes[0].status.as_deref(), Some("lost"));
+        assert_ne!(lanes[0].status.as_deref(), Some("failed"));
     }
 }

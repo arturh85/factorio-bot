@@ -23,8 +23,10 @@ import {
     Event,
     MapRecord,
     PlannedStep,
+    Position,
     Sample,
-    SatisfiedReason
+    SatisfiedReason,
+    WalkFailure
 } from '@/api/types';
 
 type Dispatched = Extract<Event, {kind: 'action_dispatched'}>;
@@ -126,8 +128,12 @@ export function joinPlanToOutcome(
 /**
  * Worst overrun first; a step that never ran has no delta at all and must
  * not sort as if it were exactly on time.
+ *
+ * Generic over anything carrying a `delta`, because walks are sorted by the
+ * same rule and a second copy of it would be a second place for "null sorts
+ * last" to stop being true.
  */
-function sortByDelta(rows: OutcomeRow[]): OutcomeRow[] {
+function sortByDelta<T extends {delta: number | null}>(rows: T[]): T[] {
     return [...rows].sort((a, b) => {
         if (a.delta === null && b.delta === null) return 0;
         if (a.delta === null) return 1;
@@ -197,6 +203,127 @@ export function joinRunOutcome(events: Event[]): OutcomeRow[] {
     const rows = planEpochs(events).flatMap((epoch) =>
         joinPlanToOutcome(epoch.plan, epoch.events, epoch.milestoneIndex)
     );
+    return sortByDelta(rows);
+}
+
+
+/**
+ * One walk of a run, joined from its dispatch and its settle.
+ *
+ * A separate row type from [`OutcomeRow`] rather than a variant of it,
+ * because a walk is keyed by something else entirely: it has no action id,
+ * and `(bot, stepIndex)` -- the walk's index within *that bot's* slice of the
+ * schedule -- is the only thing that names it. Sharing the row would put two
+ * different id spaces in one `id` column, which is how a table comes to
+ * suggest a join that does not exist.
+ */
+export interface WalkRow {
+    /** Which plan's epoch this walk belongs to, or `null` before any plan. */
+    milestoneIndex: number | null;
+    bot: number;
+    /** The walk's index in this bot's own slice of the schedule. Not an action id. */
+    stepIndex: number;
+    /**
+     * Where the *schedule* sent the bot -- an intent, never an arrival, and
+     * routinely a position the bot cannot stand on. Compare it against
+     * `failure.destination`, which is where the walk was really steering.
+     */
+    to: Position;
+    /** `null` for a walk the game never acknowledged, which has no dispatch line. */
+    dispatchedTick: number | null;
+    /** `null` for a walk the run never finished. */
+    settledTick: number | null;
+    /** What the scheduler predicted, or `null` when there was no dispatch line to read it from. */
+    plannedDuration: number | null;
+    /** What the game measured, or `null` when it was not timed at both ends. */
+    observedDuration: number | null;
+    /** `observedDuration - plannedDuration`, or `null` when either is missing. */
+    delta: number | null;
+    /** The verdict, or `'never settled'` -- which is a state, not a verdict. */
+    status: string;
+    error: string | null;
+    failure: WalkFailure | null;
+}
+
+/** `(bot, stepIndex)` as a map key -- the pair is the walk's whole identity. */
+function walkKey(bot: number, stepIndex: number): string {
+    return `${bot}:${stepIndex}`;
+}
+
+/**
+ * Every walk a run recorded, worst overrun first.
+ *
+ * Walking is most of a run's wall clock, and none of it was in the record at
+ * all until 2026-09-02 -- a run could fail three walks and leave a single
+ * error string behind. This is the table that answers "where did the time
+ * go" for the half of the schedule the overrun table has never covered.
+ *
+ * Scoped per plan epoch for the same reason `joinRunOutcome` is: `stepIndex`
+ * restarts with every plan, exactly as action ids do, so a whole-run join on
+ * it would pair a late walk with an early one. Within one epoch a bot walks
+ * one leg at a time, so `(bot, stepIndex)` is unique there.
+ *
+ * Both half-pairs are kept rather than dropped, and they mean different
+ * things. A **settle with no dispatch** is a walk the game never
+ * acknowledged: its planned duration is unknown, not zero. A **dispatch with
+ * no settle** is a bot last seen walking -- `status: 'never settled'`, which
+ * is deliberately not a verdict, because nobody gave one.
+ */
+export function walksOf(events: Event[]): WalkRow[] {
+    const rows: WalkRow[] = [];
+    for (const epoch of planEpochs(events)) {
+        const open = new Map<string, WalkRow>();
+        for (const event of epoch.events) {
+            if (event.kind === 'walk_dispatched') {
+                const row: WalkRow = {
+                    milestoneIndex: epoch.milestoneIndex,
+                    bot: event.bot,
+                    stepIndex: event.step_index,
+                    to: event.to,
+                    dispatchedTick: event.tick,
+                    settledTick: null,
+                    plannedDuration: event.planned_duration,
+                    observedDuration: null,
+                    delta: null,
+                    status: 'never settled',
+                    error: null,
+                    failure: null
+                };
+                rows.push(row);
+                open.set(walkKey(event.bot, event.step_index), row);
+            } else if (event.kind === 'walk_settled') {
+                const key = walkKey(event.bot, event.step_index);
+                const row = open.get(key);
+                if (row === undefined) {
+                    rows.push({
+                        milestoneIndex: epoch.milestoneIndex,
+                        bot: event.bot,
+                        stepIndex: event.step_index,
+                        to: event.to,
+                        dispatchedTick: null,
+                        settledTick: event.tick,
+                        plannedDuration: null,
+                        observedDuration: event.elapsed_ticks,
+                        delta: null,
+                        status: event.status,
+                        error: event.error,
+                        failure: event.failure
+                    });
+                    continue;
+                }
+                open.delete(key);
+                row.settledTick = event.tick;
+                row.observedDuration = event.elapsed_ticks;
+                row.delta =
+                    row.plannedDuration !== null && event.elapsed_ticks !== null
+                        ? event.elapsed_ticks - row.plannedDuration
+                        : null;
+                row.status = event.status;
+                row.error = event.error;
+                row.failure = event.failure;
+            }
+        }
+    }
     return sortByDelta(rows);
 }
 

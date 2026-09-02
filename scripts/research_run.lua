@@ -155,7 +155,13 @@ repeat
     -- milestone must see that milestone's real DAG, not have it shadowed by
     -- this empty closing re-plan.
     if t.action == "planned" and type(t.plan) == "table" then
-        record.plan_created(t.milestone_index, t.plan)
+        -- `t.bots` is the roster the planner expanded this plan against, which
+        -- is not the roster this process was started with whenever fewer bots
+        -- connected than were asked for -- and it is the difference the record
+        -- has to state rather than paper over. Passed through even when it is
+        -- nil: `record.plan_created` then writes null, which says "nobody told
+        -- us" instead of naming a roster nobody established.
+        record.plan_created(t.milestone_index, t.plan, t.bots)
     end
     if t.action == "acquired" then
         record.milestone_started(t.milestone_index, names[t.milestone_index] or "?")
@@ -165,6 +171,17 @@ repeat
     elseif t.action == "ran" then
         local n = 0
         if t.steps ~= nil and t.actions ~= nil then n = record.actions(t.steps, t.actions) end
+        -- The walks of the same batch. A separate call, not a third argument
+        -- to the one above, because a walk is not an action: it has no action
+        -- id, it is in neither `steps` nor `actions`, and `(bot, step_index)`
+        -- is the only thing that names it. Walking is most of the wall clock
+        -- in these plans and none of it used to reach `events.jsonl` at all --
+        -- run 30 failed three walks and left one `last_error` string in the
+        -- record, the other two surviving only in `workspace/server-log.txt`,
+        -- which this run has already overwritten. Same cadence as the flushes
+        -- around it, so a walk is written close to when it happened.
+        local nw = 0
+        if type(t.walks) == "table" then nw = record.walks(t.walks) end
         -- Flushes any `player.teleport` calls the mod made while this batch
         -- ran (a stuck walk leg, or a bot nudged clear of a ghost/blueprint
         -- bounding box) -- see `record.teleports()`. Called once per "ran"
@@ -186,10 +203,10 @@ repeat
         -- ungrouped, with `failed` holding the sum of all four, made one lost
         -- action read as `failed=1 lost=1`: two problems where there was one.
         print(string.format(
-            "   ran: success=%s pending=%s actions(failed=%s lost=%s) walks(failed=%s lost=%s) (+%d events, +%d teleports, +%d refusals)",
+            "   ran: success=%s pending=%s actions(failed=%s lost=%s) walks(failed=%s lost=%s) (+%d events, +%d walk events, +%d teleports, +%d refusals)",
             tostring(t.success), tostring(t.pending),
             tostring(t.failed), tostring(t.lost),
-            tostring(t.walks_failed), tostring(t.walks_lost), n, nt, nr))
+            tostring(t.walks_failed), tostring(t.walks_lost), n, nw, nt, nr))
         if t.first_error ~= nil then print("        first error: " .. tostring(t.first_error)) end
     elseif t.action == "satisfied" then
         record.milestone_satisfied(t.milestone_index, t.iteration or 0, t.reason)

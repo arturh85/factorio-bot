@@ -4,7 +4,7 @@ use crate::ids::{BotId, ItemId};
 use factorio_bot_core::factorio::util::{add_to_rect, calculate_distance};
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::types::{
-    FactorioEntity, FactorioTechnology, Pos, Position, Rect, ResourcePatch,
+    FactorioEntity, FactorioTechnology, PlayerId, Pos, Position, Rect, ResourcePatch,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -296,6 +296,54 @@ pub struct PlanState {
     /// derivation; computed once in [`PlanState::from_world`] because neither
     /// `base` nor the roster changes after construction.
     mining_tile_separation: f64,
+    /// The collision box of every character this plan **cannot move**, keyed
+    /// by player id.
+    ///
+    /// A character is a physical obstacle: BotBridge builds with
+    /// `build_check_type = manual` (`rcon_place_entity`,
+    /// `mods/BotBridge/control.lua`), and that check collides with characters
+    /// like any other entity. `EntityGraph` never sees one — `add` inserts a
+    /// whitelist of *factory* entity types — so before this field the planner
+    /// had no source for them at all and the ground under an idle bot read as
+    /// open.
+    ///
+    /// Run `run-1788319014-01846` is what that costs. Rung 4 sized its split
+    /// down to one bot (`bots: [1]`), leaving bots 2 and 3 parked where their
+    /// last rung-2 mine had left them 14 000 ticks earlier. Bot 2 sat at
+    /// `(-18.2421875, 51.28125)`; the planner sited a stone furnace at
+    /// `[-19, 51]`, then at `[-18, 51]` five times over, and the game refused
+    /// every one of them. The mod's own message says which character it was:
+    /// it answers `§player_blocks_placement§` when the *acting* player is
+    /// inside the footprint and the generic `can_place_entity said 'no'`
+    /// otherwise, and the run got the generic one every time — bot 1 was
+    /// clear, bot 2 was not. `samples.jsonl` has bot 2 motionless at that
+    /// position from tick 7200 to the end.
+    ///
+    /// **Roster bots are deliberately excluded**, at their base position or
+    /// any other. The plan *moves* them, so `base.players` is only where they
+    /// started, and their simulated `BotState::position` is where the plan's
+    /// own narrative has them — neither is a fact about the ground at the
+    /// moment a placement runs. The acting bot is handled instead, and
+    /// exactly, by [`crate::action::Condition::AtPosition`]'s `min_radius`
+    /// (see [`PlanState::placement_clearance`]), which keeps it out of its own
+    /// footprint. What is left over is the case that has no other guard: a
+    /// character nothing in this plan will ever tell to walk.
+    ///
+    /// Ordered by player id rather than collected straight off the `players`
+    /// `DashMap`, whose iteration order moves with the hash seed.
+    ///
+    /// **Caveat, and it is not this field's to fix.**
+    /// `Planner::initiate_missing_players_with_default_inventory`
+    /// (`crates/core/src/plan/planner.rs`) invents a `FactorioPlayer` for
+    /// every roster id the game has no player for, and a default one sits at
+    /// `(0, 0)`. Run `run-1788319014-01846` asked for four bots and got three
+    /// clients, so player 4 is such a phantom. Once a later split drops it
+    /// from the roster it lands here and shadows the ~0.4-tile box at the
+    /// origin. That is a small, bounded false refusal — `free_area_near`
+    /// steps to the next ring — and it is the price of not silently believing
+    /// a real parked bot is not there. The real fix belongs upstream, in not
+    /// inventing the player.
+    foreign_characters: BTreeMap<PlayerId, Rect>,
 }
 
 impl PlanState {
@@ -347,6 +395,26 @@ impl PlanState {
             })
             .unwrap_or(VANILLA_RESOURCE_REACH);
         let mining_tile_separation = reach + tile_occupancy_radius(&base);
+        // Every character on the surface that this plan has no way to move.
+        // `map` is the roster, so `!contains_key` is exactly "not ours to
+        // walk"; see the `foreign_characters` field doc for why a roster bot
+        // is excluded instead of being taken at its base position.
+        let (half_x, half_y) = character_half_box(&base);
+        let foreign_characters: BTreeMap<PlayerId, Rect> = base
+            .players
+            .iter()
+            .filter(|player| !map.contains_key(&BotId(*player.key())))
+            .map(|player| {
+                let p = &player.value().position;
+                (
+                    *player.key(),
+                    Rect::new(
+                        &Position::new(p.x() - half_x, p.y() - half_y),
+                        &Position::new(p.x() + half_x, p.y() + half_y),
+                    ),
+                )
+            })
+            .collect();
         PlanState {
             base,
             bots: map,
@@ -361,6 +429,7 @@ impl PlanState {
             reserved_by_anyone: Default::default(),
             max_prototype_half_diagonal,
             mining_tile_separation,
+            foreign_characters,
         }
     }
 
@@ -679,21 +748,26 @@ impl PlanState {
 
     /// Whether anything the plan can see occupies `area`.
     ///
-    /// Four sources, because no single one of them sees everything:
-    /// entities this plan has placed, entities the base world already had,
-    /// ore, and the terrain nobody built. The last two are the odd ones —
-    /// `EntityGraph::add` routes resource entities into
-    /// `resources`/`resource_tree` only, so the entity tree never sees them
-    /// and they have to be asked for by tile; and `add` only ever inserts a
-    /// whitelist of *factory* entity types into the entity tree, so trees,
-    /// cliffs, small rocks, units and water tiles are not there either and
-    /// have to come out of `blocking_boxes_within`.
+    /// Five sources, because no single one of them sees everything: entities
+    /// this plan has placed, entities the base world already had, the terrain
+    /// nobody built, characters the plan cannot move, and ore. The last three
+    /// are the odd ones — `EntityGraph::add` only ever inserts a whitelist of
+    /// *factory* entity types into the entity tree, so trees, cliffs, small
+    /// rocks, units and water tiles have to come out of
+    /// `blocking_boxes_within`; characters are not in any tree at all and come
+    /// from `base.players` via
+    /// [`foreign_characters`](PlanState#structfield.foreign_characters); and
+    /// `add` routes resource entities into `resources`/`resource_tree` only,
+    /// so ore has to be asked for by tile.
     ///
-    /// Leaving that fourth source out is what made the planner site a stone
+    /// Leaving the terrain source out is what made the planner site a stone
     /// furnace on a forest tile and the game answer `can_place_entity said
     /// 'no'` (run `run-1788309767-54739`, first dispatched action). The data
     /// was never missing — `EntityGraph` is fed `surface.find_entities(area)`,
     /// which is ~79% trees — it was only in a tree this function did not read.
+    /// Leaving the character source out produced the *same message* from the
+    /// same call for an entirely different reason two runs later; see the
+    /// field doc for `run-1788319014-01846`.
     fn is_area_clear(&self, area: &Rect) -> bool {
         for entity in self.added.values() {
             if boxes_overlap(&self.footprint_of(entity), area) {
@@ -741,6 +815,15 @@ impl PlanState {
                 continue;
             }
             if boxes_overlap(&blocked, area) {
+                return false;
+            }
+        }
+        // Characters. Nothing above can see one: they are in no tree, and
+        // `removed` cannot free them either — the plan has no action that
+        // makes a character move out of the way, and believing one will is the
+        // same wrong answer as not seeing it at all.
+        for character in self.foreign_characters.values() {
+            if boxes_overlap(character, area) {
                 return false;
             }
         }

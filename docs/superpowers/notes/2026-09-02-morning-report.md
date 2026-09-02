@@ -86,3 +86,49 @@ Both deep runs render at `http://127.0.0.1:7500/#/runs`:
 - A spurious STALE warning about `workspace/plans` — a directory with no
   production reader — trained me past the real one about `workspace/scripts`,
   which made a "teleports: 0" I reported to you meaningless.
+
+
+---
+
+## Update (~10:30): a change of tack on rung 4
+
+`cannot place item 'stone-furnace' because surface.can_place_entity said 'no'`
+has now failed **four** runs, and **three distinct causes have been found and
+fixed behind it**:
+
+1. a forest — `is_area_clear` read the tree holding factory entities, not the
+   one holding trees and cliffs;
+2. a non-roster character parked in the footprint;
+3. a roster character, after a filter whose premise turned out to be false
+   (`BotState::position` never advances during expansion, so the observed
+   position is the only position the planner has for *any* bot).
+
+Run 16 hits it again with all four bots connected and 36 of 40 actions
+succeeding. Each fix was correct; each exposed another cause.
+
+**I stopped hunting cause four.** Three correct fixes behind one message is
+evidence the model cannot reliably predict `can_place_entity` — not evidence
+that a fourth fix finishes the job. The structural gap, flagged twice tonight
+and deferred both times, is that **a refusal is information the planner
+discards**: the replanner re-chose the same refused tile twice in one run, so a
+single bad site can consume every iteration.
+
+The open question I asked to be reasoned about rather than assumed: **how long
+should a refusal be believed?** A tile refused because a bot stood on it is
+valid the moment that bot walks away; a tile refused because a cliff is on it
+never is, and the message does not always distinguish them.
+
+## The phantom bot, now with three effects
+
+`initiate_missing_players_with_default_inventory` invents a player at `(0,0)`
+when fewer clients connect than requested — which happened in most runs tonight.
+It shadows a collision box at the origin; it drags the start-of-run keyframe's
+bounds to the origin, so the map covers the wrong region; and it sits in the
+roster as a bot that can never act. Two agents flagged it and both said the real
+fix is upstream. Run 16 had all four connect and did not have it.
+
+## A record semantics trap
+
+`plan_created.bots` is derived from the **steps**, not the roster. `bots: [2]`
+does not mean the roster was one bot. Anyone reading that field as a roster —
+including a future diagnosis — will be wrong.

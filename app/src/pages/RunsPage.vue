@@ -362,6 +362,7 @@ function researchPct(progress: number): string {
                     :entities="store.entities"
                     :bots="store.mapBots"
                     :trail="store.trail"
+                    :records="store.map"
                     :bounds="store.mapBounds"
                 />
             </div>

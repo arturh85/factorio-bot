@@ -784,10 +784,19 @@ end
 -- observation knows when the game dispatched it and what verdict it reached.
 -- Neither half carries both.
 --
--- Ticks come from the game, so an action the game never reported a dispatch
--- for is not recorded -- it cannot be placed in time, and placing it anywhere
--- would be an invention. An action that *was* dispatched and never settled is
--- recorded as the dispatch alone, which is a real state and one worth seeing.
+-- An `action_dispatched` needs a dispatch tick from the game: an action the
+-- game never acknowledged was never dispatched, and saying otherwise would be
+-- an invention.
+--
+-- An `action_settled` needs only a *verdict*. Every action that reached one --
+-- `success`, `failed` or `lost` -- gets exactly one settle line, whether or
+-- not the game stamped a reply tick for it, because a `lost` action never has
+-- one and used to fall out of the record entirely. When the tick is not the
+-- game's, `elapsed_ticks` is null and says so. `pending` and `running` write
+-- no settle: no verdict, nothing to report.
+--
+-- So a settle with no dispatch beside it is possible, and it is a finding
+-- rather than a gap: the action ended before the game ever acknowledged it.
 --
 -- The dispatch also carries `target`, when the action has one: the tile or
 -- position the plan sent the bot to, straight from the plan rather than
@@ -861,7 +870,28 @@ end
                             .map_err(record_error)?;
                         written += 1;
                     }
-                    if let Some(replied) = replied {
+                    // The settle is keyed on the **verdict**, not on a measured
+                    // reply tick.
+                    //
+                    // It used to be keyed on `replied_tick`, and that made one
+                    // whole outcome unrecordable: a `Status::Lost` action is
+                    // *defined* by no reply ever arriving, so it never has a
+                    // reply tick and so it never got an `action_settled` line.
+                    // `run-1788347034-00981` wrote 179 dispatches against 170
+                    // settles that way -- nine lost `craft`s, every one of them
+                    // a dispatch with nothing after it, while the supervisor
+                    // counted one lost action per iteration of milestone 7. The
+                    // same gate swallowed a `Status::Failed` whose failure
+                    // arrived before the game stamped anything
+                    // (`ActionFailure::not_dispatched` carries
+                    // `ActionTicks::UNKNOWN`), which left a failed action with
+                    // no line anywhere at all.
+                    //
+                    // `pending` and `running` are not verdicts and write
+                    // nothing: an action the run never finished has no outcome
+                    // to report, and inventing one is the failure mode this
+                    // gate has to avoid now that it no longer waits for a tick.
+                    if matches!(status.as_str(), "success" | "failed" | "lost") {
                         // `None` only on a genuine success: a settle this
                         // codebase does not spell `"success"` is a failure of
                         // some kind, even one the classifier cannot name yet,
@@ -870,14 +900,35 @@ end
                         // before this classifier existed.
                         let failure = (status != "success")
                             .then(|| classify_failure(error.as_deref().unwrap_or("")));
+                        // The game's own tick when it gave one. When it did
+                        // not, the honest stamp is the record's own high-water
+                        // mark (see `RunRecorder::not_before`): this verdict
+                        // was reached no earlier than everything already
+                        // written, including this action's own dispatch a few
+                        // lines above. What is never done is reusing the
+                        // dispatch tick, which would report a real reply at a
+                        // real instant and a duration of zero.
+                        //
+                        // `elapsed_ticks` is what says the difference out
+                        // loud. It is `Some` only when *both* ends were
+                        // measured, so a synthesized stamp always carries a
+                        // null duration -- "nobody measured this", exactly as
+                        // `EventKind::ActionSettled` documents -- and can
+                        // never be mistaken for a timed span.
+                        let settled_tick = match replied {
+                            Some(replied) => replied,
+                            None => recorder.not_before(dispatched.unwrap_or(0)),
+                        };
+                        let elapsed_ticks =
+                            dispatched.zip(replied).map(|(d, r)| r.saturating_sub(d));
                         recorder
                             .record(
-                                replied,
+                                settled_tick,
                                 EventKind::ActionSettled {
                                     id,
                                     bot,
                                     status,
-                                    elapsed_ticks: dispatched.map(|d| replied.saturating_sub(d)),
+                                    elapsed_ticks,
                                     error,
                                     failure,
                                 },
@@ -894,7 +945,7 @@ end
                             let placement = placement_from_lua(&placed)?;
                             recorder
                                 .record_map(MapRecord {
-                                    tick: replied,
+                                    tick: settled_tick,
                                     kind: MapKind::Placed {
                                         bot,
                                         intent: placement.intent,
@@ -1648,6 +1699,225 @@ mod tests {
                 kind: FailureKind::Rejected,
                 detail: None,
             })
+        );
+    }
+
+    // ------------------------------------------- every attempt settles exactly once
+
+    /// **A dispatch with no settle beside it was the record's largest hole.**
+    ///
+    /// `run-1788347034-00981` recorded 179 `action_dispatched` lines and 170
+    /// `action_settled` lines, and every one of the nine missing settles was a
+    /// `craft` the game acknowledged and then never answered — `Status::Lost`.
+    /// The settle used to be written only when the observation carried a
+    /// `replied_tick`, which a lost action can never have *by definition*: no
+    /// reply arrived, so no reply tick was ever stamped. The verdict was
+    /// therefore structurally unrecordable, and milestone 7 read as an
+    /// unbroken run of successes while the supervisor's own counters said one
+    /// action per iteration had been lost.
+    #[test]
+    fn a_lost_action_settles_even_though_the_game_never_replied() {
+        let (lua, _tmp, run_dir) = recording_lua();
+        let written: u32 = lua
+            .load(
+                r#"
+                local steps = { { id = 13, bot = 1, label = "craft 1 stone-furnace" } }
+                local actions = {
+                    [13] = {
+                        status = "lost",
+                        dispatched_tick = 93392,
+                        error = "the game reported no readable outcome: no action result received in time",
+                    },
+                }
+                return record.actions(steps, actions)
+                "#,
+            )
+            .eval()
+            .expect("record.actions runs");
+        assert_eq!(
+            written, 2,
+            "one dispatch and one settle, not just a dispatch"
+        );
+
+        let events = read_events(&run_dir);
+        let ticks = read_event_ticks(&run_dir);
+        assert!(matches!(
+            &events[0],
+            EventKind::ActionDispatched { id: 13, bot: 1, .. }
+        ));
+        match &events[1] {
+            EventKind::ActionSettled {
+                id,
+                bot,
+                status,
+                elapsed_ticks,
+                error,
+                failure,
+            } => {
+                assert_eq!(*id, 13);
+                assert_eq!(*bot, 1);
+                assert_eq!(
+                    status, "lost",
+                    "`lost` is not `failed`: the game said nothing, it did not say no"
+                );
+                assert_eq!(
+                    *elapsed_ticks, None,
+                    "no reply tick was measured, so no duration may be reported"
+                );
+                assert!(
+                    error
+                        .as_deref()
+                        .is_some_and(|e| e.contains("no action result received in time")),
+                    "the settle carries why the outcome is unknown, got {error:?}"
+                );
+                assert_eq!(
+                    failure.as_ref().map(|f| f.kind),
+                    Some(FailureKind::Timeout),
+                    "and it is classified, not left null"
+                );
+            }
+            other => panic!("expected action_settled, got {other:?}"),
+        }
+        assert!(
+            ticks[1] >= ticks[0],
+            "a synthesized settle stamp is never earlier than its own dispatch, got {ticks:?}"
+        );
+    }
+
+    /// A failure the game never stamped a tick for still reaches the record.
+    ///
+    /// `ActionFailure::not_dispatched` carries `ActionTicks::UNKNOWN`, so the
+    /// attempt has neither tick. Writing nothing for it left a `Status::Failed`
+    /// action with no line anywhere in `events.jsonl` — the same hole as the
+    /// lost case, one step earlier. There is deliberately no
+    /// `action_dispatched` beside this settle: nothing was dispatched, and
+    /// inventing a dispatch would be a fabrication in the other direction.
+    #[test]
+    fn a_failure_the_game_never_stamped_a_tick_for_still_settles() {
+        let (lua, _tmp, run_dir) = recording_lua();
+        let written: u32 = lua
+            .load(
+                r#"
+                local steps = { { id = 4, bot = 2, label = "insert 5 copper-ore" } }
+                local actions = {
+                    [4] = { status = "failed", error = "rcon: connection reset" },
+                }
+                return record.actions(steps, actions)
+                "#,
+            )
+            .eval()
+            .expect("record.actions runs");
+        assert_eq!(written, 1, "the settle alone");
+
+        let events = read_events(&run_dir);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            EventKind::ActionSettled {
+                id,
+                status,
+                elapsed_ticks,
+                error,
+                ..
+            } => {
+                assert_eq!(*id, 4);
+                assert_eq!(status, "failed");
+                assert_eq!(*elapsed_ticks, None);
+                assert_eq!(error.as_deref(), Some("rcon: connection reset"));
+            }
+            other => panic!("expected action_settled, got {other:?}"),
+        }
+    }
+
+    /// The control: an action the run never attempted must stay absent.
+    ///
+    /// The fix above keys the settle on the *status* rather than on a measured
+    /// reply tick, and the failure mode of that is writing verdicts for work
+    /// nobody started. `pending` and `running` are not verdicts, so neither
+    /// produces a line.
+    #[test]
+    fn an_action_with_no_verdict_yet_writes_nothing() {
+        let (lua, _tmp, run_dir) = recording_lua();
+        let written: u32 = lua
+            .load(
+                r#"
+                local steps = {
+                    { id = 1, bot = 1, label = "mine 5 iron-ore" },
+                    { id = 2, bot = 2, label = "mine 5 iron-ore" },
+                }
+                local actions = {
+                    [1] = { status = "pending" },
+                    [2] = { status = "running", dispatched_tick = 40 },
+                }
+                return record.actions(steps, actions)
+                "#,
+            )
+            .eval()
+            .expect("record.actions runs");
+        assert_eq!(
+            written, 1,
+            "the running action's dispatch, and no verdict for either"
+        );
+        let events = read_events(&run_dir);
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, EventKind::ActionSettled { .. })),
+            "no verdict was given, so none may be recorded: {events:?}"
+        );
+    }
+
+    /// Every dispatch in one batch is matched by exactly one settle, whatever
+    /// mixture of verdicts the batch holds.
+    ///
+    /// This is the invariant the live run broke, stated directly: counting
+    /// `action_dispatched` against `action_settled` over a whole run is how the
+    /// hole was found, so it is what the test counts.
+    #[test]
+    fn every_dispatched_action_settles_exactly_once() {
+        let (lua, _tmp, run_dir) = recording_lua();
+        lua.load(
+            r#"
+            local steps = {
+                { id = 0, bot = 1, label = "mine 5 iron-ore" },
+                { id = 1, bot = 2, label = "place stone-furnace" },
+                { id = 2, bot = 3, label = "craft 1 stone-furnace" },
+            }
+            local actions = {
+                [0] = { status = "success", dispatched_tick = 100, replied_tick = 700 },
+                [1] = { status = "failed", dispatched_tick = 710, replied_tick = 710,
+                        error = "game rejected the command: can_place_entity said 'no'" },
+                [2] = { status = "lost", dispatched_tick = 720,
+                        error = "no action result received in time" },
+            }
+            record.actions(steps, actions)
+            "#,
+        )
+        .exec()
+        .expect("record.actions runs");
+
+        let events = read_events(&run_dir);
+        let mut dispatched: Vec<u32> = Vec::new();
+        let mut settled: Vec<(u32, String)> = Vec::new();
+        for event in &events {
+            match event {
+                EventKind::ActionDispatched { id, .. } => dispatched.push(*id),
+                EventKind::ActionSettled { id, status, .. } => {
+                    settled.push((*id, status.clone()));
+                }
+                other => panic!("unexpected event {other:?}"),
+            }
+        }
+        dispatched.sort_unstable();
+        settled.sort();
+        assert_eq!(dispatched, vec![0, 1, 2]);
+        assert_eq!(
+            settled,
+            vec![
+                (0, "success".to_string()),
+                (1, "failed".to_string()),
+                (2, "lost".to_string()),
+            ],
+            "and the three verdicts stay three different words"
         );
     }
 

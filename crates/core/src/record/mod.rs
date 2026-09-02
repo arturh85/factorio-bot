@@ -132,6 +132,37 @@ pub enum EventKind {
     /// `elapsed_ticks` is null when the game never reported a dispatch tick to
     /// subtract from -- a duration nobody measured, which is not the same as a
     /// duration of zero.
+    //
+    // The rest of this account is deliberately a plain comment rather than a
+    // doc comment: utoipa copies `///` into the published OpenAPI schema, and
+    // `app/src/api/openapi.snapshot.json` pins it, so documenting a variant
+    // costs a snapshot regeneration in the frontend's tree. Nothing below is a
+    // fact a schema consumer needs.
+    //
+    // EVERY ATTEMPT THAT REACHED A VERDICT GETS EXACTLY ONE OF THESE, whether
+    // or not the game stamped a tick for it. `record.actions`
+    // (`crates/scripting_lua/src/globals/record.rs`) used to make it
+    // conditional on a measured reply tick, which made `status: "lost"`
+    // structurally unrecordable -- a lost action is *defined* by no reply
+    // arriving, so it never has a reply tick -- and `run-1788347034-00981`
+    // recorded 179 `action_dispatched` lines against 170 of these as a result,
+    // nine lost `craft`s with a dispatch and nothing after it. Counting the two
+    // kinds over a run is the cheapest check that this still holds.
+    //
+    // `status` is `"success"`, `"failed"` or `"lost"`, straight from the
+    // executor's `Status`. `failed` and `lost` are different facts and are
+    // never collapsed: `failed` is the game judging the action and saying no,
+    // `lost` is the game acknowledging it and never answering. Only the first
+    // is a verdict; only the second leaves work possibly still outstanding.
+    //
+    // A settle with NO `action_dispatched` beside it is legal and is a finding,
+    // not a gap: the action reached a verdict before the game acknowledged any
+    // dispatch, so there was no dispatch to record.
+    //
+    // `elapsed_ticks` is also what tells a reader that this event's own `tick`
+    // is the record's high-water mark rather than the game's clock (see
+    // [`RunRecorder::not_before`]): a settle the game timed always carries a
+    // duration, so a null one marks a synthesized stamp.
     ActionSettled {
         id: u32,
         bot: u32,
@@ -179,6 +210,24 @@ pub enum EventKind {
         /// The walk action this teleport happened during, when there is one.
         /// `None` for the two blueprint/ghost-revive sites, which are
         /// synchronous RCON calls with no dispatched action to attach to.
+        //
+        // NOT JOINABLE TO `ActionDispatched::id`, and the two names look far
+        // more alike than the things they name. This is the RCON/mod action id
+        // minted by `FactorioRcon` from `FactorioWorld::next_action_id`, a
+        // run-global counter that wraps at 1000; `ActionDispatched::id` is the
+        // planner's `ActionId`, which restarts at 0 with every plan. Joining
+        // them produces confident nonsense.
+        //
+        // Worse, there is no join to be had even in principle: a `walk_stuck`
+        // teleport belongs to a *walk leg*, and a walk is a `StepKind::Walk`
+        // with no `ActionId` at all (see `build_observation`'s `walks` array,
+        // keyed by `(bot, step_index)`). So "which action was this bot walking
+        // for" cannot be answered by unifying these two fields. Answering it
+        // needs walks in the record -- there is no walk `EventKind` today, so
+        // `obs.walks` never reaches `events.jsonl` -- plus the mod's action id
+        // carried back out of `FactorioRcon::move_player` and attached to the
+        // walk it belonged to. See
+        // `docs/superpowers/notes/2026-09-02-actions-that-never-settle.md`.
         action_id: Option<u32>,
     },
     /// The game refused a build, and the planner has stopped offering that

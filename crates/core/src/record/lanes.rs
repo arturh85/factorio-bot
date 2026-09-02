@@ -23,6 +23,13 @@ pub struct Lane {
     /// Drawn unterminated rather than dropped: the bot really did start it and
     /// nothing ever came back, which is a state worth seeing. Dropping it would
     /// make a lost action look like one that never happened.
+    //
+    // A run interrupted mid-dispatch is now the only way to reach this. An
+    // action the executor lost track of settles as `status: "lost"` and
+    // terminates its lane like any other verdict -- until 2026-09-02 it did
+    // not, because `record.actions` would not write a settle without a game
+    // reply tick, so every lost action reached here as an unterminated lane and
+    // was indistinguishable from a run that was killed.
     pub to_tick: Option<u64>,
     /// `null` while unterminated, otherwise the verdict the game gave.
     pub status: Option<String>,
@@ -146,6 +153,46 @@ mod tests {
         assert_eq!(lanes.len(), 1);
         assert_eq!(lanes[0].to_tick, None);
         assert_eq!(lanes[0].status, None);
+    }
+
+    /// A lost action closes its lane, and closes it as `lost`.
+    ///
+    /// Not as `failed`, and not by being left open. The two mean opposite
+    /// things to whoever reads the lane -- the game said no, versus we stopped
+    /// hearing about it -- and an open lane says a third thing again (the run
+    /// was interrupted here). `run-1788347034-00981` drew all nine of its lost
+    /// crafts as open lanes because no settle was ever written for them.
+    #[test]
+    fn a_lost_action_closes_its_lane_as_lost_and_not_as_failed() {
+        let lanes = derive_lanes(&[
+            dispatched(13, 1, "craft 1 stone-furnace", 93_392),
+            ev(
+                122_037,
+                EventKind::ActionSettled {
+                    id: 13,
+                    bot: 1,
+                    status: "lost".into(),
+                    // Null because nobody measured it: a lost action has no
+                    // reply tick to subtract the dispatch from.
+                    elapsed_ticks: None,
+                    error: Some("no action result received in time".into()),
+                    failure: None,
+                },
+            ),
+        ]);
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].to_tick, Some(122_037));
+        assert_eq!(lanes[0].status.as_deref(), Some("lost"));
+        assert_ne!(
+            lanes[0].status.as_deref(),
+            Some("failed"),
+            "the game never judged this, so the lane must not say it did"
+        );
+        assert_eq!(
+            lanes[0].error.as_deref(),
+            Some("no action result received in time"),
+            "and why the outcome is unknown travels with it"
+        );
     }
 
     #[test]

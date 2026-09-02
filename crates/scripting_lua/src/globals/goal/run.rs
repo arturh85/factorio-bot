@@ -162,6 +162,17 @@ fn build_observation(
     // `failed` would report a verdict nobody ever gave.
     let mut lost = 0u32;
     let mut failures: Vec<FailureRecord> = Vec::new();
+    // Why the *lowest-id* lost action was lost, for `first_error`.
+    //
+    // Kept out of `failures` deliberately -- losing the thread is not a
+    // failure, and `an_action_the_game_gave_no_verdict_for_is_reported_as_lost`
+    // pins that -- but the text still has to reach a caller, because a run
+    // whose only trouble was a lost action reported `failed = 0` and
+    // `first_error = nil` and so told `milestone_stuck` nothing at all. That is
+    // the same hole found twice before in `walks_failed` and `walks_lost`, on
+    // the actions everybody assumed were already covered; see
+    // `an_action_the_run_lost_track_of_still_reports_its_error`.
+    let mut first_lost_error: Option<String> = None;
 
     for action in net.actions() {
         let id = action.id;
@@ -215,6 +226,13 @@ fn build_observation(
             t.set("target", position_to_lua(lua, &target)?)?;
         }
         actions.set(id.0, t)?;
+
+        if status == Status::Lost && first_lost_error.is_none() {
+            // `net.actions()` iterates a `BTreeMap` ascending by `ActionId`, so
+            // "first" is the lowest id and is the same one on any two runs of
+            // the same log -- the determinism `first_error` already had.
+            first_lost_error.clone_from(&error);
+        }
 
         if status == Status::Failed {
             failures.push(FailureRecord {
@@ -290,13 +308,17 @@ fn build_observation(
         walks.set(i as i64 + 1, t)?;
     }
 
-    // An action's error first, because it is the more specific fact: it names
-    // the thing the plan was trying to do. The walk's error is the fallback for
-    // the case that produced none -- not a replacement, so every existing
-    // reading of `first_error` is unchanged.
+    // Most specific fact first, and each later term is a fallback rather than a
+    // replacement, so every existing reading of `first_error` is unchanged.
+    //
+    // A failed action names the thing the plan was trying to do *and* the
+    // game's verdict on it. A lost action names the thing but has no verdict --
+    // still far more specific than a walk, which names only a destination. A
+    // failed or lost walk is last, for the runs where nothing else went wrong.
     let first_error = failures
         .first()
         .map(|f| f.error.clone())
+        .or(first_lost_error)
         .or(first_walk_error);
 
     let obs = lua.create_table()?;
@@ -1298,6 +1320,40 @@ mod tests {
                 "a run that lost track of every walk may not report nothing")
             assert(obs.first_error:find("no action result", 1, true) ~= nil,
                 "and it has to be the walk's own words, got " .. tostring(obs.first_error))
+        "#,
+        )
+        .await;
+    }
+
+    /// **An action the run lost track of is the third place this hid.**
+    ///
+    /// `failures()` holds `Status::Failed` only, on purpose — losing the
+    /// thread is not a verdict — so an `ActionId` that ended `Status::Lost`
+    /// contributed no `FailureRecord` and therefore nothing to `first_error`
+    /// either. The two fixes before this one were both about walks
+    /// (`walks_failed`, then `walks_lost`); this is the same shape on the
+    /// actions everybody assumed was already covered. In
+    /// `run-1788347034-00981` every milestone-7 iteration reported
+    /// `obs.failed == 0, obs.lost == 1` with no failing walk anywhere, so
+    /// `first_error` was `nil` and the supervisor had nothing to hand
+    /// `milestone_stuck` — `last_error: null` beside a run whose every
+    /// iteration lost a `craft`.
+    #[tokio::test]
+    async fn an_action_the_run_lost_track_of_still_reports_its_error() {
+        let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::WithoutVerdict)));
+        exec_bounded(
+            &lua,
+            r#"
+            local obs = goal.run(goal.plan(goal.have("iron-ore", 2)))
+            assert(obs.failed == 0, "no ACTION failed -- that is the trap, got " .. obs.failed)
+            assert(obs.lost > 0, "an action was lost, got " .. tostring(obs.lost))
+            assert(obs.walks_failed == 0 and obs.walks_lost == 0,
+                "and no walk went wrong, so the walk fallback cannot be what answers")
+            assert(#obs:failures() == 0, "losing the thread is still not a failure")
+            assert(type(obs.first_error) == "string",
+                "a run that lost an action may not report nothing")
+            assert(obs.first_error:find("no readable outcome", 1, true) ~= nil,
+                "and it has to be the lost action's own words, got " .. tostring(obs.first_error))
         "#,
         )
         .await;

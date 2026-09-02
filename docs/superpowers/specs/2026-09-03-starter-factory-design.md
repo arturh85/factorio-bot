@@ -11,10 +11,14 @@ settle.
 **Date:** 2026-09-03 (written late on 2026-09-02).
 
 **Reading this against a moving tree.** `crates/planner/src/method/power.rs`
-and `docs/superpowers/notes/2026-09-02-the-power-plant.md` are **untracked**
-as this is written — `git status` shows nine modified files and those two
-additions. Every claim below about the plant is a claim about work in flight,
-not about `master`. Where that matters it is said in place.
+and `docs/superpowers/notes/2026-09-02-the-power-plant.md` were **untracked**
+while this was written and landed as `39cf19f7` ("build the power plant a
+research needs") before it was committed, so this spec sits directly on top of
+them. Two consequences: where the text below calls the plant "in flight" it is
+now on `master`, and — the part that has *not* changed — **the plant has still
+never been built in a running game.** Every claim here about it is a claim
+about a planner that produces a 171-action network, not about observed
+behaviour. §15 keeps that distinction.
 
 ---
 

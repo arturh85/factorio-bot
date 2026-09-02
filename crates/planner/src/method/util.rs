@@ -660,10 +660,10 @@ pub fn research_ticks(tech: &FactorioTechnology) -> Ticks {
 mod tests {
     use super::*;
     use crate::ids::BotId;
-    use crate::state::PlanState;
+    use crate::state::{DEFAULT_RESOURCE_PER_TILE, PlanState};
     use factorio_bot_core::serde_json;
     use factorio_bot_core::test_utils::fixture_world;
-    use factorio_bot_core::types::{FactorioForce, Position};
+    use factorio_bot_core::types::{Direction, FactorioEntity, FactorioForce, Position};
     use std::sync::Arc;
 
     fn state() -> PlanState {
@@ -952,6 +952,183 @@ mod tests {
     fn an_item_that_is_not_a_resource_has_no_seats() {
         let s = state();
         assert_eq!(resource_seats(&s, "iron-plate", 100), 0);
+    }
+
+    /// Tile centres for three isolated `uranium-ore` tiles, ten tiles apart --
+    /// far more than [`PlanState::mining_tile_separation`] -- so each is
+    /// trivially its own seat and excluding one never perturbs the others.
+    /// `fixture_world()` ships no uranium at all (see
+    /// `a_missing_resource_has_no_tile`), so these are the only tiles of this
+    /// item in play and every assertion below can be exact.
+    const URANIUM_A: (f64, f64) = (100.5, 100.5);
+    const URANIUM_B: (f64, f64) = (110.5, 100.5);
+    const URANIUM_C: (f64, f64) = (120.5, 100.5);
+
+    /// `fixture_world()` plus the three uranium tiles above and, when `block`
+    /// is `true`, a `simple-entity` covering `URANIUM_A` built exactly like
+    /// `FactorioEntity::new_rock` -- the same shape crash-site wreckage takes
+    /// in the real graph (`EntityGraph::add`'s whitelist routes anything
+    /// named other than `rock-big`/`rock-huge` into `blocked_tree` only, never
+    /// `entity_tree`), so this reproduces the obstruction without needing a
+    /// live game's wreck prototype.
+    fn state_with_uranium(block: bool) -> PlanState {
+        let world = fixture_world();
+        let mut entities = vec![
+            FactorioEntity::new_resource(
+                &Position::new(URANIUM_A.0, URANIUM_A.1),
+                Direction::North,
+                "uranium-ore",
+            ),
+            FactorioEntity::new_resource(
+                &Position::new(URANIUM_B.0, URANIUM_B.1),
+                Direction::North,
+                "uranium-ore",
+            ),
+            FactorioEntity::new_resource(
+                &Position::new(URANIUM_C.0, URANIUM_C.1),
+                Direction::North,
+                "uranium-ore",
+            ),
+        ];
+        if block {
+            entities.push(FactorioEntity::new_rock(
+                &Position::new(URANIUM_A.0, URANIUM_A.1),
+                "crash-site-spaceship-wreck-medium-3",
+            ));
+        }
+        world.update_chunk_entities(entities).unwrap();
+        PlanState::from_world(Arc::new(world), &[BotId(1)])
+    }
+
+    /// The failure this fix targets: a resource tile covered by debris must
+    /// not be handed to a bot. `nearest_resource_tile` has to walk past it to
+    /// the next-nearest tile, exactly as `is_area_free` already walks past a
+    /// tree for placement (`docs/superpowers/notes/2026-09-02-placement-refusal.md`).
+    #[test]
+    fn a_resource_tile_under_debris_is_skipped_by_the_nearest_tile_search() {
+        let s = state_with_uranium(true);
+        let a = Position::new(URANIUM_A.0, URANIUM_A.1);
+        let b = Position::new(URANIUM_B.0, URANIUM_B.1);
+        let from = Position::new(95., URANIUM_A.1);
+
+        let tile = nearest_resource_tile(&s, "uranium-ore", &from, 1)
+            .expect("two unblocked uranium tiles remain");
+        assert_eq!(
+            tile, b,
+            "the nearest tile is covered by debris and must be skipped"
+        );
+
+        // The ore is covered, not gone: `EntityGraph::add` never removes a
+        // resource entity because something else was placed over it, so the
+        // physical reading `Condition::ResourceAvailable` relies on must stay
+        // truthful even though the tile is unusable for a *new* assignment.
+        assert!(
+            s.resource_available(&a, "uranium-ore") > 0,
+            "the covered tile still physically holds ore"
+        );
+        assert_eq!(
+            s.resource_unclaimed(&a, "uranium-ore"),
+            0,
+            "but it must not be offered to a new mining action"
+        );
+
+        // resource_tiles_for reads the same ledger and must agree: asking for
+        // everything two tiles hold (`need` is an amount of ore, not a count
+        // of tiles -- each tile supplies at most `DEFAULT_RESOURCE_PER_TILE`)
+        // draws from exactly the two unblocked ones.
+        let tiles = resource_tiles_for(&s, "uranium-ore", &from, 2 * DEFAULT_RESOURCE_PER_TILE);
+        assert_eq!(tiles.len(), 2);
+        assert!(
+            tiles.iter().all(|(t, _)| *t != a),
+            "the blocked tile must never appear in a selection"
+        );
+    }
+
+    /// Negative control: a patch nothing obstructs is unaffected by a block
+    /// elsewhere, and only the covered tile -- not its whole patch -- is
+    /// excluded. Without this, a selector that excluded far more than the one
+    /// obstructed tile could still pass the test above.
+    #[test]
+    fn an_unobstructed_patch_is_unchanged_by_a_block_elsewhere() {
+        let unblocked = state_with_uranium(false);
+        let blocked = state_with_uranium(true);
+        let origin = Position::new(0., 0.);
+
+        // The fixture's copper-ore field is nowhere near the uranium tiles
+        // above, so blocking one of the latter must not perturb it at all.
+        assert_eq!(
+            nearest_resource_tile(&unblocked, "copper-ore", &origin, 1),
+            nearest_resource_tile(&blocked, "copper-ore", &origin, 1),
+        );
+        assert_eq!(
+            resource_seats(&unblocked, "copper-ore", 100),
+            resource_seats(&blocked, "copper-ore", 100),
+        );
+
+        // Nor does it touch the *other* uranium tiles: all three are pickable
+        // when nothing is blocked, and exactly two remain once one is. `need`
+        // is an amount of ore, not a tile count, so asking for all three
+        // tiles' worth requires `3 * DEFAULT_RESOURCE_PER_TILE`.
+        let from = Position::new(95., URANIUM_A.1);
+        assert_eq!(
+            resource_tiles_for(
+                &unblocked,
+                "uranium-ore",
+                &from,
+                3 * DEFAULT_RESOURCE_PER_TILE
+            )
+            .len(),
+            3
+        );
+        assert_eq!(
+            resource_tiles_for(
+                &blocked,
+                "uranium-ore",
+                &from,
+                3 * DEFAULT_RESOURCE_PER_TILE
+            )
+            .len(),
+            0,
+            "asking for one more tile's worth than the two unblocked tiles hold must fail \
+             closed, not silently draw from the covered one"
+        );
+        assert_eq!(
+            resource_tiles_for(
+                &blocked,
+                "uranium-ore",
+                &from,
+                2 * DEFAULT_RESOURCE_PER_TILE
+            )
+            .len(),
+            2,
+            "exactly the covered tile is missing, nothing more"
+        );
+    }
+
+    /// `resource_seats` must never promise a bot a tile `resource_tiles_for`
+    /// then refuses to hand out -- they read the same ledger by design
+    /// (`resource_unclaimed`), and this pins that they keep agreeing once a
+    /// tile is obstructed rather than only when one is claimed or crowded.
+    #[test]
+    fn seats_and_selection_agree_about_an_obstructed_patch() {
+        let s = state_with_uranium(true);
+        let from = Position::new(95., URANIUM_A.1);
+
+        let seats = resource_seats(&s, "uranium-ore", 100);
+        assert_eq!(seats, 2, "one of the three tiles is covered by debris");
+
+        // `resource_tiles_for`'s `need` is an amount of ore, not a tile
+        // count, so the capacity `seats` tiles promise is `seats *
+        // DEFAULT_RESOURCE_PER_TILE`. Selection must be able to fulfil
+        // exactly that -- no more, since a third tile does not exist to draw
+        // from, and no less, since that would mean a seat existed selection
+        // could not actually place a bot on.
+        let tiles = resource_tiles_for(&s, "uranium-ore", &from, seats * DEFAULT_RESOURCE_PER_TILE);
+        assert_eq!(
+            tiles.len() as u32,
+            seats,
+            "every seat resource_seats counts must be a tile resource_tiles_for can hand out"
+        );
     }
 
     #[test]

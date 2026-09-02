@@ -899,20 +899,57 @@ impl PlanState {
 
     /// Ore at a tile that is still *available to plan against*: what
     /// [`PlanState::resource_available`] reports, or zero once the tile has
-    /// been committed to a mining action.
+    /// been committed to a mining action, or covered by something else.
     ///
     /// This — not `resource_available` — is what tile *selection* must ask.
     /// The physical reading answers "will the ore be there when the bot
     /// swings", which is what `Condition::ResourceAvailable` needs and which a
     /// claim must not distort; this one answers "may I send another bot here",
-    /// and the answer is no — whether because the tile itself is spoken for or
-    /// because a bot mining a nearby claim will be standing on it. Both, in
-    /// the order they are cheap to test.
+    /// and the answer is no — whether because the tile itself is spoken for,
+    /// because a bot mining a nearby claim will be standing on it, or because
+    /// something else already occupies the tile ([`Self::resource_tile_blocked`]).
+    /// All three, in the order they are cheap to test.
     pub fn resource_unclaimed(&self, position: &Position, item: &str) -> u32 {
         if self.is_resource_claimed(position) || self.is_resource_crowded(position) {
             return 0;
         }
+        if self.resource_tile_blocked(&Pos::from(position)) {
+            return 0;
+        }
         self.resource_available(position, item)
+    }
+
+    /// Does a blocking entity — debris, a tree, a rock, water — sit over the
+    /// resource tile centred at `tile`?
+    ///
+    /// The counterpart of the fourth source in [`PlanState::is_area_clear`],
+    /// aimed at the opposite mistake. There, the base world can hold an
+    /// obstacle that reads as open ground because `entity_tree` never sees it;
+    /// here, the base world can hold *ore* that reads as minable when the
+    /// entity the game will actually select at that position is something
+    /// else. `EntityGraph::add` routes crash-site wreckage — a
+    /// `simple-entity`, exactly like a small rock — into `blocked_tree` only,
+    /// never `entity_tree` (see that function's whitelist), and the mod's
+    /// `player.update_selected_entity` does not filter by name: whichever
+    /// entity is selectable at the position wins. When that is the wreck
+    /// instead of the ore, mining stalls with `expected coal ..., found
+    /// crash-site-spaceship-wreck-...` until the mod's own timeout fires
+    /// (`workspace/runs/run-1788317597-64759`, rung 4).
+    ///
+    /// The ore itself is not gone — `add` never removes a resource entity
+    /// because something else was placed over it, and this does not touch
+    /// [`PlanState::resource_available`], which still reports the tile's full
+    /// physical count. Only *new selection* is refused: a tile this returns
+    /// `true` for must be skipped in favour of the next one, not reported as
+    /// exhausted.
+    fn resource_tile_blocked(&self, tile: &Pos) -> bool {
+        let area = tile_area(tile);
+        self.base
+            .entity_graph
+            .blocking_boxes_within(&area)
+            .into_iter()
+            .filter(|blocked| !self.removed.contains(&Pos::from(&blocked.center())))
+            .any(|blocked| boxes_overlap(&blocked, &area))
     }
 
     /// Commit `position` to a mining action without taking anything from it.

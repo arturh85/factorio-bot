@@ -436,3 +436,19 @@ line under it.
 Worth fixing at the source: either drop the `plans` warning if the directory is
 vestigial, or find its reader and say what it is. A diagnostic that cries wolf
 is worse than none, because it degrades the ones beside it.
+
+## Second shared-checkout hazard: `git stash` (~06:30)
+
+The action-target agent used `git stash` to prove a workspace test failure
+belonged to a concurrently-running agent's WIP rather than its own change. The
+reasoning was sound and it restored the stash, but `git stash` takes the **whole
+working tree**, including the other agent's uncommitted edits — for the duration
+it is as destructive as the `git reset --hard` that already cost an agent its
+work tonight.
+
+Both belong in the same rule: in a shared checkout, a command that mutates the
+working tree globally is not a local operation. To test whether a failure is
+yours, build in a scratch worktree (`git worktree add`) or check out the
+specific paths, never stash the tree.
+
+Nothing was lost this time.

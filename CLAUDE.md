@@ -15,7 +15,12 @@ it amended *their* commit. It was recoverable — `git reset --soft` back to the
 original commit object from the reflog, `git diff` verified empty, then commit
 separately — but only because it noticed. `cargo fmt --all` has the same shape
 and has already rewritten another agent's live files; `cargo fmt -p <crate>`
-still rewrites a whole crate, so use `rustfmt <file>`.
+still rewrites a whole crate, so use `rustfmt --edition 2024 <file>`. **The
+edition flag is not optional**: bare `rustfmt` defaults to Rust 2015 and dies on
+every `async fn` in the file, which reads as a compile error in code that builds
+fine -- and chained with `&&` it silently skips whatever you meant to run next.
+It skipped a crate test run here, in the same breath as telling agents to prefer
+`rustfmt <file>`.
 
 The same reasoning covers `git add -A`, a bare `git commit`, `git reset --hard`
 and `git stash`: commit with explicit paths (`git commit -m "..." -- <paths>`),

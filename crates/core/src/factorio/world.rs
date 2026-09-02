@@ -346,7 +346,12 @@ impl FactorioWorld {
     }
 
     pub fn on_some_entity_created(&self, entity: FactorioEntity) -> Result<()> {
-        info!("XXX on_some_entity_created {:?}", &entity);
+        // Deliberately silent. This used to dump the whole `FactorioEntity` here
+        // through `info!`, which in this crate is `paris` on stdout -- the
+        // narration channel a person reads while a run happens, not a log. It
+        // fired once per entity created and was a large share of a run's output.
+        // The entity reaches `entity_graph` on the next line, so any question
+        // the dump could answer is a graph query away.
         self.entity_graph.add(vec![entity], None)?;
         Ok(())
     }

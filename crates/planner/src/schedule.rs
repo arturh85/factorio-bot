@@ -49,11 +49,40 @@ pub fn travel_ticks(from: &Position, to: &Position, min_radius: f64, radius: f64
 /// correct distance is exactly as valid as any other; a fixed one keeps this
 /// function deterministic without needing to know which directions are
 /// actually walkable, the same limitation the disc case already accepts.
+///
+/// The offset is nudged *outward* when it has to be nudged at all.
+/// `to.x() + min_radius` is a rounded sum, and the offset measured back out of
+/// it -- which is what [`crate::action::Condition::holds`] and
+/// [`travel_ticks`] both go on -- can come back a few ulps below `min_radius`
+/// when the sum lands in a coarser binade than the radius itself. That is not
+/// cosmetic: the inner bound is inclusive, so a point one ulp short of it
+/// fails the very condition it was constructed to satisfy, and the scheduler
+/// then rejects its own arrival point. It ended
+/// `workspace/runs/run-1788325660-10154` at rung 4, where `-16.0 +
+/// 1.2705824974445776` measured back as `1.2705824974445772` and no other
+/// candidate bot existed because the chain had an owner.
+///
+/// The correction rounds away from `to`, never toward it, because the bound is
+/// a *minimum*: a point rounded inward stands closer to the site than the
+/// entity's own footprint allows, which is exactly the shortfall the annulus
+/// was added to prevent, while a point rounded outward is merely a fraction of
+/// a nanotile further away. One `next_up` normally suffices; the loop is there
+/// so correctness does not rest on "normally".
 fn arrival_point(to: &Position, min_radius: f64) -> Position {
     if min_radius.total_cmp(&0.0).is_le() {
         return to.clone();
     }
-    Position::new(to.x() + min_radius, to.y())
+    // `x` starts strictly greater than `to.x()` (a positive `min_radius` was
+    // just established), so `next_up` moves it further away and the measured
+    // distance strictly increases: the loop terminates.
+    let mut x = to.x() + min_radius;
+    while calculate_distance(&Position::new(x, to.y()), to)
+        .total_cmp(&min_radius)
+        .is_lt()
+    {
+        x = x.next_up();
+    }
+    Position::new(x, to.y())
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -822,6 +851,117 @@ mod tests {
             result.steps
         );
         assert_eq!(result.makespan, 60, "just the action, no travel");
+    }
+
+    /// `PlanState::placement_clearance("stone-furnace")` for a real Factorio
+    /// 2.1 prototype set: half the diagonal of the furnace's collision box
+    /// plus half the diagonal of the character's. Written out rather than
+    /// computed so the reproduction below is pinned to the exact float the
+    /// crashing run carried, not to whatever the fixture happens to hold.
+    const STONE_FURNACE_CLEARANCE: f64 = 1.2705824974445776;
+
+    /// The defect that ended `workspace/runs/run-1788325660-10154` at rung 4:
+    ///
+    /// ```text
+    /// bot 1 owns chain ChainId(2) because its bill was sized against it,
+    /// but between 1.2705824974445776 and 10 of [-16, 18] does not hold there
+    /// ```
+    ///
+    /// `arrival_point` used to return `Position::new(to.x() + min_radius, ...)`
+    /// outright, and that sum is *rounded*: measuring the offset back out of it
+    /// can land a few ulps below `min_radius`. `-16.0 + 1.2705824974445776`
+    /// crosses down into the `[8, 16)` binade, whose ulp is eight times coarser
+    /// than the clearance's own, and the round-trip comes back as
+    /// `1.2705824974445772` — short of the inclusive inner bound the point was
+    /// constructed to sit on. The scheduler then rejected its own arrival
+    /// point, and because the chain had an owner there was no second candidate.
+    ///
+    /// `-16` was the only x of the run's 44 furnace placements whose sum
+    /// rounds down; every other one happened to round up and planned fine.
+    #[test]
+    fn a_walk_into_an_annulus_lands_where_the_condition_holds() {
+        let mut id_gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let target = Position::new(-16., 18.);
+        net.add(at_annulus(
+            &mut id_gen,
+            "place stone-furnace at [-16, 18]",
+            target.clone(),
+            STONE_FURNACE_CLEARANCE,
+            10.0,
+        ));
+        let bots = [BotId(1)];
+        let result = schedule(&net, &state(&bots), &bots)
+            .expect("a bot 75 tiles away can always walk to a placement site");
+        match &result.steps[0].what {
+            StepKind::Walk { to, .. } => {
+                let condition = Condition::AtPosition {
+                    who: Actor::Role,
+                    pos: target.clone(),
+                    radius: 10.0,
+                    min_radius: STONE_FURNACE_CLEARANCE,
+                };
+                let mut arrived = state(&bots);
+                arrived.set_position(BotId(1), to.clone());
+                assert!(
+                    condition.holds(&arrived, BotId(1)),
+                    "the walk the plan records must satisfy the condition it \
+                     was emitted for: landed {} from the target, inner bound {}",
+                    calculate_distance(to, &target),
+                    STONE_FURNACE_CLEARANCE,
+                );
+            }
+            other => panic!("a bot 75 tiles out must be walked in, got {:?}", other),
+        }
+    }
+
+    /// The class, not just the instance. Whether `to.x() + min_radius` rounds
+    /// up or down depends on which binade the sum lands in, so a single
+    /// coordinate proves nothing — the run planned 43 furnaces at coordinates
+    /// that happened to round the safe way before it hit the one that did not.
+    #[test]
+    fn an_arrival_point_never_rounds_inside_the_inner_bound() {
+        let bots = [BotId(1)];
+        let mut checked = 0u32;
+        for x in -128i32..=128 {
+            for min_radius in [
+                STONE_FURNACE_CLEARANCE,
+                0.5,
+                1.5,
+                2.0 / 3.0,
+                std::f64::consts::SQRT_2,
+            ] {
+                let target = Position::new(f64::from(x), 18.);
+                let landed = arrival_point(&target, min_radius);
+                let condition = Condition::AtPosition {
+                    who: Actor::Role,
+                    pos: target.clone(),
+                    radius: 10.0,
+                    min_radius,
+                };
+                let mut arrived = state(&bots);
+                arrived.set_position(BotId(1), landed.clone());
+                assert!(
+                    condition.holds(&arrived, BotId(1)),
+                    "arrival point {:?} for target {:?} and inner bound {} \
+                     measures {} -- inside the bound it was built to sit on",
+                    landed,
+                    target,
+                    min_radius,
+                    calculate_distance(&landed, &target),
+                );
+                // Outward rounding only: never more than one ulp of slack, so
+                // this is a correction and not a margin.
+                assert!(
+                    calculate_distance(&landed, &target)
+                        .total_cmp(&(min_radius * 1.000_000_1))
+                        .is_le(),
+                    "arrival point drifted well past the inner bound",
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 257 * 5);
     }
 
     #[test]

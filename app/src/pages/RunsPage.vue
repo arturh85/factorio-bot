@@ -11,7 +11,7 @@ import {computed, onBeforeUnmount, onMounted, ref, watch, watchEffect} from 'vue
 import {useRunsStore} from '@/store/runsStore';
 import {runFrameUrl} from '@/api/client';
 import MapPanel from '@/components/MapPanel.vue';
-import {parseVideoClock, tickToVideoSeconds} from '@/api/videoClock';
+import {parseVideoClock, tickToVideoSeconds, videoSecondsToTick} from '@/api/videoClock';
 import {videoDefects} from '@/api/videoJoin';
 import {
     formatAgo,
@@ -127,15 +127,57 @@ const videoIssues = computed(() => (store.video === null ? [] : videoDefects(sto
 
 const videoEl = ref<HTMLVideoElement | null>(null);
 
-// Follow the shared cursor. `videoAt` is null when the clock declines to answer,
-// and then the element is deliberately left where it was rather than seeked to a
-// guess.
+/**
+ * The two directions of the video/timeline sync, and the loop between them.
+ *
+ * Cursor -> video is a `watchEffect`; video -> cursor is `onVideoTime` below.
+ * Together those are a cycle, so each end only acts on a difference bigger than
+ * `SYNC_SLOP_S`: a round trip lands within the slop and stops, instead of the two
+ * ends nudging each other forever. The slop is a quarter-second because the clock
+ * samples at 2 Hz -- tighter than the data, tight enough not to be seen.
+ *
+ * `videoDriving` exists because a *seek* is not a difference to be corrected. When
+ * the video is playing it owns the cursor, and the effect must not drag it back to
+ * where the cursor was a moment ago.
+ */
+const SYNC_SLOP_S = 0.25;
+const videoDriving = ref(false);
+
 watchEffect(() => {
     const at = videoAt.value;
     const el = videoEl.value;
-    if (el === null || at === null) return;
-    if (Math.abs(el.currentTime - at.seconds) > 0.25) el.currentTime = at.seconds;
+    // `videoAt` is null when the clock declines to place this tick -- inside a
+    // stall, or outside the recording. Leave the element where it is rather than
+    // seek to a guess.
+    if (el === null || at === null || videoDriving.value) return;
+    if (Math.abs(el.currentTime - at.seconds) > SYNC_SLOP_S) el.currentTime = at.seconds;
 });
+
+/**
+ * The video is playing (or was scrubbed): move the cursor to match, so the
+ * splits, map, lanes and world-state panels all follow the picture.
+ *
+ * A null answer is respected here too -- a position inside a stall is a real
+ * picture of no tick this clock observed, and moving the cursor anyway would put
+ * every other panel on a tick the video is not showing.
+ */
+function onVideoTime() {
+    const el = videoEl.value;
+    const clock = videoClock.value;
+    if (el === null || clock === null || el.paused) return;
+    const at = videoSecondsToTick(clock, el.currentTime);
+    if (at === null) return;
+    videoDriving.value = true;
+    store.seek(at.tick);
+    // Released on the next macrotask so the cursor-driven effect sees the new
+    // value with the guard still up, and does not immediately seek back.
+    setTimeout(() => (videoDriving.value = false), 0);
+}
+
+/** Two clocks driving one cursor is one too many. */
+function onVideoPlay() {
+    if (store.playing) store.togglePlay();
+}
 
 const currentViewKey = computed(() =>
     store.bot === null || store.camera === null
@@ -392,6 +434,9 @@ function researchPct(progress: number): string {
                     preload="metadata"
                     controls
                     class="video__player"
+                    @timeupdate="onVideoTime"
+                    @seeked="onVideoTime"
+                    @play="onVideoPlay"
                 />
                 <p class="video__meta num">
                     {{ store.video.video.width }}x{{ store.video.video.height }} ·

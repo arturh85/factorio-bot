@@ -822,6 +822,37 @@ pub struct FactorioTile {
     pub color: Option<[u8; 4]>,
 }
 
+impl FactorioTile {
+    /// Every tile name vanilla Factorio gives water, and there are **two**.
+    ///
+    /// Read off a live 2.1.17 capture rather than assumed:
+    /// `crates/core/tests/live-2.1.17-tiles.json` holds 48 `water`, 14
+    /// `deepwater` and 2 `grass-1`, and the first two are the only ones that
+    /// come back `player_collidable`. A shoreline search that asks only for
+    /// `"water"` -- as
+    /// `FactorioRcon::find_offshore_pump_placement_options` does -- misses
+    /// every edge of every lake deep enough to have a middle, which on a real
+    /// map is most of them: the archived stdout in `workspace/*-log.txt` holds
+    /// 330,346 `deepwater` tiles against 79,717 `water`.
+    ///
+    /// Sorted, because a caller may reasonably iterate it and the order it is
+    /// written in should not be a source of one.
+    pub const WATER_NAMES: [&'static str; 2] = ["deepwater", "water"];
+
+    /// Whether this tile is water, by name.
+    ///
+    /// By name and not by `player_collidable`: cliffs and `out-of-map` are
+    /// collidable too, and an offshore pump may stand in the first and never
+    /// in the others. "Blocked" and "water" are different questions and
+    /// conflating them is what
+    /// [`EntityGraph::blocking_boxes_within`](crate::graph::entity_graph::EntityGraph::blocking_boxes_within)
+    /// forces on a caller today.
+    #[must_use]
+    pub fn is_water(&self) -> bool {
+        Self::WATER_NAMES.contains(&self.name.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct FactorioChunk {

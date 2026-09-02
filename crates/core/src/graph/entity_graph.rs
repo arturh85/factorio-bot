@@ -1,6 +1,7 @@
 use crate::aabb_quadtree::{ItemId, QuadTree};
 use crate::factorio::util::{
-    add_to_rect, bounding_box, format_dotgraph, move_position, rect_fields, rect_floor,
+    add_to_rect, bounding_box, calculate_distance, format_dotgraph, move_position, rect_fields,
+    rect_floor,
 };
 use crate::num_traits::FromPrimitive;
 use crate::record::map::{EntitySnapshot, resource_position_from_pos};
@@ -372,6 +373,158 @@ impl EntityGraph {
                 )
             })
             .collect()
+    }
+
+    /// Every tile this graph has been told about inside `bounds`, **by name**,
+    /// ordered by `(x, y, name)`.
+    ///
+    /// The tile tree has always carried the name -- `add_tiles` stores whole
+    /// `FactorioTile`s -- and until now nothing could read it. The only public
+    /// accessor was [`Self::tile_tree`], a raw `RwLockReadGuard` over a quad
+    /// tree, whose one caller repo-wide was a test. So a caller asking "is
+    /// there water here" had to go through [`Self::blocking_boxes_within`]
+    /// instead, which answers a *different* question: its payload is a bare
+    /// `is_minable` flag, so water arrives anonymous and indistinguishable
+    /// from a tree or a cliff. An offshore pump needs to know a tile **is
+    /// water**, not that something blocks there, and a boiler needs the exact
+    /// opposite; one bit cannot carry both.
+    ///
+    /// # Ordering, because the planner reads this
+    ///
+    /// The quad tree hands its results back in item-id order, i.e. the order
+    /// chunks happened to arrive in, which differs between two runs of the
+    /// same map. `crates/planner` is pure and deterministic and must produce
+    /// byte-identical plans for identical inputs, so the vector is sorted
+    /// explicitly on `(x, y, name)` with `total_cmp` -- the same convention
+    /// and the same comparator `PlanState::entities_within` already uses.
+    ///
+    /// # Clipped to `bounds`, unlike the obstruction queries
+    ///
+    /// Results are re-checked with [`overlaps_bounds`], for the reason
+    /// [`Self::snapshot_within`] sets out at length: the quad tree's own
+    /// predicate is half-open, so a box abutting the query's *left or top*
+    /// edge comes back while its mirror image on the right or bottom does not.
+    /// A tile box is a full 1x1, so without the clip the row of tiles
+    /// immediately left of `bounds` is reported as inside it -- the same
+    /// asymmetry that was worth 691 spurious keyframe divergences.
+    ///
+    /// This is not the narrowing that `1b2b2149` warns against. That commit
+    /// filtered the keyframe query and deliberately left `attach_world`,
+    /// `is_area_empty` and the placement obstruction checks wide, because a
+    /// *negative* question ("is anything in the way?") is safe when it
+    /// over-reports and dangerous when it under-reports. This is a
+    /// **positive** question ("where is the water?"), where over-reporting is
+    /// the unsafe direction: it would put a lake one tile outside every rect
+    /// anybody asks about.
+    pub fn tiles_within(&self, bounds: &Rect) -> Vec<FactorioTile> {
+        let query: QuadTreeRect = bounds.clone().into();
+        let mut out: Vec<FactorioTile> = self
+            .tile_tree
+            .read()
+            .query(query)
+            .into_iter()
+            .filter(|(_tile, rect, _id)| overlaps_bounds(bounds, rect))
+            .map(|(tile, _rect, _id)| tile.clone())
+            .collect();
+        out.sort_by(|a, b| {
+            a.position
+                .x
+                .total_cmp(&b.position.x)
+                .then(a.position.y.total_cmp(&b.position.y))
+                .then(a.name.cmp(&b.name))
+        });
+        out
+    }
+
+    /// Whether the tile covering `position` is water.
+    ///
+    /// The discriminator [`Self::blocking_boxes_within`] cannot provide. Its
+    /// rectangles carry no name, but a tile's box is exactly the 1x1 square of
+    /// the tile it came from, so `is_water_at(&rect.center())` names it --
+    /// keyed by the same floored `Pos` that `PlanState::is_area_clear` already
+    /// uses on those very boxes.
+    ///
+    /// `position` is a point anywhere in the tile, not the tile's corner.
+    #[must_use]
+    pub fn is_water_at(&self, position: &Position) -> bool {
+        let pos = Pos::from(position);
+        // A quarter-tile box strictly inside the tile: small enough that no
+        // neighbour's box can reach it, and non-degenerate so the tree's
+        // half-open `contains` still admits the tile it is inside of. The
+        // `Pos` comparison below is what actually decides -- this only narrows.
+        let query: QuadTreeRect = Rect::new(
+            &Position::new(f64::from(pos.0) + 0.25, f64::from(pos.1) + 0.25),
+            &Position::new(f64::from(pos.0) + 0.75, f64::from(pos.1) + 0.75),
+        )
+        .into();
+        self.tile_tree
+            .read()
+            .query(query)
+            .into_iter()
+            .any(|(tile, _rect, _id)| Pos::from(&tile.position) == pos && tile.is_water())
+    }
+
+    /// The water tile nearest `from`, or `None` if there is none within
+    /// `max_radius`.
+    ///
+    /// Where a plant gets sited. A boiler and a steam engine have to stand
+    /// next to a lake because the water is the one input that cannot be
+    /// carried, so "how far is the water" is the question a plant method asks
+    /// first and the one that a refusal ("the nearest water is 300 tiles from
+    /// the nearest coal") is worth making on.
+    ///
+    /// # Three things that are easy to get wrong here
+    ///
+    /// * **Distance is Euclidean**, via
+    ///   [`calculate_distance`](crate::factorio::util::calculate_distance).
+    ///   `Position::distance` is *Manhattan* despite the name -- it is
+    ///   `|dx| + |dy|` -- and `find_entities_in_radius` uses it, so two
+    ///   "radius" arguments in this file do not mean the same thing.
+    /// * **Distance is measured to the tile's centre**, `position + (0.5,
+    ///   0.5)`, because `FactorioTile::position` is the tile's top-left
+    ///   *corner* -- that is what the game reports and what `add_tiles`
+    ///   assumes when it builds the 1x1 box. The returned tile keeps its
+    ///   corner position, unchanged, so this is the only place the half tile
+    ///   appears. Getting the same half-tile wrong for resources made mining
+    ///   fail on every ore on every map.
+    /// * **Both water names.** `deepwater` outnumbers `water` four to one in
+    ///   the archived stdout; see [`FactorioTile::WATER_NAMES`].
+    ///
+    /// # Determinism
+    ///
+    /// Candidates are ordered by `(distance, x, y)` with `total_cmp` and the
+    /// first is taken, so two tiles equally far away resolve by position and
+    /// never by which chunk arrived first. Same shape as
+    /// `PlanState::nearest_supply_anchor`.
+    ///
+    /// The search is one bounded query over the `max_radius` box, not an
+    /// expanding ring: a ring search that stops at the first ring holding a
+    /// hit does not return the nearest tile (a hit in the corner of ring `r`
+    /// is `r * sqrt(2)` away, further than any tile in ring `r + 1`), and
+    /// making it correct means re-querying anyway. Cost is therefore linear in
+    /// the tiles inside `max_radius`, which is the caller's to bound.
+    #[must_use]
+    pub fn nearest_water_tile(&self, from: &Position, max_radius: f64) -> Option<FactorioTile> {
+        let bounds = Rect::new(
+            &Position::new(from.x() - max_radius, from.y() - max_radius),
+            &Position::new(from.x() + max_radius, from.y() + max_radius),
+        );
+        let mut candidates: Vec<(f64, FactorioTile)> = self
+            .tiles_within(&bounds)
+            .into_iter()
+            .filter(FactorioTile::is_water)
+            .filter_map(|tile| {
+                let centre = Position::new(tile.position.x() + 0.5, tile.position.y() + 0.5);
+                let distance = calculate_distance(&centre, from);
+                (distance <= max_radius).then_some((distance, tile))
+            })
+            .collect();
+        candidates.sort_by(|a, b| {
+            a.0.total_cmp(&b.0)
+                .then(a.1.position.x.total_cmp(&b.1.position.x))
+                .then(a.1.position.y.total_cmp(&b.1.position.y))
+        });
+        candidates.into_iter().next().map(|(_, tile)| tile)
     }
 
     /// Everything this graph believes lies within `bounds`: the entities the
@@ -1952,6 +2105,279 @@ mod tests {
             boxes[0],
             Rect::new(&Position::new(-70., 42.), &Position::new(-69., 43.))
         );
+    }
+
+    /// One tile of terrain, named. `player_collidable` follows the name the
+    /// way the live 2.1.17 capture does: water and deepwater collide, grass
+    /// does not.
+    fn terrain(x: f64, y: f64, name: &str) -> FactorioTile {
+        FactorioTile {
+            position: Position::new(x, y),
+            player_collidable: FactorioTile::WATER_NAMES.contains(&name),
+            name: name.into(),
+            color: None,
+        }
+    }
+
+    fn graph_with_terrain(tiles: Vec<FactorioTile>) -> EntityGraph {
+        let graph = EntityGraph::new(
+            Arc::new(fixture_entity_prototypes()),
+            Arc::new(DashMap::new()),
+        );
+        graph
+            .add_tiles(tiles, None)
+            .expect("adding tiles must not fail");
+        graph
+    }
+
+    fn named(tiles: &[FactorioTile]) -> Vec<(f64, f64, String)> {
+        tiles
+            .iter()
+            .map(|t| (t.position.x, t.position.y, t.name.clone()))
+            .collect()
+    }
+
+    /// **The gap.** `EntityGraph` held every tile's *name* and had no way to
+    /// hand one back: `tile_tree()` is a raw lock guard whose only caller
+    /// repo-wide is a test, and `blocking_boxes_within` throws the name away.
+    #[test]
+    fn tiles_within_reports_the_terrain_by_name() {
+        let graph = graph_with_terrain(vec![
+            terrain(1., 0., "water"),
+            terrain(0., 0., "grass-1"),
+            terrain(0., 1., "deepwater"),
+        ]);
+        assert_eq!(
+            named(&graph.tiles_within(&Rect::new(&Position::new(0., 0.), &Position::new(2., 2.)))),
+            vec![
+                (0., 0., "grass-1".to_string()),
+                (0., 1., "deepwater".to_string()),
+                (1., 0., "water".to_string()),
+            ],
+            "the planner cannot tell a lake from a forest without the name, \
+             and ordered by (x, y, name) because it has to be the same order \
+             every time"
+        );
+    }
+
+    /// The half-open `contains` again. A tile box is a full 1x1, so the row
+    /// immediately left of `bounds` abuts its edge and the quad tree returns
+    /// it; the same tile one column to the *right* of `bounds` is correctly
+    /// rejected. Unclipped, "the water in this rect" would name water that is
+    /// not in it -- the asymmetry that cost 691 spurious keyframe divergences.
+    #[test]
+    fn a_tile_merely_abutting_the_bounds_is_not_inside_them() {
+        let graph = graph_with_terrain(vec![
+            terrain(-1., 0., "water"),
+            terrain(0., -1., "water"),
+            terrain(2., 0., "water"),
+        ]);
+        assert_eq!(
+            named(&graph.tiles_within(&Rect::new(&Position::new(0., 0.), &Position::new(2., 2.)))),
+            vec![],
+            "left, top and right neighbours are all outside the rect and the \
+             answer must not depend on which side they are on"
+        );
+    }
+
+    /// The discriminator. Both of these reach `blocked_tree` and come back
+    /// from `blocking_boxes_within` as bare rectangles, and until now that was
+    /// everything a caller could learn about either.
+    #[test]
+    fn is_water_at_tells_a_lake_from_a_forest() {
+        let graph = entity_graph_from(vec![FactorioEntity::new_tree(&Position::new(5.5, 0.5))])
+            .expect("adding must not fail");
+        graph
+            .add_tiles(vec![terrain(0., 0., "water")], None)
+            .expect("adding tiles must not fail");
+
+        let bounds = Rect::new(&Position::new(-1., -1.), &Position::new(8., 8.));
+        let boxes = graph.blocking_boxes_within(&bounds);
+        assert_eq!(boxes.len(), 2, "a tree and a lake, both blocking");
+        assert_eq!(
+            boxes
+                .iter()
+                .filter(|b| graph.is_water_at(&b.center()))
+                .count(),
+            1,
+            "exactly one of the two is water; an offshore pump may stand in \
+             that one and a boiler may not"
+        );
+        assert!(graph.is_water_at(&Position::new(0.5, 0.5)), "the lake");
+        assert!(
+            !graph.is_water_at(&Position::new(5.5, 0.5)),
+            "the tree -- collidable, minable, and not water"
+        );
+        assert!(
+            !graph.is_water_at(&Position::new(20.5, 20.5)),
+            "and open ground nobody has said anything about is not water either"
+        );
+    }
+
+    /// `is_water` asks the name, not the collision flag, and the two are not
+    /// the same question. `out-of-map` collides with a character exactly as
+    /// water does; an offshore pump may stand in one of them.
+    #[test]
+    fn a_collidable_tile_that_is_not_water_is_not_water() {
+        let graph = graph_with_terrain(vec![
+            terrain(0., 0., "water"),
+            FactorioTile {
+                position: Position::new(2., 0.),
+                name: "out-of-map".into(),
+                player_collidable: true,
+                color: None,
+            },
+        ]);
+        assert!(graph.is_water_at(&Position::new(0.5, 0.5)));
+        assert!(
+            !graph.is_water_at(&Position::new(2.5, 0.5)),
+            "collidable, and still not somewhere a pump can draw from"
+        );
+        assert_eq!(
+            graph
+                .nearest_water_tile(&Position::new(2.5, 0.5), 30.)
+                .expect("the lake is in range")
+                .position,
+            Position::new(0., 0.),
+            "and the water search must walk past it rather than return it"
+        );
+    }
+
+    /// Distance is measured to the tile's **centre**, because
+    /// `FactorioTile::position` is its top-left corner. Measuring corner to
+    /// point biases every comparison up and to the left, and here it inverts
+    /// the answer outright: from the origin the corner of `(2, 2)` is 2.83
+    /// away against `(-3, 0)`'s 3.0, while the centres are 3.54 against 2.55.
+    ///
+    /// The half tile is the same one that, got wrong for resources, made
+    /// mining fail with "no entity to mine" for every ore on every map.
+    #[test]
+    fn distance_to_water_is_measured_to_the_tile_centre() {
+        let graph = graph_with_terrain(vec![terrain(2., 2., "water"), terrain(-3., 0., "water")]);
+        assert_eq!(
+            graph
+                .nearest_water_tile(&Position::new(0., 0.), 30.)
+                .expect("both lakes are in range")
+                .position,
+            Position::new(-3., 0.),
+        );
+    }
+
+    /// `deepwater` outnumbers `water` four to one in the archived stdout
+    /// (330,346 against 79,717), and
+    /// `FactorioRcon::find_offshore_pump_placement_options` -- the shoreline
+    /// rule this query exists to feed -- asks only for `"water"`.
+    #[test]
+    fn the_water_search_knows_both_names_for_water() {
+        let graph = graph_with_terrain(vec![terrain(10., 0., "deepwater")]);
+        let found = graph
+            .nearest_water_tile(&Position::new(0.5, 0.5), 30.)
+            .expect("a lake made only of deepwater is still a lake");
+        assert_eq!(found.name, "deepwater");
+        assert_eq!(found.position, Position::new(10., 0.));
+    }
+
+    /// Nearest by Euclidean distance to the tile's *centre*, with the tile's
+    /// *corner* handed back -- the two halves of the half-tile convention that
+    /// made mining fail on every ore on every map when it was got wrong for
+    /// resources.
+    #[test]
+    fn the_nearest_water_tile_is_the_nearest_one() {
+        let graph = graph_with_terrain(vec![
+            terrain(9., 0., "water"),
+            terrain(3., 0., "water"),
+            terrain(0., 7., "deepwater"),
+        ]);
+        let found = graph
+            .nearest_water_tile(&Position::new(0.5, 0.5), 30.)
+            .expect("three lakes are within thirty tiles");
+        assert_eq!(
+            found.position,
+            Position::new(3., 0.),
+            "3 tiles beats 7 and 9, and the position handed back is the tile \
+             corner the game reports, not the centre the distance was measured \
+             to"
+        );
+    }
+
+    /// A refusal is a useful answer -- "the nearest water is 300 tiles away"
+    /// is what a plant method should refuse on -- so the radius has to be a
+    /// real bound and not a hint.
+    ///
+    /// And the radius is a **circle**, not the square the quad tree was asked
+    /// for. The tile at `(8, 8)` is inside the 10-tile query box and 11.3
+    /// tiles away; reporting it would make the bound mean "within 10 tiles,
+    /// except diagonally, where it means 14".
+    #[test]
+    fn no_water_within_the_radius_is_no_water() {
+        let graph = graph_with_terrain(vec![terrain(100., 0., "water"), terrain(8., 8., "water")]);
+        assert!(
+            graph
+                .nearest_water_tile(&Position::new(0.5, 0.5), 10.)
+                .is_none()
+        );
+        assert_eq!(
+            graph
+                .nearest_water_tile(&Position::new(0.5, 0.5), 12.)
+                .expect("the corner lake is 11.3 tiles away")
+                .position,
+            Position::new(8., 8.),
+            "and the same lake is found when the radius reaches it"
+        );
+    }
+
+    /// Determinism, which is not optional: this feeds `crates/planner`, whose
+    /// contract is a byte-identical plan for identical inputs.
+    ///
+    /// Two tiles exactly equidistant, inserted in **both orders** into two
+    /// graphs. The quad tree returns its items in insertion order, so an
+    /// implementation that took "the first one" would answer differently for
+    /// the two graphs; breaking the tie on `(x, y)` makes the answer a
+    /// property of the map rather than of the arrival order of its chunks.
+    #[test]
+    fn two_lakes_equally_far_away_resolve_by_position_not_by_arrival() {
+        let east = terrain(5., 0., "water");
+        let south = terrain(0., 5., "water");
+        let from = Position::new(0.5, 0.5);
+
+        let one = graph_with_terrain(vec![east.clone(), south.clone()]);
+        let other = graph_with_terrain(vec![south, east]);
+        let expected = Position::new(0., 5.);
+
+        for graph in [&one, &other] {
+            for _ in 0..20 {
+                assert_eq!(
+                    graph
+                        .nearest_water_tile(&from, 30.)
+                        .expect("both lakes are in range")
+                        .position,
+                    expected,
+                    "equal distance, so the lower x wins -- every time, and \
+                     whichever chunk arrived first"
+                );
+            }
+        }
+    }
+
+    /// And the same for the bulk read.
+    #[test]
+    fn tiles_within_comes_back_in_a_fixed_order() {
+        let tiles = vec![
+            terrain(1., 1., "water"),
+            terrain(0., 1., "grass-1"),
+            terrain(1., 0., "deepwater"),
+            terrain(0., 0., "grass-1"),
+        ];
+        let mut reversed = tiles.clone();
+        reversed.reverse();
+        let bounds = Rect::new(&Position::new(0., 0.), &Position::new(2., 2.));
+
+        let expected = named(&graph_with_terrain(tiles).tiles_within(&bounds));
+        assert_eq!(expected.len(), 4);
+        let other = graph_with_terrain(reversed);
+        for _ in 0..20 {
+            assert_eq!(named(&other.tiles_within(&bounds)), expected);
+        }
     }
 
     /// A tile the same call is *not* asked about must stay out of the answer,

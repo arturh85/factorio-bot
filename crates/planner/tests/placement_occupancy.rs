@@ -1,28 +1,44 @@
 //! A character standing on the ground is an obstacle, and the planner has to
-//! know it.
+//! know it — whether or not the character is one of the plan's own bots.
 //!
-//! Run `run-1788319014-01846`, rung 4 (`research automation`), reached 92-step
-//! plans and then failed five placements in a row with
+//! Two runs, one message, and the second one is why the roster is not carved
+//! out of the first one's fix.
+//!
+//! # `run-1788319014-01846`
+//!
+//! Rung 4 (`research automation`) reached 92-step plans and then failed five
+//! placements in a row with
 //!
 //! ```text
 //! cannot place item 'stone-furnace' because surface.can_place_entity said 'no'
 //! ```
 //!
-//! The record says which character. The rung sized its split down to one bot
-//! (`bots: [1]`), so bots 2 and 3 were left standing wherever rung 2 had last
-//! sent them; `samples.jsonl` has bot 2 at `(-18.2421875, 51.28125)`,
-//! motionless from tick 7200 to the end of the run. The keyframe in
-//! `map.jsonl` shows nothing on the target tile in either the game's entities
-//! or the model's — characters are filtered out of both sides — so the
-//! obstruction could only be one of the classes a keyframe cannot show, and
-//! the samples name it.
+//! `samples.jsonl` has bot 2 at `(-18.2421875, 51.28125)`, motionless from
+//! tick 7200 to the end of the run, inside both refused footprints. The
+//! keyframe in `map.jsonl` shows nothing on either target tile in the game's
+//! entities or the model's — characters are filtered out of both sides — so
+//! the obstruction could only be one of the classes a keyframe cannot show,
+//! and the samples name it.
 //!
 //! BotBridge's own message corroborates the identity: `rcon_place_entity`
 //! answers `§player_blocks_placement§` when the *acting* player is inside the
-//! footprint and the generic text otherwise. Every one of the five refusals
-//! was generic — bot 1 was clear, someone else was not.
+//! footprint and the generic text otherwise. Every refusal in both runs was
+//! generic — the builder was clear, someone else was not.
 //!
-//! The numbers below are that run's, unchanged.
+//! # `run-1788322836-81715`
+//!
+//! Same message, same call, one run's fix in place and useless. That fix held
+//! only the characters the roster did **not** name, and this run's roster was
+//! the whole connected game (`rcon.players()` returned `[2, 3, 4]`), so the
+//! filter emptied it of everything that mattered. Rung 4 planned 114 steps and
+//! put every one of them on bot 2. Bot 3 was standing at
+//! `(-15.328125, -58.2890625)` where rung 2's copper had left it; the planner
+//! sited a stone furnace at `[-16, -58]`, over bot 3 by a third of a tile, and
+//! the game refused it three times before the milestone gave up.
+//!
+//! Being on the roster is not a promise that the plan will move you.
+//!
+//! The numbers below are those runs', unchanged.
 
 use factorio_bot_core::test_utils::fixture_world;
 use factorio_bot_core::types::{PlayerChangedPositionEvent, Position};
@@ -30,34 +46,44 @@ use factorio_bot_planner::method::util::free_area_near;
 use factorio_bot_planner::{BotId, PlanState};
 use std::sync::Arc;
 
-/// Where bot 2 was parked for the last 14 000 ticks of the run.
+/// Where bot 2 was parked for the last 14 000 ticks of `run-1788319014-01846`.
 const PARKED: (f64, f64) = (-18.2421875, 51.28125);
 
-/// The two sites rung 4 kept choosing, and the game kept refusing.
+/// The two sites that run's rung 4 kept choosing, and the game kept refusing.
 const REFUSED_SITES: [(f64, f64); 2] = [(-19., 51.), (-18., 51.)];
 
-fn state_with_parked_bot(parked: Option<(f64, f64)>, roster: &[BotId]) -> PlanState {
+/// Where bot 3 stood for the whole of `run-1788322836-81715`'s rung 4, having
+/// finished rung 2's copper there and been given no work since.
+const PARKED_ROSTER_BOT: (f64, f64) = (-15.328125, -58.2890625);
+
+/// The site that run's rung 4 chose three times, and the game refused three
+/// times. Its box spans `[-16.8, -15.2] x [-58.8, -57.2]`.
+const REFUSED_ROSTER_SITE: (f64, f64) = (-16., -58.);
+
+/// `fixture_world` has no players at all, so a parked bot is exactly the one
+/// character in the world and nothing else can account for a refusal.
+fn state_with_parked_bot(parked: &[(u8, (f64, f64))], roster: &[BotId]) -> PlanState {
     let world = fixture_world();
-    if let Some((x, y)) = parked {
+    for (player_id, (x, y)) in parked {
         world
             .player_changed_position(PlayerChangedPositionEvent {
-                player_id: 2,
-                position: Position::new(x, y),
+                player_id: *player_id,
+                position: Position::new(*x, *y),
             })
             .expect("park a player");
     }
     PlanState::from_world(Arc::new(world), roster)
 }
 
-/// The control: with nobody standing there, both sites are open ground.
+/// The control: with nobody standing there, every site in play is open ground.
 ///
-/// Without this the regression below would pass against a fixture that
-/// happened to have a tree on the tile, and would say nothing about
-/// characters at all.
+/// Without this the regressions below would pass against a fixture that
+/// happened to have a tree on the tile, and would say nothing about characters
+/// at all.
 #[test]
 fn the_refused_sites_are_clear_when_no_one_is_standing_on_them() {
-    let state = state_with_parked_bot(None, &[BotId(1)]);
-    for (x, y) in REFUSED_SITES {
+    let state = state_with_parked_bot(&[], &[BotId(1)]);
+    for (x, y) in REFUSED_SITES.iter().copied().chain([REFUSED_ROSTER_SITE]) {
         assert!(
             state.is_area_free("stone-furnace", &Position::new(x, y)),
             "[{x}, {y}] has nothing on it in the fixture"
@@ -65,10 +91,11 @@ fn the_refused_sites_are_clear_when_no_one_is_standing_on_them() {
     }
 }
 
-/// The regression: a bot the plan cannot move occupies the ground it stands on.
+/// `run-1788319014-01846`: a bot outside the roster occupies the ground it
+/// stands on.
 #[test]
 fn a_parked_bot_outside_the_roster_blocks_a_placement() {
-    let state = state_with_parked_bot(Some(PARKED), &[BotId(1)]);
+    let state = state_with_parked_bot(&[(2, PARKED)], &[BotId(1)]);
     for (x, y) in REFUSED_SITES {
         assert!(
             !state.is_area_free("stone-furnace", &Position::new(x, y)),
@@ -78,6 +105,24 @@ fn a_parked_bot_outside_the_roster_blocks_a_placement() {
     }
 }
 
+/// `run-1788322836-81715`: and so does a bot **inside** it.
+///
+/// This is the assertion that used to run the other way. A roster bot is a bot
+/// the plan *may* move, not one it will: which bots a plan moves is not settled
+/// until `schedule` has assigned the work, and this rung assigned all 114 steps
+/// to bot 2. Bot 3 was as immovable as any stranger.
+#[test]
+fn a_parked_bot_inside_the_roster_blocks_a_placement_too() {
+    let state = state_with_parked_bot(&[(3, PARKED_ROSTER_BOT)], &[BotId(2), BotId(3), BotId(4)]);
+    let (x, y) = REFUSED_ROSTER_SITE;
+    assert!(
+        !state.is_area_free("stone-furnace", &Position::new(x, y)),
+        "a stone furnace at [{x}, {y}] covers bot 3 at {PARKED_ROSTER_BOT:?}; \
+         bot 3 is on the roster and the plan still gave it nothing to do, so \
+         nothing was ever going to move it"
+    );
+}
+
 /// And the search moves on rather than returning the site anyway.
 ///
 /// `free_area_near` is what sites a furnace. It walks outward in rings and
@@ -85,7 +130,7 @@ fn a_parked_bot_outside_the_roster_blocks_a_placement() {
 /// matters is that what it hands back is somewhere the character is not.
 #[test]
 fn the_site_search_walks_past_a_parked_bot() {
-    let state = state_with_parked_bot(Some(PARKED), &[BotId(1)]);
+    let state = state_with_parked_bot(&[(2, PARKED)], &[BotId(1)]);
     let from = Position::new(REFUSED_SITES[1].0, REFUSED_SITES[1].1);
     let found = free_area_near(&state, &from, "stone-furnace").expect("open ground nearby");
     assert!(
@@ -100,22 +145,24 @@ fn the_site_search_walks_past_a_parked_bot() {
     }
 }
 
-/// A bot **in** the roster does not fence itself out of its own site.
+/// The roster case reaches the same search, and it too walks past.
 ///
-/// `base.players` holds where a roster bot *started*; the plan moves it, and
-/// the acting bot is kept out of its own footprint by `Condition::AtPosition`'s
-/// `min_radius` instead. Treating a roster bot's starting position as a
-/// permanent obstacle would refuse a placement the bot is about to walk away
-/// from — the opposite mistake, and just as silent.
+/// The cost of blocking on a roster bot is one ring of this search, which is
+/// the whole argument for taking the conservative direction: the other one
+/// costs a milestone.
 #[test]
-fn a_bot_in_the_roster_does_not_block_its_own_placement() {
-    let state = state_with_parked_bot(Some(PARKED), &[BotId(1), BotId(2)]);
-    for (x, y) in REFUSED_SITES {
-        assert!(
-            state.is_area_free("stone-furnace", &Position::new(x, y)),
-            "bot 2 is in the roster, so the plan can move it off [{x}, {y}]"
-        );
-    }
+fn the_site_search_walks_past_a_parked_roster_bot() {
+    let state = state_with_parked_bot(&[(3, PARKED_ROSTER_BOT)], &[BotId(2), BotId(3), BotId(4)]);
+    let from = Position::new(REFUSED_ROSTER_SITE.0, REFUSED_ROSTER_SITE.1);
+    let found = free_area_near(&state, &from, "stone-furnace").expect("open ground nearby");
+    assert!(
+        state.is_area_free("stone-furnace", &found),
+        "the search must not return a site it would itself refuse"
+    );
+    assert!(
+        found != Position::new(REFUSED_ROSTER_SITE.0, REFUSED_ROSTER_SITE.1),
+        "{REFUSED_ROSTER_SITE:?} is occupied and must not be chosen"
+    );
 }
 
 /// Only the ground the character actually covers is refused.
@@ -125,7 +172,7 @@ fn a_bot_in_the_roster_does_not_block_its_own_placement() {
 /// tile further out in either direction is open.
 #[test]
 fn the_block_is_the_character_box_and_no_larger() {
-    let state = state_with_parked_bot(Some(PARKED), &[BotId(1)]);
+    let state = state_with_parked_bot(&[(2, PARKED)], &[BotId(1)]);
     for site in [
         Position::new(-21., 51.),
         Position::new(-16., 51.),

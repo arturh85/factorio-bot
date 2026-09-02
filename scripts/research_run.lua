@@ -89,9 +89,16 @@ repeat
     elseif t.action == "ran" then
         local n = 0
         if t.steps ~= nil and t.actions ~= nil then n = record.actions(t.steps, t.actions) end
-        print(string.format("   ran: success=%s failed=%s lost=%s pending=%s (+%d events)",
+        -- Flushes any `player.teleport` calls the mod made while this batch
+        -- ran (a stuck walk leg, or a bot nudged clear of a ghost/blueprint
+        -- bounding box) -- see `record.teleports()`. Called once per "ran"
+        -- transition, same cadence as `record.actions` above, so a teleport
+        -- is written close to when it happened rather than batched
+        -- arbitrarily.
+        local nt = record.teleports()
+        print(string.format("   ran: success=%s failed=%s lost=%s pending=%s (+%d events, +%d teleports)",
             tostring(t.success), tostring(t.failed), tostring(t.lost),
-            tostring(t.pending), n))
+            tostring(t.pending), n, nt))
         if t.first_error ~= nil then print("        first error: " .. tostring(t.first_error)) end
     elseif t.action == "satisfied" then
         record.milestone_satisfied(t.milestone_index, t.iteration or 0, t.reason)
@@ -118,6 +125,11 @@ if not ok then
     -- record was supposed to explain.
     record.milestone_stuck(sup.index, "plan_error", tostring(err), sup.tracker and sup.tracker.best)
 end
+
+-- One last flush: a teleport queued after the final "ran" transition (e.g.
+-- during the raise the pcall above just caught) would otherwise sit in
+-- `FactorioWorld`'s queue and never reach this run's `events.jsonl` at all.
+record.teleports()
 
 local id = record.finish(ok and sup.state or "crashed")
 print("RUN FINISHED state=" .. (ok and sup.state or "crashed") .. " id=" .. id)

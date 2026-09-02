@@ -3,13 +3,15 @@ use crate::factorio::ticks::ActionOutcome;
 use crate::graph::entity_graph::EntityGraph;
 use crate::graph::flow_graph::FlowGraph;
 use crate::types::{
-    FactorioEntity, FactorioEntityPrototype, FactorioForce, FactorioGraphic, FactorioItemPrototype,
-    FactorioPlayer, FactorioRecipe, FactorioTile, PlayerChangedDistanceEvent,
-    PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent, PlayerId,
+    ActionId, FactorioEntity, FactorioEntityPrototype, FactorioForce, FactorioGraphic,
+    FactorioItemPrototype, FactorioPlayer, FactorioRecipe, FactorioTile,
+    PlayerChangedDistanceEvent, PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent,
+    PlayerId, Position,
 };
 use dashmap::DashMap;
 use image::RgbaImage;
 use miette::{IntoDiagnostic, Result};
+use parking_lot::Mutex as SyncMutex;
 use serde::de::{MapAccess, Visitor};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -17,6 +19,23 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::{fmt, fs};
 use tokio::sync::Mutex;
+
+/// The payload of a `"teleport"` writeout, emitted by all three of
+/// `mods/BotBridge/control.lua`'s `player.teleport` call sites (see
+/// `teleport_writeout` there): the stuck-walk timeout, and the two sites that
+/// move a bot out of a ghost's or a blueprint's bounding box before reviving
+/// it. `action_id` is only ever present for the stuck-walk site -- the other
+/// two are synchronous RCON calls with no dispatched action to attach to.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TeleportEvent {
+    pub player_id: PlayerId,
+    pub reason: String,
+    pub from: Position,
+    pub to: Position,
+    pub distance: f64,
+    #[serde(default)]
+    pub action_id: Option<ActionId>,
+}
 
 pub struct FactorioWorld {
     pub players: DashMap<PlayerId, FactorioPlayer>,
@@ -39,6 +58,19 @@ pub struct FactorioWorld {
     pub next_action_id: Mutex<u32>,
     pub entity_graph: Arc<EntityGraph>,
     pub flow_graph: Arc<FlowGraph>,
+    /// Teleports the mod has reported since the last
+    /// [`FactorioWorld::drain_teleports`], each tagged with the game tick the
+    /// mod stamped on its `writeout` line.
+    ///
+    /// `OutputParser` (`crates/core/src/process/output_parser.rs`) parses the
+    /// line and pushes here; `crates/scripting_lua`'s `record.teleports()`
+    /// drains it into `events.jsonl`. The queue exists because those two live
+    /// in different crates and the dependency only runs one way -- this
+    /// crate cannot depend on `crates/scripting_lua`, where the run recorder
+    /// lives -- so a teleport crosses the boundary as data sitting here
+    /// rather than as a direct call, the same shape `actions` already uses
+    /// for `action_completed`.
+    pub teleports: SyncMutex<Vec<(u64, TeleportEvent)>>,
 }
 
 impl FactorioWorld {
@@ -277,7 +309,19 @@ impl FactorioWorld {
             next_action_id: Mutex::new(1),
             entity_graph,
             flow_graph,
+            teleports: SyncMutex::new(Vec::new()),
         }
+    }
+
+    /// Queues a teleport `OutputParser` just parsed, for
+    /// [`FactorioWorld::drain_teleports`] to pick up.
+    pub fn record_teleport(&self, tick: u64, event: TeleportEvent) {
+        self.teleports.lock().push((tick, event));
+    }
+
+    /// Takes every teleport queued since the last drain, oldest first.
+    pub fn drain_teleports(&self) -> Vec<(u64, TeleportEvent)> {
+        std::mem::take(&mut *self.teleports.lock())
     }
 
     pub fn dump(&self, save_path: Option<&str>) -> Result<()> {
@@ -511,6 +555,7 @@ impl<'de> Deserialize<'de> for FactorioWorld {
                     next_action_id: Default::default(),
                     entity_graph,
                     flow_graph,
+                    teleports: Default::default(),
                 })
             }
         }
@@ -548,6 +593,10 @@ impl Clone for FactorioWorld {
             actions: self.actions.clone(),
             path_requests: self.path_requests.clone(),
             next_action_id: Mutex::new(0),
+            // Ephemeral, like `next_action_id` above: a clone starts with an
+            // empty queue rather than duplicating in-flight teleports across
+            // two independent recorders.
+            teleports: SyncMutex::new(Vec::new()),
             flow_graph: Arc::new(FlowGraph::new(_entity_graph)),
         }
     }
@@ -575,6 +624,7 @@ mod tests {
             actions: Default::default(),
             path_requests: Default::default(),
             next_action_id: Default::default(),
+            teleports: Default::default(),
             entity_graph: Arc::new(EntityGraph::new(
                 Arc::new(DashMap::new()),
                 Arc::new(DashMap::new()),

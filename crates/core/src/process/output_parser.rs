@@ -1,35 +1,17 @@
 use std::sync::Arc;
 
 use crate::factorio::ticks::ActionOutcome;
-use crate::factorio::world::FactorioWorld;
+use crate::factorio::world::{FactorioWorld, TeleportEvent};
 // use crate::factorio::ws::{
 //     FactorioWebSocketServer, PlayerChangedMainInventoryMessage, PlayerChangedPositionMessage,
 //     PlayerDistanceChangedMessage, PlayerLeftMessage, ResearchCompletedMessage,
 // };
 use crate::types::{
-    ActionId, ChunkPosition, FactorioEntity, FactorioEntityPrototype, FactorioForce,
-    FactorioGraphic, FactorioItemPrototype, FactorioRecipe, FactorioTile,
-    PlayerChangedDistanceEvent, PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent,
-    PlayerId, Pos, Position, Rect,
+    ChunkPosition, FactorioEntity, FactorioEntityPrototype, FactorioForce, FactorioGraphic,
+    FactorioItemPrototype, FactorioRecipe, FactorioTile, PlayerChangedDistanceEvent,
+    PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent, PlayerId, Pos, Position, Rect,
 };
 use miette::{IntoDiagnostic, Result, miette};
-use serde::Deserialize;
-
-/// The payload of a `"teleport"` writeout, emitted by all three of
-/// `control.lua`'s `player.teleport` call sites (see `teleport_writeout`
-/// there). `action_id` is only ever present for the stuck-walk site; the two
-/// blueprint/ghost-revive sites are synchronous RCON calls with no dispatched
-/// action to attach to.
-#[derive(Debug, Deserialize)]
-struct TeleportEvent {
-    player_id: PlayerId,
-    reason: String,
-    from: Position,
-    to: Position,
-    distance: f64,
-    #[serde(default)]
-    action_id: Option<ActionId>,
-}
 
 pub struct OutputParser {
     world: Arc<FactorioWorld>,
@@ -427,11 +409,12 @@ impl OutputParser {
             // `on_player_changed_position` fires identically for a teleport
             // and a walked step, so a run whose bots teleported repeatedly
             // recorded ordinary-looking walk durations with nothing to say
-            // otherwise. This does not yet feed a run's `events.jsonl`
-            // (`crates/core/src/record::EventKind::Teleport` exists for a
-            // caller to record with, but nothing calls `record_live` with it
-            // yet) -- logging loudly is the minimum that makes a teleport
-            // findable in a live run's diagnostics rather than invisible.
+            // otherwise. Logging is the immediate, always-on visibility; the
+            // event is also queued on `self.world` for
+            // `crates/scripting_lua`'s `record.teleports()` to drain into
+            // `events.jsonl` -- this crate cannot call the recorder directly
+            // (it lives in `crates/scripting_lua`, which depends on this
+            // crate and not the other way around).
             "teleport" => match serde_json::from_str::<TeleportEvent>(rest) {
                 Ok(event) => {
                     warn!(
@@ -446,6 +429,7 @@ impl OutputParser {
                             .map(|id| format!(", action {id}"))
                             .unwrap_or_default(),
                     );
+                    self.world.record_teleport(tick, event);
                 }
                 Err(err) => {
                     error!(
@@ -473,6 +457,15 @@ impl OutputParser {
             // websocket_server,
             world: Arc::new(FactorioWorld::new()),
         }
+    }
+
+    /// Like [`OutputParser::new`], but parsing into a world the caller
+    /// already holds a handle to -- so a test can drive a `writeout`-shaped
+    /// line through `parse` and then inspect (or hand to another crate) the
+    /// exact [`FactorioWorld`] it landed in, e.g. via
+    /// [`FactorioWorld::drain_teleports`].
+    pub fn with_world(world: Arc<FactorioWorld>) -> Self {
+        OutputParser { world }
     }
 
     pub fn world(&self) -> Arc<FactorioWorld> {

@@ -642,6 +642,59 @@ end
     }
 
     map_table.set(
+        "__doc_entry_teleports",
+        String::from(
+            r#"
+--- flushes any `player.teleport` calls the mod has reported since the last flush
+-- `control.lua` teleports a bot in three places -- a stuck walk leg timing
+-- out, and two sites that move a bot clear of a ghost's or a blueprint's
+-- bounding box before reviving it -- and none of them are otherwise visible
+-- here: `on_player_changed_position` fires identically for a teleport and an
+-- ordinary walked step. Each is queued as it is parsed with the real game
+-- tick it happened at, so calling this late does not blur *when* a teleport
+-- occurred, only when it gets written. Call it once per loop iteration
+-- (alongside `record.actions`) so nothing is left unflushed for long.
+-- @treturn number how many teleport events were written
+-- @raise if no recording is running
+function record.teleports()
+end
+    "#,
+        ),
+    )?;
+    {
+        let slot = slot.clone();
+        let world = world.clone();
+        map_table.set(
+            "teleports",
+            lua.create_function(move |_lua, ()| {
+                let mut guard = slot.lock();
+                let recorder = guard.as_mut().ok_or_else(|| {
+                    record_error("no recording is running -- call record.start() first")
+                })?;
+                let mut written = 0u32;
+                for (tick, event) in world.drain_teleports() {
+                    let tick = recorder.not_before(tick);
+                    recorder
+                        .record(
+                            tick,
+                            EventKind::Teleport {
+                                bot: u32::from(event.player_id),
+                                reason: event.reason,
+                                from: event.from,
+                                to: event.to,
+                                distance: event.distance,
+                                action_id: event.action_id,
+                            },
+                        )
+                        .map_err(record_error)?;
+                    written += 1;
+                }
+                Ok(written)
+            })?,
+        )?;
+    }
+
+    map_table.set(
         "__doc_entry_keyframe",
         String::from(
             r#"
@@ -816,6 +869,7 @@ fn mint_run_id() -> String {
 mod tests {
     use super::*;
     use factorio_bot_core::factorio::rcon::FactorioRcon;
+    use factorio_bot_core::factorio::world::TeleportEvent;
     use factorio_bot_core::record::RunRecorder;
     use factorio_bot_core::record::map::MapRecord;
 
@@ -1317,5 +1371,190 @@ mod tests {
         assert!(!keyframe_relevant("simple-entity", "rock-small"));
         assert!(!keyframe_relevant("character", "character"));
         assert!(!keyframe_relevant("item-entity", "item-on-ground"));
+    }
+
+    // ------------------------------------------------------------- teleports
+
+    /// Drives the actual mod->core->Lua path, not just `record.teleports()`
+    /// in isolation: a `writeout`-shaped line goes through
+    /// `factorio_bot_core::process::output_parser::OutputParser` -- the same
+    /// parser that reads BotBridge's real stdout -- into a `FactorioWorld`
+    /// shared with the recording Lua sandbox, and only then is
+    /// `record.teleports()` asked to drain it. A test that only exercised
+    /// `record.teleports()` against a hand-built queue would leave the
+    /// parser hop -- the actual gap this closes -- completely unverified.
+    #[test]
+    fn teleport_writeout_reaches_events_jsonl_through_the_real_parser() {
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let recorder = RunRecorder::start(tmp.path(), "run-1").expect("recorder starts");
+        let run_dir = recorder.dir().to_path_buf();
+        let slot: Slot = Arc::new(Mutex::new(Some(recorder)));
+        let world = Arc::new(FactorioWorld::new());
+
+        let table = create_lua_record_with_slot(
+            &lua,
+            Arc::new(FactorioRcon::new_empty()),
+            world.clone(),
+            tmp.path().join("scripts"),
+            vec![],
+            slot,
+        )
+        .expect("record table");
+        lua.globals().set("record", table).expect("install");
+
+        let mut parser = factorio_bot_core::process::output_parser::OutputParser::with_world(world);
+        parser
+            .parse(
+                12_345,
+                "teleport",
+                r#"{"player_id":1,"reason":"walk_stuck","from":{"x":1.0,"y":2.0},"to":{"x":41.0,"y":2.0},"distance":40.0,"action_id":7}"#,
+            )
+            .expect("teleport writeout parses");
+
+        let written: u32 = lua
+            .load("return record.teleports()")
+            .eval()
+            .expect("record.teleports() runs");
+        assert_eq!(written, 1);
+
+        let events = read_events(&run_dir);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            EventKind::Teleport {
+                bot,
+                reason,
+                from,
+                to,
+                distance,
+                action_id,
+            } => {
+                assert_eq!(*bot, 1);
+                assert_eq!(reason, "walk_stuck");
+                assert_eq!(from.x, 1.0);
+                assert_eq!(from.y, 2.0);
+                assert_eq!(to.x, 41.0);
+                assert_eq!(to.y, 2.0);
+                assert_eq!(*distance, 40.0, "the mod's own distance, not recomputed");
+                assert_eq!(
+                    *action_id,
+                    Some(7),
+                    "the stuck-walk site carries an action id"
+                );
+            }
+            other => panic!("expected teleport, got {other:?}"),
+        }
+    }
+
+    /// `recording_lua()` builds its own `FactorioWorld` internally and does
+    /// not hand it back, so this test can't push onto its queue -- it builds
+    /// the same wiring `create_lua_record` does, just keeping the world
+    /// around so it can call `record_teleport` directly. Complements
+    /// `teleport_writeout_reaches_events_jsonl_through_the_real_parser`
+    /// above (which is the one test that must go through the real parser)
+    /// with what that test doesn't cover: reason/action_id fidelity across
+    /// all three mod sites, write order, and that a second drain reports
+    /// zero once the queue is actually empty.
+    #[test]
+    fn teleports_distinguishes_all_three_mod_sites_and_drains_the_queue() {
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let recorder = RunRecorder::start(tmp.path(), "run-1").expect("recorder starts");
+        let run_dir = recorder.dir().to_path_buf();
+        let slot: Slot = Arc::new(Mutex::new(Some(recorder)));
+        let world = Arc::new(FactorioWorld::new());
+
+        let table = create_lua_record_with_slot(
+            &lua,
+            Arc::new(FactorioRcon::new_empty()),
+            world.clone(),
+            tmp.path().join("scripts"),
+            vec![],
+            slot,
+        )
+        .expect("record table");
+        lua.globals().set("record", table).expect("install");
+
+        world.record_teleport(
+            100,
+            TeleportEvent {
+                player_id: 1,
+                reason: "walk_stuck".to_string(),
+                from: Position { x: 0.0, y: 0.0 },
+                to: Position { x: 10.0, y: 0.0 },
+                distance: 10.0,
+                action_id: Some(3),
+            },
+        );
+        world.record_teleport(
+            101,
+            TeleportEvent {
+                player_id: 1,
+                reason: "revive_ghost_blocked".to_string(),
+                from: Position { x: 10.0, y: 0.0 },
+                to: Position { x: 11.0, y: 1.0 },
+                distance: 1.414,
+                action_id: None,
+            },
+        );
+        world.record_teleport(
+            102,
+            TeleportEvent {
+                player_id: 2,
+                reason: "place_blueprint_blocked".to_string(),
+                from: Position { x: 5.0, y: 5.0 },
+                to: Position { x: 6.0, y: 6.0 },
+                distance: 1.414,
+                action_id: None,
+            },
+        );
+
+        let written: u32 = lua
+            .load("return record.teleports()")
+            .eval()
+            .expect("record.teleports() drains all three");
+        assert_eq!(written, 3);
+
+        let events = read_events(&run_dir);
+        let reasons: Vec<String> = events
+            .iter()
+            .map(|e| match e {
+                EventKind::Teleport { reason, .. } => reason.clone(),
+                other => panic!("expected teleport, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            reasons,
+            vec![
+                "walk_stuck",
+                "revive_ghost_blocked",
+                "place_blueprint_blocked"
+            ],
+            "written in the order they were queued"
+        );
+
+        match &events[1] {
+            EventKind::Teleport { action_id, bot, .. } => {
+                assert_eq!(
+                    *action_id, None,
+                    "the ghost/blueprint sites have no dispatched action to attach to"
+                );
+                assert_eq!(*bot, 1);
+            }
+            other => panic!("expected teleport, got {other:?}"),
+        }
+        match &events[2] {
+            EventKind::Teleport { bot, .. } => assert_eq!(*bot, 2),
+            other => panic!("expected teleport, got {other:?}"),
+        }
+
+        let written_again: u32 = lua
+            .load("return record.teleports()")
+            .eval()
+            .expect("record.teleports() runs on an empty queue");
+        assert_eq!(
+            written_again, 0,
+            "the queue was actually drained, not just read"
+        );
     }
 }

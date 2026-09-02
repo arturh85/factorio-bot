@@ -138,6 +138,68 @@ impl EntityGraph {
         entities
     }
 
+    /// Every collision box inside `bounds` that would make the game refuse a
+    /// player build there, as world-space rectangles.
+    ///
+    /// [`Self::find_entities_in_radius`] cannot answer this and never could.
+    /// `add` inserts only a *whitelist* of entity types into `entity_tree` --
+    /// furnaces, inserters, belts, containers and the two big rocks -- because
+    /// that tree exists to model a factory, not the ground it stands on. Trees,
+    /// small rocks, cliffs and units therefore never enter it, and neither do
+    /// tiles; a caller asking "does a stone furnace fit here" and reading
+    /// `entity_tree` gets "yes" over a forest. In the recorded run at
+    /// `workspace/runs/run-1788309767-54739` that is exactly what happened:
+    /// the planner sited a furnace, the game answered `can_place_entity said
+    /// 'no'`, and the run stuck on its first dispatched action.
+    ///
+    /// `blocked_tree` is the tree that does see them. `add` puts every entity
+    /// with a non-zero collision box into it except resources and rails (ore
+    /// and rails are asked about separately, by tile), and `add_tiles` adds
+    /// every `player_collidable` tile -- water. So this is the ground truth for
+    /// buildability that the graph already had and nothing but `draw.rs` was
+    /// reading.
+    ///
+    /// Boxes, not entities: `blocked_tree`'s payload is a bare `is_minable`
+    /// flag, so there is no name or position to hand back. The rectangle is
+    /// what the question needs. Results are ordered by the quad-tree's own
+    /// item ids (see `QuadTree::query`), so the vector is deterministic for a
+    /// given tree state.
+    ///
+    /// The quad-tree query is a *narrowing* pass -- it admits boxes that merely
+    /// come close, by its own epsilon -- so a caller deciding overlap must
+    /// still test each rectangle exactly.
+    ///
+    /// Edges come back snapped to Factorio's own 1/256-of-a-tile position
+    /// grid. The quad-tree stores its rectangles as `f32`, which perturbs every
+    /// edge by a few ulps; a caller that reads the *centre* of the recovered
+    /// box -- to key it by tile, say -- would see a centre a hair below the
+    /// integer it should be and floor it into the neighbouring tile. Every
+    /// `MapPosition` the game reports is an exact multiple of 1/256, and `f32`
+    /// has far more precision than that at map coordinates, so rounding to
+    /// that grid recovers the exact edge rather than approximating it.
+    pub fn blocking_boxes_within(&self, bounds: &Rect) -> Vec<Rect> {
+        /// Factorio stores map positions as fixed point with this denominator.
+        const POSITION_GRID: f64 = 256.;
+        fn snap(v: f32) -> f64 {
+            (v as f64 * POSITION_GRID).round() / POSITION_GRID
+        }
+        let query: QuadTreeRect = bounds.clone().into();
+        self.blocked_tree
+            .read()
+            .query(query)
+            .into_iter()
+            .map(|(_minable, rect, _id)| {
+                Rect::new(
+                    &Position::new(snap(rect.origin.x), snap(rect.origin.y)),
+                    &Position::new(
+                        snap(rect.origin.x + rect.size.width),
+                        snap(rect.origin.y + rect.size.height),
+                    ),
+                )
+            })
+            .collect()
+    }
+
     /// Everything this graph believes lies within `bounds`: the entities the
     /// entity tree tracks (see `add`), plus resources.
     ///
@@ -1332,7 +1394,9 @@ pub type ResourceQuadTree = QuadTree<String, Rect, [(ItemId, QuadTreeRect); 4]>;
 mod tests {
     use crate::factorio::util::rect_fields;
     use crate::num_traits::ToPrimitive;
-    use crate::test_utils::{entity_graph_from, fixture_world, spawn_ore};
+    use crate::test_utils::{
+        entity_graph_from, fixture_entity_prototypes, fixture_world, spawn_ore,
+    };
 
     use super::*;
 
@@ -1387,6 +1451,93 @@ mod tests {
             graph.inner_graph().node_count(),
             0,
             "an entity we cannot orient must not enter the graph"
+        );
+    }
+
+    /// The entity tree cannot answer "is this ground buildable" and never
+    /// could: `add` only admits a whitelist of factory entity types. A tree is
+    /// invisible there and present in the blocked tree, which is the whole
+    /// reason [`EntityGraph::blocking_boxes_within`] exists.
+    #[test]
+    fn a_tree_is_a_blocking_box_even_though_the_entity_tree_never_sees_it() {
+        let tree = FactorioEntity::new_tree(&Position::new(3.5, 3.5));
+        let graph = entity_graph_from(vec![tree.clone()]).expect("adding must not fail");
+        let around = Rect::new(&Position::new(3., 3.), &Position::new(4., 4.));
+
+        assert!(
+            graph
+                .find_entities_in_radius(Position::new(3.5, 3.5), 4., None, None)
+                .is_empty(),
+            "a tree is not a modelled entity"
+        );
+        let boxes = graph.blocking_boxes_within(&around);
+        assert_eq!(boxes.len(), 1, "but it does block the ground: {boxes:?}");
+        // Snapped to the 1/256 grid, so the edges are the nearest representable
+        // ones rather than the fixture's decimal 0.8 -- but the centre, which
+        // is what a caller keys by tile, comes back exact.
+        assert_eq!(boxes[0].center(), tree.position);
+        for (got, want) in [
+            (boxes[0].left_top.x(), tree.bounding_box.left_top.x()),
+            (boxes[0].left_top.y(), tree.bounding_box.left_top.y()),
+            (
+                boxes[0].right_bottom.x(),
+                tree.bounding_box.right_bottom.x(),
+            ),
+            (
+                boxes[0].right_bottom.y(),
+                tree.bounding_box.right_bottom.y(),
+            ),
+        ] {
+            assert!(
+                (got - want).abs() <= 1. / 256.,
+                "edge {got} is more than one position step from {want}"
+            );
+        }
+    }
+
+    /// Water is a *tile*, not an entity, and refuses a build just the same.
+    /// The reconstructed box must come back exactly on tile boundaries --
+    /// the quad-tree stores `f32`, and a box that came back a hair short
+    /// would leave a sliver of buildable water at its edge.
+    #[test]
+    fn a_player_collidable_tile_is_a_blocking_box_on_exact_tile_bounds() {
+        let graph = EntityGraph::new(
+            Arc::new(fixture_entity_prototypes()),
+            Arc::new(DashMap::new()),
+        );
+        graph
+            .add_tiles(
+                vec![FactorioTile {
+                    position: Position::new(-70., 42.),
+                    name: EntityName::Water.to_string(),
+                    player_collidable: true,
+                    color: None,
+                }],
+                None,
+            )
+            .expect("adding tiles must not fail");
+
+        let boxes = graph.blocking_boxes_within(&Rect::new(
+            &Position::new(-70., 42.),
+            &Position::new(-69., 43.),
+        ));
+        assert_eq!(boxes.len(), 1);
+        assert_eq!(
+            boxes[0],
+            Rect::new(&Position::new(-70., 42.), &Position::new(-69., 43.))
+        );
+    }
+
+    /// A tile the same call is *not* asked about must stay out of the answer,
+    /// or "blocked" would mean "something is blocked somewhere".
+    #[test]
+    fn a_blocking_box_outside_the_bounds_is_not_reported() {
+        let graph = entity_graph_from(vec![FactorioEntity::new_tree(&Position::new(100.5, 100.5))])
+            .expect("adding must not fail");
+        assert!(
+            graph
+                .blocking_boxes_within(&Rect::new(&Position::new(0., 0.), &Position::new(1., 1.)))
+                .is_empty()
         );
     }
 

@@ -593,11 +593,21 @@ impl PlanState {
 
     /// Whether anything the plan can see occupies `area`.
     ///
-    /// Three sources, because no single one of them sees everything:
-    /// entities this plan has placed, entities the base world already had, and
-    /// ore. Ore is the odd one — `EntityGraph::add` routes resource entities
-    /// into `resources`/`resource_tree` only, so the entity tree never sees
-    /// them and they have to be asked for by tile.
+    /// Four sources, because no single one of them sees everything:
+    /// entities this plan has placed, entities the base world already had,
+    /// ore, and the terrain nobody built. The last two are the odd ones —
+    /// `EntityGraph::add` routes resource entities into
+    /// `resources`/`resource_tree` only, so the entity tree never sees them
+    /// and they have to be asked for by tile; and `add` only ever inserts a
+    /// whitelist of *factory* entity types into the entity tree, so trees,
+    /// cliffs, small rocks, units and water tiles are not there either and
+    /// have to come out of `blocking_boxes_within`.
+    ///
+    /// Leaving that fourth source out is what made the planner site a stone
+    /// furnace on a forest tile and the game answer `can_place_entity said
+    /// 'no'` (run `run-1788309767-54739`, first dispatched action). The data
+    /// was never missing — `EntityGraph` is fed `surface.find_entities(area)`,
+    /// which is ~79% trees — it was only in a tree this function did not read.
     fn is_area_clear(&self, area: &Rect) -> bool {
         for entity in self.added.values() {
             if boxes_overlap(&self.footprint_of(entity), area) {
@@ -628,6 +638,23 @@ impl PlanState {
                 continue;
             }
             if boxes_overlap(&entity.bounding_box, area) {
+                return false;
+            }
+        }
+        // Everything the entity tree structurally cannot hold: trees, cliffs,
+        // small rocks, units, and `player_collidable` tiles (water). These
+        // arrive as bare rectangles — `blocked_tree` keeps only an
+        // `is_minable` flag, no name and no position — so a plan that removed
+        // a base entity is matched by the tile its box is centred on, which is
+        // the same key `remove_entity` stores and the same one the entity loop
+        // above compares. A minable obstacle is *not* treated as clear: no
+        // method emits an action to mine one out of the way, so believing a
+        // tree will move is the same wrong answer as not seeing it at all.
+        for blocked in self.base.entity_graph.blocking_boxes_within(area) {
+            if self.removed.contains(&Pos::from(&blocked.center())) {
+                continue;
+            }
+            if boxes_overlap(&blocked, area) {
                 return false;
             }
         }
@@ -898,6 +925,61 @@ mod tests {
         assert!(
             !large.is_area_free("assembling-machine-1", &Position::new(0., 1.)),
             "an assembling machine does not fit in the same gap"
+        );
+    }
+
+    /// The defect that stuck run `run-1788309767-54739` on its first action.
+    ///
+    /// `fixture_world` spawns 100 trees around `(-20, -20)` and a 4x4 patch of
+    /// `player_collidable` water around `(40, 40)` — the same two obstacle
+    /// classes a real map is full of, and the same two `EntityGraph::add`
+    /// keeps out of `entity_tree`. Before `is_area_clear` read
+    /// `blocking_boxes_within`, both of these read as open ground and the
+    /// planner sited furnaces on them; the game answered
+    /// `can_place_entity said 'no'` and the run had no way forward.
+    #[test]
+    fn a_furnace_does_not_fit_on_a_tree_or_in_water() {
+        let s = state();
+        assert!(
+            !s.is_area_free("stone-furnace", &Position::new(-20., -20.)),
+            "the fixture's trees are centred here; a furnace cannot go on them"
+        );
+        assert!(
+            !s.is_area_free("stone-furnace", &Position::new(40., 40.)),
+            "the fixture's water is here; a furnace cannot go on it"
+        );
+        // Open ground a few tiles from either, so this cannot pass on an
+        // `is_area_free` that simply always says no.
+        assert!(
+            s.is_area_free("stone-furnace", &Position::new(0., -1.)),
+            "open ground still takes a furnace"
+        );
+    }
+
+    /// A tree the plan has already mined out of the way must stop blocking.
+    ///
+    /// `blocked_tree` carries no name and no position, only a rectangle, so
+    /// the `removed` ledger is matched against the tile the rectangle is
+    /// centred on. Getting that key wrong would leave every removal invisible
+    /// on this path, which is silent: the placement would simply never be
+    /// planned.
+    #[test]
+    fn removing_a_tree_frees_the_ground_under_it() {
+        let mut s = state();
+        let tree = Position::new(-20., -20.);
+        assert!(!s.is_area_free("stone-furnace", &tree));
+        // The fixture's trees are one per tile and 0.8 across, so a tree
+        // centred a whole tile away still reaches into a furnace's 1.398-wide
+        // box: the 3x3 around the site, not the 2x2 under it, is what has to
+        // go.
+        for x in -21..=-19 {
+            for y in -21..=-19 {
+                s.remove_entity(&Position::new(x as f64, y as f64));
+            }
+        }
+        assert!(
+            s.is_area_free("stone-furnace", &tree),
+            "with the trees mined the ground is buildable again"
         );
     }
 

@@ -962,6 +962,33 @@ mod tests {
         );
     }
 
+    /// The end-to-end shape of the run-8b failure: the site chosen for a
+    /// furnace next to an ore patch has to be one the game would actually
+    /// accept, and "no factory entity here" is not the same question.
+    ///
+    /// `fixture_world`'s forest sits around `(-20, -20)`; the search starts
+    /// inside it. Before `is_area_clear` read the blocked tree the first
+    /// candidate — the forest floor itself — came back as free, which is the
+    /// position the executor then had refused with
+    /// `can_place_entity said 'no'`.
+    #[test]
+    fn the_free_tile_search_walks_out_of_a_forest() {
+        let s = state();
+        let in_the_trees = Position::new(-20., -20.);
+        assert!(
+            !s.is_area_free("stone-furnace", &in_the_trees),
+            "the search has to start somewhere a furnace does not fit, or \
+             this test proves nothing"
+        );
+        let found =
+            free_area_near(&s, &in_the_trees, "stone-furnace").expect("the forest is not endless");
+        assert_ne!(found, in_the_trees);
+        assert!(
+            s.is_area_free("stone-furnace", &found),
+            "the site it returns must be one a furnace fits on, got {found}"
+        );
+    }
+
     #[test]
     fn one_tile_is_enough_for_a_small_request() {
         let s = state();

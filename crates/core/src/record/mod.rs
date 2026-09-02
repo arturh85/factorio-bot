@@ -171,6 +171,36 @@ pub enum EventKind {
         /// synchronous RCON calls with no dispatched action to attach to.
         action_id: Option<u32>,
     },
+    /// The game refused a build, and the planner has stopped offering that
+    /// site.
+    ///
+    /// Written by `record.refusals()` (`crates/scripting_lua`) from the
+    /// ledger `FactorioRcon::place_entity_timed` fills when
+    /// `surface.can_place_entity` says no *without* naming the acting player
+    /// as the cause. Every one of these is also visible as an
+    /// [`EventKind::ActionSettled`] failure at about the same tick -- what
+    /// this variant adds is the consequence: from here to the end of the run,
+    /// `PlanState::from_world` excludes the collision box of `entity` centred
+    /// at `position`, so every later plan sites around it.
+    ///
+    /// That consequence is the reason this is a record line at all. A planner
+    /// that has silently started preferring distant tiles is a planner nobody
+    /// can diagnose; four consecutive runs were spent on refusals whose only
+    /// trace was an error string, and the next reader should be able to see
+    /// which ground the planner has written off and when it learned to.
+    ///
+    /// A refusal the acting player caused is deliberately absent: the mod
+    /// names that one, the RCON layer walks the bot aside and retries it, and
+    /// the ground is fine once the bot moves.
+    PlacementRefused {
+        /// The item the bot was holding, which is the name the collision box
+        /// excluded from later plans is looked up under.
+        entity: String,
+        /// The centre the build was aimed at. The excluded region is that
+        /// entity's collision box centred here, not this single tile -- the
+        /// game tested the box, so the box is what the refusal is about.
+        position: Position,
+    },
     RunFinished {
         outcome: String,
         elapsed_ticks: u64,

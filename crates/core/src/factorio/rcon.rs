@@ -11,7 +11,7 @@ use crate::factorio::util::{
     move_pos, move_position, position_to_lua, rect_to_lua, span_rect, str_to_lua, value_to_lua,
     vec_to_lua, vector_add, vector_multiply, vector_normalize, vector_substract,
 };
-use crate::factorio::world::FactorioWorld;
+use crate::factorio::world::{FactorioWorld, PlacementRefusal};
 use crate::settings::FactorioSettings;
 use crate::types::{
     ActionId, AreaFilter, Direction, FactorioEntity, FactorioForce, FactorioPlayer, FactorioTile,
@@ -226,6 +226,52 @@ fn judge_transfer_reply(
 /// Documented as "how close we need to get to the goal. Default 1." The mod
 /// forwards a `nil` radius unchanged, so a caller passing `None` is asking for
 /// this, not for an exact landing.
+/// The mod's wording for a placement the game refused without naming a cause.
+///
+/// `mods/BotBridge/control.lua` prints
+/// `cannot place item '<item>' because surface.can_place_entity said 'no'`
+/// when `can_place_entity` says no and the acting player is *not* in the
+/// footprint; the other branch prints the `player_blocks_placement` sentinel,
+/// which is handled separately and deliberately not remembered (see
+/// [`PlacementRefusal`]).
+///
+/// Matched here, at the one place the game's own line is still a line, rather
+/// than downstream against an error string two more layers of wrapping deep.
+/// A wording change therefore costs a refusal that is not learned from -- the
+/// behaviour before this existed -- and never a site excluded for a reason
+/// that was not given.
+const CAN_PLACE_REFUSAL: &str = "can_place_entity said 'no'";
+
+/// Remembers `line` as a refused site, if it is one.
+///
+/// Called on both arms that turn an unrecognised reply into an error: the
+/// first attempt's, and the one after the actor has been walked aside. The
+/// second matters as much as the first -- a refusal that survives the walk is
+/// the strongest evidence there is that the blocker is not the actor.
+fn note_placement_refusal(
+    world: &Arc<FactorioWorld>,
+    tick: Option<u64>,
+    line: &str,
+    item_name: &str,
+    entity_position: &Position,
+) {
+    if !line.contains(CAN_PLACE_REFUSAL) {
+        return;
+    }
+    let refusal = PlacementRefusal {
+        tick,
+        entity: item_name.to_string(),
+        position: entity_position.clone(),
+    };
+    if world.record_placement_refusal(refusal) {
+        warn!(
+            "the game refused to build {} at {}; the planner will avoid that footprint \
+             for the rest of this run",
+            item_name, entity_position
+        );
+    }
+}
+
 const DEFAULT_PATH_RADIUS: f64 = 1.0;
 
 /// How much further than the requested radius a returned path may end from the
@@ -1708,6 +1754,13 @@ impl FactorioRcon {
                                         refused_at,
                                     ))
                                 } else {
+                                    note_placement_refusal(
+                                        world,
+                                        tick,
+                                        line,
+                                        &item_name,
+                                        &entity_position,
+                                    );
                                     Err(ActionFailure::refused(
                                         RconError {
                                             message: line.clone(),
@@ -1729,6 +1782,7 @@ impl FactorioRcon {
                         refused_at,
                     ))
                 } else {
+                    note_placement_refusal(world, tick, line, &item_name, &entity_position);
                     Err(ActionFailure::refused(
                         RconError {
                             message: line.clone(),
@@ -3614,5 +3668,103 @@ mod transfer_guarantee_tests {
         assert!(!literal.contains('\n'), "{literal:?} still holds a newline");
         assert!(!literal.contains('\r'), "{literal:?} still holds a return");
         assert_eq!(literal, "'one\\010two\\013'");
+    }
+}
+
+/// Which refusals are remembered, and which are deliberately not.
+///
+/// The mod answers a failed `can_place_entity` two different ways, and the
+/// difference is the whole basis for the belief horizon: the
+/// `player_blocks_placement` sentinel names its cause and is already handled
+/// by walking the actor aside and retrying, while the generic wording names
+/// nothing, which is exactly why it has to be remembered rather than
+/// explained away. `place_entity_timed` needs a live connection, so these
+/// drive the discriminator directly with the lines the game really sends.
+#[cfg(test)]
+mod placement_refusal_tests {
+    use super::*;
+    use crate::factorio::world::FactorioWorld;
+
+    fn world() -> Arc<FactorioWorld> {
+        Arc::new(FactorioWorld::new())
+    }
+
+    /// The line four runs died on.
+    const GENERIC: &str =
+        "cannot place item 'stone-furnace' because surface.can_place_entity said 'no'";
+
+    #[test]
+    fn the_generic_refusal_is_remembered_with_its_site() {
+        let world = world();
+        let at = Position::new(-16., -58.);
+        note_placement_refusal(&world, Some(6198), GENERIC, "stone-furnace", &at);
+        let refusals = world.placement_refusals();
+        assert_eq!(refusals.len(), 1, "got {refusals:?}");
+        assert_eq!(refusals[0].entity, "stone-furnace");
+        assert_eq!(refusals[0].position, at);
+        assert_eq!(refusals[0].tick, Some(6198));
+    }
+
+    /// The other half of the same branch. A player-blocked refusal is about a
+    /// character that will move; remembering it would fence the planner out
+    /// of ground with nothing wrong with it.
+    #[test]
+    fn a_player_blocked_refusal_is_not_remembered() {
+        let world = world();
+        note_placement_refusal(
+            &world,
+            Some(1),
+            "§player_blocks_placement§",
+            "stone-furnace",
+            &Position::new(-16., -58.),
+        );
+        assert!(
+            world.placement_refusals().is_empty(),
+            "the mod named the cause and the RCON layer retries it; that is \
+             not a fact about the ground"
+        );
+    }
+
+    /// Nor is every other complaint that arrives on the same arm. An empty
+    /// hand and a nil place_result are refusals of the *command*, not of the
+    /// site, and neither says anything about the tile.
+    #[test]
+    fn refusals_that_are_not_about_the_site_are_not_remembered() {
+        let world = world();
+        for line in [
+            "cannot place item 'stone-furnace' because the player 'bot' does not have any",
+            "cannot place item 'stone-furnace' because place_result is nil",
+            "ERROR: something else entirely",
+        ] {
+            note_placement_refusal(&world, None, line, "stone-furnace", &Position::new(0., 0.));
+        }
+        assert!(
+            world.placement_refusals().is_empty(),
+            "only `can_place_entity said 'no'` is a verdict about the ground"
+        );
+    }
+
+    /// A run that is refused the same site three times learns it once, and a
+    /// record is told about it once — while the planner keeps seeing it on
+    /// every plan, which is the difference between this ledger and the
+    /// teleport queue beside it.
+    #[test]
+    fn a_repeated_refusal_is_reported_once_and_kept_forever() {
+        let world = world();
+        let at = Position::new(-16., -58.);
+        for tick in [6198, 6204, 6209] {
+            note_placement_refusal(&world, Some(tick), GENERIC, "stone-furnace", &at);
+        }
+        assert_eq!(world.placement_refusals().len(), 1);
+        assert_eq!(world.unreported_placement_refusals().len(), 1);
+        assert!(
+            world.unreported_placement_refusals().is_empty(),
+            "a second flush writes nothing"
+        );
+        assert_eq!(
+            world.placement_refusals().len(),
+            1,
+            "reporting must not take the site away from the planner"
+        );
     }
 }

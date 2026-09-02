@@ -706,6 +706,23 @@ export type EventKind =
            *  blueprint/ghost-revive sites, which have no dispatched action. */
           action_id: number | null;
       }
+    | {
+          /**
+           * The game refused a build, and the planner has stopped offering
+           * that site. From this tick to the end of the run, every plan
+           * excludes `entity`'s collision box centred at `position` -- so
+           * this is the line that explains a planner which suddenly prefers
+           * a further-away tile. The matching `action_settled` failure sits
+           * at about the same tick and carries the game's own wording.
+           */
+          kind: 'placement_refused';
+          /** The item the bot was holding, and the name the excluded
+           *  collision box is looked up under. */
+          entity: string;
+          /** The centre the build was aimed at. The excluded region is the
+           *  whole collision box centred here, not this one tile. */
+          position: Position;
+      }
     | {kind: 'run_finished'; outcome: string; elapsed_ticks: number}
     /** A kind this build does not know. The server never emits it, but a
      *  future variant decodes to this rather than failing to parse. */

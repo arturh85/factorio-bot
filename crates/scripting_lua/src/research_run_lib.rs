@@ -107,6 +107,7 @@ mod tests {
             end
             record.actions = function(_steps, _actions) return 0 end
             record.teleports = function() return 0 end
+            record.refusals = function() return 0 end
             record.milestone_stuck = function(index, outcome, last_error, best_steps)
                 table.insert(__milestone_stuck_calls, { index = index, outcome = outcome,
                     last_error = last_error, best_steps = best_steps })

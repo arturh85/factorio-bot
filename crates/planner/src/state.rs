@@ -372,6 +372,53 @@ pub struct PlanState {
     /// there. The real fix belongs upstream, in not inventing the player, or
     /// in marking an invented one so consumers can tell.
     characters: BTreeMap<PlayerId, Rect>,
+    /// Footprints the *game* has already refused a build at, this run.
+    ///
+    /// The sixth occupancy source, and the only one that is not a model of
+    /// the ground: the five above are the planner's belief about what is
+    /// there, while this is a verdict the game handed down about a specific
+    /// box. It exists because the belief has been wrong four times in a row
+    /// for four different reasons -- a forest, a non-roster character, a
+    /// roster character, and a fourth still unidentified -- and because until
+    /// now nothing carried the verdict from the run that earned it to the
+    /// plan that came next. Run `run-1788323755-24892` re-chose one refused
+    /// tile twice in a single milestone.
+    ///
+    /// # What is excluded, and why it is the box rather than the tile
+    ///
+    /// The whole footprint the game tested, not the tile at its centre. What
+    /// the game said is "an entity of *this box* centred *here* cannot be
+    /// built", so the sound inference is that something in that box blocks a
+    /// build -- and nothing narrower is available, because the refusal names
+    /// no cause and no coordinate. Excluding only the exact tile would let
+    /// the next plan pick a neighbour whose box covers the same unknown
+    /// blocker, and `free_area_near`'s rings would then walk into it one tile
+    /// at a time, spending an iteration per step against a stall limit of
+    /// three. Excluding the box steps clear in one move.
+    ///
+    /// It over-excludes when the blocker sits in a corner of the box. That is
+    /// the same trade the `characters` field above documents, in the same
+    /// direction: a few extra tiles of `free_area_near`'s 625-candidate
+    /// window against a milestone.
+    ///
+    /// # It narrows the site, not the search
+    ///
+    /// Nothing here touches `FREE_TILE_SEARCH_RADIUS` or the ring order.
+    /// A refusal makes specific candidates unavailable and lets the existing
+    /// outward walk find the next one, so a refused site costs the *nearest*
+    /// alternative and never a wider search than the one already run.
+    ///
+    /// # Believed for the whole run
+    ///
+    /// Read from `FactorioWorld::placement_refusals` on every
+    /// [`PlanState::from_world`], and that ledger is never expired. Purity
+    /// survives it: this is an input, read once at construction like every
+    /// other field, and two `PlanState`s built from the same world and roster
+    /// still expand to the same plan.
+    ///
+    /// Sorted by geometry rather than kept in arrival order, so the field
+    /// does not depend on the sequence the game happened to refuse things in.
+    refused: Vec<Rect>,
 }
 
 impl PlanState {
@@ -441,6 +488,40 @@ impl PlanState {
                 )
             })
             .collect();
+        // Sites the game refused, turned into the boxes it refused them at.
+        // The prototype lookup is the same one `collision_area` makes, under
+        // the same name the planner used when it chose the site, so the box
+        // excluded here is exactly the box that was offered and turned down.
+        let mut refused: Vec<Rect> = base
+            .placement_refusals()
+            .iter()
+            .map(|refusal| {
+                base.entity_prototypes
+                    .get(&refusal.entity)
+                    .map(|proto| add_to_rect(&proto.collision_box, &refusal.position))
+                    // No prototype: the one thing that can be said without
+                    // inventing a size is that the game refused a build
+                    // centred here. A unit box around that centre is the
+                    // floor, not a guess at the entity -- it under-excludes,
+                    // which is the safe direction for a fallback that should
+                    // never fire (the planner only ever places names the
+                    // world has prototypes for).
+                    .unwrap_or_else(|| {
+                        Rect::new(
+                            &Position::new(refusal.position.x - 0.5, refusal.position.y - 0.5),
+                            &Position::new(refusal.position.x + 0.5, refusal.position.y + 0.5),
+                        )
+                    })
+            })
+            .collect();
+        refused.sort_by(|a, b| {
+            a.left_top
+                .x
+                .total_cmp(&b.left_top.x)
+                .then(a.left_top.y.total_cmp(&b.left_top.y))
+                .then(a.right_bottom.x.total_cmp(&b.right_bottom.x))
+                .then(a.right_bottom.y.total_cmp(&b.right_bottom.y))
+        });
         PlanState {
             base,
             bots: map,
@@ -456,6 +537,7 @@ impl PlanState {
             max_prototype_half_diagonal,
             mining_tile_separation,
             characters,
+            refused,
         }
     }
 
@@ -774,9 +856,10 @@ impl PlanState {
 
     /// Whether anything the plan can see occupies `area`.
     ///
-    /// Five sources, because no single one of them sees everything: entities
+    /// Six sources, because no single one of them sees everything: entities
     /// this plan has placed, entities the base world already had, the terrain
-    /// nobody built, the characters standing on it, and ore. The last three
+    /// nobody built, the characters standing on it, ore, and the footprints
+    /// the game itself has already refused. The middle three
     /// are the odd ones — `EntityGraph::add` only ever inserts a whitelist of
     /// *factory* entity types into the entity tree, so trees, cliffs, small
     /// rocks, units and water tiles have to come out of
@@ -794,7 +877,12 @@ impl PlanState {
     /// Leaving the character source out produced the *same message* from the
     /// same call for an entirely different reason two runs later, and again
     /// three runs after that when the character source was there but excluded
-    /// the roster; see the `characters` field doc for both.
+    /// the roster; see the `characters` field doc for both. The sixth source
+    /// is the admission that this list will keep being incomplete: it is not
+    /// a model of anything, it is the game's own refusals played back, and it
+    /// is what stops the next unmodelled obstacle costing a whole milestone
+    /// instead of one placement. See
+    /// [`refused`](PlanState#structfield.refused).
     fn is_area_clear(&self, area: &Rect) -> bool {
         for entity in self.added.values() {
             if boxes_overlap(&self.footprint_of(entity), area) {
@@ -855,9 +943,52 @@ impl PlanState {
                 return false;
             }
         }
+        // Footprints the game has already refused a build at. Not a model of
+        // an obstacle -- a verdict about one. `removed` cannot clear these
+        // either: nothing the plan does is known to change the answer, since
+        // the refusal never said what the answer was about.
+        for refused in &self.refused {
+            if boxes_overlap(refused, area) {
+                return false;
+            }
+        }
         !tiles_under(area)
             .iter()
             .any(|tile| self.base.entity_graph.any_resource_at(tile))
+    }
+
+    /// The footprints [`is_area_clear`](PlanState::is_area_clear) refuses
+    /// because the game refused them first, in the deterministic order
+    /// [`PlanState::from_world`] sorted them into.
+    ///
+    /// Exposed so a caller can say *which* sites the planner is avoiding --
+    /// a plan that quietly prefers distant tiles and cannot say why is the
+    /// failure mode this memory would otherwise introduce.
+    pub fn refused_footprints(&self) -> &[Rect] {
+        &self.refused
+    }
+
+    /// Whether the game has already refused this exact placement.
+    ///
+    /// Narrower than [`PlanState::is_area_free`], which answers "is anything
+    /// in the way" from six sources at once. This asks only about the one
+    /// source that is a verdict rather than a model, so a caller can tell
+    /// "the plan no longer fits the world" from "the game said no to this",
+    /// and treat the second as durable. `crates/executor`'s `recover` uses it
+    /// to refuse a tier-1 retry of a placement that is guaranteed to be
+    /// refused again.
+    ///
+    /// `false` for an entity the world has no prototype for: an unknown size
+    /// is not a footprint that can be compared, and the refusals themselves
+    /// fall back to a unit box in that case, which is not a shape to test
+    /// somebody else's placement against.
+    pub fn is_site_refused(&self, name: &str, position: &Position) -> bool {
+        let Some(area) = self.collision_area(name, position) else {
+            return false;
+        };
+        self.refused
+            .iter()
+            .any(|refused| boxes_overlap(refused, &area))
     }
 
     /// Whether this tile is clear.

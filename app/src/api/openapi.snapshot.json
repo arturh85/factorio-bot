@@ -671,6 +671,31 @@
             "type": "object"
           },
           {
+            "description": "The game refused a build, and the planner has stopped offering that\nsite.\n\nWritten by `record.refusals()` (`crates/scripting_lua`) from the\nledger `FactorioRcon::place_entity_timed` fills when\n`surface.can_place_entity` says no *without* naming the acting player\nas the cause. Every one of these is also visible as an\n[`EventKind::ActionSettled`] failure at about the same tick -- what\nthis variant adds is the consequence: from here to the end of the run,\n`PlanState::from_world` excludes the collision box of `entity` centred\nat `position`, so every later plan sites around it.\n\nThat consequence is the reason this is a record line at all. A planner\nthat has silently started preferring distant tiles is a planner nobody\ncan diagnose; four consecutive runs were spent on refusals whose only\ntrace was an error string, and the next reader should be able to see\nwhich ground the planner has written off and when it learned to.\n\nA refusal the acting player caused is deliberately absent: the mod\nnames that one, the RCON layer walks the bot aside and retries it, and\nthe ground is fine once the bot moves.",
+            "properties": {
+              "entity": {
+                "description": "The item the bot was holding, which is the name the collision box\nexcluded from later plans is looked up under.",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "placement_refused"
+                ],
+                "type": "string"
+              },
+              "position": {
+                "$ref": "#/components/schemas/Position",
+                "description": "The centre the build was aimed at. The excluded region is that\nentity's collision box centred here, not this single tile -- the\ngame tested the box, so the box is what the refusal is about."
+              }
+            },
+            "required": [
+              "entity",
+              "position",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "elapsed_ticks": {
                 "format": "int64",

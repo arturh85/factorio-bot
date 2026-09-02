@@ -37,6 +37,87 @@ pub struct TeleportEvent {
     pub action_id: Option<ActionId>,
 }
 
+/// A build the game refused with no cause it was willing to name.
+///
+/// `mods/BotBridge/control.lua`'s `rcon_place_entity` asks
+/// `surface.can_place_entity{... build_check_type = manual}` and, when the
+/// answer is no, prints one of two things: `§player_blocks_placement§` when
+/// the *acting* player is standing in the footprint, and
+/// `cannot place item '<item>' because surface.can_place_entity said 'no'`
+/// otherwise. Only the second one lands here. The first names its cause,
+/// [`crate::factorio::rcon::FactorioRcon::place_entity_timed`] already walks
+/// the actor aside and retries it, and the ground it complains about is
+/// legitimately buildable the moment the actor steps off — remembering it
+/// would fence the planner out of a tile nothing is wrong with.
+///
+/// # Why this is worth keeping
+///
+/// The generic refusal failed four separate runs
+/// (`docs/superpowers/notes/2026-09-02-placement-refusal*.md`), each time for
+/// a different unmodelled obstacle — a forest, a non-roster character, a
+/// roster character — and each time the planner re-chose the same tile on the
+/// next iteration, because nothing carried the refusal from one plan to the
+/// next. This is that carrier: the planner reads it back through
+/// `PlanState::from_world` and stops offering the site.
+///
+/// # What it does *not* claim
+///
+/// It does not say what is there. The game examined the entity's collision
+/// box at this position and said no; the only sound reading is "something in
+/// that box blocks a build", which is why `entity` and `position` are kept
+/// rather than a bare tile — the box is recoverable from the prototype, and
+/// the box is the extent of what was actually tested.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacementRefusal {
+    /// The `game.tick` the refusal was stamped at, or `None` when the reply
+    /// carried no stamp. Never defaulted to zero here: a record writing this
+    /// out clamps it to the log's own clock rather than inventing a tick.
+    pub tick: Option<u64>,
+    /// The item the bot was holding — which is also the name the planner
+    /// looked the collision box up under when it chose the site, so the box
+    /// this refusal covers is recoverable with the same lookup.
+    pub entity: String,
+    /// The centre the build was aimed at, exactly as dispatched.
+    pub position: Position,
+}
+
+/// Every [`PlacementRefusal`] this run has collected, plus how many of them a
+/// record has already been told about.
+///
+/// Append-only and **never drained**, unlike
+/// [`FactorioWorld::teleports`](FactorioWorld#structfield.teleports): a
+/// teleport is an event that needs writing once, while a refusal is a
+/// standing fact the planner has to re-read on every plan. The `reported`
+/// cursor is what lets `record.refusals()` write each one exactly once
+/// without taking it away from the planner.
+#[derive(Debug, Default)]
+pub struct PlacementRefusals {
+    sites: Vec<PlacementRefusal>,
+    reported: usize,
+}
+
+impl PlacementRefusals {
+    /// Remembers a refusal, or does nothing if this exact site is already
+    /// known. Returns whether it was new.
+    ///
+    /// "The same site" is the same entity name at the same centre, compared
+    /// exactly. Every position that reaches here came off the integer grid
+    /// `free_area_near` searches, so exact comparison is not the fragile
+    /// float test it looks like; and a near-miss costs a duplicate entry,
+    /// which excludes the same ground twice, rather than a wrong answer.
+    fn note(&mut self, refusal: PlacementRefusal) -> bool {
+        if self.sites.iter().any(|known| {
+            known.entity == refusal.entity
+                && known.position.x.total_cmp(&refusal.position.x).is_eq()
+                && known.position.y.total_cmp(&refusal.position.y).is_eq()
+        }) {
+            return false;
+        }
+        self.sites.push(refusal);
+        true
+    }
+}
+
 pub struct FactorioWorld {
     pub players: DashMap<PlayerId, FactorioPlayer>,
     pub forces: DashMap<String, FactorioForce>,
@@ -71,6 +152,26 @@ pub struct FactorioWorld {
     /// rather than as a direct call, the same shape `actions` already uses
     /// for `action_completed`.
     pub teleports: SyncMutex<Vec<(u64, TeleportEvent)>>,
+    /// Sites the game has refused a build at, for the life of this world.
+    ///
+    /// Two readers, which is why it sits here rather than in either of them.
+    /// `crates/planner`'s `PlanState::from_world` reads it on **every** plan
+    /// and excludes the refused footprints, which is what stops a replan
+    /// re-choosing the tile the game just turned down; `crates/scripting_lua`'s
+    /// `record.refusals()` writes the new ones into `events.jsonl` so the
+    /// avoidance is visible to whoever reads the run back. Neither crate can
+    /// see the other, and both can see this.
+    ///
+    /// **Believed for as long as this world lives, and not expired.** See
+    /// [`PlacementRefusal`] for what a refusal does and does not claim; the
+    /// horizon is argued in
+    /// `docs/superpowers/notes/2026-09-02-refusal-memory.md`. In short: every
+    /// obstacle the planner *can* model — characters, entities, ore, terrain —
+    /// is already re-read from this world on every plan, so a refusal only
+    /// ever carries what the model cannot see, and an unexplained obstruction
+    /// is not something a clock can talk us out of. Forgetting it immediately
+    /// is the behaviour that cost four runs.
+    pub placement_refusals: SyncMutex<PlacementRefusals>,
 }
 
 impl FactorioWorld {
@@ -310,6 +411,7 @@ impl FactorioWorld {
             entity_graph,
             flow_graph,
             teleports: SyncMutex::new(Vec::new()),
+            placement_refusals: SyncMutex::new(PlacementRefusals::default()),
         }
     }
 
@@ -322,6 +424,31 @@ impl FactorioWorld {
     /// Takes every teleport queued since the last drain, oldest first.
     pub fn drain_teleports(&self) -> Vec<(u64, TeleportEvent)> {
         std::mem::take(&mut *self.teleports.lock())
+    }
+
+    /// Remembers a build the game refused. Returns whether the site was new.
+    ///
+    /// Called from [`crate::factorio::rcon::FactorioRcon::place_entity_timed`],
+    /// at the point the game's own answer is still a line of text rather than
+    /// an error four wrappers deep — so the two refusals the mod distinguishes
+    /// are told apart structurally there, not by re-parsing a message here.
+    pub fn record_placement_refusal(&self, refusal: PlacementRefusal) -> bool {
+        self.placement_refusals.lock().note(refusal)
+    }
+
+    /// Every refused site, oldest first. Non-destructive: this is the
+    /// planner's read, and it happens once per plan.
+    pub fn placement_refusals(&self) -> Vec<PlacementRefusal> {
+        self.placement_refusals.lock().sites.clone()
+    }
+
+    /// The refusals no record has been told about yet, oldest first, marking
+    /// them reported. The sites themselves stay — see [`PlacementRefusals`].
+    pub fn unreported_placement_refusals(&self) -> Vec<PlacementRefusal> {
+        let mut ledger = self.placement_refusals.lock();
+        let from = ledger.reported;
+        ledger.reported = ledger.sites.len();
+        ledger.sites[from..].to_vec()
     }
 
     pub fn dump(&self, save_path: Option<&str>) -> Result<()> {
@@ -556,6 +683,7 @@ impl<'de> Deserialize<'de> for FactorioWorld {
                     entity_graph,
                     flow_graph,
                     teleports: Default::default(),
+                    placement_refusals: Default::default(),
                 })
             }
         }
@@ -597,6 +725,17 @@ impl Clone for FactorioWorld {
             // empty queue rather than duplicating in-flight teleports across
             // two independent recorders.
             teleports: SyncMutex::new(Vec::new()),
+            // Knowledge, not a queue -- and knowledge about the *game*, which
+            // a clone of our belief about it does not stop being true of. A
+            // clone that started blank would hand the planner back exactly
+            // the sites it has already been refused.
+            placement_refusals: SyncMutex::new(PlacementRefusals {
+                sites: self.placement_refusals.lock().sites.clone(),
+                // Reset: a second recorder has been told nothing, and writing
+                // a site twice into two different records is the honest
+                // answer for two independent records.
+                reported: 0,
+            }),
             flow_graph: Arc::new(FlowGraph::new(_entity_graph)),
         }
     }
@@ -625,6 +764,7 @@ mod tests {
             path_requests: Default::default(),
             next_action_id: Default::default(),
             teleports: Default::default(),
+            placement_refusals: Default::default(),
             entity_graph: Arc::new(EntityGraph::new(
                 Arc::new(DashMap::new()),
                 Arc::new(DashMap::new()),

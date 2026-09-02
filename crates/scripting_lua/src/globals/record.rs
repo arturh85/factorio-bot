@@ -893,6 +893,63 @@ end
     }
 
     map_table.set(
+        "__doc_entry_refusals",
+        String::from(
+            r#"
+--- flushes the placement refusals the game has handed down since the last flush
+-- A refusal is `surface.can_place_entity` saying no with no cause named --
+-- not the `player_blocks_placement` case, which the RCON layer walks the bot
+-- clear of and retries. Each one is remembered for the rest of the run and
+-- every later plan sites around the refused footprint, so writing them out is
+-- what makes that avoidance readable: without it, a planner that has quietly
+-- started preferring distant tiles looks like a planner with a bug. Call it
+-- once per loop iteration, alongside `record.actions` and `record.teleports`.
+-- @treturn number how many refusal events were written
+-- @raise if no recording is running
+function record.refusals()
+end
+    "#,
+        ),
+    )?;
+    {
+        let slot = slot.clone();
+        let world = world.clone();
+        let rcon = rcon.clone();
+        map_table.set(
+            "refusals",
+            lua.create_function(move |_lua, ()| {
+                let mut guard = slot.lock();
+                let recorder = guard.as_mut().ok_or_else(|| {
+                    record_error("no recording is running -- call record.start() first")
+                })?;
+                let mut written = 0u32;
+                for refusal in world.unreported_placement_refusals() {
+                    // The refusal's own stamp when the reply carried one.
+                    // `not_before` is what keeps a missing stamp from
+                    // travelling backwards through the log: it clamps to the
+                    // last tick already written rather than inventing a zero.
+                    let tick = recorder.not_before(
+                        refusal
+                            .tick
+                            .unwrap_or_else(|| rcon.last_tick().unwrap_or(0)),
+                    );
+                    recorder
+                        .record(
+                            tick,
+                            EventKind::PlacementRefused {
+                                entity: refusal.entity,
+                                position: refusal.position,
+                            },
+                        )
+                        .map_err(record_error)?;
+                    written += 1;
+                }
+                Ok(written)
+            })?,
+        )?;
+    }
+
+    map_table.set(
         "__doc_entry_keyframe",
         String::from(
             r#"
@@ -1112,6 +1169,16 @@ mod tests {
             .events
             .into_iter()
             .map(|event| event.kind)
+            .collect()
+    }
+
+    /// The ticks the log carries, in file order -- what `not_before` is for.
+    fn read_event_ticks(dir: &std::path::Path) -> Vec<u64> {
+        factorio_bot_core::record::read_events(&dir.join("events.jsonl"))
+            .expect("events.jsonl readable")
+            .events
+            .into_iter()
+            .map(|event| event.tick)
             .collect()
     }
 
@@ -1699,6 +1766,126 @@ mod tests {
         assert!(!keyframe_relevant("simple-entity", "rock-small"));
         assert!(!keyframe_relevant("character", "character"));
         assert!(!keyframe_relevant("item-entity", "item-on-ground"));
+    }
+
+    // ------------------------------------------------------------- refusals
+
+    /// `record.refusals()` writes each refused site once and leaves it on the
+    /// world.
+    ///
+    /// The second half is the point, and is where this differs from
+    /// `record.teleports()` beside it: a teleport is an event that needs
+    /// writing once, while a refusal is a standing fact `PlanState::from_world`
+    /// has to re-read on every plan. Draining it into the record would make
+    /// the planner forget the site the moment it was written down.
+    #[test]
+    fn refusals_are_written_once_and_stay_available_to_the_planner() {
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let recorder = RunRecorder::start(tmp.path(), "run-1").expect("recorder starts");
+        let run_dir = recorder.dir().to_path_buf();
+        let slot: Slot = Arc::new(Mutex::new(Some(recorder)));
+        let world = Arc::new(FactorioWorld::new());
+
+        let table = create_lua_record_with_slot(
+            &lua,
+            Arc::new(FactorioRcon::new_empty()),
+            world.clone(),
+            tmp.path().join("scripts"),
+            vec![],
+            slot,
+        )
+        .expect("record table");
+        lua.globals().set("record", table).expect("install");
+
+        for (tick, x, y) in [(6198u64, -16., -58.), (6204, -19., 51.)] {
+            world.record_placement_refusal(factorio_bot_core::factorio::world::PlacementRefusal {
+                tick: Some(tick),
+                entity: "stone-furnace".to_string(),
+                position: Position { x, y },
+            });
+        }
+
+        let written: u32 = lua
+            .load("return record.refusals()")
+            .eval()
+            .expect("record.refusals() runs");
+        assert_eq!(written, 2);
+
+        let events = read_events(&run_dir);
+        assert_eq!(events.len(), 2);
+        match &events[0] {
+            EventKind::PlacementRefused { entity, position } => {
+                assert_eq!(entity, "stone-furnace");
+                assert_eq!(position.x, -16.);
+                assert_eq!(position.y, -58.);
+            }
+            other => panic!("expected placement_refused, got {other:?}"),
+        }
+
+        let again: u32 = lua
+            .load("return record.refusals()")
+            .eval()
+            .expect("record.refusals() runs on an empty ledger");
+        assert_eq!(again, 0, "each refusal is written exactly once");
+        assert_eq!(
+            world.placement_refusals().len(),
+            2,
+            "the planner must still see both sites after they were recorded"
+        );
+    }
+
+    /// A refusal whose reply carried no tick stamp still lands in order.
+    ///
+    /// `not_before` is what does it: a missing stamp becomes the last tick
+    /// already written, never a zero that would sort the line before the run
+    /// started.
+    #[test]
+    fn an_unstamped_refusal_does_not_travel_backwards_in_the_log() {
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut recorder = RunRecorder::start(tmp.path(), "run-1").expect("recorder starts");
+        let run_dir = recorder.dir().to_path_buf();
+        recorder
+            .record(
+                900,
+                EventKind::MilestoneStarted {
+                    index: 1,
+                    goal: "anything".to_string(),
+                },
+            )
+            .expect("a first event");
+        let slot: Slot = Arc::new(Mutex::new(Some(recorder)));
+        let world = Arc::new(FactorioWorld::new());
+
+        let table = create_lua_record_with_slot(
+            &lua,
+            Arc::new(FactorioRcon::new_empty()),
+            world.clone(),
+            tmp.path().join("scripts"),
+            vec![],
+            slot,
+        )
+        .expect("record table");
+        lua.globals().set("record", table).expect("install");
+
+        world.record_placement_refusal(factorio_bot_core::factorio::world::PlacementRefusal {
+            tick: None,
+            entity: "stone-furnace".to_string(),
+            position: Position { x: 0., y: 0. },
+        });
+        let written: u32 = lua
+            .load("return record.refusals()")
+            .eval()
+            .expect("record.refusals() runs");
+        assert_eq!(written, 1);
+
+        let ticks = read_event_ticks(&run_dir);
+        assert_eq!(
+            ticks,
+            vec![900, 900],
+            "an unstamped refusal is clamped to the log's own clock"
+        );
     }
 
     // ------------------------------------------------------------- teleports

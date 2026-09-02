@@ -778,6 +778,10 @@ const SCHEMAS: Record<string, SchemaContract> = {
             distance: {required: true, type: 'number'},
             action_id: {required: false, type: 'integer', nullable: true}
         },
+        placement_refused: {
+            entity: {required: true, type: 'string'},
+            position: {required: true, ref: 'Position'}
+        },
         run_finished: {
             outcome: {required: true, type: 'string'},
             elapsed_ticks: {required: true, type: 'integer'}

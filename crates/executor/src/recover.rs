@@ -8,7 +8,8 @@
 
 use crate::log::{ExecutionLog, Status};
 use factorio_bot_planner::{
-    ActionId, ActionNetwork, BotId, Goal, PlanState, Schedule, expand, registry_for, schedule,
+    ActionId, ActionKind, ActionNetwork, BotId, Goal, PlanState, Schedule, expand, registry_for,
+    schedule,
 };
 use std::collections::BTreeSet;
 
@@ -202,6 +203,35 @@ fn exhausted_tier_one(net: &ActionNetwork, log: &ExecutionLog) -> bool {
         .any(|id| log.status(id) == Status::Failed && log.attempts(id) >= MAX_TIER_ONE_ATTEMPTS)
 }
 
+/// Whether some failed placement aimed at ground the game has since refused.
+///
+/// The one failure tier 1 must not retry. Tier 1's premise is that the plan
+/// still fits the world and the failure was circumstance — a bot mid-walk, a
+/// chest briefly full — so re-running the same actions is worth a try. A
+/// `Place` whose footprint the game itself turned down is the opposite of
+/// that: `PlanState` carries the refusal forward for the rest of the run
+/// (`FactorioWorld::placement_refusals`), so a reschedule would dispatch a
+/// command we already believe cannot succeed, three times, before
+/// `MAX_TIER_ONE_ATTEMPTS` let the decision escalate to a re-expansion that
+/// would have sited it elsewhere on the first try.
+///
+/// Only the game's own verdicts count, never the other five occupancy sources
+/// — `state.is_site_refused`, not `is_area_free`. A character standing in the
+/// footprint of a planned build is an ordinary transient and exactly what
+/// tier 1 is for; escalating on it would spend a re-expansion on a bot that
+/// is about to walk away.
+fn refused_by_the_game(net: &ActionNetwork, log: &ExecutionLog, state: &PlanState) -> bool {
+    net.actions().any(|action| {
+        log.status(action.id) == Status::Failed
+            && match &action.kind {
+                ActionKind::Place { entity } => {
+                    state.is_site_refused(&entity.name, &entity.position)
+                }
+                _ => false,
+            }
+    })
+}
+
 /// `keep`, plus every succeeded action that a kept action depends on.
 ///
 /// Those extra nodes are not work — the schedule never assigns them — they are
@@ -273,7 +303,7 @@ pub fn recover(
     // Tier 1 — the same plan, minus what is already done. Skipped once an
     // action has burned through its attempts: proposing the same plan again is
     // the loop `MAX_TIER_ONE_ATTEMPTS` exists to break.
-    if !exhausted_tier_one(net, log) {
+    if !exhausted_tier_one(net, log) && !refused_by_the_game(net, log, state) {
         // Two different networks, on purpose.
         //
         // `schedule` runs over the strictly unfinished actions, so nothing that
@@ -489,6 +519,80 @@ mod tests {
         }
 
         (ore_goal(4), net, s, BOTS.to_vec(), log)
+    }
+
+    /// A stone furnace the plan wants to build at `pos`.
+    fn place_at(id_gen: &mut ActionIdGen, pos: &Position) -> Action {
+        Action {
+            id: id_gen.next(),
+            kind: ActionKind::Place {
+                entity: Box::new(factorio_bot_core::types::FactorioEntity {
+                    name: "stone-furnace".into(),
+                    entity_type: "furnace".into(),
+                    position: pos.clone(),
+                    ..Default::default()
+                }),
+            },
+            pre: vec![Condition::AreaFree {
+                pos: pos.clone(),
+                entity: "stone-furnace".into(),
+            }],
+            eff: vec![],
+            duration: 30,
+            pinned: None,
+            label: "place stone-furnace".into(),
+        }
+    }
+
+    /// Tier 1 does not retry a placement the *game* has refused.
+    ///
+    /// The distinction the escalation rests on: an ordinary failure is
+    /// circumstance and tier 1 is for exactly that, while a refused footprint
+    /// is a verdict `PlanState` now carries for the rest of the run. Without
+    /// this, a refused site is re-dispatched until `MAX_TIER_ONE_ATTEMPTS`
+    /// runs out — three commands the planner already believes cannot succeed
+    /// — before the re-expansion that would have sited it elsewhere.
+    #[test]
+    fn a_placement_the_game_refused_is_not_rescheduled_at_the_same_site() {
+        let site = Position::new(3., 3.);
+        let mut id_gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let failed = net.add(place_at(&mut id_gen, &site));
+        let mut log = ExecutionLog::default();
+        log.start(failed, 0);
+        log.fail(failed, 30, "game rejected the command".to_string());
+
+        // The control: with nothing refused this is an ordinary failure and
+        // tier 1 answers, on its first attempt.
+        let clean = PlanState::from_world(Arc::new(fixture_world()), &BOTS);
+        assert!(
+            !clean.is_site_refused("stone-furnace", &site),
+            "the fixture world has been refused nothing"
+        );
+        assert!(
+            matches!(
+                recover(&ore_goal(1), &net, &clean, &BOTS, &log),
+                Recovery::Rescheduled { .. }
+            ),
+            "an ordinary placement failure is what tier 1 is for"
+        );
+
+        // And with the game's refusal on record, the same log escalates.
+        let world = fixture_world();
+        world.record_placement_refusal(factorio_bot_core::factorio::world::PlacementRefusal {
+            tick: Some(30),
+            entity: "stone-furnace".into(),
+            position: site.clone(),
+        });
+        let refused = PlanState::from_world(Arc::new(world), &BOTS);
+        assert!(refused.is_site_refused("stone-furnace", &site));
+        assert!(
+            !matches!(
+                recover(&ore_goal(1), &net, &refused, &BOTS, &log),
+                Recovery::Rescheduled { .. }
+            ),
+            "re-running a command the game has already refused is not recovery"
+        );
     }
 
     #[test]

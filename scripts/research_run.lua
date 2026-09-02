@@ -96,9 +96,15 @@ repeat
         -- is written close to when it happened rather than batched
         -- arbitrarily.
         local nt = record.teleports()
-        print(string.format("   ran: success=%s failed=%s lost=%s pending=%s (+%d events, +%d teleports)",
+        -- The sites the game refused this batch. Each one is now excluded
+        -- from every later plan for the rest of the run, so it has to be in
+        -- the record: otherwise the next reader sees a planner that started
+        -- choosing further-away tiles for no stated reason. Same cadence as
+        -- the two flushes above, for the same reason.
+        local nr = record.refusals()
+        print(string.format("   ran: success=%s failed=%s lost=%s pending=%s (+%d events, +%d teleports, +%d refusals)",
             tostring(t.success), tostring(t.failed), tostring(t.lost),
-            tostring(t.pending), n, nt))
+            tostring(t.pending), n, nt, nr))
         if t.first_error ~= nil then print("        first error: " .. tostring(t.first_error)) end
     elseif t.action == "satisfied" then
         record.milestone_satisfied(t.milestone_index, t.iteration or 0, t.reason)
@@ -130,6 +136,10 @@ end
 -- during the raise the pcall above just caught) would otherwise sit in
 -- `FactorioWorld`'s queue and never reach this run's `events.jsonl` at all.
 record.teleports()
+-- And the same for a refusal, which is worse to lose: a run that died on its
+-- last placement is precisely the run whose refused site someone will want to
+-- look up.
+record.refusals()
 
 local id = record.finish(ok and sup.state or "crashed")
 print("RUN FINISHED state=" .. (ok and sup.state or "crashed") .. " id=" .. id)

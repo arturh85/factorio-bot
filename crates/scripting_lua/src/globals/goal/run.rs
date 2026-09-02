@@ -1288,6 +1288,7 @@ mod tests {
             seeded_world_for(&[1, 2]),
             refusing_factory(),
             vec![1, 2],
+            None,
         )
         .expect("goal table");
         lua.globals().set("goal", table).expect("install");
@@ -2097,6 +2098,7 @@ mod tests {
             seeded_world_for(&[1, 2]),
             factory(Arc::new(stub)),
             vec![1, 2],
+            None,
         )
         .expect("goal table");
         lua.globals().set("goal", table).expect("install");

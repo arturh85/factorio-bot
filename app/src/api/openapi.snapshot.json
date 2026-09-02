@@ -665,8 +665,15 @@
             "type": "object"
           },
           {
-            "description": "The game refused a build, and the planner has stopped offering that\nsite.\n\nWritten by `record.refusals()` (`crates/scripting_lua`) from the\nledger `FactorioRcon::place_entity_timed` fills when\n`surface.can_place_entity` says no *without* naming the acting player\nas the cause. Every one of these is also visible as an\n[`EventKind::ActionSettled`] failure at about the same tick -- what\nthis variant adds is the consequence: from here to the end of the run,\n`PlanState::from_world` excludes the collision box of `entity` centred\nat `position`, so every later plan sites around it.\n\nThat consequence is the reason this is a record line at all. A planner\nthat has silently started preferring distant tiles is a planner nobody\ncan diagnose; four consecutive runs were spent on refusals whose only\ntrace was an error string, and the next reader should be able to see\nwhich ground the planner has written off and when it learned to.\n\nA refusal the acting player caused is deliberately absent: the mod\nnames that one, the RCON layer walks the bot aside and retries it, and\nthe ground is fine once the bot moves.",
+            "description": "The game refused a build, and the planner has stopped offering that\nsite.\n\nWritten by `record.refusals()` (`crates/scripting_lua`) from the\nledger two writers fill: `FactorioRcon::place_entity_timed`, when a\ndispatched build is refused *without* naming the acting player as the\ncause, and `FactorioRcon::can_place_entities`, the pre-flight check\n`goal.plan` runs over a plan's chosen sites before returning it.\n`source` says which. From here to the end of the run,\n`PlanState::from_world` excludes the collision box of `entity` centred\nat `position`, so every later plan sites around it.\n\nThat consequence is the reason this is a record line at all. A planner\nthat has silently started preferring distant tiles is a planner nobody\ncan diagnose; four consecutive runs were spent on refusals whose only\ntrace was an error string, and the next reader should be able to see\nwhich ground the planner has written off and when it learned to.\n\nA refusal the acting player caused is deliberately absent: the mod\nnames that one, the RCON layer walks the bot aside and retries it, and\nthe ground is fine once the bot moves.",
             "properties": {
+              "blockers": {
+                "description": "The distinct names of the entities the game found in the tested\ncollision box, sorted.\n\nAlways empty for `source = \"dispatch\"`: the game's refusal names\nno cause and there is nothing left to ask by the time it arrives.\nThat absence of a cause is what five consecutive runs were spent\non, and filling it in is most of the reason the pre-check exists.\n\nEmpty on a `pre_check` refusal means something else and is\ngenuinely informative: no entity intersected the footprint at all,\nso the ground itself is the answer -- see `tile`.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
               "entity": {
                 "description": "The item the bot was holding, which is the name the collision box\nexcluded from later plans is looked up under.",
                 "type": "string"
@@ -680,11 +687,24 @@
               "position": {
                 "$ref": "#/components/schemas/Position",
                 "description": "The centre the build was aimed at. The excluded region is that\nentity's collision box centred here, not this single tile -- the\ngame tested the box, so the box is what the refusal is about."
+              },
+              "source": {
+                "description": "`\"dispatch\"` or `\"pre_check\"` -- whether a bot flew to this site\nand was refused, or the planner asked before committing to it.\n\nThe two cost very different things and a reader must not have to\nguess which happened. `dispatch` means an action failed here and\nits dependents were abandoned; there is an\n[`EventKind::ActionSettled`] failure beside it. `pre_check` means\nno action was ever created for this site: `goal.plan` asked the\ngame, re-expanded, and the plan that reached the executor sites\nsomewhere else. There is deliberately **no** `action_settled` line\nnext to a `pre_check` refusal, and its absence is not a gap.",
+                "type": "string"
+              },
+              "tile": {
+                "description": "The tile under the refused centre, when it was asked for. `None`\nfor `source = \"dispatch\"`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
               "entity",
               "position",
+              "source",
+              "blockers",
               "kind"
             ],
             "type": "object"

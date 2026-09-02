@@ -20,7 +20,7 @@ mod recovery;
 mod run;
 mod value;
 
-use factorio_bot_core::factorio::rcon::FactorioRcon;
+use factorio_bot_core::factorio::rcon::{FactorioRcon, PlacementQuery, PlacementVerdict};
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_executor::{Actuator, RconActuator};
@@ -40,6 +40,37 @@ use std::sync::{Arc, Mutex, MutexGuard};
 /// and not the binding a script actually calls.
 type ActuatorFactory = Arc<
     dyn Fn() -> Pin<Box<dyn Future<Output = Result<Arc<dyn Actuator>, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// How `goal.plan` asks the game whether the sites it just chose are legal.
+///
+/// # Why this is a separate seam from [`ActuatorFactory`]
+///
+/// The actuator belongs to a *run*: building one queries the game for the
+/// connected roster and `defines.inventory`, and there is no run yet when a
+/// plan is being expanded. This is a plain question about the map that needs
+/// neither, and giving it its own seam is what lets `goal.plan` stay callable
+/// with no run in sight.
+///
+/// # Why the planner's purity survives this
+///
+/// It is not called from expansion, and expansion cannot reach it. The
+/// sequence is: expand (pure) -> schedule (pure) -> **ask** -> write what the
+/// game said into the world's refusal ledger -> expand again (pure, and now
+/// reading a world with one more fact in it). Every expansion is still a pure
+/// function of a world snapshot and a roster, which is exactly what
+/// `expansion_is_deterministic` pins; what changed between two of them is the
+/// world, and a changing world is what `PlanState::from_world` is for.
+///
+/// `None` — no game, or a build with no RCON — means no pre-check, and a plan
+/// is returned exactly as it always was. That default is deliberate: an
+/// absent checker must never be able to look like a green answer.
+pub(crate) type PlacementChecker = Arc<
+    dyn Fn(
+            Vec<PlacementQuery>,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<PlacementVerdict>, String>> + Send>>
         + Send
         + Sync,
 >;
@@ -76,6 +107,9 @@ pub fn create_lua_goal(
     rcon: Option<Arc<FactorioRcon>>,
     bots: Vec<u8>,
 ) -> LuaResult<LuaTable> {
+    // Cloned before the actuator factory takes ownership of `rcon`: the
+    // pre-check and the actuator both need it and neither owns the other.
+    let probe_rcon = rcon.clone();
     let actuator: ActuatorFactory = Arc::new(move || {
         let rcon = rcon.clone();
         let world = real_world.clone();
@@ -88,7 +122,26 @@ pub fn create_lua_goal(
                 .map_err(|err| err.to_string())
         })
     });
-    create_lua_goal_with(lua, plan_world, actuator, bots)
+    // Captures `plan_world`, not `real_world`: what this writes is read back
+    // by `PlanState::from_world`, which is given the planning world. They are
+    // the same object today (see this function's own doc comment) and the
+    // pre-check would still work if they were separated -- but it would be
+    // writing an observation about the ground into a world nobody plans
+    // against, which is the one way this could go quietly useless.
+    let checker: Option<PlacementChecker> = probe_rcon.map(|rcon| {
+        let world = plan_world.clone();
+        Arc::new(move |queries: Vec<PlacementQuery>| {
+            let rcon = rcon.clone();
+            let world = world.clone();
+            Box::pin(async move {
+                rcon.can_place_entities(&world, &queries)
+                    .await
+                    .map_err(|err| err.to_string())
+            })
+                as Pin<Box<dyn Future<Output = Result<Vec<PlacementVerdict>, String>> + Send>>
+        }) as PlacementChecker
+    });
+    create_lua_goal_with(lua, plan_world, actuator, bots, checker)
 }
 
 /// [`create_lua_goal`] with the actuator supplied rather than built from RCON.
@@ -100,6 +153,7 @@ pub(crate) fn create_lua_goal_with(
     plan_world: Arc<FactorioWorld>,
     actuator: ActuatorFactory,
     bots: Vec<u8>,
+    placement_checker: Option<PlacementChecker>,
 ) -> LuaResult<LuaTable> {
     let map_table = lua.create_table()?;
     map_table.set(
@@ -230,6 +284,20 @@ end
 -- Both `radius` and the other scalar fields are accepted by `plan:count{...}`
 -- and `plan:find{...}`; `to` and `pos` are not, being tables rather than
 -- comparable values.
+--
+-- **This asks the game before it hands the plan back.** Once the sites are
+-- chosen, one RCON call puts every placement in the plan to
+-- `surface.can_place_entity`; any the game would refuse is remembered for the
+-- rest of the run (`record.refusals()` writes them out) and the goal is
+-- expanded again around them, up to twice. So a plan that would have died on
+-- `can_place_entity said 'no'` mid-run is re-sited before anything is
+-- dispatched, at a cost of one round trip for a plan with nothing wrong with
+-- it and none at all for a plan that places nothing.
+--
+-- A green answer is **not a guarantee**. It is what the game said at the tick
+-- it was asked, and the plan runs afterwards: a bot can walk into the
+-- footprint before the build happens. A build can still be refused at
+-- dispatch, exactly as before.
 -- @treturn PlanValue the expanded, scheduled plan
 -- @raise if the goal names an unknown item or technology, if any bot in
 --   `opts.bots` is not a connected player, or if `opts.bots` is empty
@@ -238,7 +306,13 @@ end
 "#,
         ),
     )?;
-    plan::install_goal_plan(lua, &map_table, plan_world.clone(), roster.clone())?;
+    plan::install_goal_plan(
+        lua,
+        &map_table,
+        plan_world.clone(),
+        roster.clone(),
+        placement_checker,
+    )?;
 
     // `goal.holds`
     map_table.set(
@@ -828,9 +902,14 @@ mod tests {
     pub(crate) fn lua_with_goal(stub: Arc<dyn Actuator>) -> Lua {
         let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
         lua.set_app_data(crate::lua_runner::PendingWork::default());
-        let table =
-            create_lua_goal_with(&lua, seeded_world_for(&[1, 2]), factory(stub), vec![1, 2])
-                .expect("goal table");
+        let table = create_lua_goal_with(
+            &lua,
+            seeded_world_for(&[1, 2]),
+            factory(stub),
+            vec![1, 2],
+            None,
+        )
+        .expect("goal table");
         lua.globals().set("goal", table).expect("install");
         lua
     }
@@ -1356,6 +1435,7 @@ mod tests {
                 seeded_world_for(&roster),
                 factory(rec.clone()),
                 roster.clone(),
+                None,
             )
             .expect("goal table");
             lua.globals().set("goal", table).expect("install");
@@ -1450,6 +1530,7 @@ mod tests {
                 seeded_world(bot_count),
                 factory(Arc::new(StubActuator::new(Failure::Never))),
                 (1..=bot_count).collect(),
+                None,
             )
             .expect("goal table");
             lua.globals().set("goal", table).expect("install");
@@ -1559,6 +1640,7 @@ mod tests {
             seeded_world_for(&[1]),
             factory(Arc::new(StubActuator::new(Failure::Never))),
             vec![1, 2],
+            None,
         )
         .expect("goal table");
         lua.globals().set("goal", table).expect("install");
@@ -1605,6 +1687,7 @@ mod tests {
             world,
             factory(Arc::new(StubActuator::new(Failure::Never))),
             vec![1, 2],
+            None,
         )
         .expect("goal table");
         lua.globals().set("goal", table).expect("install");
@@ -1641,6 +1724,7 @@ mod tests {
             world.clone(),
             factory(Arc::new(StubActuator::new(Failure::Never))),
             vec![1, 2],
+            None,
         )
         .expect("goal table");
         lua.globals().set("goal", table).expect("install");
@@ -1686,6 +1770,7 @@ mod tests {
             seeded_world_for(&[1, 2]),
             factory(rec.clone()),
             vec![1, 2],
+            None,
         )
         .expect("goal table");
         lua.globals().set("goal", table).expect("install");

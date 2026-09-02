@@ -897,13 +897,20 @@ end
         String::from(
             r#"
 --- flushes the placement refusals the game has handed down since the last flush
--- A refusal is `surface.can_place_entity` saying no with no cause named --
--- not the `player_blocks_placement` case, which the RCON layer walks the bot
--- clear of and retries. Each one is remembered for the rest of the run and
--- every later plan sites around the refused footprint, so writing them out is
--- what makes that avoidance readable: without it, a planner that has quietly
--- started preferring distant tiles looks like a planner with a bug. Call it
--- once per loop iteration, alongside `record.actions` and `record.teleports`.
+-- A refusal is `surface.can_place_entity` saying no -- not the
+-- `player_blocks_placement` case, which the RCON layer walks the bot clear of
+-- and retries. Each one is remembered for the rest of the run and every later
+-- plan sites around the refused footprint, so writing them out is what makes
+-- that avoidance readable: without it, a planner that has quietly started
+-- preferring distant tiles looks like a planner with a bug. Call it once per
+-- loop iteration, alongside `record.actions` and `record.teleports`.
+--
+-- Two writers fill the ledger and each event says which one it came from.
+-- `source = "dispatch"` is a build a bot actually attempted and the game
+-- turned down; there is a failed action beside it. `source = "pre_check"` is
+-- a site `goal.plan` asked the game about *before* returning the plan, so no
+-- action for it was ever created -- and only that kind carries `blockers`
+-- and `tile`, naming what was in the way.
 -- @treturn number how many refusal events were written
 -- @raise if no recording is running
 function record.refusals()
@@ -939,6 +946,9 @@ end
                             EventKind::PlacementRefused {
                                 entity: refusal.entity,
                                 position: refusal.position,
+                                source: refusal.source.as_str().to_string(),
+                                blockers: refusal.blockers,
+                                tile: refusal.tile,
                             },
                         )
                         .map_err(record_error)?;
@@ -1799,11 +1809,13 @@ mod tests {
         lua.globals().set("record", table).expect("install");
 
         for (tick, x, y) in [(6198u64, -16., -58.), (6204, -19., 51.)] {
-            world.record_placement_refusal(factorio_bot_core::factorio::world::PlacementRefusal {
-                tick: Some(tick),
-                entity: "stone-furnace".to_string(),
-                position: Position { x, y },
-            });
+            world.record_placement_refusal(
+                factorio_bot_core::factorio::world::PlacementRefusal::at_dispatch(
+                    Some(tick),
+                    "stone-furnace",
+                    Position { x, y },
+                ),
+            );
         }
 
         let written: u32 = lua
@@ -1815,10 +1827,22 @@ mod tests {
         let events = read_events(&run_dir);
         assert_eq!(events.len(), 2);
         match &events[0] {
-            EventKind::PlacementRefused { entity, position } => {
+            EventKind::PlacementRefused {
+                entity,
+                position,
+                source,
+                blockers,
+                tile,
+            } => {
                 assert_eq!(entity, "stone-furnace");
                 assert_eq!(position.x, -16.);
                 assert_eq!(position.y, -58.);
+                assert_eq!(source, "dispatch");
+                assert!(
+                    blockers.is_empty() && tile.is_none(),
+                    "a refusal observed at dispatch has no cause to report: \
+                     {blockers:?} / {tile:?}"
+                );
             }
             other => panic!("expected placement_refused, got {other:?}"),
         }
@@ -1833,6 +1857,67 @@ mod tests {
             2,
             "the planner must still see both sites after they were recorded"
         );
+    }
+
+    /// A refusal the pre-flight check learned carries what the game found, and
+    /// says it was learned before dispatch.
+    ///
+    /// The distinction is not cosmetic. A `dispatch` refusal has a failed
+    /// action beside it in the same log; a `pre_check` refusal has none, and a
+    /// reader who could not tell them apart would go looking for the missing
+    /// `action_settled` line. `blockers` and `tile` are the other half: five
+    /// runs ended on a refusal that named no cause, and this is the line that
+    /// names one.
+    #[test]
+    fn a_pre_check_refusal_records_its_source_and_what_was_in_the_way() {
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let recorder = RunRecorder::start(tmp.path(), "run-1").expect("recorder starts");
+        let run_dir = recorder.dir().to_path_buf();
+        let slot: Slot = Arc::new(Mutex::new(Some(recorder)));
+        let world = Arc::new(FactorioWorld::new());
+
+        let table = create_lua_record_with_slot(
+            &lua,
+            Arc::new(FactorioRcon::new_empty()),
+            world.clone(),
+            tmp.path().join("scripts"),
+            vec![],
+            slot,
+        )
+        .expect("record table");
+        lua.globals().set("record", table).expect("install");
+
+        world.record_placement_refusal(factorio_bot_core::factorio::world::PlacementRefusal {
+            tick: Some(6198),
+            entity: "stone-furnace".to_string(),
+            position: Position { x: -16., y: -58. },
+            source: factorio_bot_core::factorio::world::RefusalSource::PreCheck,
+            blockers: vec!["tree-01".to_string(), "tree-02".to_string()],
+            tile: Some("grass-3".to_string()),
+        });
+        let written: u32 = lua
+            .load("return record.refusals()")
+            .eval()
+            .expect("record.refusals() runs");
+        assert_eq!(written, 1);
+
+        match &read_events(&run_dir)[0] {
+            EventKind::PlacementRefused {
+                source,
+                blockers,
+                tile,
+                ..
+            } => {
+                assert_eq!(source, "pre_check");
+                assert_eq!(
+                    blockers,
+                    &vec!["tree-01".to_string(), "tree-02".to_string()]
+                );
+                assert_eq!(tile.as_deref(), Some("grass-3"));
+            }
+            other => panic!("expected placement_refused, got {other:?}"),
+        }
     }
 
     /// A refusal whose reply carried no tick stamp still lands in order.
@@ -1869,11 +1954,13 @@ mod tests {
         .expect("record table");
         lua.globals().set("record", table).expect("install");
 
-        world.record_placement_refusal(factorio_bot_core::factorio::world::PlacementRefusal {
-            tick: None,
-            entity: "stone-furnace".to_string(),
-            position: Position { x: 0., y: 0. },
-        });
+        world.record_placement_refusal(
+            factorio_bot_core::factorio::world::PlacementRefusal::at_dispatch(
+                None,
+                "stone-furnace",
+                Position { x: 0., y: 0. },
+            ),
+        );
         let written: u32 = lua
             .load("return record.refusals()")
             .eval()

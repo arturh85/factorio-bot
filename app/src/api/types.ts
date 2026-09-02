@@ -712,8 +712,14 @@ export type EventKind =
            * that site. From this tick to the end of the run, every plan
            * excludes `entity`'s collision box centred at `position` -- so
            * this is the line that explains a planner which suddenly prefers
-           * a further-away tile. The matching `action_settled` failure sits
-           * at about the same tick and carries the game's own wording.
+           * a further-away tile.
+           *
+           * `source` says when the game was asked, and the two are not
+           * interchangeable. `'dispatch'` means a bot flew there and tried to
+           * build: there is an `action_settled` failure at about the same
+           * tick carrying the game's own wording. `'pre_check'` means the
+           * planner asked before committing, so **no action for this site was
+           * ever created** and there is no `action_settled` line to look for.
            */
           kind: 'placement_refused';
           /** The item the bot was holding, and the name the excluded
@@ -722,6 +728,15 @@ export type EventKind =
           /** The centre the build was aimed at. The excluded region is the
            *  whole collision box centred here, not this one tile. */
           position: Position;
+          /** `'dispatch'` or `'pre_check'` -- see above. */
+          source: string;
+          /** The distinct names of the entities the game found in the tested
+           *  collision box, sorted. Always empty for `'dispatch'`, which has
+           *  no way to ask. Empty for `'pre_check'` means no entity was in
+           *  the footprint at all, which points at `tile`. */
+          blockers: string[];
+          /** The tile under the refused centre. `null` for `'dispatch'`. */
+          tile: string | null;
       }
     | {kind: 'run_finished'; outcome: string; elapsed_ticks: number}
     /** A kind this build does not know. The server never emits it, but a

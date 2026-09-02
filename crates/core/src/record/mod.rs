@@ -175,11 +175,11 @@ pub enum EventKind {
     /// site.
     ///
     /// Written by `record.refusals()` (`crates/scripting_lua`) from the
-    /// ledger `FactorioRcon::place_entity_timed` fills when
-    /// `surface.can_place_entity` says no *without* naming the acting player
-    /// as the cause. Every one of these is also visible as an
-    /// [`EventKind::ActionSettled`] failure at about the same tick -- what
-    /// this variant adds is the consequence: from here to the end of the run,
+    /// ledger two writers fill: `FactorioRcon::place_entity_timed`, when a
+    /// dispatched build is refused *without* naming the acting player as the
+    /// cause, and `FactorioRcon::can_place_entities`, the pre-flight check
+    /// `goal.plan` runs over a plan's chosen sites before returning it.
+    /// `source` says which. From here to the end of the run,
     /// `PlanState::from_world` excludes the collision box of `entity` centred
     /// at `position`, so every later plan sites around it.
     ///
@@ -200,6 +200,33 @@ pub enum EventKind {
         /// entity's collision box centred here, not this single tile -- the
         /// game tested the box, so the box is what the refusal is about.
         position: Position,
+        /// `"dispatch"` or `"pre_check"` -- whether a bot flew to this site
+        /// and was refused, or the planner asked before committing to it.
+        ///
+        /// The two cost very different things and a reader must not have to
+        /// guess which happened. `dispatch` means an action failed here and
+        /// its dependents were abandoned; there is an
+        /// [`EventKind::ActionSettled`] failure beside it. `pre_check` means
+        /// no action was ever created for this site: `goal.plan` asked the
+        /// game, re-expanded, and the plan that reached the executor sites
+        /// somewhere else. There is deliberately **no** `action_settled` line
+        /// next to a `pre_check` refusal, and its absence is not a gap.
+        source: String,
+        /// The distinct names of the entities the game found in the tested
+        /// collision box, sorted.
+        ///
+        /// Always empty for `source = "dispatch"`: the game's refusal names
+        /// no cause and there is nothing left to ask by the time it arrives.
+        /// That absence of a cause is what five consecutive runs were spent
+        /// on, and filling it in is most of the reason the pre-check exists.
+        ///
+        /// Empty on a `pre_check` refusal means something else and is
+        /// genuinely informative: no entity intersected the footprint at all,
+        /// so the ground itself is the answer -- see `tile`.
+        blockers: Vec<String>,
+        /// The tile under the refused centre, when it was asked for. `None`
+        /// for `source = "dispatch"`.
+        tile: Option<String>,
     },
     RunFinished {
         outcome: String,

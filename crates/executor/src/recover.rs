@@ -579,11 +579,13 @@ mod tests {
 
         // And with the game's refusal on record, the same log escalates.
         let world = fixture_world();
-        world.record_placement_refusal(factorio_bot_core::factorio::world::PlacementRefusal {
-            tick: Some(30),
-            entity: "stone-furnace".into(),
-            position: site.clone(),
-        });
+        world.record_placement_refusal(
+            factorio_bot_core::factorio::world::PlacementRefusal::at_dispatch(
+                Some(30),
+                "stone-furnace",
+                site.clone(),
+            ),
+        );
         let refused = PlanState::from_world(Arc::new(world), &BOTS);
         assert!(refused.is_site_refused("stone-furnace", &site));
         assert!(

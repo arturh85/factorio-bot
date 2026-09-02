@@ -19,7 +19,8 @@
 //! is what makes the old mismatch unrepresentable.
 
 use super::value::goal_from_lua;
-use super::{expand_goal, goal_error, refuse_unknown_bots};
+use super::{PlacementChecker, expand_goal, goal_error, refuse_unknown_bots};
+use factorio_bot_core::factorio::rcon::PlacementQuery;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::types::Position;
@@ -29,6 +30,7 @@ use factorio_bot_planner::{
     ActionKind, ActionNetwork, Goal, InventorySlot, PlanState, Schedule, ScheduledStep, StepKind,
     Ticks, graphviz, mermaid_gantt, schedule,
 };
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -384,37 +386,205 @@ pub(crate) fn install_goal_plan(
     table: &LuaTable,
     world: Arc<FactorioWorld>,
     default_roster: Vec<BotId>,
+    checker: Option<PlacementChecker>,
 ) -> LuaResult<()> {
     table.set(
         "plan",
-        lua.create_function(move |_lua, (g, opts): (LuaTable, Option<LuaTable>)| {
-            let goal = goal_from_lua(&g)?;
-            let roster = resolve_roster(opts.as_ref(), &default_roster)?;
-            // Built once and reused for the scheduler below; `expand_goal`
-            // builds its own copy internally to run the same refusal, which
-            // is redundant but harmless: `PlanState::from_world` is a pure
-            // read of the world snapshot.
-            let state = PlanState::from_world(world.clone(), &roster);
-            refuse_unknown_bots(&state)?;
-            let net = expand_goal(goal.clone(), &world, &roster)?;
-            let scheduled = schedule(&net, &state, &roster).map_err(goal_error)?;
-            // The goal, the world and the roster are kept together on the
-            // plan, not because dispatching needs them -- it does not -- but
-            // because `obs:recover()` will, one run later, and a recovery must
-            // re-plan the same goal for the same roster or it is answering a
-            // different question.
-            Ok(PlanValue::new(
-                Arc::new(net),
-                Arc::new(scheduled),
-                Arc::new(PlanOrigin {
-                    goal,
-                    world: world.clone(),
-                    roster,
-                }),
-            ))
+        lua.create_async_function(move |_lua, (g, opts): (LuaTable, Option<LuaTable>)| {
+            let world = world.clone();
+            let default_roster = default_roster.clone();
+            let checker = checker.clone();
+            async move {
+                let goal = goal_from_lua(&g)?;
+                let roster = resolve_roster(opts.as_ref(), &default_roster)?;
+                let (net, scheduled) =
+                    plan_verified(&goal, &world, &roster, checker.as_ref()).await?;
+                // The goal, the world and the roster are kept together on the
+                // plan, not because dispatching needs them -- it does not --
+                // but because `obs:recover()` will, one run later, and a
+                // recovery must re-plan the same goal for the same roster or
+                // it is answering a different question.
+                Ok(PlanValue::new(
+                    Arc::new(net),
+                    Arc::new(scheduled),
+                    Arc::new(PlanOrigin {
+                        goal,
+                        world: world.clone(),
+                        roster,
+                    }),
+                ))
+            }
         })?,
     )?;
     Ok(())
+}
+
+/// How many times `goal.plan` will re-site a plan the game says it would
+/// refuse, before handing back whatever the last expansion produced.
+///
+/// Bounded rather than "until it converges", for two independent reasons.
+/// Each round costs one RCON round trip *and* one full expansion, so an
+/// unbounded loop is an unbounded stall inside a call a script thinks is
+/// cheap; and a bug that stopped the ledger reaching the planner would turn
+/// that loop into a hang rather than into the visible regression it should
+/// be. Three expansions and three round trips is the worst case.
+///
+/// Exceeding the budget is not an error and does not raise. The plan is
+/// returned with whatever sites it has, the dispatch-time refusal path
+/// catches them exactly as it did before this existed, and every site the
+/// game turned down along the way is in the ledger and in the record either
+/// way. The pre-check is an improvement on the failure mode, never a new one.
+const MAX_RESITE_ROUNDS: usize = 2;
+
+/// Expands and schedules `goal`, asking the game about the placements the
+/// plan chose and re-expanding around the ones it would refuse.
+///
+/// # The loop, and why it terminates
+///
+/// Expansion and scheduling are pure functions of the world snapshot and the
+/// roster. The only thing that changes between two rounds is the world: a
+/// refused site is written into `FactorioWorld::placement_refusals` by
+/// [`FactorioRcon::can_place_entities`], and `PlanState::from_world` reads
+/// that ledger on the next `from_world`, so `free_area_near` stops offering
+/// the refused footprint. That is the whole reason a pre-check needed refusal
+/// memory to exist first: without somewhere durable to put the answer, the
+/// next expansion re-derives the same site from the same inputs and the loop
+/// never moves.
+///
+/// [`MAX_RESITE_ROUNDS`] bounds it regardless, so a defect in that chain costs
+/// two wasted round trips rather than a hang.
+///
+/// # Cost
+///
+/// One round trip for a plan whose sites are all legal — the overwhelmingly
+/// common case, and the one the budget is chosen for. A plan with no `Place`
+/// action at all costs none: the query list is empty and no call is made.
+///
+/// # What a green pre-check does not promise
+///
+/// Nothing about the moment the action runs. See the module-level note on
+/// staleness in `docs/superpowers/notes/2026-09-02-placement-precheck.md`; in
+/// short, the check narrows the window between "the site was chosen" and "the
+/// build is attempted", and does not close it.
+async fn plan_verified(
+    goal: &Goal,
+    world: &Arc<FactorioWorld>,
+    roster: &[BotId],
+    checker: Option<&PlacementChecker>,
+) -> LuaResult<(ActionNetwork, Schedule)> {
+    for round in 0..=MAX_RESITE_ROUNDS {
+        // Rebuilt every round, deliberately: this is the read that picks up
+        // the refusals the previous round's query wrote.
+        let state = PlanState::from_world(world.clone(), roster);
+        refuse_unknown_bots(&state)?;
+        let net = expand_goal(goal.clone(), world, roster)?;
+        let scheduled = schedule(&net, &state, roster).map_err(goal_error)?;
+
+        let Some(checker) = checker else {
+            return Ok((net, scheduled));
+        };
+        let queries = placement_queries(&net, &scheduled);
+        if queries.is_empty() {
+            return Ok((net, scheduled));
+        }
+        let verdicts = match checker(queries.clone()).await {
+            Ok(verdicts) => verdicts,
+            Err(err) => {
+                // A pre-check that cannot be made must not stop a run. The
+                // plan is exactly the plan this call would have returned
+                // before the pre-check existed, and the dispatch-time refusal
+                // path is untouched -- so the cost of an unreachable or
+                // out-of-date mod is the behaviour we already had, reported
+                // once, rather than a raise from a call that used to be
+                // infallible.
+                factorio_bot_core::tracing::warn!(
+                    "could not ask the game whether this plan's {} placement(s) are legal, \
+                     dispatching it unchecked: {}",
+                    queries.len(),
+                    err
+                );
+                return Ok((net, scheduled));
+            }
+        };
+        // Length mismatches are rejected inside `can_place_entities`, which
+        // is the only place the join by index is made; anything shorter than
+        // the query list here would mean a stub, and zipping is then the
+        // conservative read -- an unanswered site is not a refused one.
+        let refused = verdicts.iter().filter(|v| v.is_durable_refusal()).count();
+        if refused == 0 {
+            return Ok((net, scheduled));
+        }
+        // The last round still *asks* -- it just does not re-expand. Every
+        // site the game turned down is in the ledger either way, so the next
+        // `goal.plan` (the supervisor replans every iteration) starts from
+        // what this one learned rather than rediscovering it.
+        if round == MAX_RESITE_ROUNDS {
+            factorio_bot_core::tracing::warn!(
+                "still {} refused placement(s) after {} re-sitings; dispatching the plan as it \
+                 stands. The refused sites are on record and the dispatch-time refusal path is \
+                 unchanged, so this is the behaviour that existed before the pre-check, not a \
+                 new failure",
+                refused,
+                MAX_RESITE_ROUNDS,
+            );
+            return Ok((net, scheduled));
+        }
+        factorio_bot_core::tracing::info!(
+            "the game would refuse {} of this plan's {} placement(s); re-siting rather than \
+             dispatching (round {} of {})",
+            refused,
+            queries.len(),
+            round + 1,
+            MAX_RESITE_ROUNDS,
+        );
+    }
+    // Unreachable: the loop above returns on its last round.
+    Err(goal_error(
+        "placement pre-check loop ended without a plan (internal error)",
+    ))
+}
+
+/// Every placement this plan would make, as a question for the game.
+///
+/// Deduplicated, because a schedule may legitimately name the same site more
+/// than once and asking twice would cost a round trip's worth of payload for
+/// an answer already in hand. Ordered by `ActionId` -- `ActionNetwork::actions`
+/// iterates a `BTreeMap` -- so two runs of the same plan ask the same
+/// questions in the same order.
+///
+/// A `Place` the schedule assigns to no bot is skipped rather than guessed at:
+/// `can_place_entity` needs a force and a surface, both of which come from the
+/// acting player, and inventing one would ask about a placement nobody is
+/// going to make.
+fn placement_queries(net: &ActionNetwork, sched: &Schedule) -> Vec<PlacementQuery> {
+    let mut seen: BTreeSet<(u8, String, String, u8)> = BTreeSet::new();
+    let mut queries = Vec::new();
+    for action in net.actions() {
+        let ActionKind::Place { entity } = &action.kind else {
+            continue;
+        };
+        let Some(bot) = sched.assignment(action.id) else {
+            continue;
+        };
+        // A `BotId` *is* a Factorio player id; there is no mapping layer
+        // anywhere in this stack and this must not become one.
+        let key = (
+            bot.0,
+            entity.name.clone(),
+            format!("{:?},{:?}", entity.position.x, entity.position.y),
+            entity.direction,
+        );
+        if !seen.insert(key) {
+            continue;
+        }
+        queries.push(PlacementQuery {
+            player_id: bot.0,
+            item_name: entity.name.clone(),
+            position: entity.position.clone(),
+            direction: entity.direction,
+        });
+    }
+    queries
 }
 
 /// A `Position` as a Lua table `{ x = ..., y = ... }`.
@@ -680,6 +850,10 @@ mod tests {
     use crate::globals::goal::tests::{
         Failure, StubActuator, factory, seeded_world_for, test_origin,
     };
+    use factorio_bot_core::factorio::rcon::PlacementVerdict;
+    use factorio_bot_core::factorio::world::{PlacementRefusal, RefusalSource};
+    use std::future::Future;
+    use std::pin::Pin;
 
     /// A hand-built network and schedule covering every step kind, so the
     /// step-shape test does not depend on what the planner happens to emit.
@@ -987,21 +1161,412 @@ mod tests {
     /// value-based `have`/`researched`/`all` that `goal.plan` consumes, so
     /// nothing has to be installed on top of it any more.
     fn lua_with_world(roster: &[u8]) -> Lua {
+        lua_with_world_and_checker(seeded_world_for(roster), roster, None)
+    }
+
+    /// [`lua_with_world`] over a chosen world and with a chosen pre-flight
+    /// placement checker.
+    ///
+    /// `None` is what every test that predates the pre-check passes, and is
+    /// also what production uses when there is no game to ask -- so those
+    /// tests exercise the same code path a headless run takes, not a special
+    /// one.
+    fn lua_with_world_and_checker(
+        world: Arc<FactorioWorld>,
+        roster: &[u8],
+        checker: Option<PlacementChecker>,
+    ) -> Lua {
         let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
         lua.set_app_data(crate::lua_runner::PendingWork::default());
         let table = create_lua_goal_with(
             &lua,
-            seeded_world_for(roster),
+            world,
             factory(Arc::new(StubActuator::new(Failure::Never))),
             roster.to_vec(),
+            checker,
         )
         .expect("goal table");
         lua.globals().set("goal", table).expect("install");
         lua
     }
 
+    // ------------------------------------------- goal.plan's placement pre-check
+
+    /// The question list is the plan's own placements: deduplicated, ordered,
+    /// and silent about a `Place` nobody is scheduled to make.
+    ///
+    /// Order matters because the whole reply is joined back by index, and
+    /// determinism matters because two runs of the same plan must ask the same
+    /// questions -- otherwise the round-trip count, and which sites get
+    /// learned, would depend on iteration order.
     #[test]
-    fn plan_defaults_to_the_whole_roster() {
+    fn the_query_list_is_the_plans_own_placements_deduplicated_and_ordered() {
+        use factorio_bot_core::types::{FactorioEntity, Position};
+        use factorio_bot_planner::{Action, ActionKind, ScheduledStep, StepKind};
+
+        let furnace = |x: f64, y: f64| ActionKind::Place {
+            entity: Box::new(FactorioEntity::new_stone_furnace(
+                &Position::new(x, y),
+                factorio_bot_core::types::Direction::North,
+            )),
+        };
+        let mut net = ActionNetwork::default();
+        // 0 and 1 are the same site scheduled twice; 2 is a second site; 3 is
+        // a placement no bot is scheduled to make.
+        for (id, kind) in [
+            (0u32, furnace(1., 1.)),
+            (1, furnace(1., 1.)),
+            (2, furnace(5., 5.)),
+            (3, furnace(9., 9.)),
+            (
+                4,
+                ActionKind::Craft {
+                    item: "iron-plate".to_string(),
+                    count: 1,
+                },
+            ),
+        ] {
+            net.add(Action {
+                id: ActionId(id),
+                kind,
+                pre: vec![],
+                eff: vec![],
+                duration: 10,
+                pinned: None,
+                label: format!("step {id}"),
+            });
+        }
+        let sched = Schedule {
+            steps: [0u32, 1, 2, 4]
+                .iter()
+                .map(|id| ScheduledStep {
+                    what: StepKind::Act {
+                        action: ActionId(*id),
+                        label: format!("step {id}"),
+                    },
+                    bot: BotId(3),
+                    start: 0,
+                    end: 10,
+                })
+                .collect(),
+            makespan: 10,
+        };
+
+        let queries = placement_queries(&net, &sched);
+        assert_eq!(
+            queries.len(),
+            2,
+            "one question per distinct site, and none for the unscheduled one: {queries:?}"
+        );
+        assert_eq!(queries[0].position, Position::new(1., 1.));
+        assert_eq!(queries[1].position, Position::new(5., 5.));
+        assert!(
+            queries.iter().all(|q| q.player_id == 3),
+            "a BotId is a player id; there is no mapping layer"
+        );
+    }
+
+    /// What a stub checker answers.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Policy {
+        /// Every site is fine. The common case, and the one the cost claim is
+        /// about: one round trip, no re-expansion.
+        Allow,
+        /// The first distinct site ever asked about is refused; everything
+        /// else is allowed. Models a single unmodelled obstacle.
+        RefuseFirstSite,
+        /// Every site is refused, forever. Models the pathological case the
+        /// round budget exists for.
+        RefuseEverything,
+        /// Every site is refused *because a character is standing in it* --
+        /// which is not a fact about the ground and must change nothing.
+        CharacterEverywhere,
+        /// The game cannot be reached.
+        Fail,
+    }
+
+    /// Everything one stub checker remembers about how it was used.
+    #[derive(Default)]
+    struct CheckerLog {
+        /// One entry per call, holding that call's queries. Its length is the
+        /// round-trip count, which is the cost claim this whole design rests
+        /// on.
+        calls: Vec<Vec<PlacementQuery>>,
+        /// The first site ever asked about, for [`Policy::RefuseFirstSite`].
+        first_site: Option<Position>,
+    }
+
+    /// A [`PlacementChecker`] that answers by `policy` and records what it was
+    /// asked.
+    ///
+    /// It writes durable refusals into `world` itself, because that is the
+    /// contract the production checker has (see [`PlacementChecker`], and
+    /// `FactorioRcon::can_place_entities`, which does the same thing at the
+    /// point the game's answer arrives). A stub that answered but recorded
+    /// nothing would let `plan_verified` loop forever on a world that never
+    /// learns, and would be testing a checker nobody has.
+    fn stub_checker(
+        world: Arc<FactorioWorld>,
+        policy: Policy,
+    ) -> (PlacementChecker, Arc<std::sync::Mutex<CheckerLog>>) {
+        let log = Arc::new(std::sync::Mutex::new(CheckerLog::default()));
+        let checker_log = log.clone();
+        let checker: PlacementChecker = Arc::new(move |queries: Vec<PlacementQuery>| {
+            let world = world.clone();
+            let log = checker_log.clone();
+            let mut verdicts = Vec::with_capacity(queries.len());
+            {
+                let mut log = log.lock().unwrap_or_else(|e| e.into_inner());
+                if log.first_site.is_none() {
+                    log.first_site = queries.first().map(|q| q.position.clone());
+                }
+                let first = log.first_site.clone();
+                log.calls.push(queries.clone());
+                for query in &queries {
+                    let refuse = match policy {
+                        Policy::Allow | Policy::Fail => false,
+                        Policy::RefuseEverything | Policy::CharacterEverywhere => true,
+                        Policy::RefuseFirstSite => first.as_ref() == Some(&query.position),
+                    };
+                    let verdict = PlacementVerdict {
+                        ok: !refuse,
+                        character: refuse && policy == Policy::CharacterEverywhere,
+                        blockers: if refuse {
+                            vec!["tree-01".to_string()]
+                        } else {
+                            Vec::new()
+                        },
+                        tile: refuse.then(|| "grass-1".to_string()),
+                        error: None,
+                    };
+                    if verdict.is_durable_refusal() {
+                        world.record_placement_refusal(PlacementRefusal {
+                            tick: Some(6198),
+                            entity: query.item_name.clone(),
+                            position: query.position.clone(),
+                            source: RefusalSource::PreCheck,
+                            blockers: verdict.blockers.clone(),
+                            tile: verdict.tile.clone(),
+                        });
+                    }
+                    verdicts.push(verdict);
+                }
+            }
+            Box::pin(async move {
+                if policy == Policy::Fail {
+                    return Err("rcon is not connected".to_string());
+                }
+                Ok(verdicts)
+            })
+                as Pin<Box<dyn Future<Output = Result<Vec<PlacementVerdict>, String>> + Send>>
+        });
+        (checker, log)
+    }
+
+    /// The `x` of every `place` step in the plan bound to `p`, as the script
+    /// sees them.
+    const PLACE_SITES: &str = r#"
+        local sites = {}
+        for _, s in ipairs(p:find{ kind = "place" }) do
+            sites[#sites + 1] = s.pos.x .. "," .. s.pos.y
+        end
+        table.sort(sites)
+        return table.concat(sites, " ")
+    "#;
+
+    async fn plan_sites(lua: &Lua, goal: &str) -> String {
+        lua.load(format!("p = goal.plan({goal})\n{PLACE_SITES}"))
+            .eval_async()
+            .await
+            .expect("plan")
+    }
+
+    /// **The cost claim.** A plan whose sites are all legal costs exactly one
+    /// round trip, whatever it contains.
+    ///
+    /// One call, and its queries are precisely the placements the plan chose
+    /// -- not one per candidate the search considered, and not one per step.
+    #[tokio::test]
+    async fn a_legal_plan_costs_one_round_trip_naming_only_the_sites_it_chose() {
+        let world = seeded_world_for(&[1, 2]);
+        let (checker, log) = stub_checker(world.clone(), Policy::Allow);
+        let lua = lua_with_world_and_checker(world, &[1, 2], Some(checker));
+        let sites = plan_sites(&lua, r#"goal.have("iron-plate", 8)"#).await;
+        assert!(!sites.is_empty(), "the fixture plan must place something");
+
+        let log = log.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            log.calls.len(),
+            1,
+            "one round trip for a plan with no problem"
+        );
+        let asked: Vec<String> = {
+            let mut asked: Vec<String> = log.calls[0]
+                .iter()
+                .map(|q| format!("{:?},{:?}", q.position.x, q.position.y))
+                .collect();
+            asked.sort();
+            asked
+        };
+        assert_eq!(
+            asked.join(" "),
+            sites,
+            "the questions are exactly the plan's own placements"
+        );
+    }
+
+    /// A plan with nothing to place asks nothing at all.
+    #[tokio::test]
+    async fn a_plan_with_no_placement_makes_no_round_trip() {
+        let world = seeded_world_for(&[1, 2]);
+        let (checker, log) = stub_checker(world.clone(), Policy::Allow);
+        let lua = lua_with_world_and_checker(world, &[1, 2], Some(checker));
+        lua.load(r#"p = goal.plan(goal.have("iron-ore", 2))"#)
+            .exec_async()
+            .await
+            .expect("plan");
+        assert!(
+            log.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .calls
+                .is_empty(),
+            "an empty query list must not become an empty call"
+        );
+    }
+
+    /// **The defect this exists to remove.** A site the game would refuse is
+    /// never handed to the executor.
+    ///
+    /// Before the pre-check, the refusal cost a dispatched action, its
+    /// dependents, and a recovery escalation -- five separate runs ended that
+    /// way. Now it costs one extra round trip and one re-expansion, and the
+    /// plan `goal.plan` returns sites somewhere else.
+    #[tokio::test]
+    async fn a_site_the_game_would_refuse_never_reaches_the_returned_plan() {
+        let world = seeded_world_for(&[1, 2]);
+        let (checker, log) = stub_checker(world.clone(), Policy::RefuseFirstSite);
+        let lua = lua_with_world_and_checker(world.clone(), &[1, 2], Some(checker));
+        let sites = plan_sites(&lua, r#"goal.have("iron-plate", 8)"#).await;
+
+        let log = log.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(log.calls.len(), 2, "asked, re-sited, asked again");
+        let refused = log.first_site.clone().expect("a site was asked about");
+        assert!(
+            !sites.contains(&format!("{:?},{:?}", refused.x, refused.y)),
+            "the refused site {refused:?} is still in the returned plan: {sites}"
+        );
+        assert!(
+            !sites.is_empty(),
+            "re-siting produces a plan, not an empty one"
+        );
+
+        let learned = world.placement_refusals();
+        assert_eq!(learned.len(), 1, "and the site is remembered: {learned:?}");
+        assert_eq!(learned[0].position, refused);
+        assert_eq!(learned[0].source, RefusalSource::PreCheck);
+        assert_eq!(learned[0].blockers, vec!["tree-01".to_string()]);
+    }
+
+    /// Re-siting is bounded, and running out of budget is not an error.
+    ///
+    /// A world where every site is refused would otherwise loop forever. The
+    /// budget turns that into three round trips and a plan handed back
+    /// unchanged, which is exactly the behaviour that existed before the
+    /// pre-check: the dispatch-time refusal path is still there and still
+    /// catches it. A pre-check must never be able to fail a run that would
+    /// otherwise have merely stumbled.
+    #[tokio::test]
+    async fn re_siting_is_bounded_and_running_out_of_rounds_still_returns_a_plan() {
+        let world = seeded_world_for(&[1, 2]);
+        let (checker, log) = stub_checker(world.clone(), Policy::RefuseEverything);
+        let lua = lua_with_world_and_checker(world, &[1, 2], Some(checker));
+        lua.load(r#"p = goal.plan(goal.have("iron-plate", 8))"#)
+            .exec_async()
+            .await
+            .expect("a plan still comes back");
+        assert_eq!(
+            log.lock().unwrap_or_else(|e| e.into_inner()).calls.len(),
+            MAX_RESITE_ROUNDS + 1,
+            "one query per expansion, and no more expansions than the budget allows"
+        );
+    }
+
+    /// A character in the footprint changes nothing: not the ledger, not the
+    /// plan, not the number of round trips.
+    ///
+    /// It is the one blocker that moves on its own, `PlanState::from_world`
+    /// already re-reads every character from the world on every plan, and at
+    /// pre-check time the acting bot has not walked to the site yet. Re-siting
+    /// on it would also reopen the very loop this design closes: the planner
+    /// would flee ground that is fine, one tile per iteration, against the
+    /// supervisor's stall limit.
+    #[tokio::test]
+    async fn a_character_in_the_footprint_neither_re_sites_nor_is_remembered() {
+        let world = seeded_world_for(&[1, 2]);
+        let (unchecked, _) = stub_checker(world.clone(), Policy::Allow);
+        let baseline = lua_with_world_and_checker(world.clone(), &[1, 2], Some(unchecked));
+        let expected = plan_sites(&baseline, r#"goal.have("iron-plate", 8)"#).await;
+
+        let world = seeded_world_for(&[1, 2]);
+        let (checker, log) = stub_checker(world.clone(), Policy::CharacterEverywhere);
+        let lua = lua_with_world_and_checker(world.clone(), &[1, 2], Some(checker));
+        let sites = plan_sites(&lua, r#"goal.have("iron-plate", 8)"#).await;
+
+        assert_eq!(
+            sites, expected,
+            "the plan is the one that would have been made"
+        );
+        assert_eq!(
+            log.lock().unwrap_or_else(|e| e.into_inner()).calls.len(),
+            1,
+            "no re-expansion: nothing was learned to re-expand around"
+        );
+        assert!(
+            world.placement_refusals().is_empty(),
+            "a bot standing there is not a fact about the ground"
+        );
+    }
+
+    /// A pre-check that cannot be made is not a planning failure.
+    ///
+    /// The plan is the plan this call would have returned before the
+    /// pre-check existed, and the dispatch-time refusal path is untouched. An
+    /// unreachable game, or a `workspace/mods` copy older than this binary,
+    /// therefore costs the behaviour we already had rather than a raise from
+    /// a call that used to be infallible.
+    #[tokio::test]
+    async fn a_checker_that_cannot_reach_the_game_does_not_stop_planning() {
+        let world = seeded_world_for(&[1, 2]);
+        let (unchecked, _) = stub_checker(world.clone(), Policy::Allow);
+        let baseline = lua_with_world_and_checker(world.clone(), &[1, 2], Some(unchecked));
+        let expected = plan_sites(&baseline, r#"goal.have("iron-plate", 8)"#).await;
+
+        let world = seeded_world_for(&[1, 2]);
+        let (checker, _) = stub_checker(world.clone(), Policy::Fail);
+        let lua = lua_with_world_and_checker(world.clone(), &[1, 2], Some(checker));
+        let sites = plan_sites(&lua, r#"goal.have("iron-plate", 8)"#).await;
+        assert_eq!(sites, expected);
+        assert!(world.placement_refusals().is_empty());
+    }
+
+    /// The same plan, with and without a checker installed, is the same plan.
+    ///
+    /// The control for everything above: a build with no game to ask takes
+    /// the `None` path, and it must not be a different planner.
+    #[tokio::test]
+    async fn no_checker_plans_exactly_as_an_all_clear_checker_does() {
+        let world = seeded_world_for(&[1, 2]);
+        let (checker, _) = stub_checker(world.clone(), Policy::Allow);
+        let checked = lua_with_world_and_checker(world, &[1, 2], Some(checker));
+        let with = plan_sites(&checked, r#"goal.have("iron-plate", 8)"#).await;
+
+        let bare = lua_with_world(&[1, 2]);
+        let without = plan_sites(&bare, r#"goal.have("iron-plate", 8)"#).await;
+        assert_eq!(with, without);
+    }
+
+    #[tokio::test]
+    async fn plan_defaults_to_the_whole_roster() {
         let lua = lua_with_world(&[1, 2, 3, 4]);
         lua.load(
             r#"
@@ -1010,12 +1575,13 @@ mod tests {
             for i = 1, 4 do assert(p.bots[i] == i, "roster is 1..4 in order") end
         "#,
         )
-        .exec()
+        .exec_async()
+        .await
         .expect("script");
     }
 
-    #[test]
-    fn plan_honours_a_bot_subset() {
+    #[tokio::test]
+    async fn plan_honours_a_bot_subset() {
         let lua = lua_with_world(&[1, 2, 3, 4]);
         lua.load(
             r#"
@@ -1027,12 +1593,13 @@ mod tests {
             end
         "#,
         )
-        .exec()
+        .exec_async()
+        .await
         .expect("script");
     }
 
-    #[test]
-    fn expansion_and_scheduling_always_share_one_roster() {
+    #[tokio::test]
+    async fn expansion_and_scheduling_always_share_one_roster() {
         // The regression this design exists for. A four-bot world, planned
         // for one bot, must schedule every action of its own network onto
         // that bot and satisfy every precondition -- not fail on a
@@ -1046,12 +1613,13 @@ mod tests {
             assert(#p.steps > 0, "a one-bot plan is still a plan")
         "#,
         )
-        .exec()
+        .exec_async()
+        .await
         .expect("script");
     }
 
-    #[test]
-    fn semantic_errors_raise_at_plan_time_not_construction() {
+    #[tokio::test]
+    async fn semantic_errors_raise_at_plan_time_not_construction() {
         let lua = lua_with_world(&[1, 2]);
         lua.load(
             r#"
@@ -1068,12 +1636,12 @@ mod tests {
             assert(tostring(err2):find("no%-such%-technology"), "names it: " .. tostring(err2))
         "#,
         )
-        .exec()
+        .exec_async().await
         .expect("script");
     }
 
-    #[test]
-    fn an_unknown_bot_raises_and_names_it() {
+    #[tokio::test]
+    async fn an_unknown_bot_raises_and_names_it() {
         let lua = lua_with_world(&[1, 2]);
         lua.load(
             r#"
@@ -1082,12 +1650,13 @@ mod tests {
             assert(tostring(err):find("99"), "the error names the bot: " .. tostring(err))
         "#,
         )
-        .exec()
+        .exec_async()
+        .await
         .expect("script");
     }
 
-    #[test]
-    fn every_action_step_carries_its_predecessor_ids() {
+    #[tokio::test]
+    async fn every_action_step_carries_its_predecessor_ids() {
         // `record.plan_created` needs the DAG, not just a step list: an
         // action step's `deps` is the network's own `preds`, and a smelt
         // chain (mine ore -> place furnace -> insert -> remove) has real
@@ -1109,12 +1678,13 @@ mod tests {
             assert(any_deps, "a smelt chain has at least one real dependency edge")
         "#,
         )
-        .exec()
+        .exec_async()
+        .await
         .expect("script");
     }
 
-    #[test]
-    fn an_empty_bot_list_raises() {
+    #[tokio::test]
+    async fn an_empty_bot_list_raises() {
         let lua = lua_with_world(&[1, 2]);
         lua.load(
             r#"
@@ -1123,7 +1693,8 @@ mod tests {
             assert(tostring(err):find("bot"), "the error is about bots: " .. tostring(err))
         "#,
         )
-        .exec()
+        .exec_async()
+        .await
         .expect("script");
     }
 }

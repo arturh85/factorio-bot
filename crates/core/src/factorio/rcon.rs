@@ -11,7 +11,7 @@ use crate::factorio::util::{
     move_pos, move_position, position_to_lua, rect_to_lua, span_rect, str_to_lua, value_to_lua,
     vec_to_lua, vector_add, vector_multiply, vector_normalize, vector_substract,
 };
-use crate::factorio::world::{FactorioWorld, PlacementRefusal};
+use crate::factorio::world::{FactorioWorld, PlacementRefusal, RefusalSource};
 use crate::settings::FactorioSettings;
 use crate::types::{
     ActionId, AreaFilter, Direction, FactorioEntity, FactorioForce, FactorioPlayer, FactorioTile,
@@ -258,11 +258,11 @@ fn note_placement_refusal(
     if !line.contains(CAN_PLACE_REFUSAL) {
         return;
     }
-    let refusal = PlacementRefusal {
-        tick,
-        entity: item_name.to_string(),
-        position: entity_position.clone(),
-    };
+    // `at_dispatch`, not a literal: the mod's line names no cause and there is
+    // nothing left to ask by the time it arrives here, so this path has no
+    // blockers and no tile to report. Only the pre-flight check
+    // (`FactorioRcon::can_place_entities`) can fill those in.
+    let refusal = PlacementRefusal::at_dispatch(tick, item_name, entity_position.clone());
     if world.record_placement_refusal(refusal) {
         warn!(
             "the game refused to build {} at {}; the planner will avoid that footprint \
@@ -270,6 +270,151 @@ fn note_placement_refusal(
             item_name, entity_position
         );
     }
+}
+
+/// Joins a `can_place_entities` reply to the queries that produced it and
+/// writes the durable refusals into the world's ledger.
+///
+/// Split out of [`FactorioRcon::can_place_entities`] so the join and the
+/// filtering can be driven without a game: everything above this line is
+/// transport, everything in it is the judgement.
+///
+/// The join is **by index and only by index**, which is why a reply of the
+/// wrong length is rejected outright rather than zipped to the shorter of the
+/// two. A verdict attached to the wrong query would exclude ground the game
+/// never refused — a silent, permanent error in the one direction that
+/// matters, since the ledger is never expired.
+fn accept_verdicts(
+    world: &Arc<FactorioWorld>,
+    queries: &[PlacementQuery],
+    reply: PlacementVerdicts,
+) -> Result<Vec<PlacementVerdict>> {
+    if reply.sites.len() != queries.len() {
+        return Err(miette!(
+            "asked the game about {} placements and got {} verdicts back; the reply cannot be \
+             joined to the queries by index, so none of it is used",
+            queries.len(),
+            reply.sites.len()
+        ));
+    }
+    for (query, verdict) in queries.iter().zip(reply.sites.iter()) {
+        if !verdict.is_durable_refusal() {
+            continue;
+        }
+        let refusal = PlacementRefusal {
+            tick: reply.tick,
+            entity: query.item_name.clone(),
+            position: query.position.clone(),
+            source: RefusalSource::PreCheck,
+            blockers: verdict.blockers.clone(),
+            tile: verdict.tile.clone(),
+        };
+        if world.record_placement_refusal(refusal) {
+            warn!(
+                "the game would refuse to build {} at {} ({}); replanning around that footprint \
+                 rather than dispatching it",
+                query.item_name,
+                query.position,
+                describe_blockers(&verdict.blockers, verdict.tile.as_deref()),
+            );
+        }
+    }
+    Ok(reply.sites)
+}
+
+/// A human-readable cause for a pre-check refusal, for the one warning line
+/// this produces.
+///
+/// Deliberately distinguishes "no entity was in the box" from "we did not
+/// look": an empty blocker list on a pre-check refusal is a real observation
+/// — nothing intersected the footprint — and it points at the ground itself,
+/// which is why the tile is named alongside it.
+fn describe_blockers(blockers: &[String], tile: Option<&str>) -> String {
+    let what = if blockers.is_empty() {
+        "no entity in the footprint".to_string()
+    } else {
+        format!("blocked by {}", blockers.join(", "))
+    };
+    match tile {
+        Some(tile) => format!("{what}; tile {tile}"),
+        None => what,
+    }
+}
+
+/// One candidate placement to ask the game about before a plan commits to it.
+///
+/// The three fields are exactly what
+/// [`FactorioRcon::place_entity_timed`] would be called with, and that is the
+/// point: a pre-check that asked a different question would be worse than no
+/// pre-check, because its green would be believed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacementQuery {
+    /// The player whose force and surface the check runs against. A `BotId`
+    /// *is* a player id, so this is the bot the schedule assigned the step to.
+    pub player_id: PlayerId,
+    /// The item the bot would be holding.
+    pub item_name: String,
+    /// The centre the build would be aimed at.
+    pub position: Position,
+    /// `defines.direction`, as the plan chose it.
+    pub direction: u8,
+}
+
+/// The game's answer for one [`PlacementQuery`].
+///
+/// `ok` is the whole verdict; everything else is evidence about a `false`,
+/// and is what a refusal observed at dispatch can never carry.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct PlacementVerdict {
+    /// Whether `surface.can_place_entity` said yes.
+    #[serde(default)]
+    pub ok: bool,
+    /// Whether a **character** — any character, not just the acting bot — was
+    /// inside the tested collision box.
+    ///
+    /// This is the discriminator that keeps the ledger honest. A character is
+    /// the one blocker that moves on its own, `PlanState::from_world` already
+    /// re-reads every character from the world on every plan, and at
+    /// pre-check time the acting bot has not walked to the site yet — so a
+    /// character in the footprint now says nothing about the ground and must
+    /// not be remembered as if it did. It is the same distinction the mod
+    /// makes at dispatch with `§player_blocks_placement§`, widened from the
+    /// acting player to every character because at plan time there is no
+    /// acting player standing anywhere yet.
+    #[serde(default)]
+    pub character: bool,
+    /// The distinct names of the entities intersecting the tested box, sorted.
+    #[serde(default)]
+    pub blockers: Vec<String>,
+    /// The tile under the queried centre, when the game reported one.
+    #[serde(default)]
+    pub tile: Option<String>,
+    /// Set when the mod could not run the check at all — an unknown player, or
+    /// an item with no `place_result`. Such a site is **not** recorded as a
+    /// refusal: nothing was learned about the ground.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+impl PlacementVerdict {
+    /// Whether this verdict is a fact about the ground worth keeping.
+    ///
+    /// Three ways to be `false`, and they are different: the game said yes;
+    /// the game said no because a character was standing there (transient);
+    /// or the mod could not ask at all (nothing observed).
+    pub fn is_durable_refusal(&self) -> bool {
+        !self.ok && !self.character && self.error.is_none()
+    }
+}
+
+/// The whole `can_place_entities` reply: one tick, one verdict per query, in
+/// the order asked.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PlacementVerdicts {
+    #[serde(default)]
+    tick: Option<u64>,
+    #[serde(default)]
+    sites: Vec<PlacementVerdict>,
 }
 
 const DEFAULT_PATH_RADIUS: f64 = 1.0;
@@ -1611,6 +1756,62 @@ impl FactorioRcon {
         }
         let json = lines.unwrap().pop().unwrap();
         parse_reply("player_force", &json)
+    }
+
+    /// Asks the game whether each of `queries` could be built, **before** any
+    /// of them is dispatched, and remembers the ones it refuses.
+    ///
+    /// # One round trip, whatever the plan's size
+    ///
+    /// Every query goes out in a single `remote.call`, and the answer is one
+    /// JSON document. A 103-step plan with six placements costs one call, not
+    /// six; the reply is a handful of bytes per site, orders of magnitude
+    /// short of the single-packet limit [`FactorioRcon::remote_call_json`]
+    /// guards.
+    ///
+    /// # What it records, and what it deliberately does not
+    ///
+    /// A verdict that [`PlacementVerdict::is_durable_refusal`] lands in the
+    /// world's refusal ledger exactly as a dispatch-time refusal does, so
+    /// `PlanState::from_world` excludes the footprint on the very next
+    /// expansion and `record.refusals()` writes it out. A refusal with a
+    /// character in the footprint, and a site the mod could not judge, are
+    /// **not** recorded — see [`PlacementVerdict::character`].
+    ///
+    /// # What a green answer is not
+    ///
+    /// It is not a guarantee. It is the game's answer at the tick it was
+    /// asked, and the plan runs afterwards: a bot can walk into the footprint,
+    /// a biter can wander in, and an earlier step of the same plan can put
+    /// something there. The dispatch-time refusal path is still the backstop
+    /// and is unchanged.
+    pub async fn can_place_entities(
+        &self,
+        world: &Arc<FactorioWorld>,
+        queries: &[PlacementQuery],
+    ) -> Result<Vec<PlacementVerdict>> {
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sites: Vec<String> = queries
+            .iter()
+            .map(|q| {
+                format!(
+                    "{{ player = {}, item = {}, position = {}, direction = {} }}",
+                    q.player_id,
+                    str_to_lua(&q.item_name),
+                    vec_to_lua(vec![q.position.x.to_string(), q.position.y.to_string()]),
+                    q.direction,
+                )
+            })
+            .collect();
+        let json = self
+            .remote_call_json("can_place_entities", vec![vec_to_lua(sites)])
+            .await?;
+        let reply: PlacementVerdicts = serde_json::from_str(&json)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("failed to parse the can_place_entities reply: {json}"))?;
+        accept_verdicts(world, queries, reply)
     }
 
     pub async fn place_entity(
@@ -3219,6 +3420,149 @@ mod reply_snippet_tests {
     }
 }
 
+/// What the pre-flight check writes into the refusal ledger, and what it
+/// deliberately refuses to write.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod placement_precheck_tests {
+    use super::*;
+
+    fn query(item: &str, x: f64, y: f64) -> PlacementQuery {
+        PlacementQuery {
+            player_id: 1,
+            item_name: item.to_string(),
+            position: Position::new(x, y),
+            direction: 0,
+        }
+    }
+
+    fn verdict(ok: bool, character: bool, error: Option<&str>) -> PlacementVerdict {
+        PlacementVerdict {
+            ok,
+            character,
+            blockers: if ok {
+                Vec::new()
+            } else {
+                vec!["tree-01".into()]
+            },
+            tile: if ok { None } else { Some("grass-1".into()) },
+            error: error.map(str::to_string),
+        }
+    }
+
+    /// The whole filter, in one batch: four sites, exactly one of which is a
+    /// fact about the ground.
+    ///
+    /// The three that are not are not near-misses -- they are the three ways
+    /// a `false` can arrive without meaning "this ground is unbuildable", and
+    /// each was reasoned about separately. A green is not a refusal; a
+    /// character is transient and is already modelled from the world on every
+    /// plan; and a question the mod could not ask is not an answer.
+    #[test]
+    fn only_a_refusal_with_no_character_and_no_error_reaches_the_ledger() {
+        let world = Arc::new(FactorioWorld::new());
+        let queries = vec![
+            query("stone-furnace", 1., 1.),
+            query("stone-furnace", 2., 2.),
+            query("stone-furnace", 3., 3.),
+            query("stone-furnace", 4., 4.),
+        ];
+        let reply = PlacementVerdicts {
+            tick: Some(6198),
+            sites: vec![
+                verdict(true, false, None),
+                verdict(false, true, None),
+                verdict(false, false, Some("item 'x' has no place_result")),
+                verdict(false, false, None),
+            ],
+        };
+        let verdicts = accept_verdicts(&world, &queries, reply).expect("the lengths agree");
+        assert_eq!(
+            verdicts.len(),
+            4,
+            "every verdict is handed back to the caller"
+        );
+
+        let learned = world.placement_refusals();
+        assert_eq!(
+            learned.len(),
+            1,
+            "only the fourth site is a fact about the ground: {learned:?}"
+        );
+        assert_eq!(learned[0].position, Position::new(4., 4.));
+        assert_eq!(learned[0].tick, Some(6198));
+        assert_eq!(learned[0].source, RefusalSource::PreCheck);
+        assert_eq!(learned[0].blockers, vec!["tree-01".to_string()]);
+        assert_eq!(learned[0].tile.as_deref(), Some("grass-1"));
+    }
+
+    /// A reply that cannot be joined to its queries is refused whole.
+    ///
+    /// Zipping to the shorter of the two would attach a verdict to the wrong
+    /// query, and a refusal is never expired -- so a mis-join would exclude
+    /// ground nobody refused for the rest of the run. Nothing is recorded.
+    #[test]
+    fn a_reply_of_the_wrong_length_is_rejected_and_records_nothing() {
+        let world = Arc::new(FactorioWorld::new());
+        let queries = vec![
+            query("stone-furnace", 1., 1.),
+            query("stone-furnace", 2., 2.),
+        ];
+        let reply = PlacementVerdicts {
+            tick: Some(6198),
+            sites: vec![verdict(false, false, None)],
+        };
+        let err = accept_verdicts(&world, &queries, reply).expect_err("one verdict for two sites");
+        let text = format!("{err:?}");
+        assert!(text.contains('2') && text.contains('1'), "{text}");
+        assert!(
+            world.placement_refusals().is_empty(),
+            "a reply that cannot be joined teaches nothing at all"
+        );
+    }
+
+    /// A pre-check refusal and a dispatch refusal at the same site are one
+    /// entry, and the first one recorded is the one kept.
+    #[test]
+    fn a_site_already_in_the_ledger_is_not_recorded_twice() {
+        let world = Arc::new(FactorioWorld::new());
+        let queries = vec![query("stone-furnace", 1., 1.)];
+        let reply = PlacementVerdicts {
+            tick: Some(10),
+            sites: vec![verdict(false, false, None)],
+        };
+        accept_verdicts(&world, &queries, reply).expect("recorded");
+        world.record_placement_refusal(PlacementRefusal::at_dispatch(
+            Some(20),
+            "stone-furnace",
+            Position::new(1., 1.),
+        ));
+        let learned = world.placement_refusals();
+        assert_eq!(learned.len(), 1);
+        assert_eq!(
+            learned[0].source,
+            RefusalSource::PreCheck,
+            "the first recording wins, which is the one carrying the evidence"
+        );
+    }
+
+    /// The one warning line has to say what the game found -- and has to
+    /// distinguish "nothing was in the footprint" from "we did not look".
+    #[test]
+    fn the_cause_reads_differently_when_nothing_was_in_the_footprint() {
+        assert_eq!(
+            describe_blockers(&["tree-01".into(), "cliff".into()], Some("grass-1")),
+            "blocked by tree-01, cliff; tile grass-1"
+        );
+        assert_eq!(
+            describe_blockers(&[], Some("water")),
+            "no entity in the footprint; tile water",
+            "an empty list on a pre-check refusal points at the ground itself"
+        );
+        assert_eq!(describe_blockers(&[], None), "no entity in the footprint");
+    }
+}
+
 #[cfg(test)]
 mod game_tick_query_tests {
     use super::*;
@@ -3342,7 +3686,7 @@ mod transfer_guarantee_tests {
     /// really accepts or yields, and `asked` is the count in the command.
     /// Loads `stub`, then the repo's own `types.lua` and `control.lua`, runs
     /// `call`, and hands back the RCON reply body the mod printed.
-    fn run_handler(stub: String, call: &str) -> Vec<String> {
+    fn lua_for_mod_source() -> Lua {
         // The workspace forbids building an interpreter outside
         // `scripting_lua::sandbox`, and rightly: that one runs *user* scripts.
         // This one runs a single file from this repository, `control.lua`, with
@@ -3360,6 +3704,11 @@ mod transfer_guarantee_tests {
             LuaOptions::default(),
         )
         .expect("test interpreter");
+        lua
+    }
+
+    fn run_handler(stub: String, call: &str) -> Vec<String> {
+        let lua = lua_for_mod_source();
         lua.load(stub)
             .set_name("stub_game")
             .exec()
@@ -3502,6 +3851,310 @@ mod transfer_guarantee_tests {
                 "expected {expected:?} in {lines:?}"
             );
         }
+    }
+
+    /// Enough of the API for `rcon_can_place_entities` to run, plus a record
+    /// of **every argument table `can_place_entity` was asked with**.
+    ///
+    /// `_asked` is the point of this stub. The pre-flight check is only worth
+    /// anything if it asks the game the same question the real placement
+    /// asks, and the two traps there are silent: `build_check_type` defaults
+    /// to `ghost_revive` rather than `manual` (a ghost check validates far
+    /// less than it looks like it does -- the same family of mistake as
+    /// `only_ghosts = true` on a blueprint), and `force` defaults to
+    /// `"neutral"`. A pre-check that fell into either would hand back a green
+    /// that means nothing.
+    ///
+    /// `entities` is what `find_entities_filtered` reports inside the
+    /// footprint, as `(name, type)` pairs.
+    fn stub_can_place(can_place: bool, entities: &[(&str, &str)], tile: &str) -> String {
+        let found: String = entities
+            .iter()
+            .map(|(name, kind)| format!("{{ name = \"{name}\", type = \"{kind}\" }}, "))
+            .collect();
+        format!(
+            r#"
+            local function auto()
+                local t = {{}}
+                setmetatable(t, {{ __index = function(tbl, k)
+                    local v = auto(); rawset(tbl, k, v); return v
+                end }})
+                return t
+            end
+            defines = auto()
+            defines.build_check_type.manual = "MANUAL"
+            defines.build_check_type.ghost_revive = "GHOST_REVIVE"
+            local function noop() end
+            local function nooptable()
+                return setmetatable({{}}, {{ __index = function() return noop end }})
+            end
+            script = nooptable()
+            remote = nooptable()
+            commands = nooptable()
+            require = function() return {{}} end
+            print = noop
+
+            _rcon_lines = {{}}
+            rcon = {{ print = function(s) _rcon_lines[#_rcon_lines + 1] = tostring(s) end }}
+            -- Every argument table `can_place_entity` is asked with, in order.
+            _asked = {{}}
+
+            -- Enough of a json writer for the assertions below: the reply is
+            -- only ever booleans, numbers, strings and arrays of strings.
+            helpers = setmetatable(
+                {{ table_to_json = function(v) return _json(v) end }},
+                {{ __index = function() return noop end }})
+            function _json(v)
+                local t = type(v)
+                if t == "nil" then return "null" end
+                if t == "boolean" or t == "number" then return tostring(v) end
+                if t == "string" then return '"' .. v .. '"' end
+                if #v > 0 then
+                    local parts = {{}}
+                    for _, item in ipairs(v) do parts[#parts + 1] = _json(item) end
+                    return "[" .. table.concat(parts, ",") .. "]"
+                end
+                local keys = {{}}
+                for k in pairs(v) do keys[#keys + 1] = k end
+                table.sort(keys)
+                local parts = {{}}
+                for _, k in ipairs(keys) do
+                    parts[#parts + 1] = '"' .. k .. '":' .. _json(v[k])
+                end
+                return "{{" .. table.concat(parts, ",") .. "}}"
+            end
+
+            local found = {{ {found} }}
+            local surface = {{
+                can_place_entity = function(args)
+                    _asked[#_asked + 1] = args
+                    return {can_place}
+                end,
+                create_entity = function(args) return nil end,
+                find_entity = function(name, pos) return nil end,
+                find_entities_filtered = function(args) return found end,
+                get_tile = function(x, y) return {{ valid = true, name = "{tile}" }} end,
+            }}
+            local player = {{
+                name = "bot1",
+                position = {{ x = 0.5, y = 0.5 }},
+                force = "player",
+                surface = surface,
+                get_item_count = function(name) return 1 end,
+                remove_item = function(items) return items.count end,
+            }}
+            prototypes = {{ item = {{
+                ["stone-furnace"] = {{ place_result = {{
+                    name = "stone-furnace",
+                    collision_box = {{
+                        left_top = {{ x = -0.7, y = -0.7 }},
+                        right_bottom = {{ x = 0.7, y = 0.7 }},
+                    }},
+                }} }},
+            }} }}
+            game = {{
+                tick = {tick},
+                players = {{ player }},
+                forces = {{ player = {{ print = noop }} }},
+            }}
+        "#,
+            can_place = if can_place { "true" } else { "false" },
+            found = found,
+            tile = tile,
+            tick = STUB_TICK,
+        )
+    }
+
+    const CHECK_FURNACE: &str = r#"rcon_can_place_entities({
+        { player = 1, item = "stone-furnace", position = {38, 16}, direction = 0 } })"#;
+
+    /// Runs the real handler and parses its reply the way production does.
+    fn check(can_place: bool, entities: &[(&str, &str)], tile: &str) -> PlacementVerdicts {
+        let printed = run_handler(stub_can_place(can_place, entities, tile), CHECK_FURNACE);
+        assert_eq!(printed.len(), 1, "one json document, got {printed:?}");
+        serde_json::from_str(&printed[0])
+            .unwrap_or_else(|err| panic!("the reply must parse: {err} in {:?}", printed[0]))
+    }
+
+    /// **The question has to be the same question.**
+    ///
+    /// A pre-check asking a *different* `can_place_entity` than the real
+    /// placement is worse than no pre-check, because its green would be
+    /// believed. Both call sites go through `placement_check_args`, and this
+    /// drives both handlers against the same stub and compares the argument
+    /// tables the game was actually handed.
+    ///
+    /// The `build_check_type` assertion is not decoration. Verified against
+    /// `workspace/factorio-api-docs/runtime-api.json` (Factorio 2.1.17,
+    /// runtime api 6): the parameter is optional and **defaults to
+    /// `ghost_revive`**, so omitting it asks about reviving a ghost rather
+    /// than about a player building by hand. That is the same trap as
+    /// `only_ghosts = true` — ghosts do not collide, so the check validates
+    /// far less than it appears to.
+    #[test]
+    fn the_pre_check_asks_can_place_entity_exactly_what_a_real_placement_asks() {
+        fn asked(call: &str) -> Vec<(String, String, String, String)> {
+            let lua = lua_for_mod_source();
+            lua.load(stub_can_place(true, &[], "grass-1"))
+                .set_name("stub_game")
+                .exec()
+                .expect("stub game");
+            lua.load(TYPES_LUA)
+                .set_name("types.lua")
+                .exec()
+                .expect("mod types.lua");
+            lua.load(CONTROL_LUA)
+                .set_name("control.lua")
+                .exec()
+                .expect("mod control.lua");
+            lua.load(call)
+                .set_name("call")
+                .exec()
+                .expect("handler call");
+            lua.globals()
+                .get::<mlua::Table>("_asked")
+                .expect("_asked")
+                .sequence_values::<mlua::Table>()
+                .map(|args| {
+                    let args = args.expect("an argument table");
+                    (
+                        args.get::<String>("name").expect("name"),
+                        format!(
+                            "{:?}",
+                            args.get::<mlua::Value>("position").expect("position")
+                        ),
+                        args.get::<String>("force").expect("force"),
+                        args.get::<String>("build_check_type").expect(
+                            "build_check_type is not optional here: the game's default \
+                                     is ghost_revive, which is a different question",
+                        ),
+                    )
+                })
+                .collect()
+        }
+
+        let placed = asked(PLACE_FURNACE);
+        let checked = asked(CHECK_FURNACE);
+        assert_eq!(placed.len(), 1, "the placement asks exactly once");
+        assert_eq!(checked.len(), 1, "the pre-check asks exactly once");
+        assert_eq!(
+            placed[0].0, checked[0].0,
+            "both must name the same entity prototype"
+        );
+        assert_eq!(
+            placed[0].2, checked[0].2,
+            "both must ask as the acting player's force, not the default neutral"
+        );
+        assert_eq!(
+            placed[0].3, "MANUAL",
+            "the real placement must ask the manual build check"
+        );
+        assert_eq!(
+            checked[0].3, "MANUAL",
+            "and so must the pre-check: the game's default is ghost_revive, which \
+             validates far less than it looks like it does"
+        );
+    }
+
+    /// A site the game allows comes back green and says nothing else.
+    #[test]
+    fn an_allowed_site_is_green_and_carries_no_cause() {
+        let reply = check(true, &[("tree-01", "tree")], "grass-1");
+        assert_eq!(reply.tick, Some(STUB_TICK));
+        assert_eq!(reply.sites.len(), 1);
+        let verdict = &reply.sites[0];
+        assert!(verdict.ok);
+        assert!(!verdict.is_durable_refusal(), "green is not a refusal");
+        assert!(
+            verdict.blockers.is_empty() && verdict.tile.is_none(),
+            "nothing is looked up for a site that is fine: {verdict:?}"
+        );
+    }
+
+    /// **The answer five runs did not have.** A refused site names what is
+    /// standing in the footprint the game just tested, and the tile under it.
+    #[test]
+    fn a_refused_site_names_what_is_in_the_way() {
+        let reply = check(
+            false,
+            &[("tree-02", "tree"), ("tree-01", "tree")],
+            "grass-3",
+        );
+        let verdict = &reply.sites[0];
+        assert!(!verdict.ok);
+        assert!(verdict.is_durable_refusal());
+        assert!(!verdict.character, "no character was in the box");
+        assert_eq!(
+            verdict.blockers,
+            vec!["tree-01".to_string(), "tree-02".to_string()],
+            "distinct names, sorted, so two runs report the same thing"
+        );
+        assert_eq!(verdict.tile.as_deref(), Some("grass-3"));
+    }
+
+    /// The one blocker that must **not** be learned as a fact about the
+    /// ground.
+    ///
+    /// A character moves on its own, `PlanState::from_world` re-reads every
+    /// character from the world on every plan, and at pre-check time the
+    /// acting bot has not walked to the site yet -- so a character in the
+    /// footprint now says nothing about whether the site is buildable when
+    /// the plan gets there. The mod makes the same distinction at dispatch
+    /// with `§player_blocks_placement§`; this widens it from the acting
+    /// player to every character, for the reason above.
+    #[test]
+    fn a_character_in_the_footprint_is_reported_but_is_not_a_durable_refusal() {
+        let reply = check(false, &[("character", "character")], "grass-1");
+        let verdict = &reply.sites[0];
+        assert!(!verdict.ok, "the game did refuse it");
+        assert!(verdict.character);
+        assert!(
+            !verdict.is_durable_refusal(),
+            "a bot standing there is not a fact about the ground"
+        );
+    }
+
+    /// An item that cannot be built at all is reported as an error, not as a
+    /// refusal: nothing was learned about the ground.
+    #[test]
+    fn an_item_with_no_place_result_is_an_error_not_a_refusal() {
+        let printed = run_handler(
+            stub_can_place(true, &[], "grass-1"),
+            r#"rcon_can_place_entities({
+                { player = 1, item = "iron-plate", position = {38, 16}, direction = 0 } })"#,
+        );
+        let reply: PlacementVerdicts =
+            serde_json::from_str(&printed[0]).expect("the reply must parse");
+        let verdict = &reply.sites[0];
+        assert!(!verdict.ok);
+        assert!(verdict.error.is_some(), "{verdict:?}");
+        assert!(
+            !verdict.is_durable_refusal(),
+            "a question the mod could not ask is not an answer about the ground"
+        );
+    }
+
+    /// The batch is answered in the order it was asked, which is the only
+    /// thing the join by index can rest on.
+    #[test]
+    fn a_batch_comes_back_in_the_order_it_was_asked() {
+        let printed = run_handler(
+            stub_can_place(true, &[], "grass-1"),
+            r#"rcon_can_place_entities({
+                { player = 1, item = "stone-furnace", position = {1, 1}, direction = 0 },
+                { player = 9, item = "stone-furnace", position = {2, 2}, direction = 0 },
+                { player = 1, item = "stone-furnace", position = {3, 3}, direction = 0 } })"#,
+        );
+        let reply: PlacementVerdicts =
+            serde_json::from_str(&printed[0]).expect("the reply must parse");
+        assert_eq!(reply.sites.len(), 3, "one verdict per query");
+        assert!(reply.sites[0].ok);
+        assert!(
+            reply.sites[1].error.is_some(),
+            "player 9 does not exist in the stub, and the slot still has to be filled \
+             or every later verdict joins to the wrong query"
+        );
+        assert!(reply.sites[2].ok);
     }
 
     const REMOVE_TEN: &str = r#"rcon_remove_from_inventory(

@@ -781,7 +781,10 @@ const SCHEMAS: Record<string, SchemaContract> = {
         },
         placement_refused: {
             entity: {required: true, type: 'string'},
-            position: {required: true, ref: 'Position'}
+            position: {required: true, ref: 'Position'},
+            source: {required: true, type: 'string'},
+            blockers: {required: true, type: 'array'},
+            tile: {required: false, type: 'string', nullable: true}
         },
         run_finished: {
             outcome: {required: true, type: 'string'},

@@ -79,6 +79,77 @@ pub struct PlacementRefusal {
     pub entity: String,
     /// The centre the build was aimed at, exactly as dispatched.
     pub position: Position,
+    /// Whether the game was asked before or after the plan committed to this
+    /// site. See [`RefusalSource`].
+    pub source: RefusalSource,
+    /// What the game found standing in the tested collision box, deduplicated
+    /// and sorted by name.
+    ///
+    /// **Empty is not "nothing was there".** Only the pre-flight check asks;
+    /// a refusal observed at dispatch carries the game's bare `said 'no'` and
+    /// nothing else, so it always arrives with this empty. An empty list on a
+    /// [`RefusalSource::PreCheck`] refusal *is* informative — it means no
+    /// entity intersected the box and the ground itself (see `tile`) is the
+    /// answer.
+    pub blockers: Vec<String>,
+    /// The name of the tile under the refused centre, when the pre-flight
+    /// check reported one. `None` for a refusal observed at dispatch, which
+    /// has no way to ask.
+    pub tile: Option<String>,
+}
+
+impl PlacementRefusal {
+    /// A refusal observed **at dispatch**: a bot tried to build here and the
+    /// game said no without naming a cause.
+    ///
+    /// There is no `blockers`/`tile` argument on purpose. That path has
+    /// nothing to put in them -- the mod's line is all there is by then -- and
+    /// an optional argument would invite a caller to fill them in from
+    /// somewhere else, which would make a guess indistinguishable from an
+    /// observation.
+    pub fn at_dispatch(tick: Option<u64>, entity: impl Into<String>, position: Position) -> Self {
+        PlacementRefusal {
+            tick,
+            entity: entity.into(),
+            position,
+            source: RefusalSource::Dispatch,
+            blockers: Vec::new(),
+            tile: None,
+        }
+    }
+}
+
+/// When the game was asked about a site — and therefore what the answer cost.
+///
+/// The two are not redundant with each other and a reader must be able to
+/// tell them apart. A `Dispatch` refusal is one a bot flew to the site and
+/// tried to build at: an action failed, its dependents were abandoned, and
+/// recovery had to escalate. A `PreCheck` refusal cost a plan-time
+/// re-expansion and no game action at all — the plan that reaches the
+/// executor never contained the bad site.
+///
+/// Which also means the two carry different evidence: only `PreCheck` can say
+/// *what* was in the way, because only it asks a question that has room for
+/// an answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RefusalSource {
+    /// The game refused a build a bot actually attempted.
+    #[default]
+    Dispatch,
+    /// The game answered `can_place_entity` for a site a plan had chosen but
+    /// not yet run.
+    PreCheck,
+}
+
+impl RefusalSource {
+    /// The wire spelling, shared by the record's `EventKind::PlacementRefused`
+    /// and by anything else that has to name one.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RefusalSource::Dispatch => "dispatch",
+            RefusalSource::PreCheck => "pre_check",
+        }
+    }
 }
 
 /// Every [`PlacementRefusal`] this run has collected, plus how many of them a
@@ -105,6 +176,12 @@ impl PlacementRefusals {
     /// `free_area_near` searches, so exact comparison is not the fragile
     /// float test it looks like; and a near-miss costs a duplicate entry,
     /// which excludes the same ground twice, rather than a wrong answer.
+    ///
+    /// `source`, `blockers` and `tile` are deliberately **not** part of the
+    /// identity: a site the pre-flight check learned about and a site a
+    /// dispatch was refused at are the same fact about the ground, and the
+    /// first one recorded is the one kept. In practice that means the
+    /// pre-check's answer wins, which is the one carrying the evidence.
     fn note(&mut self, refusal: PlacementRefusal) -> bool {
         if self.sites.iter().any(|known| {
             known.entity == refusal.entity

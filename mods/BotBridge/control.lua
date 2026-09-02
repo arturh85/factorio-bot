@@ -2436,7 +2436,7 @@ function rcon_place_entity(player_id, item_name, entity_position, direction)
 		return
 	end
 
-	if not surface.can_place_entity{name=entproto.name, position=entity_position, direction=direction, force=player.force, build_check_type=defines.build_check_type.manual} then
+	if not surface.can_place_entity(placement_check_args(entproto, entity_position, direction, player.force)) then
 		local bb = add_to_bounding_box(expand_rect_floor_ceil(entproto.collision_box), {x = entity_position[1], y = entity_position[2]})
 		if position_in_rect(player.position, bb) then
 			rcon.print("§player_blocks_placement§")
@@ -2457,6 +2457,119 @@ function rcon_place_entity(player_id, item_name, entity_position, direction)
 		rcon.print(helpers.table_to_json(serialize_entity(result)))
 	end
 	stamp_tick()
+end
+
+-- The exact question a build asks the game, in one place.
+--
+-- `rcon_place_entity` below and `rcon_can_place_entities` (the pre-flight
+-- check the planner runs before it commits a plan to a site) MUST ask
+-- `can_place_entity` the same question, or the pre-check answers about a
+-- placement nobody is going to make. Two traps live in this table:
+--
+--   * `build_check_type` defaults to `ghost_revive`, NOT to `manual`. A ghost
+--     check is the same family of mistake as `only_ghosts = true` on a
+--     blueprint: ghosts do not collide, so it validates far less than it
+--     looks like it does. `manual` is what a player building by hand runs,
+--     which is what a bot placing an entity is.
+--   * `force` decides whose entities count as friendly, so it has to be the
+--     acting player's force and not the default `"neutral"`.
+--
+-- Verified against workspace/factorio-api-docs/runtime-api.json (Factorio
+-- 2.1.17, runtime api version 6): `LuaSurface.can_place_entity` takes
+-- {name, position, direction, force, build_check_type, forced, inner_name},
+-- and `forced` is read only for the three `*_ghost` check types. There is no
+-- `force_build`/`build_mode` parameter on this method at all -- that rename
+-- belongs to blueprint building, not here.
+function placement_check_args(entproto, position, direction, force)
+	return {
+		name = entproto.name,
+		position = position,
+		direction = direction,
+		force = force,
+		build_check_type = defines.build_check_type.manual,
+	}
+end
+
+-- Answers, for a batch of candidate placements, whether the game would allow
+-- each one -- and when it would not, what is standing there.
+--
+-- `sites` is an array of {player=<id>, item=<item name>, position={x,y},
+-- direction=<defines.direction>}. The reply is ONE json document:
+--
+--   { "tick": <game.tick>, "sites": [ { "ok": bool,
+--                                       "character": bool,
+--                                       "blockers": [names],
+--                                       "tile": <tile name> }, ... ] }
+--
+-- in the same order as `sites`, so a caller joins by index.
+--
+-- Two things this reports that a refused *placement* cannot. First,
+-- `character`: `can_place_entity` says no when any character is in the
+-- footprint, and a character is the one blocker that moves on its own, so it
+-- must not be learned as a fact about the ground. `rcon_place_entity` makes
+-- the same distinction for the *acting* player and this makes it for every
+-- character, because at pre-check time the acting bot has not walked to the
+-- site yet and any bot standing there is equally transient.
+--
+-- Second, `blockers`/`tile`: the game's own refusal names no cause, which is
+-- why five separate runs ended on `can_place_entity said 'no'` with nothing
+-- to go on. `find_entities_filtered` over the collision box the check just
+-- tested names what is in it, and the tile name covers the case where the
+-- ground itself (water, a cliff edge) is the answer and there is no entity to
+-- find.
+--
+-- The box queried is the raw `collision_box` shifted to the position -- the
+-- box `can_place_entity` tested -- not the floor/ceil-expanded one
+-- `rcon_place_entity` uses for its player-in-footprint test, which would pull
+-- in neighbours that are not colliding with anything.
+function rcon_can_place_entities(sites)
+	local out = { tick = game.tick, sites = {} }
+	for i, site in ipairs(sites) do
+		local rec = { ok = false, character = false }
+		local player = game.players[site.player]
+		local itemproto = prototypes.item[site.item]
+		local entproto = nil
+		if itemproto ~= nil then
+			entproto = itemproto.place_result
+		end
+		if player == nil then
+			rec.error = "no player "..tostring(site.player)
+		elseif entproto == nil then
+			rec.error = "item '"..tostring(site.item).."' has no place_result"
+		else
+			local surface = player.surface
+			local pos = { x = site.position[1], y = site.position[2] }
+			if surface.can_place_entity(placement_check_args(entproto, pos, site.direction, player.force)) then
+				rec.ok = true
+			else
+				local bb = add_to_bounding_box(entproto.collision_box, pos)
+				local seen = {}
+				local blockers = {}
+				for _, e in pairs(surface.find_entities_filtered{ area = bb }) do
+					if e.type == "character" then
+						rec.character = true
+					end
+					if not seen[e.name] then
+						seen[e.name] = true
+						blockers[#blockers + 1] = e.name
+					end
+				end
+				table.sort(blockers)
+				-- Omitted rather than sent empty: `helpers.table_to_json`
+				-- renders an empty Lua table as `{}`, which is an object, and
+				-- the Rust side reads this field as a list.
+				if #blockers > 0 then
+					rec.blockers = blockers
+				end
+				local tile = surface.get_tile(pos.x, pos.y)
+				if tile ~= nil and tile.valid then
+					rec.tile = tile.name
+				end
+			end
+		end
+		out.sites[i] = rec
+	end
+	rcon.print(helpers.table_to_json(out))
 end
 
 function add_to_bounding_box(bb, center_position)
@@ -3144,6 +3257,7 @@ remote.add_interface("botbridge", {
 	add_research=rcon_add_research,
 	player_info=rcon_player_info,
 	place_entity=rcon_place_entity,
+	can_place_entities=rcon_can_place_entities,
 	inventory_contents_at=rcon_inventory_contents_at,
 	find_entities_filtered=rcon_find_entities_filtered,
 	find_tiles_filtered=rcon_find_tiles_filtered,

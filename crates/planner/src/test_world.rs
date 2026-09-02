@@ -16,10 +16,49 @@
 //! `automation` carries the real game's numbers; the rest are chosen to reach
 //! specific branches and are commented with which.
 
+use factorio_bot_core::factorio::util::add_to_rect;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::serde_json;
 use factorio_bot_core::test_utils::fixture_world;
-use factorio_bot_core::types::FactorioForce;
+use factorio_bot_core::types::{FactorioForce, Position, Rect};
+
+/// A world whose iron front can seat a whole roster, and its ore neighbours
+/// with it.
+///
+/// **Why this exists, measured rather than assumed.** `fixture_world`'s iron
+/// patch is 121 tiles, and at the separation two hand-mining characters need
+/// (3.99 tiles, from `PlanState::mining_tile_separation`) that is **nine
+/// seats** for the whole plan — a claim is committed for the length of an
+/// expansion and never released. The un-converged four-bot unlock plan already
+/// uses eight of the nine. So the shared fixture cannot host any multi-bot
+/// mining beyond what it already does: a converged smelt claims one seat per
+/// supplier where a solo one claims one in total, and the ninth seat is the
+/// only slack there is.
+///
+/// That is a fact about the fixture, not about the design — a real Factorio ore
+/// field is thousands of tiles and hundreds of seats. So convergence is
+/// demonstrated on a front sized like a real one, and the shared fixture is
+/// left exactly as it is, with the makespans `tests/red_science.rs` and
+/// `tests/scheduling.rs` pin untouched.
+///
+/// The extra ore is a separate block, clear of every existing patch, rather
+/// than an enlargement of one: overlapping `spawn_ore` would put two resource
+/// entities on one tile and the doubled amounts would be a second, silent
+/// change to the fixture.
+pub(crate) fn widen_ore_front(world: FactorioWorld) -> FactorioWorld {
+    let mut entities = Vec::new();
+    // Clear of the fixture's own iron (centred (-40, 40), 11 tiles across),
+    // its copper and coal (y around 0) and its water (40, 40).
+    factorio_bot_core::test_utils::spawn_ore(
+        &mut entities,
+        add_to_rect(&Rect::from_wh(30., 24.), &Position::new(-40., 64.)),
+        "iron-ore",
+    );
+    world
+        .update_chunk_entities(entities)
+        .expect("a fixture world accepts its own ore");
+    world
+}
 
 /// One force, `player`, with a small technology tree.
 ///

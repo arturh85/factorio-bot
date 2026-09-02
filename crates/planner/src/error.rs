@@ -173,6 +173,20 @@ pub enum PlannerError {
     )]
     SelfUnlockingResearchTrigger { technology: String, item: ItemId },
 
+    /// A `Step::Owned` whose holder names no bot.
+    ///
+    /// Deliberately an error rather than "keep the current chain". A handover
+    /// exists precisely to move work off the chain it was written in, so a
+    /// block of steps addressed to `Holder::Anyone` would quietly weld the
+    /// supplier's work back onto the consumer — the very defect convergence
+    /// exists to remove — and the plan would look correct while doing the old
+    /// thing. There is no world state that makes this right and no replan that
+    /// fixes it: it is a mistake in the method that wrote the step, and it
+    /// fails where it was written.
+    #[error("a handover names {holder}, which is nobody; a Step::Owned must name a bot")]
+    #[diagnostic(code(planner::unowned_handover))]
+    UnownedHandover { holder: String },
+
     #[error(
         "expansion of {goal} exceeded {depth} levels; a method is probably expanding into itself"
     )]

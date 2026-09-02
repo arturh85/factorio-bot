@@ -5,8 +5,8 @@
 //! pinned.
 //!
 //! A chain stays with one bot because the driver stamps a whole subtree with
-//! one `ChainId`, and the scheduler assigns chains rather than actions. Three
-//! things open a chain, and only these three: a caller naming a bot
+//! one `ChainId`, and the scheduler assigns chains rather than actions. Four
+//! things open a chain, and only these four: a caller naming a bot
 //! (`Holder::Bot`), which additionally records that bot as the chain's owner;
 //! a `Holder::Share`, which states that the holding ends up in one inventory
 //! sized against a named bot's starting inventory, and — since 2026-09-02,
@@ -14,7 +14,17 @@
 //! chain's owner, because the sizing is only true if that bot is the one who
 //! runs it; and a method whose decomposition makes several *produced* items
 //! meet in one inventory (`Method::converges`), which gets no owner, since
-//! nothing named a bot for it.
+//! nothing named a bot for it; and — since the material-convergence work of
+//! 2026-09-02 — a `Step::Owned`, which is a method saying "these steps are
+//! *that* bot's", and which always names an owner because naming one is the
+//! whole point of it.
+//!
+//! The fourth is what lets a plan converge instead of weld. Before it, any
+//! convergence inside a share was a convergence onto that share's owner: a
+//! smelt's ore, coal and furnace all landed on the bot the share was sized
+//! against, whatever the size of the bill. `SharedSmelt` splits the ore across
+//! the roster and has each supplier load the same furnace, which the taker
+//! places, fuels and unloads.
 //!
 //! `HasItem` preconditions alone are not enough, for two different reasons.
 //! They keep a *linear* chain together, since only the bot holding the items
@@ -33,7 +43,7 @@ use crate::ItemId;
 use crate::action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot};
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
-use crate::ids::{BotId, Ticks};
+use crate::ids::{ActionId, BotId, Ticks};
 use crate::method::util::{
     CRAFTING_CATEGORY, RecipeGate, SMELTING_CATEGORY, free_area_near, ingredients_of, mining_ticks,
     nearest_resource_tile, output_per_craft, recipe_for, recipe_gate, recipe_ticks,
@@ -298,253 +308,240 @@ impl Method for Smelt {
     }
 
     fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
-        let Some(Demand {
-            item,
-            need,
-            whose,
-            unlocks,
-        }) = demand(goal, &ctx.state)
-        else {
-            return Err(PlannerError::NoApplicableMethod {
-                goal: goal.to_string(),
-            });
-        };
-        let recipe =
-            recipe_for(&ctx.state, item).ok_or_else(|| PlannerError::NoApplicableMethod {
-                goal: goal.to_string(),
-            })?;
-        let per_craft = output_per_craft(&recipe, item);
-        let runs = need.div_ceil(per_craft);
-        // `recipe_ticks`, deliberately, where the lag below uses
-        // `smelting_ticks`. Coal is a quantity of *energy*, not of elapsed
-        // time: this expression is `energy per run / energy per coal`, written
-        // in ticks because both halves are calibrated at the stone furnace's
-        // 90 kW (see `COAL_BURN_TICKS`). Feeding it the speed-divided duration
-        // would make a faster furnace look like it needed less coal *because
-        // it finished sooner*, which is the wrong mechanism even where it
-        // lands on a plausible number. The two must stay decoupled until the
-        // machine's own `energy_usage` is available to divide by properly.
-        let coal = recipe_ticks(&recipe)
-            .saturating_mul(runs)
-            .div_ceil(COAL_BURN_TICKS)
-            .max(1);
-        let ingredients = ingredients_of(&recipe);
+        smelt_steps(goal, ctx, None)
+    }
+}
 
-        let from = ctx
-            .state
-            .bot(ctx.chain_actor)
-            .map(|b| b.position.clone())
-            .unwrap_or_default();
-        // Site the furnace by the ore rather than by the bot's start, which
-        // never advances during expansion — otherwise every chain walks
-        // ore-patch, origin, ore-patch.
-        let anchor = ingredients
-            .first()
-            .and_then(|(ingredient, _)| nearest_resource_tile(&ctx.state, ingredient, &from, 1))
-            .unwrap_or(from.clone());
-        let furnace_entity: String = "stone-furnace".into();
-        let pos = free_area_near(&ctx.state, &anchor, &furnace_entity).ok_or_else(|| {
-            PlannerError::NoApplicableMethod {
-                goal: goal.to_string(),
-            }
-        })?;
-        let build = ctx
-            .state
-            .bot(ctx.chain_actor)
-            .map(|b| b.build_distance)
-            .unwrap_or(10.0);
-        let reach = ctx
-            .state
-            .bot(ctx.chain_actor)
-            .map(|b| b.reach_distance)
-            .unwrap_or(10.0);
+/// A smelt whose ore is supplied by several bots instead of one.
+///
+/// Carried into [`smelt_steps`] by `SharedSmelt` and by nothing else; `None`
+/// there is `Smelt`'s own expansion, unchanged.
+pub(crate) struct SharedOre {
+    /// The ingredient being split. Only the ingredient of this name is
+    /// shared; anything else a smelting recipe wants stays with the taker,
+    /// which is a distinction with no instance in vanilla (every smelting
+    /// recipe has exactly one ingredient) and is written anyway so that a
+    /// modded two-ingredient smelt does not silently share the wrong one.
+    pub ore: ItemId,
+    /// Work per participating bot, ascending `BotId` — a `BTreeMap` because
+    /// emission order fixes `ActionId` allocation and therefore `schedule`'s
+    /// `(end, ActionId, BotId)` tie-break.
+    pub shares: BTreeMap<BotId, u32>,
+    /// The bot whose hands the smelted item ends up in, and the one that
+    /// places, fuels and unloads the furnace.
+    pub taker: BotId,
+    /// Ore the taker already holds and will load itself, on top of whatever
+    /// share it was given. `sum(shares) + held` is the furnace's whole bill,
+    /// so a taker that already has ore does not make the roster mine it twice.
+    pub held: u32,
+}
 
-        let furnace = FactorioEntity {
-            name: furnace_entity.clone(),
-            entity_type: "furnace".into(),
-            position: pos.clone(),
-            ..Default::default()
-        };
+/// The body of a smelt, with the ore supplied by one bot or by several.
+///
+/// `shared: None` is `Smelt::expand` verbatim — the ore is one subgoal and one
+/// insert, in the enclosing chain, exactly as it has always been. `Some` turns
+/// that one insert into one per participating bot, each in a chain of its own
+/// owned by that bot ([`Step::Owned`]), and links them to the take the taker
+/// still performs.
+///
+/// **The furnace, its stone and its coal stay with the taker.** The furnace
+/// has to exist before any supplier can insert into it, so placing it in a
+/// supplier's chain would buy an extra cross-chain edge on the critical path
+/// for about five stone and one coal of work. That is a real residual and a
+/// deliberate one: stage 1 changes one thing.
+fn smelt_steps(
+    goal: &Goal,
+    ctx: &mut ExpansionCtx,
+    shared: Option<SharedOre>,
+) -> Result<Vec<Step>, PlannerError> {
+    let Some(Demand {
+        item,
+        need,
+        whose,
+        unlocks,
+    }) = demand(goal, &ctx.state)
+    else {
+        return Err(PlannerError::NoApplicableMethod {
+            goal: goal.to_string(),
+        });
+    };
+    let recipe = recipe_for(&ctx.state, item).ok_or_else(|| PlannerError::NoApplicableMethod {
+        goal: goal.to_string(),
+    })?;
+    let per_craft = output_per_craft(&recipe, item);
+    let runs = need.div_ceil(per_craft);
+    // `recipe_ticks`, deliberately, where the lag below uses
+    // `smelting_ticks`. Coal is a quantity of *energy*, not of elapsed
+    // time: this expression is `energy per run / energy per coal`, written
+    // in ticks because both halves are calibrated at the stone furnace's
+    // 90 kW (see `COAL_BURN_TICKS`). Feeding it the speed-divided duration
+    // would make a faster furnace look like it needed less coal *because
+    // it finished sooner*, which is the wrong mechanism even where it
+    // lands on a plausible number. The two must stay decoupled until the
+    // machine's own `energy_usage` is available to divide by properly.
+    let coal = recipe_ticks(&recipe)
+        .saturating_mul(runs)
+        .div_ceil(COAL_BURN_TICKS)
+        .max(1);
+    let ingredients = ingredients_of(&recipe);
 
-        let mut steps: Vec<Step> = Vec::new();
-
-        // A smelting recipe the force has not unlocked yet has to be researched
-        // first — a furnace will not smelt what the force cannot make. The
-        // condition goes on both the inserts and the removal rather than on the
-        // removal alone, so the plan does not load a furnace it may not yet
-        // fire. See `HandCraft::expand` for why the subgoal is emitted first.
-        let mut research_pre: Vec<Condition> = Vec::new();
-        match recipe_gate(&ctx.state, &recipe) {
-            RecipeGate::NeedsResearch(tech) => {
-                steps.push(Step::Subgoal(Goal::Researched(tech.clone())));
-                research_pre.push(Condition::Researched(tech));
-            }
-            // The research is already in this network, put there by a sibling.
-            // The condition still has to be stated or nothing orders this
-            // smelt after it -- see `RecipeGate::PlannedResearch`.
-            RecipeGate::PlannedResearch(tech) => research_pre.push(Condition::Researched(tech)),
-            RecipeGate::Open | RecipeGate::Unobtainable => {}
+    let from = ctx
+        .state
+        .bot(ctx.chain_actor)
+        .map(|b| b.position.clone())
+        .unwrap_or_default();
+    // Site the furnace by the ore rather than by the bot's start, which
+    // never advances during expansion — otherwise every chain walks
+    // ore-patch, origin, ore-patch.
+    let anchor = ingredients
+        .first()
+        .and_then(|(ingredient, _)| nearest_resource_tile(&ctx.state, ingredient, &from, 1))
+        .unwrap_or(from.clone());
+    let furnace_entity: String = "stone-furnace".into();
+    let pos = free_area_near(&ctx.state, &anchor, &furnace_entity).ok_or_else(|| {
+        PlannerError::NoApplicableMethod {
+            goal: goal.to_string(),
         }
+    })?;
+    let build = ctx
+        .state
+        .bot(ctx.chain_actor)
+        .map(|b| b.build_distance)
+        .unwrap_or(10.0);
+    let reach = ctx
+        .state
+        .bot(ctx.chain_actor)
+        .map(|b| b.reach_distance)
+        .unwrap_or(10.0);
 
-        // Ingredients, fuel, and the furnace itself, as subgoals.
-        for (ingredient, amount) in &ingredients {
-            steps.push(Step::Subgoal(Goal::Have {
-                item: ingredient.clone(),
-                count: amount.saturating_mul(runs),
-                whose: whose.clone(),
-            }));
+    let furnace = FactorioEntity {
+        name: furnace_entity.clone(),
+        entity_type: "furnace".into(),
+        position: pos.clone(),
+        ..Default::default()
+    };
+
+    let mut steps: Vec<Step> = Vec::new();
+
+    // A smelting recipe the force has not unlocked yet has to be researched
+    // first — a furnace will not smelt what the force cannot make. The
+    // condition goes on both the inserts and the removal rather than on the
+    // removal alone, so the plan does not load a furnace it may not yet
+    // fire. See `HandCraft::expand` for why the subgoal is emitted first.
+    let mut research_pre: Vec<Condition> = Vec::new();
+    match recipe_gate(&ctx.state, &recipe) {
+        RecipeGate::NeedsResearch(tech) => {
+            steps.push(Step::Subgoal(Goal::Researched(tech.clone())));
+            research_pre.push(Condition::Researched(tech));
+        }
+        // The research is already in this network, put there by a sibling.
+        // The condition still has to be stated or nothing orders this
+        // smelt after it -- see `RecipeGate::PlannedResearch`.
+        RecipeGate::PlannedResearch(tech) => research_pre.push(Condition::Researched(tech)),
+        RecipeGate::Open | RecipeGate::Unobtainable => {}
+    }
+
+    // Is this smelt's ore being supplied by the roster? Only if a caller said
+    // so *and* the named ingredient is really one of this recipe's — a
+    // mismatch means the shares were sized against a different recipe than
+    // the one being expanded, and loading the furnace from them would be
+    // arithmetic about the wrong item. Falling back to the unshared path
+    // there is the conservative reading: slower, never wrong.
+    let shared = shared.filter(|s| ingredients.iter().any(|(name, _)| *name == s.ore));
+
+    // Ingredients, fuel, and the furnace itself, as subgoals.
+    //
+    // The shared ingredient is deliberately absent from this list: it is asked
+    // for once per supplier, further down, inside the chain that will supply
+    // it. Asking for it here as well would size the whole bill against the
+    // taker a second time.
+    for (ingredient, amount) in &ingredients {
+        if shared.as_ref().is_some_and(|s| s.ore == *ingredient) {
+            continue;
         }
         steps.push(Step::Subgoal(Goal::Have {
-            item: "coal".into(),
-            count: coal,
+            item: ingredient.clone(),
+            count: amount.saturating_mul(runs),
             whose: whose.clone(),
         }));
-        steps.push(Step::Subgoal(Goal::Have {
-            item: "stone-furnace".into(),
-            count: 1,
-            whose: whose.clone(),
-        }));
+    }
+    steps.push(Step::Subgoal(Goal::Have {
+        item: "coal".into(),
+        count: coal,
+        whose: whose.clone(),
+    }));
+    steps.push(Step::Subgoal(Goal::Have {
+        item: "stone-furnace".into(),
+        count: 1,
+        whose: whose.clone(),
+    }));
 
-        let place_id = ctx.ids.next();
-        // The annulus's inner bound: how far the furnace's own footprint (and
-        // the acting character's) keeps a stand-point from the site's centre.
-        // `None` only when the world carries no `stone-furnace` prototype at
-        // all, in which case `Condition::AreaFree` below refuses this action
-        // outright on the same missing data -- so falling back to a plain
-        // disc here does not let an unknown-sized entity slip past the
-        // annulus's own protection; it fails on `AreaFree` instead.
-        let min_radius = ctx
-            .state
-            .placement_clearance(&furnace_entity)
-            .unwrap_or(0.0);
-        steps.push(Step::Act(Box::new(Action {
-            id: place_id,
-            kind: ActionKind::Place {
-                entity: Box::new(furnace.clone()),
+    let place_id = ctx.ids.next();
+    // The annulus's inner bound: how far the furnace's own footprint (and
+    // the acting character's) keeps a stand-point from the site's centre.
+    // `None` only when the world carries no `stone-furnace` prototype at
+    // all, in which case `Condition::AreaFree` below refuses this action
+    // outright on the same missing data -- so falling back to a plain
+    // disc here does not let an unknown-sized entity slip past the
+    // annulus's own protection; it fails on `AreaFree` instead.
+    let min_radius = ctx
+        .state
+        .placement_clearance(&furnace_entity)
+        .unwrap_or(0.0);
+    steps.push(Step::Act(Box::new(Action {
+        id: place_id,
+        kind: ActionKind::Place {
+            entity: Box::new(furnace.clone()),
+        },
+        pre: vec![
+            Condition::AtPosition {
+                who: Actor::Role,
+                pos: pos.clone(),
+                radius: build,
+                min_radius,
             },
-            pre: vec![
-                Condition::AtPosition {
-                    who: Actor::Role,
-                    pos: pos.clone(),
-                    radius: build,
-                    min_radius,
-                },
-                Condition::AreaFree {
-                    pos: pos.clone(),
-                    entity: furnace_entity.clone(),
-                },
-                Condition::HasItem {
-                    who: Actor::Role,
-                    item: "stone-furnace".into(),
-                    count: 1,
-                },
-            ],
-            eff: vec![
-                Effect::LoseItem {
-                    who: Actor::Role,
-                    item: "stone-furnace".into(),
-                    count: 1,
-                },
-                Effect::CreateEntity(Box::new(furnace)),
-            ],
-            duration: PLACE_TICKS,
-            pinned: None,
-            label: format!("place stone-furnace at {}", pos),
-        })));
+            Condition::AreaFree {
+                pos: pos.clone(),
+                entity: furnace_entity.clone(),
+            },
+            Condition::HasItem {
+                who: Actor::Role,
+                item: "stone-furnace".into(),
+                count: 1,
+            },
+        ],
+        eff: vec![
+            Effect::LoseItem {
+                who: Actor::Role,
+                item: "stone-furnace".into(),
+                count: 1,
+            },
+            Effect::CreateEntity(Box::new(furnace)),
+        ],
+        duration: PLACE_TICKS,
+        pinned: None,
+        label: format!("place stone-furnace at {}", pos),
+    })));
 
-        let mut insert_ids = Vec::new();
-        for (ingredient, amount) in &ingredients {
-            let total = amount.saturating_mul(runs);
-            let id = ctx.ids.next();
-            insert_ids.push(id);
-            steps.push(Step::Act(Box::new(Action {
-                id,
-                kind: ActionKind::Insert {
-                    pos: pos.clone(),
-                    entity: furnace_entity.clone(),
-                    slot: InventorySlot::FurnaceSource,
-                    item: ingredient.clone(),
-                    count: total,
-                },
-                pre: {
-                    let mut pre = vec![
-                        Condition::AtPosition {
-                            who: Actor::Role,
-                            pos: pos.clone(),
-                            radius: reach,
-                            min_radius: 0.0,
-                        },
-                        Condition::EntityAt {
-                            pos: pos.clone(),
-                            name: "stone-furnace".into(),
-                        },
-                        Condition::HasItem {
-                            who: Actor::Role,
-                            item: ingredient.clone(),
-                            count: total,
-                        },
-                    ];
-                    pre.extend(research_pre.iter().cloned());
-                    pre
-                },
-                eff: vec![Effect::LoseItem {
-                    who: Actor::Role,
-                    item: ingredient.clone(),
-                    count: total,
-                }],
-                duration: TRANSFER_TICKS,
-                pinned: None,
-                label: format!("insert {} {}", total, ingredient),
-            })));
+    let mut insert_ids = Vec::new();
+    // The ore inserts specifically, which need an edge from the place that
+    // the other inserts get by sitting in the same chain as it.
+    let mut ore_insert_ids: Vec<ActionId> = Vec::new();
+    for (ingredient, amount) in &ingredients {
+        if shared.as_ref().is_some_and(|s| s.ore == *ingredient) {
+            continue;
         }
-
-        let fuel_id = ctx.ids.next();
-        insert_ids.push(fuel_id);
+        let total = amount.saturating_mul(runs);
+        let id = ctx.ids.next();
+        insert_ids.push(id);
         steps.push(Step::Act(Box::new(Action {
-            id: fuel_id,
+            id,
             kind: ActionKind::Insert {
                 pos: pos.clone(),
                 entity: furnace_entity.clone(),
-                slot: InventorySlot::Fuel,
-                item: "coal".into(),
-                count: coal,
-            },
-            pre: vec![
-                Condition::AtPosition {
-                    who: Actor::Role,
-                    pos: pos.clone(),
-                    radius: reach,
-                    min_radius: 0.0,
-                },
-                Condition::EntityAt {
-                    pos: pos.clone(),
-                    name: "stone-furnace".into(),
-                },
-                Condition::HasItem {
-                    who: Actor::Role,
-                    item: "coal".into(),
-                    count: coal,
-                },
-            ],
-            eff: vec![Effect::LoseItem {
-                who: Actor::Role,
-                item: "coal".into(),
-                count: coal,
-            }],
-            duration: TRANSFER_TICKS,
-            pinned: None,
-            label: format!("fuel the furnace with {} coal", coal),
-        })));
-
-        let remove_id = ctx.ids.next();
-        steps.push(Step::Act(Box::new(Action {
-            id: remove_id,
-            kind: ActionKind::Remove {
-                pos: pos.clone(),
-                entity: furnace_entity.clone(),
-                slot: InventorySlot::FurnaceResult,
-                item: item.clone(),
-                count: need,
+                slot: InventorySlot::FurnaceSource,
+                item: ingredient.clone(),
+                count: total,
             },
             pre: {
                 let mut pre = vec![
@@ -558,57 +555,254 @@ impl Method for Smelt {
                         pos: pos.clone(),
                         name: "stone-furnace".into(),
                     },
+                    Condition::HasItem {
+                        who: Actor::Role,
+                        item: ingredient.clone(),
+                        count: total,
+                    },
                 ];
                 pre.extend(research_pre.iter().cloned());
                 pre
             },
-            eff: vec![Effect::GainItem {
+            eff: vec![Effect::LoseItem {
                 who: Actor::Role,
-                item: item.clone(),
-                count: need,
+                item: ingredient.clone(),
+                count: total,
             }],
             duration: TRANSFER_TICKS,
             pinned: None,
-            label: format!("take {} {} from the furnace", need, item),
+            label: format!("insert {} {}", total, ingredient),
         })));
+    }
 
-        // The furnace runs between the last insert and the removal. The bot is
-        // free to do other work across this lag — that is what it is for.
+    let fuel_id = ctx.ids.next();
+    insert_ids.push(fuel_id);
+    steps.push(Step::Act(Box::new(Action {
+        id: fuel_id,
+        kind: ActionKind::Insert {
+            pos: pos.clone(),
+            entity: furnace_entity.clone(),
+            slot: InventorySlot::Fuel,
+            item: "coal".into(),
+            count: coal,
+        },
+        pre: vec![
+            Condition::AtPosition {
+                who: Actor::Role,
+                pos: pos.clone(),
+                radius: reach,
+                min_radius: 0.0,
+            },
+            Condition::EntityAt {
+                pos: pos.clone(),
+                name: "stone-furnace".into(),
+            },
+            Condition::HasItem {
+                who: Actor::Role,
+                item: "coal".into(),
+                count: coal,
+            },
+        ],
+        eff: vec![Effect::LoseItem {
+            who: Actor::Role,
+            item: "coal".into(),
+            count: coal,
+        }],
+        duration: TRANSFER_TICKS,
+        pinned: None,
+        label: format!("fuel the furnace with {} coal", coal),
+    })));
+
+    // The ore, loaded by whoever mined it.
+    //
+    // One block per participant in ascending `BotId` — `BTreeMap` order, which
+    // fixes `ActionId` allocation and so `schedule`'s tie-break. The taker's
+    // own block is emitted **inline**, in the enclosing chain, because a bot
+    // handing an item to itself is not a handover and wrapping it would open a
+    // second chain for the same runner; every other participant's block is a
+    // `Step::Owned` and lands in a chain owned by that bot.
+    //
+    // Each participant is asked to *hold* its spare plus its share and to
+    // *insert* only its share; the taker additionally inserts the spare it
+    // already had, which is what keeps `sum(shares) + held` equal to the
+    // furnace's whole bill and stops the roster mining ore the taker is
+    // already carrying.
+    if let Some(SharedOre {
+        ore,
+        shares: work,
+        taker,
+        held,
+    }) = &shared
+    {
+        let mut participants: Vec<(BotId, u32)> = work.iter().map(|(b, w)| (*b, *w)).collect();
+        // A taker holding ore but given no share still has to put that ore in.
+        // Pushed and re-sorted rather than appended, so emission stays
+        // ascending by `BotId` whatever the taker's id is.
+        if *held > 0 && !work.contains_key(taker) {
+            participants.push((*taker, 0));
+            participants.sort_unstable();
+        }
+        for (bot, work_b) in participants {
+            let spare = ctx.state.available(&Holder::Share(bot), ore);
+            let target = spare.saturating_add(work_b);
+            let load = if bot == *taker { target } else { work_b };
+            if load == 0 {
+                continue;
+            }
+            let bot_reach = ctx
+                .state
+                .bot(bot)
+                .map(|b| b.reach_distance)
+                .unwrap_or(reach);
+            let id = ctx.ids.next();
+            insert_ids.push(id);
+            ore_insert_ids.push(id);
+            let block = vec![
+                Step::Subgoal(Goal::Have {
+                    item: ore.clone(),
+                    count: target,
+                    whose: Holder::Share(bot),
+                }),
+                Step::Act(Box::new(Action {
+                    id,
+                    kind: ActionKind::Insert {
+                        pos: pos.clone(),
+                        entity: furnace_entity.clone(),
+                        slot: InventorySlot::FurnaceSource,
+                        item: ore.clone(),
+                        count: load,
+                    },
+                    pre: {
+                        let mut pre = vec![
+                            Condition::AtPosition {
+                                who: Actor::Role,
+                                pos: pos.clone(),
+                                radius: bot_reach,
+                                min_radius: 0.0,
+                            },
+                            Condition::EntityAt {
+                                pos: pos.clone(),
+                                name: "stone-furnace".into(),
+                            },
+                            Condition::HasItem {
+                                who: Actor::Role,
+                                item: ore.clone(),
+                                count: load,
+                            },
+                        ];
+                        pre.extend(research_pre.iter().cloned());
+                        pre
+                    },
+                    eff: vec![Effect::LoseItem {
+                        who: Actor::Role,
+                        item: ore.clone(),
+                        count: load,
+                    }],
+                    duration: TRANSFER_TICKS,
+                    pinned: None,
+                    label: format!("insert {} {}", load, ore),
+                })),
+            ];
+            if bot == *taker {
+                steps.extend(block);
+            } else {
+                steps.push(Step::Owned {
+                    whose: Holder::Share(bot),
+                    steps: block,
+                });
+            }
+        }
+        // `Condition::EntityAt` is world-scoped, so `infer_edges` would keep
+        // this edge across chains anyway — but the method holds both ids and a
+        // plan should not depend on inference where a statement is free.
+        // `ActionNetwork::link` folds the duplicate.
         //
-        // `smelting_ticks`, not `recipe_ticks`: a machine divides the recipe's
-        // time by its own crafting speed. `furnace_entity` is the machine
-        // actually acting, so the speed is read for *that* entity rather than
-        // assumed — see `machine_crafting_speed` for why this is written now
-        // even though it changes nothing while the furnace is always stone.
-        // One craft cycle of headroom, because this lag is a *schedule
-        // constraint* and not a report. A removal placed at exactly the
-        // predicted completion is right half the time by construction, and
-        // being early costs an entire replan cycle while being late costs
-        // scheduled slack the bot spends on other work anyway.
-        //
-        // The mechanism the headroom covers: the furnace cannot begin before
-        // the ore lands, and the insert action's reply tick is when the *mod*
-        // returned, not when the furnace next looked at its input slot. A start
-        // that misses the current craft boundary loses up to one cycle.
-        //
-        // Observed before this: a removal at insert+1924 against a modelled
-        // 1920 came back with nine plates out of ten, and the run spent the
-        // rest of its iteration budget replanning around the one that was
-        // missing.
-        let per_run = smelting_ticks(&ctx.state, &recipe, &furnace_entity);
-        let smelt_lag = per_run.saturating_mul(runs).saturating_add(per_run);
-        for id in insert_ids {
-            let lag = if id == fuel_id { 0 } else { smelt_lag };
+        // **Deleting this loop fails no test, and that was checked rather than
+        // assumed.** Inference reproduces every edge it states, so there is no
+        // observable difference to assert on; it is here for whoever reads the
+        // plan and for the day a condition stops being world-scoped, not
+        // because anything currently depends on it.
+        for id in &ore_insert_ids {
             steps.push(Step::Link {
-                from: id,
-                to: remove_id,
-                lag,
+                from: place_id,
+                to: *id,
+                lag: 0,
             });
         }
-
-        attach_unlock(&mut steps, item, unlocks);
-        Ok(steps)
     }
+
+    let remove_id = ctx.ids.next();
+    steps.push(Step::Act(Box::new(Action {
+        id: remove_id,
+        kind: ActionKind::Remove {
+            pos: pos.clone(),
+            entity: furnace_entity.clone(),
+            slot: InventorySlot::FurnaceResult,
+            item: item.clone(),
+            count: need,
+        },
+        pre: {
+            let mut pre = vec![
+                Condition::AtPosition {
+                    who: Actor::Role,
+                    pos: pos.clone(),
+                    radius: reach,
+                    min_radius: 0.0,
+                },
+                Condition::EntityAt {
+                    pos: pos.clone(),
+                    name: "stone-furnace".into(),
+                },
+            ];
+            pre.extend(research_pre.iter().cloned());
+            pre
+        },
+        eff: vec![Effect::GainItem {
+            who: Actor::Role,
+            item: item.clone(),
+            count: need,
+        }],
+        duration: TRANSFER_TICKS,
+        pinned: None,
+        label: format!("take {} {} from the furnace", need, item),
+    })));
+
+    // The furnace runs between the last insert and the removal. The bot is
+    // free to do other work across this lag — that is what it is for.
+    //
+    // `smelting_ticks`, not `recipe_ticks`: a machine divides the recipe's
+    // time by its own crafting speed. `furnace_entity` is the machine
+    // actually acting, so the speed is read for *that* entity rather than
+    // assumed — see `machine_crafting_speed` for why this is written now
+    // even though it changes nothing while the furnace is always stone.
+    // One craft cycle of headroom, because this lag is a *schedule
+    // constraint* and not a report. A removal placed at exactly the
+    // predicted completion is right half the time by construction, and
+    // being early costs an entire replan cycle while being late costs
+    // scheduled slack the bot spends on other work anyway.
+    //
+    // The mechanism the headroom covers: the furnace cannot begin before
+    // the ore lands, and the insert action's reply tick is when the *mod*
+    // returned, not when the furnace next looked at its input slot. A start
+    // that misses the current craft boundary loses up to one cycle.
+    //
+    // Observed before this: a removal at insert+1924 against a modelled
+    // 1920 came back with nine plates out of ten, and the run spent the
+    // rest of its iteration budget replanning around the one that was
+    // missing.
+    let per_run = smelting_ticks(&ctx.state, &recipe, &furnace_entity);
+    let smelt_lag = per_run.saturating_mul(runs).saturating_add(per_run);
+    for id in insert_ids {
+        let lag = if id == fuel_id { 0 } else { smelt_lag };
+        steps.push(Step::Link {
+            from: id,
+            to: remove_id,
+            lag,
+        });
+    }
+
+    attach_unlock(&mut steps, item, unlocks);
+    Ok(steps)
 }
 
 /// Mine the shortfall straight out of the ground.
@@ -1158,59 +1352,6 @@ impl Method for SplitAcrossBots {
         };
         let need = shortfall(&ctx.state, item, *count, whose);
 
-        // `registry_for` copies the caller's slice verbatim, so a caller can
-        // list the same `BotId` twice. Without deduping, that used to open
-        // two chains for one bot, the second sized after the first had
-        // already reserved its share against the *same* raw holding, so it
-        // over-asked. Reading the distinct bots' `spare` first makes the
-        // split independent of how many times a bot's id appears in the
-        // slice, only whether it appears at all.
-        //
-        // `spare(b)` is `available(&Holder::Share(b), item)`, the same
-        // ledger the emitted subgoal's own shortfall is taken against (see
-        // the comment on the target below) -- not the raw holding, which
-        // does not see what an earlier split already reserved and produced
-        // 24 ore for two shortfalls of 8 across four identical bots instead
-        // of 16.
-        //
-        // Candidates are ordered `(spare, BotId)` ascending -- poorest
-        // first, `BotId` breaking ties -- and only the first `k` participate.
-        // `BotId` is unique within the deduped roster, so the key is a total
-        // order and `sort_unstable` is exactly as deterministic as a stable
-        // sort would be; nobody should "fix" this to `sort`. The order does
-        // not depend on the caller's slice order at all, only on the set of
-        // bots and their holdings.
-        let mut seen = BTreeSet::new();
-        let distinct: Vec<BotId> = self
-            .bots
-            .iter()
-            .copied()
-            .filter(|b| seen.insert(*b))
-            .collect();
-
-        // The registry's roster against the state's, checked over *every*
-        // candidate rather than only the ones that end up with a share.
-        //
-        // `expand_goal` makes the same check when it meets a `Holder::Share`,
-        // so this used to be reached incidentally — but only for a bot that
-        // actually got a share. It was therefore already silent whenever the
-        // split was narrower than the roster (a shortfall of two across four
-        // bots has never checked bots 3 and 4), and capacity makes narrow
-        // splits ordinary rather than exceptional. A roster naming a bot the
-        // state has never heard of is a caller's mistake whoever wins a seat,
-        // so it is answered before anything is sized.
-        for bot in &distinct {
-            if ctx.state.bot(*bot).is_none() {
-                return Err(PlannerError::UnknownBot(*bot));
-            }
-        }
-
-        let mut candidates: Vec<(u32, BotId)> = distinct
-            .into_iter()
-            .map(|bot| (ctx.state.available(&Holder::Share(bot), item), bot))
-            .collect();
-        candidates.sort_unstable();
-
         // How many holders the world can accommodate at once, if anything
         // named a limit. The driver put it there (see `ExpansionCtx`), having
         // asked the registry; `None` means nobody named one.
@@ -1228,49 +1369,21 @@ impl Method for SplitAcrossBots {
         // `NoApplicableMethod`. A three-bot plan on a three-seat patch is a
         // perfectly good plan and is now what comes out.
         let seats = ctx.concurrency.unwrap_or(u32::MAX);
-        if seats == 0 {
+        let shares = even_shares(&ctx.state, item, need, &self.bots, seats)?;
+        if shares.is_empty() {
             // Nobody fits. Refused rather than planned at zero width: a plan
             // that quietly does no work is worse than a refusal, because a
             // caller cannot tell it happened. Named rather than folded into
             // `NoApplicableMethod`, which said only that the goal could not be
             // met and left the reader to guess between "no ore in this world"
             // and "this plan has already taken every seat".
+            //
+            // `applicable` has already established a shortfall and a non-empty
+            // roster, so an empty answer here can only mean zero seats.
             return Err(PlannerError::NoRoomToWork {
                 goal: goal.to_string(),
-                holders: candidates.len() as u32,
+                holders: distinct_bots(&self.bots).len() as u32,
             });
-        }
-
-        let chains = (candidates.len() as u32).min(need).min(seats);
-        let base = need / chains;
-        let remainder = need % chains;
-
-        // The work itself is split evenly across participants; holdings
-        // decide only *who* participates and *who carries the remainder*,
-        // never how much a participant is asked to produce. The obvious
-        // alternative -- levelling final holdings, so a bot already holding
-        // more produces less -- reads more principled but is worse: on a
-        // `have(iron-plate, 20)` goal with one bot ahead by 8, equal work per
-        // participant measured 2156 ticks against levelling's 2427. Equal
-        // work keeps every participant busy for the same stretch; levelling
-        // concentrates the same total work onto fewer bots and lengthens the
-        // makespan. So the remainder -- the one place holdings change the
-        // *amount* of work -- goes to the poorest participants, not to
-        // whichever bots the caller happened to list first.
-        let mut shares: BTreeMap<BotId, u32> = BTreeMap::new();
-        for (index, &(spare, bot)) in candidates.iter().take(chains as usize).enumerate() {
-            let work = base + if (index as u32) < remainder { 1 } else { 0 };
-            // A `Have` goal states a holding, not a delivery, so a share of
-            // one handed to a bot already holding five is a goal that is
-            // already met — and the share evaporates. Ask for what the bot
-            // has *plus* its share, so the shortfall the other methods see
-            // is the share: the subgoal below is claimed a frame later by
-            // whichever method satisfies `Have { count, whose: Share(bot) }`,
-            // and that method computes its own shortfall against `available`
-            // (see `shortfall`/`demand` above), so the target must be stated
-            // in that same ledger or the chain is asked for `share +
-            // reserved` instead of `share`.
-            shares.insert(bot, spare.saturating_add(work));
         }
 
         // Emit in ascending `BotId`, not the sorted participation order:
@@ -1280,7 +1393,21 @@ impl Method for SplitAcrossBots {
         // considered in changes. `BTreeMap` gives ascending order for free.
         let steps = shares
             .into_iter()
-            .map(|(bot, target)| {
+            .map(|(bot, work)| {
+                // A `Have` goal states a holding, not a delivery, so a share of
+                // one handed to a bot already holding five is a goal that is
+                // already met — and the share evaporates. Ask for what the bot
+                // has *plus* its share, so the shortfall the other methods see
+                // is the share: the subgoal below is claimed a frame later by
+                // whichever method satisfies `Have { count, whose: Share(bot) }`,
+                // and that method computes its own shortfall against `available`
+                // (see `shortfall`/`demand` above), so the target must be stated
+                // in that same ledger or the chain is asked for `share +
+                // reserved` instead of `share`.
+                let target = ctx
+                    .state
+                    .available(&Holder::Share(bot), item)
+                    .saturating_add(work);
                 Step::Subgoal(Goal::Have {
                     item: item.clone(),
                     count: target,
@@ -1292,11 +1419,419 @@ impl Method for SplitAcrossBots {
     }
 }
 
+/// The caller's roster with repeats removed, in the order it was given.
+///
+/// `registry_for` copies the caller's slice verbatim, so a caller can list the
+/// same `BotId` twice. Without deduping, that used to open two chains for one
+/// bot, the second sized after the first had already reserved its share
+/// against the *same* raw holding, so it over-asked. Reading the distinct bots
+/// first makes every split independent of how many times a bot's id appears in
+/// the slice, only whether it appears at all.
+fn distinct_bots(bots: &[BotId]) -> Vec<BotId> {
+    let mut seen = BTreeSet::new();
+    bots.iter().copied().filter(|b| seen.insert(*b)).collect()
+}
+
+/// Split `need` of `item` across `bots`: equal work per participant, remainder
+/// to the poorest.
+///
+/// **One rule, in one place.** `SplitAcrossBots` scatters a top-level goal and
+/// `SharedSmelt` gathers a converging one, and they are the same arithmetic
+/// pointed in opposite directions — so they share this, and cannot come to
+/// disagree about who participates or how much each is asked for.
+///
+/// `spare(b)` is `available(&Holder::Share(b), item)`, the same ledger the
+/// emitted subgoal's own shortfall is taken against -- not the raw holding,
+/// which does not see what an earlier split already reserved and produced 24
+/// ore for two shortfalls of 8 across four identical bots instead of 16.
+///
+/// Candidates are ordered `(spare, BotId)` ascending -- poorest first, `BotId`
+/// breaking ties -- and only the first `k = min(candidates, need, seats)`
+/// participate. `BotId` is unique within the deduped roster, so the key is a
+/// **total order** and `sort_unstable` is exactly as deterministic as a stable
+/// sort would be; nobody should "fix" this to `sort`. The order does not depend
+/// on the caller's slice order at all, only on the set of bots and their
+/// holdings.
+///
+/// The work itself is split evenly across participants; holdings decide only
+/// *who* participates and *who carries the remainder*, never how much a
+/// participant is asked to produce. The obvious alternative -- levelling final
+/// holdings, so a bot already holding more produces less -- reads more
+/// principled but is worse: on a `have(iron-plate, 20)` goal with one bot ahead
+/// by 8, equal work per participant measured 2156 ticks against levelling's
+/// 2427. Equal work keeps every participant busy for the same stretch;
+/// levelling concentrates the same total work onto fewer bots and lengthens the
+/// makespan. So the remainder -- the one place holdings change the *amount* of
+/// work -- goes to the poorest participants, not to whichever bots the caller
+/// happened to list first.
+///
+/// Returns the **work** per participant, keyed by `BotId` so a caller emitting
+/// in map order emits in ascending `BotId` — and emission order fixes
+/// `ActionId` allocation and therefore `schedule`'s tie-break. A caller that
+/// wants a `Have` *target* adds the bot's spare back on; a caller that wants an
+/// insert *count* does not.
+///
+/// **Empty when nobody can participate** — `need` is zero, the roster is
+/// empty, or `seats` is zero — and the caller decides what that means.
+/// `SplitAcrossBots` turns it into a `NoRoomToWork` naming the goal it could
+/// not seat; a converging method simply declines to converge. Returning an
+/// error here instead would make this helper name a goal it was not given.
+///
+/// The registry's roster is checked against the state's over *every* candidate
+/// rather than only the ones that end up with a share. `expand_goal` makes the
+/// same check when it meets a `Holder::Share`, so this used to be reached
+/// incidentally — but only for a bot that actually got a share. It was
+/// therefore already silent whenever the split was narrower than the roster (a
+/// shortfall of two across four bots has never checked bots 3 and 4), and
+/// capacity makes narrow splits ordinary rather than exceptional. A roster
+/// naming a bot the state has never heard of is a caller's mistake whoever wins
+/// a seat, so it is answered before anything is sized.
+pub fn even_shares(
+    state: &PlanState,
+    item: &str,
+    need: u32,
+    bots: &[BotId],
+    seats: u32,
+) -> Result<BTreeMap<BotId, u32>, PlannerError> {
+    let distinct = distinct_bots(bots);
+    for bot in &distinct {
+        if state.bot(*bot).is_none() {
+            return Err(PlannerError::UnknownBot(*bot));
+        }
+    }
+
+    let mut candidates: Vec<(u32, BotId)> = distinct
+        .into_iter()
+        .map(|bot| (state.available(&Holder::Share(bot), item), bot))
+        .collect();
+    candidates.sort_unstable();
+
+    let chains = (candidates.len() as u32).min(need).min(seats);
+    if chains == 0 {
+        return Ok(BTreeMap::new());
+    }
+    let base = need / chains;
+    let remainder = need % chains;
+
+    let mut shares: BTreeMap<BotId, u32> = BTreeMap::new();
+    for (index, &(_, bot)) in candidates.iter().take(chains as usize).enumerate() {
+        shares.insert(bot, base + if (index as u32) < remainder { 1 } else { 0 });
+    }
+    Ok(shares)
+}
+
+/// How long one supplier's detour to the buffer costs.
+///
+/// A constant — about 45 tiles at the walking speed the scheduler models — and
+/// not a computed distance, because bot positions do not advance during
+/// expansion (`smelt_steps` says so in place: "the bot's start… never advances
+/// during expansion"). A real distance here would be a confidently wrong number
+/// rather than an admittedly rough one.
+///
+/// **Charged per supplier, not once per handover**, which is where this
+/// departs from the design's §7. That section charges the walk flat and then
+/// works its own milestone-5 row at `k = 2`; the roster in that run was four
+/// bots and a three-ore shortfall seats `k = 3`, at which the flat model gives
+/// `576 / 3 + (3·10 + 10 + 300) = 532 < 576` and **converges** — the verdict
+/// §7 says is wrong, out of §7's own formula. Per supplier refuses three ore at
+/// every `k` and at both the fixture's mining rate and the game's, and still
+/// converges the fifty-ore lab bill by a factor of two and a half. Each
+/// supplier really does have to walk to the furnace and back to its own work;
+/// charging one walk for four of them understates the cost by a factor of `k`.
+///
+/// It is the design's one tuning constant, and the first live run after this
+/// lands is still what should be read for whether handovers fire where they
+/// should not.
+const HANDOVER_WALK_TICKS: Ticks = 300;
+
+/// The supplier shares for a convergence, or `None` when convergence does not
+/// pay.
+///
+/// One function, so a method's `applicable` and its `expand` cannot answer
+/// differently — which is how a method comes to claim a goal it then refuses.
+///
+/// The rule is conservative in one specific direction. **Converging where
+/// splitting would have done is a regression**, because splitting costs nothing
+/// and a handover costs an insert, a take and a walk; being slow is not a
+/// regression against anything. So this refuses by default and only converges
+/// where the physics forces the count into one inventory *and* the arithmetic
+/// pays.
+///
+/// The gates, in order:
+///
+/// * **G1. More than one bot.** At least two distinct bots the state knows, and
+///   at least one of them other than `taker`.
+/// * **G2. The count really must land in one inventory.** Not tested here — it
+///   is a fact about the *site*, enforced by the caller's `claims`
+///   (`!top_level && in_chain`). A top-level goal is scattered by
+///   `SplitAcrossBots` with no handover at all. This is the gate that keeps the
+///   measured benefit of splitting intact: nothing that splits today converges
+///   tomorrow.
+/// * **G3. Not already converging.** Also `claims`, via `GoalSite::converging`.
+///   Termination.
+/// * **G4. Splittable at all.** `need >= 2` and `k >= 2`, where `k` is how many
+///   participants `even_shares` actually seats — `seats` arrives from
+///   `Method::split_probe` → `MethodRegistry::concurrency`, so an ore patch
+///   with three seats produces a three-way split rather than a `NoRoomToWork`
+///   for the whole expansion.
+/// * **G5. The arithmetic pays**: `solo / k + handover(k) < solo`, where
+///   `handover(k) = k * (TRANSFER_TICKS + HANDOVER_WALK_TICKS) + TRANSFER_TICKS`
+///   — one insert *and one walk* per supplier, plus the single take.
+///
+/// Two deliberate approximations, both erring toward *not* converging:
+///
+/// * `solo` is **shallow** — one level, no recursion into a recipe's own
+///   ingredients — so it under-states the work being spread and the predicate
+///   under-fires.
+/// * `handover` charges a full transfer per supplier *and* the take, where a
+///   solo smelt already pays one of each; the difference is charged to
+///   convergence rather than netted off.
+///
+/// Worked against the measured cases, at the game's ~192 ticks per iron ore.
+/// Milestone 5's three-plate shortfall is three ore, seating `k = 3` on that
+/// run's four-bot roster: `576 / 3 + 3·310 + 10 = 1132 > 576` — refused, and
+/// correctly, a three-plate handover is not worth three walks. Milestone 6's
+/// ~50 iron ore at `k = 4` is `9600 / 4 + 4·310 + 10 = 3650 < 9600` — converged,
+/// and that is the 8,280 ticks of one bot's mining the note measured.
+///
+/// The break-even is around fourteen ore at `k = 4`, which is deliberately well
+/// above the four-ore shares an ordinary `SplitAcrossBots` hands out. Below it,
+/// convergence was not merely wasteful: mining *seats* are a plan-global
+/// resource that is never released during an expansion, a solo smelt takes one
+/// and a converged smelt takes `k`, and a fixture patch of 121 tiles seats only
+/// nine. Firing on every four-ore share exhausted the patch and made `Mine`
+/// refuse a goal it had always been able to satisfy — an over-fire that showed
+/// up as `NoApplicableMethod`, not as a slow plan.
+///
+/// `item`/`need` are what will actually be **split** — the ore, for a smelt —
+/// not what the goal asked for.
+///
+/// Stage 2's chest adds a `PLACE_TICKS + buffer_bill_ticks` term to `handover`
+/// for the case where a buffer has to be built. Stage 1 pays nothing there: the
+/// furnace it hands over through is one the smelt places anyway.
+pub fn worth_converging(
+    state: &PlanState,
+    item: &str,
+    need: u32,
+    taker: BotId,
+    bots: &[BotId],
+    seats: u32,
+) -> Option<BTreeMap<BotId, u32>> {
+    // G1. Known bots only, so `even_shares` below cannot fail.
+    let known: Vec<BotId> = distinct_bots(bots)
+        .into_iter()
+        .filter(|b| state.bot(*b).is_some())
+        .collect();
+    if known.len() < 2 || !known.iter().any(|b| *b != taker) {
+        return None;
+    }
+
+    // G4. A shortfall of one is one bot's errand however many bots there are.
+    if need < 2 {
+        return None;
+    }
+    let shares = even_shares(state, item, need, &known, seats).ok()?;
+    let k = shares.len() as u32;
+    if k < 2 || !shares.keys().any(|b| *b != taker) {
+        return None;
+    }
+
+    // G6. The working spots this split claims must be spots the plan can
+    // spare.
+    //
+    // Not in the design, and found by measurement. A solo smelt claims **one**
+    // mining seat; a converged one claims `k`, and a claim is never released
+    // during an expansion — `PlanState::claimed` commits a whole tile and the
+    // tiles around it, for the whole plan, because the model cannot yet say
+    // "at the same time". So convergence spends a plan-global resource `k`
+    // times over, and spending it where it is scarce does not make the plan
+    // slower, it makes it **impossible**: `Mine::applicable` goes false and the
+    // whole expansion comes back `NoApplicableMethod` for a goal that a solo
+    // smelt would have satisfied.
+    //
+    // Measured on `unlock_state`: a 121-tile iron field seats nine miners at a
+    // separation of 3.99, and the un-converged plan already uses eight of them.
+    //
+    // So the front must seat this split *and* still seat the roster
+    // afterwards. `seats` is counted to twice the roster (see
+    // `expand_goal_body`), which is the largest number this line can use.
+    // Erring toward refusal, as every other gate here does.
+    if seats < k.saturating_add(2u32.saturating_mul(known.len() as u32)) {
+        return None;
+    }
+
+    // G5. Integer ticks throughout — no float comparison anywhere in the
+    // predicate, so the answer cannot depend on a rounding mode.
+    let solo = solo_ticks(state, item, need);
+    let handover = TRANSFER_TICKS
+        .saturating_add(HANDOVER_WALK_TICKS)
+        .saturating_mul(k)
+        .saturating_add(TRANSFER_TICKS);
+    if (solo / k).saturating_add(handover) >= solo {
+        return None;
+    }
+    Some(shares)
+}
+
+/// Roughly what one bot would spend making `need` of `item` by itself.
+///
+/// Shallow on purpose: one level, no recursion into a recipe's own
+/// ingredients. That under-states the work a split would spread, so
+/// `worth_converging` under-fires — which is the direction to err in. Zero for
+/// an item that is neither mined nor crafted, which makes convergence refuse it
+/// outright rather than guess.
+fn solo_ticks(state: &PlanState, item: &str, need: u32) -> Ticks {
+    if !state.resource_patches(item).is_empty() {
+        return mining_ticks(state, item).saturating_mul(need);
+    }
+    match recipe_for(state, item) {
+        Some(recipe) => {
+            let per = output_per_craft(&recipe, item).max(1);
+            recipe_ticks(&recipe).saturating_mul(need.div_ceil(per))
+        }
+        None => 0,
+    }
+}
+
+/// Smelt the shortfall, with the ore supplied by the rest of the roster.
+///
+/// The furnace the smelt places anyway is the handover buffer: no new item, no
+/// new entity, no new action kind, and no mod change. Every plate the measured
+/// failure needs is smelted, so this covers the whole of it — a chest (stage 2)
+/// is for hand-crafted items a furnace cannot carry, and costs eight iron
+/// plates this path does not pay.
+///
+/// Registered ahead of `Smelt` in `registry_for` and **not** in
+/// `default_registry` — a single-bot registry has nobody to converge with, and
+/// keeping multi-bot behaviour in roster-aware methods is the pattern
+/// `SplitAcrossBots` already set.
+///
+/// `converges` stays `false`, and that is not an oversight.
+/// `Method::converges` asks whether this decomposition makes several *produced*
+/// items meet in one inventory, so that the driver can weld the producers to
+/// the consumer. This method does the opposite of welding. `smelting_never_
+/// converges` records the honest answer for a furnace and it is still the
+/// honest answer here.
+pub struct SharedSmelt {
+    pub bots: Vec<BotId>,
+}
+
+impl SharedSmelt {
+    /// The bot the smelted item has to end up with.
+    ///
+    /// `Holder::Anyone` is refused: there is no named consumer to hand
+    /// anything to, and guessing `ctx.chain_actor` would size the whole
+    /// handover against a bot the goal never mentioned. Every goal this method
+    /// can reach names one — `claims` restricts it to a chained, non-top-level
+    /// site, and the chains a smelt sits under are `Holder::Share` goals — so
+    /// refusing costs nothing that has been observed and cannot be wrong.
+    fn taker(goal: &Goal) -> Option<BotId> {
+        match goal {
+            Goal::Have { whose, .. } | Goal::Produced { whose, .. } => match whose {
+                Holder::Bot(b) | Holder::Share(b) => Some(*b),
+                Holder::Anyone => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// What this smelt would split, if it split anything: the recipe's first
+    /// ingredient, the furnace's whole bill of it, and how much of that bill
+    /// still has to be *produced* once the taker's own stock is counted.
+    ///
+    /// The third number is the one that gets split, and taking it rather than
+    /// the whole bill is what stops a taker who is already carrying the ore
+    /// from sending three bots out to mine it again.
+    fn split(state: &PlanState, goal: &Goal, taker: BotId) -> Option<(ItemId, u32, u32)> {
+        let Demand { item, need, .. } = demand(goal, state)?;
+        let recipe = recipe_for(state, item)?;
+        let runs = need.div_ceil(output_per_craft(&recipe, item).max(1));
+        let (ore, amount) = ingredients_of(&recipe).into_iter().next()?;
+        let total = amount.saturating_mul(runs);
+        let held = state.available(&Holder::Share(taker), &ore);
+        Some((ore, total, total.saturating_sub(held)))
+    }
+}
+
+impl Method for SharedSmelt {
+    fn name(&self) -> &'static str {
+        "shared-smelt"
+    }
+
+    /// G2 and G3, which are facts about the site rather than about the world.
+    ///
+    /// `!top_level` and `in_chain` together say that some single inventory
+    /// downstream is waiting for this count — which is exactly the situation a
+    /// split cannot help with and a handover can. A top-level goal stays
+    /// `SplitAcrossBots`', because splitting with no handover is strictly
+    /// better. `!converging` is the termination guard: the supplier shares
+    /// this method emits are ordinary `Have` goals, and without it they would
+    /// converge in their turn, forever.
+    fn claims(&self, site: GoalSite) -> bool {
+        !site.top_level && site.in_chain && !site.converging
+    }
+
+    /// Everything `Smelt` requires, plus a convergence that pays.
+    ///
+    /// Asked with `seats = u32::MAX`, because `applicable` cannot see
+    /// `ctx.concurrency` — the driver fills that in only once a method has been
+    /// chosen. `expand` asks again with the real number and falls back to
+    /// `Smelt`'s own expansion when the world's seats narrow the split below
+    /// two, so the two can still not disagree about the *plan*: the fallback
+    /// is byte-identical to what `Smelt` would have produced.
+    fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
+        if !Smelt.applicable(goal, state) {
+            return false;
+        }
+        let Some(taker) = Self::taker(goal) else {
+            return false;
+        };
+        let Some((ore, _, need)) = Self::split(state, goal, taker) else {
+            return false;
+        };
+        worth_converging(state, &ore, need, taker, &self.bots, u32::MAX).is_some()
+    }
+
+    /// The ore, not the plate: the seats that bound this split belong to the
+    /// ore patch, and asking about the plate would get `None` from every
+    /// method. Returning a *goal* rather than a number is what keeps this
+    /// method from learning what a seat is.
+    fn split_probe(&self, goal: &Goal, state: &PlanState) -> Option<Goal> {
+        let taker = Self::taker(goal)?;
+        let (ore, _, need) = Self::split(state, goal, taker)?;
+        Some(Goal::Have {
+            item: ore,
+            count: need,
+            whose: Holder::Anyone,
+        })
+    }
+
+    fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+        let seats = ctx.concurrency.unwrap_or(u32::MAX);
+        let converged = Self::taker(goal).and_then(|taker| {
+            let (ore, total, need) = Self::split(&ctx.state, goal, taker)?;
+            let shares = worth_converging(&ctx.state, &ore, need, taker, &self.bots, seats)?;
+            Some(SharedOre {
+                ore,
+                held: total.saturating_sub(shares.values().copied().sum::<u32>()),
+                shares,
+                taker,
+            })
+        });
+        // No shares the world can seat: this is an ordinary smelt, and saying
+        // so here rather than refusing keeps `applicable` honest.
+        smelt_steps(goal, ctx, converged)
+    }
+}
+
 /// The registry to use for a given bot roster.
 pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
     MethodRegistry::new()
         .with(Box::new(AlreadySatisfied))
         .with(Box::new(SplitAcrossBots {
+            bots: bots.to_vec(),
+        }))
+        .with(Box::new(SharedSmelt {
             bots: bots.to_vec(),
         }))
         .with(Box::new(Smelt))
@@ -4796,6 +5331,32 @@ mod tests {
         s
     }
 
+    /// `unlock_state` on an ore front that can seat the roster.
+    ///
+    /// Identical in every other respect — same trigger, same technology, same
+    /// seeded furnaces, coal and positions — so the two tests that use them
+    /// differ in exactly one thing, and the difference in their distributions
+    /// is attributable to that one thing.
+    fn wide_unlock_state(bots: &[BotId]) -> PlanState {
+        let mut s = PlanState::from_world(
+            Arc::new(crate::test_world::widen_ore_front(
+                crate::test_world::world_with_trigger(
+                    "asp-tech",
+                    r#"{"type": "craft-item", "item": "lab", "count": 1}"#,
+                    Some("automation-science-pack"),
+                    None,
+                ),
+            )),
+            bots,
+        );
+        for (index, bot) in bots.iter().enumerate() {
+            s.gain(*bot, "stone-furnace", 4);
+            s.gain(*bot, "coal", 40);
+            s.set_position(*bot, Position::new(index as f64 * 6.0, 0.));
+        }
+        s
+    }
+
     /// **A characterisation test, not a regression test: it pins a defect.**
     ///
     /// Every action of the unlock subtree — mining the ore, the coal and the
@@ -4828,12 +5389,24 @@ mod tests {
     ///   makespan gets *worse* — 16832 — because the hoisted chain no longer
     ///   shares intermediates with the share it used to sit under.
     ///
-    /// What would move it is a way for several bots to load one machine that
-    /// a single bot then unloads — the furnace as buffer. That is option 3 of
-    /// `docs/superpowers/notes/2026-09-02-rung-3-4-findings.md` and is
-    /// written up in `docs/superpowers/notes/2026-09-02-research-bill-spread.md`.
-    /// When it lands, this test's assertion flips and its numbers are the
-    /// before column.
+    /// What moves it is a way for several bots to load one machine that a
+    /// single bot then unloads — the furnace as buffer, landed as
+    /// `SharedSmelt`. **It does not move it here, and the reason is this
+    /// fixture rather than the design.**
+    ///
+    /// `fixture_world`'s iron patch is 121 tiles, which at a hand-mining
+    /// separation of 3.99 seats **nine** miners for the whole plan — a claim is
+    /// committed for the length of an expansion and never released. The plan
+    /// below already uses eight of the nine. A converged smelt claims one seat
+    /// per supplier where a solo one claims one in total, so there is room here
+    /// for no convergence at all, and `worth_converging`'s G6 declines rather
+    /// than spending seats the rest of the plan needs. Without that gate this
+    /// expansion does not come out slower, it comes out
+    /// `NoApplicableMethod { goal: "have 2 iron-ore" }`.
+    ///
+    /// So this stays the before column, unchanged, and
+    /// `the_unlock_subtree_spreads_when_the_ore_front_can_seat_the_roster`
+    /// is the after column on a front sized like a real one.
     #[test]
     fn the_whole_unlock_subtree_lands_on_one_bot() {
         let bots = vec![BotId(1), BotId(2), BotId(3), BotId(4)];
@@ -4902,6 +5475,93 @@ mod tests {
         );
     }
 
+    /// **The after column.** The same goal, the same roster, the same bill —
+    /// on an ore front that can seat the roster.
+    ///
+    /// The only difference from `the_whole_unlock_subtree_lands_on_one_bot` is
+    /// `widen_ore_front`, which adds a block of iron clear of every existing
+    /// patch. That is what a real Factorio ore field looks like and what the
+    /// shared fixture is not; see `widen_ore_front` for the measurement.
+    ///
+    /// **What it buys, measured, and it is less than the design hoped.** The
+    /// unlock subtree goes from `{bot 1: 48}` to `{bot 1: 48, bot 2: 2,
+    /// bot 3: 2, bot 4: 2}` — the handover really happens, three bots really
+    /// mine and load ore for a furnace a fourth unloads — but the plan as a
+    /// whole goes 49/12/12/12 at makespan 15922 to 49/14/14/14 at **17122**.
+    /// Convergence costs 1,200 ticks here and saves none.
+    ///
+    /// Two measured reasons, both worth having in writing before stage 2:
+    ///
+    /// * **The bill is not one smelt, it is many.** `HandCraft` decomposes the
+    ///   lab into gears, circuits and belts, and each asks for its own plates,
+    ///   so the largest single iron-plate goal is about twenty — not the fifty
+    ///   the design costed. A handover's overhead is paid per smelt, so a bill
+    ///   split into five smelts pays it five times or, as here, clears the bar
+    ///   only once.
+    /// * **G5 assumes the suppliers are idle.** It compares `solo` against
+    ///   `solo / k`, which is the right arithmetic only when the other bots
+    ///   have nothing else to do. Here they have their own pack shares, so a
+    ///   supplier's detour delays its own chain *and* the taker's take waits
+    ///   for whichever supplier arrives last. In the run this design was
+    ///   written for, three bots idled 13,000 ticks — that is the case where
+    ///   the assumption holds, and this fixture is not it.
+    ///
+    /// So this asserts the thing that is true and checkable — the subtree is no
+    /// longer one bot's — and does **not** assert a makespan improvement,
+    /// because there is not one to assert.
+    #[test]
+    fn the_unlock_subtree_spreads_when_the_ore_front_can_seat_the_roster() {
+        let bots = vec![BotId(1), BotId(2), BotId(3), BotId(4)];
+        let s = wide_unlock_state(&bots);
+        let net = expand(
+            &[Goal::Have {
+                item: "automation-science-pack".into(),
+                count: 4,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a trigger-unlocked pack plans");
+        let plan = schedule(&net, &s, &bots).expect("schedulable");
+
+        let unlocker = net
+            .actions()
+            .find(|a| a.eff.contains(&Effect::Researched("asp-tech".into())))
+            .map(|a| a.id)
+            .expect("some action carries the unlock");
+        let mut subtree: BTreeSet<ActionId> = BTreeSet::new();
+        let mut frontier = vec![unlocker];
+        while let Some(id) = frontier.pop() {
+            if !subtree.insert(id) {
+                continue;
+            }
+            frontier.extend(net.preds(id).into_iter().map(|(from, _)| from));
+        }
+
+        let mut per_bot: BTreeMap<BotId, usize> = BTreeMap::new();
+        let mut unlock_owners: BTreeMap<BotId, usize> = BTreeMap::new();
+        for step in &plan.steps {
+            let StepKind::Act { action, .. } = &step.what else {
+                continue;
+            };
+            *per_bot.entry(step.bot).or_default() += 1;
+            if subtree.contains(action) {
+                *unlock_owners.entry(step.bot).or_default() += 1;
+            }
+        }
+        assert!(
+            unlock_owners.len() > 1,
+            "the unlock subtree still lands on one bot: {unlock_owners:?}; \
+             whole plan {per_bot:?}"
+        );
+        assert!(
+            unlock_owners.len() >= bots.len(),
+            "every bot the front can seat should be supplying it: {unlock_owners:?}"
+        );
+    }
+
     /// Same goal, same state, twice: byte-identical plans.
     ///
     /// The crate's determinism is already pinned for the un-researched path by
@@ -4937,5 +5597,480 @@ mod tests {
             (labels, assignments, plan.makespan)
         };
         assert_eq!(once(), once());
+    }
+
+    // ---------------------------------------------------------------------
+    // Stage 1: material convergence through the furnace the smelt places.
+    // ---------------------------------------------------------------------
+
+    /// Four bots, each with a furnace and fuel, so a smelt's bill is ore and
+    /// nothing else and the arithmetic under test is not buried in stone.
+    fn smelting_state(bots: &[BotId]) -> PlanState {
+        let mut s = PlanState::from_world(
+            Arc::new(crate::test_world::widen_ore_front(fixture_world())),
+            bots,
+        );
+        for bot in bots {
+            s.gain(*bot, "stone-furnace", 2);
+            s.gain(*bot, "coal", 40);
+        }
+        s
+    }
+
+    /// A goal that reaches `SharedSmelt`: nested inside a chain, so some single
+    /// inventory downstream is waiting for the plates. `Holder::Bot` opens the
+    /// chain; the plate subgoal `HandCraft` emits under it is the site.
+    fn gears_for(bot: BotId, count: u32) -> Goal {
+        Goal::Have {
+            item: "iron-gear-wheel".into(),
+            count,
+            whose: Holder::Bot(bot),
+        }
+    }
+
+    fn furnace_ore_inserts(net: &ActionNetwork) -> Vec<&Action> {
+        net.actions()
+            .filter(|a| {
+                matches!(
+                    &a.kind,
+                    ActionKind::Insert {
+                        slot: InventorySlot::FurnaceSource,
+                        item,
+                        ..
+                    } if item == "iron-ore"
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn even_shares_gives_equal_work_and_the_remainder_to_the_poorest() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let mut s = state(&bots);
+        // Bot 4 is the richest, so it carries no remainder.
+        s.gain(BotId(4), "iron-ore", 10);
+        let shares = even_shares(&s, "iron-ore", 10, &bots, u32::MAX).expect("splits");
+        assert_eq!(shares.values().copied().sum::<u32>(), 10);
+        assert_eq!(shares.len(), 4);
+        assert_eq!(
+            shares[&BotId(4)],
+            2,
+            "the richest gets base and no remainder"
+        );
+        assert_eq!(
+            shares.values().copied().max().unwrap() - shares.values().copied().min().unwrap(),
+            1,
+            "equal work per participant, off by at most the remainder: {shares:?}"
+        );
+    }
+
+    #[test]
+    fn even_shares_is_empty_when_no_seat_is_free() {
+        let bots = [BotId(1), BotId(2)];
+        let s = state(&bots);
+        assert!(
+            even_shares(&s, "iron-ore", 10, &bots, 0)
+                .expect("no error, just nobody")
+                .is_empty()
+        );
+        assert!(
+            even_shares(&s, "iron-ore", 0, &bots, u32::MAX)
+                .expect("no error, just nothing to do")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn even_shares_refuses_a_bot_the_state_does_not_know() {
+        let s = state(&[BotId(1)]);
+        let err = even_shares(&s, "iron-ore", 4, &[BotId(1), BotId(7)], u32::MAX)
+            .expect_err("a bot with no inventory cannot be sized against");
+        assert!(
+            matches!(err, PlannerError::UnknownBot(BotId(7))),
+            "got {err:?}"
+        );
+    }
+
+    /// Milestone 5's arithmetic, pinned as a predicate test.
+    ///
+    /// The measured failure was `craft iron gear wheels x20` planning 9/1/1/1:
+    /// `SplitAcrossBots` split it perfectly and bot 1's share came up three
+    /// plates short. Convergence must **not** fire there — three ore is not
+    /// worth a walk, and converging where splitting would have done is the one
+    /// regression this predicate exists to avoid.
+    #[test]
+    fn a_three_ore_shortfall_is_not_worth_a_handover() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let s = smelting_state(&bots);
+        assert!(
+            worth_converging(&s, "iron-ore", 3, BotId(1), &bots, u32::MAX).is_none(),
+            "a three-ore handover costs more walking than it saves mining"
+        );
+    }
+
+    /// Milestone 6's, the other way round: ~50 iron ore for a lab is a third of
+    /// one bot's whole plan, and it is what a roster can obviously share.
+    #[test]
+    fn a_fifty_ore_bill_is_worth_a_handover() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let s = smelting_state(&bots);
+        let shares = worth_converging(&s, "iron-ore", 50, BotId(1), &bots, u32::MAX)
+            .expect("fifty ore pays for a handover many times over");
+        assert_eq!(shares.values().copied().sum::<u32>(), 50);
+        assert!(
+            shares.keys().any(|b| *b != BotId(1)),
+            "a convergence with no supplier is not a convergence: {shares:?}"
+        );
+    }
+
+    /// **The walk is charged per supplier, and this is what says so.**
+    ///
+    /// Ten ore across four bots is the count where the design's flat charge and
+    /// the per-supplier one disagree at this fixture's mining rate: flat gives
+    /// `1200 / 4 + (4·10 + 10 + 300) = 650 < 1200` and converges; per supplier
+    /// gives `1200 / 4 + 4·310 + 10 = 1550 > 1200` and does not. Ten ore is
+    /// about the size of an ordinary `SplitAcrossBots` share, and converging
+    /// those is the over-fire that exhausted the ore front — so the whole
+    /// difference between a working stage 1 and a broken one is in this row.
+    ///
+    /// `seats` is passed high enough that G6 cannot be what refuses, or this
+    /// would pass for the wrong reason and go on passing if the cost model were
+    /// reverted.
+    #[test]
+    fn a_share_sized_shortfall_does_not_converge_because_every_supplier_walks() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let s = smelting_state(&bots);
+        assert!(
+            worth_converging(&s, "iron-ore", 10, BotId(1), &bots, 12).is_none(),
+            "four suppliers walking for ten ore is four walks, not one"
+        );
+        // The same predicate, same seats, on a bill that really does pay.
+        assert!(
+            worth_converging(&s, "iron-ore", 50, BotId(1), &bots, 12).is_some(),
+            "fifty ore still pays for the walking"
+        );
+    }
+
+    #[test]
+    fn a_shortfall_of_one_never_converges() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let s = smelting_state(&bots);
+        assert!(worth_converging(&s, "iron-ore", 1, BotId(1), &bots, u32::MAX).is_none());
+    }
+
+    #[test]
+    fn one_bot_never_converges() {
+        let bots = [BotId(1)];
+        let s = smelting_state(&bots);
+        assert!(worth_converging(&s, "iron-ore", 500, BotId(1), &bots, u32::MAX).is_none());
+    }
+
+    /// Seats bound the split before any share is sized, so a patch with room
+    /// for one bot produces an ordinary smelt rather than a refusal.
+    #[test]
+    fn a_world_with_one_seat_does_not_converge() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let s = smelting_state(&bots);
+        assert!(worth_converging(&s, "iron-ore", 50, BotId(1), &bots, 1).is_none());
+    }
+
+    /// `solo` is zero for something this planner can neither mine nor craft,
+    /// and a zero saving never beats a handover's cost.
+    #[test]
+    fn an_item_with_no_route_never_converges() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let s = smelting_state(&bots);
+        assert!(worth_converging(&s, "wood", 50, BotId(1), &bots, u32::MAX).is_none());
+    }
+
+    /// G2, stated where it is enforced. A top-level goal is `SplitAcrossBots`'
+    /// and stays `SplitAcrossBots`': splitting with no handover is strictly
+    /// better than converging, and nothing that splits today converges
+    /// tomorrow.
+    #[test]
+    fn a_top_level_goal_is_still_split_and_never_converged() {
+        let bots = vec![BotId(1), BotId(2), BotId(3), BotId(4)];
+        let s = smelting_state(&bots);
+        let reg = registry_for(&bots);
+        let goal = gather("iron-plate", 40);
+        assert_eq!(
+            reg.find(&goal, &s, GoalSite::root()).map(|m| m.name()),
+            Some("split-across-bots")
+        );
+        assert!(
+            !SharedSmelt { bots: bots.clone() }.claims(GoalSite::root()),
+            "a converging method must never claim a scatter site"
+        );
+    }
+
+    /// A single-bot registry has nobody to converge with, so its plans are
+    /// exactly what they always were.
+    #[test]
+    fn a_single_bot_registry_never_converges() {
+        let bots = vec![BotId(1)];
+        let s = smelting_state(&bots);
+        let reg = registry_for(&bots);
+        let site = GoalSite {
+            top_level: false,
+            in_chain: true,
+            converging: false,
+        };
+        let goal = Goal::Have {
+            item: "iron-plate".into(),
+            count: 50,
+            whose: Holder::Share(BotId(1)),
+        };
+        assert_eq!(reg.find(&goal, &s, site).map(|m| m.name()), Some("smelt"));
+    }
+
+    /// The handover itself: several bots load one furnace, one bot unloads it.
+    #[test]
+    fn a_converged_smelt_hands_each_supplier_a_chain_of_its_own() {
+        let bots = vec![BotId(1), BotId(2), BotId(3), BotId(4)];
+        let s = smelting_state(&bots);
+        let net = expand(
+            &[gears_for(BotId(1), 10)],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("twenty plates' worth of gears plans");
+
+        let inserts = furnace_ore_inserts(&net);
+        assert!(
+            inserts.len() >= 2,
+            "the ore should be loaded by several bots, got {} insert(s)",
+            inserts.len()
+        );
+        let owners: BTreeSet<BotId> = inserts
+            .iter()
+            .filter_map(|a| net.chain_of(a.id))
+            .filter_map(|c| net.owner_of(c))
+            .collect();
+        assert!(
+            owners.len() >= 2,
+            "every ore insert still belongs to one bot: {owners:?}"
+        );
+
+        // The take is still the taker's, and every insert is ordered before it
+        // with the furnace's own smelting time in between — the one edge no
+        // inference can produce, which is why the method owns both ids.
+        let remove = net
+            .actions()
+            .find(|a| matches!(&a.kind, ActionKind::Remove { .. }))
+            .expect("something unloads the furnace");
+        assert_eq!(
+            net.chain_of(remove.id).and_then(|c| net.owner_of(c)),
+            Some(BotId(1)),
+            "the plates must land in the taker's hands"
+        );
+        for insert in &inserts {
+            let lag = net
+                .preds(remove.id)
+                .into_iter()
+                .find(|(from, _)| *from == insert.id)
+                .map(|(_, lag)| lag)
+                .unwrap_or_else(|| panic!("{} is not ordered before the take", insert.label));
+            assert!(lag > 0, "the smelting time must ride on the handover edge");
+        }
+    }
+
+    /// The whole bill still arrives: `sum(shares) + held` is the furnace's own
+    /// count, not more and not less.
+    #[test]
+    fn a_converged_smelt_loads_the_whole_bill_and_no_more() {
+        let bots = vec![BotId(1), BotId(2), BotId(3), BotId(4)];
+        let s = smelting_state(&bots);
+        let net = expand(
+            &[gears_for(BotId(1), 10)],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("plans");
+        let loaded: u32 = furnace_ore_inserts(&net)
+            .iter()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Insert { count, .. } => Some(*count),
+                _ => None,
+            })
+            .sum();
+        let taken: u32 = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Remove { item, count, .. } if item == "iron-plate" => Some(*count),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(
+            loaded, taken,
+            "one iron ore makes one iron plate; the furnace must be loaded for what is taken"
+        );
+    }
+
+    /// A taker already carrying the ore does not send the roster out to mine
+    /// it again. The split is over what still has to be *produced*, not over
+    /// the furnace's whole bill.
+    #[test]
+    fn a_taker_holding_the_ore_already_does_not_send_the_roster_mining() {
+        let bots = vec![BotId(1), BotId(2), BotId(3), BotId(4)];
+        let mut s = smelting_state(&bots);
+        s.gain(BotId(1), "iron-ore", 40);
+        let net = expand(
+            &[gears_for(BotId(1), 10)],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("plans");
+        assert_eq!(
+            furnace_ore_inserts(&net).len(),
+            1,
+            "the ore is already in the taker's hands: one insert, no handover"
+        );
+        assert!(
+            !net.actions()
+                .any(|a| matches!(&a.kind, ActionKind::Mine { item, .. } if item == "iron-ore")),
+            "nothing should be mined for ore the taker is carrying"
+        );
+    }
+
+    /// Termination: a supplier's own share is an ordinary `Have` goal, and
+    /// without `GoalSite::converging` it would converge in its turn, forever.
+    #[test]
+    fn a_converging_site_refuses_to_converge_again() {
+        let bots = vec![BotId(1), BotId(2), BotId(3), BotId(4)];
+        let method = SharedSmelt { bots };
+        assert!(!method.claims(GoalSite {
+            top_level: false,
+            in_chain: true,
+            converging: true,
+        }));
+        assert!(method.claims(GoalSite {
+            top_level: false,
+            in_chain: true,
+            converging: false,
+        }));
+    }
+
+    /// Same goal, same state, twice: byte-identical plans, assignments
+    /// included. A rendezvous or a share order chosen by hash iteration would
+    /// be a correctness bug, not a style one, and this is what says it is not.
+    #[test]
+    fn a_converged_smelt_plans_identically_twice() {
+        let bots = vec![BotId(1), BotId(2), BotId(3), BotId(4)];
+        let once = || {
+            let s = smelting_state(&bots);
+            let net = expand(
+                &[gears_for(BotId(1), 10)],
+                &s,
+                &registry_for(&bots),
+                BotId(1),
+            )
+            .expect("plans");
+            let plan = schedule(&net, &s, &bots).expect("schedulable");
+            let labels: Vec<String> = net.actions().map(|a| a.label.clone()).collect();
+            let chains: Vec<(String, Option<BotId>)> = net
+                .actions()
+                .map(|a| {
+                    (
+                        a.label.clone(),
+                        net.chain_of(a.id).and_then(|c| net.owner_of(c)),
+                    )
+                })
+                .collect();
+            let assignments: Vec<(BotId, u32, u32, String)> = plan
+                .steps
+                .iter()
+                .map(|s| (s.bot, s.start, s.end, format!("{:?}", s.what)))
+                .collect();
+            (labels, chains, assignments, plan.makespan)
+        };
+        assert_eq!(once(), once());
+    }
+
+    /// **The over-fire the design did not model, and the gate that stops it.**
+    ///
+    /// G2 keeps a *top-level* goal with `SplitAcrossBots`, on the ground that
+    /// splitting costs nothing and a handover costs a walk. It says nothing
+    /// about what happens *inside* each of the resulting shares. When every
+    /// share is short by the same amount — a symmetric roster on a symmetric
+    /// goal — each one would independently decide its own smelt is worth
+    /// converging, and the roster would mine the same total ore while walking
+    /// between four furnaces instead of one.
+    ///
+    /// That is not a slow plan, it is a broken one: each converged smelt claims
+    /// one mining seat per supplier where a solo smelt claims one in total, and
+    /// firing on every four-ore share exhausted the ore front and made `Mine`
+    /// refuse goals it had always satisfied. Two things stop it — the walk is
+    /// charged per supplier (`HANDOVER_WALK_TICKS`), which puts the break-even
+    /// well above the size of an ordinary share, and G6, which refuses to spend
+    /// seats a plan cannot spare.
+    ///
+    /// So: one furnace per share, one loader per furnace.
+    #[test]
+    fn sibling_shares_do_not_converge_each_others_smelts() {
+        let bots = vec![BotId(1), BotId(2), BotId(3), BotId(4)];
+        let s = smelting_state(&bots);
+        let net = expand(
+            &[gather("iron-plate", 40)],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("plans");
+        let furnaces = net
+            .actions()
+            .filter(|a| matches!(&a.kind, ActionKind::Place { .. }))
+            .count();
+        let inserts = furnace_ore_inserts(&net).len();
+        assert_eq!(
+            inserts, furnaces,
+            "an evenly split goal needs no handover at all: {inserts} ore inserts \
+             for {furnaces} furnace(s)"
+        );
+    }
+
+    /// **Milestone 5, end to end.** `craft iron gear wheels x20` on four bots
+    /// that came out of the smelting milestones unequal — the run that planned
+    /// 9/1/1/1 while three bots idled 3,200 ticks.
+    ///
+    /// `SplitAcrossBots` still splits it four ways; bot 1's share is still
+    /// three plates short; and the smelt that covers those three plates is
+    /// still bot 1's alone, because §7's arithmetic says a three-ore handover
+    /// costs more walking than it saves mining. **Convergence must not fire
+    /// here.** Converging where splitting would have done is the one
+    /// regression this design can cause, and a slow plan is not a regression
+    /// against anything.
+    #[test]
+    fn milestone_fives_three_plate_shortfall_is_still_one_bots_smelt() {
+        let bots = vec![BotId(1), BotId(2), BotId(3), BotId(4)];
+        let mut s = smelting_state(&bots);
+        // What two smelting milestones left behind: enough for a five-gear
+        // share on three bots, three plates short on the fourth.
+        s.gain(BotId(1), "iron-plate", 7);
+        for bot in [BotId(2), BotId(3), BotId(4)] {
+            s.gain(bot, "iron-plate", 10);
+        }
+        let net = expand(
+            &[gather("iron-gear-wheel", 20)],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("plans");
+
+        let inserts = furnace_ore_inserts(&net);
+        assert_eq!(
+            inserts.len(),
+            1,
+            "a three-ore shortfall must stay one bot's errand: {:?}",
+            inserts.iter().map(|a| &a.label).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            net.chain_of(inserts[0].id).and_then(|c| net.owner_of(c)),
+            Some(BotId(1)),
+            "and it must stay the short bot's, not move to whoever is cheapest"
+        );
     }
 }

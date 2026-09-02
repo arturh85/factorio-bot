@@ -9,6 +9,7 @@ use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::ids::{ActionId, ActionIdGen, BotId, ChainId, ChainIdGen, ItemId, Ticks};
 use crate::state::PlanState;
+use std::collections::BTreeMap;
 
 /// One element of a method's expansion.
 #[derive(Clone, Debug)]
@@ -25,6 +26,26 @@ pub enum Step {
         to: ActionId,
         lag: Ticks,
     },
+    /// A block of steps that belong to **another bot**.
+    ///
+    /// The driver opens a fresh chain owned by `whose`'s bot, rebinds
+    /// `chain_actor` to it, runs `steps` inside it — so every `Step::Act` in
+    /// there is stamped with that chain and every `Step::Subgoal` is sized
+    /// against that bot's inventory — and then restores everything.
+    ///
+    /// This is the only way a method can emit an action it does not intend to
+    /// run itself, and it exists because material convergence is exactly
+    /// that: the insert belongs to the supplier and the take belongs to the
+    /// consumer, and both are emitted by one method because only that method
+    /// knows the `ActionId`s to link.
+    ///
+    /// `whose` must name a bot (`Holder::Bot` or `Holder::Share`).
+    /// `Holder::Anyone` is refused with
+    /// [`PlannerError::UnownedHandover`](crate::error::PlannerError::UnownedHandover)
+    /// rather than silently treated as "keep the current chain": a handover
+    /// with no named supplier is a method bug, and it should fail where it is
+    /// written.
+    Owned { whose: Holder, steps: Vec<Step> },
 }
 
 /// State threaded through one expansion.
@@ -59,8 +80,10 @@ pub enum Step {
 /// of choosing per action. A subtree is chained when a caller named a bot for
 /// it (`Holder::Bot`), when the goal is a `Holder::Share` and so states that
 /// its holding ends up in one inventory, or when the method claiming its root
-/// `converges` — see `expand_goal_body`. It is `None` outside such a subtree,
-/// which leaves an action freely assignable.
+/// `converges` — see `expand_goal_body` — and, since the material-convergence
+/// work of 2026-09-02, when a method emits a [`Step::Owned`], which opens a
+/// chain owned by the bot that step names. It is `None` outside such a
+/// subtree, which leaves an action freely assignable.
 ///
 /// The first two also give the chain an **owner** — the named bot, in both
 /// cases — so the scheduler runs it there rather than merely keeping it
@@ -98,6 +121,20 @@ pub struct ExpansionCtx {
     /// never learns what produced it, which is what keeps a generic
     /// item-splitting method free of any notion of ore.
     pub(crate) concurrency: Option<u32>,
+    /// True anywhere beneath a converging method's own expansion — a method
+    /// that answered [`Method::split_probe`] and so is about to hand one goal
+    /// to several bots.
+    ///
+    /// The termination argument, and driver-owned for the same reason `chain`
+    /// is. A handover's supplier shares, and a buffer's own bill, are ordinary
+    /// `Have` goals; without this flag a handover would converge its own
+    /// inputs, and a buffer costing eight iron plates would want a handover to
+    /// deliver those plates. One level of convergence per convergence point,
+    /// deliberately.
+    ///
+    /// Carried *into* [`Step::Owned`] rather than cleared there: a supplier's
+    /// own production must not itself converge either.
+    pub(crate) converging: bool,
     pub depth: u32,
 }
 
@@ -111,6 +148,7 @@ impl ExpansionCtx {
             chain: None,
             top_level: true,
             concurrency: None,
+            converging: false,
             depth: 0,
         }
     }
@@ -135,6 +173,12 @@ pub struct GoalSite {
     /// True when the goal is being expanded inside a per-bot chain, so its
     /// actions will all be welded to that chain's single runner.
     pub in_chain: bool,
+    /// True anywhere beneath a converging method's own expansion.
+    ///
+    /// The termination guard: a converging method's own inputs — its supplier
+    /// shares, and any buffer it has to build — must not converge again. One
+    /// level of convergence per convergence point.
+    pub converging: bool,
 }
 
 impl GoalSite {
@@ -143,6 +187,7 @@ impl GoalSite {
         GoalSite {
             top_level: true,
             in_chain: false,
+            converging: false,
         }
     }
 }
@@ -202,6 +247,25 @@ pub trait Method {
     /// harmless; returning less than the true limit is a narrower plan, never
     /// a wrong one, which is the direction to err in.
     fn concurrency(&self, _goal: &Goal, _state: &PlanState, _cap: u32) -> Option<u32> {
+        None
+    }
+
+    /// The goal whose concurrency limit this method needs, if it is going to
+    /// hand one goal to several bots.
+    ///
+    /// `None` — the default — for every method that scatters nothing. A
+    /// converging method returns the goal it will split, which is not always
+    /// the goal it was asked about: `SharedSmelt` is asked for iron *plate*
+    /// and splits iron *ore*, and the seats that bound the split are the ore
+    /// patch's. Returning the goal keeps the method from learning what a seat
+    /// is ([`Method::concurrency`]'s whole point) while still getting the
+    /// number.
+    ///
+    /// Answering also tells the driver that this method converges, so the
+    /// whole subtree beneath it is marked [`GoalSite::converging`] and cannot
+    /// converge again. The two are one answer because they are one decision:
+    /// a method that splits a goal is a convergence point.
+    fn split_probe(&self, _goal: &Goal, _state: &PlanState) -> Option<Goal> {
         None
     }
 
@@ -352,14 +416,15 @@ fn expand_goal(
     }
 
     // Save, run, restore — on every exit path, errors included. A completed
-    // call must leave `depth`, `chain_actor`, `chain` and `top_level` exactly
-    // as it found them even when it fails, or a caller that continues past an
-    // error inherits a corrupted context and a comment claiming that cannot
-    // happen.
+    // call must leave `depth`, `chain_actor`, `chain`, `top_level`,
+    // `concurrency` and `converging` exactly as it found them even when it
+    // fails, or a caller that continues past an error inherits a corrupted
+    // context and a comment claiming that cannot happen.
     let previous_actor = ctx.chain_actor;
     let previous_chain = ctx.chain;
     let previous_top_level = ctx.top_level;
     let previous_concurrency = ctx.concurrency;
+    let previous_converging = ctx.converging;
     if let Some(Holder::Bot(bot) | Holder::Share(bot)) = stated_holder(goal) {
         // The same reconciliation `expand` does for `chain_actor`, applied to
         // the roster a method decomposes with: `SplitAcrossBots` addresses the
@@ -384,6 +449,7 @@ fn expand_goal(
     ctx.chain = previous_chain;
     ctx.top_level = previous_top_level;
     ctx.concurrency = previous_concurrency;
+    ctx.converging = previous_converging;
     result
 }
 
@@ -409,6 +475,7 @@ fn expand_goal_body(
     let site = GoalSite {
         top_level: ctx.top_level,
         in_chain: ctx.chain.is_some(),
+        converging: ctx.converging,
     };
     let method =
         registry
@@ -432,18 +499,46 @@ fn expand_goal_body(
     //
     // Assigned unconditionally rather than left alone, so a nested expansion
     // can never read an ancestor's answer about a different goal.
+    //
+    // The second arm is the one exception the original objection allows for.
+    // A converging method — one that answered `split_probe` — is going to hand
+    // one goal to several bots from *inside* a chain, so it needs the same
+    // number at a site the first arm does not cover; and it names the goal it
+    // will actually split, which need not be the goal it was asked about (a
+    // shared smelt is asked for plate and splits ore). It fires only for a
+    // method that has already decided it is going to read the answer, so the
+    // walk of an ore field is still not bought for a number nobody reads.
+    //
+    // No more holders can ever be wanted than the state has bots, so that is
+    // the ceiling a counting method may stop at — and it is a true ceiling,
+    // not merely a plausible one, because `SplitAcrossBots` refuses a roster
+    // naming a bot the state does not know before it sizes anything. Were that
+    // not so, this would silently narrow a split to the state's roster and
+    // hide the caller's mistake.
+    let cap = ctx.state.bot_ids().len() as u32;
+    let probe = method.split_probe(goal, &ctx.state);
     ctx.concurrency = if site.top_level && !site.in_chain {
-        // No more holders can ever be wanted than the state has bots, so that
-        // is the ceiling a counting method may stop at — and it is a true
-        // ceiling, not merely a plausible one, because `SplitAcrossBots`
-        // refuses a roster naming a bot the state does not know before it
-        // sizes anything. Were that not so, this would silently narrow a
-        // split to the state's roster and hide the caller's mistake.
-        let cap = ctx.state.bot_ids().len() as u32;
         registry.concurrency(goal, &ctx.state, cap)
+    } else if let Some(probe) = &probe {
+        // A wider ceiling than a scatter site's, because a converging method
+        // does not only ask "how many may work at once" — it also has to know
+        // whether the answer is *comfortable*. Its split claims one working
+        // spot per supplier where the solo version claims one in total, and a
+        // claim is never released during an expansion, so a method that
+        // converges on a barely-sufficient count starves whatever the plan
+        // wants to produce next. The largest number it can use is its own
+        // width plus the roster, and its width is at most the roster.
+        registry.concurrency(probe, &ctx.state, cap.saturating_mul(3))
     } else {
         None
     };
+
+    // A method that will scatter this goal is a convergence point, and nothing
+    // beneath it may be one again — see `GoalSite::converging`. Sticky rather
+    // than assigned, so a converging method nested under another (which the
+    // guard is there to prevent in the first place) cannot clear the flag.
+    // Restored by `expand_goal`, like every other driver-owned field.
+    ctx.converging = ctx.converging || probe.is_some();
 
     // A chain welds actions to one runner. Three things ask for that.
     //
@@ -561,16 +656,34 @@ fn expand_goal_body(
     // Inert on its own — a plan with no chains has nothing to reserve — so
     // this is the other half of chaining a share rather than a change in its
     // own right.
-    if let Some(before) = produce_before {
-        for (item, count) in ctx.state.item_totals() {
-            let gained = count.saturating_sub(before.get(&item).copied().unwrap_or(0));
-            if gained > 0 {
-                ctx.state
-                    .reserve(&Holder::Bot(ctx.chain_actor), &item, gained);
-            }
+    reserve_chain_produce(ctx, produce_before);
+    result
+}
+
+/// Book everything a chain just produced to the bot that ran it.
+///
+/// Extracted from `expand_goal_body` so that [`Step::Owned`] — which opens a
+/// chain the body's `chain_on_entry.is_none()` test can never see — pays the
+/// same ledger entry. Without the call there, a supplier chain's output would
+/// look like spare stock to the *taker's* subsequent shortfall arithmetic:
+/// the exact defect the ledger was added for, reintroduced through the new
+/// door.
+///
+/// `produce_before` is `None` when the caller did not open a chain (or when
+/// the roster is one bot, which is exempt — see the caller), and the whole
+/// thing is then a no-op. Reserved against `ctx.chain_actor`, so it must be
+/// called *before* a caller restores that field.
+fn reserve_chain_produce(ctx: &mut ExpansionCtx, produce_before: Option<BTreeMap<ItemId, u32>>) {
+    let Some(before) = produce_before else {
+        return;
+    };
+    for (item, count) in ctx.state.item_totals() {
+        let gained = count.saturating_sub(before.get(&item).copied().unwrap_or(0));
+        if gained > 0 {
+            ctx.state
+                .reserve(&Holder::Bot(ctx.chain_actor), &item, gained);
         }
     }
-    result
 }
 
 /// Walk one method's steps, expanding subgoals, emitting actions and holding
@@ -640,6 +753,63 @@ fn run_steps(
                 }
             }
             Step::Link { from, to, lag } => net.link(from, to, lag),
+            Step::Owned {
+                whose,
+                steps: inner,
+            } => {
+                // A handover names a supplier. `Holder::Anyone` names nobody,
+                // and treating it as "keep the current chain" would silently
+                // turn a convergence back into the welding it exists to undo.
+                let (Holder::Bot(bot) | Holder::Share(bot)) = &whose else {
+                    return Err(PlannerError::UnownedHandover {
+                        holder: whose.to_string(),
+                    });
+                };
+                let bot = *bot;
+                // The same reconciliation `expand` and `expand_goal` make: a
+                // bot the state does not know has no inventory and no
+                // position, and would be planned for as a default one standing
+                // at the origin.
+                if ctx.state.bot(bot).is_none() {
+                    return Err(PlannerError::UnknownBot(bot));
+                }
+
+                // Save, run, restore — on every exit path, errors included,
+                // exactly as `expand_goal` does and for the same reason.
+                let previous_actor = ctx.chain_actor;
+                let previous_chain = ctx.chain;
+                let previous_top_level = ctx.top_level;
+
+                let chain = ctx.chains.next();
+                // Always owned. A `Step::Owned` names a bot; that is the whole
+                // point, and it puts the supplier's chain on the same footing
+                // as a `Holder::Bot` or a `Holder::Share` in the scheduler,
+                // where an owner is a hard constraint with no fallback tier.
+                net.set_chain_owner(chain, bot);
+                ctx.chain_actor = bot;
+                ctx.chain = Some(chain);
+                ctx.top_level = false;
+                // `ctx.converging` is deliberately *not* cleared: a supplier's
+                // own production must not converge again either.
+
+                // The same exemption the enclosing body makes, for the same
+                // reason: with one bot there is no second runner for the
+                // ledger to protect against.
+                let produce_before =
+                    (ctx.state.bot_ids().len() > 1).then(|| ctx.state.item_totals());
+
+                let mut inner_promised: Vec<(Holder, ItemId, u32)> = Vec::new();
+                let result = run_steps(inner, ctx, net, registry, &mut inner_promised);
+                for (whose, item, count) in &inner_promised {
+                    ctx.state.release(whose, item, *count);
+                }
+                reserve_chain_produce(ctx, produce_before);
+
+                ctx.chain_actor = previous_actor;
+                ctx.chain = previous_chain;
+                ctx.top_level = previous_top_level;
+                result?;
+            }
         }
     }
     Ok(())
@@ -1972,5 +2142,219 @@ mod tests {
         fn expand(&self, _g: &Goal, _c: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
             Ok(vec![])
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // `Step::Owned`: a method emitting actions into another bot's chain.
+    // ---------------------------------------------------------------------
+
+    fn two_bot_ctx() -> ExpansionCtx {
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1), BotId(2)]);
+        ExpansionCtx::new(state, BotId(1))
+    }
+
+    /// A bare action: no preconditions, no effects, nobody pinned.
+    fn bare(ctx: &mut ExpansionCtx, label: &str) -> Box<crate::action::Action> {
+        Box::new(crate::action::Action {
+            id: ctx.ids.next(),
+            kind: crate::action::ActionKind::Craft {
+                item: "iron-gear-wheel".into(),
+                count: 1,
+            },
+            pre: vec![],
+            eff: vec![],
+            duration: 10,
+            pinned: None,
+            label: label.into(),
+        })
+    }
+
+    /// An action that puts `count` of `item` into whoever runs it.
+    fn gains(
+        ctx: &mut ExpansionCtx,
+        label: &str,
+        item: &str,
+        count: u32,
+    ) -> Box<crate::action::Action> {
+        let mut action = bare(ctx, label);
+        action.eff = vec![crate::action::Effect::GainItem {
+            who: crate::action::Actor::Role,
+            item: item.into(),
+            count,
+        }];
+        action
+    }
+
+    #[test]
+    fn an_owned_block_puts_its_actions_in_a_chain_owned_by_the_named_bot() {
+        let mut ctx = two_bot_ctx();
+        let mut net = crate::network::ActionNetwork::new();
+        let reg = MethodRegistry::new();
+
+        // The taker's own chain, exactly as `expand_goal_body` would open it.
+        let taker_chain = ctx.chains.next();
+        ctx.chain = Some(taker_chain);
+        net.set_chain_owner(taker_chain, BotId(1));
+
+        let mine = bare(&mut ctx, "the taker acts");
+        let mine_id = mine.id;
+        let theirs = bare(&mut ctx, "the supplier acts");
+        let theirs_id = theirs.id;
+        let steps = vec![
+            Step::Act(mine),
+            Step::Owned {
+                whose: Holder::Share(BotId(2)),
+                steps: vec![Step::Act(theirs)],
+            },
+        ];
+        let mut promised = Vec::new();
+        run_steps(steps, &mut ctx, &mut net, &reg, &mut promised).expect("a handover expands");
+
+        let supplier_chain = net
+            .chain_of(theirs_id)
+            .expect("the supplier's action is chained");
+        assert_eq!(net.chain_of(mine_id), Some(taker_chain));
+        assert_ne!(
+            supplier_chain, taker_chain,
+            "a handover must open a chain of its own, or the scheduler welds it back onto the taker"
+        );
+        assert_eq!(net.owner_of(supplier_chain), Some(BotId(2)));
+        assert_eq!(net.owner_of(taker_chain), Some(BotId(1)));
+    }
+
+    #[test]
+    fn an_owned_block_restores_the_context_however_it_exits() {
+        for failing in [false, true] {
+            let mut ctx = two_bot_ctx();
+            let mut net = crate::network::ActionNetwork::new();
+            // An empty registry claims nothing, so a subgoal is an error.
+            let reg = MethodRegistry::new();
+            let outer_chain = ctx.chains.next();
+            ctx.chain = Some(outer_chain);
+            ctx.top_level = true;
+            ctx.converging = true;
+
+            let inner = if failing {
+                vec![Step::Subgoal(Goal::Have {
+                    item: "coal".into(),
+                    count: 1,
+                    whose: Holder::Anyone,
+                })]
+            } else {
+                vec![]
+            };
+            let steps = vec![Step::Owned {
+                whose: Holder::Share(BotId(2)),
+                steps: inner,
+            }];
+            let mut promised = Vec::new();
+            let result = run_steps(steps, &mut ctx, &mut net, &reg, &mut promised);
+            assert_eq!(result.is_err(), failing, "failing={failing}");
+
+            assert_eq!(ctx.chain_actor, BotId(1), "failing={failing}");
+            assert_eq!(ctx.chain, Some(outer_chain), "failing={failing}");
+            assert!(ctx.top_level, "failing={failing}");
+            // Deliberately *not* restored, and deliberately not cleared: a
+            // supplier's own production must not converge either.
+            assert!(ctx.converging, "failing={failing}");
+        }
+    }
+
+    #[test]
+    fn a_handover_that_names_nobody_is_refused_where_it_was_written() {
+        let mut ctx = two_bot_ctx();
+        let mut net = crate::network::ActionNetwork::new();
+        let reg = MethodRegistry::new();
+        let act = bare(&mut ctx, "whose?");
+        let steps = vec![Step::Owned {
+            whose: Holder::Anyone,
+            steps: vec![Step::Act(act)],
+        }];
+        let mut promised = Vec::new();
+        let err = run_steps(steps, &mut ctx, &mut net, &reg, &mut promised)
+            .expect_err("a handover to nobody is a method bug");
+        assert!(
+            matches!(err, PlannerError::UnownedHandover { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_handover_to_a_bot_the_state_does_not_know_is_refused() {
+        let mut ctx = two_bot_ctx();
+        let mut net = crate::network::ActionNetwork::new();
+        let reg = MethodRegistry::new();
+        let act = bare(&mut ctx, "for a stranger");
+        let steps = vec![Step::Owned {
+            whose: Holder::Share(BotId(9)),
+            steps: vec![Step::Act(act)],
+        }];
+        let mut promised = Vec::new();
+        let err = run_steps(steps, &mut ctx, &mut net, &reg, &mut promised)
+            .expect_err("a bot with no inventory and no position cannot be planned for");
+        assert!(
+            matches!(err, PlannerError::UnknownBot(BotId(9))),
+            "got {err:?}"
+        );
+    }
+
+    /// What a supplier's chain made belongs to that supplier's chain.
+    ///
+    /// The produce ledger fires in `expand_goal_body` only when *that frame*
+    /// opened the chain, which a nested one never does. Without the extracted
+    /// `reserve_chain_produce` call in the `Step::Owned` arm, a supplier's
+    /// output would read as spare stock to the taker's own shortfall
+    /// arithmetic — the exact defect the ledger exists for, coming back through
+    /// the new door.
+    #[test]
+    fn a_supplier_chains_output_is_not_spare_stock_for_the_taker() {
+        let mut ctx = two_bot_ctx();
+        let mut net = crate::network::ActionNetwork::new();
+        let reg = MethodRegistry::new();
+        ctx.chain = Some(ctx.chains.next());
+
+        let act = gains(&mut ctx, "the supplier mines", "iron-ore", 5);
+        let steps = vec![Step::Owned {
+            whose: Holder::Share(BotId(2)),
+            steps: vec![Step::Act(act)],
+        }];
+        let mut promised = Vec::new();
+        run_steps(steps, &mut ctx, &mut net, &reg, &mut promised).expect("expands");
+
+        assert_eq!(
+            ctx.state.inventory_count(BotId(2), "iron-ore"),
+            5,
+            "the ore really is in the supplier's hands"
+        );
+        assert_eq!(
+            ctx.state.available(&Holder::Anyone, "iron-ore"),
+            0,
+            "and it is spoken for: a later goal must not plan against it"
+        );
+        assert_eq!(ctx.state.available(&Holder::Bot(BotId(2)), "iron-ore"), 0);
+    }
+
+    /// The inertness wedge, stated as a test rather than as an argument.
+    ///
+    /// Every nested stated holder this crate emits names `ctx.chain_actor`, so
+    /// until a method emits a `Step::Owned` the driver change cannot move a
+    /// plan. A method that emits none must therefore produce exactly one chain
+    /// for a `Holder::Bot` goal, as it always has.
+    #[test]
+    fn a_method_that_emits_no_owned_step_opens_no_extra_chain() {
+        let mut ctx = two_bot_ctx();
+        let mut net = crate::network::ActionNetwork::new();
+        let reg = MethodRegistry::new();
+        let outer = ctx.chains.next();
+        ctx.chain = Some(outer);
+
+        let first = bare(&mut ctx, "one");
+        let second = bare(&mut ctx, "two");
+        let steps = vec![Step::Act(first), Step::Act(second)];
+        let mut promised = Vec::new();
+        run_steps(steps, &mut ctx, &mut net, &reg, &mut promised).expect("expands");
+
+        let chains: BTreeSet<ChainId> = net.actions().filter_map(|a| net.chain_of(a.id)).collect();
+        assert_eq!(chains, BTreeSet::from([outer]));
     }
 }

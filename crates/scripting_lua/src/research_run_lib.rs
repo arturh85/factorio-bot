@@ -125,15 +125,40 @@ mod tests {
 
     #[test]
     fn a_connected_roster_runs_every_milestone_to_completion() {
-        // Four milestones, each satisfied on the first plan.
-        let lua = harness("{0, 0, 0, 0}", "{1, 2}");
+        const MILESTONES: u32 = 7;
+
+        // Every milestone the shipped ladder declares, each satisfied on the
+        // first plan.
+        //
+        // MILESTONES tracks `scripts/research_run.lua`'s `goals` table and must
+        // be updated with it. Deriving it would be better, but the table is a
+        // Lua local the harness cannot see, and a wrong count here fails loudly
+        // -- which is how this constant was found when the ladder grew from
+        // four rungs to seven.
+        // One scripted zero-step plan per milestone, built from the same
+        // constant the assertion uses. Hand-writing the list is what broke when
+        // the ladder grew: `goal.plan` errors on an unscripted call, so four
+        // entries against seven rungs crashed the run rather than failing the
+        // count, which is a slower thing to read.
+        let plans = format!(
+            "{{{}}}",
+            std::iter::repeat("0")
+                .take(MILESTONES as usize)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let lua = harness(&plans, "{1, 2}");
         lua.load(RESEARCH_RUN_LUA)
             .exec()
             .expect("research_run.lua runs to completion");
         let g = lua.globals();
         let satisfied: mlua::Table = g.get("__milestone_satisfied_calls").unwrap();
-        assert_eq!(satisfied.raw_len(), 4, "all four milestones satisfied");
-        for i in 1..=4u32 {
+        assert_eq!(
+            satisfied.raw_len(),
+            MILESTONES as usize,
+            "every milestone the ladder declares must be satisfied"
+        );
+        for i in 1..=MILESTONES {
             let call: mlua::Table = satisfied.get(i).unwrap();
             assert_eq!(
                 call.get::<String>("reason").unwrap(),

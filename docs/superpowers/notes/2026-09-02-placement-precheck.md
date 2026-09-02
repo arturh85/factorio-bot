@@ -444,7 +444,7 @@ box and `PlacementVerdict::is_durable_refusal` excludes it. The dispatch path
 makes the narrower acting-player-only distinction, and cause six lives in
 exactly that gap.
 
-## Proposed fix (not applied — see "What needs a decision")
+## The fix, applied
 
 Mod-only, and **no Rust change at all**, because the Rust side already filters
 on wording:
@@ -456,7 +456,7 @@ if not surface.can_place_entity(placement_check_args(entproto, entity_position, 
     if position_in_rect(player.position, bb) then
         rcon.print("§player_blocks_placement§")
     elseif character_in_footprint(surface, entproto, pos) then
-        rcon.print("cannot place item '"..item_name.."' because another character is standing in the footprint")
+        rcon.print("cannot place item '"..item_name.."' because a character is standing in the footprint")
     else
         rcon.print("cannot place item '"..item_name.."' because surface.can_place_entity said 'no'")
     end
@@ -508,11 +508,14 @@ character, then the ground.
    is supposed to be the thing that source *cannot* see. Cross-checking one
    against the other at read time would make the ledger's meaning conditional
    and would still believe the refusal once the bot moved on.
-4. **Spacing furnaces further apart in the planner** (option B in the report).
-   It would work for this shape — a 3-tile grid leaves a character-width gap —
-   but it is a policy decision with real costs (more ground, more walking, more
-   search), it only covers furnace rows rather than the general case of a bot
-   standing anywhere, and I would be guessing the constant. Not mine to pick.
+4. **Spacing furnaces further apart in the planner.** It would work for this
+   shape — a 3-tile grid leaves a character-width gap — but it is a policy
+   constant chosen to dodge one symptom, it costs ground, walking and search,
+   it covers only furnace rows while the general case is a bot standing
+   anywhere, and it would make the planner answerable for a distinction the mod
+   was failing to draw. Put to the project owner and rejected, for those
+   reasons; see "Why this transient is common rather than rare" below for what
+   the honest version of that fix would be.
 
 ## What I could not verify without a live run
 
@@ -528,20 +531,140 @@ character, then the ground.
   one. The record shows one occurrence; the geometry says every furnace row is
   a candidate.
 
-## What needs a decision (why the fix is proposed, not applied)
+## Transient or refusal: one concept, and now three call sites
 
-The change belongs in `mods/BotBridge/control.lua`, which is inside this
-session's file boundaries. Its regression test does not: the right home is
-`crates/core/tests/botbridge_placement_material.rs`, which already drives the
-real `control.lua` in a Lua 5.4 interpreter and already asserts the *inverse*
-invariant (`an_unpaid_placement_reads_as_a_material_refusal_not_a_site_refusal`
-checks that a material refusal stays out of the `can_place_entity said 'no'`
-family). The new test is its sibling and needs `stub_place` to grow a
-`can_place_entity` verdict flag and a `find_entities_filtered` returning a
-character.
+This is the sentence the next reader needs, because the whole bug was two paths
+drawing different lines around the same fact.
 
-That file is outside the assigned boundaries and unassigned, and committing a
-behaviour change to the mod with no test — when a test home plainly exists — is
-the half-built outcome the brief rules out. So: permission to touch
-`crates/core/tests/botbridge_placement_material.rs`, or a reassignment of the
-fix to whoever owns it.
+**A character in a footprint is a transient. Everything else the game refuses is
+a fact about the ground.** The planner already re-reads every character from the
+world on every plan (`PlanState`'s `characters` source), so a character is
+precisely the blocker the refusal ledger must *not* carry: the ledger exists for
+what the model cannot see, and a parked bot is something the model sees for free
+on the next plan.
+
+Three places now ask a placement question, and all three must draw that line the
+same way:
+
+| call site | how it draws the line |
+|---|---|
+| `rcon_can_place_entities` (pre-check, mod) | sets `rec.character` for **any** character in the raw collision box |
+| `FactorioRcon::can_place_entities` (pre-check, Rust) | `PlacementVerdict::is_durable_refusal` = `!ok && !character && error.is_none()` |
+| `rcon_place_entity` (dispatch, mod) | acting player → `§player_blocks_placement§`; any other character → wording outside the learned family; ground → the learned wording |
+
+The dispatch path was the odd one out: it recognised only the *acting* player,
+which is a narrower line than the other two draw, and cause six lived in exactly
+that difference. A fourth path asking this question must draw the line at "any
+character", not at "the bot I happen to be holding".
+
+## Tier-1 reschedule survives the new message — checked, not assumed
+
+Recording a parked bot as a durable refusal was the *smaller* half of the
+damage. The larger half is that a recorded refusal **disables the recovery that
+fits**: `recover`'s tier 1 reschedules the same network, which is exactly right
+for a blocker that walks away, and tier 1 is skipped when a failed `Place` sits
+on a refused footprint. So the old behaviour turned "wait and try again" into
+"never here again", which is the wrong answer twice.
+
+The chain was checked link by link, and every link is pinned by a test that
+exists:
+
+1. **The mod's new message is outside the learned family.**
+   `another_bot_in_the_footprint_is_a_transient_not_a_verdict_about_the_ground`
+   (`crates/core/tests/botbridge_placement_material.rs`) asserts the reply does
+   not contain `can_place_entity said 'no'`, is not
+   `§player_blocks_placement§`, and names both the item and a character.
+2. **The ledger has exactly two production writers, and both are guarded.**
+   Enumerated rather than assumed — every other `record_placement_refusal` call
+   in the workspace is inside a `#[cfg(test)]` module. They are
+   `note_placement_refusal` (guarded by the `can_place_entity said 'no'`
+   substring, pinned by `refusals_that_are_not_about_the_site_are_not_remembered`)
+   and `accept_verdicts` (guarded by `is_durable_refusal`, which already
+   excludes characters). Neither can accept the new wording.
+3. **Tier 1 is gated solely on the ledger.** `refused_by_the_game`
+   (`crates/executor/src/recover.rs`) asks `state.is_site_refused` and nothing
+   else — deliberately not `is_area_free`, as its own doc says — and
+   `PlanState::is_site_refused` reads only `self.refused`, populated from the
+   ledger in `from_world`.
+4. **An empty ledger reschedules.** The existing executor control asserts
+   exactly this, on a log whose failure text is `game rejected the command`:
+   with `is_site_refused` false, `recover` answers `Recovery::Rescheduled`;
+   with the refusal recorded, the same log escalates.
+
+So: ledger untouched → `is_site_refused` false → `refused_by_the_game` false →
+tier 1 available. The one thing that would pin it in a single test is adding the
+new wording to
+`refusals_that_are_not_about_the_site_are_not_remembered`'s list in
+`crates/core/src/factorio/rcon.rs`; that file is outside this session's
+boundaries, and the four links above are each pinned without it.
+
+## Why this transient is common rather than rare, and it is not fixed here
+
+Write this down so it is not rediscovered as cause seven.
+
+`method::have` sites furnaces on a **2-tile grid**. A stone furnace's collision
+box is `±0.9`, so two neighbours 2 tiles apart leave a **0.2-tile gap** between
+their boxes. A character is **0.4 tiles wide**. A bot servicing one furnace
+therefore *cannot* stand between it and the next one without spilling into the
+neighbour's footprint — which is precisely what bot 3 did at
+`(-21.47, 23.73)` in run 24, standing east of its own furnace at `[-23, 24]` and
+a third of a tile inside `[-21, 24]`.
+
+So the geometry does not merely permit this transient, it **manufactures** it:
+every furnace row the planner builds has interior sites whose footprints a
+servicing bot must occupy. The fix above makes each occurrence cost a
+reschedule instead of a site, which is the right cost; it does not make the
+occurrences rarer.
+
+Widening the grid was considered and **rejected as the wrong lever**: a 3-tile
+spacing is a constant chosen to dodge one symptom, it costs ground, walking and
+search, it covers only furnace rows while the general case is a bot standing
+anywhere, and it would make the planner responsible for a distinction the mod
+was failing to draw — moving the fix further from the defect rather than nearer.
+If furnace-row throughput is ever measured and the reschedules show up in it,
+the honest fix is a stand-point model (where a bot parks after servicing a
+machine), not a magic number.
+
+## Test summary for this section
+
+**4 new tests**, all in `crates/core/tests/botbridge_placement_material.rs`,
+driving the real `control.lua` in a Lua 5.4 interpreter against a stub whose
+`find_entities_filtered` intersects real bounding boxes and records the area it
+was asked for.
+
+- `another_bot_in_the_footprint_is_a_transient_not_a_verdict_about_the_ground`
+  — the defect. Also pins that the box scanned is the **raw** collision box
+  (`-21.90,23.10,-20.10,24.90`), not the floor/ceil-expanded one, which is the
+  same choice `rcon_can_place_entities` makes.
+- `a_refusal_with_no_character_in_the_footprint_is_still_about_the_ground` —
+  the control that stops the fix swallowing the real thing.
+- `a_tree_in_the_footprint_is_a_verdict_about_the_ground` — forest siting is
+  one of the five causes already paid for; a tree must still be learned.
+- `the_acting_player_still_gets_the_walk_aside_sentinel` — the branch order,
+  asserted with another character in the box as well, because walking the actor
+  aside beats a reschedule and must win.
+
+The coordinates are run 24's own: the site `[-21, 24]`, the acting bot at
+`(-16.39, 20.46)`, the parked bot at `(-21.47, 23.73)`.
+
+**Verified red first.** Before the mod change, exactly one of the four failed —
+the defect test — and it failed on the first assertion with the production
+wording quoted back:
+
+```
+a bot standing here says nothing about the ground. ...
+Got "cannot place item 'stone-furnace' because surface.can_place_entity said 'no'"
+```
+
+The other three passed before and after, which is what makes them controls
+rather than three more copies of the defect test.
+
+## Gates for this section
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --workspace --all-features --all-targets -- --deny warnings` — exit 0.
+- `cargo test --workspace` — exit 0, **1285 passed, 0 failed**.
+
+All through `nix develop -c`. The tree also carried another agent's uncommitted
+edits to `crates/scripting_lua/src/globals/{record.rs,goal/run.rs}` while these
+ran; the gates were green with them present, and neither is in this commit.

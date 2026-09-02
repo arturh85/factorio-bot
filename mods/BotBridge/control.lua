@@ -2605,9 +2605,46 @@ function rcon_place_entity(player_id, item_name, entity_position, direction)
 	end
 
 	if not surface.can_place_entity(placement_check_args(entproto, entity_position, direction, player.force)) then
-		local bb = add_to_bounding_box(expand_rect_floor_ceil(entproto.collision_box), {x = entity_position[1], y = entity_position[2]})
+		local pos = {x = entity_position[1], y = entity_position[2]}
+		local bb = add_to_bounding_box(expand_rect_floor_ceil(entproto.collision_box), pos)
+		-- **Three answers, not two, and the order is deliberate.**
+		--
+		-- `can_place_entity` collides with characters like anything else, but
+		-- a character is the one blocker that leaves on its own. Reporting one
+		-- as a verdict about the ground is worse than reporting nothing: the
+		-- generic wording below is what `note_placement_refusal`
+		-- (crates/core/src/factorio/rcon.rs) remembers, and a remembered
+		-- refusal ALSO suppresses `recover`'s tier-1 reschedule
+		-- (`refused_by_the_game`, gated on `PlanState::is_site_refused`) --
+		-- which is exactly the recovery a blocker that walks away needs. So
+		-- the false ledger entry costs the site, and the suppressed retry
+		-- costs the milestone.
+		--
+		-- Run 24 (`run-1788347034-00981`) is what that costs. Bot 4 was
+		-- refused a stone furnace at `[-21, 24]`; bot 3 was parked at
+		-- `(-21.47, 23.73)`, a third of a tile inside the footprint, having
+		-- been left there by its own furnace at `[-23, 24]`. The site was
+		-- fenced off for the rest of the run and the next plan fled to
+		-- `[-26, 14]`.
+		--
+		-- Order:
+		--   1. the ACTING player -- the RCON layer can walk it around eight
+		--      compass points and retry, which beats a reschedule, so this
+		--      case must win even when another character is in the box too;
+		--   2. any OTHER character -- a transient, reported in wording
+		--      deliberately outside the `can_place_entity said 'no'` family so
+		--      nothing durable is learned and tier 1 stays available;
+		--   3. the ground -- the durable fact the refusal memory exists for.
+		--
+		-- (2) is the same distinction `rcon_can_place_entities` already draws
+		-- with `rec.character`, which the Rust side reads as
+		-- `PlacementVerdict::is_durable_refusal`. Two call sites, one concept:
+		-- any character, not just the acting one, is a transient. A third path
+		-- asking this question must draw it the same way.
 		if position_in_rect(player.position, bb) then
 			rcon.print("§player_blocks_placement§")
+		elseif character_in_footprint(surface, entproto, pos) then
+			rcon.print("cannot place item '"..item_name.."' because a character is standing in the footprint")
 		else
 			rcon.print("cannot place item '"..item_name.."' because surface.can_place_entity said 'no'")
 		end
@@ -2705,6 +2742,24 @@ function placement_check_args(entproto, position, direction, force)
 		force = force,
 		build_check_type = defines.build_check_type.manual,
 	}
+end
+
+-- Whether any character stands in the footprint `can_place_entity` just
+-- tested.
+--
+-- The **raw** collision box, not the floor/ceil-expanded one
+-- `rcon_place_entity` uses for its acting-player test: the expanded box
+-- reaches half a tile past what the game actually judged and would pull in a
+-- bot standing legitimately clear, turning a real ground refusal into a
+-- transient nobody learns from. `rcon_can_place_entities` scans the same raw
+-- box for the same reason.
+--
+-- Filtered at the game by `type`, which is safe here in a way it is not for
+-- the queries that feed `EntityGraph`: this asks only whether a character is
+-- present, so nothing about trees is load-bearing.
+function character_in_footprint(surface, entproto, position)
+	local bb = add_to_bounding_box(entproto.collision_box, position)
+	return #surface.find_entities_filtered{ area = bb, type = "character" } > 0
 end
 
 -- Answers, for a batch of candidate placements, whether the game would allow

@@ -408,3 +408,200 @@ fn no_force_build_reaches_the_game_as_defines_build_mode_normal() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// A refused placement: is the refusal about the *ground*, or about a bot that
+// is standing there and will walk away?
+// ---------------------------------------------------------------------------
+
+/// The site run 24 (`run-1788347034-00981`) was refused at, and the two bot
+/// positions the run's `samples.jsonl` recorded eleven ticks before the
+/// dispatch. Real coordinates rather than invented ones, so a reader can put
+/// the test beside the record.
+const SITE: &str = "{-21, 24}";
+/// Bot 4, the acting bot: nowhere near the footprint.
+const ACTOR_AWAY: (f64, f64) = (-16.39, 20.46);
+/// Bot 3, parked where servicing its own furnace at `[-23, 24]` left it.
+/// A character's collision box is `±0.2` by `±0.3`, so this box is
+/// `[-21.67, -21.27] x [23.43, 24.03]` — inside the furnace footprint
+/// `[-21.9, -20.1] x [23.1, 24.9]` by a third of a tile in x.
+const PARKED_BOT: &str = r#"
+    { name = "character", type = "character", bounding_box = {
+        left_top = { x = -21.67, y = 23.43 },
+        right_bottom = { x = -21.27, y = 24.03 } } }
+"#;
+/// Something that is *not* going to walk away, in the same footprint.
+const TREE: &str = r#"
+    { name = "tree-01", type = "tree", bounding_box = {
+        left_top = { x = -21.6, y = 23.6 },
+        right_bottom = { x = -21.2, y = 24.0 } } }
+"#;
+
+/// A stub whose `can_place_entity` refuses, so what is under test is the
+/// branch that decides *what kind* of refusal to report.
+///
+/// `occupants` is Lua source for the list the surface holds;
+/// `find_entities_filtered` intersects them against the area it is given,
+/// exactly as the real one does, and records that area so the test can pin
+/// which box was asked about.
+fn stub_refused_place(player_position: (f64, f64), occupants: &str) -> String {
+    format!(
+        r#"
+        _filter_area = "not called"
+        local occupants = {{ {occupants} }}
+        local surface = {{
+            can_place_entity = function(args) return false end,
+            create_entity = function(args) error("must not build a refused site") end,
+            find_entity = function(name, pos) return nil end,
+            find_entities_filtered = function(args)
+                local a = args.area
+                _filter_area = string.format("%.2f,%.2f,%.2f,%.2f",
+                    a.left_top.x, a.left_top.y, a.right_bottom.x, a.right_bottom.y)
+                local hits = {{}}
+                for _, e in ipairs(occupants) do
+                    if args.type ~= nil and e.type ~= args.type then goto continue end
+                    local b = e.bounding_box
+                    if b.left_top.x <= a.right_bottom.x and b.right_bottom.x >= a.left_top.x
+                        and b.left_top.y <= a.right_bottom.y and b.right_bottom.y >= a.left_top.y then
+                        hits[#hits + 1] = e
+                    end
+                    ::continue::
+                end
+                return hits
+            end,
+        }}
+        local player = {{
+            name = "bot4",
+            position = {{ x = {px}, y = {py} }},
+            force = "player",
+            surface = surface,
+            get_item_count = function(name) return 1 end,
+            remove_item = function(items) error("must not charge for a refused site") end,
+        }}
+        prototypes = {{ item = {{
+            ["stone-furnace"] = {{ place_result = {{
+                name = "stone-furnace",
+                collision_box = {{
+                    left_top = {{ x = -0.9, y = -0.9 }},
+                    right_bottom = {{ x = 0.9, y = 0.9 }},
+                }},
+            }} }},
+        }} }}
+        game = {{
+            tick = {tick},
+            players = {{ player }},
+            forces = {{ player = {{ print = noop }} }},
+        }}
+    "#,
+        px = player_position.0,
+        py = player_position.1,
+        tick = STUB_TICK,
+    )
+}
+
+fn refuse(player_position: (f64, f64), occupants: &str) -> Lua {
+    run(
+        &stub_refused_place(player_position, occupants),
+        STUB_SERIALISE,
+        &format!(r#"rcon_place_entity(1, "stone-furnace", {SITE}, 0)"#),
+    )
+}
+
+fn string_global(lua: &Lua, name: &str) -> String {
+    lua.globals()
+        .get(name)
+        .unwrap_or_else(|err| panic!("reading {name}: {err}"))
+}
+
+/// **The defect run 24 ended on, and the reason it cost a site rather than a
+/// retry.**
+///
+/// `can_place_entity` collides with characters like anything else, and the
+/// mod's three-way branch used to recognise only the *acting* player
+/// (`§player_blocks_placement§`). Any other bot standing in the footprint fell
+/// through to the generic `can_place_entity said 'no'` — which is the exact
+/// substring `note_placement_refusal` (`crates/core/src/factorio/rcon.rs`)
+/// matches. So a bot parked for a few thousand ticks put open ground into
+/// `FactorioWorld::placement_refusals`, which is never expired.
+///
+/// The ledger entry is the smaller half of the cost. `recover`'s tier 1
+/// reschedules the same network, which is *precisely* the recovery a blocker
+/// that walks away needs — and tier 1 is skipped when the failed `Place` sits
+/// on a refused footprint (`refused_by_the_game`, gated on
+/// `PlanState::is_site_refused`). Recording this refusal therefore disabled
+/// the one recovery tier that fits it.
+///
+/// This is the same distinction the pre-check path already draws with
+/// `rec.character` / [`PlacementVerdict::is_durable_refusal`]: **any**
+/// character, not just the acting one, is a transient rather than a fact about
+/// the ground. Two call sites, one concept.
+#[test]
+fn another_bot_in_the_footprint_is_a_transient_not_a_verdict_about_the_ground() {
+    let lua = refuse(ACTOR_AWAY, PARKED_BOT);
+    let line = one_line_reply(&lua);
+    assert!(
+        !line.contains("can_place_entity said 'no'"),
+        "a bot standing here says nothing about the ground. Matching that \
+         wording fences the planner out of a legal site for the rest of the \
+         run AND suppresses the tier-1 reschedule that would have worked. \
+         Got {line:?}"
+    );
+    assert_ne!(
+        line, "§player_blocks_placement§",
+        "that sentinel makes the RCON layer walk the ACTING bot around eight \
+         compass points; the acting bot is not the blocker here, so the walk \
+         cannot help"
+    );
+    assert!(
+        line.contains("cannot place item 'stone-furnace'") && line.contains("character"),
+        "the refusal must name the item and say a character is in the way, so \
+         a reader of the run log can tell it from a ground verdict. Got {line:?}"
+    );
+    assert_eq!(
+        string_global(&lua, "_filter_area"),
+        "-21.90,23.10,-20.10,24.90",
+        "the box scanned must be the raw collision box the game just tested, \
+         not the floor/ceil-expanded one the acting-player check uses — the \
+         same choice `rcon_can_place_entities` makes and for the same reason"
+    );
+}
+
+/// The control that keeps the fix from swallowing the real thing: an empty
+/// footprint is still a verdict about the ground, and still enters the ledger.
+#[test]
+fn a_refusal_with_no_character_in_the_footprint_is_still_about_the_ground() {
+    let line = one_line_reply(&refuse(ACTOR_AWAY, ""));
+    assert!(
+        line.contains("cannot place item 'stone-furnace'")
+            && line.contains("can_place_entity said 'no'"),
+        "with nothing standing there the game's refusal is the durable fact \
+         the refusal memory exists to keep. Got {line:?}"
+    );
+}
+
+/// A tree is not a transient. Only `type == \"character\"` walks away on its
+/// own, so anything else must keep the wording the planner learns from.
+#[test]
+fn a_tree_in_the_footprint_is_a_verdict_about_the_ground() {
+    let line = one_line_reply(&refuse(ACTOR_AWAY, TREE));
+    assert!(
+        line.contains("can_place_entity said 'no'"),
+        "forest siting is one of the five causes already paid for; a tree must \
+         still fence the planner off this footprint. Got {line:?}"
+    );
+}
+
+/// The acting player keeps its existing, better recovery, and keeps it even
+/// when another character is in the box too. The branch order is deliberate:
+/// walking the actor aside and retrying beats a reschedule, so it is tested
+/// first.
+#[test]
+fn the_acting_player_still_gets_the_walk_aside_sentinel() {
+    let actor_in_the_box = (-21.0, 24.0);
+    assert_eq!(
+        one_line_reply(&refuse(actor_in_the_box, PARKED_BOT)),
+        "§player_blocks_placement§",
+        "the acting bot in its own footprint is the case the RCON layer can \
+         fix by walking it, and that must win over the reschedule path"
+    );
+}

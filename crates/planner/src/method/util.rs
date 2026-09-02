@@ -5,7 +5,9 @@ use crate::ids::Ticks;
 use crate::state::PlanState;
 use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::num_traits::ToPrimitive;
-use factorio_bot_core::types::{FactorioRecipe, FactorioTechnology, Position, ResearchTrigger};
+use factorio_bot_core::types::{
+    Direction, FactorioRecipe, FactorioTechnology, Position, Rect, ResearchTrigger,
+};
 
 const TICKS_PER_SECOND: f64 = 60.0;
 
@@ -394,6 +396,84 @@ pub fn free_area_near_where(
     None
 }
 
+/// An axis-aligned box, rotated about its own origin into `direction`.
+///
+/// A collision box is written for a north-facing entity; a boiler is 3x2 tiles
+/// facing north and **2x3 facing east**, and a placement checked against the
+/// unrotated box is checking the wrong ground. Every `Place` this planner has
+/// ever emitted carried direction 0, so nothing needed this until the power
+/// plant, whose boiler and steam engine are turned by whichever way the
+/// shoreline faces.
+///
+/// Rotating the two stated corners is enough: a 90-degree rotation maps a
+/// rectangle onto a rectangle and takes opposite corners to opposite corners,
+/// so the min/max of those two images spans the image of all four.
+///
+/// `None` for the eight half-diagonals — [`Position::turn`] names no rotation
+/// for them, and a building never stands on one.
+pub fn rotated_collision_box(box_: &Rect, direction: Direction) -> Option<Rect> {
+    let a = box_.left_top.turn(direction)?;
+    let b = box_.right_bottom.turn(direction)?;
+    Some(Rect::new(
+        &Position::new(a.x().min(b.x()), a.y().min(b.y())),
+        &Position::new(a.x().max(b.x()), a.y().max(b.y())),
+    ))
+}
+
+/// Entities whose build grid their collision box does not predict.
+///
+/// Factorio snaps a building by `tile_width`/`tile_height`, which *default* to
+/// the collision box's extents rounded up — that default is exactly what
+/// [`tile_alignment`] computes. A prototype may state them outright, and then
+/// the collision box says nothing about the grid. **The mod sends neither
+/// field**: `FactorioEntityPrototype` carries `collision_box`, mining and
+/// crafting numbers and nothing about grids. So the exceptions are written
+/// down here where they can be checked, the same discipline as
+/// `crate::state`'s pole tables and [`COAL_BURN_TICKS`].
+///
+/// [`COAL_BURN_TICKS`]: crate::method::have::COAL_BURN_TICKS
+///
+/// There is exactly one in vanilla 2.1 among the entities this planner places.
+/// `offshore-pump` declares `tile_width = 1, tile_height = 1`
+/// (`base/prototypes/entity/entities.lua`, checked in this repo's
+/// `workspace/data`) against a collision box of 1.195 x 1.344 tiles, which
+/// would otherwise round up to 2 x 2. The difference is not cosmetic: an even
+/// extent puts the entity's centre on a tile **corner**, and the pump's own
+/// `tile_buildability_rules` — one ground tile beneath it, water ahead of it —
+/// cannot be met from a corner by any shoreline that exists.
+fn explicit_tile_extent(entity: &str) -> Option<(i64, i64)> {
+    match entity {
+        "offshore-pump" => Some((1, 1)),
+        _ => None,
+    }
+}
+
+/// Where on the tile grid `entity`'s centre belongs when it faces `direction`.
+///
+/// [`tile_alignment`] is this facing north, and every caller that places an
+/// unrotated entity should keep using that.
+pub fn tile_alignment_facing(state: &PlanState, entity: &str, direction: Direction) -> (f64, f64) {
+    // `ceil` and not `round`: an entity 2.3984 tiles across occupies three
+    // tiles, not two. The tiny epsilon keeps a box that is exactly `n` tiles
+    // wide -- which the binary-fraction prototype numbers really can be --
+    // from ceiling to `n + 1` on float noise.
+    let tiles = |extent: f64| (extent - 1. / 512.).ceil() as i64;
+    let parity = |tiles: i64| if tiles.rem_euclid(2) == 0 { 0. } else { 0.5 };
+    let swapped = matches!(direction, Direction::East | Direction::West);
+
+    if let Some((w, h)) = explicit_tile_extent(entity) {
+        let (w, h) = if swapped { (h, w) } else { (w, h) };
+        return (parity(w), parity(h));
+    }
+    let Some(prototype) = state.base().entity_prototypes.get(entity) else {
+        return (0., 0.);
+    };
+    let box_ = &prototype.collision_box;
+    let (w, h) = (tiles(box_.width()), tiles(box_.height()));
+    let (w, h) = if swapped { (h, w) } else { (w, h) };
+    (parity(w), parity(h))
+}
+
 /// Where on the tile grid `entity`'s centre belongs, as an offset to add to an
 /// integer tile coordinate: `0.0` or `0.5` on each axis.
 ///
@@ -411,19 +491,7 @@ pub fn free_area_near_where(
 /// placement is refused by `Condition::AreaFree` on the same missing prototype
 /// anyway.
 pub fn tile_alignment(state: &PlanState, entity: &str) -> (f64, f64) {
-    let Some(prototype) = state.base().entity_prototypes.get(entity) else {
-        return (0., 0.);
-    };
-    let axis = |extent: f64| {
-        // `ceil` and not `round`: an entity 2.3984 tiles across occupies three
-        // tiles, not two. The tiny epsilon keeps a box that is exactly `n`
-        // tiles wide -- which the binary-fraction prototype numbers really can
-        // be -- from ceiling to `n + 1` on float noise.
-        let tiles = (extent - 1. / 512.).ceil() as i64;
-        if tiles.rem_euclid(2) == 0 { 0. } else { 0.5 }
-    };
-    let box_ = &prototype.collision_box;
-    (axis(box_.width()), axis(box_.height()))
+    tile_alignment_facing(state, entity, Direction::North)
 }
 
 /// Ingredients of `item`, or an empty vector when the recipe has none.

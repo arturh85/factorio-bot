@@ -536,6 +536,7 @@ mod tests {
             pre: vec![Condition::AreaFree {
                 pos: pos.clone(),
                 entity: "stone-furnace".into(),
+                direction: 0,
             }],
             eff: vec![],
             duration: 30,

@@ -179,6 +179,13 @@ impl std::error::Error for PlanRefusal {}
 ///   never told about the technology, and both are broken inputs rather than
 ///   verdicts. `supervisor.lua` has named "an unknown item or technology" a
 ///   construction error since it was written, and this keeps that promise.
+/// - The three `PowerPlant*` variants -- verdicts for the same reason
+///   `ResearchNeedsPower` is one, and now the ones a caller actually sees:
+///   since the plant landed, an unpowered world is answered by *building* a
+///   power plant, so what reaches a script is "there is no water in reach",
+///   "the water is too far to carry a plant to" or "no shoreline here has room
+///   for one". All three are facts about the map, and a different map makes
+///   them false.
 fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
     use miette::Diagnostic;
 
@@ -186,6 +193,9 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         PlannerError::NoApplicableMethod { .. }
         | PlannerError::NoRoomToWork { .. }
         | PlannerError::ResearchNeedsPower { .. }
+        | PlannerError::PowerPlantNeedsWater { .. }
+        | PlannerError::PowerPlantTooFarFromWater { .. }
+        | PlannerError::PowerPlantNeedsShore { .. }
         | PlannerError::UnsupportedResearchTrigger { .. }
         | PlannerError::SelfUnlockingResearchTrigger { .. }
         | PlannerError::PreconditionUnsatisfied { .. }
@@ -2084,15 +2094,33 @@ mod tests {
     /// recognisable -- it carries the planner's own diagnostic code, so a loop
     /// spanning milestones can tell "this world cannot do that" from "this
     /// planner is broken" without matching on message text.
+    ///
+    /// **The refusal this reproduces has moved, and that is the point.** Since
+    /// the planner learned to build a power plant, an unpowered world is
+    /// answered by building one; what a script can still be told is that the
+    /// *water* is out of reach. So the bot is put 80 tiles from the fixture's
+    /// lake -- far enough to fail the 64-tile siting bound, near enough that
+    /// the refusal can name the distance -- and the code checked is
+    /// `power_plant_too_far_from_water`. The classification seam this test
+    /// exists for is unchanged.
     #[tokio::test]
-    async fn a_research_goal_with_no_power_raises_a_recognisable_refusal() {
-        use factorio_bot_core::types::FactorioForce;
+    async fn a_research_that_cannot_reach_the_water_raises_a_recognisable_refusal() {
+        use factorio_bot_core::types::{FactorioForce, PlayerChangedPositionEvent, Position};
 
         let world = fixture_world();
         let force: FactorioForce = factorio_bot_core::serde_json::from_str(RESEARCH_FORCE_JSON)
             .expect("the research force fixture must parse");
         world.update_force(force).expect("update_force");
         seed_players(&world, &[1]);
+        // `fixture_world`'s lake is the 4x4 block of tiles at (38..=41) on
+        // both axes. From here it is ~80 tiles away: visible, and too far to
+        // carry a power plant to.
+        world
+            .player_changed_position(PlayerChangedPositionEvent {
+                player_id: 1,
+                position: Position::new(-40., 40.),
+            })
+            .expect("moving a seeded player cannot fail");
 
         let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
         lua.set_app_data(crate::lua_runner::PendingWork::default());
@@ -2121,11 +2149,11 @@ mod tests {
         let result: LuaTable = lua.globals().get("result").expect("result");
         assert!(
             !result.get::<bool>("ok").expect("ok"),
-            "a lab with no power cannot be planned; the call must not succeed"
+            "a plant that cannot be sited cannot be planned; the call must not succeed"
         );
         let text: String = result.get("text").expect("text");
         assert!(
-            text.contains("needs a lab with 60 kW"),
+            text.contains("the nearest water is"),
             "the planner's own sentence must survive to the script: {text}"
         );
         assert_eq!(
@@ -2133,13 +2161,13 @@ mod tests {
                 .get::<Option<String>>("code")
                 .expect("code")
                 .as_deref(),
-            Some("planner::research_needs_power"),
+            Some("planner::power_plant_too_far_from_water"),
             "the refusal must be recognisable by the planner's own code, \
              not by matching the message: {text}"
         );
         let message: String = result.get("message").expect("message");
         assert!(
-            message.starts_with("automation needs a lab"),
+            message.starts_with("the nearest water is"),
             "the carried message is the planner's sentence, unprefixed, so a \
              report line can put its own word in front of it: {message}"
         );

@@ -44,6 +44,7 @@ use crate::action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot}
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::ids::{ActionId, BotId, Ticks};
+use crate::method::power::{plan_plant, plant_steps};
 use crate::method::util::{
     CRAFTING_CATEGORY, RecipeGate, SMELTING_CATEGORY, free_area_near, free_area_near_where,
     ingredients_of, mining_ticks, nearest_resource_tile, output_per_craft, recipe_for, recipe_gate,
@@ -280,10 +281,10 @@ impl Method for AlreadySatisfied {
 pub const COAL_BURN_TICKS: Ticks = 2666;
 
 /// Time to put items into or take them out of a machine.
-const TRANSFER_TICKS: Ticks = 10;
+pub(crate) const TRANSFER_TICKS: Ticks = 10;
 
 /// Time to place an entity.
-const PLACE_TICKS: Ticks = 30;
+pub(crate) const PLACE_TICKS: Ticks = 30;
 
 /// Smelt the shortfall in a stone furnace.
 pub struct Smelt;
@@ -503,6 +504,7 @@ fn smelt_steps(
             Condition::AreaFree {
                 pos: pos.clone(),
                 entity: furnace_entity.clone(),
+                direction: 0,
             },
             Condition::HasItem {
                 who: Actor::Role,
@@ -1126,7 +1128,7 @@ const LAB: &str = "lab";
 /// Written down rather than read from the world because the mod does not send
 /// `energy_usage` — see [`crate::state::PlanState::electric_supply_kw`] for the
 /// same gap on the generation side. 60 kW is the shipped 2.1 figure.
-const LAB_POWER_KW: f64 = 60.0;
+pub(crate) const LAB_POWER_KW: f64 = 60.0;
 
 /// How far from the acting bot the method looks for a lab that is already
 /// standing, and for the power to run one, in tiles.
@@ -1341,7 +1343,39 @@ impl Method for Researched {
             .bot(ctx.chain_actor)
             .map(|b| b.position.clone())
             .unwrap_or_default();
-        let site = lab_site(&ctx.state, &from, name)?;
+        // Where this research will happen, and — since the power plant — how
+        // it gets powered if nothing already does.
+        //
+        // `lab_site` refuses when the plan cannot show 60 kW. That refusal is
+        // now the *trigger* for building a plant rather than the end of the
+        // road: an offshore pump on a shoreline, three pipes, a boiler, a
+        // steam engine and a pole, from `crate::method::power`. The plant
+        // reserves its own ground in `ctx.state` as it emits each `Place`, so
+        // the second `lab_site` call reads a world that already has 900 kW in
+        // it and sites the lab inside the new pole's supply area.
+        //
+        // **Asked again from the pole, not from the bot.** Both searches are
+        // bounded at 64 tiles and the plant itself may be up to 64 tiles from
+        // the bot, so re-asking from where the bot is standing could put a
+        // plant just built outside the lab's own reach. The lab follows the
+        // plant.
+        //
+        // Only `ResearchNeedsPower` is caught. Any other refusal — an
+        // unsatisfiable site, an unknown technology — means something other
+        // than power is missing, and building a power plant would not help.
+        let mut power_links: Vec<ActionId> = Vec::new();
+        let site = match lab_site(&ctx.state, &from, name) {
+            Ok(site) => site,
+            Err(PlannerError::ResearchNeedsPower { .. }) => {
+                let plant = plan_plant(&ctx.state, &from)?;
+                let anchor = plant.pole.clone();
+                let (built, links) = plant_steps(ctx, &plant);
+                steps.extend(built);
+                power_links = links;
+                lab_site(&ctx.state, &anchor, name)?
+            }
+            Err(other) => return Err(other),
+        };
 
         let build = ctx
             .state
@@ -1388,6 +1422,7 @@ impl Method for Researched {
                     Condition::AreaFree {
                         pos: site.pos.clone(),
                         entity: LAB.into(),
+                        direction: 0,
                     },
                     Condition::HasItem {
                         who: Actor::Role,
@@ -1543,7 +1578,7 @@ impl Method for Researched {
         // the research starts, because no effect of an insert satisfies any
         // condition of the research. Inference cannot draw this edge; the
         // method holds both ids, so it states it.
-        for id in insert_ids {
+        for id in insert_ids.into_iter().chain(power_links) {
             steps.push(Step::Link {
                 from: id,
                 to: research_id,
@@ -2182,6 +2217,37 @@ mod tests {
         state
     }
 
+    /// `world_with_technologies()` with **no** power standing in it, and one
+    /// wood in the acting bot's pocket.
+    ///
+    /// The fixture world carries a 4x4 lake centred on (40, 40), so this is a
+    /// world where the plan has to *build* its power rather than read it.
+    ///
+    /// The wood is not decoration. `small-electric-pole` is `wood 1 +
+    /// copper-cable 2`, the planner **cannot make wood** — `Mine` sources only
+    /// `EntityGraph::resources`, which `add` fills for `entity_type ==
+    /// "resource"`, and trees are obstacles — and every bot the Lua runner
+    /// starts carries exactly one, confirmed across all 22 archived runs'
+    /// `samples.jsonl` and in `crates/core/tests/live-2.1.17-players.json`.
+    /// The shared fixture has no players at all, so its bots start empty and
+    /// the one wood has to be put there for the fixture to model a real
+    /// roster. That single item is also the **hard lifetime cap**: four bots,
+    /// four wood, eight poles ever.
+    fn unpowered_lakeside_state(bots: &[BotId]) -> PlanState {
+        let mut state =
+            PlanState::from_world(Arc::new(crate::test_world::world_with_technologies()), bots);
+        for bot in bots {
+            Effect::GainItem {
+                who: Actor::Role,
+                item: "wood".into(),
+                count: 1,
+            }
+            .apply(&mut state, *bot)
+            .expect("seeding an inventory cannot fail");
+        }
+        state
+    }
+
     /// The steps `Researched` emits for `tech`, without running the driver
     /// over them. Asserting a bill of materials against the network the
     /// subgoals eventually expand into would be asserting it against the
@@ -2793,6 +2859,18 @@ mod tests {
     /// This is the whole point of the rewrite: run 30 spent 85,030 ticks on a
     /// milestone that could not close, and the only thing in the record saying
     /// so was a `research_progress` of `0.0` that nobody was watching.
+    ///
+    /// **Asked of `lab_site` and no longer of `expand`.** Since the power
+    /// plant landed, `expand` answers this refusal by *building* a plant, so
+    /// the only world in which it still reaches a caller is one where the
+    /// plant cannot be built either — and then the refusal a caller sees names
+    /// the water, not the kilowatts (see
+    /// `a_research_with_no_water_anywhere_refuses_for_want_of_water`). What is
+    /// pinned here is the thing that has not changed and must not: an
+    /// unpowered world does not get a lab sited on bare ground. `lab_site` is
+    /// the trigger for the plant, so a `lab_site` that quietly stopped
+    /// refusing would stop the plant being built at all *and* put the lab back
+    /// where run 30 had it.
     #[test]
     fn research_refuses_when_the_lab_would_have_no_power() {
         let bots = [BotId(1)];
@@ -2801,13 +2879,9 @@ mod tests {
             Arc::new(crate::test_world::world_with_technologies()),
             &bots,
         );
-        let err = expand(
-            &[Goal::Researched("automation".into())],
-            &s,
-            &registry_for(&bots),
-            BotId(1),
-        )
-        .expect_err("an unpowered world must refuse, not plan a dead lab");
+        let err = lab_site(&s, &Position::new(0., 0.), "automation")
+            .err()
+            .expect("an unpowered world must refuse, not site a dead lab");
         let PlannerError::ResearchNeedsPower {
             technology,
             needed_kw,
@@ -2828,6 +2902,9 @@ mod tests {
     /// under-supplied network does not run slowly, it reads as completely
     /// dead, so a check that stopped at "a pole reaches it" would pass on the
     /// base that produced run 30's `generated_kw = 0.0`.
+    ///
+    /// Asked of `lab_site` for the same reason as the test above: `expand`
+    /// now answers a bare pole by building the generator it is missing.
     #[test]
     fn a_pole_with_nothing_generating_is_not_power() {
         let bots = [BotId(1)];
@@ -2840,13 +2917,9 @@ mod tests {
             position: Position::new(10.5, 10.5),
             ..Default::default()
         });
-        let err = expand(
-            &[Goal::Researched("automation".into())],
-            &s,
-            &registry_for(&bots),
-            BotId(1),
-        )
-        .expect_err("a pole is not a generator");
+        let err = lab_site(&s, &Position::new(0., 0.), "automation")
+            .err()
+            .expect("a pole is not a generator");
         assert!(
             matches!(err, PlannerError::ResearchNeedsPower { .. }),
             "got {err:?}"
@@ -6920,6 +6993,282 @@ mod tests {
             net.chain_of(inserts[0].id).and_then(|c| net.owner_of(c)),
             Some(BotId(1)),
             "and it must stay the short bot's, not move to whoever is cheapest"
+        );
+    }
+
+    /// **Rung 7, end to end.** A world with a lake, no power and no lab must
+    /// now plan the whole thing: pump, pipes, boiler, engine, pole, coal in
+    /// the boiler, lab in the pole's supply area, packs in the lab, research.
+    ///
+    /// This is the milestone that has never once been satisfied in this
+    /// project's history. Before the plant it refused with
+    /// `automation needs a lab with 60 kW of electric supply, and the plan can
+    /// show only 0 kW`.
+    #[test]
+    fn rung_seven_builds_the_power_it_needs() {
+        let bots = [BotId(1)];
+        let s = unpowered_lakeside_state(&bots);
+        let net = expand(
+            &[Goal::Researched("automation".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a world with a lake can build its own power");
+
+        let placed: Vec<&str> = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Place { entity } => Some(entity.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        for wanted in [
+            "offshore-pump",
+            "pipe",
+            "boiler",
+            "steam-engine",
+            "small-electric-pole",
+            "lab",
+        ] {
+            assert!(
+                placed.contains(&wanted),
+                "the plan must place a {wanted}; it places {placed:?}"
+            );
+        }
+        assert_eq!(
+            placed.iter().filter(|n| **n == "pipe").count(),
+            crate::method::power::PIPE_COUNT as usize,
+            "one pipe per joint, no more: {placed:?}"
+        );
+
+        let coal = net
+            .actions()
+            .find(|a| {
+                matches!(
+                    &a.kind,
+                    ActionKind::Insert { slot, entity, .. }
+                        if *slot == InventorySlot::Fuel && entity == "boiler"
+                )
+            })
+            .expect("the boiler has to be fuelled, or the engine turns nothing");
+        let ActionKind::Insert { count, item, .. } = &coal.kind else {
+            unreachable!("matched above")
+        };
+        assert_eq!(item, "coal");
+        assert_eq!(*count, crate::method::power::PLANT_COAL);
+
+        assert_eq!(
+            research_actions(&net).len(),
+            1,
+            "and it still ends in exactly one research"
+        );
+    }
+
+    /// The research is ordered after **every** piece of the plant, and not by
+    /// inference.
+    ///
+    /// No `Effect` satisfies `Condition::Powered`, so `infer_edges` can draw no
+    /// edge from any of the plant to the research; the method states them.
+    /// Without them the scheduler is free to research before the boiler is lit,
+    /// which is run 30's failure with extra steps. The pipes and the pump are
+    /// in the set too, because `Powered` counts *nameplate* capacity: an engine
+    /// with no steam satisfies the condition and turns nothing.
+    #[test]
+    fn the_research_waits_for_every_piece_of_the_plant() {
+        let bots = [BotId(1)];
+        let s = unpowered_lakeside_state(&bots);
+        let net = expand(
+            &[Goal::Researched("automation".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a world with a lake can build its own power");
+        let research = research_actions(&net)[0].id;
+        let pole = net
+            .actions()
+            .find(|a| matches!(&a.kind, ActionKind::Place { entity } if entity.name == "small-electric-pole"))
+            .expect("a pole is placed")
+            .id;
+        let fuel = net
+            .actions()
+            .find(|a| matches!(&a.kind, ActionKind::Insert { slot, .. } if *slot == InventorySlot::Fuel))
+            .expect("the boiler is fuelled")
+            .id;
+        // Reachability by walking `preds` backwards from the research: the
+        // network stores edges the other way round and offers no `reaches`.
+        let mut seen: std::collections::BTreeSet<ActionId> = Default::default();
+        let mut queue = vec![research];
+        while let Some(id) = queue.pop() {
+            for (pred, _) in net.preds(id) {
+                if seen.insert(pred) {
+                    queue.push(pred);
+                }
+            }
+        }
+        let engine = net
+            .actions()
+            .find(|a| matches!(&a.kind, ActionKind::Place { entity } if entity.name == "steam-engine"))
+            .expect("an engine is placed")
+            .id;
+        let pump = net
+            .actions()
+            .find(|a| matches!(&a.kind, ActionKind::Place { entity } if entity.name == "offshore-pump"))
+            .expect("a pump is placed")
+            .id;
+        for (id, what) in [
+            (pole, "the pole"),
+            (fuel, "the fuel"),
+            (engine, "the engine"),
+            (pump, "the pump"),
+        ] {
+            assert!(
+                seen.contains(&id),
+                "{what} must be ordered before the research; the research's ancestors are {seen:?}"
+            );
+        }
+    }
+
+    /// The plant is sited **at the water**, and the lab beside the plant.
+    ///
+    /// Both halves matter. Siting the plant at the coal instead would put
+    /// `pipe-to-ground` between the boiler and the lake at 15 iron per 10
+    /// tiles, against a rung-7 bill of about 98 iron in total; siting the lab
+    /// back where the bot started would put it outside the one pole's 5x5
+    /// supply area, which is the check `Condition::Powered` then fails.
+    #[test]
+    fn the_plant_stands_on_the_shore_and_the_lab_stands_by_the_plant() {
+        let bots = [BotId(1)];
+        let s = unpowered_lakeside_state(&bots);
+        let net = expand(
+            &[Goal::Researched("automation".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a world with a lake can build its own power");
+        let site = |name: &str| {
+            net.actions()
+                .find_map(|a| match &a.kind {
+                    ActionKind::Place { entity } if entity.name == name => {
+                        Some(entity.position.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{name} is placed"))
+        };
+        let pump = site("offshore-pump");
+        // The fixture's lake is the 4x4 block whose tiles run (38..=41) on
+        // both axes; a pump on its shore is within a couple of tiles of it.
+        let water = s
+            .nearest_water_tile(&pump, 8.)
+            .expect("the pump is sited within sight of the water it pumps");
+        assert!(
+            calculate_distance(&water.position, &pump) < 4.,
+            "the pump at {pump} is {} tiles from the nearest water",
+            calculate_distance(&water.position, &pump)
+        );
+        let lab = site("lab");
+        let pole = site("small-electric-pole");
+        assert!(
+            calculate_distance(&lab, &pole) < 8.,
+            "the lab at {lab} has to sit in the pole's supply area, and the pole is at {pole}"
+        );
+    }
+
+    /// A world with **no water at all** still refuses, and by a different name
+    /// than the old power refusal.
+    #[test]
+    fn a_research_with_no_water_anywhere_refuses_for_want_of_water() {
+        let bots = [BotId(1)];
+        let s = unpowered_lakeside_state(&bots);
+        // Same fixture, lake drained: `world_with_technologies` builds on
+        // `fixture_world`, whose only tiles are that lake.
+        let dry = crate::test_world::world_with_technologies_and_no_water();
+        let mut dry = PlanState::from_world(Arc::new(dry), &bots);
+        Effect::GainItem {
+            who: Actor::Role,
+            item: "wood".into(),
+            count: 1,
+        }
+        .apply(&mut dry, BotId(1))
+        .expect("seeding cannot fail");
+        // The watered twin plans, so the refusal below is about the water and
+        // not about anything else in the fixture.
+        expand(
+            &[Goal::Researched("automation".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("the control must plan");
+        let err = expand(
+            &[Goal::Researched("automation".into())],
+            &dry,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect_err("no water, no plant, no research");
+        assert!(
+            matches!(err, PlannerError::PowerPlantNeedsWater { .. }),
+            "expected PowerPlantNeedsWater, got {err:?}"
+        );
+    }
+
+    /// Determinism, across the whole rung-7 plan and not only the plant.
+    #[test]
+    fn a_rung_seven_plan_is_identical_on_a_second_expansion() {
+        let bots = [BotId(1)];
+        let s = unpowered_lakeside_state(&bots);
+        let plan = || {
+            let net = expand(
+                &[Goal::Researched("automation".into())],
+                &s,
+                &registry_for(&bots),
+                BotId(1),
+            )
+            .expect("a world with a lake can build its own power");
+            let labels: Vec<String> = net.actions().map(|a| a.label.clone()).collect();
+            let scheduled = schedule(&net, &s, &bots).expect("it schedules");
+            (labels, scheduled.makespan)
+        };
+        let first = plan();
+        for _ in 0..5 {
+            assert_eq!(plan(), first, "same inputs, same plan");
+        }
+    }
+
+    /// The fuel bill is a quantity, not a taste.
+    ///
+    /// Coal carries 4 MJ (`COAL_BURN_TICKS`'s own doc comment); a lab draws
+    /// `LAB_POWER_KW`; `automation` runs for `research_ticks`. The research
+    /// alone is 6 MJ — **one and a half coal** — so the one-coal plan the
+    /// stage-2 note warns about stalls at about two thirds and reports
+    /// nothing, because `electric_supply_kw` counts nameplate capacity and the
+    /// executor waits on `on_research_finished` with no timeout.
+    ///
+    /// The second assertion is the control: without it a bill of one coal
+    /// would satisfy a "covers the research" test that had the arithmetic
+    /// wrong by a factor of four and nobody would know.
+    #[test]
+    fn the_boilers_fuel_bill_covers_the_research_several_times_over() {
+        const COAL_MJ: f64 = 4.0;
+        let s = tech_state(&[BotId(1)]);
+        let tech = s.technology("automation").expect("the fixture has it");
+        let seconds = f64::from(research_ticks(&tech)) / 60.0;
+        let research_mj = LAB_POWER_KW * seconds / 1000.0;
+        assert_eq!(research_mj, 6.0, "60 kW for 100 s is 6 MJ");
+        let billed_mj = f64::from(crate::method::power::PLANT_COAL) * COAL_MJ;
+        assert!(
+            billed_mj >= research_mj * 3.0,
+            "the boiler is lit long before the research starts and stays lit through it; \
+             {billed_mj} MJ of coal against {research_mj} MJ of research is not enough headroom"
+        );
+        assert!(
+            COAL_MJ < research_mj,
+            "control: one coal must genuinely be short of the research, or the bound above \
+             is satisfied by any number at all"
         );
     }
 }

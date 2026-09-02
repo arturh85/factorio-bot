@@ -2,6 +2,7 @@
 //! runs them until only actions remain.
 
 pub mod have;
+pub mod power;
 pub mod util;
 
 use crate::action::Action;

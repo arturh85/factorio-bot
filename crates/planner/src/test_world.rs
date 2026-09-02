@@ -629,6 +629,54 @@ pub(crate) fn world_with_technologies() -> FactorioWorld {
     world
 }
 
+/// [`world_with_technologies`] with the lake drained.
+///
+/// `fixture_world`'s only tiles are a 4x4 block of `water` centred on
+/// (40, 40), which since `9ca7229a` is the terrain a plant is sited against
+/// and since `fa8dabf3` is solid ground nothing may be built on. A world with
+/// no tiles at all is therefore the *control* for every water question: it is
+/// what a map with no lake in reach looks like, and it is also exactly what a
+/// world attached from a snapshot looks like, since `attach_world` fetches no
+/// tiles.
+///
+/// Built by copying rather than by removing: `update_chunk_tiles` is additive
+/// and `EntityGraph` has no "forget the terrain" call, so draining a lake
+/// after the fact is not a thing this can ask for.
+///
+/// **The ore does not come across either**, because resources live in
+/// `resource_tree` and `EntityGraph` exposes no query that hands them back.
+/// That is harmless for what this world is used for and worth stating anyway:
+/// `Researched` chooses where the research will happen *before* it emits the
+/// science-pack bill — deliberately, so that a research with no power refuses
+/// without first planning the mining of packs nothing would consume — so the
+/// water refusal is reached before an empty map could produce a different one.
+/// A test using this world should assert the refusal **by variant**, so that
+/// the missing ore cannot pass for the missing water.
+pub(crate) fn world_with_technologies_and_no_water() -> FactorioWorld {
+    let wet = world_with_technologies();
+    let dry = FactorioWorld::new();
+    dry.update_entity_prototypes(
+        wet.entity_prototypes
+            .iter()
+            .map(|e| e.value().clone())
+            .collect(),
+    )
+    .expect("prototypes copy");
+    dry.update_item_prototypes(
+        wet.item_prototypes
+            .iter()
+            .map(|e| e.value().clone())
+            .collect(),
+    )
+    .expect("item prototypes copy");
+    dry.update_recipes(wet.recipes.iter().map(|e| e.value().clone()).collect())
+        .expect("recipes copy");
+    for force in wet.forces.iter() {
+        dry.update_force(force.value().clone()).expect("force copy");
+    }
+    dry
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

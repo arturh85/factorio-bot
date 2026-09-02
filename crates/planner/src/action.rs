@@ -4,7 +4,8 @@ use crate::error::PlannerError;
 use crate::ids::{ActionId, BotId, ItemId, Ticks};
 use crate::state::PlanState;
 use factorio_bot_core::factorio::util::calculate_distance;
-use factorio_bot_core::types::{FactorioEntity, Pos, Position};
+use factorio_bot_core::num_traits::FromPrimitive;
+use factorio_bot_core::types::{Direction, FactorioEntity, Pos, Position};
 use serde::{Deserialize, Serialize};
 
 /// Who an action's condition or effect applies to.
@@ -73,10 +74,20 @@ pub enum Condition {
     /// which is true of both tiles of a pair of stone furnaces sited one tile
     /// apart even though the game refuses the second: the furnace is 1.398
     /// tiles across. The size is looked up from the prototype at check time
-    /// (`PlanState::is_area_free`), so nothing here has to know it.
+    /// (`PlanState::is_area_free_facing`), so nothing here has to know it.
+    ///
+    /// `direction` is Factorio's `defines.direction` on the 2.x scale, and it
+    /// is not decoration: a boiler is 3x2 tiles facing north and **2x3 facing
+    /// east**, so the same `pos` and `entity` describe different ground at
+    /// different angles. Every `Place` this planner emitted before the power
+    /// plant carried direction 0, which is why the field is new rather than
+    /// old and always zero; the plant turns its boiler and its steam engine to
+    /// face whichever way the shoreline does, and a check against the
+    /// unrotated box asks about ground the building will not stand on.
     AreaFree {
         pos: Position,
         entity: ItemId,
+        direction: u8,
     },
     Researched(String),
     /// Electric supply reaches an entity of `entity` centred at `pos`, with at
@@ -129,7 +140,18 @@ impl Condition {
                 matches!(state.entity_at(pos), Some(e) if &e.name == name)
             }
             Condition::PositionFree { pos } => state.is_position_free(pos),
-            Condition::AreaFree { pos, entity } => state.is_area_free(entity, pos),
+            Condition::AreaFree {
+                pos,
+                entity,
+                direction,
+            } => match Direction::from_u8(*direction) {
+                Some(facing) => state.is_area_free_facing(entity, pos, facing),
+                // A half-diagonal names no rotation and no building stands on
+                // one, so there is no box to compare -- the same "an unknown
+                // size is not a guessed size" answer `is_area_free` gives for
+                // an unknown prototype.
+                None => false,
+            },
             Condition::Researched(tech) => state.is_researched(tech),
             Condition::Powered { pos, entity, kw } => match state.collision_area(entity, pos) {
                 // No prototype, no footprint, no answer — and the answer this
@@ -180,7 +202,17 @@ impl std::fmt::Display for Condition {
             }
             Condition::EntityAt { pos, name } => write!(f, "{} at {}", name, pos),
             Condition::PositionFree { pos } => write!(f, "{} is free", pos),
-            Condition::AreaFree { pos, entity } => write!(f, "{} fits at {}", entity, pos),
+            Condition::AreaFree {
+                pos,
+                entity,
+                direction,
+            } => {
+                if *direction == 0 {
+                    write!(f, "{} fits at {}", entity, pos)
+                } else {
+                    write!(f, "{} fits at {} facing {}", entity, pos, direction)
+                }
+            }
             Condition::Researched(tech) => write!(f, "{} researched", tech),
             Condition::Powered { pos, entity, kw } => {
                 write!(f, "{} at {} has {} kW of supply", entity, pos, kw)
@@ -849,6 +881,49 @@ mod tests {
                 InventorySlot::FurnaceSource,
                 InventorySlot::FurnaceResult
             ]
+        );
+    }
+
+    /// `Condition::AreaFree` asks about the ground the building will really
+    /// stand on, which depends on which way it faces.
+    ///
+    /// A boiler is 3x2 tiles facing north and 2x3 facing east. The pole below
+    /// sits 1.05 tiles east of the site: inside the north-facing box (half
+    /// width 1.289) and clear of the east-facing one (half width 0.789). So
+    /// the same `pos` and the same `entity` must answer differently at the two
+    /// directions, and a check that ignored the direction would answer the
+    /// same both times.
+    ///
+    /// This is the fluid-connection trap in its structural form: nothing else
+    /// in the plan notices a boiler checked against the wrong footprint until
+    /// the game refuses the build.
+    #[test]
+    fn an_area_free_check_turns_with_the_building() {
+        let mut s = state();
+        let site = Position::new(100.5, 100.);
+        s.create_entity(FactorioEntity {
+            name: "small-electric-pole".into(),
+            entity_type: "electric-pole".into(),
+            position: Position::new(site.x() + 1.05, site.y()),
+            ..Default::default()
+        });
+        let facing = |direction: u8| Condition::AreaFree {
+            pos: site.clone(),
+            entity: "boiler".into(),
+            direction,
+        };
+        assert!(
+            !facing(0).holds(&s, BotId(1)),
+            "a north-facing boiler is 1.289 tiles wide each way and reaches the pole"
+        );
+        assert!(
+            facing(4).holds(&s, BotId(1)),
+            "an east-facing boiler is only 0.789 wide each way and clears it"
+        );
+        // A half-diagonal names no rotation and therefore no footprint.
+        assert!(
+            !facing(2).holds(&s, BotId(1)),
+            "no building stands on a half-diagonal, so there is no box to compare"
         );
     }
 }

@@ -1,10 +1,13 @@
 use crate::error::PlannerError;
 use crate::goal::Holder;
 use crate::ids::{BotId, ChainId, ItemId};
+use crate::method::util::rotated_collision_box;
 use factorio_bot_core::factorio::util::{add_to_rect, calculate_distance};
 use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::num_traits::FromPrimitive;
 use factorio_bot_core::types::{
-    FactorioEntity, FactorioTechnology, PlayerId, Pos, Position, Rect, ResourcePatch,
+    Direction, FactorioEntity, FactorioTechnology, FactorioTile, PlayerId, Pos, Position, Rect,
+    ResourcePatch,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -1003,10 +1006,97 @@ impl PlanState {
     /// Failing to plan is recoverable; planning a placement the game refuses,
     /// which costs the bot its whole remaining slice, is not.
     pub fn collision_area(&self, name: &str, position: &Position) -> Option<Rect> {
+        self.collision_area_facing(name, position, Direction::North)
+    }
+
+    /// [`collision_area`](Self::collision_area) for an entity that stands
+    /// facing `direction` rather than north.
+    ///
+    /// A boiler is 3x2 tiles facing north and 2x3 facing east, so the ground a
+    /// placement claims is a function of its direction and not only of its
+    /// name. Every `Place` this planner emitted before the power plant carried
+    /// direction 0, which is why one function sufficed until now.
+    ///
+    /// `None` for an unknown prototype, exactly as
+    /// [`collision_area`](Self::collision_area), and also for a half-diagonal
+    /// direction: no building stands on one, and guessing a box for it would
+    /// be inventing a footprint.
+    pub fn collision_area_facing(
+        &self,
+        name: &str,
+        position: &Position,
+        direction: Direction,
+    ) -> Option<Rect> {
+        let proto = self.base.entity_prototypes.get(name)?;
+        let box_ = rotated_collision_box(&proto.collision_box, direction)?;
+        Some(add_to_rect(&box_, position))
+    }
+
+    /// Does `name`'s prototype collide with water tiles?
+    ///
+    /// **The offshore pump does not**, and that single exception is why this
+    /// exists. Its `collision_mask` is object and train layers only — the
+    /// vanilla prototype says so in a comment in place, "collide just with
+    /// object-layer and train-layer which don't collide with water" — so it is
+    /// the one building in this plan that may stand with its box over a lake.
+    /// Since `fa8dabf3` made water solid, every water tile is a blocking box
+    /// in `blocked_tree`, and a pump sited on a real shoreline has its body
+    /// over two of them. Without this the plant refuses every site it finds.
+    ///
+    /// Read from the prototype rather than named here, so it is the game's
+    /// answer and not this crate's. **Both spellings of the layer**, because
+    /// the two captures in this repo disagree: the entity-prototype fixture
+    /// says `water-tile` and `player-layer` (Factorio 1.x names) while the live
+    /// 2.1.17 snapshot says `water_tile` and `player`. Matching one of them
+    /// would make this true in tests and false in a run, or the reverse.
+    ///
+    /// A prototype with **no** mask at all collides: an unstated mask is not a
+    /// licence to build in a lake.
+    pub fn collides_with_water(&self, name: &str) -> bool {
+        match self.base.entity_prototypes.get(name) {
+            Some(proto) => match &proto.collision_mask {
+                Some(layers) => layers
+                    .iter()
+                    .any(|layer| layer == "water-tile" || layer == "water_tile"),
+                None => true,
+            },
+            None => true,
+        }
+    }
+
+    /// The water tile nearest `from`, or `None` if there is none within
+    /// `max_radius`.
+    ///
+    /// A straight delegation to `EntityGraph`, and it stays one on purpose:
+    /// **the plan overlay has no tiles.** Nothing this planner emits creates
+    /// or removes terrain, so there is no `added`/`removed` pass to make here
+    /// and no way for a plan to disagree with the world about where the lake
+    /// is. Ordering, the Euclidean/Manhattan trap and the half-tile between a
+    /// tile's corner and its centre are all settled there; see
+    /// `EntityGraph::nearest_water_tile`.
+    ///
+    /// **`None` is not "there is no water".** A world attached from a snapshot
+    /// (`crates/core`'s `attach_world`) fetches no tiles at all, so every
+    /// answer here is `None` for it. That is the right failure — a plant sited
+    /// against terrain nobody has read would be sited by guesswork — but it is
+    /// a failure, not an observation.
+    pub fn nearest_water_tile(&self, from: &Position, max_radius: f64) -> Option<FactorioTile> {
+        self.base.entity_graph.nearest_water_tile(from, max_radius)
+    }
+
+    /// Every water tile inside `bounds`, in `(x, y)` order.
+    ///
+    /// One bounded query, so a shoreline search asks the quad tree once
+    /// instead of once per candidate tile. Since `fa8dabf3` a fully charted
+    /// map carries ~410,000 water tiles, and the per-tile shape of this
+    /// question is what would make that expensive.
+    pub fn water_tiles_within(&self, bounds: &Rect) -> Vec<FactorioTile> {
         self.base
-            .entity_prototypes
-            .get(name)
-            .map(|proto| add_to_rect(&proto.collision_box, position))
+            .entity_graph
+            .tiles_within(bounds)
+            .into_iter()
+            .filter(FactorioTile::is_water)
+            .collect()
     }
 
     /// The ground an entity already in the plan covers.
@@ -1020,7 +1110,8 @@ impl PlanState {
         if entity.bounding_box.width() > 0. && entity.bounding_box.height() > 0. {
             return entity.bounding_box.clone();
         }
-        self.collision_area(&entity.name, &entity.position)
+        Direction::from_u8(entity.direction)
+            .and_then(|facing| self.collision_area_facing(&entity.name, &entity.position, facing))
             .unwrap_or_else(|| tile_area(&Pos::from(&entity.position)))
     }
 
@@ -1035,8 +1126,30 @@ impl PlanState {
     /// a placement is refused when it would actually collide and not merely
     /// when it shares a tile.
     pub fn is_area_free(&self, name: &str, position: &Position) -> bool {
-        match self.collision_area(name, position) {
-            Some(area) => self.is_area_clear(&area),
+        self.is_area_free_facing(name, position, Direction::North)
+    }
+
+    /// [`is_area_free`](Self::is_area_free) for an entity that stands facing
+    /// `direction`.
+    ///
+    /// Two things change with the direction, and both of them matter:
+    ///
+    /// * the footprint rotates (see
+    ///   [`collision_area_facing`](Self::collision_area_facing));
+    /// * nothing else. **Water tolerance is a property of the entity, not of
+    ///   its facing** — see [`collides_with_water`](Self::collides_with_water)
+    ///   — and it applies to `is_area_free` too, which is why the plain
+    ///   function is this one facing north rather than a stricter sibling. A
+    ///   pump refused for standing in the lake it pumps from would be refused
+    ///   at every angle equally.
+    pub fn is_area_free_facing(
+        &self,
+        name: &str,
+        position: &Position,
+        direction: Direction,
+    ) -> bool {
+        match self.collision_area_facing(name, position, direction) {
+            Some(area) => self.is_area_clear_of(&area, self.collides_with_water(name)),
             None => false,
         }
     }
@@ -1110,6 +1223,24 @@ impl PlanState {
     /// instead of one placement. See
     /// [`refused`](PlanState#structfield.refused).
     fn is_area_clear(&self, area: &Rect) -> bool {
+        self.is_area_clear_of(area, true)
+    }
+
+    /// [`is_area_clear`](Self::is_area_clear), with water optionally not
+    /// counted as an obstacle.
+    ///
+    /// `water_blocks` is the caller's answer to "does the thing being sited
+    /// here collide with water", and only the terrain source consults it: an
+    /// entity, a character or a refused footprint standing on a lake still
+    /// blocks whatever the pump's mask says about tiles.
+    ///
+    /// The water is identified by name through `EntityGraph::is_water_at`, not
+    /// by the blocking box's own payload, which carries a bare `is_minable`
+    /// flag and no name at all. A box's centre is the tile it came from — a
+    /// tile's blocking box is exactly that tile's 1x1 square — which is the
+    /// same key the `removed` lookup one line above already uses on the very
+    /// same rectangle.
+    fn is_area_clear_of(&self, area: &Rect, water_blocks: bool) -> bool {
         for entity in self.added.values() {
             if boxes_overlap(&self.footprint_of(entity), area) {
                 return false;
@@ -1153,6 +1284,9 @@ impl PlanState {
         // tree will move is the same wrong answer as not seeing it at all.
         for blocked in self.base.entity_graph.blocking_boxes_within(area) {
             if self.removed.contains(&Pos::from(&blocked.center())) {
+                continue;
+            }
+            if !water_blocks && self.base.entity_graph.is_water_at(&blocked.center()) {
                 continue;
             }
             if boxes_overlap(&blocked, area) {
@@ -1327,6 +1461,31 @@ impl PlanState {
             .map(|(_, position, _)| position)
     }
 
+    /// Would a pole of `name` standing at `position` supply `area`?
+    ///
+    /// The coverage half of [`electric_supply_kw`](Self::electric_supply_kw),
+    /// asked on its own, because siting a pole is a different question from
+    /// reading one: `electric_supply_kw` answers "what reaches this ground",
+    /// and a plant choosing where to put its pole needs "would this pole reach
+    /// the engine". Sharing [`pole_supply_half_extent`] is the point — a
+    /// second table of supply areas is exactly the drift this avoids.
+    ///
+    /// Overlap, not containment, because that is the game's rule: an entity is
+    /// supplied when its bounding box meets the supply area.
+    ///
+    /// `false` for a pole this crate does not know the supply area of, which
+    /// refuses rather than over-credits.
+    pub fn pole_would_supply(&self, name: &str, position: &Position, area: &Rect) -> bool {
+        let Some(supply) = pole_supply_half_extent(name) else {
+            return false;
+        };
+        let box_ = Rect::new(
+            &Position::new(position.x() - supply, position.y() - supply),
+            &Position::new(position.x() + supply, position.y() + supply),
+        );
+        boxes_overlap(&box_, area)
+    }
+
     /// How much generation, in kW, is wired to whatever occupies `area`.
     ///
     /// The question `Condition::Powered` asks, and the reason it is asked at
@@ -1466,7 +1625,9 @@ impl PlanState {
     pub fn create_entity(&mut self, mut entity: FactorioEntity) {
         let key = Pos::from(&entity.position);
         if (entity.bounding_box.width() == 0. || entity.bounding_box.height() == 0.)
-            && let Some(area) = self.collision_area(&entity.name, &entity.position)
+            && let Some(area) = Direction::from_u8(entity.direction).and_then(|facing| {
+                self.collision_area_facing(&entity.name, &entity.position, facing)
+            })
         {
             entity.bounding_box = area;
         }

@@ -226,6 +226,67 @@ pub enum PlannerError {
         supply_kw: f64,
     },
 
+    /// No water within [`PLANT_REPORT_RADIUS`] of the acting bot.
+    ///
+    /// **Not the same as "this map has no lakes."** Two other things produce
+    /// it, and both are worth telling apart from a genuinely dry map:
+    ///
+    /// * a world attached from a snapshot (`crates/core`'s `attach_world`)
+    ///   fetches **no tiles at all**, so every question about terrain answers
+    ///   "nothing there";
+    /// * an owned run only knows the chunks the game has charted.
+    ///
+    /// [`PLANT_REPORT_RADIUS`]: crate::method::power
+    #[error("a power plant needs water, and the plan can see none within {radius} tiles")]
+    #[diagnostic(
+        code(planner::power_plant_needs_water),
+        help(
+            "the plant is sited at the water because water is the one input that cannot be \
+             carried; a world attached from a snapshot carries no tiles at all, and an owned run \
+             knows only the chunks the game has charted"
+        )
+    )]
+    PowerPlantNeedsWater { radius: f64 },
+
+    /// There is water, and it is too far to build against.
+    ///
+    /// The refusal `2026-09-02-building-power.md` §5 asked for by name: *"the
+    /// nearest water is 300 tiles from the nearest coal"* is a good outcome.
+    /// The bound is a walk rather than a pipe run, because the plant is sited
+    /// at the water — everything it is made of, plus the lab, plus ten science
+    /// packs, is carried to it from wherever the ore was.
+    #[error(
+        "the nearest water is {distance:.1} tiles away, and a power plant may not be sited more \
+         than {limit} tiles from the bot that has to carry it there"
+    )]
+    #[diagnostic(
+        code(planner::power_plant_too_far_from_water),
+        help(
+            "everything the plant is made of is carried to the shore, and the lab has to stand in \
+             its supply area afterwards; a plant further away than this costs more walking than \
+             the whole rest of the research"
+        )
+    )]
+    PowerPlantTooFarFromWater { distance: f64, limit: f64 },
+
+    /// Water near enough, but no piece of its edge with room behind it.
+    ///
+    /// A pump needs a straight shoreline — one ground tile under it and a
+    /// three-by-two block of water in front — and the boiler, the engine and
+    /// the pipes need about five by nine tiles of clear ground behind that.
+    #[error(
+        "the nearest water is {distance:.1} tiles away, but no shoreline within {radius} tiles of \
+         it has room for a pump, a boiler, a steam engine and the pipes between them"
+    )]
+    #[diagnostic(
+        code(planner::power_plant_needs_shore),
+        help(
+            "the pump wants one ground tile with a three-by-two block of water in front of it, \
+             and the plant behind it wants about five tiles by nine of clear ground"
+        )
+    )]
+    PowerPlantNeedsShore { distance: f64, radius: f64 },
+
     #[error(
         "expansion of {goal} exceeded {depth} levels; a method is probably expanding into itself"
     )]

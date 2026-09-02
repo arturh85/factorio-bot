@@ -1122,3 +1122,46 @@ right.
 Both runs used the same map and the same seed, so this measures the encoder, not
 the ladder's robustness to a different world. Two identical runs are evidence of
 determinism, not of generality.
+
+## Run 35 — three identical ladders, and the buffer refresh meets a live game
+
+`run-1788384802-*`, 23:33-23:55. **All seven rungs again**, step counts identical
+to runs 33 and 34 for the third time:
+
+```
+8 · 8 · 37 · 40 · 16 · 52 · 111
+```
+
+Three complete ladders, three identical plans. That is the planner being
+deterministic, not three lucky draws, and it is what every makespan pin has been
+protecting.
+
+### The buffer refresh works, and the narration is why I could tell
+
+This was the top-ranked open item — `refresh_buffers` was wired and tested but
+had never met a live game. It has now:
+
+```
+plan  1-5   no buffers to read before planning   <- before any furnace exists
+plan  6     read the contents of  4 buffer(s)
+plan  8     read the contents of  7 buffer(s)
+plan  9     read the contents of 11 buffer(s)
+plan 12     read the contents of 12 buffer(s)
+plan 14     read the contents of 15 buffer(s)
+```
+
+**I read the five "no buffers" lines as a defect first**, because the run places
+21 stone furnaces and "the world knows of no furnace" looked plainly false. It is
+not: all five fall *before the first furnace is built*, and the count then tracks
+the furnaces as they go up.
+
+That check was only possible because the narration exists at all. It was added
+for exactly this: "asked, and there was nothing" and "nobody asked" produce
+identical worlds and identical plans, and only one of them is a defect. Without
+the line I would have had no way to tell a working refresh from an absent one —
+and with it, a wrong suspicion took one query to settle.
+
+Worth noting against the day's pattern: this is the fourth time tonight I have
+suspected a false success and been wrong. Being wrong in that direction is the
+right way round, but the ratio is worth watching — a check that always fires is
+as uninformative as one that never does.

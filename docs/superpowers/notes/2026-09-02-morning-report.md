@@ -1003,3 +1003,75 @@ lever.
 The safeguard did its job both times: the recorder records the geometry it
 **observes**, so the file is honestly described at 1426x1728 rather than
 mislabelled 1280x720.
+
+## THE LADDER IS COMPLETE — run 33, 23:03
+
+`run-1788381727-24882`, built at `f70ab258`. **All seven rungs satisfied**, for
+the first time in the project's history.
+
+```
+milestone 1  satisfied  1 iteration    8 steps
+milestone 2  satisfied  1 iteration    8 steps
+milestone 3  satisfied  1 iteration   37 steps
+milestone 4  satisfied  2 iterations  40 steps
+milestone 5  satisfied  1 iteration   16 steps
+milestone 6  satisfied  1 iteration   52 steps
+milestone 7  satisfied  1 iteration  111 steps   ← research automation
+```
+
+Rung 7: **87 actions, 48 walks, zero failures of any of the four kinds, zero
+teleports, one iteration.**
+
+### The evidence it is real, not another false success
+
+Every claim below is from the run record, not from the supervisor's verdict.
+
+**The bots built a working power plant.** `map.jsonl` placements:
+
+```
+offshore-pump 1 · boiler 1 · steam-engine 1 · pipe 3 ·
+small-electric-pole 1 · lab 1 · stone-furnace 21
+```
+
+**It generated power and the lab drew it.** Final force sample:
+
+```
+power: {"generated_kw": 900.0, "consumed_kw": 60.0, "satisfaction": 1.0}
+```
+
+**The research actually finished, on the game's own signal:**
+
+```
+research automation  dispatched tick 73819
+                     settled    tick 79818  status=success  elapsed=5999
+run_finished         outcome=done
+```
+
+**5,999 ticks against the 6,000 the spec predicted** (600 × 10). That settle
+comes from `on_research_finished` — this morning's awaited-research fix. Before
+it, `Actuator::research` reported success the instant it sent the command, so a
+green rung 7 would have been meaningless.
+
+### A false alarm of my own, worth recording
+
+I first read this as a false success and was wrong. Two mistakes:
+
+1. The last **force sample** is at tick 79800 and reads `progress: 0.9968` —
+   18 ticks before completion. Samples are every 300 ticks; the research finished
+   between the last one and the end.
+2. I grepped `events.jsonl` for `research` among `action_settled` events and
+   found none — **`action_settled` carries `id`/`bot`/`status` and no action
+   name**, so that search could not have succeeded. The settle was there all
+   along, joined by id.
+
+Being wrong in the *safe* direction is the right way round, but the second
+mistake is the same shape as the ones this record keeps catching: absence of
+evidence read as evidence of absence, when the evidence was in a different field.
+
+### What it took, on the day
+
+The rung failed all day for five distinct reasons, each invisible until the one
+before it was fixed: a walk teleport that reported arrival at unreachable
+destinations; crafts that never reported completion; actions that could not be
+represented as failed; a planner reading the `enemy` force's technology; and a
+lab with no power, on a map whose water was not solid.

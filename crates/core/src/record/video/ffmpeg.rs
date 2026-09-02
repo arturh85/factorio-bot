@@ -81,7 +81,7 @@ pub fn record_args(settings: &EncodeSettings, output: &Path) -> Vec<String> {
         "-x264-params".to_string(),
         format!("keyint={keyint}:min-keyint={keyint}:scenecut=0"),
         "-movflags".to_string(),
-        "+frag_keyframe+empty_moov+default_base_is_moof".to_string(),
+        "+frag_keyframe+empty_moov+default_base_moof".to_string(),
         "-progress".to_string(),
         "pipe:1".to_string(),
         "-y".to_string(),

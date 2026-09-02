@@ -92,6 +92,7 @@ mod tests {
                 __run_calls = __run_calls + 1
                 local o = __run_obs[__run_calls] or {}
                 return { failed = o.failed or 0, lost = o.lost or 0,
+                         walks_failed = o.walks_failed or 0,
                          pending = o.pending or 0, success = o.success or 0,
                          running = 0, done = true,
                          first_error = o.first_error }
@@ -210,6 +211,34 @@ mod tests {
         assert_eq!(
             state, "stuck_silent",
             "no failures anywhere means something claimed success it did not deliver"
+        );
+    }
+
+    /// **A run whose walks failed is not a silent one.**
+    ///
+    /// `stuck_silent` means "no progress and every run claimed success", and it
+    /// carries no error because there is supposed to be none to carry. A walk
+    /// failure produces no failed *action*, so the loop used to see
+    /// `failed = 0` and call that silence — which is how
+    /// `workspace/runs/run-1788341905-92036` was recorded `stuck_silent` with
+    /// `last_error: null` while the pathfinder's refusal was logged once per
+    /// iteration.
+    #[test]
+    fn walks_that_failed_are_failures_and_the_halt_carries_their_error() {
+        let lua = harness(
+            "{10, 10, 10, 10}",
+            "{{walks_failed=2, pending=10, first_error='the pathfinder returned no path'}}",
+        );
+        let (state, _, _) = drive(&lua, "{stall_limit = 3}");
+        assert_eq!(
+            state, "stuck",
+            "a failed walk is a failure; calling it silence hides the only \
+             evidence the run produced"
+        );
+        let report: String = lua.globals().get("__report").expect("__report");
+        assert!(
+            report.contains("the pathfinder returned no path"),
+            "the halt has to carry the reason, got {report}"
         );
     }
 

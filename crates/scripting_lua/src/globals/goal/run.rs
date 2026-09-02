@@ -230,8 +230,6 @@ fn build_observation(
         }
     }
 
-    let first_error = failures.first().map(|f| f.error.clone());
-
     // `obs.walks`: the array the action table has no room for, because a walk
     // has no `ActionId` to be keyed by.
     //
@@ -248,7 +246,22 @@ fn build_observation(
     // the game did not say. `status` is what separates a walk that failed from
     // one that merely went unobserved: both have `nil` ticks.
     let walks = lua.create_table()?;
+    // A walk has no `ActionId`, so it is in none of the counts above and used
+    // to be in no error either. When one fails the rest of that bot's slice is
+    // abandoned, which leaves every action `Pending` and the whole run
+    // reporting `failed = 0` with `first_error = nil` -- a run that failed and
+    // said nothing. `run-1788341905-92036` was recorded `stuck_silent,
+    // last_error: null` that way while its console log carried the
+    // pathfinder's refusal once per iteration.
+    let mut walks_failed = 0u32;
+    let mut first_walk_error: Option<String> = None;
     for (i, (bot, step_index, w)) in log.walks().enumerate() {
+        if w.status == Status::Failed {
+            walks_failed += 1;
+            if first_walk_error.is_none() {
+                first_walk_error.clone_from(&w.error);
+            }
+        }
         let t = lua.create_table()?;
         t.set("bot", bot.0)?;
         t.set("step_index", step_index)?;
@@ -264,6 +277,15 @@ fn build_observation(
         walks.set(i as i64 + 1, t)?;
     }
 
+    // An action's error first, because it is the more specific fact: it names
+    // the thing the plan was trying to do. The walk's error is the fallback for
+    // the case that produced none -- not a replacement, so every existing
+    // reading of `first_error` is unchanged.
+    let first_error = failures
+        .first()
+        .map(|f| f.error.clone())
+        .or(first_walk_error);
+
     let obs = lua.create_table()?;
     obs.set("done", done)?;
     obs.set("pending", pending)?;
@@ -271,6 +293,11 @@ fn build_observation(
     obs.set("success", success)?;
     obs.set("failed", failed)?;
     obs.set("lost", lost)?;
+    // Counted separately from `failed` rather than folded into it: `failed` is
+    // a count of *actions*, every other field beside it is about actions, and
+    // a caller that has been reading it as one must not silently start getting
+    // a different number. The supervisor adds the two itself.
+    obs.set("walks_failed", walks_failed)?;
     obs.set("first_error", first_error)?;
     obs.set("actions", actions)?;
     obs.set("walks", walks)?;
@@ -1195,6 +1222,54 @@ mod tests {
             assert(#fs == obs.failed, "failures() agrees with the count")
             assert(type(fs[1].error) == "string" and #fs[1].error > 0, "each failure carries its error")
             assert(fs[1].id ~= nil, "each failure names its action")
+        "#,
+        )
+        .await;
+    }
+
+    /// **A run that failed only in its walks must still say so.**
+    ///
+    /// A walk has no `ActionId`, so it appears in none of the action counts and
+    /// contributed to `first_error` not at all. When a walk fails the rest of
+    /// that bot's slice is abandoned, so every action stays `Pending` and the
+    /// run reports `failed = 0` with no error — which is how
+    /// `run-1788341905-92036` was recorded `stuck_silent, last_error: null`
+    /// while `the game's pathfinder returned no path` was in the console log
+    /// once per iteration.
+    #[tokio::test]
+    async fn a_run_that_failed_only_in_its_walks_reports_the_walk_error() {
+        let lua = lua_with_goal(Arc::new(
+            StubActuator::new(Failure::Never).with_failing_walks(),
+        ));
+        exec_bounded(
+            &lua,
+            r#"
+            local obs = goal.run(goal.plan(goal.have("iron-ore", 2)))
+            assert(obs.failed == 0,
+                "no ACTION failed -- that is the whole trap, got " .. obs.failed)
+            assert(obs.walks_failed > 0,
+                "the walks did fail and have to be counted, got " .. tostring(obs.walks_failed))
+            assert(type(obs.first_error) == "string",
+                "an error existed, so first_error may not be nil")
+            assert(obs.first_error:find("pathfinder", 1, true) ~= nil,
+                "and it has to be the walk's own words, got " .. tostring(obs.first_error))
+        "#,
+        )
+        .await;
+    }
+
+    /// The control for the test above: a clean run counts no failed walks and
+    /// still reports no error, so `walks_failed` cannot be a constant.
+    #[tokio::test]
+    async fn a_clean_run_counts_no_failed_walks() {
+        let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never)));
+        exec_bounded(
+            &lua,
+            r#"
+            local obs = goal.run(goal.plan(goal.have("iron-ore", 2)))
+            assert(obs.walks_failed == 0,
+                "nothing failed, got " .. tostring(obs.walks_failed))
+            assert(obs.first_error == nil, "no error on a clean run")
         "#,
         )
         .await;

@@ -388,8 +388,14 @@ end
 -- Exactly `goal.start(plan):wait()`.
 -- @tparam PlanValue plan a plan returned by `goal.plan`
 -- @treturn table an observation: `{ done, pending, running, success, failed,
---   lost, first_error, actions, walks, failures, recover }` -- see
---   `RunValue`'s own `:wait()` for the shape.
+--   lost, walks_failed, first_error, actions, walks, failures, recover }` --
+--   see `RunValue`'s own `:wait()` for the shape.
+--
+--   `walks_failed` counts walks the game refused. A walk has no action id, so
+--   it is in none of the counts above; when one fails the rest of that bot's
+--   slice is abandoned, so a run whose walking failed reports `failed = 0`
+--   with everything `pending`. `first_error` falls back to the first failed
+--   walk's error when no action failed, so such a run is never silent.
 --
 --   `lost` counts what was dispatched and never accounted for: the game
 --   answered with no readable outcome, or the run ended still waiting. Those
@@ -586,13 +592,18 @@ mod tests {
 
     /// An actuator that never touches a game.
     ///
-    /// `walk` always succeeds and is never gated: a bot whose *walk* fails has
-    /// the rest of its slice abandoned before a single action is dispatched, so
-    /// everything would stay `Pending` and the counting these tests exist to
-    /// exercise would never run.
+    /// `walk` succeeds by default and is never gated: a bot whose *walk* fails
+    /// has the rest of its slice abandoned before a single action is
+    /// dispatched, so everything would stay `Pending` and the counting most of
+    /// these tests exist to exercise would never run. `with_failing_walks` is
+    /// for the tests that want exactly that shape — it is what a run whose
+    /// pathfinder refuses looks like, and it is the shape that reached
+    /// `stuck_silent` with no error to show for it.
     pub(crate) struct StubActuator {
         pub(crate) delay: Duration,
         pub(crate) fails: Failure,
+        /// Every walk is refused, before any action is dispatched.
+        pub(crate) fail_walks: bool,
         /// Signalled as each action is dispatched, so a test can observe a run
         /// mid-flight without sleeping and hoping.
         pub(crate) entered: Option<mpsc::UnboundedSender<()>>,
@@ -623,10 +634,20 @@ mod tests {
             StubActuator {
                 delay: Duration::ZERO,
                 fails,
+                fail_walks: false,
                 entered: None,
                 gate: None,
                 clock: None,
             }
+        }
+
+        /// Refuses every walk. The run then dispatches nothing at all, which
+        /// is the case `workspace/runs/run-1788341905-92036` hit: 33 steps
+        /// planned, none dispatched, `failed = 0` for every action, and the
+        /// pathfinder's refusal reaching no record.
+        pub(crate) fn with_failing_walks(mut self) -> Self {
+            self.fail_walks = true;
+            self
         }
 
         /// Gives the stub a monotonic clock, so its dispatches report ticks
@@ -691,6 +712,14 @@ mod tests {
             _to: Position,
             _radius: f64,
         ) -> Result<ActionTicks, ActuatorFailure> {
+            if self.fail_walks {
+                // The live wording, so a test asserting the error text is
+                // asserting something a run could actually produce.
+                return Err(ActuatorError::Rejected(
+                    "the game's pathfinder returned no path".to_string(),
+                )
+                .into());
+            }
             Ok(self.tick())
         }
         async fn mine(

@@ -290,7 +290,14 @@ function Sup:step()
     -- reading fields off afterwards.
     local steps = plan.steps
     local obs = goal.run(plan)
-    local failed = (obs.failed or 0) + (obs.lost or 0)
+    -- `walks_failed` is here for a reason worth stating: a walk has no action
+    -- id, so it is counted in neither `failed` nor `lost`, and when one fails
+    -- the rest of that bot's slice is abandoned -- leaving every action
+    -- `pending` and the whole run looking like `failed = 0`. Without this term
+    -- a run that dispatched nothing at all because its pathfinder refused was
+    -- reported `stuck_silent` with `last_error: null`, which says the opposite
+    -- of what happened. `run-1788341905-92036` is that run.
+    local failed = (obs.failed or 0) + (obs.lost or 0) + (obs.walks_failed or 0)
     if failed > 0 then
         self.any_failures = true
         if self.first_error == nil then

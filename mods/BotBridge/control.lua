@@ -290,6 +290,22 @@ function walk_leg_timeout_ticks(player, from_pos, to_pos)
 	return math.max(60, math.ceil((leg_length / speed) * 3))
 end
 
+--- How far from a waypoint the stuck-walk recovery may look for somewhere the
+--- character actually fits, and how finely it steps while looking.
+---
+--- Small on purpose. The point of the teleport is to put the bot *on its
+--- route*; a recovery free to move it several tiles sideways is no longer
+--- recovering the walk, it is inventing a different one. 4 tiles is room for
+--- a handful of stacked bots and no more.
+---
+--- The precision is half a tile because a character's collision box is about
+--- 0.4 tiles across, so half a tile is the coarsest step that can always find
+--- the gap beside an occupied position. `find_non_colliding_position` requires
+--- at least 0.01 and a radius of 0 would search forever, so neither may be
+--- zero.
+WALK_STUCK_TELEPORT_RADIUS = 4
+WALK_STUCK_TELEPORT_PRECISION = 0.5
+
 --- How long the mining handler may fail to start mining before it gives the
 --- action a verdict.
 ---
@@ -746,7 +762,16 @@ function on_tick(event)
 					player.walking_state = {walking=false}
 					storage.p[idx].walking = nil
 					if w.stuck then
-						action_failed(event.tick, w.action_id, "ERROR: stuck while walking, aborted before reaching last waypoint")
+						-- `w.stuck` carries the reason as a string. It used to
+						-- be a bare `true` with the message hardcoded here,
+						-- which reported "aborted before reaching last
+						-- waypoint" for the two intermediate-leg aborts as
+						-- well, neither of which is that. `storage` outlives a
+						-- save, so an in-flight walk from an older version may
+						-- still hold `true`; that keeps the old wording.
+						local why = "ERROR: stuck while walking, aborted before reaching last waypoint"
+						if type(w.stuck) == "string" then why = w.stuck end
+						action_failed(event.tick, w.action_id, why)
 					else
 						action_completed(event.tick, w.action_id)
 					end
@@ -807,21 +832,68 @@ function on_tick(event)
 					if w.idx_tick ~= nil and event.tick - w.idx_tick > (w.leg_timeout or 60) then
 						if w.idx > #w.waypoints - 1 then -- if last waypoint just abort
 							print("Player is stuck while moving to last waypoint, just stop moving")
-							w.stuck = true
+							w.stuck = "ERROR: stuck while walking, aborted before reaching last waypoint"
 							w.waypoints[w.idx] = nil
 						else
-							teleport_writeout(event.tick, idx, "walk_stuck", pos, w.waypoints[w.idx], w.action_id)
-							player.teleport(w.waypoints[w.idx])
-							-- The arrival check above normally re-stamps
-							-- idx_tick/leg_timeout on the very next tick once
-							-- it sees the character standing on the
-							-- destination, but stamp it here too rather than
-							-- rely on that: this is the site the teleport
-							-- actually happens, and a leg's timer must never
-							-- be left counting against where the walk used to
-							-- be.
-							w.idx_tick = event.tick
-							w.leg_timeout = walk_leg_timeout_ticks(player, w.waypoints[w.idx], w.waypoints[w.idx])
+							-- This recovery used to teleport straight onto the
+							-- waypoint, and that MANUFACTURED the condition it
+							-- exists to fix. `LuaControl.teleport` does not
+							-- respect collisions and characters do collide, so
+							-- two bots stuck near the same tile were both put
+							-- on it; the pathfinder then correctly reported no
+							-- path for either of them, and every retry stacked
+							-- them further. Run run-1788341905-92036 ended
+							-- exactly that way: bots 1 and 3 frozen at the same
+							-- coordinates, 33 steps planned and none
+							-- dispatched.
+							--
+							-- `find_non_colliding_position` is asked with the
+							-- *character* prototype, so the answer accounts for
+							-- whoever is already standing there -- including a
+							-- bot this same pass teleported a moment ago, since
+							-- a teleport takes effect immediately and this loop
+							-- handles one player at a time.
+							local target = w.waypoints[w.idx]
+							local landing = player.surface.find_non_colliding_position(
+								"character", target,
+								WALK_STUCK_TELEPORT_RADIUS, WALK_STUCK_TELEPORT_PRECISION)
+							if landing == nil then
+								-- Nothing free near the waypoint. Failing costs
+								-- this walk; stacking would cost both bots for
+								-- the rest of the run.
+								print("Player is stuck and nothing is free near the next waypoint, aborting the walk")
+								w.stuck = "ERROR: stuck while walking, no free position within "
+									.. WALK_STUCK_TELEPORT_RADIUS .. " tiles of the next waypoint"
+								w.waypoints[w.idx] = nil
+							elseif not player.teleport(landing) then
+								-- `teleport` returns whether it happened. That
+								-- return used to be discarded, so a recovery
+								-- that moved nothing was indistinguishable from
+								-- one that worked.
+								print("Player is stuck and the game refused to teleport it, aborting the walk")
+								w.stuck = "ERROR: stuck while walking, the game refused to teleport the character"
+								w.waypoints[w.idx] = nil
+							else
+								-- Recorded AFTER the teleport, and from the
+								-- character's own position rather than from the
+								-- waypoint we aimed at. The two differ whenever
+								-- the landing was adjusted, and a record of the
+								-- intent asserts something untrue about where
+								-- the bot is.
+								teleport_writeout(event.tick, idx, "walk_stuck", pos, player.character.position, w.action_id)
+								-- The arrival check above normally re-stamps
+								-- idx_tick/leg_timeout on the very next tick once
+								-- it sees the character standing on the
+								-- destination, but stamp it here too rather than
+								-- rely on that: this is the site the teleport
+								-- actually happens, and a leg's timer must never
+								-- be left counting against where the walk used to
+								-- be. Measured from where the bot LANDED to the
+								-- waypoint, because an adjusted landing still has
+								-- the remaining offset to walk.
+								w.idx_tick = event.tick
+								w.leg_timeout = walk_leg_timeout_ticks(player, player.character.position, target)
+							end
 						end
 					end
 

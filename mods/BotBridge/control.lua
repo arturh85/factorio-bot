@@ -52,7 +52,28 @@ require "types"
 
 local my_client_id = nil
 
-local client_local_data = nil -- DO NOT USE, will cause desyncs
+-- Per-peer state, deliberately NOT in `storage`: writing it there would
+-- replicate it and desync. Nothing that must be identical across peers may
+-- live here.
+--
+-- **Initialised at load, not on the first tick.** It used to be `nil` until
+-- `on_tick` built it, which made every other reader -- `on_player_joined_game`,
+-- `on_chunk_generated`, `rcon_whoami` -- depend on a tick having run first,
+-- with nothing saying so. A player joining at tick 0 (the host's own player
+-- does, under `--host`) hit `attempt to index upvalue 'client_local_data'` and
+-- the mod went to `Failed`, non-recoverable, with a message naming a nil
+-- upvalue rather than the ordering that caused it. See
+-- `docs/superpowers/notes/2026-09-02-graphical-host-probe.md`.
+--
+-- Initialising rather than guarding each reader, because the value has a
+-- natural empty form and this removes the ordering dependency instead of
+-- tolerating it -- a guard would leave the next handler added to this file with
+-- the same trap, and a guard that *skipped* would silently drop whatever the
+-- pre-tick call was carrying (`rcon_whoami`'s identity, a counted join).
+--
+-- Not a desync risk: this is the same table every peer would have built on its
+-- own first tick, built at the same point in every peer's load.
+local client_local_data = { whoami = nil } -- DO NOT USE for anything replicated
 local last_tick = 0
 
 local wait_for_player = false
@@ -823,12 +844,10 @@ function on_whoami()
 end
 
 function on_tick(event)
-	if (client_local_data == nil) then
-		client_local_data = {}
-		client_local_data.whoami = nil
---		game.write_file("players_connected.txt", "server\n", true, 0) -- only on server
-	end
-
+	-- `client_local_data` used to be built here, and only here. It is
+	-- initialised at its declaration now; see the comment there for why. Do
+	-- not restore a lazy init: it would read as necessary and put the ordering
+	-- dependency back for every handler in this file.
 	if client_local_data.initial_discovery then
 		local id = client_local_data.initial_discovery
 		local maxi = id.idx + 1 -1

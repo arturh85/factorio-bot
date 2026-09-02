@@ -445,6 +445,7 @@
           {
             "properties": {
               "bots": {
+                "description": "The **roster** the plan was made for, ascending -- every bot the run\nhad, not the bots the plan happens to give work to.\n\nIt used to be the latter, derived from `plan`'s steps, which deleted\nfrom the record exactly the bots a reader of it is asking about: a\nlive run with four bots recorded `bots: [2]`, indistinguishable from\na run of one bot, and \"why did bot 4 do nothing\" could not be asked\nof it at all. `record.plan_created`'s Lua binding takes this from\nthe run's own roster rather than from an argument, so a script\ncannot pass one that disagrees with the run.",
                 "items": {
                   "format": "int32",
                   "minimum": 0,

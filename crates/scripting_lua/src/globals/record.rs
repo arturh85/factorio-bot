@@ -658,12 +658,19 @@ end
 --- records the plan the scheduler produced for a milestone
 -- Takes an array of step tables -- `id`, `bot`, `action`, `deps` (an array of
 -- step ids this one waits on), `planned_start`, `planned_duration` -- so a
--- run's record shows what was planned, not only what happened. `steps`,
--- `makespan` and `bots` are derived from `plan` itself rather than taken as
--- separate arguments, so nothing here can disagree with what was actually
--- recorded: `steps` is `plan`'s length, `makespan` the latest
--- `planned_start + planned_duration` across every entry (0 for an empty
--- plan), and `bots` the distinct bot ids it names, ascending.
+-- run's record shows what was planned, not only what happened. `steps` and
+-- `makespan` are derived from `plan` itself rather than taken as separate
+-- arguments, so neither can disagree with what was actually recorded: `steps`
+-- is `plan`'s length and `makespan` the latest
+-- `planned_start + planned_duration` across every entry (0 for an empty plan).
+--
+-- `bots` is the **run's roster**, not the bots the plan happens to name. It
+-- was derived from the steps, which made a bot that got no work invisible in
+-- the record -- a plan covering one bot out of four recorded `bots: [2]` and
+-- read exactly like a run of one bot. "Why did bot 4 do nothing" is a question
+-- the record has to be able to answer, and it cannot be asked of a field that
+-- omits every bot it is about. The roster comes from the run itself, so a
+-- script cannot pass a wrong one.
 -- @number index the milestone's position in the run, from 1
 -- @tparam table plan an array of step tables
 -- @raise if no recording is running
@@ -675,15 +682,23 @@ end
     {
         let slot = slot.clone();
         let rcon = rcon.clone();
+        // The run's roster, closed over rather than read off the plan. A bot
+        // that got no step is exactly the bot a reader of this record is
+        // asking about, and deriving the field from the steps deleted it.
+        // Ascending and distinct, so the field's shape is unchanged.
+        let roster: Vec<u32> = all_bots
+            .iter()
+            .map(|id| u32::from(*id))
+            .collect::<BTreeSet<u32>>()
+            .into_iter()
+            .collect();
         map_table.set(
             "plan_created",
             lua.create_function(move |_lua, (index, plan): (u32, LuaTable)| {
                 let mut steps: Vec<PlannedStep> = Vec::new();
-                let mut bots: BTreeSet<u32> = BTreeSet::new();
                 let mut makespan: u64 = 0;
                 for step in plan.sequence_values::<LuaTable>() {
                     let planned = planned_step_from_lua(&step?)?;
-                    bots.insert(planned.bot);
                     makespan = makespan.max(
                         planned
                             .planned_start
@@ -699,7 +714,7 @@ end
                         milestone_index: index,
                         steps: step_count,
                         makespan,
-                        bots: bots.into_iter().collect(),
+                        bots: roster.clone(),
                         plan: steps,
                     },
                 )
@@ -1199,6 +1214,11 @@ mod tests {
     /// Returns the temp dir (kept alive for the caller) and the recorder's
     /// own directory, so a test can read `map.jsonl` back off disk.
     fn recording_lua() -> (Lua, tempfile::TempDir, std::path::PathBuf) {
+        recording_lua_for(vec![])
+    }
+
+    /// [`recording_lua`] with a stated roster, for the bindings that report one.
+    fn recording_lua_for(all_bots: Vec<PlayerId>) -> (Lua, tempfile::TempDir, std::path::PathBuf) {
         let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
         let tmp = tempfile::tempdir().expect("tempdir");
         let recorder = RunRecorder::start(tmp.path(), "run-1").expect("recorder starts");
@@ -1210,7 +1230,7 @@ mod tests {
             Arc::new(FactorioRcon::new_empty()),
             Arc::new(FactorioWorld::new()),
             tmp.path().join("scripts"),
-            vec![],
+            all_bots,
             slot,
         )
         .expect("record table");
@@ -1251,9 +1271,16 @@ mod tests {
 
     // ------------------------------------------------------------- plan_created
 
+    /// `bots` is the roster the plan was made for, not the bots it used.
+    ///
+    /// The plan below gives work to 1 and 2 out of a run of four. Derived from
+    /// the steps -- which is what this did -- the record said `bots: [1, 2]`
+    /// and a live run said `bots: [2]`, which reads exactly like a run of one
+    /// bot and makes "why did bot 4 do nothing" unanswerable from the record.
+    /// The bots that got nothing are the whole question.
     #[test]
-    fn plan_created_derives_steps_makespan_and_bots_from_the_plan_itself() {
-        let (lua, _tmp, run_dir) = recording_lua();
+    fn plan_created_reports_the_runs_roster_and_not_the_bots_in_the_plan() {
+        let (lua, _tmp, run_dir) = recording_lua_for(vec![1, 2, 3, 4]);
         lua.load(
             r#"
             record.plan_created(1, {
@@ -1283,7 +1310,11 @@ mod tests {
                     *makespan, 900,
                     "the latest planned_start + planned_duration"
                 );
-                assert_eq!(*bots, vec![1, 2], "distinct bots, ascending");
+                assert_eq!(
+                    *bots,
+                    vec![1, 2, 3, 4],
+                    "the roster, including the two bots this plan gave no work to"
+                );
                 assert_eq!(plan[0].id, 1);
                 assert_eq!(plan[0].deps, Vec::<u32>::new());
                 assert_eq!(plan[1].deps, vec![1]);
@@ -1317,9 +1348,14 @@ mod tests {
         }
     }
 
+    /// An empty plan still names who was available for it.
+    ///
+    /// This is the case where deriving from the steps was most obviously
+    /// wrong: a milestone that planned nothing recorded `bots: []`, which is
+    /// indistinguishable from a run with no bots in it.
     #[test]
     fn plan_created_of_an_empty_plan_is_zero_steps_and_zero_makespan() {
-        let (lua, _tmp, run_dir) = recording_lua();
+        let (lua, _tmp, run_dir) = recording_lua_for(vec![1, 2]);
         lua.load("record.plan_created(3, {})")
             .exec()
             .expect("plan_created runs");
@@ -1335,7 +1371,7 @@ mod tests {
                 assert_eq!(*milestone_index, 3);
                 assert_eq!(*steps, 0);
                 assert_eq!(*makespan, 0);
-                assert!(bots.is_empty());
+                assert_eq!(*bots, vec![1, 2], "the roster, even with nothing planned");
                 assert!(plan.is_empty());
             }
             other => panic!("expected plan_created, got {other:?}"),

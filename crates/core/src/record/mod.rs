@@ -84,6 +84,16 @@ pub enum EventKind {
         milestone_index: u32,
         steps: u32,
         makespan: u64,
+        /// The **roster** the plan was made for, ascending -- every bot the run
+        /// had, not the bots the plan happens to give work to.
+        ///
+        /// It used to be the latter, derived from `plan`'s steps, which deleted
+        /// from the record exactly the bots a reader of it is asking about: a
+        /// live run with four bots recorded `bots: [2]`, indistinguishable from
+        /// a run of one bot, and "why did bot 4 do nothing" could not be asked
+        /// of it at all. `record.plan_created`'s Lua binding takes this from
+        /// the run's own roster rather than from an argument, so a script
+        /// cannot pass one that disagrees with the run.
         bots: Vec<u32>,
         /// The steps the planner actually produced, in enough detail to draw
         /// the DAG: who runs each one, what it waits on, and when the

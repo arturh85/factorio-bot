@@ -576,3 +576,64 @@ have no `ActionId` at all — there is no walk `EventKind`, and `obs.walks` neve
 reaches `events.jsonl` even though walking is most of the wall-clock. The
 question has no answer in this id space. Renaming would hide that rather than fix
 it.
+
+## Update (~14:45): run 25 — the cleanest rungs yet, and a shallower finish
+
+Run 25 (`run-1788351494-76427`), built at `537adf30` (the parked-bot transient
+fix). **5 of 7**, which is one rung *worse* than run 24, and simultaneously the
+best-behaved run there has been:
+
+```
+gather iron ore x20      3 actions   0 failed   1 iteration
+gather copper ore x20    3 actions   0 failed   1 iteration
+smelt iron plates x50   18 actions   0 failed   1 iteration
+smelt copper plates x20 22 actions   0 failed   1 iteration
+craft iron gear wheels  11 actions   0 failed   1 iteration
+```
+
+**Every one of rungs 1-5 in a single iteration with zero failures, and zero
+teleports across all 16 iterations** — against 1414 teleports two runs ago and
+rung 4 needing three iterations with a refusal.
+
+### What actually happened
+
+```
+12:18:14  client 4 times out; roster plans for 3 of 4 and names the absent id
+12:18:32  rungs 1-5 satisfied
+12:29:30  rung 6: could not have player client3 craft 4 automation-science-pack (but only 0)
+12:43:16  RAISED: bot(s) 1, 2, 3 are not connected players in this world
+```
+
+Two of those lines are fixes from today working exactly as designed:
+
+- `planning for 3 of 4 bot(s): the game has no player for [4], so nothing will be
+  assigned to it. A client that never connected is not a bot.` — the phantom-bot
+  fix, naming the absent id instead of inventing a bot at `(0,0)`.
+- The raise at 12:43 is the guard **refusing to plan against a fabricated
+  inventory and guessed reach distances** once the remaining clients dropped.
+  Failing loudly there is right; the alternative is a plan built on invented
+  bodies.
+
+### The real defect, and it is not in the bot
+
+**The three surviving clients died mid-run**, somewhere between 12:29 and 12:43.
+Nothing in this repository knows why, because `--logs` was not passed, so no
+client log was written — `workspace/client1-log.txt` is from 31 August. A
+Factorio client dying during a run is a first-class reliability problem and it is
+currently **undiagnosable by construction**.
+
+*Every subsequent run passes `--logs`.* That is the cheapest possible fix and it
+should have been on from the start.
+
+### Rung 6's own failure is separate and still open
+
+`could not have player client3 craft 4 automation-science-pack (but only 0)` with
+a three-bot roster. Bot 3 ended holding 3 copper-plate and 3 iron-gear-wheel —
+enough for three packs, not four — while bot 1 held a finished `lab` and 20
+iron-plate. That is the "a lab is one craft, and no bot can hand an item to
+another" constraint measured earlier today, now reached from the other side: the
+shares were sized against a four-bot roster's materials and executed by three.
+
+Also still true in this build: **102 dispatched against 98 settled, and all 98
+settled are `success`.** The four lost actions are invisible, because this binary
+predates `fcb4ed68`. The next run is the first to carry the settlement fix.

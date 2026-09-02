@@ -45,7 +45,7 @@ pub fn scripts_dir(workspace_path: &Path) -> Result<PathBuf> {
     #[cfg(not(debug_assertions))]
     {
         std::fs::create_dir_all(&workspace_scripts).into_diagnostic()?;
-        crate::process::instance_setup::PLANS_CONTENT
+        crate::process::instance_setup::SCRIPTS_CONTENT
             .extract(workspace_scripts.clone())
             .map_err(|err| miette!("failed to extract bundled scripts: {err:?}"))?;
         std::fs::canonicalize(workspace_scripts).into_diagnostic()
@@ -72,7 +72,7 @@ pub fn scripts_dir(workspace_path: &Path) -> Result<PathBuf> {
 /// long-running server call this once at startup instead.
 ///
 /// In release builds a *newly created* directory is seeded with the bundled
-/// scripts (`PLANS_CONTENT`), matching [`scripts_dir`]. An already-populated
+/// scripts (`SCRIPTS_CONTENT`), matching [`scripts_dir`]. An already-populated
 /// directory is left alone -- editing `scripts/*.lua` in the repo has no
 /// effect on it -- so this is safe to call on every start; when it is already
 /// populated this also checks it for drift from the embedded snapshot (once
@@ -102,7 +102,7 @@ pub fn ensure_scripts_dir(workspace_path: &crate::paths::ResolvedWorkspace) -> R
             let staging = workspace_path.join(".scripts-partial");
             let _ = std::fs::remove_dir_all(&staging);
             std::fs::create_dir_all(&staging).into_diagnostic()?;
-            crate::process::instance_setup::PLANS_CONTENT
+            crate::process::instance_setup::SCRIPTS_CONTENT
                 .extract(staging.clone())
                 .map_err(|err| miette!("failed to extract bundled scripts: {err:?}"))?;
             std::fs::rename(&staging, &workspace_scripts).into_diagnostic()?;
@@ -135,7 +135,7 @@ fn check_scripts_staleness_once(workspace_scripts: &Path) -> Result<()> {
         return Ok(());
     }
     if crate::process::asset_sync::refresh_if_requested(
-        &crate::process::instance_setup::PLANS_CONTENT,
+        &crate::process::instance_setup::SCRIPTS_CONTENT,
         workspace_scripts,
         REFRESH_SCRIPTS_ENV,
     )
@@ -147,7 +147,7 @@ fn check_scripts_staleness_once(workspace_scripts: &Path) -> Result<()> {
         );
     } else {
         crate::process::asset_sync::warn_if_stale(
-            &crate::process::instance_setup::PLANS_CONTENT,
+            &crate::process::instance_setup::SCRIPTS_CONTENT,
             workspace_scripts,
             "scripts",
             REFRESH_SCRIPTS_ENV,

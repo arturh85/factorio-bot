@@ -149,10 +149,12 @@ Two consequences, both of which have already cost debugging sessions:
 - editing `mods/` or `scripts/` has **no effect on a release binary** until it is rebuilt — the embedded copy is a snapshot;
 - it has **no effect on an existing workspace at all, in any build**, because extraction is skipped once the target directory exists. Delete `workspace/mods` (or edit the copy in place) to pick up mod changes.
 
-Scripts follow the same rule in two places: `scripts::ensure_scripts_dir` seeds
-`workspace/scripts` from `PLANS_CONTENT` when that directory does not yet
-exist, and instance setup separately extracts the same content into
-`workspace/plans`. Both are release-only and both skip an existing directory.
+Scripts follow the same rule: `scripts::ensure_scripts_dir` seeds
+`workspace/scripts` from `SCRIPTS_CONTENT` when that directory does not yet
+exist. It is release-only and skips an existing directory. (Instance setup used
+to extract the same content a second time into an unread `workspace/plans`; that
+duplicate — and its permanently-stale warning — is gone. An old
+`workspace/plans` directory is inert and can be deleted by hand.)
 
 The divergence is deliberate. Do not "fix" it by dropping the embedding.
 

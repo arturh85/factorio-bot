@@ -15,15 +15,13 @@
 //!   FACTORIO_BOT_REFRESH_MODS=1 FACTORIO_BOT_REFRESH_SCRIPTS=1 \
 //!     ./target/release/examples/asset_staleness_demo --step 2 # shows it clear
 //!
-//! Only compiled in a release build: `MODS_CONTENT`/`PLANS_CONTENT` do not
-//! exist under `cfg(debug_assertions)`.
+//! Only compiled in a release build: `MODS_CONTENT` does not exist under
+//! `cfg(debug_assertions)`.
 #[cfg(not(debug_assertions))]
 fn main() {
     use factorio_bot_core::paths::resolve_workspace;
     use factorio_bot_core::process::asset_sync::{refresh_if_requested, warn_if_stale};
-    use factorio_bot_core::process::instance_setup::{
-        MODS_CONTENT, PLANS_CONTENT, REFRESH_MODS_ENV, REFRESH_PLANS_ENV,
-    };
+    use factorio_bot_core::process::instance_setup::{MODS_CONTENT, REFRESH_MODS_ENV};
     use factorio_bot_core::scripts::ensure_scripts_dir;
 
     // Fixed, not process-id-based: the whole point is that step 2 reuses the
@@ -31,9 +29,8 @@ fn main() {
     // in the real demonstration, a rebuild in between).
     let workspace = std::env::temp_dir().join("factorio-bot-asset-staleness-demo");
     let mods_path = workspace.join("mods");
-    let plans_path = workspace.join("plans");
     // `ensure_scripts_dir` derives the path itself as `<given>/scripts`, so it
-    // gets its own workspace root rather than sharing one with mods/plans.
+    // gets its own workspace root rather than sharing one with mods.
     let scripts_workspace = workspace.join("live_scripts_workspace");
     // `ensure_scripts_dir` demands a resolved workspace, same as every real
     // caller -- this path is always absolute (built from `temp_dir()`), so
@@ -46,16 +43,14 @@ fn main() {
     if step {
         let _ = std::fs::remove_dir_all(&workspace);
         std::fs::create_dir_all(&mods_path).expect("create mods dir");
-        std::fs::create_dir_all(&plans_path).expect("create plans dir");
         std::fs::create_dir_all(scripts_workspace.as_path()).expect("create scripts workspace");
         MODS_CONTENT.extract(&mods_path).expect("extract mods");
-        PLANS_CONTENT.extract(&plans_path).expect("extract plans");
         // Exercises the actual production entry point (`crates/core/src/scripts.rs`),
         // not `asset_sync` directly, so the once-per-process guard and the wiring
         // are covered too, not just the shared comparison logic.
         ensure_scripts_dir(&scripts_workspace).expect("ensure_scripts_dir");
         println!(
-            "[step 1] extracted the embedded mods/, plans/ and scripts/ snapshots into {:?}, \
+            "[step 1] extracted the embedded mods/ and scripts/ snapshots into {:?}, \
        simulating a workspace populated by a prior run.",
             workspace
         );
@@ -63,7 +58,6 @@ fn main() {
             "[step 1] checking immediately -- must be silent (nothing extracted, nothing edited yet):"
         );
         warn_if_stale(&MODS_CONTENT, &mods_path, "mods", REFRESH_MODS_ENV);
-        warn_if_stale(&PLANS_CONTENT, &plans_path, "plans", REFRESH_PLANS_ENV);
         println!(
             "[step 1] done. Now edit a tracked file under mods/ or scripts/, rebuild this example, and run with --step=2."
         );
@@ -84,16 +78,6 @@ fn main() {
     }
     warn_if_stale(&MODS_CONTENT, &mods_path, "mods", REFRESH_MODS_ENV);
 
-    let plans_refreshed = refresh_if_requested(&PLANS_CONTENT, &plans_path, REFRESH_PLANS_ENV)
-        .expect("refresh plans");
-    if plans_refreshed {
-        println!(
-            "[step 2] {}=1 was set: refreshed the plans workspace copy.",
-            REFRESH_PLANS_ENV
-        );
-    }
-    warn_if_stale(&PLANS_CONTENT, &plans_path, "plans", REFRESH_PLANS_ENV);
-
     println!(
         "[step 2] now the same check through the real ensure_scripts_dir() entry point, called twice:"
     );
@@ -109,7 +93,7 @@ fn main() {
 #[cfg(debug_assertions)]
 fn main() {
     eprintln!(
-        "this demo only makes sense against MODS_CONTENT/PLANS_CONTENT, which only exist in a release build; run with --release"
+        "this demo only makes sense against MODS_CONTENT/SCRIPTS_CONTENT, which only exist in a release build; run with --release"
     );
     std::process::exit(1);
 }

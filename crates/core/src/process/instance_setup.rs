@@ -42,24 +42,24 @@ use tokio::fs::create_dir;
 // checkout itself (`repo_mods_path!`) in a debug one -- and the mods line
 // printed on every setup carries the verdict, so "which code am I actually
 // running" is answered where the question is asked rather than in a check
-// that could be skipped. `REFRESH_MODS_ENV` / `REFRESH_PLANS_ENV` are the
+// that could be skipped. `REFRESH_MODS_ENV` / `REFRESH_SCRIPTS_ENV` are the
 // explicit, opt-in way to overwrite a stale copy in a release build (see
 // their doc comments); a debug build has no snapshot to refresh from, so its
 // remedy is to delete the workspace copy and let the checkout be used
 // directly, which is what the drift report tells the reader to do.
 #[cfg(not(debug_assertions))]
 pub const MODS_CONTENT: include_dir::Dir = include_dir!("mods");
+/// The repo's `scripts/` directory, embedded. Extracted into
+/// `<workspace>/scripts` by [`crate::scripts::ensure_scripts_dir`], which --
+/// together with [`crate::scripts::scripts_dir`] -- is its only consumer.
 #[cfg(not(debug_assertions))]
-pub const PLANS_CONTENT: include_dir::Dir = include_dir!("scripts");
+pub const SCRIPTS_CONTENT: include_dir::Dir = include_dir!("scripts");
 
 /// Set to any value to overwrite a stale `<workspace>/mods` with the snapshot
 /// embedded in this binary. Not read automatically: refreshing on every run
 /// would silently discard a workspace copy someone edited on purpose.
 #[cfg(not(debug_assertions))]
 pub const REFRESH_MODS_ENV: &str = "FACTORIO_BOT_REFRESH_MODS";
-/// Same as [`REFRESH_MODS_ENV`], for `<workspace>/plans`.
-#[cfg(not(debug_assertions))]
-pub const REFRESH_PLANS_ENV: &str = "FACTORIO_BOT_REFRESH_PLANS";
 
 /// The repo's `mods/` directory as a compile-time path, with `$suffix`
 /// appended -- e.g. `repo_mods_path!("/BotBridge/control.lua")`.
@@ -360,33 +360,6 @@ pub async fn setup_factorio_instance(
             }
         }
     }
-    #[cfg(not(debug_assertions))]
-    {
-        let data_plans_path = workspace_path.join(PathBuf::from("plans"));
-        if !data_plans_path.exists() {
-            std::fs::create_dir_all(&data_plans_path).into_diagnostic()?;
-            if let Err(err) = PLANS_CONTENT.extract(data_plans_path.clone()) {
-                error!("failed to extract static plans content: {:?}", err);
-                return Err(PlansExtractFailed {}.into());
-            }
-        } else if asset_sync::refresh_if_requested(
-            &PLANS_CONTENT,
-            &data_plans_path,
-            REFRESH_PLANS_ENV,
-        )
-        .into_diagnostic()?
-        {
-            if !silent {
-                info!(
-                    "Refreshed <bright-blue>{:?}</> from the embedded snapshot ({}=1 was set)",
-                    data_plans_path, REFRESH_PLANS_ENV
-                );
-            }
-        } else {
-            asset_sync::warn_if_stale(&PLANS_CONTENT, &data_plans_path, "plans", REFRESH_PLANS_ENV);
-        }
-    }
-
     let workspace_mods_path = fs::canonicalize(workspace_mods_path).into_diagnostic()?;
     if !silent {
         info!(

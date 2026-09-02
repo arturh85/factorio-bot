@@ -38,14 +38,6 @@ pub struct ModSymlinkFailed {}
 pub struct ModExtractFailed {}
 
 #[derive(Error, Debug, Diagnostic)]
-#[error("failed to extract scripts to workspace")]
-#[diagnostic(
-    code(factorio::workspace::not_found),
-    help("allow elevated access for symlink creating")
-)]
-pub struct PlansExtractFailed {}
-
-#[derive(Error, Debug, Diagnostic)]
 #[error(
     "mod {mod_name} targets Factorio {mod_factorio_version} but the installed game is {game_version}"
 )]

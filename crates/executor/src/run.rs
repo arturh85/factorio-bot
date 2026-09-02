@@ -10,11 +10,12 @@ use crate::log::{ExecutionLog, Status};
 use factorio_bot_core::petgraph::algo::toposort;
 use factorio_bot_core::petgraph::graph::{DiGraph, NodeIndex};
 use factorio_bot_planner::{
-    ActionId, ActionKind, ActionNetwork, BotId, Schedule, ScheduledStep, StepKind, Ticks,
+    ActionId, ActionKind, ActionNetwork, BotId, Condition, Schedule, ScheduledStep, StepKind, Ticks,
 };
 use futures::future::join_all;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
+use std::time::Duration;
 use tokio::sync::watch;
 
 enum PredOutcome {
@@ -457,7 +458,87 @@ async fn await_preds(
     if max_lag > 0 {
         wait_out_lag(act, max_lag).await;
     }
+    // A predecessor's success is not the same fact as its *effect* having
+    // landed. See `await_research`.
+    await_research(act, net, id).await;
     PredOutcome::Ready
+}
+
+/// How long a dispatch may wait for a technology its own plan unlocks.
+///
+/// The one measurement there is says 16 game ticks — ~0.27 s at 60 UPS, more on
+/// a server running behind, which this one always is. Five seconds is that with
+/// an order of magnitude of headroom, and is still short enough that a
+/// technology which is genuinely never coming costs one wait rather than a
+/// stalled run.
+const RESEARCH_SETTLE_BUDGET: Duration = Duration::from_secs(5);
+
+/// How often to re-ask while waiting out [`RESEARCH_SETTLE_BUDGET`].
+///
+/// The question is a read of the world map the mod's stdout already fills in,
+/// not a round trip, so polling is cheap; this is only the granularity of the
+/// answer.
+const RESEARCH_POLL: Duration = Duration::from_millis(100);
+
+/// Wait for the technologies this action's own preconditions name.
+///
+/// # Why an edge is not enough
+///
+/// `Condition::Researched(tech)` on a craft is turned by
+/// `ActionNetwork::infer_edges` into an edge from whichever action carries the
+/// matching `Effect::Researched` — normally the craft of the item a Factorio
+/// 2.0 `craft-item` trigger technology watches for. The edge is right and
+/// `await_preds` honours it. What it cannot say is that **the game applies the
+/// unlock some ticks after the craft that triggers it**, because that is not a
+/// fact about the plan.
+///
+/// `run-1788365280-15443` is the measurement. The plan was correct — milestone
+/// 6's `craft 10 automation-science-pack` carried `deps: [4, 18, 22]` with 18
+/// being `craft 1 lab` — and the executor waited: the same edge in the next
+/// iteration dispatched four ticks after the lab settled. But
+/// `workspace/server-log.txt` has `§53469§action_completed§ok 44` (the lab) and
+/// `§53485§on_research_finished§` (the technology), **16 ticks apart**. The
+/// dependent craft landed inside that window and the mod answered "recipe
+/// automation-science-pack is not enabled for this force", which abandoned the
+/// iteration and cost 27,462 ticks of work that was then done again.
+///
+/// So the precondition is *checked* rather than inferred from a predecessor's
+/// success. This is the same discipline as [`wait_out_lag`], for the same kind
+/// of reason: the plan's ordering describes when work may start, not when the
+/// world has caught up with it.
+///
+/// # What it will not do
+///
+/// It will not wait forever, and it will not fail the action. An actuator that
+/// cannot answer ([`Actuator::technology_researched`] returning `Ok(None)`) or
+/// that errors is not waited on at all, and a budget spent without an answer
+/// dispatches anyway — the action's own verdict is then the report, which is a
+/// far better failure than a bot that never moves again. Same trade, and the
+/// same wording, as [`LAG_CHASE_BUDGET`].
+async fn await_research(act: &dyn Actuator, net: &ActionNetwork, id: ActionId) {
+    let Some(action) = net.action(id) else {
+        return;
+    };
+    for tech in action.pre.iter().filter_map(|c| match c {
+        Condition::Researched(tech) => Some(tech.as_str()),
+        _ => None,
+    }) {
+        let deadline = tokio::time::Instant::now() + RESEARCH_SETTLE_BUDGET;
+        loop {
+            match act.technology_researched(tech).await {
+                // Researched, or nobody can say. Neither is a reason to wait:
+                // `Ok(None)` is "this actuator has no answer", and waiting on
+                // it would spend the whole budget for something that is never
+                // going to change.
+                Ok(Some(true)) | Ok(None) | Err(_) => break,
+                Ok(Some(false)) => {}
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(RESEARCH_POLL).await;
+        }
+    }
 }
 
 /// How much *extra* wall clock a lag wait may spend chasing the game's clock,
@@ -759,6 +840,54 @@ mod tests {
         (net, sched)
     }
 
+    /// The shape run 30's milestone 6 had: a craft whose recipe a technology
+    /// unlocks, ordered behind the craft that triggers that technology.
+    ///
+    /// `craft 1 lab` carries `Effect::Researched`, `craft 10
+    /// automation-science-pack` carries the matching `Condition::Researched`,
+    /// and an edge joins them — exactly what `21a1228a` made the planner emit
+    /// and what `events.jsonl` recorded as `deps: [4, 18, 22]`. Both crafts run
+    /// on one bot, because that is what the run did and because it removes any
+    /// question of cross-bot timing from the assertion.
+    fn trigger_unlock_fixture() -> (ActionNetwork, Schedule) {
+        const TECH: &str = "automation-science-pack";
+        let mut net = ActionNetwork::new();
+        net.add(Action {
+            id: first_action_id(),
+            kind: ActionKind::Craft {
+                item: "lab".into(),
+                count: 1,
+            },
+            pre: vec![],
+            eff: vec![Effect::Researched(TECH.into())],
+            duration: 120,
+            pinned: None,
+            label: "craft 1 lab".into(),
+        });
+        net.add(Action {
+            id: second_action_id(),
+            kind: ActionKind::Craft {
+                item: TECH.into(),
+                count: 10,
+            },
+            pre: vec![Condition::Researched(TECH.into())],
+            eff: vec![],
+            duration: 3000,
+            pinned: None,
+            label: format!("craft 10 {TECH}"),
+        });
+        net.link(first_action_id(), second_action_id(), 0);
+
+        let sched = Schedule {
+            steps: vec![
+                act_step(first_action_id(), BotId(0), 0, 120),
+                act_step(second_action_id(), BotId(0), 120, 3120),
+            ],
+            makespan: 3120,
+        };
+        (net, sched)
+    }
+
     // ------------------------------------------------------- recording actuator
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -794,6 +923,17 @@ mod tests {
         /// the case that broke `run-1788320177-77989` — and `Some(0.0)` is a
         /// clock that has stopped.
         ticks_per_second: Option<f64>,
+        /// How many times `technology_researched` must be asked before it
+        /// answers `Some(true)`; every earlier ask answers `Some(false)`.
+        ///
+        /// `None` — the default, matching `Actuator::technology_researched`'s
+        /// own — answers `Ok(None)`: *this actuator cannot say*. That is what
+        /// every test written before this field existed gets, and it is what
+        /// keeps them dispatching without a wait.
+        ///
+        /// `Some(1)` is a technology the world already has. `Some(u32::MAX)` is
+        /// one that never lands, which is how the budget is pinned.
+        research_lands_after: Option<u32>,
     }
 
     impl Default for Script {
@@ -806,6 +946,7 @@ mod tests {
                 speed: 1.0,
                 placement: None,
                 ticks_per_second: None,
+                research_lands_after: None,
             }
         }
     }
@@ -817,6 +958,16 @@ mod tests {
         script: Script,
         origin: tokio::time::Instant,
         seen: std::sync::Mutex<Vec<(Dispatch, Duration)>>,
+        /// Every `technology_researched` question, in order.
+        tech_queries: std::sync::Mutex<Vec<String>>,
+        /// Every craft dispatch, paired with how many technology questions had
+        /// been asked by the time it went out.
+        ///
+        /// The pairing is the assertion: "the craft happened after the unlock
+        /// was confirmed" is an ordering claim, and a count taken at dispatch
+        /// is the only way to state it that a mutation cannot satisfy by
+        /// accident.
+        crafts: std::sync::Mutex<Vec<(String, usize)>>,
     }
 
     impl RecordingAct {
@@ -825,7 +976,25 @@ mod tests {
                 script,
                 origin: tokio::time::Instant::now(),
                 seen: std::sync::Mutex::new(Vec::new()),
+                tech_queries: std::sync::Mutex::new(Vec::new()),
+                crafts: std::sync::Mutex::new(Vec::new()),
             }
+        }
+
+        /// How many times this actuator was asked about a technology.
+        fn tech_query_count(&self) -> usize {
+            self.tech_queries.lock().unwrap().len()
+        }
+
+        /// How many technology questions had been asked when `recipe` was
+        /// dispatched, or `None` if it never was.
+        fn crafted_after_queries(&self, recipe: &str) -> Option<usize> {
+            self.crafts
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(name, _)| name == recipe)
+                .map(|(_, n)| *n)
         }
 
         fn record(&self, what: Dispatch) {
@@ -911,9 +1080,14 @@ mod tests {
         async fn craft(
             &self,
             _bot: BotId,
-            _recipe: &str,
+            recipe: &str,
             _count: u32,
         ) -> Result<ActionTicks, ActuatorFailure> {
+            let asked = self.tech_query_count();
+            self.crafts
+                .lock()
+                .unwrap()
+                .push((recipe.to_string(), asked));
             Ok(some_ticks())
         }
 
@@ -971,6 +1145,18 @@ mod tests {
                 return Ok(None);
             };
             Ok(Some((self.origin.elapsed().as_secs_f64() * rate) as u64))
+        }
+
+        /// Answers `Some(false)` until it has been asked
+        /// `script.research_lands_after` times, then `Some(true)`; `Ok(None)`
+        /// when the script names no number at all.
+        async fn technology_researched(&self, tech: &str) -> Result<Option<bool>, ActuatorError> {
+            let asked = {
+                let mut q = self.tech_queries.lock().unwrap();
+                q.push(tech.to_string());
+                q.len() as u32
+            };
+            Ok(self.script.research_lands_after.map(|lands| asked >= lands))
         }
 
         fn take_placement(&self, _bot: BotId) -> Option<Placement> {
@@ -2092,5 +2278,135 @@ mod tests {
             Status::Success,
             "the other bot's remaining work must survive the bad input"
         );
+    }
+
+    // ---------------------------------------------- research the plan unlocks
+
+    /// The defect `run-1788365280-15443` recorded, as a test.
+    ///
+    /// The plan was right and the edge was honoured; the game applied the
+    /// trigger technology 16 ticks after the craft that triggered it
+    /// (`§53469§action_completed§ok 44` against `§53485§on_research_finished§`
+    /// in `workspace/server-log.txt`), and the dependent craft went out inside
+    /// that window. Without `await_research` this asserts `Some(0)` — the
+    /// craft was dispatched having asked the game nothing at all.
+    #[tokio::test(start_paused = true)]
+    async fn a_craft_waits_for_the_unlock_its_predecessor_triggers() {
+        let (net, sched) = trigger_unlock_fixture();
+        let act = RecordingAct::new(Script {
+            research_lands_after: Some(3),
+            ..Default::default()
+        });
+
+        let log = within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should start");
+
+        assert_eq!(
+            act.crafted_after_queries("automation-science-pack"),
+            Some(3),
+            "the craft must go out only after the game confirmed the unlock, \
+             not merely after the craft that triggers it succeeded"
+        );
+        assert_eq!(log.status(second_action_id()), Status::Success);
+    }
+
+    /// The wait is bounded. A technology that never lands must cost one budget,
+    /// not the run: the craft's own verdict is a far better report than a bot
+    /// that never moves again.
+    ///
+    /// A mutation that drops the deadline hangs here, and
+    /// `within_deadline` says so rather than blocking CI.
+    #[tokio::test(start_paused = true)]
+    async fn an_unlock_that_never_lands_still_dispatches_after_the_budget() {
+        let (net, sched) = trigger_unlock_fixture();
+        let act = RecordingAct::new(Script {
+            research_lands_after: Some(u32::MAX),
+            ..Default::default()
+        });
+
+        within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should start");
+
+        assert!(
+            act.crafted_after_queries("automation-science-pack")
+                .is_some(),
+            "the craft is dispatched anyway once the budget is spent"
+        );
+        assert!(
+            act.tech_query_count() > 1,
+            "and it really did wait first: {} question(s) asked",
+            act.tech_query_count()
+        );
+    }
+
+    /// `Ok(None)` is "this actuator cannot say", and waiting on it would spend
+    /// the whole budget on every craft for an answer that is never going to
+    /// change. Asked once, then dispatched.
+    #[tokio::test(start_paused = true)]
+    async fn an_actuator_that_cannot_answer_is_asked_once_and_not_waited_on() {
+        let (net, sched) = trigger_unlock_fixture();
+        let act = RecordingAct::new(Script {
+            research_lands_after: None,
+            ..Default::default()
+        });
+
+        within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should start");
+
+        assert_eq!(
+            act.tech_query_count(),
+            1,
+            "cannot answer is not the same claim as not researched"
+        );
+        assert_eq!(
+            act.crafted_after_queries("automation-science-pack"),
+            Some(1)
+        );
+    }
+
+    /// The common case must stay free: a technology the world already has costs
+    /// one question and no sleep at all.
+    #[tokio::test(start_paused = true)]
+    async fn a_technology_the_world_already_has_costs_one_question() {
+        let (net, sched) = trigger_unlock_fixture();
+        let act = RecordingAct::new(Script {
+            research_lands_after: Some(1),
+            ..Default::default()
+        });
+
+        within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should start");
+
+        assert_eq!(act.tech_query_count(), 1);
+        assert_eq!(
+            act.crafted_after_queries("automation-science-pack"),
+            Some(1)
+        );
+    }
+
+    /// And an action that states no research precondition asks nothing. The
+    /// wait keys on the plan's own condition, not on "this is a craft".
+    #[tokio::test(start_paused = true)]
+    async fn an_action_with_no_research_precondition_asks_nothing() {
+        let (net, sched) = walk_then_mine_fixture();
+        let act = RecordingAct::new(Script {
+            research_lands_after: Some(u32::MAX),
+            ..Default::default()
+        });
+
+        within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should start");
+
+        assert_eq!(
+            act.tech_query_count(),
+            0,
+            "nothing here names a technology, so nothing may be waited on"
+        );
+        assert!(act.crafted_after_queries("iron-gear-wheel").is_some());
     }
 }

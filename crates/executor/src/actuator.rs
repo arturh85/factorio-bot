@@ -250,6 +250,46 @@ pub trait Actuator: Send + Sync {
         Ok(None)
     }
 
+    /// Has the force the bots act for finished `tech`?
+    ///
+    /// `Ok(None)` means **this actuator cannot answer** — no world to read, or
+    /// a technology it has no record of. It is not "no": a caller that treats
+    /// it as one waits out its whole budget for an answer that is never
+    /// coming, so the two are kept apart here the same way [`ActuatorError::
+    /// NoVerdict`] is kept apart from [`ActuatorError::Rejected`].
+    ///
+    /// # Why an action needs to ask at all
+    ///
+    /// A plan states `Condition::Researched(tech)` on a craft whose recipe a
+    /// technology unlocks, and `ActionNetwork::infer_edges` turns that into an
+    /// edge from whichever action carries the matching `Effect::Researched`.
+    /// The edge orders the *actions* correctly and the executor honours it —
+    /// but the game does not apply a 2.0 `craft-item` trigger technology in
+    /// the tick the craft completes.
+    ///
+    /// `run-1788365280-15443` measured the gap. `workspace/server-log.txt`:
+    /// `§53469§action_completed§ok 44` is the lab craft settling, and
+    /// `§53485§on_research_finished§` is the technology it triggers landing —
+    /// **16 ticks later**. The dependent craft went out inside that window and
+    /// the mod refused it with "recipe automation-science-pack is not enabled
+    /// for this force", which abandoned the milestone's whole iteration and
+    /// cost 27,462 ticks of redone work. Nothing in the plan can express this:
+    /// the edge already says everything the planner knows.
+    ///
+    /// So the executor checks the precondition it was given rather than
+    /// assuming the predecessor's success delivered it. A default of `Ok(None)`
+    /// keeps every actuator that cannot look — including every mock — behaving
+    /// exactly as it did before this existed.
+    ///
+    /// A bare [`ActuatorError`] for the same reason as [`Actuator::game_speed`]
+    /// and [`Actuator::game_tick`]: this asks the game a question rather than
+    /// telling a bot to do something, so there is no dispatch for a tick to
+    /// belong to.
+    async fn technology_researched(&self, tech: &str) -> Result<Option<bool>, ActuatorError> {
+        let _ = tech;
+        Ok(None)
+    }
+
     /// Claims the placement `bot` most recently made, if this actuator is
     /// tracking one.
     ///
@@ -328,6 +368,87 @@ mod tests {
         assert_eq!(
             silent.to_string(),
             "the game reported no readable outcome: unreadable status"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_actuator_with_no_world_says_it_cannot_answer_rather_than_no() {
+        // The default has to be `None`, not `Some(false)`. `false` is a claim
+        // about the game — "this technology is not researched" — and a caller
+        // that believes it waits out its budget every single time.
+        struct Blind;
+        #[async_trait]
+        impl Actuator for Blind {
+            async fn walk(
+                &self,
+                _: BotId,
+                _: Position,
+                _: f64,
+            ) -> Result<ActionTicks, ActuatorFailure> {
+                unreachable!()
+            }
+            async fn mine(
+                &self,
+                _: BotId,
+                _: &str,
+                _: Position,
+                _: u32,
+            ) -> Result<ActionTicks, ActuatorFailure> {
+                unreachable!()
+            }
+            async fn craft(
+                &self,
+                _: BotId,
+                _: &str,
+                _: u32,
+            ) -> Result<ActionTicks, ActuatorFailure> {
+                unreachable!()
+            }
+            async fn place(
+                &self,
+                _: BotId,
+                _: &str,
+                _: Position,
+                _: u8,
+            ) -> Result<ActionTicks, ActuatorFailure> {
+                unreachable!()
+            }
+            async fn insert(
+                &self,
+                _: BotId,
+                _: &str,
+                _: Position,
+                _: InventorySlot,
+                _: &str,
+                _: u32,
+            ) -> Result<ActionTicks, ActuatorFailure> {
+                unreachable!()
+            }
+            async fn remove(
+                &self,
+                _: BotId,
+                _: &str,
+                _: Position,
+                _: InventorySlot,
+                _: &str,
+                _: u32,
+            ) -> Result<ActionTicks, ActuatorFailure> {
+                unreachable!()
+            }
+            async fn research(&self, _: &str) -> Result<ActionTicks, ActuatorFailure> {
+                unreachable!()
+            }
+        }
+
+        let answer = Blind
+            .technology_researched("automation-science-pack")
+            .await
+            .expect("the default cannot fail");
+        assert_eq!(answer, None, "an actuator with no world cannot answer");
+        assert_ne!(
+            answer,
+            Some(false),
+            "cannot answer is not the same claim as not researched"
         );
     }
 

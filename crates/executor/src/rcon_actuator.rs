@@ -113,6 +113,39 @@ pub const DEFINES_QUERY: &str = "/silent-command \
 local t={} for k,v in pairs(defines.inventory) do t[k]=v end \
 rcon.print(helpers.table_to_json(t))";
 
+/// The force the bots act for, by the mod's own definition.
+///
+/// **Named, not derived.** `mods/BotBridge/control.lua` hardcodes
+/// `game.forces["player"]` in every place that speaks for the bots —
+/// `collect_recipes`, `collect_player_force`, `start_research` — so this is
+/// the force whose technology table describes them.
+///
+/// It must not be picked by sorting `FactorioWorld::forces`: `writeout_forces`
+/// emits **all** of `game.forces`, so from the first `on_research_finished` of
+/// a run the world also holds `enemy` and `neutral`, whose technology tables
+/// describe nobody and are researched by nobody. See
+/// `docs/superpowers/notes/2026-09-02-recipe-not-enabled.md`.
+const BOT_FORCE: &str = "player";
+
+/// Whether `world` records `tech` as researched for the force the bots act for.
+///
+/// Three answers, and the third is the interesting one:
+///
+/// - `Some(true)` / `Some(false)` — the force is in the world and so is the
+///   technology, so this is a report about the game.
+/// - `None` — **nobody can say**. Either no force has been read yet (the world
+///   is populated asynchronously from the mod's stdout) or the force has no
+///   such technology. Neither is evidence that it is unresearched, and a caller
+///   that waits for a `true` must not wait on this.
+///
+/// A free function rather than a method so it can be tested against a
+/// hand-built [`FactorioWorld`]; [`RconActuator`] itself needs a live
+/// [`FactorioRcon`] to exist.
+pub fn technology_researched_in(world: &FactorioWorld, tech: &str) -> Option<bool> {
+    let force = world.forces.get(BOT_FORCE)?;
+    force.technologies.get(tech).map(|t| t.researched)
+}
+
 /// Drives a real Factorio game over RCON.
 pub struct RconActuator {
     rcon: Arc<FactorioRcon>,
@@ -417,6 +450,18 @@ impl Actuator for RconActuator {
             .map_err(classify)
     }
 
+    /// Read from the world, not asked over RCON.
+    ///
+    /// The mod already tells us: `on_research_finished` calls
+    /// `writeout_recipes()` and `writeout_forces()` *before* it settles the
+    /// action, so by the time a technology has landed, `OutputParser` has
+    /// already written the new force into this world. A round trip would ask a
+    /// question the answer to which is sitting in memory, and the caller
+    /// (`run::await_research`) asks repeatedly.
+    async fn technology_researched(&self, tech: &str) -> Result<Option<bool>, ActuatorError> {
+        Ok(technology_researched_in(&self.world, tech))
+    }
+
     /// The game's own clock, asked fresh.
     ///
     /// Not [`FactorioRcon::last_tick`]: that is the stamp off whatever was
@@ -455,6 +500,100 @@ mod tests {
     use super::*;
     use factorio_bot_core::errors::{RconError, RconPlayerNotFound, RconTimeout};
     use std::collections::BTreeSet;
+
+    /// A force carrying exactly the technologies named, with the researched
+    /// flag each pair gives.
+    fn force_with(name: &str, techs: &[(&str, bool)]) -> factorio_bot_core::types::FactorioForce {
+        use factorio_bot_core::types::{FactorioForce, FactorioTechnology};
+        let technologies = techs
+            .iter()
+            .map(|(tech, researched)| {
+                (
+                    (*tech).to_string(),
+                    FactorioTechnology {
+                        name: (*tech).to_string(),
+                        enabled: true,
+                        upgrade: false,
+                        researched: *researched,
+                        prerequisites: None,
+                        research_unit_ingredients: Vec::new(),
+                        research_unit_count: 0,
+                        research_unit_energy: Default::default(),
+                        order: String::new(),
+                        level: 1,
+                        valid: true,
+                        unlocked_recipes: Vec::new(),
+                        research_trigger: None,
+                    },
+                )
+            })
+            .collect();
+        FactorioForce {
+            name: name.to_string(),
+            force_id: 1,
+            current_research: None,
+            research_progress: None,
+            manual_mining_speed_modifier: None,
+            technologies: Box::new(technologies),
+        }
+    }
+
+    #[test]
+    fn the_bots_force_answers_for_a_technology_it_has_finished() {
+        let world = FactorioWorld::new();
+        world
+            .update_force(force_with("player", &[("automation-science-pack", true)]))
+            .expect("force accepted");
+        assert_eq!(
+            technology_researched_in(&world, "automation-science-pack"),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn the_other_forces_in_the_world_do_not_get_a_vote() {
+        // `writeout_forces` emits all of `game.forces`, so from the first
+        // `on_research_finished` of a run the world holds `enemy` and
+        // `neutral` too -- and neither ever researches anything. Sorting the
+        // map and taking the first name (which is what
+        // `PlanState::from_world` does) picks `enemy` and answers "not
+        // researched" forever. This is the test that would have caught it.
+        let world = FactorioWorld::new();
+        world
+            .update_force(force_with("player", &[("automation-science-pack", true)]))
+            .expect("force accepted");
+        world
+            .update_force(force_with("enemy", &[("automation-science-pack", false)]))
+            .expect("force accepted");
+        world
+            .update_force(force_with("neutral", &[("automation-science-pack", false)]))
+            .expect("force accepted");
+        assert_eq!(
+            technology_researched_in(&world, "automation-science-pack"),
+            Some(true),
+            "the bots act for `player`; `enemy` sorts first and must not decide"
+        );
+    }
+
+    #[test]
+    fn a_world_that_has_read_no_force_yet_cannot_answer() {
+        let world = FactorioWorld::new();
+        assert_eq!(
+            technology_researched_in(&world, "automation-science-pack"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_technology_the_force_does_not_list_is_unknown_rather_than_unresearched() {
+        // `Some(false)` here would make a caller wait out its whole budget for
+        // a technology the game has never heard of.
+        let world = FactorioWorld::new();
+        world
+            .update_force(force_with("player", &[("electronics", true)]))
+            .expect("force accepted");
+        assert_eq!(technology_researched_in(&world, "no-such-technology"), None);
+    }
 
     #[test]
     fn defines_are_parsed_from_the_games_reply() {

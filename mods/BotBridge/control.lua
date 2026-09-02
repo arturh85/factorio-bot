@@ -290,6 +290,51 @@ function walk_leg_timeout_ticks(player, from_pos, to_pos)
 	return math.max(60, math.ceil((leg_length / speed) * 3))
 end
 
+--- How long the mining handler may fail to start mining before it gives the
+--- action a verdict.
+---
+--- Three branches of that handler used to `print` and fall through: nothing
+--- selectable under the cursor, another character standing on the target, and
+--- a selection that is neither the target nor a tree. None of them completed
+--- the action and none of them failed it, so the caller waited out its whole
+--- `ACTION_RESULT_DEADLINE` (360s, crates/core/src/factorio/rcon.rs) and
+--- learned nothing. Run 9 (`workspace/runs/run-1788310810-27811`) spent 1080
+--- of its 1096 recorded seconds that way -- three consecutive plans, each 360
+--- seconds long, each containing about two seconds of work.
+---
+--- 300 ticks (5s) is far longer than anything the handler legitimately waits
+--- for -- the step-aside walk below is about 1.35 tiles, roughly 9 ticks --
+--- and it is not a mining timeout: the clock only runs on ticks where
+--- `mining_state` was NOT set, and any tick that sets it clears the clock. A
+--- mine that is actually mining, however slowly, is never interrupted.
+MINE_BLOCKED_TIMEOUT_TICKS = 300
+
+--- Where to stand when another character is on the tile we mean to mine.
+---
+--- This used to be a flat `{ent.x - 2, ent.y - 2}`, from 2021, when the reach
+--- guard above was a flat `> 6`. The guard was tightened to the real
+--- `resource_reach_distance` in dd2852e3, and a character's is **2.7** --
+--- while that waypoint is `sqrt(8)` = **2.828** tiles from the entity. So the
+--- bot walked exactly where it was told and the guard refused it on the next
+--- tick with `too far too mine`: arrived, on target, still out of reach.
+---
+--- Sized to the reach instead, and by the same rule the Rust side uses for a
+--- mine's corrective walk (`approach_radius`, crates/core/src/factorio/rcon.rs):
+--- aim at half the bound, so the follower's 0.3-by-0.3 stopping box still
+--- leaves the bot comfortably inside it. Half the reach split over two axes is
+--- `reach * 0.5 / sqrt(2)` each, giving a straight-line distance of exactly
+--- half the reach.
+function mine_step_aside_waypoint(player, ent)
+	local reach = player.resource_reach_distance
+	if reach == nil or reach <= 0 or reach > 1000 then
+		-- A player without a character reports `MAX_DOUBLE` here; there is no
+		-- sensible fraction of that, and 1.35 is what a character would get.
+		reach = 2.7
+	end
+	local offset = (reach * 0.5) / math.sqrt(2)
+	return { ent.position.x - offset, ent.position.y - offset }
+end
+
 -- Emits a machine-readable record of a `player.teleport` call, since none of
 -- the three call sites are otherwise distinguishable from ordinary walking
 -- to the Rust side: `on_player_changed_position` fires identically for a
@@ -811,21 +856,56 @@ function on_tick(event)
 					-- select something different instead. (e.g., a tree or the player in the way)
 					player.update_selected_entity(ent.position)
 					local ent2 = player.selected
+					local m = storage.p[idx].mining
+
+					-- `blocked` is the reason this tick could NOT set
+					-- `mining_state`, or nil if it could. Every branch below has
+					-- to set one or the other, because a branch that sets
+					-- neither is a mine that never mines and never answers --
+					-- see MINE_BLOCKED_TIMEOUT_TICKS for what that used to cost.
+					local blocked = nil
 
 					if (ent2 == nil) then
-						print("wtf, not mining any target")
+						blocked = "nothing selectable at " .. coord(ent.position)
 					elseif (ent.name ~= ent2.name or ent.position.x ~= ent2.position.x or ent.position.y ~= ent2.position.y) then
 						if ent2.type == "tree" then
 							print("mining: there's a tree in our way. deforesting...") -- HACK
 							player.mining_state = { mining=true, position=ent.position }
 						elseif ent2.name == "character" then
-							print("wtf, not mining the expected target, MOVING! (expected: "..ent.name..", found: "..ent2.name..")")
-							rcon_action_start_walk_waypoints(4711, idx, {{ ent.position.x - 2, ent.position.y - 2 }})
+							blocked = "another character is standing on the " .. ent.name
+							-- Step aside once per blocked episode, not once per
+							-- tick: re-dispatching every tick restamps the
+							-- walk's own leg timer, so the walk could never
+							-- time out, and every completion wrote another
+							-- reply under the same hardcoded action id.
+							if not m.stepped_aside then
+								m.stepped_aside = true
+								print("mining: " .. blocked .. ", stepping aside")
+								rcon_action_start_walk_waypoints(4711, idx, { mine_step_aside_waypoint(player, ent) })
+							end
 						else
-							print("wtf, not mining the expected target (expected: "..ent.name..", found: "..ent2.name..")")
+							blocked = "expected " .. ent.name .. " at " .. coord(ent.position) .. ", found " .. ent2.name
 						end
 					else
 						player.mining_state = { mining=true, position=ent.position }
+					end
+
+					if blocked == nil then
+						-- Progress. Whatever was in the way is not any more, so
+						-- the clock starts again if it ever comes back.
+						m.blocked_since = nil
+						m.blocked_reason = nil
+						m.stepped_aside = nil
+					else
+						m.blocked_reason = blocked
+						if m.blocked_since == nil then
+							m.blocked_since = event.tick
+						elseif event.tick - m.blocked_since > MINE_BLOCKED_TIMEOUT_TICKS then
+							action_failed(event.tick, m.action_id,
+								"ERROR: could not start mining for "
+								.. (event.tick - m.blocked_since) .. " ticks: " .. blocked)
+							storage.p[idx].mining = nil
+						end
 					end
 
 					end

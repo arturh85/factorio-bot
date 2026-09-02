@@ -342,3 +342,26 @@ subscriber, which binds a fixed port, so a viewer and a game run cannot both be
 `console-subscriber` and nothing about the game. The binaries are now split:
 `factorio-bot-serve` (all features) for the viewer, `factorio-bot`
 (`cli,lua`) for runs.
+
+## A trap I warned others about and then walked into (~05:10)
+
+The CLI printed, and I had not been reading it:
+
+```
+scripts workspace copy is STALE: 2 file(s) differ
+```
+
+`workspace/scripts/research_run.lua` was 12 lines behind the repo — missing the
+`record.teleports()` drain added with the teleport writer. I re-seeded
+`workspace/mods` before every single run tonight and **never once re-seeded
+`workspace/scripts`**.
+
+Consequence: when I reported `teleports: 0` for run 8b, that was not "no
+teleports happened". It was the script never draining the queue. The number was
+real and meant nothing, which is the exact failure mode this night has been
+about.
+
+**Both copies must be re-seeded before a run**, and the STALE warnings the tool
+already prints are worth reading rather than scrolling past. It also warned
+about `workspace/plans` (15 files) — unexamined, probably irrelevant, but
+unexamined.

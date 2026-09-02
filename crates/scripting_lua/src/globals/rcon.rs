@@ -79,7 +79,7 @@ end
                     let filter = AreaFilter::PositionRadius((search_center, Some(radius)));
                     let result = _rcon
                         .as_ref()
-                        .find_entities_filtered(&filter, search_name, search_type)
+                        .find_entities_filtered(&filter, search_name, search_type.map(|t| vec![t]))
                         .await
                         .map_err(rcon_error)?;
                     _lua.to_value(&result)

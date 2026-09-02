@@ -2178,11 +2178,22 @@ impl FactorioRcon {
        invert :: boolean (optional): If the filters should be inverted. These filters are: name, type, ghost_name, ghost_type, direction, collision_mask, force.
     */
 
+    /// `search_type` is a list because the game's own `type` filter is:
+    /// passing one type discards everything else at the source, and the game
+    /// happily accepts several at once (`type :: string or array of string`).
+    /// [`crate::factorio::snapshot::attach_world`] still passes `None` for
+    /// this on purpose -- it feeds `EntityGraph::add`, whose `blocked_tree`
+    /// keys placement refusals off *every* collidable entity including
+    /// trees, so narrowing this query would silently reintroduce furnaces
+    /// sited inside forests. A caller that only reads a curated subset back
+    /// out (`EntityGraph::snapshot_within`'s whitelist, say) is the one that
+    /// should narrow here -- see `keyframe_relevant_types` in
+    /// `crates/scripting_lua/src/globals/record.rs`.
     pub async fn find_entities_filtered(
         &self,
         area_filter: &AreaFilter,
         search_name: Option<String>,
-        search_type: Option<String>,
+        search_type: Option<Vec<String>>,
     ) -> Result<Vec<FactorioEntity>> {
         let mut args: HashMap<String, String> = HashMap::new();
         match area_filter {
@@ -2202,16 +2213,19 @@ impl FactorioRcon {
         if let Some(name) = search_name {
             args.insert(String::from("name"), str_to_lua(&name));
         }
-        if let Some(entity_type) = search_type {
-            args.insert(String::from("type"), str_to_lua(&entity_type));
+        if let Some(entity_types) = search_type {
+            let quoted: Vec<String> = entity_types.iter().map(|t| str_to_lua(t)).collect();
+            args.insert(String::from("type"), vec_to_lua(quoted));
         }
-        let result = self
-            .remote_call("find_entities_filtered", vec![hashmap_to_lua(args)])
+        // `remote_call_json` rather than `remote_call`: this reply is
+        // unbounded by construction (an area query, not a count), and a
+        // short read here previously failed only at `serde_json::from_str`,
+        // leaving the connection in the pool still holding the unread
+        // remainder -- see `remote_call_json`'s own doc comment for what that
+        // costs the *next* command on the same connection.
+        let mut json = self
+            .remote_call_json("find_entities_filtered", vec![hashmap_to_lua(args)])
             .await?;
-        if result.is_none() {
-            return Err(RconUnexpectedEmptyResponse {}.into());
-        }
-        let mut json = result.unwrap().pop().unwrap();
         // empty objects/arrays are the same in lua
         if json == "{}" {
             json = String::from("[]");
@@ -2261,13 +2275,12 @@ impl FactorioRcon {
         if let Some(name) = name {
             args.insert(String::from("name"), str_to_lua(&name));
         }
-        let result = self
-            .remote_call("find_tiles_filtered", vec![hashmap_to_lua(args)])
+        // See the matching comment on `find_entities_filtered`: this reply is
+        // also unbounded by construction, so a short read must be detected
+        // rather than merely fail to parse.
+        let mut json = self
+            .remote_call_json("find_tiles_filtered", vec![hashmap_to_lua(args)])
             .await?;
-        if result.is_none() {
-            return Err(RconUnexpectedEmptyResponse {}.into());
-        }
-        let mut json = result.unwrap().pop().unwrap();
         // empty objects/arrays are the same in lua
         if json == "{}" {
             json = String::from("[]");

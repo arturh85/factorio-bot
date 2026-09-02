@@ -77,7 +77,7 @@ pub async fn find_entities(
         .find_entities_filtered(
             &area_filter,
             params.name.clone(),
-            params.entity_type.clone(),
+            params.entity_type.clone().map(|t| vec![t]),
         )
         .await
         .map_err(ErrorResponse::from)?;

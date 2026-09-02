@@ -44,12 +44,12 @@ fn rcon_error(err: impl std::fmt::Display) -> LuaError {
 ///
 /// The keyframe compares what the game has against `EntityGraph::snapshot_within`
 /// -- the "model" side -- and a divergence list is only a useful signal when
-/// both sides describe the same population. `find_entities_filtered` with no
-/// type filter returns *everything* in the box: trees, small rocks, ore,
-/// characters, items on the ground. None of those are things a bot places or
-/// something `EntityGraph` tracks, so left in, they would dominate every
-/// keyframe's `game` array with terrain nobody placed and swamp the actual
-/// divergences underneath.
+/// both sides describe the same population. An unfiltered `find_entities_filtered`
+/// would return *everything* in the box: trees, small rocks, ore, characters,
+/// items on the ground. None of those are things a bot places or something
+/// `EntityGraph` tracks, so left in, they would dominate every keyframe's
+/// `game` array with terrain nobody placed and swamp the actual divergences
+/// underneath.
 ///
 /// This mirrors `EntityGraph::add` (`crates/core/src/graph/entity_graph.rs`)
 /// exactly: the entity types it inserts into `entity_tree`, the two named
@@ -58,6 +58,16 @@ fn rcon_error(err: impl std::fmt::Display) -> LuaError {
 /// side too). Keep the two lists in sync -- a type `add` starts tracking
 /// without a matching arm here would show up as a permanent, spurious
 /// divergence for every run that touches it.
+///
+/// [`keyframe_snapshot`] now also sends the type half of this filter to the
+/// game via `find_entities_filtered`'s `type` parameter (see
+/// `keyframe_relevant_types`), so this function's job today is narrower than
+/// it used to be: the game already dropped every tree, fish and unit before
+/// the reply left the server. What is left for this function to do is the
+/// `simple-entity` tail -- the game's `type` filter cannot itself say "type
+/// simple-entity AND name rock-big-or-rock-huge", so `keyframe_relevant_types`
+/// asks for all of `simple-entity` (rocks, small and large) and this function
+/// still has to pick the two big ones back out by name.
 fn keyframe_relevant(entity_type: &str, name: &str) -> bool {
     matches!(
         EntityType::from_str(entity_type),
@@ -81,6 +91,46 @@ fn keyframe_relevant(entity_type: &str, name: &str) -> bool {
         || name == "rock-huge"
 }
 
+/// The `type` filter [`keyframe_snapshot`] sends to `find_entities_filtered`
+/// so the game drops trees, fish, units, characters and dropped items before
+/// the reply ever crosses RCON, instead of `keyframe_relevant` doing it here
+/// after the whole box has already been serialised, sent and parsed.
+///
+/// Every type [`keyframe_relevant`] admits outright, plus `simple-entity` --
+/// the game cannot filter that down to just `rock-big`/`rock-huge` by type
+/// alone (its `type` and `name` filters narrow the *same* query rather than
+/// offering alternatives), so `simple-entity` is asked for in full and
+/// `keyframe_relevant` still does the by-name narrowing on what comes back.
+/// That tail is measured to be small: a 473-chunk capture of this map's
+/// starting area logged 326 `simple-entity` records against 10,542 `tree` and
+/// 2,693 `resource` -- so admitting all of `simple-entity` costs a few hundred
+/// records at most, where admitting no type filter at all would have cost
+/// tens of thousands.
+fn keyframe_relevant_types() -> Vec<String> {
+    [
+        EntityType::Furnace,
+        EntityType::Inserter,
+        EntityType::Boiler,
+        EntityType::Lab,
+        EntityType::OffshorePump,
+        EntityType::MiningDrill,
+        EntityType::StorageTank,
+        EntityType::Container,
+        EntityType::Splitter,
+        EntityType::TransportBelt,
+        EntityType::UndergroundBelt,
+        EntityType::Pipe,
+        EntityType::PipeToGround,
+        EntityType::LogisticContainer,
+        EntityType::AssemblingMachine,
+        EntityType::Resource,
+        EntityType::SimpleEntity,
+    ]
+    .iter()
+    .map(|entity_type| entity_type.to_string())
+    .collect()
+}
+
 /// Queries the live game and the world model within `bounds` and reports
 /// where they diverge.
 ///
@@ -99,13 +149,20 @@ async fn keyframe_snapshot(
         &Position::new(bounds.right, bounds.bottom),
     );
     let game_entities = rcon
-        .find_entities_filtered(&AreaFilter::Rect(rect.clone()), None, None)
+        .find_entities_filtered(
+            &AreaFilter::Rect(rect.clone()),
+            None,
+            Some(keyframe_relevant_types()),
+        )
         .await
         .map_err(rcon_error)?;
     // Restricted to what `EntityGraph` models -- see `keyframe_relevant` --
     // so `game` and `model` are comparable populations rather than the
     // unfiltered box (trees, rocks, ore, characters, dropped items) against
-    // the curated one.
+    // the curated one. The type half of that restriction already happened on
+    // the game's side (`keyframe_relevant_types`, above); this pass is what is
+    // left: picking `rock-big`/`rock-huge` out of the `simple-entity`s the
+    // game could not narrow any further by type alone.
     let game: Vec<EntitySnapshot> = game_entities
         .into_iter()
         .filter(|e| keyframe_relevant(&e.entity_type, &e.name))

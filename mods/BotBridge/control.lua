@@ -824,11 +824,33 @@ end
 function writeout_recipes()
 	writeout_records("recipes", collect_recipes())
 end
+-- **The force the bots act for, and only that one.**
+--
+-- This used to walk `game.forces`, which also holds `enemy` and `neutral`.
+-- All three then reached `FactorioWorld::forces`, where
+-- `crates/planner/src/state.rs` picks its acting force with
+-- `forces.keys().min()` -- which over that set returns `enemy`. In run 30 that
+-- happened at the first `on_research_finished` (tick 26,449) and covered
+-- milestones 6 and 7: at tick 53,485 `player` had `automation-science-pack`
+-- researched and `enemy` did not, so all five milestone-7 plans re-derived the
+-- trigger technology and planned a second lab for a technology the force
+-- already had. That milestone burned 85,030 ticks and ended the run `stuck`.
+--
+-- The other half of that fix -- naming the force instead of sorting for it --
+-- is in the planner and is independent of this: every archived run record
+-- still contains three forces, so it has to be correct against those anyway.
+--
+-- Nothing read the other two. The only readers of `FactorioWorld::forces` are
+-- the planner and `crates/executor/src/rcon_actuator.rs`, which already names
+-- `"player"` and cites this emission as the reason it must not sort. And the
+-- RCON transport already did this: `WorldSnapshot::forces` carries exactly
+-- `player`, for these reasons. The two transports are meant to agree about
+-- shape, so this is the stdout one catching up.
+--
+-- Also ~287 kB less stdout per research completion -- `enemy` and `neutral`
+-- carry ~120 kB technology tables each and describe nobody.
 function writeout_forces()
-	local lines = {}
-	for name, force in pairs(game.forces) do
-		writeout(0, "force", helpers.table_to_json(serialize_force(force)))
-	end
+	writeout(0, "force", helpers.table_to_json(collect_player_force()))
 end
 
 function on_whoami()

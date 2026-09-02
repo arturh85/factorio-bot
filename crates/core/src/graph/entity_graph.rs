@@ -663,6 +663,19 @@ impl EntityGraph {
                     | (_, EntityType::PipeToGround)
                     | (_, EntityType::LogisticContainer)
                     | (_, EntityType::AssemblingMachine)
+                    // The electric network, admitted 2026-09-02. A pole and a
+                    // steam engine reached `blocked_tree` above -- so they
+                    // refused placements -- and stopped there, which made a
+                    // hand-built power plant unreadable *by name* and
+                    // `PlanState::electric_supply_kw` score every live base
+                    // 0 kW. They draw no edges in `connect` (its match ends
+                    // `_ => {}`, and neither carries a drop or pickup
+                    // position) and `FlowGraph` prunes anything it reaches
+                    // that it does not model, so admitting them adds nodes
+                    // and no behaviour beyond being nameable.
+                    | (_, EntityType::ElectricPole)
+                    | (_, EntityType::Generator)
+                    | (_, EntityType::SolarPanel)
                     | ("rock-big", _)
                     | ("rock-huge", _) => {
                         if let Some(entity_id) = self.entity_at(&entity.position) {
@@ -1799,6 +1812,113 @@ mod tests {
                 "edge {got} is more than one position step from {want}"
             );
         }
+    }
+
+    /// A hand-built power plant has to be readable **by name**, not merely
+    /// collidable.
+    ///
+    /// Until 2026-09-02 `EntityGraph::add`'s entity-tree whitelist had no
+    /// `electric-pole` and no `generator` arm -- and, one layer below that,
+    /// `EntityType` had no variant to write one with, so
+    /// `EntityType::from_str("electric-pole")` failed and the entity was
+    /// dropped before the match was even reached. A pole and a steam engine a
+    /// live world already contained went into `blocked_tree` (so they refused
+    /// placements) and nowhere else, which made
+    /// `PlanState::electric_supply_kw` score every real base 0 kW and refuse
+    /// every research. See
+    /// `docs/superpowers/notes/2026-09-02-building-power.md`.
+    #[test]
+    fn a_hand_built_power_plant_is_readable_by_name() {
+        let graph = entity_graph_from(power_plant()).expect("adding must not fail");
+        let mut names: Vec<String> = graph
+            .find_entities_in_radius(Position::new(10.5, 10.5), 16., None, None)
+            .into_iter()
+            .map(|entity| entity.name)
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "small-electric-pole".to_string(),
+                "solar-panel".to_string(),
+                "steam-engine".to_string(),
+            ],
+            "a pole, a generator and a panel a world already contains must be \
+             nameable, not just collidable"
+        );
+    }
+
+    /// The same three, as graph nodes carrying the type they were read as.
+    ///
+    /// `find_entities_in_radius` reads the quad tree; this reads the petgraph
+    /// the tree is indexed against, so it fails separately if the entity lands
+    /// in one and not the other.
+    #[test]
+    fn a_power_plants_entities_become_graph_nodes_with_their_own_type() {
+        let graph = entity_graph_from(power_plant()).expect("adding must not fail");
+        let inner = graph.inner_graph();
+        let mut types: Vec<String> = inner
+            .node_weights()
+            .map(|node| node.entity_type.to_string())
+            .collect();
+        types.sort();
+        assert_eq!(
+            types,
+            vec![
+                "electric-pole".to_string(),
+                "generator".to_string(),
+                "solar-panel".to_string(),
+            ]
+        );
+    }
+
+    /// A pole, a steam engine and a solar panel, spaced so none of their
+    /// collision boxes meet -- `add` refuses an entity whose position is
+    /// already occupied, and a test that tripped that would be measuring the
+    /// wrong thing.
+    ///
+    /// Boxes are the vanilla ones from `entity-prototype-fixtures.json`; a
+    /// zero-width box is skipped by `add` outright, so they cannot be left at
+    /// their default.
+    fn power_plant() -> Vec<FactorioEntity> {
+        fn boxed(
+            name: &str,
+            entity_type: &str,
+            position: Position,
+            w: f64,
+            h: f64,
+        ) -> FactorioEntity {
+            FactorioEntity {
+                name: name.into(),
+                entity_type: entity_type.into(),
+                bounding_box: add_to_rect(&Rect::from_wh(w, h), &position),
+                position,
+                ..Default::default()
+            }
+        }
+        vec![
+            boxed(
+                "small-electric-pole",
+                "electric-pole",
+                Position::new(10.5, 10.5),
+                0.296_875,
+                0.296_875,
+            ),
+            boxed(
+                "steam-engine",
+                "generator",
+                Position::new(14.5, 10.5),
+                2.5,
+                4.695_312_5,
+            ),
+            boxed(
+                "solar-panel",
+                "solar-panel",
+                Position::new(10.5, 16.5),
+                2.796_875,
+                2.796_875,
+            ),
+        ]
     }
 
     /// Water is a *tile*, not an entity, and refuses a build just the same.

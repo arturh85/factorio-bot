@@ -1958,6 +1958,108 @@ mod tests {
             .expect("the fixture has a lab")
     }
 
+    /// The end-to-end one: a power plant the **world** already carries, not
+    /// one this plan placed.
+    ///
+    /// Every other test in this section builds its plant through
+    /// `create_entity`, the expansion overlay, because until 2026-09-02
+    /// `EntityGraph::add` dropped `electric-pole` and `generator` before they
+    /// reached the entity tree and nothing could read their name. That is the
+    /// gap that made every live world score 0 kW and every research refuse.
+    /// This test goes through `FactorioWorld` instead, so it fails if that
+    /// whitelist ever narrows again.
+    #[test]
+    fn a_power_plant_the_world_already_carries_reads_as_supply() {
+        let world = fixture_world();
+        world
+            .update_chunk_entities(vec![
+                world_entity(
+                    "small-electric-pole",
+                    "electric-pole",
+                    10.5,
+                    10.5,
+                    0.296_875,
+                    0.296_875,
+                ),
+                world_entity("steam-engine", "generator", 12.5, 10.5, 2.5, 4.695_312_5),
+            ])
+            .expect("adding the plant must not fail");
+        let s = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+        assert_eq!(
+            s.electric_supply_kw(&lab_area(&s, Position::new(8.5, 8.5))),
+            900.0,
+            "a hand-built plant standing in the world is supply the plan can see"
+        );
+    }
+
+    /// A solar panel the world carries is *readable* and still not credited.
+    ///
+    /// The two halves are separate claims and this is the one that could
+    /// regress quietly: widening the whitelist makes the panel visible, and
+    /// visible is one short step from counted. Its output is a function of the
+    /// in-game clock, so counting it would make the same plan feasible or not
+    /// according to when the run started.
+    #[test]
+    fn a_solar_panel_the_world_carries_is_visible_and_still_not_power() {
+        let world = fixture_world();
+        world
+            .update_chunk_entities(vec![
+                world_entity(
+                    "small-electric-pole",
+                    "electric-pole",
+                    10.5,
+                    10.5,
+                    0.296_875,
+                    0.296_875,
+                ),
+                world_entity(
+                    "solar-panel",
+                    "solar-panel",
+                    13.5,
+                    10.5,
+                    2.796_875,
+                    2.796_875,
+                ),
+            ])
+            .expect("adding the panel must not fail");
+        let s = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+        assert!(
+            s.entities_within(&Position::new(10.5, 10.5), 8.)
+                .iter()
+                .any(|entity| entity.name == "solar-panel"),
+            "the panel has to be readable by name, or this asserts nothing"
+        );
+        assert_eq!(
+            s.electric_supply_kw(&lab_area(&s, Position::new(8.5, 8.5))),
+            0.0,
+            "a solar panel is not deterministic generation"
+        );
+    }
+
+    /// A `FactorioEntity` shaped the way the game reports one: with the
+    /// bounding box it actually occupies. `EntityGraph::add` skips a
+    /// zero-width box outright, so a default-constructed entity would never
+    /// reach the tree and the test would pass for the wrong reason.
+    fn world_entity(
+        name: &str,
+        entity_type: &str,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+    ) -> FactorioEntity {
+        FactorioEntity {
+            name: name.into(),
+            entity_type: entity_type.into(),
+            position: Position::new(x, y),
+            bounding_box: Rect::new(
+                &Position::new(x - w / 2., y - h / 2.),
+                &Position::new(x + w / 2., y + h / 2.),
+            ),
+            ..Default::default()
+        }
+    }
+
     /// A pole covering the site with a generator wired to it is power.
     #[test]
     fn a_covered_site_with_a_generator_on_its_network_has_supply() {

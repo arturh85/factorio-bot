@@ -1382,6 +1382,25 @@ pub enum EntityType {
     PipeToGround,
     StorageTank,
     OffshorePump,
+    // The electric network. Added 2026-09-02: without these three,
+    // `EntityType::from_str("electric-pole")` is an `Err` and
+    // `EntityGraph::add` drops the entity before its whitelist is consulted,
+    // so a power plant a live world already contains is collidable and
+    // otherwise invisible -- and the planner's `electric_supply_kw` scores
+    // every real base 0 kW. See
+    // `docs/superpowers/notes/2026-09-02-building-power.md`.
+    //
+    // `SolarPanel` is here to be *readable*, not to be credited: the planner
+    // deliberately refuses to count a panel as generation, because its output
+    // depends on the in-game time of day and the same plan would be feasible
+    // or not according to when the run started.
+    //
+    // `Accumulator` is deliberately absent, and so is every other electrical
+    // type: an unrecognised type is skipped exactly as it was before, so
+    // naming one here is a decision to model it, not a formality.
+    ElectricPole,
+    Generator,
+    SolarPanel,
     FlyingText,
     StraightRail,
     CurvedRail,

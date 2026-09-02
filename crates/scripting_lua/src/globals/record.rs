@@ -72,6 +72,15 @@ fn rcon_error(err: impl std::fmt::Display) -> LuaError {
 /// simple-entity AND name rock-big-or-rock-huge", so `keyframe_relevant_types`
 /// asks for all of `simple-entity` (rocks, small and large) and this function
 /// still has to pick the two big ones back out by name.
+///
+/// `electric-pole`, `generator` and `solar-panel` joined both lists on
+/// 2026-09-02, the day `EntityGraph::add` started tracking them. They are the
+/// worked example of the paragraph above: the model side gained them
+/// immediately (`snapshot_within` reads `entity_tree`), and had this filter
+/// not moved with it, every keyframe taken anywhere near a power plant would
+/// have carried one permanent `only_in: "model"` entry per pole -- the same
+/// class of noise the `overlaps_bounds` fix was written to remove. See
+/// `docs/superpowers/notes/2026-09-02-building-power.md`.
 fn keyframe_relevant(entity_type: &str, name: &str) -> bool {
     matches!(
         EntityType::from_str(entity_type),
@@ -90,6 +99,9 @@ fn keyframe_relevant(entity_type: &str, name: &str) -> bool {
             | Ok(EntityType::PipeToGround)
             | Ok(EntityType::LogisticContainer)
             | Ok(EntityType::AssemblingMachine)
+            | Ok(EntityType::ElectricPole)
+            | Ok(EntityType::Generator)
+            | Ok(EntityType::SolarPanel)
             | Ok(EntityType::Resource)
     ) || name == "rock-big"
         || name == "rock-huge"
@@ -127,6 +139,9 @@ fn keyframe_relevant_types() -> Vec<String> {
         EntityType::PipeToGround,
         EntityType::LogisticContainer,
         EntityType::AssemblingMachine,
+        EntityType::ElectricPole,
+        EntityType::Generator,
+        EntityType::SolarPanel,
         EntityType::Resource,
         EntityType::SimpleEntity,
     ]
@@ -2282,10 +2297,28 @@ mod tests {
             "pipe-to-ground",
             "logistic-container",
             "assembling-machine",
+            // The electric network, admitted to `EntityGraph::add` on
+            // 2026-09-02. These three are exactly the case this test's doc
+            // warns about: a type `add` tracks and this filter does not is a
+            // permanent `only_in: "model"` divergence on every keyframe that
+            // sees a pole.
+            "electric-pole",
+            "generator",
+            "solar-panel",
         ] {
             assert!(
                 keyframe_relevant(entity_type, "some-entity"),
                 "{entity_type} is one of EntityGraph::add's tracked types"
+            );
+        }
+        // And the game-side half of the filter has to ask for them, or they
+        // are dropped before the reply leaves the server and diverge just the
+        // same, in the other direction.
+        let asked_for = keyframe_relevant_types();
+        for entity_type in ["electric-pole", "generator", "solar-panel"] {
+            assert!(
+                asked_for.iter().any(|t| t == entity_type),
+                "the game-side type filter must ask for {entity_type} too, got {asked_for:?}"
             );
         }
         // Ore, tracked via `resource_tree` and surfaced by `snapshot_within`.

@@ -518,3 +518,61 @@ and was live in run 24 — it answered correctly and the failure happened
 downstream of it. I did not check the log before dispatching. The agent verified
 rather than rebuilt, which is the only reason that cost an hour of one agent
 instead of a duplicate implementation.
+
+## Update (~14:20): the record could not report a lost action, by construction
+
+The settlement hole is fixed (`fcb4ed68`), and both the mechanism and my reading
+of it needed correcting.
+
+**My reading was wrong in one specific way.** I said `failed=1 lost=1` meant two
+things went wrong. It names **one** action. `scripts/supervisor.lua` sets
+`t.failed` to a *sum* — `obs.failed + obs.lost + obs.walks_failed +
+obs.walks_lost` — and `research_run.lua` prints that sum under the label
+`failed=`. So those lines mean `obs.lost == 1` and everything else zero. There
+was no invisible `Status::Failed` in that run at all. The mislabelled `failed=`
+is its own defect, reported and not yet fixed.
+
+**Where the action escaped: not the executor.** `crates/executor/src/run.rs`
+already reaches a terminal status for everything it dispatches. The escape was
+one layer out, in `record.rs`: the settle was written inside
+`if let Some(replied) = replied`. `replied_tick` is a *measurement*, and it is
+correctly `None` when the game never said anything — so **a `Status::Lost` action
+could never produce a settle, by construction.** Not a missed branch; a shape
+that made the case unrepresentable.
+
+The fix keys the settle on the **verdict** instead: success, failed and lost each
+write exactly one line; pending and running write none. With no reply tick the
+stamp is `not_before(dispatched)` rather than the dispatch tick, which would fake
+a zero-duration reply, and `elapsed_ticks` is `Some` only when both ends were
+measured — so a synthesized stamp always carries a null duration and cannot be
+misread as a timed span.
+
+**Third instance of the same shape today, and this time it was actions.**
+`build_observation`'s `first_error` came from `failures`, which holds
+`Status::Failed` only — deliberately, pinned by a test saying "losing the thread
+is not a failure". So a lost *action* contributed nothing to `first_error`
+either. Every milestone-7 iteration had `obs.failed == 0, obs.lost == 1` and no
+failing walk, so `first_error` was `nil`: had milestone 7 halted, `milestone_stuck`
+would have written `last_error: null` **again, after both walk fixes**. Now
+`first_lost_error` falls back: failed action → lost action → failed-or-lost walk.
+
+**And the finding that matters most: all nine unsettled actions were `craft`.**
+
+```
+plan  8  ms 6   craft 1 stone-furnace
+plan  9  ms 6   craft N automation-science-pack   (x4)
+plan 10-13 ms 7 craft 1 stone-furnace             (x4)
+```
+
+No mine, no place, no insert, no walk. Crafting is the one action class that
+never reports completion, so each costs a full 360-second deadline before being
+written off. That is almost certainly what rung 7 has been grinding against, and
+it is the same defect research had this morning — durative work nobody waits for.
+
+**Not fixable: joining a teleport to an action.** `teleport.action_id` is the
+mod's run-global id; `action_dispatched.id` is the planner's plan-local
+`ActionId`. Worse, a `walk_stuck` teleport belongs to a *walk leg*, and walks
+have no `ActionId` at all — there is no walk `EventKind`, and `obs.walks` never
+reaches `events.jsonl` even though walking is most of the wall-clock. The
+question has no answer in this id space. Renaming would hide that rather than fix
+it.

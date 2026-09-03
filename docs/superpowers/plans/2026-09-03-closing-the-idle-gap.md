@@ -104,6 +104,73 @@ Two structural facts explain why nothing fills the idle:
   variant (`Have`, `Researched`, `Produced`, `Producing`, `All`) is
   demand-driven.
 
+## Measured offline: the PLAN is 13:05, so execution fixes alone cannot reach 9
+
+`a5b31c80` added `factorio-bot score-map`. Run against the reference run's own
+map (reconstructed offline by replaying `workspace/server-log.txt`):
+
+```
+iron-ore 24.9   copper-ore 29.8   coal 54.5   stone 67.8   water 40.8   (tiles)
+walk score 1,454 ticks   charting 17/17   VIABLE
+makespan 47,127 ticks (13:05) over bots 1-4, 23.7% utilisation
+```
+
+**The current planner's own makespan for `researched:automation` on this map is
+13:05.** That is what a *perfect* executor would achieve. The target is under
+9:00. So no amount of execution fixing gets there — **the plan itself has to get
+shorter**, and its roster utilisation of 23.7% is the reason it does not.
+
+This promotes the plan-side workstreams (B, A, D, E) from "margin" to
+"necessary", and workstream 0 makes each of them measurable in **0.26 s**
+instead of a 20-minute run. That is the loop to run now.
+
+### Two findings that argue against workstream 0b
+
+1. **The reference map is already a good one.** Everything rung 1 needs is
+   inside 68 tiles and the verdict is `Viable`. A seed search is therefore not
+   where the remaining minutes are.
+2. **The justfile already argued this**, in as many words: searching for a good
+   seed "stops being comparable to the ~9 minute manual solo baseline, which was
+   not run on an optimised map". The owner's benchmark was set on a random map.
+   Optimising ours would make our number better *and* less comparable. Recorded,
+   not decided — this is the owner's call.
+
+**`walk_score` ranks maps; it does not predict a run.** 1,454 ticks against bot
+1's measured 14,330 — ~10x loose, because rung 1 walks to each resource
+repeatedly and between them, which a nearest-tile proxy cannot see.
+
+### The known-good map is UNIDENTIFIED and was at risk
+
+No `map-gen-seed.txt` or `map-exchange-string.txt` exists for it — it predates
+the `--seed` fix (`61ec7364`), so nothing recorded what it was. It survives
+**only** as `workspace/server/saves/level.zip`, and `just bench` passes `--new`,
+which deletes the map. **Copied to `workspace/known-good-map/level.zip`**
+(gitignored). Before any seed work runs, capture this map's exchange string
+from a live game so it can be regenerated at will.
+
+### Seed `20260903` is still unscored
+
+No map exists for it and creating one is a live run. It remains what the
+justfile says it is: a date, chosen for being written down. Do not treat it as
+validated.
+
+### Corrections from this workstream
+
+- **"Trees are a bonus, not a requirement" was wrong.** Wood *is* on the power
+  plant's bill (1, for a `small-electric-pole`). It is not a *map* requirement
+  only because every bot starts holding one wood and a four-bot run has four.
+- **`roll-seed`'s stated blocker no longer exists.** Its doc asks for plumbing
+  to read a `Schedule` out of the Lua runtime; a world dump loads straight into
+  `PlanState`, so no Lua runtime is involved. Only the map-generating loop is
+  still missing.
+- **Water's bound is the planner's own**: `plan_plant` scans 64 then 128 tiles
+  and raises `PowerPlantNeedsWater` beyond that, so water at 200 tiles is
+  reported *missing* — "too far to use" and "not found" are the same outcome.
+- **Charting does not invalidate the scorer.** The mod charts 418 chunks
+  spanning `[-320, 320)` at startup, so a 256-radius search disc fits inside
+  what a t=0 dump already knows. A t=0 census remains a *lower bound*, so a
+  miss is `Incomplete`, never "absent".
+
 ## The path to under 9 minutes — a budget, not a hope
 
 Bot 1's 19.62-minute span is the run. Spending it down:
@@ -113,7 +180,7 @@ Bot 1's 19.62-minute span is the run. Spending it down:
 | baseline | — | **19.62 min** |
 | **F** — lag clock starts at the predecessor's finish | 6.89 min of idle (F accounts for ~99% of it) | **12.72 min** |
 | **B + R3** — split the mining across four bots | `mine` is 5.25 min, the largest single activity; four ways is ~1.31 | **~8.8 min** |
-| **C** — overlap `research` (1.67 min) and `craft` (1.83) with walking | up to ~2 min more, minus what cannot overlap | **~7 min** |
+| **C** — overlap `research` (1.67 min) and `craft` (1.83) with walking | up to ~2 min more, minus what cannot overlap — and the footprint rule below forbids some of it | **~7 min** |
 | **0b** — a seed with ore near spawn | some of the 3.98 min of walking | **lower** |
 
 **F plus splitting the mining is what reaches the target.** Everything else is
@@ -436,21 +503,57 @@ Needs: a `Condition` naming chest contents; planner methods that route
 through it; executor support for take/insert against a buffer chest;
 a placement rule for where the buffer lives.
 
-### C. Overlap crafting AND research with other work — ~2 min, approved for full implementation
+### C. Overlap crafting AND research with other work — **LANDED**
 
-In Factorio hand-crafting runs in a **background queue**: a player queues
-crafts and keeps walking and mining. The mod already uses `begin_crafting`
-and settles on `on_player_crafted_item`, so the game side is right. The
-**executor** is what serialises it — one action per bot, waiting for settle.
+**Implemented.** The executor's invariant is now "one *exclusive* action in
+flight per bot" rather than "one action". `crates/executor/src/occupancy.rs`
+holds the classification in one exhaustive `match` — `Craft` and `Research`
+are background, everything else is exclusive — and `run_bot_signalled`
+queues a background action and moves the bot on to its next step instead of
+standing still for it.
 
-Crafts settle at exactly nominal duration (stone-furnace 30 ticks,
-burner-mining-drill 120), so the *cost model* is accurate; the
-*exclusivity assumption* is what's wrong.
+**Ordering is untouched.** A background action still runs `await_preds`
+before it dispatches, and every consumer still waits on that action's own
+completion signal, published when the game *settles* it rather than when it
+was queued. The wait edges the loop imposes are a strict subset of the ones
+`check_wait_graph` approved before the run started, so no schedule that used
+to terminate can now hang.
 
-Needs: a notion of which actions are exclusive (mine, walk) versus
-background (craft), and per-bot concurrency for the latter. Note this
-interacts with A — a bot with a filler task and a queued craft is doing two
-things, which is correct and currently impossible.
+**The inventory hazard, and the narrow rule taken for it.** Hand-crafting
+spends materials, and two mechanisms in `crates/planner` reason about a
+bot's inventory by walking its steps *in order*: `PlanState::available`'s
+reservations, and `ActionNetwork::infer_edges`, which deliberately omits the
+producer→consumer edge for a role-scoped `HasItem` across chains on the
+stated grounds that the scheduler's per-bot feasibility check re-derives it.
+So schedule order really is load-bearing for some material dependencies.
+
+The rule chosen is **disjoint item footprints**: every item an action names
+in its `pre`, its `eff` or its own `ActionKind`, and two of a bot's actions
+may overlap only if those sets do not meet. It is sufficient rather than
+necessary and it forbids real wins — a craft spending iron plates blocks a
+later *take* of iron plates, which is harmless in fact because Factorio
+removes a craft's ingredients the moment `begin_crafting` accepts it.
+Distinguishing those needs the recipe, which the executor does not have.
+
+**What that permits in practice**: a queued craft or research overlaps every
+`Walk` step (footprint empty — this is the bulk of it) and every action
+naming other items. What it forbids: two crafts sharing an ingredient, and a
+transfer of an item a queued craft names.
+
+**Not claimed**: any wall-clock saving on a real run. What is verified
+offline is the concurrency invariant, the ordering guarantee and the
+footprint rule, each pinned by a test that fails under the pre-change
+behaviour (checked by mutation: exclusive-everything fails 3 run tests,
+always-disjoint fails 1, background-everything fails the exclusivity test).
+
+Note this interacts with A — a bot with a filler task and a queued craft is
+doing two things, which is correct and was impossible before.
+
+**One measurement caveat this creates.** `just analyse`'s per-bot
+`busy_ticks` is a sum of intervals, not a union, so it can now exceed the
+window span and report `busy% > 100`. That is a real reading — the bot did
+two things at once — and the overlap-aware figure is `idle_gaps`, which
+merges the intervals first. Commented in place in `tools/run_analysis.py`.
 
 ### D. Stop pricing an idle bot's time as scarce
 

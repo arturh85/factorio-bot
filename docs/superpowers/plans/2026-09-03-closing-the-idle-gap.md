@@ -104,6 +104,102 @@ Two structural facts explain why nothing fills the idle:
   variant (`Have`, `Researched`, `Produced`, `Producing`, `All`) is
   demand-driven.
 
+## TARGET MET OFFLINE: 30,077 ticks (8:21)
+
+Workstream B landed as `0069b41c`. Verified independently, and **byte-identical
+across two invocations** — determinism held.
+
+| | before | after |
+|---|---|---|
+| makespan | 44,548 (12:22) | **30,077 (8:21)** |
+| utilisation | 24.7% | **38.8%** |
+| bot 1 planned / idle | 27,999 / 16,549 | 24,709 / **5,368** |
+| bots 2/3/4 planned | 6,502 / 4,656 / 4,878 | 8,175 / 6,768 / 7,077 |
+| actions | 109 | 205 |
+
+Solo is **byte-identical** (53,692 both sides, 103 actions). Two bots:
+45,045 → 39,553.
+
+**This is the plan, not a run.** Nothing has been executed. The measured run is
+the next step and it may not track the plan.
+
+### I had the mechanism wrong, and it matters
+
+This plan predicted "if bot 1's share were balanced across four bots … roughly
+27,500". **Right in magnitude, wrong in mechanism** — and the wrong mechanism
+would have sent the next workstream in the wrong direction.
+
+Bot 1's planned ticks fell only **12%** (27,999 → 24,709) while the makespan
+fell **32.5%**. Balancing load is not what paid. The 44,548 was 21,560 ticks of
+bot-1 prefix **followed by** the 12,240-tick cell lag, because the lag only
+starts at `fuel the burner-mining-drill` — which needed 13 coal that bot 1
+mined at the *end* of its prefix. Putting that coal in a chest moved the fuel
+load to tick **7,071**, and the lag then **overlapped** the prefix instead of
+queueing behind it.
+
+**The lever was moving a lag's start time earlier, not spreading work.** A lag
+that overlaps costs nothing; the same lag queued behind a prefix costs its full
+length.
+
+### B required D — this plan had the sequencing backwards
+
+The plan said "D is a re-measurement that only becomes meaningful after A and
+B". It is the opposite: `worth_converging` refuses **every** bill in this plan,
+so the first working chest bought exactly nothing — 44,548, unchanged. The
+largest single bill is thirteen coal at 1,560 ticks against a break-even near
+2,200, because the model charges an **idle** supplier's detour at the *taker's*
+rate. B needed the re-pricing to do anything at all.
+
+Related: `even_shares` deals the taker a share, and here that costs 6,800 ticks
+(36,877 vs 30,077) — the taker's share is exactly the work the chest exists to
+remove.
+
+### The new binding constraint
+
+Bot 1 is now **82% busy** (24,709 of 30,077), idling only 5,368. The cell lag no
+longer binds — it is fuelled at 7,071 and the take waits 1,733. What binds is
+bot 1's own serial chain:
+
+| | ticks |
+|---|---|
+| walking | 7,789 |
+| research | 6,000 (hard floor) |
+| crafting | 5,760 |
+| mining | 4,200 |
+| transfers | 960 |
+
+**The movable half is crafting**, and it is currently immovable: `Stockpile::site`
+requires `has_resource_patches`, so only *raw* materials route through a chest.
+Every crafted intermediate — gears, cable, circuits, pipes, and the 3,000-tick
+`craft 10 automation-science-pack` — still converges on the chain owner's
+inventory. Extending `Stockpile` to crafted items (supplier crafts its share,
+deposits, owner withdraws) is the next cut, and the machinery is now in place.
+
+### Corrections from this workstream
+
+- **Most of the brief's "at minimum" list already existed.** `Condition::BufferHas`,
+  `Effect::BufferLose`, `PlanState::buffered`/`take_from_buffer` and `Withdraw`
+  all shipped with R3's read-only buffer work. Only the *deposit* side was
+  missing. **No executor change was needed** — `Insert`/`Remove` with
+  `InventorySlot::Chest` is already the assembly cell's path.
+- **The real executor-side gap was elsewhere**: `BUFFER_ENTITIES` in `crates/core`
+  whitelists which entities `refresh_buffers` asks the game about, and listed
+  only `stone-furnace`. Without `wooden-chest`, a replan is blind to every chest
+  the previous plan built — the exact discontinuity that list exists to bridge.
+- **`iron-chest` was the wrong guess** (a comment predicted it). Wooden is 8x
+  cheaper here: 372 planned ticks against 2,965.
+- **`produce::craft_ticks` prices wood at zero** — it checks for a resource patch
+  then a recipe, and a tree is neither, so a wooden chest costed 60 ticks and the
+  affordability gate stopped guarding. Fixed locally via `chest_ticks`, not
+  globally (that would move `PlaceDrill`'s crossover). **Latent trap for anything
+  else costed through `craft_ticks` that bottoms out in a minable.**
+- **A buffer-scoped condition needs a real edge where a role-scoped one did not.**
+  The role-scoped omission is justified by the scheduler re-deriving it from one
+  bot's ordered slice; a stockpile's depositors and its withdrawer are different
+  bots by construction, so no such slice exists. Demonstrated, not asserted:
+  removing the arm makes a whole-plan test find a chest drawn on before it was
+  filled.
+
 ## The offline loop is real: 4 seconds per experiment
 
 A live dump of the known-good map now exists at `workspace/scripts/map.json`
@@ -522,7 +618,7 @@ Design questions to settle before implementation:
 wall-clock, ordered collections only, floats via `total_cmp`. Filler
 selection must be a deterministic function of plan state.
 
-### B. Shared chest as a material buffer — unblocks A, C and R3's residual
+### B. Shared chest as a material buffer — **DONE** (`0069b41c`, see above)
 
 The R3 agent could hand a furnace's stone, craft, placement and coal to
 another bot, but **could not hand over the ore**: ore is

@@ -711,8 +711,27 @@ async fn perform<A: Actuator + ?Sized>(
             act.set_recipe(bot, entity, pos.clone(), recipe.as_str())
                 .await
         }
+        // The scheduler has already walked the bot here to satisfy this
+        // action's own `AtPosition` precondition -- see
+        // `ActionKind::Evacuate`'s own doc for why there is nothing else for
+        // this dispatch to ask the game for. The call is not a formality:
+        // without it this action would never reach a verdict, and
+        // `EventKind::ActionSettled`'s own rule ("every attempt that reaches
+        // a verdict gets exactly one of these") would have nothing to record
+        // against the dispatch the scheduler already wrote down.
+        ActionKind::Evacuate { to } => act.walk(bot, to.clone(), 0.0, EVACUATE_RADIUS).await,
     }
 }
+
+/// How close to the chosen escape tile counts as "there", for
+/// [`ActionKind::Evacuate`]'s own re-confirmation walk.
+///
+/// Generous relative to `crate::enclosure::CELL` on purpose: the tile itself
+/// was proven safe at that resolution, but the game's own pathing does not
+/// promise to land a character on an exact float, and asking for tighter than
+/// this would risk the walk itself being refused over noise smaller than a
+/// character's own collision box.
+const EVACUATE_RADIUS: f64 = 0.5;
 
 #[cfg(test)]
 mod tests {

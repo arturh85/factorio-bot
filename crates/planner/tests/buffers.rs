@@ -111,6 +111,7 @@ fn kinds(net: &ActionNetwork) -> Vec<String> {
             ActionKind::SetRecipe { entity, recipe, .. } => {
                 format!("set recipe {recipe} on {entity}")
             }
+            ActionKind::Evacuate { to } => format!("evacuate to {to}"),
         })
         .collect();
     out.sort();

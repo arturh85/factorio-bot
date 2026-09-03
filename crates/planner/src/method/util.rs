@@ -1,7 +1,9 @@
 //! Helpers shared by more than one method.
 
+use crate::action::{Action, ActionKind, Actor, Condition};
 use crate::error::PlannerError;
-use crate::ids::Ticks;
+use crate::ids::{ActionId, Ticks};
+use crate::method::{ExpansionCtx, Step};
 use crate::state::PlanState;
 use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::num_traits::ToPrimitive;
@@ -10,6 +12,65 @@ use factorio_bot_core::types::{
 };
 
 const TICKS_PER_SECOND: f64 = 60.0;
+
+/// How close to the chosen escape tile counts as "there", for an evacuation
+/// action's own `AtPosition` precondition.
+///
+/// Kept equal to `crates/executor::run::EVACUATE_RADIUS` by convention, not by
+/// a shared constant -- the two crates do not share code across the
+/// planner/executor boundary for anything else in this enum either. Generous
+/// relative to `crate::enclosure::CELL` on purpose: the tile was proven safe
+/// at that resolution, but the game's own pathing does not promise to land a
+/// character on an exact float.
+pub(crate) const EVACUATION_RADIUS: f64 = 0.5;
+
+/// One [`Step::Act`] that walks `evacuation.bot` clear of a footprint before
+/// it is built, and the id it must precede every one of the footprint's own
+/// placements.
+///
+/// Pinned to the bystander itself (`Actor::Role` plus `pinned: Some(bot)`),
+/// never to `ctx.chain_actor`: the bystander is not the bot doing the
+/// building, and binding this to the chain would hand it to whichever bot the
+/// scheduler later gives the chain to, which reproduces exactly the bug
+/// `PlanState`'s own `characters` field doc already warns against for the
+/// acting bot.
+///
+/// `why` names what the bot is being walked clear of, straight into the
+/// label -- the only place this reaches the run record. It dispatches
+/// through the ordinary `record.actions()` path like any other action
+/// (`ActionDispatched`/`ActionSettled`), and `action` is this label verbatim
+/// (`crates/scripting_lua/src/globals/record.rs`), so a run that had to
+/// evacuate a bot shows it in the same jsonl every other action already
+/// writes to, findable by grepping "evacuate" without a second event schema
+/// to learn.
+pub(crate) fn evacuation_step(
+    ctx: &mut ExpansionCtx,
+    evacuation: &crate::enclosure::Evacuation,
+    why: &str,
+) -> (Step, ActionId) {
+    let id = ctx.ids.next();
+    let action = Action {
+        id,
+        kind: ActionKind::Evacuate {
+            to: evacuation.to.clone(),
+        },
+        pre: vec![Condition::AtPosition {
+            who: Actor::Role,
+            pos: evacuation.to.clone(),
+            radius: EVACUATION_RADIUS,
+            min_radius: 0.0,
+        }],
+        eff: Vec::new(),
+        duration: 0,
+        pinned: Some(evacuation.bot),
+        label: format!(
+            "evacuate bot {} to {} clear of {why} -- would otherwise lose all \
+             {:.2} sq tiles of reachable ground",
+            evacuation.bot, evacuation.to, evacuation.pocket_tiles
+        ),
+    };
+    (Step::Act(Box::new(action)), id)
+}
 
 /// How far out `free_area_near` will search before giving up, in tiles.
 ///

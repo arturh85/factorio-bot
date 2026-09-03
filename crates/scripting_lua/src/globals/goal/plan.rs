@@ -964,6 +964,16 @@ fn step_to_lua(lua: &Lua, net: &ActionNetwork, step: &ScheduledStep) -> LuaResul
                     t.set("entity", entity.clone())?;
                     t.set("recipe", recipe.clone())?;
                 }
+                // Its own kind rather than folded into a `walk` step: a walk
+                // has no action id and is never dispatched on its own (see
+                // `StepKind::Walk`'s own doc), while this is a real,
+                // individually-scheduled action -- `crate::enclosure::check`'s
+                // evacuation -- that happens to ask the game for nothing but
+                // the walk its own `AtPosition` precondition already caused.
+                ActionKind::Evacuate { to } => {
+                    t.set("kind", "evacuate")?;
+                    t.set("pos", position_to_lua(lua, to)?)?;
+                }
             }
         }
     }

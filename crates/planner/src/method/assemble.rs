@@ -449,6 +449,10 @@ pub struct Cell {
     pub parts: Vec<CellPart>,
     /// Every tile a bot must be able to stand on to charge this cell.
     pub lane: Vec<Position>,
+    /// Bystanders `fit` found would be sealed into a pocket by this cell's
+    /// own footprint, and where each must walk first. Empty in the ordinary
+    /// case -- see [`crate::enclosure::check`].
+    pub evacuate: Vec<crate::enclosure::Evacuation>,
 }
 
 impl Cell {
@@ -622,11 +626,12 @@ fn fit(state: &PlanState, origin: &Position, facing: Direction, with_pole: bool)
             return None;
         }
     }
-    let cell = Cell {
+    let mut cell = Cell {
         origin: origin.clone(),
         facing,
         parts,
         lane,
+        evacuate: Vec::new(),
     };
     let mut trial = state.fork();
     for part in &cell.parts {
@@ -647,6 +652,17 @@ fn fit(state: &PlanState, origin: &Position, facing: Direction, with_pole: bool)
         {
             return None;
         }
+    }
+    // Last, because it is the most expensive check and every cheaper one
+    // above has already had the chance to reject this candidate for free --
+    // see `crate::enclosure::check`'s own doc for why `trial` (parts already
+    // created) is exactly the fork that check wants.
+    match crate::enclosure::check(state, &trial, origin) {
+        crate::enclosure::EnclosurePrevention::Clear => {}
+        crate::enclosure::EnclosurePrevention::Evacuate(evacuations) => {
+            cell.evacuate = evacuations;
+        }
+        crate::enclosure::EnclosurePrevention::Refuse => return None,
     }
     Some(cell)
 }
@@ -1046,8 +1062,38 @@ fn cell_steps(
         .unwrap_or(10.0);
 
     for cell in cells {
+        // Every bystander `fit` found would be sealed in by this cell walks
+        // clear before any of the cell's own parts go down -- see
+        // `crate::enclosure::check`.
+        let evacuation_ids: Vec<ActionId> = cell
+            .evacuate
+            .iter()
+            .map(|evacuation| {
+                let (step, id) = crate::method::util::evacuation_step(
+                    ctx,
+                    evacuation,
+                    &format!("the assembly cell at {}", cell.origin),
+                );
+                steps.push(step);
+                id
+            })
+            .collect();
+        let mut part_ids: Vec<ActionId> = Vec::new();
         for part in &cell.parts {
-            steps.push(place_step(ctx, part));
+            let step = place_step(ctx, part);
+            if let Step::Act(action) = &step {
+                part_ids.push(action.id);
+            }
+            steps.push(step);
+        }
+        for evacuation_id in &evacuation_ids {
+            for part_id in &part_ids {
+                steps.push(Step::Link {
+                    from: *evacuation_id,
+                    to: *part_id,
+                    lag: 0,
+                });
+            }
         }
 
         let Some(chain) = links(cell) else {
@@ -1721,6 +1767,7 @@ mod tests {
                 facing,
                 parts: layout(&origin, facing, true).unwrap(),
                 lane: lane(&origin, facing).unwrap(),
+                evacuate: Vec::new(),
             };
             let mut trial = s.fork();
             for part in &cell.parts {
@@ -1757,6 +1804,7 @@ mod tests {
                 facing: Direction::North,
                 parts,
                 lane: lane(&origin, Direction::North).unwrap(),
+                evacuate: Vec::new(),
             };
             let turned = cell.at(role).unwrap();
             assert!(

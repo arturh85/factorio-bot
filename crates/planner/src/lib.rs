@@ -1,4 +1,5 @@
 pub mod action;
+pub mod enclosure;
 pub mod error;
 pub mod goal;
 pub mod ids;

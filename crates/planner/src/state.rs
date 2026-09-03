@@ -1995,6 +1995,133 @@ impl PlanState {
         true
     }
 
+    /// Every obstacle a walking character could not pass through, inside
+    /// `window` -- the three sources [`crate::enclosure`] uses, none of them
+    /// the six [`PlanState::is_area_clear_of`] does. See that module's own
+    /// doc for why characters, refusals and resource tiles are all left out
+    /// here on purpose.
+    fn walkable_obstacles_within(&self, window: &Rect) -> Vec<Rect> {
+        let mut obstacles = Vec::new();
+        for entity in self.added.values() {
+            obstacles.push(self.footprint_of(entity));
+        }
+        let area_half_diagonal = (window.width() / 2.).hypot(window.height() / 2.);
+        let radius = area_half_diagonal + self.max_prototype_half_diagonal + TOUCH_SLACK;
+        for entity in
+            self.base
+                .entity_graph
+                .find_entities_in_radius(window.center(), radius, None, None)
+        {
+            if self.removed.contains(&Pos::from(&entity.position)) {
+                continue;
+            }
+            obstacles.push(entity.bounding_box.clone());
+        }
+        for blocked in self.base.entity_graph.blocking_boxes_within(window) {
+            if self.removed.contains(&Pos::from(&blocked.center())) {
+                continue;
+            }
+            obstacles.push(blocked);
+        }
+        obstacles
+    }
+
+    /// The blocked-cell grid [`crate::enclosure`]'s fills read, for the
+    /// `enclosure::SEARCH_RADIUS`-tile window around `from` -- or `None` when
+    /// that window is not entirely inside the region `blocked_tree` covers,
+    /// in which case a query for it would come back short and the missing
+    /// part would read as open ground. See
+    /// `crates/core::graph::enclosure::EscapeUnknown::OutsideModel` for the
+    /// same check made once already, against the real world rather than a
+    /// plan.
+    fn enclosure_grid(&self, from: &Position) -> Option<(Vec<bool>, (f64, f64))> {
+        let (window, origin) = crate::enclosure::window(from);
+        let tree = self.base.entity_graph.blocked_tree();
+        let bounds = tree.bounding_box();
+        let modelled = (
+            bounds.origin.x as f64,
+            bounds.origin.y as f64,
+            (bounds.origin.x + bounds.size.width) as f64,
+            (bounds.origin.y + bounds.size.height) as f64,
+        );
+        drop(tree);
+        if window.left_top.x() < modelled.0
+            || window.left_top.y() < modelled.1
+            || window.right_bottom.x() > modelled.2
+            || window.right_bottom.y() > modelled.3
+        {
+            return None;
+        }
+        let half_box = character_half_box(&self.base);
+        let obstacles = self.walkable_obstacles_within(&window);
+        Some((
+            crate::enclosure::rasterize(obstacles.into_iter(), origin, half_box),
+            origin,
+        ))
+    }
+
+    /// Can a character standing at `from` reach ground outside a
+    /// `enclosure::SEARCH_RADIUS`-tile window, given what this state alone
+    /// believes is there?
+    ///
+    /// Used twice for one judgement: once against the state before a
+    /// candidate placement exists and once against a fork that already
+    /// carries it (see [`crate::enclosure::check`]). Neither call mutates
+    /// anything and both read the same three obstacle sources, so the two
+    /// answers differ only by whatever the fork actually added.
+    pub(crate) fn escape_from(&self, from: &Position) -> crate::enclosure::Escape {
+        match self.enclosure_grid(from) {
+            None => crate::enclosure::Escape::Unknown,
+            Some((blocked, _origin)) => crate::enclosure::fill_from_center(&blocked),
+        }
+    }
+
+    /// The nearest tile a character at `from` could walk to under `self`'s
+    /// own occupancy that stays connected to open ground under `after`'s --
+    /// typically a fork of `self` that already carries a candidate placement.
+    ///
+    /// Two fills over the same window rather than one fill per tile
+    /// considered: `self`'s grid gives every reachable cell in nearest-first
+    /// order, `after`'s grid gives the set still connected to the window's
+    /// own edge, and the first cell in the first list that is also in the
+    /// second is the answer. `None` when no such cell exists in the window --
+    /// the honest answer when a placement's only escape route runs through
+    /// its own footprint, or when either grid could not be built at all (see
+    /// [`Self::enclosure_grid`]).
+    pub(crate) fn nearest_safe_escape(
+        &self,
+        after: &PlanState,
+        from: &Position,
+    ) -> Option<Position> {
+        let (before_blocked, origin) = self.enclosure_grid(from)?;
+        let (after_blocked, _) = after.enclosure_grid(from)?;
+        let safe = crate::enclosure::reachable_from_boundary(&after_blocked);
+        for cell in crate::enclosure::bfs_order_from_center(&before_blocked) {
+            if safe[crate::enclosure::cell_index(cell.0, cell.1)] {
+                return Some(crate::enclosure::cell_to_position(origin, cell));
+            }
+        }
+        None
+    }
+
+    /// Every roster or non-roster bot within `radius` of `point`, as
+    /// `(id, position)` -- the candidate pool [`crate::enclosure::check`]
+    /// tests against a footprint. Ordered by player id, since `characters` is
+    /// a `BTreeMap`.
+    pub(crate) fn characters_near(
+        &self,
+        point: &Position,
+        radius: f64,
+    ) -> Vec<(PlayerId, Position)> {
+        self.characters
+            .iter()
+            .filter_map(|(id, rect)| {
+                let center = rect.center();
+                (calculate_distance(point, &center) <= radius).then_some((*id, center))
+            })
+            .collect()
+    }
+
     /// The footprints [`is_area_clear`](PlanState::is_area_clear) refuses
     /// because the game refused them first, in the deterministic order
     /// [`PlanState::from_world`] sorted them into.

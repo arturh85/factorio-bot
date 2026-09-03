@@ -1306,6 +1306,7 @@ dependencies = [
  "factorio-bot-core",
  "miette",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
 ]
 

@@ -339,6 +339,10 @@ pub struct Plant {
     /// the bot's position could put a plant just built out of the lab's reach.
     /// Asking from the pole finds it at distance zero.
     pub pole: Position,
+    /// Bystanders `fit` found would be sealed into a pocket by this plant's
+    /// own footprint, and where each must walk first. Empty in the ordinary
+    /// case -- see [`crate::enclosure::check`].
+    pub evacuate: Vec<crate::enclosure::Evacuation>,
 }
 
 /// Turn a north-frame offset into `direction`.
@@ -648,17 +652,34 @@ fn fit(state: &PlanState, pump: &Position, facing: Direction) -> Option<Plant> {
     })?;
 
     let mut parts = parts;
-    parts.push(PlantPart {
+    let pole_part = PlantPart {
         name: POLE,
         position: pole.clone(),
         direction: Direction::North,
-    });
-    Some(Plant {
+    };
+    // Into `trial` too, not just `parts` -- the enclosure check below reads
+    // `trial`'s own `added` map, and a plant checked without its pole would
+    // miss the one part sited last.
+    trial.create_entity(entity_for(&trial, &pole_part));
+    parts.push(pole_part);
+    let mut plant = Plant {
         parts,
         boiler,
         engine,
         pole,
-    })
+        evacuate: Vec::new(),
+    };
+    // Last, for the same reason `method::assemble::fit` runs it last: every
+    // cheaper check above already had the chance to reject this candidate
+    // for free.
+    match crate::enclosure::check(state, &trial, pump) {
+        crate::enclosure::EnclosurePrevention::Clear => {}
+        crate::enclosure::EnclosurePrevention::Evacuate(evacuations) => {
+            plant.evacuate = evacuations;
+        }
+        crate::enclosure::EnclosurePrevention::Refuse => return None,
+    }
+    Some(plant)
 }
 
 /// The `FactorioEntity` a part places.
@@ -760,6 +781,24 @@ pub fn plant_steps(ctx: &mut ExpansionCtx, plant: &Plant) -> (Vec<Step>, Vec<Act
         .map(|b| b.reach_distance)
         .unwrap_or(10.0);
 
+    // Every bystander `fit` found would be sealed in by this plant walks
+    // clear before any of its parts go down -- see `crate::enclosure::check`.
+    // Not folded into `order_research_after`: that list gates power-dependent
+    // actions, which already wait on every one of the plant's own placements,
+    // and those placements are what the `Step::Link`s below make wait on the
+    // evacuation in turn.
+    let evacuation_ids: Vec<ActionId> = plant
+        .evacuate
+        .iter()
+        .map(|evacuation| {
+            let (step, id) =
+                crate::method::util::evacuation_step(ctx, evacuation, "the power plant");
+            steps.push(step);
+            id
+        })
+        .collect();
+    let mut part_ids: Vec<ActionId> = Vec::new();
+
     for part in &plant.parts {
         let entity = entity_for(&ctx.state, part);
         let direction = entity.direction;
@@ -770,6 +809,7 @@ pub fn plant_steps(ctx: &mut ExpansionCtx, plant: &Plant) -> (Vec<Step>, Vec<Act
         let min_radius = ctx.state.placement_clearance(part.name).unwrap_or(0.0);
         let id = ctx.ids.next();
         order_research_after.push(id);
+        part_ids.push(id);
         steps.push(Step::Act(Box::new(Action {
             id,
             kind: ActionKind::Place {
@@ -806,6 +846,15 @@ pub fn plant_steps(ctx: &mut ExpansionCtx, plant: &Plant) -> (Vec<Step>, Vec<Act
             label: format!("place {} at {}", part.name, part.position),
         })));
         ctx.state.create_entity(entity);
+    }
+    for evacuation_id in &evacuation_ids {
+        for part_id in &part_ids {
+            steps.push(Step::Link {
+                from: *evacuation_id,
+                to: *part_id,
+                lag: 0,
+            });
+        }
     }
 
     let fuel = ctx.ids.next();
@@ -1121,6 +1170,69 @@ mod tests {
                 part.name,
                 part.position
             );
+        }
+    }
+
+    /// `plant_steps` turns a non-empty `evacuate` into a real
+    /// [`ActionKind::Evacuate`], pinned to the bystander, ordered before
+    /// every one of the plant's own placements -- the half of the wiring
+    /// `tests/enclosure_prevention.rs` (real `run-1788432181-42528` geometry)
+    /// cannot reach, because it exercises `crate::enclosure::check` directly
+    /// rather than the step emission downstream of it.
+    #[test]
+    fn plant_steps_walks_a_bystander_clear_before_any_part_goes_down() {
+        let s = state();
+        let mut plant = plan_plant(&s, &Position::new(0., 0.)).expect("a lake");
+        plant.evacuate = vec![crate::enclosure::Evacuation {
+            bot: BotId(2),
+            to: Position::new(1.5, 1.5),
+            pocket_tiles: 4.0,
+        }];
+
+        let mut ctx = ExpansionCtx::new(s.clone(), BotId(1));
+        let (steps, _needs_power) = plant_steps(&mut ctx, &plant);
+
+        let evacuate_id = steps
+            .iter()
+            .find_map(|step| match step {
+                Step::Act(action) if matches!(action.kind, ActionKind::Evacuate { .. }) => {
+                    assert_eq!(
+                        action.pinned,
+                        Some(BotId(2)),
+                        "an evacuation must be pinned to the bystander, never to \
+                         whichever bot the scheduler later gives the chain"
+                    );
+                    Some(action.id)
+                }
+                _ => None,
+            })
+            .expect("an evacuate action was emitted for the bystander");
+
+        let place_ids: Vec<ActionId> = steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Act(action) if matches!(action.kind, ActionKind::Place { .. }) => {
+                    Some(action.id)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(place_ids.len(), plant.parts.len());
+
+        let linked_from_evacuate: Vec<ActionId> = steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Link { from, to, .. } if *from == evacuate_id => Some(*to),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            linked_from_evacuate.len(),
+            place_ids.len(),
+            "every placement must wait on the evacuation, not just the first"
+        );
+        for place_id in &place_ids {
+            assert!(linked_from_evacuate.contains(place_id));
         }
     }
 

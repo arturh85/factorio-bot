@@ -608,6 +608,25 @@ pub enum ActionKind {
         entity: String,
         recipe: ItemId,
     },
+    /// Walk to `to` and stand there. Nothing else.
+    ///
+    /// The one variant whose dispatch asks the game for nothing beyond the
+    /// walk the scheduler already issues to satisfy its own `AtPosition`
+    /// precondition -- see `crates/executor::run::perform`. It exists for
+    /// exactly one caller, `crate::enclosure::check`: a placement that would
+    /// seal a bystander into a pocket with no reachable open ground is
+    /// preceded by one of these, pinned to that bystander, so the bot is
+    /// clear of the footprint before the walls that would trap it go up.
+    ///
+    /// No existing variant says "stand here and do nothing else". Reusing one
+    /// with a zero count or an already-true condition (`Craft` with `count:
+    /// 0`, `SetRecipe` to a recipe already set) would put a real RCON
+    /// dispatch where nothing needs to happen once the walk lands, and would
+    /// read in the record as the thing it was borrowed from rather than as
+    /// what it is.
+    Evacuate {
+        to: Position,
+    },
 }
 
 impl ActionKind {
@@ -642,6 +661,7 @@ impl ActionKind {
             | ActionKind::Remove { pos, .. }
             | ActionKind::SetRecipe { pos, .. } => Some(pos.clone()),
             ActionKind::Place { entity } => Some(entity.position.clone()),
+            ActionKind::Evacuate { to } => Some(to.clone()),
             ActionKind::Craft { .. } | ActionKind::Research { .. } => None,
         }
     }

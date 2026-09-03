@@ -1494,6 +1494,40 @@ mod tests {
     }
 
     #[test]
+    fn provenance_lands_in_the_run_directory_and_survives_a_run_that_never_finishes() {
+        // The seam the unit tests in `provenance` cannot reach: that the file
+        // goes *into this run's directory* and is readable by the run id alone.
+        //
+        // The second half of the name is the whole design. `finish` is never
+        // called here, exactly as it was never called for the nine archived
+        // runs that were killed -- and provenance still has to be there
+        // afterwards, because those are the runs whose identity somebody needs.
+        let root = tmpdir("provenance");
+        let recorder = RunRecorder::start(&root, "run-prov-1").unwrap();
+        let provenance = Provenance {
+            schema: Provenance::SCHEMA,
+            run_id: "run-prov-1".into(),
+            started_unix: recorder.started_unix(),
+            started_tick: 4330,
+            seed: Some("20260903".into()),
+            map_exchange_string: None,
+            map: None,
+            factorio: Some("2.1.17".into()),
+            git: None,
+            profile: "debug".into(),
+            roster_requested: vec![1, 2, 3, 4],
+            workspace: None,
+            resumed_from: None,
+        };
+        recorder.record_provenance(&provenance).unwrap();
+        drop(recorder);
+
+        let read = read_provenance(&root.join("run-prov-1")).expect("provenance is on disk");
+        assert_eq!(read, provenance);
+        assert!(!root.join("run-prov-1").join("manifest.json").exists());
+    }
+
+    #[test]
     fn every_event_kind_round_trips() {
         let kinds = [
             EventKind::RunStarted {

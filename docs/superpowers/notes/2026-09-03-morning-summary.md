@@ -151,31 +151,51 @@ had 6. Something re-seeded it in between and I could not attribute it. What is
 not in doubt is that run 4's *game* had the old mod — Factorio loads mods at
 server start, and the game itself raised the missing-function error.
 
-## Pathfinder refusals happen at sub-tile distances (lead, not yet a fix)
+## `min_radius` is dropped at lowering — the same bug this file already fixed once
 
-Two runs refused a walk over a distance shorter than one tile:
+**Three live refusals, one mechanism, and the precedent is documented in the
+file it happens in.**
 
-* run 8: no path from `(-28.394, -26.906)` to `(-28.5, -27.5)` — **0.6 tiles**
-* run 1: no path from `(-19.890, 13.875)` to `(-20.5, 13.5)` — **0.7 tiles**
+Runs 1 and 8 refused three walks, every one of them shorter than a tile and
+every one aimed at a **tile centre** from inside that same tile:
 
-The bot is effectively standing on its destination and the game still answers
-`failed to path find` (searched and found nothing — not `try again later`,
-which would mean a full queue).
+* `(-19.890, 13.875)` -> `(-20.5, 13.5)` — 0.70 tiles
+* `(-28.394, -26.906)` -> `(-28.5, -27.5)` — 0.60 tiles
+* `(-47.840, -10.734)` -> `(-48.5, -10.5)` — 0.70 tiles
 
-The radius *is* honoured: `rcon_actuator.rs:298` passes
-`Some(approach_radius(radius))`. But `approach_radius` is
-`(bound * 0.5).clamp(0.5, bound.max(0.5))` (`rcon.rs:893`), so a radius of 1.0
-becomes **0.5** — an acceptance ring small enough that one occupied goal tile
-leaves no reachable point at all. The mod already treats "caller already stood
-within arrival tolerance" as a no-op success (`control.lua:958`), but only when
-the *path request comes back empty*; it does not cover a request that was made
-and refused.
+All three answered `failed to path find` — the game searched and found nothing,
+as opposed to `try again later`, which would mean a full queue.
 
-**Candidate fix:** compare against the walk's *original* radius before issuing a
-path request, and report arrival without asking the pathfinder when the bot is
-already inside it. Cheap, and it removes a class of recoverable-but-costly
-failures — costly because of the transient-refusal defect above, where any
-failure abandons that bot's whole remaining chain.
+**`Condition::AtPosition` carries `radius` AND `min_radius`**, because the
+target is routinely a position the bot must never stand on — the tile a
+furnace sits on, the ore a mine consumes — and `min_radius` is what keeps the
+acting bot out of its own footprint (`state.rs:822`). `schedule.rs` models that
+annulus faithfully: `travel_ticks(from, to, min_radius, radius)` walks a bot
+*outwards* when it is too close (`:29-30`), and the simulated arrival point is
+picked `min_radius` out along a fixed direction (`:35-54`).
+
+**But `StepKind::Walk` carries only `{ to, radius }`** (`schedule.rs:109-112`),
+so `min_radius` is dropped at lowering, and the string does not occur anywhere
+in `crates/executor`. The executor then asks for
+`Some(approach_radius(radius))` (`rcon_actuator.rs:298`), and `approach_radius`
+halves and clamps to 0.5 (`rcon.rs:893`) — a goal disc of radius 0.5 centred on
+a tile centre lies **entirely inside the blocked tile**. There is no legal goal,
+so the pathfinder is right to refuse.
+
+So the plan's *timing model* honours the annulus while the *dispatched walk*
+aims at its forbidden centre.
+
+**The precedent is in the same file.** `schedule.rs:103-108` records that
+`radius` "used to be dropped here while `travel_ticks` went on using it, which
+made every such walk execute as 'stand exactly on it'", and names the run it
+cost. This is that identical defect surviving in its `min_radius` half.
+
+**Fix:** carry `min_radius` in `StepKind::Walk` and pass it through to the
+dispatch, so the executor asks for the annulus the planner specified. Until
+then, expect a refusal whenever a bot is already standing in the tile it is
+being sent to — and each one abandons that bot's entire remaining chain
+(`run.rs:258`), which on a roster where bot 1 does ~88% of the work means most
+of a batch.
 
 Not implemented; a run held the workspace.
 

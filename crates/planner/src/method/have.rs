@@ -1083,7 +1083,12 @@ impl Method for Mine {
             Goal::Have { item, .. } | Goal::Produced { item, .. } => item,
             _ => return None,
         };
-        if state.resource_patches(item).is_empty() {
+        // The predicate, not the query: `concurrency` is asked about every
+        // `Have`/`Produced` goal in the plan and most of them name something
+        // that is not ore. `resource_patches` warns on each miss and dumps the
+        // world's resource list beside it; see
+        // `EntityGraph::has_resource_patches`.
+        if !state.has_resource_patches(item) {
             return None;
         }
         Some(resource_seats(state, item, cap))
@@ -2489,7 +2494,9 @@ pub fn worth_converging(
 /// an item that is neither mined nor crafted, which makes convergence refuse it
 /// outright rather than guess.
 fn solo_ticks(state: &PlanState, item: &str, need: u32) -> Ticks {
-    if !state.resource_patches(item).is_empty() {
+    // `has_resource_patches`, for the reason `Mine::concurrency` gives above:
+    // this asks "is this raw" of every item a share is sized for.
+    if state.has_resource_patches(item) {
         return mining_ticks(state, item).saturating_mul(need);
     }
     match recipe_for(state, item) {

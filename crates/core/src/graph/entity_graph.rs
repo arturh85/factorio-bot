@@ -712,6 +712,29 @@ impl EntityGraph {
         out
     }
 
+    /// Does the world hold any tile of `resource_name` at all?
+    ///
+    /// [`EntityGraph::resource_patches`] answers this too -- `is_empty()` on
+    /// what it returns -- but it answers it *loudly*: a miss logs the name and
+    /// then dumps every resource the world does have, which is right for a
+    /// caller that expected a patch and wrong for a caller that is only asking
+    /// whether an item is raw. `craft_ticks`
+    /// (`crates/planner/src/method/produce.rs`) asks exactly that, once per
+    /// item per recursion, and every intermediate it walks -- plates, gears,
+    /// the drill itself -- is a legitimate miss. One plan emitted ~22 pairs of
+    /// `no resource patch found for 'burner-mining-drill'` and the full
+    /// resource dump beside it, which is the volume that teaches a reader to
+    /// skip the log; two real problems went unnoticed behind it in one day.
+    ///
+    /// So this is the predicate and `resource_patches` stays the query, with
+    /// its warning intact for callers that mean it. It also does no flood fill
+    /// and allocates nothing.
+    pub fn has_resource_patches(&self, resource_name: &str) -> bool {
+        self.resources
+            .get(resource_name)
+            .is_some_and(|tiles| !tiles.is_empty())
+    }
+
     pub fn resource_patches(&self, resource_name: &str) -> Vec<ResourcePatch> {
         let mut patches: Vec<ResourcePatch> = vec![];
         let mut positions_by_id: HashMap<Pos, Option<u32>> = HashMap::new();
@@ -2596,6 +2619,37 @@ mod tests {
         let copper_positions: std::collections::HashSet<Pos> =
             copper[0].elements.iter().map(Pos::from).collect();
         assert!(iron_positions.is_disjoint(&copper_positions));
+    }
+
+    /// The quiet predicate agrees with the loud query, on both answers.
+    ///
+    /// They must, because one exists only to spare the other's warning: a
+    /// `craft_ticks` that asked `has_resource_patches` and got a different
+    /// answer than `!resource_patches(..).is_empty()` would price an
+    /// intermediate as ore or ore as free. Mined out counts as absent on both
+    /// sides -- `remove_resource` drops a tile from `resources` -- so the
+    /// depleted case is checked too.
+    #[test]
+    fn the_resource_predicate_agrees_with_the_query() {
+        let world = fixture_world();
+        for name in [
+            EntityName::IronOre.to_string(),
+            EntityName::CopperOre.to_string(),
+            EntityName::Coal.to_string(),
+            EntityName::Stone.to_string(),
+            // Everything a plan's cost model walks past on its way to ore.
+            "iron-plate".to_string(),
+            "iron-gear-wheel".to_string(),
+            "stone-furnace".to_string(),
+            "burner-mining-drill".to_string(),
+            "uranium-ore".to_string(),
+        ] {
+            assert_eq!(
+                world.entity_graph.has_resource_patches(&name),
+                !world.entity_graph.resource_patches(&name).is_empty(),
+                "the predicate and the query disagree about '{name}'"
+            );
+        }
     }
 
     #[test]

@@ -1724,6 +1724,36 @@ impl PlanState {
             .any(|tile| self.resource_available(&Position::from(tile), item) > 0)
     }
 
+    /// Does `area` cover a resource tile this plan has already committed to a
+    /// mining action?
+    ///
+    /// The mirror of [`PlanState::resource_tile_blocked`]'s first source, and
+    /// the other half of the same rule: that one keeps a *mine* off ground the
+    /// plan has built on, this one keeps a *placement* off ground the plan has
+    /// promised to a miner. Both exist because nothing constrains the order the
+    /// two commitments are made in — a `Mine` expanded before the cell is sited
+    /// claims its tiles into an empty entity overlay, and a cell sited before
+    /// the mine writes its drill into an empty claim ledger — so a single-sided
+    /// check would only ever cover whichever order happened to be the one in
+    /// front of it.
+    ///
+    /// Whole-tile, like [`PlanState::is_resource_claimed`] and for the same
+    /// reason: a claim says the tile is spoken for, not how much of it is.
+    /// Crowding ([`PlanState::is_resource_crowded`]) is deliberately *not*
+    /// asked. That rule is about where a bot stands, and a machine does not
+    /// stand anywhere; a drill on the tile next to a mined one is legal, and
+    /// the run this comes from mined `(-33.5, -24.5)` and `(-34.5, -24.5)`
+    /// against a drill at `[-34, -23]` successfully.
+    ///
+    /// Reads the *claim* ledger, not `resource_available`: a tile a mining
+    /// action has committed to still holds its ore, which is exactly why
+    /// `covers_resource` above is happy to site a drill on it.
+    pub fn covers_claimed_resource(&self, area: &Rect) -> bool {
+        tiles_under(area)
+            .iter()
+            .any(|tile| self.claimed.contains_key(tile))
+    }
+
     /// Where the machine `entity` puts what it makes, in world coordinates.
     ///
     /// **The game's own answer when it has one.** `FactorioEntity` carries a
@@ -3004,22 +3034,47 @@ impl PlanState {
             .any(|character| self.character_stands_on_tile(&character.center(), position))
     }
 
-    /// Does a blocking entity — debris, a tree, a rock, water — sit over the
-    /// resource tile centred at `tile`?
+    /// Does anything the game would select *instead of the ore* stand over the
+    /// resource tile `tile`?
     ///
-    /// The counterpart of the fourth source in [`PlanState::is_area_clear`],
-    /// aimed at the opposite mistake. There, the base world can hold an
-    /// obstacle that reads as open ground because `entity_tree` never sees it;
-    /// here, the base world can hold *ore* that reads as minable when the
-    /// entity the game will actually select at that position is something
-    /// else. `EntityGraph::add` routes crash-site wreckage — a
-    /// `simple-entity`, exactly like a small rock — into `blocked_tree` only,
-    /// never `entity_tree` (see that function's whitelist), and the mod's
-    /// `player.update_selected_entity` does not filter by name: whichever
-    /// entity is selectable at the position wins. When that is the wreck
-    /// instead of the ore, mining stalls with `expected coal ..., found
-    /// crash-site-spaceship-wreck-...` until the mod's own timeout fires
-    /// (`workspace/runs/run-1788317597-64759`, rung 4).
+    /// Two sources, and neither of them sees the other's.
+    ///
+    /// * **Entities this plan has placed.** Nothing ever placed anything on
+    ///   ore during a gathering goal until `11fabe43` added `PlaceDrill`, and
+    ///   a burner mining drill is the one entity `is_area_clear_of` lets stand
+    ///   on a patch (see [`PlanState::stands_on_resources`]) — so the plan
+    ///   acquired the ability to bury the ore it was about to mine, and this
+    ///   ledger did not learn about it. Run `run-1788455754-92581` is what
+    ///   that cost: one plan carried `place burner-mining-drill at [-34, -23]`
+    ///   and `mine 4 iron-ore` at `(-33.5, -22.5)`, a tile inside that drill's
+    ///   own footprint, and the mine died on `expected iron-ore at
+    ///   (-33.5/-22.5), found burner-mining-drill`. Both came out of a single
+    ///   `PlaceDrill` expansion — the cell is written into the state before
+    ///   its own bill is expanded, so the ore that paid for the drill was
+    ///   selected from under it.
+    /// * **Blocking boxes** — debris, a tree, a rock, water, *and every
+    ///   machine the base world already holds*: the counterpart
+    ///   of the fourth source in [`PlanState::is_area_clear`], aimed at the
+    ///   opposite mistake. There, the base world can hold an obstacle that
+    ///   reads as open ground because `entity_tree` never sees it; here, the
+    ///   base world can hold *ore* that reads as minable when the entity the
+    ///   game will actually select at that position is something else.
+    ///   `EntityGraph::add` routes crash-site wreckage — a `simple-entity`,
+    ///   exactly like a small rock — into `blocked_tree` only, never
+    ///   `entity_tree` (see that function's whitelist), and the mod's
+    ///   `player.update_selected_entity` does not filter by name: whichever
+    ///   entity is selectable at the position wins. When that is the wreck
+    ///   instead of the ore, mining stalls with `expected coal ..., found
+    ///   crash-site-spaceship-wreck-...` until the mod's own timeout fires
+    ///   (`workspace/runs/run-1788317597-64759`, rung 4).
+    ///
+    ///   This source is wider than its name suggests, and that is why the
+    ///   *previous* plan's drill needs nothing further: `EntityGraph::add`
+    ///   files every entity with a non-zero collision box into `blocked_tree`
+    ///   except resources and rails, machines included, so a cell that really
+    ///   got built is already out of selection for the next milestone. Only
+    ///   the plan's own not-yet-built overlay was missing, which is why the
+    ///   first source above is the whole of the fix. There is a test.
     ///
     /// The ore itself is not gone — `add` never removes a resource entity
     /// because something else was placed over it, and this does not touch
@@ -3027,8 +3082,20 @@ impl PlanState {
     /// physical count. Only *new selection* is refused: a tile this returns
     /// `true` for must be skipped in favour of the next one, not reported as
     /// exhausted.
+    ///
+    /// The mirror of this — a *placement* refusing ground some mining action
+    /// has already spoken for — is [`PlanState::covers_claimed_resource`].
+    /// Both are needed because expansion order decides which of the two
+    /// commitments is made first, and nothing constrains that order.
     fn resource_tile_blocked(&self, tile: &Pos) -> bool {
         let area = tile_area(tile);
+        if self
+            .added
+            .values()
+            .any(|entity| boxes_overlap(&self.footprint_of(entity), &area))
+        {
+            return true;
+        }
         self.base
             .entity_graph
             .blocking_boxes_within(&area)
@@ -3150,6 +3217,17 @@ impl PlanState {
                 .sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
         }
         patches
+    }
+
+    /// Is `item` something this world's ground yields at all?
+    ///
+    /// `!self.resource_patches(item).is_empty()`, without the flood fill and
+    /// without `EntityGraph::resource_patches`'s miss warning -- see that
+    /// method for why a predicate needs its own spelling. Asked of the base
+    /// world only, exactly as `resource_patches` is: a plan neither creates
+    /// nor exhausts a patch, it only claims and drains tiles of one.
+    pub fn has_resource_patches(&self, item: &str) -> bool {
+        self.base.entity_graph.has_resource_patches(item)
     }
 
     /// Every standing tree or rock that yields `item`, as

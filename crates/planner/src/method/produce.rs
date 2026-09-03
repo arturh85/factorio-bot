@@ -332,7 +332,13 @@ fn machine(
 /// geometry check:
 ///
 /// 1. the drill's footprint covers a tile that still holds `ore` — a drill one
-///    tile off the patch mines nothing;
+///    tile off the patch mines nothing — and no tile it covers has already
+///    been promised to a mining action
+///    ([`PlanState::covers_claimed_resource`]). Ore is the one thing
+///    `is_area_free_facing` lets a drill stand on, so without the second half
+///    a cell will happily be sited on the very tiles the plan is about to send
+///    a bot to hand-mine, and the bot arrives to `expected iron-ore ..., found
+///    burner-mining-drill`;
 /// 2. the ground under the drill is otherwise clear (ore does not block a
 ///    drill; everything else still does, and `stands_on_resources` is narrow on
 ///    purpose);
@@ -345,6 +351,9 @@ fn machine(
 fn fit(state: &PlanState, drill: &Position, facing: Direction, ore: &str) -> Option<Cell> {
     let area = state.collision_area_facing(DRILL, drill, facing)?;
     if !state.covers_resource(&area, ore) {
+        return None;
+    }
+    if state.covers_claimed_resource(&area) {
         return None;
     }
     if !state.is_area_free_facing(DRILL, drill, facing) {
@@ -856,7 +865,13 @@ fn craft_ticks(state: &PlanState, item: &str, count: u32, depth: u32) -> Ticks {
     }
     // Checked before the recipe, mirroring `solo_ticks`: a raw resource is
     // priced by mining it regardless of `depth`, since it never recurses.
-    if !state.resource_patches(item).is_empty() {
+    //
+    // `has_resource_patches`, not `!resource_patches(..).is_empty()`: this is
+    // a predicate over every item the recursion meets, and most of them are
+    // legitimately not ore. The query form warns on each miss and dumps the
+    // world's whole resource list beside it, which cost ~22 spurious warning
+    // pairs per plan.
+    if state.has_resource_patches(item) {
         return mining_ticks(state, item).saturating_mul(count);
     }
     let Some(recipe) = recipe_for(state, item) else {
@@ -1941,7 +1956,7 @@ mod tests {
     /// One bot, one cell, 15 iron plates a minute: hand-mine and hand-smelt
     /// nine iron plates, craft three gears and a spare furnace, craft the
     /// drill (which eats a furnace of its own), mine 37 coal, place the pair
-    /// at the iron patch's edge and fuel both. 27 actions and 10,288 ticks --
+    /// at the iron patch's edge and fuel both. 27 actions and 10,315 ticks --
     /// about 2.9 minutes of game time, against a cell that then makes 150
     /// plates in its first ten.
     ///
@@ -1949,6 +1964,15 @@ mod tests {
     /// consequence of a choice somewhere else: the fuel budget, the bill's
     /// ordering, and the siting. A change that moves any of them should say so
     /// out loud.
+    ///
+    /// **10,288 until the cell stopped being allowed to bury its own ore.**
+    /// The two iron mines used to be `[-34.5, 35.5]` and `[-35.5, 35.5]`,
+    /// which are two of the four tiles under the drill this same plan sites at
+    /// `[-35, 35]` -- the `run-1788455754-92581` failure in miniature. With
+    /// `PlanState::resource_tile_blocked` reading the plan's own entities they
+    /// are `[-34.5, 36.5]` and `[-36.5, 35.5]`, one tile further out each, and
+    /// the two hand-smelting furnaces sited from those tiles follow them. The
+    /// action count does not move -- the same work, 27 ticks more walking.
     #[test]
     fn the_whole_of_stage_one_costs_this_much() {
         let bots = [BotId(1)];
@@ -1957,7 +1981,7 @@ mod tests {
         assert_eq!(net.len(), 27, "actions in a one-cell plan");
         let sched = crate::schedule::schedule(&net, &s, &bots).expect("it schedules");
         assert_eq!(
-            sched.makespan, 10_288,
+            sched.makespan, 10_315,
             "ticks for one bot to build one cell"
         );
     }

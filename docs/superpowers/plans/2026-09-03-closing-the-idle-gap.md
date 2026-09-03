@@ -71,8 +71,10 @@ inside the idle figure above. Bot 1's 19 minutes resolve as:
 | **walking** | **4.0 min** | **21%** |
 | waiting (neither acting nor walking) | 8.5 min | 45% |
 
-The remaining 8.5 minutes is the smelting lag: every large gap that is not
-a walk sits immediately before a `take … from the furnace`.
+The remaining 8.5 minutes was assumed to be smelting lag. **It is mostly
+not.** Workstream F below establishes that 88% of bot 1's idle ticks are a
+executor defect — waiting out a software timer for machine time already
+spent — rather than the game actually smelting.
 
 ---
 
@@ -245,27 +247,75 @@ The owner's framing: "usually one starts with miner+furnace pairs" — a drill
 feeding a furnace directly, which removes both the mining and the hauling
 from a bot's critical path.
 
-### F. The 3.6-minute gap — unexplained
+### F. The lag clock starts too late — DIAGNOSED, and it is the biggest single item
 
-The single largest wait in the run: **12,837 ticks (3.6 min, 17% of the
-entire run)** between `craft 10 electronic-circuit` and
-`take 50 iron-plate from the cell`. Not yet diagnosed. Large enough that it
-may be a defect rather than ordinary smelting lag, and it should be
-understood before it is optimised around.
+**This was "the unexplained 3.6-minute gap". It is a defect, and it is worth
+~32% of the run.** Full diagnosis:
+`docs/superpowers/notes/2026-09-03-the-lag-clock-starts-too-late.md`
+(`6cee0143`).
 
-### G. Milestone saves — queued, unblocked
+**The mechanism.** `wait_out_lag` (`crates/executor/src/run.rs:601`) starts
+the lag countdown at the tick the bot **arrives** at the action:
 
-Save on milestone satisfaction so later experiments resume instead of
-re-deriving a deterministic 21-minute prelude. `provenance.json` already
-carries a `resumed_from` field (pre-added), so **no schema bump is needed**.
+```rust
+let deadline = started.saturating_add(u64::from(lag));   // started == NOW
+```
 
-Two constraints established:
-- A resumed run is **not benchmark-comparable** — `--compare` must refuse or
-  flag it (it already refuses on differing `resumed_from`).
-- A save carries mod `storage.*`. Factorio only migrates on a version bump
-  and `mods/BotBridge/info.json` is pinned at `0.0.1`, so a save written
-  under one `control.lua` and resumed under a changed one silently keeps the
-  old state. This has already poisoned runs here.
+The planner's semantics (`crates/planner/src/schedule.rs:285`) is
+`finished[predecessor] + lag`. The two agree **only** if the bot arrives on
+the exact tick its predecessor settled. They diverge by exactly the amount of
+parallelism achieved — and `schedule.rs:225-227` states that walking across a
+lag is *where multi-bot parallelism comes from*.
+
+**So the better the plan overlaps a lag, the more the executor throws away.**
+Parallelism is not merely unrewarded here; it is actively punished.
+
+**The arithmetic, exact to 23 ticks.** `#24 fuel the stone-furnace` settled at
+26,833, every predecessor done. Modelled lag 12,240 (`produce.rs:2051`,
+`51 * 240` — the drill's 240 ticks/ore is the cell bottleneck, not the
+furnace's 192). Correct deadline: **39,073**. Bot 1 did 17,371 ticks of other
+useful work, walked to the cell, and arrived at **44,204** — already 5,131
+ticks *after* the plates were due. `wait_out_lag` then set the deadline to
+44,204 + 12,240, dispatching at **56,467**. The take succeeded with
+`elapsed_ticks: 0`.
+
+**Independent proof the wait was empty.** `samples.jsonl` cumulative
+`iron-plate` production reads **76 at tick 40,200 and 76 at tick 56,400** —
+zero plates produced anywhere on the map during the entire wait. Production
+stopped near 40,000 when the drill's 8 coal ran out at 39,631, exactly as the
+planner sized it (predicted 39,073, delivered by 40,200 — within 3%). Bot 1's
+position is frozen at `(-26.2, -24.8)` in every sample from 44,400 to 56,460.
+
+**It is seven gaps, not one.** All ten of bot 1's idle gaps over 400 ticks are
+`take`s waiting out lag edges. **24,583 of 27,853 idle ticks — 88%, about 6.8
+minutes, roughly 32% of the run — were spent waiting for machine time that had
+already been spent.**
+
+**Why nothing caught it.** Invisible to a verb histogram, because `take`
+settles in its dispatch tick. Invisible to the test suite, because all four
+`wait_out_lag` tests use `cross_bot_fixture`, where arrival time and finish
+time are the same number — they pin the wait's *duration* and never its
+*origin*.
+
+**The fix.** `ExecutionLog::AttemptRecord.replied_tick`
+(`crates/executor/src/log.rs:192`) already holds the missing number. Either
+carry it in the completion signal (`Status::Success(Ticks)`) or pass the log
+into `await_preds`, then compute
+`deadline = max over preds (finish(pred) + lag(pred))` and wait
+`deadline.saturating_sub(now)`. Two cautions from the diagnosis:
+`await_preds` currently collapses `max_lag` across predecessors independently
+of which predecessor each lag belongs to (`run.rs:446-468`) — harmless today,
+wrong under finish-based timing; and the change must not undo the
+tick-versus-wall-clock fix (`run-1788320177-77989`). The walk-before-wait
+ordering (`run.rs:280-322`) is corrected for free by the same change.
+
+**Not claimed:** that fixing this cuts 6.8 minutes off the run. Bot 1 holds 90
+of 96 steps so it is probably close to the critical path, but that is a
+prediction and must be measured on the benchmark seed.
+
+**The other three bots are idle from 32,793 to the end (48,504 ticks) but are
+not blocked by this** — the plan gave them two steps each and they finished.
+That is the separate `Holder::Share` ceiling.
 
 ---
 
@@ -329,7 +379,11 @@ Two constraints established:
 
 ## Sequencing
 
-**0 before everything, then 0b.** Offline planning is what makes the rest
+**F first — it is a bug fix, not a capability, and it is the largest single
+item.** It is confined to `crates/executor` and blocks nothing else, so it
+can land immediately and in parallel with the rest.
+
+**0 before everything else, then 0b.** Offline planning is what makes the rest
 cheap to evaluate; without it each workstream below costs a 20-minute run
 to judge. Seed selection (0b) comes straight after, because every timing
 below is measured against a map, and comparisons across different maps are
@@ -342,7 +396,7 @@ a re-measurement that only becomes meaningful after A and B. F should be
 diagnosed early — it is 17% of the run and might be a defect, in which case
 it changes the arithmetic above.
 
-**No live runs until 0, 0b, B, A and C are in.** The next run should be the
+**No live runs until F, 0, 0b, B, A and C are in.** The next run should be the
 first honest before/after: on the seed chosen and scored in 0b, with
 provenance recorded and `--compare` guarding the comparison.
 

@@ -2,12 +2,15 @@
 /**
  * The frames panel after screenshot cameras were retired (2026-09-02).
  *
- * Video is the visual record now and a run captures no frames unless it asks,
- * so **zero frames is the normal case, not a failure**. The panel has to say
- * that in words. What it used to do instead was render its `<select>` with no
- * options and the message "This bot and camera captured no frames in this
- * run." -- which names a bot and a camera nobody chose, because there were
- * none to choose from, and reads as a picker that has gone wrong.
+ * Video is the visual record now and almost no run captures frames, so the
+ * panel explaining its own emptiness appeared on every run page. It is gone:
+ * a run with no frames renders nothing here at all.
+ *
+ * Two things still have to hold. A run that DID capture frames keeps its
+ * picker, because those are the tick-addressable record. And a listing that
+ * FAILED still shows its error -- "we could not find out" is not "there were
+ * none", and the panel must not go quiet on the one case where it does not
+ * know.
  */
 import {beforeEach, describe, expect, it} from 'vitest';
 import {createPinia, setActivePinia} from 'pinia';
@@ -59,22 +62,22 @@ function open(frames: ArchivedFrame[]) {
 }
 
 describe('RunsPage frames panel', () => {
-    it('says no frames were captured, and offers no picker, when there are none', () => {
+    it('renders nothing at all when there are no frames', () => {
         const wrapper = open([]);
 
-        const none = wrapper.find('[data-testid="no-frames"]');
-        expect(none.exists()).toBe(true);
-        expect(none.text().toLowerCase()).toContain('no screenshots');
-        // The picker is the part that reads as broken: a <select> with nothing
-        // in it, above a message naming a bot and camera nobody chose.
+        // Not a message, not an empty picker: nothing. Screenshot cameras are
+        // retired, so this is every run, and a paragraph about a retired
+        // feature on every run page is worse than silence.
+        expect(wrapper.find('.frame').exists()).toBe(false);
         expect(wrapper.find('[data-testid="frame-picker"]').exists()).toBe(false);
+        expect(wrapper.text().toLowerCase()).not.toContain('no screenshots');
     });
 
     it('still offers the picker for a run that did capture frames', () => {
         const wrapper = open([frame(1, 300, 'follow'), frame(1, 600, 'follow')]);
 
         expect(wrapper.find('[data-testid="frame-picker"]').exists()).toBe(true);
-        expect(wrapper.find('[data-testid="no-frames"]').exists()).toBe(false);
+        expect(wrapper.find('.frame').exists()).toBe(true);
     });
 
     it('keeps saying so when the frames listing itself failed, which is not the same thing', () => {
@@ -88,6 +91,8 @@ describe('RunsPage frames panel', () => {
         });
 
         expect(wrapper.text()).toContain('frames unavailable');
-        expect(wrapper.find('[data-testid="no-frames"]').exists()).toBe(false);
+        // The panel exists in this case precisely because it has something to
+        // say; the empty case is the one that renders nothing.
+        expect(wrapper.find('.frame').exists()).toBe(true);
     });
 });

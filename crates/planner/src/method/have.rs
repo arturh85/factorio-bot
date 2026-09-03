@@ -1178,8 +1178,21 @@ impl Method for Mine {
 /// that yield four is two actions at two positions, not one action with
 /// `count: 8`. Each action's `Effect::RemoveEntity` takes its tree out of the
 /// plan's overlay as it is emitted, which is what stops the second action
-/// picking the first one's tree -- and, as a side effect that is real rather
-/// than incidental, frees the ground it stood on for a later placement.
+/// picking the first one's tree.
+///
+/// # It also frees the ground, and that is only half wired
+///
+/// `Effect::RemoveEntity` is what takes the tree out of the overlay, and
+/// `Effect::satisfies` already links it to `Condition::PositionFree` and
+/// `Condition::AreaFree` **at the same tile** -- so a placement sited exactly
+/// where a tree stood is ordered after the chop that removed it. A placement
+/// whose footprint merely *overlaps* a chopped tree's tile gets no such edge,
+/// because the condition names one tile and the removal names another. This is
+/// the first method in the crate to emit a `RemoveEntity` at all, so nothing
+/// depended on that gap before; it is not exercised today either, since a cell
+/// and a lab are both sited against the state as it stands *before* the bill's
+/// subgoals expand, and nothing here chops in order to clear ground. Anything
+/// that starts chopping deliberately to make room has to close it.
 pub struct Chop;
 
 impl Method for Chop {

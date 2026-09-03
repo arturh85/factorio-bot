@@ -40,3 +40,11 @@ test:
 fix:
     cargo fmt --all
     cargo clippy --fix --workspace --tests --allow-dirty
+
+# Where did a run's time go? Point it at an archived run directory.
+#
+# Reads only, and tolerates a run that is still being written, so it is safe
+# to aim at a live game run. `just analyse` with no argument is the whole
+# archive, one line each; pass a directory for the full accounting.
+analyse *ARGS:
+    python3 tools/run_analysis.py {{ if ARGS == "" { "--all --summary" } else { ARGS } }}

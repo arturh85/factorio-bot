@@ -457,10 +457,82 @@ timeout 180 target/release/factorio-bot lua multi_client_test.lua -c 2
 1. **Server starts** and outputs "waiting finished" when ready (~12-17s)
 2. **Clients spawn** as graphical Factorio windows (not headless)
 3. **Clients load** sprites and resources (~26s per client)
-4. **Wait loop** polls `rcon_players()` every 1 second for up to 90 seconds
-5. **Timeout warning** may appear if clients take >90s to fully connect (expected, not a failure)
+4. **Wait loop** polls `rcon_players()` every 1 second. The bound is
+   `CONNECT_STALL_TIMEOUT` (`crates/core/src/process/connect_wait.rs`), **300
+   seconds of NO PROGRESS** -- it restarts every time another client appears,
+   so a trickle of arrivals cannot trip it. Raised from 90s on 2026-09-03
+   after two runs on a loaded machine stalled at 0/4 while every client did
+   eventually connect (one reached `Factorio initialised` at 123.5s).
+5. **A stall does NOT abort the run -- it proceeds with whoever showed up**,
+   logging `Gave up waiting for clients ... The run continues without them`.
+   That degrades silently to a one-bot roster and a *different plan*. **Check
+   `plan_created.bots == [1,2,3,4]` before comparing a run to anything.** A
+   one-bot run misread as a four-bot regression cost a good commit a revert.
 6. **Script runs** - clients should be connected by this point
 7. **Multi-bot coordination** verified via task graph execution
+
+### Measuring a run, and the traps that have produced wrong answers
+
+**Every wrong conclusion drawn on 2026-09-03 came from a measurement, not from
+carelessness.** Read this before quoting a number.
+
+**Use `just analyse` (`tools/run_analysis.py`).** It reports milestone spans in
+game time, per-verb dispatch->settle ticks, `steps/bot`, `planned ticks/bot`,
+per-bot failed walks, frozen-position detection, repeated refused destinations,
+sample coverage, per-network power and per-machine status. It exists because
+the ad-hoc one-liners that produced those wrong answers were unrepeatable.
+
+- **Game time, not wall clock.** `roster ready -> SATISFIED` on the clock
+  includes client load and startup. One run read as 24.4 min on the clock and
+  21.4 min of game time.
+- **`walk_dispatched` has NO `id` field.** Joining it to `walk_settled` on `id`
+  makes Python key everything under `None` and attribute every failure to the
+  last dispatch. **`walk_settled` carries `bot` directly -- read it.** This
+  produced "all twelve failed walks were bot 1's" when bot 1 had *zero*.
+- **A verb histogram cannot see waiting.** Verbs that settle in their dispatch
+  tick (`place`, `insert`, `fuel`, `take`) contribute 0, and *idle* time appears
+  nowhere. "88% of the run is hand-mining" was 88% of the *timed* verbs, while
+  walking was 31.8% of the milestone and 39.1% was one bot waiting on a furnace.
+  Ask what a number cannot see before acting on it.
+- **Runs are only comparable if the map is.** Two runs 13 hours and ~20 commits
+  apart, on different maps (one had a resource 100 tiles east the other lacked)
+  produced "four bots do double the work of one". Retracted. `factorio-bot lua`
+  takes **`--seed`** -- use it, and record which seed a result came from.
+- **Step counts, furnace counts and plan sizes move for reasons that are not
+  progress.** `steps/bot` has been the number that mattered all along; it sat at
+  `{1: 103, 2: 4, 3: 4, 4: 4}` while two whole classes of defect were fixed and
+  the headline time did not move.
+
+### Silence is not success
+
+Four separate mechanisms have been found reporting nothing while broken. When
+adding any check, ask what a reader sees when it *fails*, and prefer a record
+entry over a log line:
+
+- the `Using mods directory` line was gated behind `if !silent`, which every CLI
+  path sets, so the authoritative "did my edit ship" answer printed on no run;
+- 19 of 20 walk failures were archived as `kind: "other"` because
+  `classify_walk_failure` did not know the wording this build emits;
+- archived samples stopped at the last closed milestone while the mod sampled
+  the whole run -- one run lost 199,449 ticks, the entire window its cell
+  existed in, and it was only recovered from the mod's live file;
+- a run created a 198-step plan and dispatched **nothing for two hours**, with
+  all processes alive and the record static.
+
+### Working alongside other agents
+
+- **`git commit -- <path>` takes the WHOLE file.** If another agent has
+  uncommitted work in a file you need, committing yours ships theirs under your
+  message. Land one, then the other -- or hand over a patch. Two agents have
+  had to stop for this.
+- **Develop in a throwaway worktree** (`git worktree add /tmp/x HEAD`) when a
+  live run holds `target/debug/factorio-bot`; cargo cannot write a running
+  binary (`Text file busy`).
+- **A worktree run redirects `workspace/mods/BotBridge` at that worktree's
+  copy.** A run launched from `/tmp/x` loaded `/tmp/x/mods/BotBridge` and
+  produced no machine samples even though the feature had landed in the main
+  checkout. Restore the symlink afterwards and `readlink` it before trusting a
+  run's mod-dependent data.
 
 ### Known Issues & Workarounds
 

@@ -24,13 +24,17 @@
 //! See `crates/core/tests/README.md` for what each file is and how it was
 //! captured.
 
+use factorio_bot_core::dashmap::DashMap;
 use factorio_bot_core::factorio::snapshot::WorldSnapshot;
+use factorio_bot_core::graph::entity_graph::EntityGraph;
 use factorio_bot_core::num_traits::FromPrimitive;
 use factorio_bot_core::test_utils::entity_graph_from;
 use factorio_bot_core::types::{
-    Direction, FactorioEntity, FactorioPlayer, FactorioTile, InventoryResponse,
+    Direction, FactorioEntity, FactorioEntityPrototype, FactorioPlayer, FactorioTile,
+    InventoryResponse, Pos, Position,
 };
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 const PLAYERS: &str = include_str!("live-2.1.17-players.json");
 const WORLD_SNAPSHOT: &str = include_str!("live-2.1.17-world-snapshot.json");
@@ -912,6 +916,71 @@ fn the_live_inserters_direction_and_geometry_agree_that_four_is_east() {
         (our_pickup.x(), our_pickup.y()),
         (pickup.x(), pickup.y()),
         "our East inserter must pick up from the tile the live game named"
+    );
+}
+
+/// A real minable entity out of a real capture is readable by name, at the
+/// position the game itself reported, and yields what its own prototype says.
+///
+/// **The position is the whole point.** The live capture's `big-rock` stands
+/// at `(-43.125, -55.1875)` — not a tile centre, not an integer, and not a
+/// position any hand-written fixture in this repo produces. `EntityGraph`
+/// keys minables by a floored `Pos`, so a reader that handed the *key* back
+/// would send a bot to `(-44, -56)`; the mod's `surface.find_entity(name,
+/// position)` matches exactly and would answer nil, and the bot would fail
+/// with "no entity to mine" about an entity standing right in front of it.
+/// That is the same fault that once made mining fail on every real map while
+/// every test passed, and this is the one input that can catch it.
+///
+/// It is a rock rather than a tree only because the captured chunk had no
+/// tree in it. The path is the same one wood takes: `add` files any
+/// `is_minable` entity by name, and `minables_yielding` reads the bill off
+/// `mine_result`.
+#[test]
+fn a_live_minable_is_readable_by_name_at_the_position_the_game_reported() {
+    let snapshot: WorldSnapshot = serde_json::from_str(WORLD_SNAPSHOT)
+        .unwrap_or_else(|err| panic!("the live world snapshot must parse: {err}"));
+    let prototypes: DashMap<String, FactorioEntityPrototype> = snapshot
+        .entity_prototypes
+        .iter()
+        .map(|proto| (proto.name.clone(), proto.clone()))
+        .collect();
+    let entities: Vec<FactorioEntity> = serde_json::from_str(ENTITIES_RESOURCES)
+        .unwrap_or_else(|err| panic!("live resource entities must parse: {err}"));
+    let live: Vec<(String, Position)> = entities
+        .iter()
+        .filter(|entity| entity.is_minable())
+        .map(|entity| (entity.name.clone(), entity.position.clone()))
+        .collect();
+    assert_eq!(
+        live,
+        vec![("big-rock".to_string(), Position::new(-43.125, -55.1875))],
+        "the capture's one minable, and its position is neither integral nor a \
+         tile centre — which is what makes it worth asserting against"
+    );
+
+    let graph = EntityGraph::new(Arc::new(prototypes), Arc::new(DashMap::new()));
+    graph
+        .add(entities, None)
+        .expect("the live entities build a graph");
+
+    assert_eq!(
+        graph.minable_positions("big-rock"),
+        vec![Position::new(-43.125, -55.1875)],
+        "the game's own position, not the floored key it is filed under"
+    );
+    assert_eq!(
+        graph.minables_yielding("stone"),
+        vec![("big-rock".to_string(), 20)],
+        "read off the live prototype's `mine_result`"
+    );
+    assert!(
+        graph.minables_yielding("wood").is_empty(),
+        "control: a rock is not a tree"
+    );
+    assert!(
+        !graph.any_resource_at(&Pos(-44, -56)),
+        "a rock is not ore, and the ground under it must not read as a patch"
     );
 }
 

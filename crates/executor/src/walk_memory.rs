@@ -27,6 +27,7 @@
 use factorio_bot_core::errors::RconPathRequestFailed;
 use factorio_bot_core::factorio::rcon::{ActionFailure, path_request_was_busy};
 use factorio_bot_core::factorio::world::{FactorioWorld, WalkRefusal};
+use factorio_bot_core::graph::enclosure::enclosure_at;
 use factorio_bot_core::miette::Report;
 use factorio_bot_core::types::{PlayerId, Position};
 
@@ -91,12 +92,45 @@ pub fn note_walk_refusal(
     let Some(from) = from else {
         return false;
     };
-    world.record_walk_refusal(WalkRefusal {
+    let learned = world.record_walk_refusal(WalkRefusal {
         tick: failure.ticks.dispatched,
         player,
         from: from.clone(),
         to: to.clone(),
-    })
+    });
+    note_enclosure(world, player, from, failure.ticks.dispatched);
+    learned
+}
+
+/// Asks whether the character can reach open ground at all, and remembers the
+/// answer when it cannot.
+///
+/// # Why here
+///
+/// This is the cheapest useful trigger. A refused path is the moment the game
+/// itself has already said something is wrong about this spot -- and by the
+/// time it reaches this function, five searches from it have found nothing (the
+/// goal plus `player_path`'s four rotated offsets). Running the fill per
+/// *dispatch* would ask a question nobody has a reason to ask, thousands of
+/// times a run; running it on a timer would ask it of bots nothing is wrong
+/// with. This asks it exactly when there is a reason to.
+///
+/// The conjunction is also what keeps a false positive out of the archive. A
+/// report needs the pathfinder to refuse a route from here **and** an
+/// independent fill over the occupancy model to close, and the model is
+/// incomplete only in the direction that opens the fill up (uncharted ground
+/// holds no entities and so reads as free).
+///
+/// # Why the answer is deliberately not acted on
+///
+/// Nothing reads this ledger except the record. Evacuating a bot before a build
+/// and mining a way out are both worth doing and neither can be designed
+/// against a run archive that has never once said when this happens -- which is
+/// the entire finding of `run-1788432181-42528`.
+fn note_enclosure(world: &FactorioWorld, player: PlayerId, from: &Position, tick: Option<u64>) {
+    if let Some(found) = enclosure_at(&world.entity_graph, player, from, tick) {
+        world.record_enclosure(found);
+    }
 }
 
 #[cfg(test)]
@@ -104,6 +138,7 @@ mod tests {
     use super::*;
     use factorio_bot_core::errors::RconTimeout;
     use factorio_bot_core::factorio::ticks::ActionTicks;
+    use factorio_bot_core::types::FactorioEntity;
 
     /// The exact wording run `run-1788432181-42528` failed nineteen walks with.
     const NO_PATH: &str = "failed to path find";
@@ -217,5 +252,86 @@ mod tests {
             &path_failure(NO_PATH)
         ));
         assert_eq!(world.walk_refusals().len(), 1);
+    }
+
+    /// Seals `around` inside a ring of trees, exactly the way
+    /// `crates/core`'s `enclosure_bounds` tests do, so a refusal raised from
+    /// inside it has something real to find.
+    fn wall_in(world: &FactorioWorld, around: &Position) {
+        let mut ring = Vec::new();
+        let mut offset = -3.0;
+        while offset <= 3.0 {
+            for (x, y) in [
+                (around.x() + offset, around.y() - 3.0),
+                (around.x() + offset, around.y() + 3.0),
+                (around.x() - 3.0, around.y() + offset),
+                (around.x() + 3.0, around.y() + offset),
+            ] {
+                ring.push(FactorioEntity::new_tree(&Position::new(x, y)));
+            }
+            offset += 0.5;
+        }
+        world.entity_graph.add(ring, None).expect("the ring loads");
+    }
+
+    /// The refusal and the diagnosis are written together, from one call.
+    ///
+    /// This is the wiring the whole change is for: `run-1788432181-42528`
+    /// produced nineteen of these refusals and the record still could not say
+    /// that the bot was unable to move at all.
+    #[test]
+    fn a_refusal_from_inside_a_wall_also_names_the_enclosure() {
+        let world = FactorioWorld::new();
+        wall_in(&world, &here());
+        assert!(note_walk_refusal(
+            &world,
+            3,
+            Some(&here()),
+            &there(),
+            &path_failure(NO_PATH)
+        ));
+        let found = world.enclosures();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].player, 3);
+        assert_eq!(found[0].at, here());
+        assert!(found[0].pocket_tiles > 0.);
+    }
+
+    /// A refusal from open ground names no enclosure -- the two are separate
+    /// judgements and only their conjunction is a finding.
+    #[test]
+    fn a_refusal_from_open_ground_names_no_enclosure() {
+        let world = FactorioWorld::new();
+        assert!(note_walk_refusal(
+            &world,
+            3,
+            Some(&here()),
+            &there(),
+            &path_failure(NO_PATH)
+        ));
+        assert!(
+            world.enclosures().is_empty(),
+            "the destination was unreachable; the bot was not"
+        );
+    }
+
+    /// A walled-in bot whose failure taught us nothing still teaches nothing.
+    ///
+    /// The check hangs off the refusal that *established* something. A full
+    /// request queue means the game never searched, so there is no reason to
+    /// believe anything is wrong here and no report is made -- even though the
+    /// fill would have found the ring.
+    #[test]
+    fn a_busy_queue_names_no_enclosure_even_inside_a_wall() {
+        let world = FactorioWorld::new();
+        wall_in(&world, &here());
+        assert!(!note_walk_refusal(
+            &world,
+            3,
+            Some(&here()),
+            &there(),
+            &path_failure(BUSY)
+        ));
+        assert!(world.enclosures().is_empty());
     }
 }

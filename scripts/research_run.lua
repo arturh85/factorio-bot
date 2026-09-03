@@ -195,6 +195,16 @@ repeat
         -- choosing further-away tiles for no stated reason. Same cadence as
         -- the two flushes above, for the same reason.
         local nr = record.refusals()
+        -- The bots this batch found walled in: a flood fill from where the bot
+        -- stands that closed without reaching open ground. Only asked when the
+        -- game's pathfinder has already refused that bot a route from that
+        -- spot, so each one explains a failed walk beside it. Same cadence as
+        -- the three flushes above. `run-1788432181-42528` ran its whole budget
+        -- with two of four bots frozen for 77% of it and said so nowhere; this
+        -- line is what makes that visible without reading `samples.jsonl` by
+        -- hand.
+        local ne = record.enclosures()
+        if ne > 0 then print("   WALLED IN: " .. ne .. " bot(s) can no longer reach open ground") end
         -- Grouped, because the four trouble counts are two axes and a flat
         -- list of four `x=n` pairs invites exactly the misreading this line
         -- used to produce: `failed` and `lost` name the same distinction for
@@ -250,6 +260,10 @@ record.teleports()
 -- last placement is precisely the run whose refused site someone will want to
 -- look up.
 record.refusals()
+-- And the same for an enclosure, for the same reason: a run that ended with a
+-- bot unable to move is precisely the run whose frozen bot someone will want to
+-- look up.
+record.enclosures()
 
 local id = record.finish(ok and sup.state or "crashed")
 print("RUN FINISHED state=" .. (ok and sup.state or "crashed") .. " id=" .. id)

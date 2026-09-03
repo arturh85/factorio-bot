@@ -803,6 +803,12 @@ const SCHEMAS: Record<string, SchemaContract> = {
             blockers: {required: true, type: 'array'},
             tile: {required: false, type: 'string', nullable: true}
         },
+        bot_enclosed: {
+            bot: {required: true, type: 'integer'},
+            position: {required: true, ref: 'Position'},
+            pocket_tiles: {required: true, type: 'number'},
+            searched_tiles: {required: true, type: 'number'}
+        },
         run_finished: {
             outcome: {required: true, type: 'string'},
             elapsed_ticks: {required: true, type: 'integer'}

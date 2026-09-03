@@ -1541,6 +1541,72 @@ end
     }
 
     map_table.set(
+        "__doc_entry_enclosures",
+        String::from(
+            r#"
+--- flushes the bots found walled in since the last flush
+-- A bot is "walled in" when a flood fill over the occupancy model, started
+-- where it stands, closes without reaching open ground -- every placement
+-- around it was individually legal and the *set* formed a wall. The check runs
+-- when the game's own pathfinder has already refused that bot a route from
+-- that spot, so each event sits beside a failed walk and explains it.
+--
+-- Call it once per loop iteration, alongside `record.actions`,
+-- `record.teleports` and `record.refusals`. Nothing acts on these: they change
+-- no plan and move no bot. They exist because `run-1788432181-42528` ran its
+-- whole budget with two of four bots frozen for 77% of it and no artefact said
+-- so.
+--
+-- Each event carries `searched_tiles`, the radius the fill was allowed. An
+-- enclosure wider than that window produces no event, so no events is not
+-- evidence that no bot was walled in.
+-- @treturn number how many enclosure events were written
+-- @raise if no recording is running
+function record.enclosures()
+end
+    "#,
+        ),
+    )?;
+    {
+        let slot = slot.clone();
+        let world = world.clone();
+        let rcon = rcon.clone();
+        map_table.set(
+            "enclosures",
+            lua.create_function(move |_lua, ()| {
+                let mut guard = slot.lock();
+                let recorder = guard.as_mut().ok_or_else(|| {
+                    record_error("no recording is running -- call record.start() first")
+                })?;
+                let mut written = 0u32;
+                for found in world.unreported_enclosures() {
+                    // The observation's own stamp when it had one, which it
+                    // ordinarily does not: a path request that finds nothing is
+                    // refused before the walk is dispatched and so is never
+                    // stamped. `not_before` clamps to the last tick already
+                    // written rather than inventing a zero, exactly as
+                    // `record.refusals` does.
+                    let tick = recorder
+                        .not_before(found.tick.unwrap_or_else(|| rcon.last_tick().unwrap_or(0)));
+                    recorder
+                        .record(
+                            tick,
+                            EventKind::BotEnclosed {
+                                bot: u32::from(found.player),
+                                position: found.at,
+                                pocket_tiles: found.pocket_tiles,
+                                searched_tiles: found.searched_tiles,
+                            },
+                        )
+                        .map_err(record_error)?;
+                    written += 1;
+                }
+                Ok(written)
+            })?,
+        )?;
+    }
+
+    map_table.set(
         "__doc_entry_keyframe",
         String::from(
             r#"

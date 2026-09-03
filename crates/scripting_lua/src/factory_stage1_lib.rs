@@ -136,6 +136,7 @@ mod tests {
             record.walks = function() return 0 end
             record.teleports = function() return 0 end
             record.refusals = function() return 0 end
+            record.enclosures = function() return 0 end
             record.keyframe = function() end
             record.finish = function(outcome)
                 table.insert(__finish, outcome)

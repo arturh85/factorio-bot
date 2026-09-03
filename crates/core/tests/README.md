@@ -46,6 +46,7 @@ So: if you add a fixture, add a row here. If you refresh one, change its row.
 | `live-2.1.17-entities-spawn.json` | 2.1.17 (build 87315, linux64, space-age) | 2026-08-30 | `remote.call('botbridge', 'find_entities_filtered', {area={{-24,-16},{8,8}}})` | `live_2_1_payloads.rs` |
 | `live-2.1.17-entities-resources.json` | 2.1.17 (build 87315, linux64, space-age) | 2026-08-30 | `remote.call('botbridge', 'find_entities_filtered', {area={{-56,-60},{-40,-44}}})` | `live_2_1_payloads.rs` |
 | `live-2.1.17-inventory-contents-at.json` | 2.1.17 (build 87315, linux64, space-age) | 2026-08-30 | `remote.call('botbridge', 'inventory_contents_at', {{name='crash-site-spaceship', position={x=-5,y=-6}}})` | `live_2_1_payloads.rs` |
+| `run-1788432181-42528-frozen-bots.json` | 2.1.17 (build 87315, linux64, space-age) | 2026-09-03 | that run's own `samples.jsonl` and `map.jsonl` (see below) | `enclosure_run13.rs` |
 | `recipes-fixtures.json` | **1.1 (stale)** | 2022-06-27 (`21cebd70`) | unrecorded | `src/test_utils.rs::fixture_recipes` |
 | `item-prototype-fixtures.json` | **1.1 (stale)** | 2022-06-27 (`21cebd70`) | unrecorded | `src/test_utils.rs::fixture_item_prototypes` |
 | `entity-prototype-fixtures.json` | **1.1 (stale)** | 2022-06-27 (`21cebd70`) | unrecorded | `src/test_utils.rs::fixture_entity_prototypes` |
@@ -138,3 +139,27 @@ session's.
   with `current_research: null` and every technology unresearched, which is the
   state a fresh game is in. The researched branch is a documented gap, not a
   covered one.
+
+### `run-1788432181-42528-frozen-bots.json`
+
+Not a mod payload but a **run archive** extract, which is why it sits apart
+from the `live-2.1.17-*` group. Two arrays, both copied out as the exact
+substrings the run wrote:
+
+* `bots` -- the last `kind: "bots"` line of `workspace/runs/<run>/samples.jsonl`
+  (tick 211 800). `last_position_change_tick` beside it is derived: the last
+  tick at which each bot's sampled position differed from the previous sample.
+  It reads `{"1": 211440, "2": 47940, "3": 48000, "4": 204480}` -- bots 2 and 3
+  did not move for the last 163 800 ticks of the run.
+* `entities` -- the `game` array of the last keyframe in the same run's
+  `map.jsonl` (tick 211 506): 1 028 entities, mostly ore and stone furnaces.
+
+**The obstacle that froze bots 2 and 3 is not in here, and cannot be.** A
+keyframe is written by `EntityGraph::snapshot_within`, which reads
+`entity_tree`, and `EntityGraph::add` admits only an allow-list of types to
+that tree; trees, small rocks, cliffs and water reach `blocked_tree` alone. The
+one full entity dump left in `workspace/` (`server-log.txt`) is of a **different
+world** -- its chunks do not contain this run's copper field -- so nothing on
+disk closes the gap. `enclosure_run13.rs` pins that as a fact and reconstructs
+the missing class of obstacle explicitly for the positive case; see its module
+docs.

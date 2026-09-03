@@ -345,6 +345,102 @@ impl WalkRefusals {
     }
 }
 
+/// A character that cannot reach open ground from where it stands.
+///
+/// # What it claims
+///
+/// A flood fill over the occupancy model
+/// ([`crate::graph::enclosure::escape_from`]) started at `at` and closed
+/// without reaching the edge of a window `searched_tiles` across. So: every
+/// point this character can walk to is inside `pocket_tiles` square tiles of
+/// configuration space, and it gets out only by mining, by being moved, or by
+/// something in the way being removed.
+///
+/// It is a fact about a **position**, not about a bot. A bot teleported clear,
+/// or one whose wall is mined away, is no longer enclosed and this row says
+/// nothing about it -- exactly as [`WalkRefusal`] is a fact about a pair of
+/// points rather than about a destination.
+///
+/// # Why it is a ledger row and not a log line
+///
+/// `run-1788432181-42528` ran its whole budget with two of four bots frozen
+/// from tick ~48 000, and nothing anywhere named the condition. Twenty walks
+/// failed on bots 2/3/4 and none on bot 1; bot 1 performed 746 of 831
+/// dispatches. That ~90% concentration read as a scheduling quirk for days.
+/// The record is where a run is read back after the fact, so a condition that
+/// only reaches a log line is a condition nobody finds -- which is the failure
+/// this type exists to stop repeating.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Enclosure {
+    /// The `game.tick` the observation was stamped at, or `None`. Ordinarily
+    /// `None`: the walk refusal that triggers the check is answered *before*
+    /// the walk is dispatched and so is never stamped. Never defaulted to
+    /// zero, for the reason [`PlacementRefusal::tick`] gives.
+    pub tick: Option<u64>,
+    /// The Factorio player the check was run for. A [`PlayerId`] rather than a
+    /// bot id because this crate has no bot ids; they are the same number.
+    pub player: PlayerId,
+    /// Where the character was standing. The fill was seeded here, so this is
+    /// the position the claim is about and not an approximation of it.
+    pub at: Position,
+    /// How much ground the character can still reach, in square tiles of
+    /// *configuration space* -- obstacles grown by the character's own
+    /// half-box, so this is where its centre may go rather than the floor area
+    /// a person would measure by eye. Reported because "boxed into 3 square
+    /// tiles" and "boxed into 300" are different situations.
+    pub pocket_tiles: f64,
+    /// The radius of the window the fill was allowed to search, in tiles.
+    /// Carried so a reader knows how strong the claim is: an enclosure larger
+    /// than this window is invisible to the search and is reported as no
+    /// enclosure at all.
+    pub searched_tiles: f64,
+}
+
+/// Every [`Enclosure`] this run has observed, plus how many of them a record
+/// has already been told about.
+///
+/// Append-only and never drained, and carrying a `reported` cursor, exactly
+/// like [`PlacementRefusals`] and for the same two reasons: the condition is a
+/// standing fact rather than an event, and `record.enclosures()` has to write
+/// each one once without taking it away from anyone else who reads the ledger.
+#[derive(Debug, Default)]
+pub struct Enclosures {
+    found: Vec<Enclosure>,
+    reported: usize,
+}
+
+impl Enclosures {
+    /// Remembers an enclosure, or does nothing if this character has already
+    /// been found enclosed at this spot. Returns whether it was new.
+    ///
+    /// Identity is the player and the position, within
+    /// [`WalkRefusal::SAME_PLACE_TOLERANCE`] -- and that tolerance rather than
+    /// an exact float test is the point. A boxed-in bot is asked about once
+    /// per refused walk, which in `run-1788432181-42528` was five times for
+    /// one bot from one spot; the position reported for it drifts in the last
+    /// bits between reads even when the bot has not moved a tile. Comparing
+    /// exactly would write the same condition five times and make the record
+    /// read as five separate findings.
+    ///
+    /// `pocket_tiles` is deliberately not part of the identity: the pocket
+    /// grows and shrinks as things are built and mined around a bot that is
+    /// still stuck in the same place, and that is the same condition, not a
+    /// new one.
+    fn note(&mut self, found: Enclosure) -> bool {
+        if self.found.iter().any(|known| {
+            known.player == found.player
+                && (known.at.x - found.at.x)
+                    .hypot(known.at.y - found.at.y)
+                    .total_cmp(&WalkRefusal::SAME_PLACE_TOLERANCE)
+                    .is_le()
+        }) {
+            return false;
+        }
+        self.found.push(found);
+        true
+    }
+}
+
 /// What a container or machine was last observed to be holding.
 ///
 /// # Why this is not a field on the stored [`FactorioEntity`]
@@ -512,6 +608,16 @@ pub struct FactorioWorld {
     /// is narrower than the placement ledger's claim -- it is about a pair of
     /// points, not about a destination.
     pub walk_refusals: SyncMutex<WalkRefusals>,
+    /// Characters this run has found unable to reach open ground from where
+    /// they stand.
+    ///
+    /// Not read by the planner -- this ledger exists to be *reported*, which
+    /// is the whole finding of `run-1788432181-42528`: the condition was real
+    /// for two of four bots for 163 000 ticks and appeared in no artefact.
+    /// Acting on it is a separate change with a separate risk (evacuating a
+    /// bot before a build, or mining a way out), and neither can be reasoned
+    /// about before a run record says when it happens.
+    pub enclosures: SyncMutex<Enclosures>,
 }
 
 impl FactorioWorld {
@@ -839,6 +945,7 @@ impl FactorioWorld {
             inventories: DashMap::new(),
             placement_refusals: SyncMutex::new(PlacementRefusals::default()),
             walk_refusals: SyncMutex::new(WalkRefusals::default()),
+            enclosures: SyncMutex::new(Enclosures::default()),
         }
     }
 
@@ -884,6 +991,33 @@ impl FactorioWorld {
     /// planner's read, and it happens once per plan.
     pub fn walk_refusals(&self) -> Vec<WalkRefusal> {
         self.walk_refusals.lock().walks.clone()
+    }
+
+    /// Remembers a character found unable to reach open ground. Returns
+    /// whether the condition was new -- see [`Enclosures::note`] for what
+    /// "new" means, which is not "a different float".
+    ///
+    /// Called from `walk_memory` (`crates/executor`), off the back of a walk
+    /// the game's own pathfinder refused. That trigger is deliberate: the
+    /// check costs one quad-tree query and a fixed-size fill, which is cheap
+    /// but not free, and a refused walk is the moment we already know
+    /// something is wrong.
+    pub fn record_enclosure(&self, found: Enclosure) -> bool {
+        self.enclosures.lock().note(found)
+    }
+
+    /// Every enclosure observed, oldest first. Non-destructive.
+    pub fn enclosures(&self) -> Vec<Enclosure> {
+        self.enclosures.lock().found.clone()
+    }
+
+    /// The enclosures no record has been told about yet, oldest first, marking
+    /// them reported. The rows themselves stay -- see [`Enclosures`].
+    pub fn unreported_enclosures(&self) -> Vec<Enclosure> {
+        let mut ledger = self.enclosures.lock();
+        let from = ledger.reported;
+        ledger.reported = ledger.found.len();
+        ledger.found[from..].to_vec()
     }
 
     /// The refusals no record has been told about yet, oldest first, marking
@@ -1130,6 +1264,7 @@ impl<'de> Deserialize<'de> for FactorioWorld {
                     inventories: Default::default(),
                     placement_refusals: Default::default(),
                     walk_refusals: Default::default(),
+                    enclosures: Default::default(),
                 })
             }
         }
@@ -1192,6 +1327,14 @@ impl Clone for FactorioWorld {
             walk_refusals: SyncMutex::new(WalkRefusals {
                 walks: self.walk_refusals.lock().walks.clone(),
             }),
+            // Knowledge, and with a cursor that resets like the placement
+            // ledger's above: a second recorder has been told about none of
+            // these, and a condition worth naming once is worth naming once
+            // in each record that could otherwise not explain a frozen bot.
+            enclosures: SyncMutex::new(Enclosures {
+                found: self.enclosures.lock().found.clone(),
+                reported: 0,
+            }),
             flow_graph: Arc::new(FlowGraph::new(_entity_graph)),
         }
     }
@@ -1223,6 +1366,7 @@ mod tests {
             inventories: Default::default(),
             placement_refusals: Default::default(),
             walk_refusals: Default::default(),
+            enclosures: Default::default(),
             entity_graph: Arc::new(EntityGraph::new(
                 Arc::new(DashMap::new()),
                 Arc::new(DashMap::new()),

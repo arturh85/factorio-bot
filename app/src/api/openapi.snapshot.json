@@ -758,6 +758,44 @@
             "type": "object"
           },
           {
+            "description": "A character cannot reach open ground from where it stands.\n\n**The condition this whole event exists for went unnamed for a whole\nrun.** In `run-1788432181-42528` bots 2 and 3 reported byte-identical\npositions from tick ~48 000 to the end -- 77% of the run -- while bot 1\nperformed 746 of 831 dispatches. Twenty walks failed, none of them\nbot 1's. Every artefact the run produced was consistent with a\nscheduling quirk, and the truth was found only by reading\n`samples.jsonl` by hand. A `walk_settled` with `failure.kind: \"no_path\"`\nsays a *destination* could not be reached; it cannot say the bot could\nreach nothing at all, and nineteen of them in a row still cannot.\n\nWritten by `record.enclosures()` (`crates/scripting_lua`) from the\nledger `crates/executor`'s `walk_memory` fills. The check runs when the\ngame's pathfinder has refused a route from this spot, so the event\nalways sits beside a failed walk -- it is the *diagnosis* of that\nfailure, not a second report of it.\n\nNothing acts on this. It changes no plan and moves no bot; it exists so\nthe next reader can see the condition without reconstructing it.",
+            "properties": {
+              "bot": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "enum": [
+                  "bot_enclosed"
+                ],
+                "type": "string"
+              },
+              "pocket_tiles": {
+                "description": "How much ground is still reachable, in square tiles of\n**configuration space** -- obstacles grown by the character's own\ncollision box, so this is where the character's centre may go, not\nthe floor area a person would measure by eye. It is smaller than\nthe latter, always. Reported because \"boxed into 3 square tiles\"\nand \"boxed into 300\" are different situations.",
+                "format": "double",
+                "type": "number"
+              },
+              "position": {
+                "$ref": "#/components/schemas/Position",
+                "description": "Where the character stood. The fill was seeded here, so this is the\nposition the claim is about rather than an approximation of it --\nand unlike a walk's `to`, it is *observed*: the world reported it\nat the instant the path was refused."
+              },
+              "searched_tiles": {
+                "description": "How far the fill was allowed to look, in tiles.\n\nThis is what bounds the claim, and it is on the event rather than\nimplied by the build that wrote it: an enclosure wider than this\nwindow is invisible to the search and produces **no event at all**.\nSo the absence of this event is not evidence that no bot was walled\nin -- only that none was walled into a pen this small. A reader\ncomparing two runs whose builds disagree about the radius needs the\nnumber that was actually used.",
+                "format": "double",
+                "type": "number"
+              }
+            },
+            "required": [
+              "bot",
+              "position",
+              "pocket_tiles",
+              "searched_tiles",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "elapsed_ticks": {
                 "format": "int64",

@@ -420,6 +420,51 @@ pub enum EventKind {
         /// for `source = "dispatch"`.
         tile: Option<String>,
     },
+    /// A character cannot reach open ground from where it stands.
+    ///
+    /// **The condition this whole event exists for went unnamed for a whole
+    /// run.** In `run-1788432181-42528` bots 2 and 3 reported byte-identical
+    /// positions from tick ~48 000 to the end -- 77% of the run -- while bot 1
+    /// performed 746 of 831 dispatches. Twenty walks failed, none of them
+    /// bot 1's. Every artefact the run produced was consistent with a
+    /// scheduling quirk, and the truth was found only by reading
+    /// `samples.jsonl` by hand. A `walk_settled` with `failure.kind: "no_path"`
+    /// says a *destination* could not be reached; it cannot say the bot could
+    /// reach nothing at all, and nineteen of them in a row still cannot.
+    ///
+    /// Written by `record.enclosures()` (`crates/scripting_lua`) from the
+    /// ledger `crates/executor`'s `walk_memory` fills. The check runs when the
+    /// game's pathfinder has refused a route from this spot, so the event
+    /// always sits beside a failed walk -- it is the *diagnosis* of that
+    /// failure, not a second report of it.
+    ///
+    /// Nothing acts on this. It changes no plan and moves no bot; it exists so
+    /// the next reader can see the condition without reconstructing it.
+    BotEnclosed {
+        bot: u32,
+        /// Where the character stood. The fill was seeded here, so this is the
+        /// position the claim is about rather than an approximation of it --
+        /// and unlike a walk's `to`, it is *observed*: the world reported it
+        /// at the instant the path was refused.
+        position: Position,
+        /// How much ground is still reachable, in square tiles of
+        /// **configuration space** -- obstacles grown by the character's own
+        /// collision box, so this is where the character's centre may go, not
+        /// the floor area a person would measure by eye. It is smaller than
+        /// the latter, always. Reported because "boxed into 3 square tiles"
+        /// and "boxed into 300" are different situations.
+        pocket_tiles: f64,
+        /// How far the fill was allowed to look, in tiles.
+        ///
+        /// This is what bounds the claim, and it is on the event rather than
+        /// implied by the build that wrote it: an enclosure wider than this
+        /// window is invisible to the search and produces **no event at all**.
+        /// So the absence of this event is not evidence that no bot was walled
+        /// in -- only that none was walled into a pen this small. A reader
+        /// comparing two runs whose builds disagree about the radius needs the
+        /// number that was actually used.
+        searched_tiles: f64,
+    },
     RunFinished {
         outcome: String,
         elapsed_ticks: u64,

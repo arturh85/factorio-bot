@@ -812,6 +812,37 @@ export type EventKind =
           /** The tile under the refused centre. `null` for `'dispatch'`. */
           tile: string | null;
       }
+    | {
+          /**
+           * A character cannot reach open ground from where it stands.
+           *
+           * A flood fill over the occupancy model, started where the bot
+           * stood, closed without reaching open ground. Every placement
+           * around it was individually clear of the bot; the *set* formed a
+           * wall, which is why no per-placement check could see it.
+           *
+           * Always sits beside a failed walk: the check only runs once the
+           * game's own pathfinder has refused that bot a route from that
+           * spot, so this is the diagnosis of that failure rather than a
+           * second report of it. Nothing acts on it -- it changes no plan and
+           * moves no bot.
+           *
+           * `run-1788432181-42528` had two of four bots frozen for 77% of the
+           * run and produced no event like this, which is why it exists.
+           */
+          kind: 'bot_enclosed';
+          bot: number;
+          /** Where the character stood -- *observed*, unlike a walk's `to`. */
+          position: Position;
+          /** Reachable ground in square tiles of configuration space
+           *  (obstacles grown by the character's own box), so smaller than
+           *  the floor area a person would measure by eye. */
+          pocket_tiles: number;
+          /** How far the fill was allowed to look, in tiles. An enclosure
+           *  wider than this window produces **no event**, so no events is
+           *  not evidence that no bot was walled in. */
+          searched_tiles: number;
+      }
     | {kind: 'run_finished'; outcome: string; elapsed_ticks: number}
     /** A kind this build does not know. The server never emits it, but a
      *  future variant decodes to this rather than failing to parse. */

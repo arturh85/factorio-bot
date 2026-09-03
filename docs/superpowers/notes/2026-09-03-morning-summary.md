@@ -110,6 +110,40 @@ Four times tonight I suspected a false success and was **wrong** — including
 run 33 itself, where I misread a settle because `action_settled` carries no
 action name. Erring that way round is right, but the ratio is worth watching.
 
+## A transient refusal costs a whole batch (found 2026-09-03)
+
+**Two findings from tonight's runs meet here, and together they are a real
+defect rather than two annoyances.**
+
+`cannot place item '<x>' because a character is standing in the footprint`
+fired **three times across runs 1 and 2**. The mod is right about it: a
+character in a footprint is a *transient*, and `PlacementVerdict::
+is_durable_refusal` (`crates/core/src/factorio/rcon.rs:506`) deliberately
+refuses to remember it, because it "says nothing about the ground". The mod
+even acts on it — `step_aside_from_footprint` (`control.lua:3171`) dispatches a
+walk asking the blocker to move, so the next attempt would find the ground it
+was always going to find.
+
+**But the executor stops the bot anyway.** `crates/executor/src/run.rs:258`
+says plainly "Stops that bot at its first failure: later steps in a chain
+depend on it", and `abandon_rest(&mine[i..], senders)` throws away *every*
+remaining step that bot had. That rule is right for a durable failure and wrong
+for a transient the mod is already resolving.
+
+**What makes it expensive is the other finding.** The wood RCA established that
+**bot 1 performs essentially all the work** — 235 of 267 action dispatches in
+run 1, and every single craft; bots 2/3/4 did 10-11 actions each. So stopping
+"that bot" is, in practice, stopping the run: both of run 1's batches ended
+early with 127 and 89 steps still pending, each after at least one failure.
+
+So bot-1 concentration is not just a wood problem. It is an amplifier that
+turns any single transient into most of a lost batch. Worth fixing at either
+end: retry a transient on the same bot instead of abandoning its chain, or
+spread work across the roster so one stopped bot is not the whole run. The
+first is narrower and matches what the mod already does.
+
+Not implemented — found while a live run held the workspace.
+
 ## Open, ranked
 
 1. ~~`supervisor.witness` — the factory's definition of done.~~ **Done and

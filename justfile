@@ -21,6 +21,31 @@ factorio *ARGS:
 lua SCRIPT *ARGS:
     cargo run --release --no-default-features --features cli,lua -- lua {{SCRIPT}} {{ARGS}}
 
+# The benchmark seed. Fixed, written down, and deliberately NOT chosen for
+# being a good map.
+#
+# Searching for a seed that scores well finds one with ore and water near
+# spawn, after which every timing flatters us -- and stops being comparable to
+# the ~9 minute manual solo baseline, which was not run on an optimised map.
+# What benchmarking needs is a fixed, representative seed plus honesty about
+# which seed produced a number. This one is the date the discipline started.
+BENCHMARK_SEED := "20260903"
+
+# A reproducible benchmark run on BENCHMARK_SEED.
+#
+# DESTRUCTIVE. `--new` deletes workspace/server/saves/level.zip and everything
+# built on it, because that is the ONLY way a seed takes effect: `--seed`
+# without `--new` is silently ignored on a workspace that already has a map
+# (see "Reproducible runs" in CLAUDE.md). Passing the seed without the deletion
+# would be worse than passing neither -- the run would look controlled and not
+# be.
+#
+# The seed has NOT been validated by a run yet. A map whose nearest shoreline
+# does not fit a pump/boiler/engine has genuinely refused a run here; confirm
+# this one produces a viable map before quoting any number against it.
+bench SCRIPT *ARGS:
+    cargo run --release --no-default-features --features cli,lua -- lua {{SCRIPT}} --seed {{BENCHMARK_SEED}} --new {{ARGS}}
+
 # Fast iteration: connect to already-running Factorio (start with 'just factorio' first)
 lua-connect SCRIPT *ARGS:
     cargo run --release --no-default-features --features cli,lua -- lua --connect {{SCRIPT}} {{ARGS}}

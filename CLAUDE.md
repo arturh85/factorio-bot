@@ -497,11 +497,70 @@ the ad-hoc one-liners that produced those wrong answers were unrepeatable.
 - **Runs are only comparable if the map is.** Two runs 13 hours and ~20 commits
   apart, on different maps (one had a resource 100 tiles east the other lacked)
   produced "four bots do double the work of one". Retracted. `factorio-bot lua`
-  takes **`--seed`** -- use it, and record which seed a result came from.
+  takes **`--seed`** -- but read the next section before trusting it, because
+  **`--seed` alone does nothing at all on a workspace that already has a map.**
 - **Step counts, furnace counts and plan sizes move for reasons that are not
   progress.** `steps/bot` has been the number that mattered all along; it sat at
   `{1: 103, 2: 4, 3: 4, 4: 4}` while two whole classes of defect were fixed and
   the headline time did not move.
+
+### Reproducible runs: the seed, and the trap in it
+
+**`--seed` is ignored, silently, whenever `workspace/server/saves/level.zip`
+already exists.** This was measured, not assumed. The seed only ever reaches
+Factorio as `--map-gen-seed` on a `--create` invocation
+(`crates/core/src/process/instance_setup.rs`), and `--create` runs only inside
+`if !saves_level_path.exists()`. The single thing that deletes that file is
+`recreate_save`, i.e. the `--new` / `-n` flag, which defaults to false. So:
+
+```bash
+# WRONG. Prints nothing, generates nothing, runs on whatever map was there.
+factorio-bot lua factory_stage2.lua -c 4 --seed 20260903
+
+# RIGHT. --new deletes level.zip, so the seeded map is actually generated.
+# DESTRUCTIVE: the previous map, and everything built on it, is gone.
+factorio-bot lua factory_stage2.lua -c 4 --seed 20260903 --new
+```
+
+This is worse than not passing a seed, because the run *looks* controlled. It
+now prints a loud `--seed was IGNORED` warning that is deliberately **not**
+gated on `silent` -- every CLI path sets `silent`, which is exactly how the
+`Using mods directory` line came to print on no run at all.
+
+Two further paths accept `--seed` and can never use it: `lua --connect` (never
+starts a server) and `--server <host>` (never sets one up).
+
+**The benchmark seed is `20260903`.** It is the date the discipline started, and
+it is deliberately **not** chosen for being a good map. Searching for a seed
+that scores well finds one with ore and water near spawn, after which every
+timing flatters us and stops being comparable to the ~9-minute manual solo
+baseline, which was not run on an optimised map. What benchmarking needs is a
+*fixed, representative* seed plus honesty about which seed produced a number.
+(`roll-seed` exists and is deliberately gated off -- `app/src-tauri/src/cli/
+roll_seed.rs` explains that reviving it needs a fitness function. Not the goal.)
+
+`just bench <script>` is that run. **It has not yet been executed once**, so the
+seed is unvalidated: a map whose nearest shoreline does not fit a pump/boiler/
+engine has genuinely refused a run here (`the nearest water is 66.7 tiles
+away`). Confirm it before quoting any number against it.
+
+**What a run now records about its map** (`crates/core/src/record/provenance.rs`):
+`provenance.json`, written at run *start* rather than at finish. That timing is
+the point -- `manifest.json` is written only in `finish()`, and 9 of the 24
+archived runs have none, which are precisely the killed runs whose identity
+somebody later needs. It carries the seed, the map-exchange string, the game
+version, the git commit **and whether the tree was dirty**, the build profile,
+the requested roster, and a `map` fingerprint.
+
+That fingerprint (`EntityGraph::resource_fingerprint`) is the only identity
+available for a map whose seed nobody wrote down, which is every map used so
+far. **Its two answers are not symmetrical: equal digests mean the same map, a
+different digest means unknown**, because the resource table holds *charted*
+tiles and charting grows as bots explore.
+
+**None of this can be backfilled.** No archived run recorded a seed, and the mod
+never read `map_gen_settings`, so the maps behind every timing quoted in the
+2026-09-03 notes are permanently unidentifiable.
 
 ### Silence is not success
 

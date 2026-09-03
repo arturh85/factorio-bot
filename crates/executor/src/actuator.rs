@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use factorio_bot_core::factorio::rcon::DestinationFull;
 pub use factorio_bot_core::factorio::ticks::ActionTicks;
 use factorio_bot_core::record::map::Placement;
 use factorio_bot_core::types::Position;
@@ -337,6 +338,30 @@ pub trait Actuator: Send + Sync {
     /// does not override this — in particular every mock, which inherits it
     /// unmodified and so needs no change to keep compiling or passing.
     fn take_placement(&self, bot: BotId) -> Option<Placement> {
+        let _ = bot;
+        None
+    }
+
+    /// Claims the reason `bot`'s last `insert` succeeded without delivering
+    /// everything, if that is what happened.
+    ///
+    /// The same side channel as [`Actuator::take_placement`], for the same
+    /// reason and drained in the same breath: an `insert` that filled its
+    /// destination is a **success** (see `judge_transfer_reply` in
+    /// `factorio_bot_core::factorio::rcon`), so the fact has no failure to ride
+    /// out on, and this trait has no `ActionId` to attach it to.
+    ///
+    /// Without it a run in which every boiler top-up moved 3 of 17 would be
+    /// indistinguishable from one in which they all moved 17 -- and that
+    /// difference is the whole diagnosis: it says the planner is sizing from
+    /// demand against a fuel level nothing reports. The short-source failure it
+    /// used to be confused with is still a failure and still arrives as one, so
+    /// the record shows the two as different rows and not as one.
+    ///
+    /// The default returns `None`, exactly as `take_placement`'s does: an
+    /// actuator that tracks no transfers has nothing to give, and every mock
+    /// inherits it unchanged.
+    fn take_destination_full(&self, bot: BotId) -> Option<DestinationFull> {
         let _ = bot;
         None
     }

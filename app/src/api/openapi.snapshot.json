@@ -514,7 +514,7 @@
                 ]
               },
               "error": {
-                "description": "The human-readable verdict, as the game or the executor reported\nit. Kept *beside* `failure`, never replaced by it: this is what a\nperson reads, `failure` is what a query groups by, and one is not\na substitute for the other.",
+                "description": "The human-readable verdict, as the game or the executor reported\nit. Kept *beside* `failure`, never replaced by it: this is what a\nperson reads, `failure` is what a query groups by, and one is not\na substitute for the other.\n\n**Not only failures**, despite the name. `status` is what says\nwhether anything went wrong; this is whatever this run has to say\nabout the attempt in words, and three states write it (see\n`Attempt::error`, `crates/executor/src/log.rs`). A `success` with a\nmessage is a success that needs qualifying, and today that is\nexactly one thing: an `insert` whose destination had no room for\nthe rest, which reads `destination full: moved 3 of 17 coal, which\nnow holds 50`. Without it, a run whose every boiler top-up moved 3\nof 17 would be indistinguishable from one whose top-ups all moved\n17 -- and the difference is the diagnosis. See\n[`FailureKind::PartialTransfer`] for the failure it is kept apart\nfrom.",
                 "type": [
                   "string",
                   "null"

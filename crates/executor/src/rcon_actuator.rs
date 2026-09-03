@@ -1,7 +1,9 @@
 use crate::actuator::{ActionTicks, Actuator, ActuatorError, ActuatorFailure};
 use async_trait::async_trait;
 use factorio_bot_core::constants::BOT_FORCE;
-use factorio_bot_core::factorio::rcon::{ActionFailure, Dispatch, FactorioRcon, approach_annulus};
+use factorio_bot_core::factorio::rcon::{
+    ActionFailure, DestinationFull, Dispatch, FactorioRcon, approach_annulus,
+};
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::record::map::{EntitySnapshot, Placement, drift_between};
 use factorio_bot_core::types::{PlayerId, Position};
@@ -157,6 +159,16 @@ pub struct RconActuator {
     /// exactly once rather than risking a stale one landing on a later,
     /// unrelated attempt.
     placements: Mutex<BTreeMap<PlayerId, Placement>>,
+    /// The reason each bot's last `insert` succeeded without delivering
+    /// everything, waiting to be claimed by
+    /// [`Actuator::take_destination_full`].
+    ///
+    /// A second `placements`, keyed and drained the same way and for the same
+    /// reason: this trait's `insert` has no `ActionId`, and the fact belongs to
+    /// exactly one attempt. Overwritten rather than accumulated -- a bot runs
+    /// its own steps strictly in order, so the previous entry has always been
+    /// claimed by the time a second insert finishes.
+    destinations_full: Mutex<BTreeMap<PlayerId, DestinationFull>>,
 }
 
 impl RconActuator {
@@ -193,6 +205,7 @@ impl RconActuator {
             defines,
             connected,
             placements: Mutex::new(BTreeMap::new()),
+            destinations_full: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -392,7 +405,15 @@ impl Actuator for RconActuator {
     ) -> Result<ActionTicks, ActuatorFailure> {
         let p = self.player(bot)?;
         let inv = self.defines.get(slot)?;
-        self.rcon
+        // `TransferOutcome::destination_full` is `Some` when the game accepted
+        // fewer than were offered *because the destination had no room left*.
+        // That is a success -- see `judge_transfer_reply` -- but it is not a
+        // full delivery, and the difference is the only evidence a run record
+        // carries that the plan asked for more than the world could hold. It
+        // is parked here for `run.rs`'s settle path to claim, exactly as a
+        // placement is, because this method has no `ActionId` to attach it to.
+        let outcome = self
+            .rcon
             .insert_to_inventory_timed(
                 p,
                 entity.to_string(),
@@ -403,7 +424,14 @@ impl Actuator for RconActuator {
                 &self.world,
             )
             .await
-            .map_err(classify)
+            .map_err(classify)?;
+        if let Some(full) = outcome.destination_full {
+            self.destinations_full
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(p, full);
+        }
+        Ok(outcome.ticks)
     }
 
     async fn remove(
@@ -505,6 +533,17 @@ impl Actuator for RconActuator {
     /// marking that action's `Attempt` done.
     fn take_placement(&self, bot: BotId) -> Option<Placement> {
         self.placements
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&bot.0)
+    }
+
+    /// Claims the full-destination fact `bot`'s last insert produced, if one is
+    /// waiting. Removes it, for the same reason `take_placement` does: it is a
+    /// fact about one attempt, and leaving it would let a later, unrelated
+    /// insert be recorded as having filled something.
+    fn take_destination_full(&self, bot: BotId) -> Option<DestinationFull> {
+        self.destinations_full
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&bot.0)
@@ -842,6 +881,7 @@ mod tests {
             defines: InventoryDefines::default(),
             connected: [1u8].into_iter().collect(),
             placements: Mutex::new(BTreeMap::new()),
+            destinations_full: Mutex::new(BTreeMap::new()),
         };
         let f = tokio::runtime::Builder::new_current_thread()
             .enable_all()

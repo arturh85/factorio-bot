@@ -190,6 +190,28 @@ pub struct Attempt {
     /// `game.tick` when the game **reported the outcome** of this attempt.
     /// `None` if the game never said — see the type docs.
     pub replied_tick: Option<Ticks>,
+    /// What this run has to say about the attempt in words, whatever that
+    /// turns out to be. **Not "why it failed"** — [`Status`] is what says
+    /// whether anything failed, and this field is deliberately shared by every
+    /// state that has something to say, so a reader asking "what does this log
+    /// say about this attempt?" never has to know which of several message
+    /// fields to look in. [`ExecutionLog::lose_track`] already writes a
+    /// not-a-verdict here for the same reason.
+    ///
+    /// Three writers, told apart by `status` alone:
+    ///
+    /// - [`Status::Failed`] — the verdict, from [`ExecutionLog::fail`].
+    /// - [`Status::Lost`] — why the outcome is unknown, from
+    ///   [`ExecutionLog::lose_track`].
+    /// - [`Status::Success`] — a qualification on the success, from
+    ///   [`ExecutionLog::record_note`]. Today that is exactly one thing: an
+    ///   `insert` that filled its destination and kept the remainder.
+    ///
+    /// It reaches the run record verbatim as `action_settled`'s `error`, which
+    /// `factorio_bot_core::record::EventKind::ActionSettled` documents as *the
+    /// human-readable verdict* rather than as an error, and which is written
+    /// beside `status` and the classified `failure` — `null` on a success — so
+    /// the three cases stay distinguishable in `events.jsonl`.
     pub error: Option<String>,
     /// What this attempt placed, when it placed anything.
     ///
@@ -479,6 +501,26 @@ impl ExecutionLog {
     pub fn record_placement(&mut self, id: ActionId, placement: Placement) {
         if let Some(a) = self.attempts.get_mut(&id) {
             a.placed = Some(placement);
+        }
+    }
+
+    /// Attaches a note to `id`'s attempt: something true about it that its
+    /// [`Status`] does not say.
+    ///
+    /// Called from `run.rs`'s settle path right after [`ExecutionLog::succeed`]
+    /// for the same id, exactly like [`ExecutionLog::record_placement`], and
+    /// with the same no-upsert rule: a note about an attempt this log never
+    /// started describes nothing, so it is silently dropped rather than
+    /// fabricating an attempt to hang it on.
+    ///
+    /// The one caller today is the full-destination insert — a success that did
+    /// not deliver everything, because the destination had no room for the rest
+    /// (`judge_transfer_reply`, `crates/core/src/factorio/rcon.rs`). It writes
+    /// into [`Attempt::error`] on purpose; see that field's docs for why the
+    /// message field is shared and `status` is what separates the cases.
+    pub fn record_note(&mut self, id: ActionId, note: String) {
+        if let Some(a) = self.attempts.get_mut(&id) {
+            a.error = Some(note);
         }
     }
 

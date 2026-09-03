@@ -2829,7 +2829,21 @@ function rcon_insert_to_inventory(player_id, entity_name, entity_pos, inventory_
 		local real_n = inventory.insert({name=items.name, count=count})
 
 		if count ~= real_n then
-			complain("tried to insert "..count.."x "..items.name.." but inserted " .. real_n)
+			-- The destination took fewer than it was offered. The counts alone
+			-- do not say *why*, and the two reasons are opposite outcomes: an
+			-- inventory with no room left for this item cannot be made to hold
+			-- more by anyone, while an inventory that simply would not take the
+			-- item is a real failure. Only this side can see the difference, so
+			-- report the destination's own state and let the caller judge --
+			-- `judge_transfer_reply` in crates/core/src/factorio/rcon.rs is the
+			-- reader, and it treats a suffix it does not recognise as a failure.
+			--
+			-- Read *after* the insert, so `holds` includes whatever just went
+			-- in and `room` is what is left over now.
+			local holds = inventory.get_item_count(items.name)
+			local room = inventory.get_insertable_count(items.name)
+			complain("tried to insert "..count.."x "..items.name.." but inserted "..real_n
+				.." (destination holds "..holds..", room for "..room..")")
 		end
 
 		local check_n = player.remove_item({name=items.name, count=real_n})

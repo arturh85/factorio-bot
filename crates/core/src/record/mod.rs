@@ -192,6 +192,19 @@ pub enum EventKind {
         /// it. Kept *beside* `failure`, never replaced by it: this is what a
         /// person reads, `failure` is what a query groups by, and one is not
         /// a substitute for the other.
+        ///
+        /// **Not only failures**, despite the name. `status` is what says
+        /// whether anything went wrong; this is whatever this run has to say
+        /// about the attempt in words, and three states write it (see
+        /// `Attempt::error`, `crates/executor/src/log.rs`). A `success` with a
+        /// message is a success that needs qualifying, and today that is
+        /// exactly one thing: an `insert` whose destination had no room for
+        /// the rest, which reads `destination full: moved 3 of 17 coal, which
+        /// now holds 50`. Without it, a run whose every boiler top-up moved 3
+        /// of 17 would be indistinguishable from one whose top-ups all moved
+        /// 17 -- and the difference is the diagnosis. See
+        /// [`FailureKind::PartialTransfer`] for the failure it is kept apart
+        /// from.
         error: Option<String>,
         /// The same failure, classified. `None` on success, and also on a
         /// failure recorded before this field existed -- `#[serde(default)]`
@@ -524,6 +537,26 @@ pub enum FailureKind {
     /// `moved 18 of 20 iron-plate`, because "it failed" is not enough to
     /// replan against and the numbers were otherwise reachable only by
     /// re-parsing the human-readable `error` string.
+    ///
+    /// # What this no longer covers
+    ///
+    /// A partial *insert* has two causes and they are opposite outcomes. This
+    /// kind is the one that is genuinely a failure: **the source came up
+    /// short**, so the bot could not deliver what the plan believed it held.
+    /// The other -- **the destination had no room** -- is a success, because
+    /// nobody can make that inventory hold more of that item and the remainder
+    /// stays with the bot. It arrives as a settle with `status: "success"`,
+    /// `failure: null` and an `error` reading `destination full: moved 3 of 17
+    /// coal, which now holds 50`, so the two are told apart by status and both
+    /// keep their numbers.
+    ///
+    /// They used to collapse into this one kind, which is how a planner sizing
+    /// boiler top-ups from demand alone stayed invisible until
+    /// `run-1788432181-42528` -- the furthest a run had ever got -- died on one
+    /// at tick 211399. `judge_transfer_reply`
+    /// (`crates/core/src/factorio/rcon.rs`) makes the call, on the
+    /// destination's own state, which only `mods/BotBridge/control.lua` can
+    /// see and now reports.
     PartialTransfer,
     Rejected,
     Timeout,

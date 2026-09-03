@@ -354,6 +354,19 @@ async fn run_bot_signalled(
                             if let Some(placement) = act.take_placement(bot) {
                                 log.record_placement(*action, placement);
                             }
+                            // Drained in the same breath and for the same
+                            // reason. This one qualifies a *success*: an
+                            // `insert` whose destination had no room for the
+                            // rest delivered less than the plan asked for and
+                            // still satisfied the goal, and without this the
+                            // record would show it as an ordinary full
+                            // delivery. The short-source case -- the bot not
+                            // holding what the plan believed -- is a failure
+                            // and arrives on the `Err` arm below instead, so
+                            // the two never share a row.
+                            if let Some(full) = act.take_destination_full(bot) {
+                                log.record_note(*action, full.to_string());
+                            }
                         }
                         if let Some(tx) = senders.get(action) {
                             let _ = tx.send(Status::Success);
@@ -704,6 +717,7 @@ async fn perform<A: Actuator + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use factorio_bot_core::factorio::rcon::DestinationFull;
     use factorio_bot_core::record::map::{EntitySnapshot, Placement};
     use factorio_bot_core::types::{FactorioEntity, Position};
     use factorio_bot_planner::{Action, Actor, Condition, Effect, InventorySlot};
@@ -936,6 +950,17 @@ mod tests {
         /// bot asks first. `None` for every test written before this field
         /// existed, matching `Actuator::take_placement`'s own default.
         placement: Option<Placement>,
+        /// What `RecordingAct::take_destination_full` hands back, to whichever
+        /// bot asks first. `None` for every test written before this field
+        /// existed, matching `Actuator::take_destination_full`'s own default.
+        destination_full: Option<DestinationFull>,
+        /// The verdict `RecordingAct::insert` refuses with, if it refuses.
+        ///
+        /// The other half of `destination_full`: a transfer that moved less
+        /// than asked because the *bot* did not hold it is a real failure and
+        /// must stay one, and the pair of them is what a run record has to be
+        /// able to tell apart.
+        fail_insert: Option<String>,
         /// How many game ticks this actuator's clock advances per second of
         /// (virtual) wall clock, or `None` for an actuator with no clock.
         ///
@@ -967,6 +992,8 @@ mod tests {
                 fail_mine: BTreeSet::new(),
                 speed: 1.0,
                 placement: None,
+                destination_full: None,
+                fail_insert: None,
                 ticks_per_second: None,
                 research_lands_after: None,
             }
@@ -1133,6 +1160,9 @@ mod tests {
             _item: &str,
             _count: u32,
         ) -> Result<ActionTicks, ActuatorFailure> {
+            if let Some(why) = &self.script.fail_insert {
+                return Err(ActuatorError::Rejected(why.clone()).at(some_ticks()));
+            }
             Ok(some_ticks())
         }
 
@@ -1194,6 +1224,10 @@ mod tests {
 
         fn take_placement(&self, _bot: BotId) -> Option<Placement> {
             self.script.placement.clone()
+        }
+
+        fn take_destination_full(&self, _bot: BotId) -> Option<DestinationFull> {
+            self.script.destination_full.clone()
         }
     }
 
@@ -2081,6 +2115,183 @@ mod tests {
             a.placed,
             Some(placement),
             "the actuator's placement must reach the attempt it belongs to"
+        );
+    }
+
+    /// One `insert` for one bot, so the two runs below differ in exactly one
+    /// thing: what the game said about the transfer.
+    fn one_insert_fixture() -> (ActionNetwork, Schedule, ActionId) {
+        let id = ActionId(0);
+        let mut net = ActionNetwork::new();
+        net.add(Action {
+            id,
+            kind: ActionKind::Insert {
+                pos: Position::new(-7.0, -54.5),
+                entity: "boiler".into(),
+                slot: InventorySlot::Fuel,
+                item: "coal".into(),
+                count: 17,
+            },
+            pre: vec![],
+            eff: vec![],
+            duration: 30,
+            pinned: None,
+            label: "top the boiler up with 17 coal".into(),
+        });
+        let sched = Schedule {
+            steps: vec![act_step(id, BotId(0), 0, 30)],
+            makespan: 30,
+        };
+        (net, sched, id)
+    }
+
+    /// **The fix.** An insert the destination had no room for is a success, and
+    /// the run record says *why* it moved less than it was asked to.
+    ///
+    /// This is the shape that killed `run-1788432181-42528` at tick 211399:
+    /// `boiler_coal` sizes a top-up from demand alone -- nothing in
+    /// `FactorioWorld` reports a fuel level -- so it asked for 17 coal into a
+    /// boiler already holding 47, the fuel slot took 3, and the executor read
+    /// the mod's honest arithmetic as a verdict of failure and abandoned the
+    /// rest of that bot's chain.
+    ///
+    /// `RconActuator::insert` cannot be driven here without a live game, but
+    /// `Actuator::take_destination_full`'s contract is exactly what it hands
+    /// back once the reply has been judged (`judge_transfer_reply`,
+    /// `crates/core/src/factorio/rcon.rs`, which has its own tests against the
+    /// real `control.lua`). What this proves is the settle wiring: that the
+    /// fact reaches the `Attempt` it belongs to instead of being dropped.
+    #[tokio::test]
+    async fn an_insert_whose_destination_was_full_succeeds_and_says_so() {
+        let script = Script {
+            destination_full: Some(DestinationFull {
+                item: "coal".to_string(),
+                asked: 17,
+                moved: 3,
+                holds: 50,
+            }),
+            ..Default::default()
+        };
+        let act = RecordingAct::new(script);
+        let (net, sched, id) = one_insert_fixture();
+
+        let log = run(&act, &sched, &net).await.expect("the run should start");
+
+        assert_eq!(
+            log.status(id),
+            Status::Success,
+            "a destination with no room left is a goal that holds, not a failure"
+        );
+        let a = log.attempt(id).expect("the insert was attempted");
+        assert_eq!(
+            a.error.as_deref(),
+            Some("destination full: moved 3 of 17 coal, which now holds 50"),
+            "a success that did not deliver everything must say so, or a run \
+             whose every top-up moves 3 of 17 looks exactly like one whose \
+             top-ups all move 17"
+        );
+    }
+
+    /// The other half, and the one that must **not** move: a bot that could not
+    /// deliver what the plan believed it held is a real failure.
+    #[tokio::test]
+    async fn an_insert_the_bot_was_too_short_to_make_still_fails() {
+        let script = Script {
+            fail_insert: Some(
+                "game rejected the command: [\"cannot insert 17x coal, because \
+                 player #1 only has 3. clamping...\"]"
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+        let act = RecordingAct::new(script);
+        let (net, sched, id) = one_insert_fixture();
+
+        let log = run(&act, &sched, &net).await.expect("the run should start");
+
+        assert_eq!(
+            log.status(id),
+            Status::Failed,
+            "the plan's model of what the bot holds is wrong; treating that as \
+             success is the silent divergence this project keeps being bitten by"
+        );
+        let a = log.attempt(id).expect("the insert was attempted");
+        assert!(
+            a.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("only has 3"),
+            "the verdict must survive to the record: got {:?}",
+            a.error
+        );
+    }
+
+    /// **The property that keeps this fixed.** The same action, the same plan,
+    /// the same bot -- and a record a reader can tell apart afterwards.
+    ///
+    /// Both outcomes used to arrive as `Failed` with an indistinguishable
+    /// *"moved 3 of 17"* message, which is how a planner sizing top-ups from
+    /// demand stayed invisible for thirteen runs. Two facts separate them now
+    /// and both are asserted, because either alone can be satisfied by
+    /// accident: the **status**, which is the executor's verdict, and the
+    /// **message**, which is what a person reads in `events.jsonl`.
+    #[tokio::test]
+    async fn the_record_tells_a_full_destination_from_a_short_source() {
+        let (net, sched, id) = one_insert_fixture();
+
+        let full = RecordingAct::new(Script {
+            destination_full: Some(DestinationFull {
+                item: "coal".to_string(),
+                asked: 17,
+                moved: 3,
+                holds: 50,
+            }),
+            ..Default::default()
+        });
+        let short = RecordingAct::new(Script {
+            fail_insert: Some(
+                "game rejected the command: [\"cannot insert 17x coal, because \
+                 player #1 only has 3. clamping...\"]"
+                    .to_string(),
+            ),
+            ..Default::default()
+        });
+
+        let full_log = run(&full, &sched, &net).await.expect("run starts");
+        let short_log = run(&short, &sched, &net).await.expect("run starts");
+
+        let full_row = full_log.attempt(id).expect("attempted").clone();
+        let short_row = short_log.attempt(id).expect("attempted").clone();
+
+        assert_ne!(
+            full_row.status, short_row.status,
+            "a full destination and a short source are opposite outcomes and \
+             must not share a verdict"
+        );
+        assert_ne!(
+            full_row.error, short_row.error,
+            "and they must not share a message either: the status alone says \
+             nothing about how much moved, which is the number that names the \
+             defect"
+        );
+        // Named rather than merely different, so this cannot be satisfied by
+        // two rows that are both wrong -- in particular not by a full-
+        // destination row that says nothing at all, which is `assert_ne!`'s
+        // blind spot: `None` differs from a message without being one.
+        assert_eq!(full_row.status, Status::Success);
+        assert_eq!(short_row.status, Status::Failed);
+        let full_says = full_row.error.expect("the success has to qualify itself");
+        assert!(
+            full_says.contains("3 of 17") && full_says.contains("full"),
+            "the surviving row must name how much moved and why the rest did \
+             not: got {full_says:?}"
+        );
+        let short_says = short_row
+            .error
+            .expect("the failure has to say what happened");
+        assert!(
+            short_says.contains("only has 3"),
+            "and the failing row must carry the game's own verdict: got {short_says:?}"
         );
     }
 

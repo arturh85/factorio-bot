@@ -215,22 +215,199 @@ fn parse_reply<T: serde::de::DeserializeOwned>(call: &str, text: &str) -> Result
 /// The two mechanisms this rests on are the mod's complaint path and this
 /// function; breaking either silently downgrades every transfer's `Success` to
 /// the weak reading.
+///
+/// # The one complaint that is not a failure
+///
+/// There are two ways an insert moves less than it was asked to, and they are
+/// **opposite outcomes**:
+///
+/// - **The source was short.** The bot did not hold what the plan believed it
+///   held, so the delivery did not happen and the plan's model of the world is
+///   wrong. The mod clamps and says so (`... only has N. clamping...`). A real
+///   failure, and it stays one.
+/// - **The destination was full.** The bot held everything, offered it, and the
+///   inventory had no room for the rest. Nobody can make that inventory hold
+///   more of that item; the remainder stays with the bot, which is where it
+///   belongs. Nothing is wrong with the world and re-issuing the command would
+///   change nothing.
+///
+/// Collapsing the second into the first cost `run-1788432181-42528` its
+/// furthest-ever run at tick 211399: `boiler_coal` sizes a top-up from demand
+/// alone, because nothing in `FactorioWorld` reports a fuel level, so it asked
+/// for 17 coal into a boiler already holding 47. A fuel slot is one stack, the
+/// boiler took 3, and the executor read the mod's honest report as a verdict of
+/// failure and abandoned the rest of that bot's chain.
+///
+/// The counts alone cannot tell the two apart -- *3 of 17 moved* is what both
+/// look like from here -- so the mod reports the destination's own state
+/// beside them (`(destination holds H, room for R)`) and this function makes
+/// the call. **The judgement is here and the observation is there**, on
+/// purpose: only the mod can see `H` and `R`, and only this side is unit
+/// testable against the real `control.lua`.
+///
+/// A reply whose shortfall line carries no such suffix -- an older
+/// `workspace/mods` copy that a release build extracted before this existed --
+/// fails exactly as it always did. That is the safe direction: a stale mod
+/// under-claims rather than inventing a satisfied goal.
+///
+/// # A zero-move is still a failure, except in the one case where it is not
+///
+/// `moved == 0` with `holds > 0` and `room == 0` is a boiler whose fuel slot
+/// was *already* a full stack of the item asked for. Nothing moved because
+/// nothing needed to, and the goal held before the bot arrived. Every other
+/// zero-move stays a failure, including the one this distinction is most
+/// easily confused with: an inventory that would not take the item at all --
+/// the wrong fuel, a filtered slot, a recipe that does not use it -- reports
+/// `holds 0`, and `holds > 0` is what excludes it.
 fn judge_transfer_reply(
     lines: Option<Vec<String>>,
     tick: Option<u64>,
-) -> Result<ActionTicks, ActionFailure> {
-    if let Some(lines) = lines {
-        // The game answered, so it saw the command and judged it: a verdict
-        // at a real tick, not a command that never landed.
-        return Err(ActionFailure::refused(
-            RconError {
-                message: format!("{lines:?}"),
-            }
-            .into(),
-            ActionTicks::at(tick),
-        ));
+) -> Result<TransferOutcome, ActionFailure> {
+    let ticks = ActionTicks::at(tick);
+    let Some(lines) = lines else {
+        return Ok(TransferOutcome {
+            ticks,
+            destination_full: None,
+        });
+    };
+    // Every surviving line must be a full-destination shortfall for this to be
+    // anything but a failure. A reply that clamped *and* then overflowed
+    // prints both lines, and the clamp is the one that means the bot could not
+    // deliver -- so one unrecognised line is enough to refuse the whole thing.
+    let shortfalls: Option<Vec<InsertShortfall>> = lines
+        .iter()
+        .map(|line| parse_insert_shortfall(line).filter(InsertShortfall::is_destination_full))
+        .collect();
+    if let Some(shortfalls) = shortfalls
+        && let Some(first) = shortfalls.into_iter().next()
+    {
+        return Ok(TransferOutcome {
+            ticks,
+            destination_full: Some(first.into_report()),
+        });
     }
-    Ok(ActionTicks::at(tick))
+    // The game answered, so it saw the command and judged it: a verdict
+    // at a real tick, not a command that never landed.
+    Err(ActionFailure::refused(
+        RconError {
+            message: format!("{lines:?}"),
+        }
+        .into(),
+        ticks,
+    ))
+}
+
+/// What a transfer the game judged actually did.
+///
+/// `ticks` is what [`judge_transfer_reply`] always returned. `destination_full`
+/// is the fact that used to be destroyed: a transfer that succeeded *without*
+/// moving everything asked, because the destination had no room for the rest.
+///
+/// It is `Some` only on the success path, and only for an insert -- the mod's
+/// remove handler has no destination to be full. A caller that ignores it
+/// loses nothing about the verdict; it loses the run record's only evidence
+/// that the planner asked for more than the world could hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferOutcome {
+    pub ticks: ActionTicks,
+    pub destination_full: Option<DestinationFull>,
+}
+
+/// An insert that succeeded because the destination was already at capacity.
+///
+/// Carried out to the run record (`crates/executor`) rather than logged and
+/// dropped, because a run whose every boiler top-up moves 3 of 17 and a run
+/// whose top-ups all move 17 must not look identical afterwards: the first one
+/// says the planner is sizing from demand against a world it cannot see, and
+/// that is precisely the diagnosis this outcome used to hide behind a failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DestinationFull {
+    pub item: String,
+    /// What the command asked to insert.
+    pub asked: u32,
+    /// What the destination accepted. May be zero -- see
+    /// [`judge_transfer_reply`].
+    pub moved: u32,
+    /// How much of `item` the destination holds now, `moved` included.
+    pub holds: u32,
+}
+
+impl std::fmt::Display for DestinationFull {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "destination full: moved {} of {} {}, which now holds {}",
+            self.moved, self.asked, self.item, self.holds
+        )
+    }
+}
+
+/// One `tried to insert ... but inserted ...` complaint, parsed.
+///
+/// The wording is `rcon_insert_to_inventory`'s
+/// (`mods/BotBridge/control.lua`):
+///
+/// ```text
+/// tried to insert 17x coal but inserted 3 (destination holds 50, room for 0)
+/// ```
+///
+/// Parsed rather than pattern-matched wholesale so that a wording change costs
+/// a `None` -- which refuses the transfer, the behaviour before this existed --
+/// rather than a wrong verdict. Nothing here is inferred: every one of the four
+/// numbers must parse or this declines.
+///
+/// The prefix through `but inserted <moved>` is *also* read by
+/// `partial_transfer_detail`
+/// (`crates/scripting_lua/src/globals/record.rs`), which builds the
+/// `FailureKind::PartialTransfer` detail for the failures that survive.
+/// The suffix was appended rather than folded into that wording so both
+/// readers keep working; `a_short_source_still_fails_and_keeps_the_counts_the_record_parses`
+/// below is the pin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InsertShortfall {
+    item: String,
+    asked: u32,
+    moved: u32,
+    holds: u32,
+    room: u32,
+}
+
+impl InsertShortfall {
+    /// Whether this shortfall is the destination being at capacity rather than
+    /// the destination refusing the item.
+    ///
+    /// `room == 0` says no more of this item fits. `holds > 0` says the
+    /// inventory is full *of the thing that was asked for*, which is what
+    /// separates a fuelled boiler from a fuel slot that would not take the
+    /// item at all -- the latter reports `holds 0` and stays a failure.
+    fn is_destination_full(&self) -> bool {
+        self.room == 0 && self.holds > 0
+    }
+
+    fn into_report(self) -> DestinationFull {
+        DestinationFull {
+            item: self.item,
+            asked: self.asked,
+            moved: self.moved,
+            holds: self.holds,
+        }
+    }
+}
+
+fn parse_insert_shortfall(line: &str) -> Option<InsertShortfall> {
+    let rest = line.trim().strip_prefix("tried to insert ")?;
+    let (asked, rest) = rest.split_once("x ")?;
+    let (item, rest) = rest.split_once(" but inserted ")?;
+    let (moved, rest) = rest.split_once(" (destination holds ")?;
+    let (holds, room) = rest.split_once(", room for ")?;
+    let room = room.strip_suffix(')')?;
+    Some(InsertShortfall {
+        item: item.to_string(),
+        asked: asked.parse().ok()?,
+        moved: moved.parse().ok()?,
+        holds: holds.parse().ok()?,
+        room: room.parse().ok()?,
+    })
 }
 
 /// Judges the reply to a `set_recipe` RPC.
@@ -2826,6 +3003,11 @@ impl FactorioRcon {
 
     /// [`FactorioRcon::insert_to_inventory`], reporting the game tick it ran
     /// at. Synchronous, so both ends of [`ActionTicks`] are that tick.
+    ///
+    /// Returns a [`TransferOutcome`] rather than bare ticks because an insert
+    /// has one success that is not a full delivery: the destination had no room
+    /// for the rest. See [`judge_transfer_reply`] for why that is a success and
+    /// [`DestinationFull`] for why the fact travels instead of being dropped.
     #[allow(clippy::too_many_arguments)]
     pub async fn insert_to_inventory_timed(
         &self,
@@ -2836,7 +3018,7 @@ impl FactorioRcon {
         item_name: String,
         item_count: u32,
         world: &Arc<FactorioWorld>,
-    ) -> Result<ActionTicks, ActionFailure> {
+    ) -> Result<TransferOutcome, ActionFailure> {
         let player = world.players.get(&player_id);
         if player.is_none() {
             return Err(ActionFailure::not_dispatched(
@@ -2899,6 +3081,11 @@ impl FactorioRcon {
 
     /// [`FactorioRcon::remove_from_inventory`], reporting the game tick it ran
     /// at. Synchronous, so both ends of [`ActionTicks`] are that tick.
+    ///
+    /// Bare ticks, unlike [`FactorioRcon::insert_to_inventory_timed`]: a remove
+    /// has no destination that can be full. Its shortfall wording (`tried to
+    /// remove N ITEM but removed M`) means the *source* did not have it, which
+    /// is the failure this whole distinction exists to keep failing.
     #[allow(clippy::too_many_arguments)]
     pub async fn remove_from_inventory_timed(
         &self,
@@ -2941,7 +3128,7 @@ impl FactorioRcon {
                 ],
             )
             .await?;
-        judge_transfer_reply(lines, tick)
+        judge_transfer_reply(lines, tick).map(|o| o.ticks)
     }
 
     /// Put `recipe` on the crafting machine named `entity_name` at
@@ -4759,10 +4946,13 @@ mod transfer_guarantee_tests {
     const STUB_TICK: u64 = 64738;
 
     /// Enough of Factorio's Lua API for `control.lua` to load and for the two
-    /// transfer handlers to run. Everything here is a stub *except* the two
-    /// numbers the handlers do arithmetic on: `_held`, what the player has, and
-    /// `_moves`, what the target inventory will actually accept or give up.
-    fn stub_game(held: i64, moves: i64) -> String {
+    /// transfer handlers to run. Everything here is a stub *except* the four
+    /// numbers the handlers do arithmetic on or report: `held`, what the player
+    /// has; `moves`, what the target inventory will actually accept or give up;
+    /// and `dest_holds` / `dest_room`, the destination's own state that
+    /// `rcon_insert_to_inventory` reads back after a shortfall so this side can
+    /// tell a full destination from one that refused the item.
+    fn stub_game(held: i64, moves: i64, dest_holds: i64, dest_room: i64) -> String {
         format!(
             r#"
             -- `defines.events.on_tick` and friends are read at load time; any
@@ -4797,6 +4987,9 @@ mod transfer_guarantee_tests {
                 -- What the furnace hands over (remove) or takes (insert).
                 remove = function(items) return moves end,
                 insert = function(items) return moves end,
+                -- The destination's own state, read back after a shortfall.
+                get_item_count = function(name) return {dest_holds} end,
+                get_insertable_count = function(name) return {dest_room} end,
             }}
             local entity = {{ get_inventory = function(t) return inventory end }}
             local player = {{
@@ -4815,6 +5008,8 @@ mod transfer_guarantee_tests {
         "#,
             held = held,
             moves = moves,
+            dest_holds = dest_holds,
+            dest_room = dest_room,
             tick = STUB_TICK,
         )
     }
@@ -4884,8 +5079,28 @@ mod transfer_guarantee_tests {
         }
     }
 
-    fn transfer(call: &str, held: i64, moves: i64) -> (Result<ActionTicks, ActionFailure>, String) {
-        let printed = run_handler(stub_game(held, moves), call);
+    /// A transfer into a destination that is not full and holds none of the
+    /// item -- the shape every test written before the full-destination
+    /// distinction existed assumed, and the one that keeps a shortfall a
+    /// failure.
+    fn transfer(
+        call: &str,
+        held: i64,
+        moves: i64,
+    ) -> (Result<TransferOutcome, ActionFailure>, String) {
+        transfer_into(call, held, moves, 0, 0)
+    }
+
+    /// [`transfer`] with the destination's own state spelled out: how much of
+    /// the item it holds afterwards and how much more it would take.
+    fn transfer_into(
+        call: &str,
+        held: i64,
+        moves: i64,
+        dest_holds: i64,
+        dest_room: i64,
+    ) -> (Result<TransferOutcome, ActionFailure>, String) {
+        let printed = run_handler(stub_game(held, moves, dest_holds, dest_room), call);
         let body = reply_body(&printed);
         let (lines, tick) = take_tick_stamp(split_reply(&body, true));
         (judge_transfer_reply(lines, tick), printed.join("\n"))
@@ -5394,6 +5609,165 @@ mod transfer_guarantee_tests {
         );
     }
 
+    /// The command that killed `run-1788432181-42528`, verbatim in shape: bot 1
+    /// topping a boiler up with 17 coal at (-7.0, -54.5).
+    const INSERT_SEVENTEEN_COAL: &str = r#"rcon_insert_to_inventory(
+        1, "boiler", {x=-7.0, y=-54.5}, 1, {name="coal", count=17})"#;
+
+    /// **The fix.** A shortfall the *destination* caused is a success.
+    ///
+    /// The bot held all 17, offered all 17, and the boiler's one fuel slot took
+    /// 3 because it already held 47. Nobody can make that inventory hold more
+    /// coal; the goal ("the boiler has fuel") holds, and the remaining 14 stay
+    /// with the bot, which is where they belong. Reporting this as a failure
+    /// cost bot 1 its whole remaining chain at tick 211399.
+    #[test]
+    fn an_insert_the_destination_had_no_room_for_is_a_success() {
+        let (verdict, printed) = transfer_into(INSERT_SEVENTEEN_COAL, 17, 3, 50, 0);
+        let outcome = verdict.expect(
+            "a boiler that took 3 of 17 because its fuel slot is full is a goal that \
+             holds, not a command the game refused",
+        );
+        assert_eq!(outcome.ticks, ActionTicks::at(Some(STUB_TICK)));
+        assert_eq!(
+            outcome.destination_full,
+            Some(DestinationFull {
+                item: "coal".to_string(),
+                asked: 17,
+                moved: 3,
+                holds: 50,
+            }),
+            "the numbers have to survive: a run whose every top-up moves 3 of 17 \
+             must not look like one whose top-ups all move 17. It printed {printed:?}"
+        );
+    }
+
+    /// The same, with nothing moved at all: the fuel slot was *already* a full
+    /// stack of the item asked for.
+    ///
+    /// This is the one exception to "a zero-move is never green", and it is
+    /// narrow on purpose -- `holds > 0` is what makes it, and the test below is
+    /// the case it must not widen to.
+    #[test]
+    fn an_insert_into_a_destination_already_full_of_the_item_moves_nothing_and_succeeds() {
+        let (verdict, printed) = transfer_into(INSERT_SEVENTEEN_COAL, 17, 0, 50, 0);
+        let outcome = verdict.expect("a boiler already holding a full stack of coal has its fuel");
+        assert_eq!(
+            outcome.destination_full.map(|f| (f.moved, f.holds)),
+            Some((0, 50)),
+            "printed {printed:?}"
+        );
+    }
+
+    /// **The case a zero-move must keep failing.** An inventory that would not
+    /// take the item at all -- the wrong fuel, a filtered slot, a recipe that
+    /// does not use it -- reports the same counts as a full one and holds none
+    /// of what was offered. Nothing was delivered and nothing is satisfied.
+    #[test]
+    fn an_insert_the_destination_refused_outright_is_still_a_failure() {
+        let (verdict, printed) = transfer_into(INSERT_SEVENTEEN_COAL, 17, 0, 0, 0);
+        let failure = verdict
+            .expect_err("an inventory holding none of the item did not accept it, it refused it");
+        assert!(matches!(failure.dispatch, Dispatch::Refused));
+        assert!(
+            printed.contains("destination holds 0"),
+            "the mod must report the destination's own state, which is the only \
+             thing separating this from the test above; it printed {printed:?}"
+        );
+    }
+
+    /// A destination that still has room and yet took less is a report that
+    /// contradicts itself. Nothing here guesses which half to believe: an
+    /// unrecognised outcome refuses, which is what the code did before the
+    /// distinction existed.
+    #[test]
+    fn a_shortfall_into_a_destination_with_room_left_is_still_a_failure() {
+        let (verdict, _) = transfer_into(INSERT_SEVENTEEN_COAL, 17, 3, 3, 47);
+        verdict.expect_err("room left and a shortfall cannot both be true; this is not a success");
+    }
+
+    /// **The failure that must stay one.** The bot did not hold what the plan
+    /// believed it held.
+    ///
+    /// The mod clamps to what the player has and says so, then the clamped
+    /// insert fills the destination and says that too -- two lines, opposite
+    /// meanings. The clamp is the one that matters: the delivery did not
+    /// happen and the plan's model of the bot's inventory is wrong. One
+    /// unrecognised line refuses the whole reply, which is what makes this
+    /// work without ranking the lines against each other.
+    #[test]
+    fn a_short_source_is_a_failure_even_when_the_destination_was_also_full() {
+        let (verdict, printed) = transfer_into(INSERT_SEVENTEEN_COAL, 10, 3, 50, 0);
+        verdict.expect_err(
+            "a bot that could not deliver what the plan believed it held is exactly \
+             the silent divergence this project keeps being bitten by",
+        );
+        assert!(
+            printed.contains("only has 10"),
+            "the clamp is what makes this a failure; it printed {printed:?}"
+        );
+    }
+
+    /// The shortfall wording, pinned whole, for the same reason the clamp and
+    /// remove wordings above are.
+    ///
+    /// Two readers depend on this line and neither can check the other.
+    /// [`parse_insert_shortfall`] reads the `(destination holds H, room for R)`
+    /// suffix to make the success/failure call. `partial_transfer_detail`
+    /// (`crates/scripting_lua/src/globals/record.rs`) reads the *prefix* --
+    /// everything through `but inserted <moved>` -- to build the
+    /// `FailureKind::PartialTransfer` detail for the shortfalls that stay
+    /// failures. The suffix was appended rather than folded into the wording
+    /// precisely so both keep working; if this assertion fails because the mod
+    /// moved, that classifier's own tests are the other half to update.
+    #[test]
+    fn the_shortfall_wording_carries_both_readers_numbers() {
+        let (_, printed) = transfer_into(INSERT_SEVENTEEN_COAL, 17, 3, 50, 0);
+        assert_eq!(
+            printed,
+            format!(
+                "tried to insert 17x coal but inserted 3 \
+                 (destination holds 50, room for 0)\n\u{a7}tick\u{a7}{STUB_TICK}"
+            )
+        );
+    }
+
+    /// A `workspace/mods` copy that predates the suffix -- a release build
+    /// extracted it once and never refreshes -- says nothing about the
+    /// destination, so nothing can be concluded and the transfer fails exactly
+    /// as it always did. Under-claiming is the safe direction here; inventing a
+    /// satisfied goal is not.
+    #[test]
+    fn a_shortfall_from_a_mod_that_reports_no_destination_state_is_a_failure() {
+        assert_eq!(
+            parse_insert_shortfall("tried to insert 17x coal but inserted 3"),
+            None
+        );
+        let verdict = judge_transfer_reply(
+            Some(vec!["tried to insert 17x coal but inserted 3".to_string()]),
+            Some(STUB_TICK),
+        );
+        verdict.expect_err("an unreadable shortfall is not evidence of a satisfied goal");
+    }
+
+    /// Every number must parse or the line is not understood. Nothing is
+    /// inferred from a partial match.
+    #[test]
+    fn a_shortfall_with_an_unparseable_number_is_not_understood() {
+        assert_eq!(
+            parse_insert_shortfall(
+                "tried to insert 17x coal but inserted lots (destination holds 50, room for 0)"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_insert_shortfall(
+                "tried to insert 17x coal but inserted 3 (destination holds 50, room for )"
+            ),
+            None
+        );
+    }
+
     /// Enough of the API for `rcon_set_recipe` to reach the game, with the
     /// force's `enabled` flag as the one variable.
     ///
@@ -5547,8 +5921,12 @@ mod transfer_guarantee_tests {
                 format!("§tick§{STUB_TICK}"),
                 "a complete transfer prints its stamp and nothing else"
             );
-            let ticks = verdict.expect("a complete transfer must succeed");
-            assert_eq!(ticks, ActionTicks::at(Some(STUB_TICK)));
+            let outcome = verdict.expect("a complete transfer must succeed");
+            assert_eq!(outcome.ticks, ActionTicks::at(Some(STUB_TICK)));
+            assert_eq!(
+                outcome.destination_full, None,
+                "nothing was left undelivered, so there is nothing to qualify"
+            );
         }
     }
 

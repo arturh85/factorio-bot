@@ -96,15 +96,21 @@ fn shortfall(state: &PlanState, item: &str, count: u32, whose: &Holder) -> u32 {
 ///
 /// One helper for both, so `applicable` and `expand` cannot answer differently
 /// -- which is how a method comes to claim a goal it then refuses.
-struct Demand<'a> {
-    item: &'a ItemId,
-    need: u32,
-    whose: &'a Holder,
+///
+/// `pub(crate)`: `crate::method::produce::PlaceDrill` asks the same question
+/// `Smelt` and `Mine` do, of the same two goal kinds, for the same reason --
+/// it is a fourth way to satisfy `Goal::Have`/`Goal::Produced` for an item a
+/// stage-1 cell can make, and must see the same shortfall they do or it could
+/// claim a goal already satisfied.
+pub(crate) struct Demand<'a> {
+    pub(crate) item: &'a ItemId,
+    pub(crate) need: u32,
+    pub(crate) whose: &'a Holder,
     /// A technology this production unlocks. Always `None` for `Have`.
-    unlocks: Option<&'a str>,
+    pub(crate) unlocks: Option<&'a str>,
 }
 
-fn demand<'a>(goal: &'a Goal, state: &PlanState) -> Option<Demand<'a>> {
+pub(crate) fn demand<'a>(goal: &'a Goal, state: &PlanState) -> Option<Demand<'a>> {
     match goal {
         Goal::Have { item, count, whose } => Some(Demand {
             item,
@@ -138,7 +144,10 @@ fn demand<'a>(goal: &'a Goal, state: &PlanState) -> Option<Demand<'a>> {
 /// `infer_edges` turns into the ordering edge that keeps anything needing the
 /// technology after the production, and a method cannot attach it to a
 /// subgoal's action because it never sees their ids.
-fn attach_unlock(steps: &mut [Step], item: &ItemId, unlocks: Option<&str>) {
+///
+/// `pub(crate)` for `PlaceDrill`, the fourth producing method -- see
+/// [`Demand`].
+pub(crate) fn attach_unlock(steps: &mut [Step], item: &ItemId, unlocks: Option<&str>) {
     let Some(tech) = unlocks else {
         return;
     };
@@ -1981,6 +1990,10 @@ pub fn default_registry() -> MethodRegistry {
     MethodRegistry::new()
         .with(Box::new(AlreadySatisfied))
         .with(Box::new(Withdraw))
+        // Ahead of `Smelt`: both claim any smelting-category `Have`/`Produced`,
+        // and `Smelt` names no quantity, so this has to be asked first for its
+        // own cost comparison to mean anything -- see its own doc.
+        .with(Box::new(crate::method::produce::PlaceDrill))
         .with(Box::new(Smelt))
         .with(Box::new(HandCraft))
         .with(Box::new(Mine))
@@ -2569,6 +2582,12 @@ pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
         // have the ore. Behind `SplitAcrossBots`, so a top-level goal is still
         // scattered first and each share asks this for itself.
         .with(Box::new(Withdraw))
+        // Ahead of `SharedSmelt` and `Smelt`: both claim any smelting-category
+        // `Have`/`Produced` regardless of quantity, so this has to be asked
+        // first for its own cost comparison against hand-smelting to mean
+        // anything -- see its own doc, including the one goal shape it does
+        // not reach.
+        .with(Box::new(crate::method::produce::PlaceDrill))
         .with(Box::new(SharedSmelt {
             bots: bots.to_vec(),
         }))
@@ -6183,6 +6202,17 @@ mod tests {
     /// `Produced` as well as `Have`, the production's `insert 50 iron-ore` was
     /// welded to nothing while the mining under it opened a chain of its own,
     /// and the two landed on different bots.
+    ///
+    /// **What fifty plates cost changed after this test was written, the
+    /// welding it guards did not.** `PlaceDrill` (added alongside a cost
+    /// comparison in `crate::method::produce`) now wins fifty plates outright
+    /// -- a burner mining drill and a furnace, fuelled and left running,
+    /// instead of hand-mining and hand-smelting the whole fifty -- so the
+    /// concrete action this test once searched for, `insert 50 iron-ore`, no
+    /// longer exists in this plan at all. `take 50 iron-plate from the cell`
+    /// is its replacement: the action that actually carries the trigger's
+    /// `Effect::Researched`, welded to the coal mined for the same cell
+    /// exactly as the furnace load used to be welded to its ore.
     #[test]
     fn the_live_four_bot_research_run_plans_and_schedules() {
         let bots = [BotId(2), BotId(3), BotId(4)];
@@ -6216,43 +6246,46 @@ mod tests {
         .expect("the goal expands");
 
         // The claim under the fix, stated on the network rather than inferred
-        // from the schedule: the furnace load and the mining that supplies it
-        // are one chain, so no assignment can separate them.
-        let insert = net
+        // from the schedule: the cell's own production and the mining that
+        // fuels it are one chain, so no assignment can separate them.
+        let take = net
             .actions()
-            .find(|a| a.label == "insert 50 iron-ore")
-            .expect("the trigger's fifty plates are smelted");
+            .find(|a| a.label == "take 50 iron-plate from the cell")
+            .expect("the trigger's fifty plates are produced by a cell");
         let mine = net
             .actions()
-            .find(|a| a.label == "mine 42 iron-ore")
-            .expect("and the ore for them is mined");
+            .find(|a| a.label == "mine 13 coal")
+            .expect("and the coal for it is mined");
         assert_eq!(
-            net.chain_of(insert.id),
+            net.chain_of(take.id),
             net.chain_of(mine.id),
-            "the ore and the furnace it goes into must be welded to one runner"
+            "the cell and the coal that fuels it must be welded to one runner"
         );
-        assert!(net.chain_of(insert.id).is_some(), "and to a real chain");
+        assert!(net.chain_of(take.id).is_some(), "and to a real chain");
 
         schedule(&net, &s, &bots).expect("and the plan schedules on the roster it was made for");
     }
 
     /// **The finding left in `2026-09-02-rung-3-4-findings.md`, turned into a
-    /// test.** Welding the trigger's insert to the mine that feeds it (the
+    /// test.** Welding the trigger's production to the mine that feeds it (the
     /// test above) stops the crash for the recorded run's geometry, but the
     /// chain it welds them into is still ownerless: the scheduler is free to
     /// bind it to whichever bot is cheapest, and the bill was sized against
-    /// bot 2's eight iron-ore specifically.
+    /// bot 2's inventory specifically.
     ///
-    /// One line reproduces it: put bot 4 — the four-ore bot — on the iron
-    /// patch (`fixture_world`'s ore sits at `(-40, 40)`, a 10x10 tile
-    /// region). Bot 4 is then nearest when the chain opens, takes it, mines
-    /// the 42 sized against bot 2's eight, ends with 4 + 42 = 46, and the
-    /// `insert 50 iron-ore` precondition fails for the bot actually holding
-    /// the ore — naming bot 4, exactly as the live run named bot 2 and then
-    /// bot 3. **Before the owner-binding fix this test fails** with
-    /// `PreconditionUnsatisfied` naming bot 4; after it, the chain is bound to
-    /// bot 2 regardless of anyone else's position, so bot 2 mines its own
-    /// shortfall and the plan schedules.
+    /// **The resource this reproduces on changed together with the test
+    /// above, for the same reason.** Every bot here starts already holding a
+    /// drill and a furnace, so `PlaceDrill`'s bill has nothing left to
+    /// produce but the coal that fuels the cell -- there is no `mine ...
+    /// iron-ore` in this plan at all any more for bot 4 to be cheaper at. One
+    /// line still reproduces the same class of bug for the resource that *is*
+    /// mined: put bot 4 on the coal patch (`fixture_world`'s coal sits at
+    /// `(-60, 0)`, a 10x10 tile region), well away from bots 2 and 3 at the
+    /// origin. Bot 4 is then nearest when the coal-mining chain opens, and
+    /// **before the owner-binding fix** this test failed with
+    /// `PreconditionUnsatisfied` naming bot 4, which had taken the chain and
+    /// mined coal sized against bot 2's own shortfall; after it, the chain is
+    /// bound to bot 2 regardless of anyone else's position.
     #[test]
     fn a_cheaper_bot_does_not_steal_a_share_chain_sized_for_another() {
         let bots = [BotId(2), BotId(3), BotId(4)];
@@ -6272,9 +6305,9 @@ mod tests {
         s.gain(BotId(2), "copper-ore", 2);
         s.gain(BotId(3), "copper-ore", 5);
         s.gain(BotId(4), "copper-ore", 13);
-        // The one addition over the test above: bot 4 — the 4-ore bot — is on
-        // the iron patch, and so is cheapest for the chain that opens there.
-        s.set_position(BotId(4), Position::new(-38., 36.));
+        // The one addition over the test above: bot 4 is on the coal patch,
+        // and so is cheapest for the chain that opens there.
+        s.set_position(BotId(4), Position::new(-58., -2.));
         crate::test_world::with_steam_power(&mut s);
 
         let net = expand(
@@ -6285,16 +6318,16 @@ mod tests {
         )
         .expect("the goal expands");
 
-        let insert = net
+        let take = net
             .actions()
-            .find(|a| a.label == "insert 50 iron-ore")
-            .expect("the trigger's fifty plates are smelted");
+            .find(|a| a.label == "take 50 iron-plate from the cell")
+            .expect("the trigger's fifty plates are produced by a cell");
         let mine = net
             .actions()
-            .find(|a| a.label == "mine 42 iron-ore")
-            .expect("sized against bot 2's eight, same as the test above");
+            .find(|a| a.label == "mine 13 coal")
+            .expect("sized against bot 2's own shortfall, same as the test above");
         let chain = net
-            .chain_of(insert.id)
+            .chain_of(take.id)
             .expect("welded, same as the test above");
         assert_eq!(net.chain_of(mine.id), Some(chain));
 
@@ -6316,7 +6349,7 @@ mod tests {
                 let StepKind::Act { action, .. } = s.what else {
                     return true;
                 };
-                action != insert.id && action != mine.id || s.bot == BotId(2)
+                action != take.id && action != mine.id || s.bot == BotId(2)
             }),
             "the whole chain must run on bot 2, got {:?}",
             plan.steps
@@ -7169,7 +7202,13 @@ mod tests {
     }
 
     /// A single-bot registry has nobody to converge with, so its plans are
-    /// exactly what they always were.
+    /// exactly what they always were -- for a shortfall too small for
+    /// `PlaceDrill`'s own cost gate to prefer a cell over hand-smelting it.
+    /// (Fifty would no longer make this point: `PlaceDrill`, added
+    /// alongside a bot-busy-ticks comparison in `crate::method::produce`,
+    /// wins a fifty-plate shortfall outright regardless of roster size, which
+    /// is a real change in *method* but not one this test is about -- see
+    /// `crate::method::produce::tests` for that comparison pinned at fifty.)
     #[test]
     fn a_single_bot_registry_never_converges() {
         let bots = vec![BotId(1)];
@@ -7182,7 +7221,7 @@ mod tests {
         };
         let goal = Goal::Have {
             item: "iron-plate".into(),
-            count: 50,
+            count: 10,
             whose: Holder::Share(BotId(1)),
         };
         assert_eq!(reg.find(&goal, &s, site).map(|m| m.name()), Some("smelt"));

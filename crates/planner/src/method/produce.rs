@@ -48,10 +48,13 @@ use crate::action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot}
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::ids::{ItemId, Ticks};
-use crate::method::have::{COAL_BURN_TICKS, PLACE_TICKS, TRANSFER_TICKS};
+use crate::method::have::{
+    COAL_BURN_TICKS, Demand, PLACE_TICKS, TRANSFER_TICKS, attach_unlock, demand,
+};
 use crate::method::util::{
-    RecipeGate, SMELTING_CATEGORY, ingredients_of, nearest_resource_tile, output_per_craft,
-    recipe_for, recipe_gate, seconds_to_ticks, smelting_ticks, tile_alignment_facing,
+    CRAFTING_CATEGORY, RecipeGate, SMELTING_CATEGORY, ingredients_of, mining_ticks,
+    nearest_resource_tile, output_per_craft, recipe_for, recipe_gate, recipe_ticks,
+    seconds_to_ticks, smelting_ticks, tile_alignment_facing,
 };
 use crate::method::{ExpansionCtx, Method, Step};
 use crate::state::PlanState;
@@ -563,10 +566,16 @@ fn bill(count: u32, coal: u32) -> Vec<(&'static str, u32)> {
     vec![(DRILL, count), (FURNACE, count), ("coal", coal)]
 }
 
+/// How much coal one machine of `burn_ticks` per coal takes to run for
+/// `duration` ticks.
+fn fuel_for_duration(duration: Ticks, burn_ticks: Ticks) -> u32 {
+    duration.div_ceil(burn_ticks.max(1)).max(1)
+}
+
 /// How much coal one machine of `burn_ticks` per coal takes to run
 /// [`CELL_FUELLED_TICKS`].
 fn fuel_for(burn_ticks: Ticks) -> u32 {
-    CELL_FUELLED_TICKS.div_ceil(burn_ticks.max(1)).max(1)
+    fuel_for_duration(CELL_FUELLED_TICKS, burn_ticks)
 }
 
 /// The steps that build `cells`.
@@ -801,6 +810,439 @@ impl Method for BuildCell {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Stage 1 for a one-shot count, not a rate
+// ---------------------------------------------------------------------------
+
+/// How many levels of a recipe's own ingredients [`craft_ticks`] follows
+/// before it gives up and prices the item as unaffordable.
+///
+/// Vanilla's deepest chain this planner ever prices is three levels down from
+/// a burner mining drill: drill -> iron-plate/iron-gear-wheel/stone-furnace ->
+/// iron-ore/iron-plate/stone. Set well past that, the same backstop-not-a-limit
+/// role `crate::method::MAX_EXPANSION_DEPTH` plays for the driver's own
+/// recursion -- a guard against a cyclic (modded) recipe table, not a number
+/// this crate's own data ever reaches.
+const CRAFT_TICKS_MAX_DEPTH: u32 = 8;
+
+/// Character-speed ticks to acquire `count` of `item` starting from nothing --
+/// no inventory, no furnace already standing, nothing another share already
+/// produced. Used **only** to compare [`PlaceDrill`] against the hand path it
+/// would replace, in [`cell_setup_bot_ticks`]; it is never what `HandCraft` or
+/// `Smelt` actually charge, and a real plan can come out cheaper than this
+/// says (a spare furnace already in a bot's hands, most obviously). That
+/// asymmetry only ever strengthens a "hand-mine" verdict this function
+/// reached and can never flip a "build" verdict the wrong way, which is the
+/// direction that matters for a gate whose failure mode to avoid is proposing
+/// a drill for a handful of plates.
+///
+/// Recurses into a recipe's own ingredients, one call per ingredient --
+/// unlike `crate::method::have`'s own `solo_ticks`, which deliberately stops
+/// at one level. The two exist for opposite reasons: `solo_ticks` under-states a
+/// *split*'s alternative on purpose, so under-splitting is its safe failure;
+/// this prices a one-off structure against a per-unit cost, where
+/// under-pricing the structure is the *unsafe* direction. The recipe graph
+/// this recurses over is a DAG in every world the game produces -- the same
+/// fact `Researched`'s own doc relies on for technologies -- so `depth` is a
+/// backstop, not a limit that is ever expected to bind.
+///
+/// A recipe category this function does not know how to run by hand (nothing
+/// in vanilla reaches this) is priced at `Ticks::MAX / 4`, not `0`:
+/// unpriceable must never look free, or an item this function cannot cost
+/// would make building look cheap by omission.
+fn craft_ticks(state: &PlanState, item: &str, count: u32, depth: u32) -> Ticks {
+    if count == 0 {
+        return 0;
+    }
+    // Checked before the recipe, mirroring `solo_ticks`: a raw resource is
+    // priced by mining it regardless of `depth`, since it never recurses.
+    if !state.resource_patches(item).is_empty() {
+        return mining_ticks(state, item).saturating_mul(count);
+    }
+    let Some(recipe) = recipe_for(state, item) else {
+        // Neither minable nor recipe-bearing: a free item, exactly as
+        // `solo_ticks` reads the same absence.
+        return 0;
+    };
+    if depth == 0 {
+        return Ticks::MAX / 4;
+    }
+    let per = output_per_craft(&recipe, item).max(1);
+    let runs = count.div_ceil(per);
+    let own = match recipe.category.as_str() {
+        SMELTING_CATEGORY => smelting_ticks(state, &recipe, FURNACE).saturating_mul(runs),
+        CRAFTING_CATEGORY => recipe_ticks(&recipe).saturating_mul(runs),
+        _ => return Ticks::MAX / 4,
+    };
+    ingredients_of(&recipe)
+        .into_iter()
+        .fold(own, |sum, (ingredient, amount)| {
+            sum.saturating_add(craft_ticks(
+                state,
+                &ingredient,
+                amount.saturating_mul(runs),
+                depth - 1,
+            ))
+        })
+}
+
+/// Bot-busy ticks [`crate::method::have::Smelt`] actually spends
+/// hand-supplying `need` of `spec.item`, mirroring `smelt_steps`'s own
+/// arithmetic for the ore, the coal and the furnace's one-time overhead.
+///
+/// **The furnace's own smelting time is deliberately excluded.** `smelt_steps`
+/// says so in place: "the bot is free to do other work across this lag". That
+/// makes it wall-clock, not bot-time, and bot-time is what
+/// [`PlaceDrill::applicable`] compares -- the same reason
+/// [`cell_setup_bot_ticks`] excludes the drill's own mining time below.
+fn hand_smelt_bot_ticks(state: &PlanState, spec: &CellSpec, need: u32) -> Ticks {
+    let per_craft = output_per_craft(&spec.recipe, &spec.item).max(1);
+    let runs = need.div_ceil(per_craft);
+    let coal = recipe_ticks(&spec.recipe)
+        .saturating_mul(runs)
+        .div_ceil(COAL_BURN_TICKS)
+        .max(1);
+    // Mine the ore, mine the coal, place one furnace, load it twice (ore,
+    // fuel) and take the result once -- `smelt_steps`'s whole action list
+    // minus the wait between the last load and the take.
+    mining_ticks(state, &spec.ore)
+        .saturating_mul(runs)
+        .saturating_add(mining_ticks(state, "coal").saturating_mul(coal))
+        .saturating_add(PLACE_TICKS)
+        .saturating_add(TRANSFER_TICKS.saturating_mul(3))
+}
+
+/// Bot-busy ticks [`PlaceDrill`] spends building one cell and fuelling it to
+/// run unattended for `need` items plus one cycle of headroom -- the same
+/// margin `smelt_steps` gives its own wait, for the same reason: a fuel load
+/// sized to land exactly on the last item is right only if nothing is early.
+///
+/// **The drill's own mining time is excluded**, for the same reason
+/// [`hand_smelt_bot_ticks`] excludes the furnace's smelting time: once fuelled
+/// the bot walks away, and the drill mines unattended.
+fn cell_setup_bot_ticks(state: &PlanState, spec: &CellSpec, need: u32) -> Ticks {
+    let duration = spec.ticks_per_item.saturating_mul(need.saturating_add(1));
+    let coal = fuel_for_duration(duration, DRILL_BURN_TICKS)
+        .saturating_add(fuel_for_duration(duration, COAL_BURN_TICKS));
+    // The drill, its own placement furnace, and the coal for both -- `bill`'s
+    // three items, priced from raw materials since none of them can be
+    // assumed already in hand. Place both machines, fuel both, and take the
+    // result once.
+    craft_ticks(state, DRILL, 1, CRAFT_TICKS_MAX_DEPTH)
+        .saturating_add(craft_ticks(state, FURNACE, 1, CRAFT_TICKS_MAX_DEPTH))
+        .saturating_add(craft_ticks(state, "coal", coal, CRAFT_TICKS_MAX_DEPTH))
+        .saturating_add(PLACE_TICKS.saturating_mul(2))
+        .saturating_add(TRANSFER_TICKS.saturating_mul(3))
+}
+
+/// Build one stage-1 cell to satisfy a one-shot [`Goal::Have`] or
+/// [`Goal::Produced`], instead of mining and hand-smelting `count` units by
+/// hand.
+///
+/// # Why a new method, and not a branch of `BuildCell`
+///
+/// [`BuildCell`] answers a *rate* and never removes what it makes: a
+/// `supervisor.witness` reads the standing structure, not an inventory, and
+/// the whole point of stage 1's design is that nobody ever empties the
+/// furnace it builds. A one-shot goal is the opposite question -- it needs
+/// `count` of `item` **in a bot's hands**, once, and then the cell is done.
+/// Sharing `BuildCell::expand` would mean teaching one function two unrelated
+/// endings; this method instead reuses the geometry (`cell_spec`,
+/// `plan_cells`, `parts`) and adds the one step `BuildCell` deliberately never
+/// takes: a `Remove` off the furnace's own output, sized to `need` and gated
+/// on the same `Condition::Feeds`-checked pair `BuildCell` places.
+///
+/// # What happens to the cell afterward
+///
+/// It is left standing, running -- nothing in this crate ever demolishes
+/// anything. That is the same answer `BuildCell` already gives for a
+/// `Producing` goal whose rate a replan later drops, and it is the right one
+/// here too: the cell is fuelled for `need` items and then it idles, which
+/// costs nothing further and is available for free if a later goal asks for
+/// more of the same plate -- `AlreadySatisfied`/`cells_standing`-style reuse
+/// of a structure this crate already does for `Producing`. A future goal
+/// wanting the coal back, or the ground under it, is out of scope for the
+/// same reason demolition is out of scope for `BuildCell`.
+///
+/// # Why quantity gates it, and what the gate actually compares
+///
+/// A burner mining drill is *slower* per unit than a character's own hands --
+/// 240 ticks an ore against 120 at vanilla's numbers -- so building one never
+/// wins on raw wall-clock ticks for this stage; see
+/// [`cell_setup_bot_ticks`] and [`hand_smelt_bot_ticks`], which `applicable`
+/// compares directly, in the same unit, with no float and no invented
+/// constant. What a cell wins on is **bot attention**: once it is fuelled the
+/// bot walks away and the drill mines unattended, while hand-smelting keeps
+/// the bot mining every single unit itself. So the comparison is *bot-busy*
+/// ticks, not wall-clock ticks -- the same quantity this crate's own
+/// `solo_ticks`/`worth_converging` pair already compares for the analogous
+/// mining-vs-splitting question, and the one `SplitAcrossBots` frees a bot
+/// for.
+///
+/// # Registered ahead of `Smelt`
+///
+/// `Smelt` (and `SharedSmelt`) claim any smelting-category `Have`/`Produced`
+/// regardless of `count`, so this has to be asked first for the comparison to
+/// mean anything -- asked after `Smelt` had already claimed the goal, it would
+/// never run at all. See `registry_for`'s own ordering comment for the one
+/// case this method does **not** reach: a top-level `Holder::Anyone` goal is
+/// scattered by `SplitAcrossBots` before either method sees it, and each
+/// resulting share is sized against the roster rather than against one bot's
+/// hands -- narrowing a share below this gate's crossover is a known
+/// limitation, not something this method can see from here.
+pub struct PlaceDrill;
+
+impl Method for PlaceDrill {
+    fn name(&self) -> &'static str {
+        "place-drill"
+    }
+
+    /// The drill, the furnace and their coal all have to land in one bot's
+    /// hands before any of them can be placed -- the same reasoning
+    /// `BuildCell` gives for the identical bill.
+    fn converges(&self, _goal: &Goal, _state: &PlanState) -> bool {
+        true
+    }
+
+    fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
+        let Some(Demand { item, need, .. }) = demand(goal, state) else {
+            return false;
+        };
+        if need == 0 {
+            return false;
+        }
+        let Some(spec) = cell_spec(state, item) else {
+            return false;
+        };
+        // A structural refusal -- no ore patch reachable, no room for the
+        // pair -- is `expand`'s business, exactly as `BuildCell` leaves it to
+        // its own `expand`: answering it here would pay for the same siting
+        // search twice.
+        cell_setup_bot_ticks(state, &spec, need) < hand_smelt_bot_ticks(state, &spec, need)
+    }
+
+    fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+        let Some(Demand {
+            item,
+            need,
+            unlocks,
+            ..
+        }) = demand(goal, &ctx.state)
+        else {
+            return Err(PlannerError::NoApplicableMethod {
+                goal: goal.to_string(),
+            });
+        };
+        let spec = cell_spec(&ctx.state, item)
+            .ok_or_else(|| PlannerError::NoCellProduces { item: item.clone() })?;
+
+        let mut steps: Vec<Step> = Vec::new();
+
+        // A smelting recipe the force has not unlocked will not run in a
+        // furnace, exactly as `cell_steps` gates the recurring form of this
+        // build.
+        let mut research_pre: Vec<Condition> = Vec::new();
+        match recipe_gate(&ctx.state, &spec.recipe) {
+            RecipeGate::NeedsResearch(tech) => {
+                steps.push(Step::Subgoal(Goal::Researched(tech.clone())));
+                research_pre.push(Condition::Researched(tech));
+            }
+            RecipeGate::PlannedResearch(tech) => research_pre.push(Condition::Researched(tech)),
+            RecipeGate::Open | RecipeGate::Unobtainable => {}
+        }
+
+        let duration = spec.ticks_per_item.saturating_mul(need.saturating_add(1));
+        let drill_coal = fuel_for_duration(duration, DRILL_BURN_TICKS);
+        let furnace_coal = fuel_for_duration(duration, COAL_BURN_TICKS);
+
+        for (bill_item, amount) in bill(1, drill_coal.saturating_add(furnace_coal)) {
+            steps.push(Step::Subgoal(Goal::Have {
+                item: bill_item.into(),
+                count: amount,
+                whose: Holder::Share(ctx.chain_actor),
+            }));
+        }
+
+        let from = ctx
+            .state
+            .bot(ctx.chain_actor)
+            .map(|b| b.position.clone())
+            .unwrap_or_default();
+        let cells = plan_cells(&ctx.state, &from, &spec, 1)?;
+        let cell = cells
+            .into_iter()
+            .next()
+            .ok_or_else(|| PlannerError::NoPatchForCell {
+                item: spec.item.clone(),
+                ore: spec.ore.clone(),
+            })?;
+
+        let build = ctx
+            .state
+            .bot(ctx.chain_actor)
+            .map(|b| b.build_distance)
+            .unwrap_or(10.0);
+        let reach = ctx
+            .state
+            .bot(ctx.chain_actor)
+            .map(|b| b.reach_distance)
+            .unwrap_or(10.0);
+
+        for entity in parts(&ctx.state, &cell) {
+            let name = entity.name.clone();
+            let position = entity.position.clone();
+            let min_radius = ctx.state.placement_clearance(&name).unwrap_or(0.0);
+            let id = ctx.ids.next();
+            steps.push(Step::Act(Box::new(Action {
+                id,
+                kind: ActionKind::Place {
+                    entity: Box::new(entity.clone()),
+                },
+                pre: vec![
+                    Condition::AtPosition {
+                        who: Actor::Role,
+                        pos: position.clone(),
+                        radius: build,
+                        min_radius,
+                    },
+                    Condition::AreaFree {
+                        pos: position.clone(),
+                        entity: name.clone(),
+                        direction: entity.direction,
+                    },
+                    Condition::HasItem {
+                        who: Actor::Role,
+                        item: name.clone(),
+                        count: 1,
+                    },
+                ],
+                eff: vec![
+                    Effect::LoseItem {
+                        who: Actor::Role,
+                        item: name.clone(),
+                        count: 1,
+                    },
+                    Effect::CreateEntity(Box::new(entity.clone())),
+                ],
+                duration: PLACE_TICKS,
+                pinned: None,
+                label: format!("place {} at {}", name, position),
+            })));
+            ctx.state.create_entity(entity);
+        }
+
+        let mut fuel_ids: Vec<crate::ids::ActionId> = Vec::new();
+        for (machine_name, position, coal, feeds) in [
+            (DRILL, cell.drill.clone(), drill_coal, false),
+            (FURNACE, cell.furnace.clone(), furnace_coal, true),
+        ] {
+            let id = ctx.ids.next();
+            fuel_ids.push(id);
+            let mut pre = vec![
+                Condition::AtPosition {
+                    who: Actor::Role,
+                    pos: position.clone(),
+                    radius: reach,
+                    min_radius: 0.0,
+                },
+                Condition::EntityAt {
+                    pos: position.clone(),
+                    name: machine_name.into(),
+                },
+                Condition::HasItem {
+                    who: Actor::Role,
+                    item: "coal".into(),
+                    count: coal,
+                },
+            ];
+            if feeds {
+                pre.push(Condition::EntityAt {
+                    pos: cell.drill.clone(),
+                    name: DRILL.into(),
+                });
+                pre.push(Condition::Feeds {
+                    from: cell.drill.clone(),
+                    to: cell.furnace.clone(),
+                });
+                pre.extend(research_pre.iter().cloned());
+            }
+            steps.push(Step::Act(Box::new(Action {
+                id,
+                kind: ActionKind::Insert {
+                    pos: position.clone(),
+                    entity: machine_name.into(),
+                    slot: InventorySlot::Fuel,
+                    item: "coal".into(),
+                    count: coal,
+                },
+                pre,
+                eff: vec![Effect::LoseItem {
+                    who: Actor::Role,
+                    item: "coal".into(),
+                    count: coal,
+                }],
+                duration: TRANSFER_TICKS,
+                pinned: None,
+                label: format!("fuel the {} with {} coal", machine_name, coal),
+            })));
+        }
+
+        // The one step `BuildCell` never takes: pull `need` of the item back
+        // out of the furnace and into the acting bot's hands, which is what
+        // turns a standing structure into a satisfied `Have`/`Produced`.
+        let take_id = ctx.ids.next();
+        let mut take_pre = vec![
+            Condition::AtPosition {
+                who: Actor::Role,
+                pos: cell.furnace.clone(),
+                radius: reach,
+                min_radius: 0.0,
+            },
+            Condition::EntityAt {
+                pos: cell.furnace.clone(),
+                name: FURNACE.into(),
+            },
+        ];
+        take_pre.extend(research_pre.iter().cloned());
+        steps.push(Step::Act(Box::new(Action {
+            id: take_id,
+            kind: ActionKind::Remove {
+                pos: cell.furnace.clone(),
+                entity: FURNACE.into(),
+                slot: InventorySlot::FurnaceResult,
+                item: item.clone(),
+                count: need,
+            },
+            pre: take_pre,
+            eff: vec![Effect::GainItem {
+                who: Actor::Role,
+                item: item.clone(),
+                count: need,
+            }],
+            duration: TRANSFER_TICKS,
+            pinned: None,
+            label: format!("take {} {} from the cell", need, item),
+        })));
+
+        // Production cannot start before either machine is fuelled, and the
+        // scheduler needs to be told: an `Insert`'s effect satisfies no
+        // condition of the `Remove` above, so nothing here is inferred. One
+        // cycle of headroom, the same margin `smelt_steps` gives its own wait
+        // and for the same reason -- a removal timed to land exactly on the
+        // last item is right only if nothing about it runs long.
+        for id in fuel_ids {
+            steps.push(Step::Link {
+                from: id,
+                to: take_id,
+                lag: duration,
+            });
+        }
+
+        attach_unlock(&mut steps, item, unlocks);
+        Ok(steps)
+    }
+}
+
 /// How far apart a cell's own two machines are, for the tests below and for
 /// anyone reading a plan.
 #[cfg(test)]
@@ -823,9 +1265,11 @@ fn gap_between(state: &PlanState, cell: &Cell) -> f64 {
 mod tests {
     use super::*;
     use crate::ids::BotId;
+    use crate::method::GoalSite;
     use crate::method::expand;
     use crate::method::have::registry_for;
     use crate::network::ActionNetwork;
+    use crate::schedule::schedule;
     use factorio_bot_core::test_utils::fixture_world;
     use std::sync::Arc;
 
@@ -1529,5 +1973,168 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(render(&first), render(&second));
+    }
+
+    // ---- PlaceDrill: a one-shot count, not a rate --------------------------
+
+    /// The recursive materials cost `cell_setup_bot_ticks` prices a drill and
+    /// a furnace at, worked out from the fixture's own vanilla numbers so the
+    /// test is a check on the arithmetic rather than a restatement of it.
+    ///
+    /// A burner mining drill: 3 iron-plate + 3 iron-gear-wheel + 1
+    /// stone-furnace, assembled in 2.0 s = 120 ticks.
+    /// * `craft_ticks(iron-plate, K)` = smelt (192 * K) + mine the ore
+    ///   (120 * K) = 312 * K.
+    /// * `craft_ticks(iron-gear-wheel, K)` = craft (30 * K) +
+    ///   `craft_ticks(iron-plate, 2K)` = 30K + 624K = 654 * K.
+    /// * `craft_ticks(stone-furnace, K)` = craft (30 * K) + mine 5 stone a
+    ///   furnace (5 * 120 * K) = 630 * K.
+    ///
+    /// So one drill -- which needs its *own* stone-furnace as an ingredient,
+    /// per its recipe -- costs `120 + 312*3 + 654*3 + 630 = 3648` ticks, and
+    /// the cell's own, separate placement furnace costs another flat `630`:
+    /// `4278` for the pair, the number [`the_hand_and_cell_costs_cross_over_near_fifty_plates`]
+    /// builds on.
+    #[test]
+    fn craft_ticks_prices_a_drill_and_a_furnace_from_raw_materials() {
+        let s = state(&[BotId(1)]);
+        assert_eq!(
+            craft_ticks(&s, "stone-furnace", 1, CRAFT_TICKS_MAX_DEPTH),
+            630
+        );
+        assert_eq!(
+            craft_ticks(&s, DRILL, 1, CRAFT_TICKS_MAX_DEPTH),
+            3648,
+            "120 (assemble) + 3*312 (plate) + 3*654 (gear wheel) + 630 (the drill's own furnace)"
+        );
+    }
+
+    /// The two bot-busy costs [`PlaceDrill::applicable`] compares, at the
+    /// quantity that started this investigation (fifty iron plates, the
+    /// `steam-power` trigger) and at one small enough that nobody wants a
+    /// drill built for it.
+    ///
+    /// Hand-smelting fifty: mine 50 ore (`120 * 50 = 6000`), mine the coal a
+    /// furnace burns smelting them (`recipe_ticks(iron-plate) * 50 = 9600`
+    /// ticks of energy, `div_ceil`d by `COAL_BURN_TICKS = 2666` is 4 coal,
+    /// `120 * 4 = 480`), one placement (`30`) and three transfers (`3 * 10 =
+    /// 30`): `6000 + 480 + 30 + 30 = 6540`.
+    ///
+    /// Building a cell for fifty: the drill and furnace from
+    /// [`craft_ticks_prices_a_drill_and_a_furnace_from_raw_materials`]
+    /// (`3648 + 630 = 4278`), two placements (`60`) and three transfers
+    /// (`30`) -- `4368` fixed -- plus coal for 51 cycles at the cell's own
+    /// 240-tick rate (`51 * 240 = 12240`; `div_ceil(1600) = 8` for the
+    /// drill, `div_ceil(2666) = 5` for the furnace, `120 * 13 = 1560`):
+    /// `4368 + 1560 = 5928`. That is below hand-smelting's `6540`, so a cell
+    /// wins fifty plates -- by a margin of 612 ticks, not a landslide, which
+    /// is what makes fifty a real crossover and not an arbitrary example.
+    ///
+    /// Five: hand-smelting stays cheap (`120*5 + 120*1(coal) + 30 + 30 =
+    /// 780`) while a cell's fixed cost barely moves with the quantity
+    /// (`4368 + 120*2(coal for 6 cycles) = 4608`), so hand-mining wins by a
+    /// wide margin -- nobody builds a drill for five plates.
+    #[test]
+    fn the_hand_and_cell_costs_cross_over_near_fifty_plates() {
+        let s = state(&[BotId(1)]);
+        let spec = iron();
+
+        assert_eq!(hand_smelt_bot_ticks(&s, &spec, 50), 6540);
+        assert_eq!(cell_setup_bot_ticks(&s, &spec, 50), 5928);
+        assert!(
+            cell_setup_bot_ticks(&s, &spec, 50) < hand_smelt_bot_ticks(&s, &spec, 50),
+            "fifty plates must be cheaper in bot-time to build than to hand-smelt"
+        );
+
+        assert_eq!(hand_smelt_bot_ticks(&s, &spec, 5), 780);
+        assert_eq!(cell_setup_bot_ticks(&s, &spec, 5), 4608);
+        assert!(
+            cell_setup_bot_ticks(&s, &spec, 5) > hand_smelt_bot_ticks(&s, &spec, 5),
+            "five plates must stay cheaper to hand-smelt than to build a cell for"
+        );
+    }
+
+    /// The method registry itself, not just the two cost functions in
+    /// isolation: a small shortfall still goes to `Smelt`, and the
+    /// `steam-power` trigger's fifty goes to `PlaceDrill` -- the concrete
+    /// finding this whole method exists to fix.
+    #[test]
+    fn the_registry_prefers_hand_smelting_below_the_crossover_and_a_cell_above_it() {
+        let bots = vec![BotId(1)];
+        let s = state(&bots);
+        let reg = registry_for(&bots);
+        let site = GoalSite {
+            top_level: false,
+            in_chain: true,
+            converging: false,
+        };
+        let small = Goal::Have {
+            item: "iron-plate".into(),
+            count: 5,
+            whose: Holder::Share(BotId(1)),
+        };
+        let trigger_sized = Goal::Have {
+            item: "iron-plate".into(),
+            count: 50,
+            whose: Holder::Share(BotId(1)),
+        };
+        assert_eq!(
+            reg.find(&small, &s, site).map(|m| m.name()),
+            Some("smelt"),
+            "five plates: hand-smelting wins"
+        );
+        assert_eq!(
+            reg.find(&trigger_sized, &s, site).map(|m| m.name()),
+            Some("place-drill"),
+            "fifty plates, the steam-power trigger's own count: a cell wins"
+        );
+    }
+
+    /// The actual plan `PlaceDrill` emits for a one-shot count: a drill and a
+    /// furnace, fuelled, and -- the one step `BuildCell` never takes -- the
+    /// fifty plates pulled back out of the furnace into the bot's own hands.
+    #[test]
+    fn a_one_shot_plan_places_a_cell_and_takes_the_count_back_out() {
+        let bots = vec![BotId(1)];
+        let s = state(&bots);
+        let net = expand(
+            &[Goal::Have {
+                item: "iron-plate".into(),
+                count: 50,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &crate::method::have::default_registry(),
+            BotId(1),
+        )
+        .expect("fifty plates plans");
+
+        net.actions()
+            .find(|a| a.label == "take 50 iron-plate from the cell")
+            .expect("the count is pulled back out of the cell");
+        assert!(
+            net.actions()
+                .any(|a| a.label.starts_with("place burner-mining-drill")),
+            "a drill is placed"
+        );
+        assert!(
+            net.actions()
+                .any(|a| a.label.starts_with("place stone-furnace")),
+            "and a furnace"
+        );
+        // The final fifty plates are never hand-inserted into a furnace --
+        // the drill feeds it unattended. A bot starting with empty hands
+        // still hand-smelts the nine plates a fresh drill's own recipe
+        // needs (see `craft_ticks_prices_a_drill_and_a_furnace_from_raw_materials`),
+        // which is the bootstrap this design accepts, not a defect: it is a
+        // one-time cost paid once per cell, not once per unit of the goal.
+        assert!(
+            net.actions().all(|a| a.label != "insert 50 iron-ore"),
+            "the final fifty are drilled, not hand-inserted"
+        );
+        assert!(
+            schedule(&net, &s, &bots).is_ok(),
+            "the plan this method emits must be schedulable, not merely constructible"
+        );
     }
 }

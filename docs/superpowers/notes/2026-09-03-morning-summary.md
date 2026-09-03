@@ -995,3 +995,29 @@ Not implemented — found while a live run held the workspace.
 **All twelve plan documents are 0% ticked — 575 checkboxes, none checked.** The
 convention was never adopted, so checkbox state carries no information and every
 progress judgement has to be read off code. Worth knowing before trusting a plan.
+
+## Spurious `no resource patch found` warnings from the drill cost model (2026-09-03 evening)
+
+Run 6 (first run carrying `11fabe43`) emits ~22 copies of
+`WARN entity_graph: no resource patch found for 'burner-mining-drill'` during a
+single plan, plus a companion line dumping every available resource name.
+
+**Not a bug in the cost model — mis-scoped logging.** `craft_ticks`
+(`crates/planner/src/method/produce.rs:853`) prices an item by recursing its
+recipe, and its first test is `if !state.resource_patches(item).is_empty()` —
+"is this a raw resource, priced by mining?". That is a *question*, and a
+negative answer is the normal case for every crafted intermediate it walks
+(drill, furnace, gear wheel, ...). But `EntityGraph::resource_patches`
+(`crates/core/src/graph/entity_graph.rs:719-720`) `warn!`s on every miss,
+because it was written for callers who expect the patch to exist.
+
+So the cost model is fine and the plan is unaffected; the noise is the problem.
+Twenty-two spurious warnings per plan is exactly the volume that trains a reader
+to skip the log, which is how the mods-directory line and the `"other"` failure
+classification both went unnoticed for so long.
+
+**Fix shape:** give the predicate case its own non-warning path — either a
+`has_resource_patches(item) -> bool` on `EntityGraph`, or drop the `warn!` to
+`debug!` and let callers that genuinely expect a patch report the absence
+themselves. Prefer the former: the warning is useful where a patch really was
+expected.

@@ -140,6 +140,7 @@ fn walk(bot: u8, x: f64, y: f64, start: Ticks, end: Ticks) -> ScheduledStep {
     ScheduledStep {
         what: StepKind::Walk {
             to: Position::new(x, y),
+            min_radius: 0.0,
             radius: 3.0,
         },
         bot: BotId(bot),

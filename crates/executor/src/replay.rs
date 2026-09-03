@@ -368,6 +368,7 @@ mod tests {
         ScheduledStep {
             what: StepKind::Walk {
                 to: Position::new(x, y),
+                min_radius: 0.0,
                 radius: 3.0,
             },
             bot: BotId(bot),

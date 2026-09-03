@@ -1061,3 +1061,42 @@ merely a slow one.
 Not yet established: whether the oscillation is *caused* by the furnace churn or
 merely correlated with it. The `best 168` floor not improving across four
 replans is the thing to explain.
+
+## Run 8: the furnace treadmill is fixed; the bottleneck was never furnaces
+
+`run-1788465258-49050`, carrying `bdbde0c9` (a smelt adopts standing furnaces).
+
+**The treadmill is gone.** Rung 1 satisfied in **two plan epochs**, 11 furnaces
+total (4 then 7). Run 7 needed three epochs, was at 23 by the same point
+(4 + 8 + 11) and kept climbing to 66 across the run without converging.
+
+**Timing barely moved, and that is the finding.** 21.4 min of game time against
+run 7's 20.6 — parity, not the win the furnace count suggests. Measure game
+time, not wall-clock: I first read this run as 24.4 min because I timed
+`roster ready -> SATISFIED` on the clock, which includes client load.
+
+Why it barely moved, from `just analyse`:
+
+```
+steps/bot         {1: 103, 2: 4, 3: 4, 4: 4}
+planned ticks/bot {1: 26390, 2: 1100, 3: 1100, 4: 1100}
+mine  n=48  23965 ticks  65.6% of measured action time
+```
+
+**One bot is given 103 of 115 steps.** Everything else is noise beside that.
+The furnace churn was real and worth fixing -- a plan that re-derives 11
+furnaces per replan cannot converge -- but it was never the thing setting the
+clock. Mining is still 65.6% of measured action time even with drills landed,
+and it is serialised onto bot 1 by the `Holder::Share` single-owner constraint.
+
+So the ceiling stands where the four-bot design doc put it: **parity with a
+single bot** until gathering can split under an owned chain (R3). Two separate
+things have now been fixed on the way to that ceiling -- bots being *unable* to
+work (enclosure, walk refusals, walled-in shares) and work being *duplicated*
+(bill duplication, furnace churn) -- and neither moved the headline number,
+because neither was the constraint.
+
+**Measurement discipline this cost:** step counts, furnace counts and wall-clock
+all moved in directions that looked like progress or regression and were
+neither. `steps/bot` was the number that mattered and it has been flat all
+session.

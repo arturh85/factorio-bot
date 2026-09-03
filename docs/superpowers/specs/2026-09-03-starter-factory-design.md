@@ -4,6 +4,26 @@
 
 **Read before implementing anything here — the document contradicts itself and the code has already broken the tie:** §8.4 anchors stage 2's origin to the supplying pole; §14, §7 and the §6.1 table describe three furnaces and **two drills** at fixed offsets from that origin, which would put a drill on ore beside the water the power plant is sited on. **§8.4 won:** `BuildAssemblyCell::expand` (`assemble.rs:1359`) sites from `nearest_supply_anchor` (`crates/planner/src/state.rs:2066`), and the drills and furnaces were deleted from the design — their job replaced by bots hand-charging two chests for `CELL_CHARGE_TICKS = 9_000` ticks (`assemble.rs:112`). §14's part list describes the version that lost. See `docs/superpowers/notes/2026-09-03-red-science-layout.md:166-173`.
 
+**RESOLVED 2026-09-03 by the owner. §8.4 stands; §14's autonomy becomes stage 2b.**
+Stage 2 closes when `supervisor.witness` sees red science appear with every bot
+idle — hand-charged chests are accepted, and the cell stopping after ~15 packs
+is a known limit, not a failure of the milestone. The reasoning: nothing has
+produced a single pack in 22 live runs, so *proving* production is worth more
+than extending it, and a witness is the one claim this project has repeatedly
+got wrong.
+
+**Stage 2b, then, is §14's version**: a pole line from the plant to the ore
+patch, drills and furnaces, so the cell feeds itself. The objection that killed
+that option — a pole costs wood, and wood was believed to be capped at four for
+a whole run — **has evaporated**: `Chop` (`b0e3e12e`) mines trees, so wood is
+renewable and the "eight poles ever" cap was a property of the model, never of
+the game.
+
+**One thing to build early in 2b, or sooner if it is cheap:** the cell starving
+is currently *silent*. It produces 15 packs and stops with nothing reporting
+that it stopped — which is the exact failure shape ("it stands, it works
+briefly, it goes quiet") this project has been fooled by four times.
+
 **Two arithmetic errors, both load-bearing downstream:** §6.1's ≈621 kW stage-2 figure is wrong for what was built — `cell_demand_kw` (`assemble.rs:659-664`) is `2×75 + 3×13` = **189 kW**, 249 kW with the lab, so **28% load on 900 kW, not 69%** — and every number in §6.2 and §7 is scaled off the phantom. §7's fuel-buffer arithmetic (one coal stack ≈ 5.4 minutes) follows from it; at the real 249 kW it is ~13 minutes. §7's `iron-chest` + `burner-inserter` fuel buffer was **not built** — what shipped is `boiler_coal()` (`assemble.rs:890-901`), a one-shot bot insert capped at `COAL_STACK = 50`, so the cell still needs a bot visit.
 
 The original status line read: *design only. No implementation, no source edits, and no `cargo` invocation at all this pass* — another agent is building the power plant in

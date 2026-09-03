@@ -2957,6 +2957,41 @@ impl PlanState {
         self.claim_runner
     }
 
+    /// Raw units this expansion has already committed `bot` to digging.
+    ///
+    /// The one *load* figure this crate can honestly report while a plan is
+    /// still being built. A method choosing between bots wants "who is least
+    /// busy", and there is no schedule yet to ask — but mining is 65.6% of the
+    /// measured action time of a rung-1 run (`run-1788465258-49050`), and
+    /// every mining action stamps the tile it commits with the serial timeline
+    /// it sits on (see [`MiningClaim`]). Summing the ore taken from the tiles
+    /// stamped `ClaimRunner::Bot(bot)` therefore counts the work this
+    /// expansion has *already* handed that bot, in the units that dominate it.
+    ///
+    /// # What it deliberately does not count
+    ///
+    /// * A claim made in an **unowned** chain ([`ClaimRunner::Chain`]) or
+    ///   outside a chain, because nothing yet says which bot will run it.
+    ///   Counting it against a guess would make the load figure disagree with
+    ///   the schedule, and the conservative reading — "not this bot's, as far
+    ///   as anyone can prove" — is the same one crowding already takes.
+    /// * Crafting, walking and machine time. A furnace's own smelting is not
+    ///   any bot's work at all, and a craft is two orders of magnitude cheaper
+    ///   than the mining that feeds it.
+    ///
+    /// So this is a *ranking* key, not a cost model: it is used to break ties
+    /// between bots that are otherwise interchangeable, never to price a plan.
+    ///
+    /// Deterministic by construction — an ordered walk of two `BTreeMap`s and
+    /// integer addition, no floats and no iteration over anything unordered.
+    pub fn planned_mining(&self, bot: BotId) -> u32 {
+        self.claimed
+            .iter()
+            .filter(|(_, claim)| claim.runner == Some(ClaimRunner::Bot(bot)))
+            .map(|(tile, _)| self.consumed.get(tile).copied().unwrap_or(0))
+            .sum()
+    }
+
     /// Has this plan already committed a batch of work to the machine at
     /// `position`? See
     /// [`committed_machines`](PlanState#structfield.committed_machines).

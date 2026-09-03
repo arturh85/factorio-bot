@@ -418,6 +418,7 @@ pub(crate) fn install_goal_plan(
                 let (net, scheduled) =
                     plan_verified(&goal, &world, &roster, checker.as_ref(), refresher.as_ref())
                         .await?;
+                narrate_work_split(&net, &scheduled);
                 // The goal, the world and the roster are kept together on the
                 // plan, not because dispatching needs them -- it does not --
                 // but because `obs:recover()` will, one run later, and a
@@ -552,6 +553,113 @@ fn narrate_production_goals(goal: &Goal, state: &PlanState) {
                 p.wanted - p.standing
             );
         }
+    }
+}
+
+/// Says how this plan divides across the roster, and how much of that division
+/// happened *inside* somebody else's chain.
+///
+/// # Why the number needs saying out loud
+///
+/// `steps/bot` is the number the whole four-bot utilisation effort turns on,
+/// and for a long time nothing said it while the run was happening. Two
+/// separate classes of defect were found and fixed in one evening — bots
+/// unable to work, and work being duplicated — and *neither moved it*, which
+/// only became visible after the run, from
+/// `tools/run_analysis.py --json <run-dir>`. A run that has already spent
+/// twenty minutes is an expensive place to learn that the work never divided.
+///
+/// The second line is R3 specifically. A `Researched` chain is welded to one
+/// bot by construction (`crates/planner`'s owner-binding comment), so the only
+/// work that can leave it is work whose product is a fact about the **map**
+/// rather than about an inventory: a furnace that stands, and a furnace that is
+/// fuelled. When that happens the plan looks, from outside, exactly like a plan
+/// where it did not — same actions, same goal, same roster — so it is said
+/// here or it is invisible. `crates/planner` carries no logger on purpose;
+/// this is where its decisions are narrated, for the same reason
+/// [`narrate_walled_in_bots`] is.
+///
+/// # How a handover is recognised
+///
+/// Off the network, not off a flag: a `Place` of a stone furnace whose chain
+/// owner is **not** the owner of the chain that takes the plates back out of
+/// that same furnace. That is the fact itself rather than a report of it, so a
+/// change that stopped handing furnaces over would silence this line rather
+/// than keep printing a stale claim.
+///
+/// # Volume
+///
+/// One line per `goal.plan`, plus a second only when a handover happened —
+/// the same budget [`narrate_production_goals`] keeps. `paris` on stdout,
+/// because it is narration a person reads while the run happens.
+fn narrate_work_split(net: &ActionNetwork, plan: &Schedule) {
+    let mut steps: std::collections::BTreeMap<BotId, usize> = Default::default();
+    let mut mined: std::collections::BTreeMap<BotId, u32> = Default::default();
+    for step in &plan.steps {
+        *steps.entry(step.bot).or_default() += 1;
+        let StepKind::Act { action, .. } = step.what else {
+            continue;
+        };
+        if let Some(ActionKind::Mine { count, .. }) = net.action(action).map(|a| &a.kind) {
+            *mined.entry(step.bot).or_default() += count;
+        }
+    }
+    if steps.is_empty() {
+        // An empty plan is a legitimate answer -- the goal is already met --
+        // and `narrate_production_goals` has already said so where it applies.
+        return;
+    }
+    let split: Vec<String> = steps
+        .iter()
+        .map(|(bot, count)| {
+            format!(
+                "bot {}: {} step(s), {} raw unit(s)",
+                bot.0,
+                count,
+                mined.get(bot).copied().unwrap_or(0)
+            )
+        })
+        .collect();
+    factorio_bot_core::paris::info!("this plan divides as <bright-blue>{}</>", split.join("; "));
+
+    // Who takes the plates out of the furnace at each position: that chain's
+    // owner is the bot the smelt was sized against.
+    let mut taker_of: std::collections::BTreeMap<String, BotId> = Default::default();
+    for action in net.actions() {
+        let ActionKind::Remove { pos, entity, .. } = &action.kind else {
+            continue;
+        };
+        if entity != "stone-furnace" {
+            continue;
+        }
+        if let Some(owner) = net.chain_of(action.id).and_then(|c| net.owner_of(c)) {
+            taker_of.insert(pos.to_string(), owner);
+        }
+    }
+    let handovers: Vec<String> = net
+        .actions()
+        .filter_map(|action| {
+            let ActionKind::Place { entity } = &action.kind else {
+                return None;
+            };
+            if entity.name != "stone-furnace" {
+                return None;
+            }
+            let builder = net.chain_of(action.id).and_then(|c| net.owner_of(c))?;
+            let taker = taker_of.get(&entity.position.to_string()).copied()?;
+            (builder != taker).then(|| format!("bot {} for bot {}", builder.0, taker.0))
+        })
+        .collect();
+    if !handovers.is_empty() {
+        factorio_bot_core::paris::info!(
+            "<bright-blue>{}</> furnace(s) are built and fuelled by a bot other than the one \
+             that will smelt in them (<bright-blue>{}</>). A furnace that stands is a fact \
+             about the map, not about anybody's pockets, so its stone and its coal are sized \
+             against the supplier *and* run by it -- the gathering divides without any chain \
+             being sized for one bot and handed to another",
+            handovers.len(),
+            handovers.join(", ")
+        );
     }
 }
 

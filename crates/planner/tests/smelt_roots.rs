@@ -11,7 +11,7 @@
 
 use factorio_bot_core::test_utils::fixture_world;
 use factorio_bot_core::types::Position;
-use factorio_bot_planner::action::ActionKind;
+use factorio_bot_planner::action::{ActionKind, InventorySlot};
 use factorio_bot_planner::goal::{Goal, Holder};
 use factorio_bot_planner::method::expand;
 use factorio_bot_planner::method::have::registry_for;
@@ -49,30 +49,63 @@ fn plan(bots: &[BotId]) -> (ActionNetwork, PlanState, Schedule) {
     (net, state, result)
 }
 
-/// Every insert into a furnace, and every place of one, keyed by the tile the
-/// furnace stands on.
-fn by_furnace(net: &ActionNetwork, result: &Schedule) -> BTreeMap<String, BTreeSet<BotId>> {
-    let mut out: BTreeMap<String, BTreeSet<BotId>> = BTreeMap::new();
+/// Who works each furnace, split by what the work *converges into*.
+///
+/// `.0` is the furnace's **inventory-convergent** side: the ore that goes in
+/// and the plates that come out. Those actions read and write one bot's
+/// pockets, and that bot has to be the one the smelt was sized against.
+///
+/// `.1` is its **world-convergent** side: the placement and the fuel load.
+/// Both produce map facts — the next action's precondition is
+/// `Condition::EntityAt`, which names a position and no bot — so R3 hands them
+/// to another bot when doing so takes real work off the taker. See
+/// `crates/planner`'s `furnace_suppliers`.
+type FurnaceWorkers = (BTreeSet<BotId>, BTreeSet<BotId>);
+
+fn by_furnace(net: &ActionNetwork, result: &Schedule) -> BTreeMap<String, FurnaceWorkers> {
+    let mut out: BTreeMap<String, FurnaceWorkers> = BTreeMap::new();
     for step in &result.steps {
         let StepKind::Act { action, .. } = &step.what else {
             continue;
         };
         let action = net.action(*action).expect("scheduled action is in the net");
-        let pos: Position = match &action.kind {
-            ActionKind::Place { entity } => entity.position.clone(),
-            ActionKind::Insert { pos, .. } | ActionKind::Remove { pos, .. } => pos.clone(),
+        let (pos, world_convergent): (Position, bool) = match &action.kind {
+            ActionKind::Place { entity } => (entity.position.clone(), true),
+            ActionKind::Insert { pos, slot, .. } => (pos.clone(), *slot == InventorySlot::Fuel),
+            ActionKind::Remove { pos, .. } => (pos.clone(), false),
             _ => continue,
         };
-        out.entry(pos.to_string()).or_default().insert(step.bot);
+        let entry = out.entry(pos.to_string()).or_default();
+        if world_convergent {
+            entry.1.insert(step.bot);
+        } else {
+            entry.0.insert(step.bot);
+        }
     }
     out
 }
 
-/// The bug, stated as the property it breaks: one furnace, one pair of hands.
+/// The bug, stated as the property it breaks: one furnace, one pair of hands
+/// **on the side of it that reads an inventory**.
 ///
 /// Asserted per furnace rather than over the plan as a whole, because "the
 /// plan schedules" is also true of a fix that welds every action onto a single
 /// bot — see the parallelism assertion below, which that fix would fail.
+///
+/// # Why the placement and the fuel load are asserted separately
+///
+/// The original claim was "its ore, its coal and the hands that placed it are
+/// one bot's", and two thirds of that is still exactly right: the ore comes
+/// out of the inserting bot's pockets and the plates go into the taker's, so a
+/// plan that mines onto one bot and loads from another dies on a `HasItem`
+/// precondition it sized correctly and delivered to the wrong bot.
+///
+/// The other third was never load-bearing and R3 spends it. A furnace that
+/// *stands* and a furnace that is *fuelled* are facts about the map, not about
+/// anybody's inventory; nothing downstream reads the placer's pockets. So the
+/// placement and the coal may be a different bot's errand — but still **one**
+/// other bot's, because they are emitted as a single `Step::Owned` block whose
+/// own bill was sized against that bot.
 #[test]
 fn every_furnace_is_placed_loaded_and_emptied_by_one_bot() {
     let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
@@ -83,12 +116,19 @@ fn every_furnace_is_placed_loaded_and_emptied_by_one_bot() {
         "the fixture is supposed to produce several smelts, got {}",
         furnaces.len()
     );
-    for (pos, actors) in &furnaces {
+    for (pos, (consumers, builders)) in &furnaces {
         assert_eq!(
-            actors.len(),
+            consumers.len(),
             1,
-            "the furnace at {pos} is worked by {actors:?}; a furnace is loaded out of \
-             one inventory, so its ore, its coal and the hands that placed it are one bot's"
+            "the furnace at {pos} has its ore put in and its plates taken out by \
+             {consumers:?}; that side of a furnace is one inventory's, so its ore \
+             and its output are one bot's"
+        );
+        assert!(
+            builders.len() <= 1,
+            "the furnace at {pos} was built and fuelled by {builders:?}; that side \
+             may be somebody else's errand, but it is emitted as one owned block \
+             and so is one bot's"
         );
     }
 }

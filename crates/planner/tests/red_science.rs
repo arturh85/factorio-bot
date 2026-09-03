@@ -28,6 +28,26 @@ fn world_with_furnaces(bots: &[BotId]) -> PlanState {
     state
 }
 
+/// The same world with **empty pockets**, which is what makes a furnace worth
+/// handing to another bot.
+///
+/// `world_with_furnaces` gives every bot two stone furnaces, and a taker
+/// holding one saves nothing by asking a supplier to place it — so
+/// `worth_handing_a_furnace_over` refuses and no chain in that fixture ever
+/// depends on another. Take the furnaces away and the five stone under each
+/// one become real work to move, which is the condition a live run is
+/// permanently in after its seed inventory is spent.
+///
+/// Bot 2 stands where it does in `world_with_furnaces`, for the same reason:
+/// so that at least one comparison in the suite is settled by a walk.
+fn world_without_furnaces(bots: &[BotId]) -> PlanState {
+    let mut state = PlanState::from_world(Arc::new(fixture_world()), bots);
+    if bots.contains(&BotId(2)) {
+        state.set_position(BotId(2), Position::new(30., 0.));
+    }
+    state
+}
+
 fn goal(count: u32) -> Goal {
     Goal::Have {
         item: "automation-science-pack".into(),
@@ -195,18 +215,33 @@ fn the_plan_renders_as_a_gantt_chart() {
 /// Two hand-built replays in `tests/scheduling.rs` check the same property, but
 /// only over networks they construct themselves — never over a real expansion.
 ///
-/// **On today's fixture it does not yet discriminate**, and saying so is the
-/// point of writing it down. Stubbing `infer_edges` to return immediately was
-/// measured to leave all seven tests in this file passing, this one included,
-/// while eleven `network` unit tests fail. Red science's chains have no
-/// cross-chain dependency — `free_tile_near` hands each chain its own furnace
-/// tile — and inside one chain the scheduler's per-bot feasibility check plus
-/// a single `free_at` cursor reconstruct the order an edge would have stated.
-/// So this guards the moment that stops being true (a method reusing an
-/// existing furnace, an `Actor::Bound` holder, a `Consolidate`), not anything
-/// the crate does today.
+/// **It used not to discriminate, and it does now.** The note this replaces
+/// said so in as many words: stubbing `infer_edges` to return immediately left
+/// every test in this file passing, because red science's chains had no
+/// cross-chain dependency at all — `free_tile_near` handed each chain its own
+/// furnace tile, and inside one chain the scheduler's per-bot feasibility
+/// check plus a single `free_at` cursor reconstruct the order an edge would
+/// have stated. It named the moment that would stop being true: "a method
+/// reusing an existing furnace, an `Actor::Bound` holder, a `Consolidate`".
+///
+/// R3 is that moment. `smelt_steps` now hands a furnace it would have had to
+/// build — the stone, the craft, the placement and the coal — to another bot
+/// as a `Step::Owned` block, so a placement in one chain gates inserts in
+/// another and a fuel load in one chain gates a take in another. Neither edge
+/// survives being dropped: the placement's would let a bot insert into a
+/// furnace that does not stand yet, and the fuel's carries the furnace's whole
+/// smelting lag, which `infer_edges` could not supply even if it kept the
+/// pairing.
+///
+/// So the loop runs over **two** fixtures. `world_with_furnaces` is the one
+/// that has always been here, and it still hands nothing over: every bot is
+/// carrying two stone furnaces, so moving a placement saves the taker nothing
+/// and `worth_handing_a_furnace_over` refuses. `world_without_furnaces` is the
+/// same world with empty pockets, which is what makes the handover pay and
+/// what puts a real cross-chain dependency in front of this replay.
 #[test]
 fn every_expansion_replays_in_time_order() {
+    let mut cross_chain_edges = 0usize;
     let rosters: [Vec<BotId>; 3] = [
         vec![BotId(1)],
         vec![BotId(1), BotId(2)],
@@ -214,14 +249,36 @@ fn every_expansion_replays_in_time_order() {
     ];
     for bots in &rosters {
         for count in [1u32, 2, 4, 10] {
-            let state = world_with_furnaces(bots);
-            let net = expand(&[goal(count)], &state, &registry_for(bots), BotId(1))
-                .unwrap_or_else(|e| panic!("{} packs on {} bots: {}", count, bots.len(), e));
-            let plan = schedule(&net, &state, bots)
-                .unwrap_or_else(|e| panic!("{} packs on {} bots: {}", count, bots.len(), e));
-            common::assert_preconditions_hold_over_time(&net, &state, &plan);
+            for (name, state) in [
+                ("with furnaces", world_with_furnaces(bots)),
+                ("without furnaces", world_without_furnaces(bots)),
+            ] {
+                let net = expand(&[goal(count)], &state, &registry_for(bots), BotId(1))
+                    .unwrap_or_else(|e| {
+                        panic!("{} packs on {} bots, {}: {}", count, bots.len(), name, e)
+                    });
+                let plan = schedule(&net, &state, bots).unwrap_or_else(|e| {
+                    panic!("{} packs on {} bots, {}: {}", count, bots.len(), name, e)
+                });
+                common::assert_preconditions_hold_over_time(&net, &state, &plan);
+                for action in net.actions() {
+                    for (from, _) in net.preds(action.id) {
+                        if net.chain_of(from) != net.chain_of(action.id) {
+                            cross_chain_edges += 1;
+                        }
+                    }
+                }
+            }
         }
     }
+    // The guard the note above turns on: if no expansion in this loop puts one
+    // chain's action in front of another's, the replay is once again checking
+    // a property nothing can break, and the doc comment is a lie.
+    assert!(
+        cross_chain_edges > 0,
+        "no expansion here crossed a chain boundary; this test has stopped \
+         discriminating and the comment above says it should not have"
+    );
 }
 
 #[test]

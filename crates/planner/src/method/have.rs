@@ -605,6 +605,125 @@ struct BankFurnace {
     take: u32,
 }
 
+/// Who builds and fuels each furnace of a bank.
+///
+/// # Why a furnace is somebody else's errand to run
+///
+/// A `Researched` chain states its whole subtree as `Holder::Share(chain
+/// actor)`, that share owns the chain, and an owner is a hard single-candidate
+/// constraint in [`crate::schedule`]. Measured on `run-1788465258-49050`, that
+/// gave **one bot 103 of a rung-1 plan's 115 steps** while the other three ran
+/// four each, and `mine` was 65.6% of the measured action time. Splitting the
+/// *gathering* under that chain is the only remaining lever, and it cannot be
+/// done by relaxing the owner: `run-1788405365-21697` died with `precondition
+/// has 3 iron-ore … does not hold for bot 2` when a chain was sized against one
+/// bot's stock and bound to another.
+///
+/// The distinction that makes it safe is **what a subtree converges into**. The
+/// ore of a smelt is *inventory-convergent*: something downstream reads the
+/// holder's inventory. A furnace is not. `place stone-furnace at P` and
+/// `fuel the furnace` produce **map facts** — the next action's precondition is
+/// `Condition::EntityAt`, which names a position and no bot at all — so the
+/// five stone, the craft, the placement and the coal can be one *other* bot's
+/// errand end to end. Its bill is sized against that bot
+/// (`Holder::Share(supplier)`) and bound to that bot ([`Step::Owned`] always
+/// names an owner), so sizing and binding still agree: four independently
+/// correct chains, not one chain with a relaxed constraint.
+///
+/// # How the bot is picked
+///
+/// Least-loaded first, by [`PlanState::planned_mining`] — the raw units this
+/// expansion has already committed each bot to digging — with `BotId` breaking
+/// ties, and dealt round-robin down that order so a bank of several furnaces
+/// reaches several bots. Load is what makes it rotate *across* smelts too: a
+/// `Researched` expansion contains a dozen of them, and each one sees what the
+/// ones before it spent.
+///
+/// **The taker is a candidate like anyone else**, and that is what keeps this
+/// inert where it should be. With one bot in the roster it is the only
+/// candidate, so a solo plan is byte-identical to the one before this existed;
+/// at the start of a fleet plan every load is zero and the tie-break picks the
+/// lowest `BotId`, which is usually the chain actor — so the first furnace
+/// stays inline, costs no cross-chain edge, and the rotation begins only once
+/// the chain owner has actually taken on work.
+///
+/// A bot that cannot walk anywhere is excluded for exactly the reason
+/// [`participants_that_can_work`] gives: a `Step::Owned` block names one owner
+/// and no other bot may ever take it over.
+///
+/// Returns one bot per bank slot. Deterministic: integer keys, `BotId`
+/// tie-break, ordered collections throughout.
+fn furnace_suppliers(state: &PlanState, taker: BotId, slots: usize) -> Vec<BotId> {
+    if slots == 0 {
+        return Vec::new();
+    }
+    let roster = state.bot_ids();
+    if roster.len() < 2 {
+        return vec![taker; slots];
+    }
+    let mut order: Vec<(u32, BotId)> = participants_that_can_work(state, roster)
+        .into_iter()
+        .map(|bot| (state.planned_mining(bot), bot))
+        .collect();
+    if order.is_empty() {
+        return vec![taker; slots];
+    }
+    order.sort_unstable();
+    (0..slots).map(|j| order[j % order.len()].1).collect()
+}
+
+/// Does handing one furnace of a bank to another bot pay for the trip?
+///
+/// The saving is **taker ticks removed**: the coal it would have had to mine,
+/// plus — for a furnace it has to build — the furnace's own bill. The cost is
+/// one supplier's detour, [`HANDOVER_WALK_TICKS`] plus a transfer, the same
+/// figure and the same constant [`worth_converging`] charges per supplier for
+/// exactly the same walk.
+///
+/// Only what the taker would otherwise have to *produce* counts, which is what
+/// makes this refuse where it should. A roster whose bots each start holding a
+/// stone furnace (freeplay does) saves nothing by moving the placement — the
+/// taker had one in its pocket — so a one-pack goal keeps its single chain and
+/// pays no cross-chain edge at all. It is the *eleventh* furnace of a
+/// `Researched` plan that pays, and by a wide margin: five stone at 120 ticks
+/// each against a 310-tick walk.
+///
+/// # Why the furnace's bill is priced one level deeper than [`solo_ticks`]
+///
+/// `solo_ticks` is shallow by design, which under-states work and so makes
+/// `worth_converging` under-fire — the right direction there. Here it would
+/// price a stone furnace at its thirty-tick *craft* and miss the six hundred
+/// ticks of stone under it, refusing every handover that matters. So the
+/// recipe's own ingredients are costed too, one level and no further, and only
+/// the part of each the taker is actually short of.
+///
+/// Every slot of a bank is asked against the *same* state, before any of this
+/// smelt's own bills are stated, so a taker holding one furnace reads a
+/// shortfall of zero for both members of a two-wide bank and keeps both. That
+/// under-fires by at most one furnace per smelt and never over-fires, which is
+/// the direction every other predicate here errs in.
+///
+/// Integer ticks throughout: no float enters the predicate, so the answer
+/// cannot depend on a rounding mode.
+fn worth_handing_a_furnace_over(
+    state: &PlanState,
+    whose: &Holder,
+    coal: u32,
+    adopted: bool,
+) -> bool {
+    let mut saved = solo_ticks(state, "coal", shortfall(state, "coal", coal, whose));
+    if !adopted && shortfall(state, "stone-furnace", 1, whose) > 0 {
+        saved = saved.saturating_add(solo_ticks(state, "stone-furnace", 1));
+        if let Some(recipe) = recipe_for(state, "stone-furnace") {
+            for (ingredient, amount) in ingredients_of(&recipe) {
+                let missing = shortfall(state, &ingredient, amount, whose);
+                saved = saved.saturating_add(solo_ticks(state, &ingredient, missing));
+            }
+        }
+    }
+    saved > TRANSFER_TICKS.saturating_add(HANDOVER_WALK_TICKS)
+}
+
 /// Smelt the shortfall in a stone furnace.
 pub struct Smelt;
 
@@ -664,11 +783,22 @@ pub(crate) struct SharedOre {
 /// owned by that bot ([`Step::Owned`]), and links them to the take the taker
 /// still performs.
 ///
-/// **The furnace, its stone and its coal stay with the taker.** The furnace
-/// has to exist before any supplier can insert into it, so placing it in a
+/// **The furnace, its stone and its coal no longer stay with the taker**, and
+/// that is R3. Stage 1 declined the trade in writing — "placing it in a
 /// supplier's chain would buy an extra cross-chain edge on the critical path
-/// for about five stone and one coal of work. That is a real residual and a
-/// deliberate one: stage 1 changes one thing.
+/// for about five stone and one coal of work… a real residual and a deliberate
+/// one: stage 1 changes one thing." The residual turned out not to be five
+/// stone: measured over a whole `Researched("automation")` plan it is sixty-five
+/// stone, thirty coal and fourteen of the chain owner's twenty-six site
+/// transitions, against a plan in which that owner already held 103 of 115
+/// steps. So the arithmetic reversed, and [`furnace_suppliers`] now names a bot
+/// per bank slot; a slot it hands away is emitted as a [`Step::Owned`] block
+/// carrying that furnace's stone, its coal, its placement and its fuel load.
+///
+/// The cross-chain edge stage 1 was unwilling to buy is now bought twice over
+/// and both halves are stated rather than inferred: the placement to the
+/// inserts that need the furnace to stand, and the fuel load to the take, with
+/// the furnace's own smelting lag on it.
 fn smelt_steps(
     goal: &Goal,
     ctx: &mut ExpansionCtx,
@@ -795,8 +925,62 @@ fn smelt_steps(
     }
     debug_assert_eq!(need_left, 0, "the bank's output has to cover the goal");
 
-    let to_build = bank.iter().filter(|f| !f.adopted).count() as u32;
-    let coal: u32 = bank.iter().map(|f| f.coal).sum();
+    // Who builds and fuels each furnace of the bank. `None` is "the taker
+    // does, inline", which is what every slot answered before R3 and what
+    // every slot still answers for a roster of one.
+    //
+    // Only a goal that names a bot has a taker to hand anything *away* from.
+    // A `Holder::Anyone` smelt is expanded inside a chain nothing named an
+    // owner for, so there is no bot to compare a supplier against and no
+    // inventory the handover could be sized in opposition to; it keeps the
+    // whole bank, exactly as before. `SharedSmelt::taker` refuses `Anyone`
+    // for the same reason and says so at length.
+    let taker_bot = match &whose {
+        Holder::Bot(bot) | Holder::Share(bot) => Some(*bot),
+        Holder::Anyone => None,
+    };
+    // Two questions, in this order: *which* slots are worth handing away
+    // (`worth_handing_a_furnace_over`, a fact about this smelt's own bill) and
+    // then *who* gets them (`furnace_suppliers`, a fact about the roster).
+    // Dealing the round-robin over only the slots that pay is what keeps the
+    // rotation even; overriding a pick afterwards would leave gaps in it.
+    let mut suppliers: Vec<Option<BotId>> = vec![None; bank.len()];
+    if let Some(taker) = taker_bot {
+        let worth: Vec<usize> = bank
+            .iter()
+            .enumerate()
+            .filter(|(_, furnace_slot)| {
+                worth_handing_a_furnace_over(
+                    &ctx.state,
+                    whose,
+                    furnace_slot.coal,
+                    furnace_slot.adopted,
+                )
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let picks = furnace_suppliers(&ctx.state, taker, worth.len());
+        for (index, bot) in worth.into_iter().zip(picks) {
+            suppliers[index] = (bot != taker).then_some(bot);
+        }
+    }
+
+    // The taker's own bill covers only the furnaces it keeps. A handed
+    // furnace asks for its stone-furnace and its coal *inside* the supplier's
+    // chain, sized against that supplier's inventory — asking for them here
+    // as well would size the same bill twice, which is the defect the shared
+    // ore path already documents one paragraph further down.
+    let to_build = bank
+        .iter()
+        .zip(suppliers.iter())
+        .filter(|(furnace_slot, supplier)| !furnace_slot.adopted && supplier.is_none())
+        .count() as u32;
+    let coal: u32 = bank
+        .iter()
+        .zip(suppliers.iter())
+        .filter(|(_, supplier)| supplier.is_none())
+        .map(|(furnace_slot, _)| furnace_slot.coal)
+        .sum();
 
     let mut steps: Vec<Step> = Vec::new();
 
@@ -842,11 +1026,17 @@ fn smelt_steps(
             whose: whose.clone(),
         }));
     }
-    steps.push(Step::Subgoal(Goal::Have {
-        item: "coal".into(),
-        count: coal,
-        whose: whose.clone(),
-    }));
+    // Zero when every furnace of the bank was handed to a supplier, and then
+    // the taker asks for no coal at all — the same reason the stone below is
+    // conditional. `bank_coal` never returns zero for a furnace, so a solo
+    // plan (which hands nothing over) always asks, exactly as before.
+    if coal > 0 {
+        steps.push(Step::Subgoal(Goal::Have {
+            item: "coal".into(),
+            count: coal,
+            whose: whose.clone(),
+        }));
+    }
     // Only the furnaces that do not exist yet. A bank that adopted every
     // member asks for no stone at all, which is the whole point of asking
     // adoption first: reuse takes stone demand *down*, not up.
@@ -869,28 +1059,28 @@ fn smelt_steps(
         .state
         .placement_clearance(&furnace_entity)
         .unwrap_or(0.0);
-    // One placement per furnace this smelt has to build, in bank order, and
-    // none for the ones it adopted. `place_ids` is parallel to `bank` so a
-    // furnace's own place can be linked to its own inserts; an adopted
-    // furnace has `None` and needs no edge, since it stands before the plan
-    // begins.
-    let mut place_ids: Vec<Option<ActionId>> = Vec::new();
-    for furnace_slot in &bank {
-        if furnace_slot.adopted {
-            place_ids.push(None);
-            continue;
-        }
-        let pos = furnace_slot.pos.clone();
+    /// The placement of one furnace, whoever runs it.
+    ///
+    /// Lifted out of the loop below because a handed furnace's placement is
+    /// emitted inside a [`Step::Owned`] block and the taker's is emitted
+    /// inline, and the two must be the *same* action — the whole safety
+    /// argument for handing it over is that nothing downstream can tell the
+    /// difference except by reading the chain.
+    fn place_action(
+        id: ActionId,
+        entity: &str,
+        pos: &Position,
+        build: f64,
+        min_radius: f64,
+    ) -> Action {
         let furnace = FactorioEntity {
-            name: furnace_entity.clone(),
+            name: entity.into(),
             entity_type: "furnace".into(),
             position: pos.clone(),
             ..Default::default()
         };
-        let place_id = ctx.ids.next();
-        place_ids.push(Some(place_id));
-        steps.push(Step::Act(Box::new(Action {
-            id: place_id,
+        Action {
+            id,
             kind: ActionKind::Place {
                 entity: Box::new(furnace.clone()),
             },
@@ -903,7 +1093,7 @@ fn smelt_steps(
                 },
                 Condition::AreaFree {
                     pos: pos.clone(),
-                    entity: furnace_entity.clone(),
+                    entity: entity.into(),
                     direction: 0,
                 },
                 Condition::HasItem {
@@ -923,7 +1113,46 @@ fn smelt_steps(
             duration: PLACE_TICKS,
             pinned: None,
             label: format!("place stone-furnace at {}", pos),
-        })));
+        }
+    }
+
+    /// The fuel load of one furnace, whoever runs it. See [`place_action`].
+    fn fuel_action(id: ActionId, entity: &str, pos: &Position, coal: u32, reach: f64) -> Action {
+        Action {
+            id,
+            kind: ActionKind::Insert {
+                pos: pos.clone(),
+                entity: entity.into(),
+                slot: InventorySlot::Fuel,
+                item: "coal".into(),
+                count: coal,
+            },
+            pre: vec![
+                Condition::AtPosition {
+                    who: Actor::Role,
+                    pos: pos.clone(),
+                    radius: reach,
+                    min_radius: 0.0,
+                },
+                Condition::EntityAt {
+                    pos: pos.clone(),
+                    name: "stone-furnace".into(),
+                },
+                Condition::HasItem {
+                    who: Actor::Role,
+                    item: "coal".into(),
+                    count: coal,
+                },
+            ],
+            eff: vec![Effect::LoseItem {
+                who: Actor::Role,
+                item: "coal".into(),
+                count: coal,
+            }],
+            duration: TRANSFER_TICKS,
+            pinned: None,
+            label: format!("fuel the furnace with {} coal", coal),
+        }
     }
 
     // Every insert into each furnace of the bank, indexed by bank slot: each
@@ -933,6 +1162,99 @@ fn smelt_steps(
     // the other inserts get by sitting in the same chain as it. Per furnace,
     // because a place only orders the inserts into the furnace it built.
     let mut ore_insert_ids: Vec<Vec<ActionId>> = vec![Vec::new(); bank.len()];
+    // One placement per furnace this smelt has to build, in bank order, and
+    // none for the ones it adopted. `place_ids` is parallel to `bank` so a
+    // furnace's own place can be linked to its own inserts; an adopted
+    // furnace has `None` and needs no edge, since it stands before the plan
+    // begins.
+    let mut place_ids: Vec<Option<ActionId>> = vec![None; bank.len()];
+    // The one fuel load per furnace, parallel to `bank` for the same reason.
+    // Always `Some` by the end of this function: every furnace of a bank is
+    // fuelled, by the taker or by its supplier.
+    let mut fuel_ids: Vec<Option<ActionId>> = vec![None; bank.len()];
+
+    // The furnaces somebody else builds and fuels.
+    //
+    // **This is the whole of R3.** Each block is a chain of its own, owned by
+    // the bot it names ([`Step::Owned`] always names an owner), so its five
+    // stone and its coal are sized against that bot's inventory and run on
+    // that bot — the same construction that makes a `Holder::Share` chain
+    // correct, applied one level in. See `furnace_suppliers` for why a furnace
+    // in particular may travel and the ore may not.
+    //
+    // Emitted **here**, where the taker's own placements are, rather than
+    // beside the fuel loads further down. Two reasons, and the first is a
+    // correctness one: `run_steps` applies each action's effects as it emits
+    // them, so a placement emitted after the shared ore blocks would let a
+    // supplier's `Mine` pick the very tile the furnace is about to stand on
+    // (`PlanState::resource_tile_blocked` only sees entities already added).
+    // The second is that a bank's furnaces are then placed in bank order
+    // whoever runs them.
+    for (index, furnace_slot) in bank.iter().enumerate() {
+        let pos = furnace_slot.pos.clone();
+        let place_id = (!furnace_slot.adopted).then(|| ctx.ids.next());
+        place_ids[index] = place_id;
+        let Some(supplier) = suppliers[index] else {
+            // The taker's own furnace, inline in the enclosing chain. Its fuel
+            // load is emitted after the ore inserts, exactly where it always
+            // was — a bot handing a furnace to itself is not a handover.
+            if let Some(place_id) = place_id {
+                steps.push(Step::Act(Box::new(place_action(
+                    place_id,
+                    &furnace_entity,
+                    &pos,
+                    build,
+                    min_radius,
+                ))));
+            }
+            continue;
+        };
+        let fuel_id = ctx.ids.next();
+        fuel_ids[index] = Some(fuel_id);
+        insert_ids[index].push(fuel_id);
+        let supplier_reach = ctx
+            .state
+            .bot(supplier)
+            .map(|b| b.reach_distance)
+            .unwrap_or(reach);
+        let mut block: Vec<Step> = Vec::new();
+        if place_id.is_some() {
+            block.push(Step::Subgoal(Goal::Have {
+                item: "stone-furnace".into(),
+                count: 1,
+                whose: Holder::Share(supplier),
+            }));
+        }
+        block.push(Step::Subgoal(Goal::Have {
+            item: "coal".into(),
+            count: furnace_slot.coal,
+            whose: Holder::Share(supplier),
+        }));
+        if let Some(place_id) = place_id {
+            block.push(Step::Act(Box::new(place_action(
+                place_id,
+                &furnace_entity,
+                &pos,
+                ctx.state
+                    .bot(supplier)
+                    .map(|b| b.build_distance)
+                    .unwrap_or(build),
+                min_radius,
+            ))));
+        }
+        block.push(Step::Act(Box::new(fuel_action(
+            fuel_id,
+            &furnace_entity,
+            &pos,
+            furnace_slot.coal,
+            supplier_reach,
+        ))));
+        steps.push(Step::Owned {
+            whose: Holder::Share(supplier),
+            steps: block,
+        });
+    }
+
     for (ingredient, amount) in &ingredients {
         if shared.as_ref().is_some_and(|s| s.ore == *ingredient) {
             continue;
@@ -991,51 +1313,25 @@ fn smelt_steps(
         }
     }
 
-    // One fuel load per furnace. The bank's coal was divided by `bank_coal`,
-    // which rounds each furnace's share up to a whole coal — the reason
-    // `bank_size` charges the split's extra coal rather than discovering it.
-    let mut fuel_ids: Vec<ActionId> = Vec::new();
+    // One fuel load per furnace the taker kept. The bank's coal was divided by
+    // `bank_coal`, which rounds each furnace's share up to a whole coal — the
+    // reason `bank_size` charges the split's extra coal rather than
+    // discovering it. A handed furnace was fuelled in its supplier's block
+    // above.
     for (index, furnace_slot) in bank.iter().enumerate() {
-        let pos = furnace_slot.pos.clone();
-        let furnace_coal = furnace_slot.coal;
+        if suppliers[index].is_some() {
+            continue;
+        }
         let fuel_id = ctx.ids.next();
-        fuel_ids.push(fuel_id);
+        fuel_ids[index] = Some(fuel_id);
         insert_ids[index].push(fuel_id);
-        steps.push(Step::Act(Box::new(Action {
-            id: fuel_id,
-            kind: ActionKind::Insert {
-                pos: pos.clone(),
-                entity: furnace_entity.clone(),
-                slot: InventorySlot::Fuel,
-                item: "coal".into(),
-                count: furnace_coal,
-            },
-            pre: vec![
-                Condition::AtPosition {
-                    who: Actor::Role,
-                    pos: pos.clone(),
-                    radius: reach,
-                    min_radius: 0.0,
-                },
-                Condition::EntityAt {
-                    pos: pos.clone(),
-                    name: "stone-furnace".into(),
-                },
-                Condition::HasItem {
-                    who: Actor::Role,
-                    item: "coal".into(),
-                    count: furnace_coal,
-                },
-            ],
-            eff: vec![Effect::LoseItem {
-                who: Actor::Role,
-                item: "coal".into(),
-                count: furnace_coal,
-            }],
-            duration: TRANSFER_TICKS,
-            pinned: None,
-            label: format!("fuel the furnace with {} coal", furnace_coal),
-        })));
+        steps.push(Step::Act(Box::new(fuel_action(
+            fuel_id,
+            &furnace_entity,
+            &furnace_slot.pos,
+            furnace_slot.coal,
+            reach,
+        ))));
     }
 
     // The ore, loaded by whoever mined it.
@@ -1197,6 +1493,30 @@ fn smelt_steps(
         }
     }
 
+    // A handed furnace's placement is in its supplier's chain while the ore
+    // that goes into it is inserted from another. `Condition::EntityAt` is
+    // world-scoped, so `infer_edges` keeps that edge across chains anyway
+    // (`network::inference_still_links_a_world_scoped_condition_across_chains`
+    // pins exactly that) — but this is the one place in the crate where a
+    // placement and the inserts that need it are *provably* on different
+    // runners, so the plan states it rather than depending on inference.
+    // `ActionNetwork::link` folds the duplicate against the loop above.
+    for (index, supplier) in suppliers.iter().enumerate() {
+        if supplier.is_none() {
+            continue;
+        }
+        let Some(place_id) = place_ids[index] else {
+            continue;
+        };
+        for id in &insert_ids[index] {
+            steps.push(Step::Link {
+                from: place_id,
+                to: *id,
+                lag: 0,
+            });
+        }
+    }
+
     // One take per furnace, and the lag that precedes it.
     //
     // **This is the whole of R1.** A furnace running `runs` batches serially
@@ -1270,7 +1590,26 @@ fn smelt_steps(
             .saturating_mul(furnace_slot.runs)
             .saturating_add(per_run);
         for id in &insert_ids[index] {
-            let lag = if fuel_ids.contains(id) { 0 } else { smelt_lag };
+            // **A furnace starts when the last of its ore and its fuel lands,
+            // and only the taker's own fuel is provably the earlier of the
+            // two.** In the taker's chain the fuel load sits one action after
+            // the ore insert on one serial timeline, so charging it no lag
+            // understates the wait by a single transfer, which the take's
+            // one-cycle headroom above already covers.
+            //
+            // A *handed* fuel is a different bot's errand in a different
+            // chain, and nothing bounds how far behind the ore it lands. Give
+            // it the zero lag and the plan schedules the take against an
+            // insert the furnace had not yet begun to consume — the
+            // "nine plates out of ten" failure recorded above, arrived at
+            // through the new door. This is the cross-chain edge R3's design
+            // predicted would be found; it is stated rather than inferred
+            // because `infer_edges` has no way to see a *lag*.
+            let lag = if fuel_ids[index] == Some(*id) && suppliers[index].is_none() {
+                0
+            } else {
+                smelt_lag
+            };
             steps.push(Step::Link {
                 from: *id,
                 to: remove_id,
@@ -7246,7 +7585,8 @@ mod tests {
     /// | | steps | unlock subtree | makespan |
     /// | --- | --- | --- | --- |
     /// | before | 49 / 12 / 12 / 12 | `{bot 1: 48}` | 15866 |
-    /// | after | 49 / 16 / 16 / 16 | `{1: 48, 2: 4, 3: 4, 4: 4}` | **12403** |
+    /// | after | 49 / 16 / 16 / 16 | `{1: 48, 2: 4, 3: 4, 4: 4}` | 12403 |
+    /// | R3 | 37 / 16 / 16 / 24 | | **10011** |
     ///
     /// (15922 in the note this work started from; 15866 after time-aware
     /// claims alone, which pack one bot's tiles a little tighter.)
@@ -7254,6 +7594,21 @@ mod tests {
     /// The makespan is pinned rather than stated as a ratio because the number
     /// *is* the claim: a handover that spreads the subtree and does not shorten
     /// the plan is the outcome stage 1 measured and could not defend.
+    ///
+    /// **12403 to 10011 is R3**, and the twelve steps bot 1 lost are the
+    /// mechanism written out: `smelt_steps` now hands a furnace it would have
+    /// had to build — its stone, its craft, its placement and its coal — to
+    /// the least-loaded bot as a [`Step::Owned`] block, because a standing
+    /// furnace is a *map* fact and nothing downstream reads the placer's
+    /// inventory (see `furnace_suppliers`). Bot 1's share of the plan falls
+    /// from 49 steps of 97 to 37 of 93, and the four steps that vanish
+    /// altogether are stone the suppliers did not have to mine because they
+    /// were carrying furnaces of their own that only their own chain could
+    /// spend.
+    ///
+    /// Sizing and binding are still in agreement, four times over rather than
+    /// relaxed once: each block is sized against `Holder::Share(supplier)` and
+    /// `Step::Owned` binds it to that same supplier.
     #[test]
     fn the_unlock_subtree_spreads_on_the_shared_fixture() {
         let bots = vec![BotId(1), BotId(2), BotId(3), BotId(4)];
@@ -7314,9 +7669,10 @@ mod tests {
              whole plan {per_bot:?}"
         );
         assert_eq!(
-            plan.makespan, 12403,
-            "the unlock was 15866 ticks on this fixture with the subtree on one \
-             bot; {per_bot:?}"
+            plan.makespan, 10011,
+            "15866 with the subtree on one bot, 12403 once the ore converged, \
+             and 10011 once the furnaces themselves became other bots' \
+             errands; {per_bot:?}"
         );
     }
 
@@ -7344,6 +7700,13 @@ mod tests {
     /// runs meet and a fixture that only ever seats nine is a poor proxy for
     /// one. It is also the test that would catch a seat model that has quietly
     /// started depending on how much ore there is.
+    ///
+    /// **R3 moved both figures by almost exactly the same amount** — 12403 to
+    /// 10011 on the shared fixture, 12428 to 10053 here — which is the control
+    /// still doing its job: handing a furnace's stone and coal to another bot
+    /// is a decision about the *roster*, not about how much ore there is, so a
+    /// wider ore front buys it nothing. The gap between the two fixtures stays
+    /// 25 ticks before R3 and becomes 42 after.
     #[test]
     fn a_wider_ore_front_barely_moves_the_spread_it_used_to_unlock() {
         let bots = vec![BotId(1), BotId(2), BotId(3), BotId(4)];
@@ -7392,9 +7755,10 @@ mod tests {
             "every bot the front can seat should be supplying it: {unlock_owners:?}"
         );
         assert_eq!(
-            plan.makespan, 12428,
-            "17122 before time-aware claims, and 12403 on the narrow fixture \
-             now: {per_bot:?}"
+            plan.makespan, 10053,
+            "17122 before time-aware claims, 12428 after them, and 10053 once \
+             R3 made a furnace somebody else's errand -- 42 ticks off the \
+             narrow fixture's 10011: {per_bot:?}"
         );
     }
 
@@ -8821,6 +9185,303 @@ mod tests {
                 |a| matches!(&a.kind, ActionKind::Craft { item, .. } if item == "small-electric-pole")
             ),
             "and the pole is crafted from it"
+        );
+    }
+}
+
+#[cfg(test)]
+mod owned_gathering {
+    //! **R3: gathering splits across bots inside an owned chain.**
+    //!
+    //! Rung 1 of the ladder — `researched("automation")` over
+    //! `world_with_trigger_prerequisite`, the freeplay starting inventory on
+    //! every bot — is the goal every measurement in
+    //! `docs/superpowers/specs/2026-09-03-four-bot-utilisation-design.md` was
+    //! taken on. Measured on the live run it names
+    //! (`run-1788465258-49050`), one bot held **103 of 115 steps** while the
+    //! other three ran four each; this fixture reproduces that shape exactly,
+    //! at 152 / 8 / 8 / 8.
+    //!
+    //! The cause is structural rather than incidental. `Researched::expand`
+    //! states its whole subtree as `Holder::Share(chain_actor)`,
+    //! `expand_goal_body` makes that share the chain's owner, and
+    //! `schedule`'s owner tier is a single candidate with no fallback — so
+    //! neither the spread preference nor `free_at` can reach any of it, and
+    //! `SplitAcrossBots` cannot claim it because it is neither top level nor
+    //! `Holder::Anyone`.
+    //!
+    //! The constraint is not relaxed here and must never be:
+    //! `run-1788405365-21697` died with `precondition has 3 iron-ore … does
+    //! not hold for bot 2` when a chain was sized against one bot and bound to
+    //! another. What moves instead is *which subtrees have to converge at
+    //! all*. A furnace that stands and a furnace that is fuelled are facts
+    //! about the map; the next action's precondition is `Condition::EntityAt`,
+    //! which names a position and no bot. So those subtrees are sized against
+    //! **and** bound to a supplier — sizing and binding still agree, four
+    //! times over rather than relaxed once.
+
+    use super::*;
+    use crate::action::ActionKind;
+    use crate::ids::BotId;
+    use crate::method::expand;
+    use crate::network::ActionNetwork;
+    use crate::schedule::{StepKind, schedule};
+    use crate::state::PlanState;
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    /// Rung 1's fixture: `steam-power` ("craft 50 iron plates") under
+    /// `automation`, and the inventory
+    /// `initiate_missing_players_with_default_inventory` really seeds.
+    fn rung_one(bots: &[BotId]) -> PlanState {
+        let mut state = PlanState::from_world(
+            Arc::new(crate::test_world::world_with_trigger_prerequisite()),
+            bots,
+        );
+        for bot in bots {
+            state.gain(*bot, "wood", 1);
+            state.gain(*bot, "stone-furnace", 1);
+            state.gain(*bot, "burner-mining-drill", 1);
+            state.gain(*bot, "iron-plate", 8);
+        }
+        state
+    }
+
+    fn rung_one_plan(bots: &[BotId]) -> (PlanState, ActionNetwork, crate::schedule::Schedule) {
+        let state = rung_one(bots);
+        let net = expand(
+            &[Goal::Researched("automation".into())],
+            &state,
+            &registry_for(bots),
+            BotId(1),
+        )
+        .expect("rung 1 expands");
+        let plan = schedule(&net, &state, bots).expect("rung 1 schedules");
+        (state, net, plan)
+    }
+
+    /// Raw units each bot is asked to dig, read off the schedule rather than
+    /// the network: who *runs* a mining action is the question, and only the
+    /// schedule answers it.
+    fn mining_by_bot(
+        net: &ActionNetwork,
+        plan: &crate::schedule::Schedule,
+    ) -> BTreeMap<BotId, u32> {
+        let mut out: BTreeMap<BotId, u32> = BTreeMap::new();
+        for step in &plan.steps {
+            let StepKind::Act { action, .. } = step.what else {
+                continue;
+            };
+            let Some(action) = net.action(action) else {
+                continue;
+            };
+            if let ActionKind::Mine { count, .. } = &action.kind {
+                *out.entry(step.bot).or_default() += count;
+            }
+        }
+        out
+    }
+
+    fn steps_by_bot(plan: &crate::schedule::Schedule) -> BTreeMap<BotId, usize> {
+        let mut out: BTreeMap<BotId, usize> = BTreeMap::new();
+        for step in &plan.steps {
+            *out.entry(step.bot).or_default() += 1;
+        }
+        out
+    }
+
+    /// **The headline claim, stated as the two numbers the design document
+    /// says are the criterion**: `steps/bot` and mining units per bot, both
+    /// less lopsided.
+    ///
+    /// | | steps / bot | planned ticks / bot | mine units / bot | makespan |
+    /// | --- | --- | --- | --- | ---: |
+    /// | before R3 | 152 / 8 / 8 / 8 | 36804 / 1897 / 2050 / 1884 | 123 / 9 / 9 / 8 | 48934 |
+    /// | after R3 | 90 / 28 / 28 / 27 | 26880 / 4802 / 4722 / 4990 | 67 / 22 / 24 / 21 | **40879** |
+    ///
+    /// The four-bot plan was *slower than the one-bot plan* (48934 against
+    /// 46446) before this, which is the parity the run log kept reporting.
+    /// It is now 12% faster than the solo plan rather than 5% slower.
+    ///
+    /// Asserted as properties rather than as those exact figures: the shape of
+    /// the answer is what matters and the arithmetic behind it moves whenever
+    /// anything else in the crate does. The figures are recorded here so that
+    /// a future movement can be compared against something.
+    #[test]
+    fn four_bots_split_rung_one_gathering_across_the_roster() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let (_, net, plan) = rung_one_plan(&bots);
+
+        let mining = mining_by_bot(&net, &plan);
+        let steps = steps_by_bot(&plan);
+        assert_eq!(
+            mining.len(),
+            bots.len(),
+            "every bot should be digging: {mining:?} (steps {steps:?})"
+        );
+
+        // Three fifths, not a half: the measured figure is 67 of 134, which
+        // is exactly half and would sit on a `< 50%` boundary where an
+        // ordinary tick of movement could flip it. 60% still refuses the
+        // pre-R3 plan by a mile (123 of 149 is 83%) and refuses anything
+        // resembling the live run's 103 of 115.
+        let total: u32 = mining.values().sum();
+        let busiest = *mining.values().max().expect("a non-empty plan");
+        assert!(
+            u64::from(busiest) * 5 < u64::from(total) * 3,
+            "one bot digs {busiest} of {total} raw units; before R3 it dug 123 of \
+             149 and the whole point is that it no longer does: {mining:?}"
+        );
+
+        // The other half of the criterion, on the same ceiling. 152 of 176
+        // steps was one bot's (86%); it is now 90 of 173 (52%).
+        let total_steps: usize = steps.values().sum();
+        let busiest_steps = *steps.values().max().expect("a non-empty plan");
+        assert!(
+            busiest_steps * 5 < total_steps * 3,
+            "one bot runs {busiest_steps} of {total_steps} steps: {steps:?}"
+        );
+    }
+
+    /// **The supplier pick reads mutable state, so it is pinned as a
+    /// function.**
+    ///
+    /// `furnace_suppliers` ranks bots by [`PlanState::planned_mining`], which
+    /// grows as the expansion proceeds — the *point* of it, since that is what
+    /// rotates the furnaces of a dozen smelts across the roster instead of
+    /// piling them on one bot. A ranking key that moves during an expansion is
+    /// exactly the shape that can make two runs of the same plan differ, so
+    /// this asserts what `crates/planner`'s purity rule requires: the same
+    /// inputs give a byte-identical plan, labels, chains, owners and schedule
+    /// alike.
+    #[test]
+    fn a_rung_one_plan_is_identical_on_a_second_expansion() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let (_, first, first_plan) = rung_one_plan(&bots);
+        let (_, second, second_plan) = rung_one_plan(&bots);
+
+        let shape = |net: &ActionNetwork| -> Vec<(String, Option<BotId>)> {
+            net.actions()
+                .map(|a| {
+                    (
+                        a.label.clone(),
+                        net.chain_of(a.id).and_then(|c| net.owner_of(c)),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(shape(&first), shape(&second));
+        assert_eq!(first_plan.makespan, second_plan.makespan);
+        assert_eq!(first_plan.steps, second_plan.steps);
+    }
+
+    /// **The single-bot path is the efficient one and does not move.**
+    ///
+    /// R3 changes who does the work, and with one bot in the roster there is
+    /// nobody else — `furnace_suppliers` returns the taker for every slot, so
+    /// not one step, edge or `ActionId` differs from the plan before it. Pinned
+    /// exactly, because "unchanged" is the claim and a ratio cannot make it.
+    #[test]
+    fn the_single_bot_rung_one_plan_is_untouched() {
+        let (_, net, plan) = rung_one_plan(&[BotId(1)]);
+        assert_eq!(net.len(), 113, "one bot's rung-1 action count");
+        assert_eq!(plan.makespan, 46446, "one bot's rung-1 makespan");
+        assert!(
+            net.actions().all(|a| net
+                .chain_of(a.id)
+                .and_then(|c| net.owner_of(c))
+                .is_none_or(|owner| owner == BotId(1))),
+            "a roster of one has no other bot to own anything"
+        );
+    }
+
+    /// **How sizing and binding are kept in agreement**, asserted on the
+    /// network rather than argued in a comment.
+    ///
+    /// Every chain this plan opens has an owner, and every action in it is
+    /// that owner's. A supplier's furnace block is sized against
+    /// `Holder::Share(supplier)` (`smelt_steps` states it so) and
+    /// [`Step::Owned`] binds the chain it opens to that same bot
+    /// (`run_steps` calls `set_chain_owner` unconditionally), so the two are
+    /// read off one value and cannot drift — the same construction
+    /// `pick_chain_actor` documents for the top-level chain.
+    #[test]
+    fn every_chain_of_a_rung_one_plan_is_owned_and_runs_where_it_was_sized() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let (_, net, plan) = rung_one_plan(&bots);
+
+        let mut placements_off_the_taker = 0usize;
+        for step in &plan.steps {
+            let StepKind::Act { action, .. } = step.what else {
+                continue;
+            };
+            let Some(chain) = net.chain_of(action) else {
+                continue;
+            };
+            let Some(owner) = net.owner_of(chain) else {
+                continue;
+            };
+            assert_eq!(
+                owner, step.bot,
+                "{:?} ran on {:?} but its chain is owned by {owner:?}",
+                action, step.bot
+            );
+            let Some(act) = net.action(action) else {
+                continue;
+            };
+            if matches!(&act.kind, ActionKind::Place { entity } if entity.name == "stone-furnace")
+                && owner != BotId(1)
+            {
+                placements_off_the_taker += 1;
+            }
+        }
+        assert!(
+            placements_off_the_taker > 0,
+            "R3's whole mechanism is a furnace placed inside the chain owner's \
+             plan by a different bot; none was"
+        );
+    }
+
+    /// **The dropped cross-chain edge this change had to find.**
+    ///
+    /// A furnace starts when the last of its ore and its fuel lands. While the
+    /// fuel load sat one action behind the ore insert on one serial timeline,
+    /// charging it no lag understated the wait by a single transfer. Hand the
+    /// fuel to another bot and nothing bounds the gap at all, so the take has
+    /// to wait `smelt_lag` from the fuel as well — `infer_edges` cannot supply
+    /// this, because it infers *edges* and never a lag.
+    #[test]
+    fn a_handed_fuel_load_gates_the_take_by_the_whole_smelting_time() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let (_, net, _) = rung_one_plan(&bots);
+
+        let fuels: BTreeSet<ActionId> = net
+            .actions()
+            .filter(|a| a.label.starts_with("fuel the furnace"))
+            .map(|a| a.id)
+            .collect();
+        let mut checked = 0usize;
+        for take in net.actions().filter(|a| a.label.starts_with("take ")) {
+            for (from, lag) in net.preds(take.id) {
+                if !fuels.contains(&from) {
+                    continue;
+                }
+                let same_chain = net.chain_of(from) == net.chain_of(take.id);
+                if same_chain {
+                    continue;
+                }
+                assert!(
+                    lag > 0,
+                    "the take `{}` waits on a fuel load in another chain with no \
+                     lag: the furnace had not begun to smelt",
+                    take.label
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 0,
+            "no handed fuel load reached a take; this test stopped testing anything"
         );
     }
 }

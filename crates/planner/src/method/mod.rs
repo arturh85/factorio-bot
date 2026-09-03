@@ -1692,14 +1692,39 @@ mod tests {
         );
         assert_eq!(solo.len(), 113, "one bot's rung-1 step count");
 
-        // The defect, stated as the property it breaks. Four bots plan the
-        // same *bill* as one -- they may split it differently and they may
+        // The defect, stated as the property it breaks. Four bots dig no more
+        // than one bot does -- they may split it differently and they may
         // schedule it differently, but there is no more ore in the ground to
         // dig for the same ten science packs.
+        //
+        // **Item by item, and no longer an equality.** R3 made the fleet's
+        // bill genuinely *smaller* than the solo bot's: `smelt_steps` hands a
+        // furnace it would have had to build to another bot, and every bot in
+        // this fixture starts holding one (freeplay's seed), so three furnaces
+        // now come out of pockets a single-bot plan can never reach. Fifteen
+        // stone, exactly -- 50 for one bot, 35 for four. Loosening the
+        // assertion to `<=` would let the original duplication back in on a
+        // *different* item, so both halves are asserted: no item exceeds the
+        // solo bill, and the whole fleet bill is pinned.
+        for (item, count) in mined(&solo) {
+            let fleet_count = mined(&fleet).get(&item).copied().unwrap_or(0);
+            assert!(
+                fleet_count <= count,
+                "four bots must not dig more {item} than one bot does for the \
+                 same goal: {fleet_count} against {count}"
+            );
+        }
         assert_eq!(
             mined(&fleet),
-            mined(&solo),
-            "four bots must dig exactly what one bot digs for the same goal"
+            BTreeMap::from([
+                ("coal".to_string(), 29),
+                ("copper-ore".to_string(), 29),
+                ("iron-ore".to_string(), 41),
+                // Fifteen below the solo bill: three of R3's supplier-owned
+                // furnaces come out of bots 2-4's starting inventory.
+                ("stone".to_string(), 35),
+            ]),
+            "four bots' rung-1 bill"
         );
     }
 

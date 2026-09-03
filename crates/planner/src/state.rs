@@ -690,6 +690,26 @@ pub struct PlanState {
     /// tile the moment a *distance* is measured to it — which
     /// [`PlanState::is_resource_crowded`] does.
     claimed: BTreeMap<Pos, MiningClaim>,
+    /// Machines this plan has already committed a batch of work to.
+    ///
+    /// The entity-side twin of [`claimed`](PlanState#structfield.claimed), and
+    /// it exists for the same reason. A furnace is a *serial* machine with one
+    /// source slot and one result slot: two smelts that both load it are two
+    /// batches queued behind each other, and each of them models its own wait
+    /// as though it had the furnace to itself. For two different ores it is
+    /// worse than a bad estimate — a furnace holding iron ore refuses copper —
+    /// and the plan would still validate, still schedule, and fail in the game.
+    ///
+    /// So a furnace a smelt adopts, or places for itself, is committed **whole
+    /// for the whole plan**, exactly as a mining claim commits a tile whole.
+    /// The cost is that a later smelt in the *same* plan re-places rather than
+    /// reuses; the benefit lands on the next plan, which sees the furnaces the
+    /// last one really built standing and uncommitted. Over-building rather
+    /// than over-claiming is the direction this crate takes everywhere.
+    ///
+    /// Keyed by `Pos`, which floors — sound here because every entry is an
+    /// entity position tested only for equality, never for distance.
+    committed_machines: BTreeSet<Pos>,
     /// Whose serial timeline a claim made **now** sits on, and whose timeline
     /// a crowding question is being asked *for*.
     ///
@@ -1196,6 +1216,7 @@ impl PlanState {
             removed: Default::default(),
             consumed: Default::default(),
             claimed: Default::default(),
+            committed_machines: Default::default(),
             claim_runner: None,
             force,
             researched: Default::default(),
@@ -1470,6 +1491,19 @@ impl PlanState {
     /// nothing to withdraw, which is all of them until a caller refreshes.
     pub fn has_buffers(&self) -> bool {
         !self.buffers.is_empty()
+    }
+
+    /// Is anything at all still sitting in the buffer on `position`'s tile?
+    ///
+    /// The item-blind form of [`PlanState::buffered`], for a caller asking
+    /// whether a machine is *idle* rather than whether it holds some
+    /// particular thing — a furnace with five plates in its result slot is
+    /// spoken for whatever those plates are, because `Withdraw` may already
+    /// have planned to take them.
+    pub fn holds_buffer(&self, position: &Position) -> bool {
+        self.buffers
+            .get(&Pos::from(position))
+            .is_some_and(|buffer| buffer.contents.values().any(|count| *count > 0))
     }
 
     /// How much of `item` the buffer standing on `position`'s tile still
@@ -2921,6 +2955,26 @@ impl PlanState {
     /// [`claim_runner`](PlanState#structfield.claim_runner).
     pub fn claim_runner(&self) -> Option<ClaimRunner> {
         self.claim_runner
+    }
+
+    /// Has this plan already committed a batch of work to the machine at
+    /// `position`? See
+    /// [`committed_machines`](PlanState#structfield.committed_machines).
+    ///
+    /// Asked by *selection* — which standing furnace a smelt may adopt — and
+    /// by nothing physical. `Condition::EntityAt` still reports what stands,
+    /// because a commitment is a fact about this plan, not about the world the
+    /// executor will meet, the same boundary
+    /// [`PlanState::resource_unclaimed`] draws.
+    pub fn machine_committed(&self, position: &Position) -> bool {
+        self.committed_machines.contains(&Pos::from(position))
+    }
+
+    /// Commit the machine at `position` to this plan, so no later method
+    /// adopts it as idle. Committing one twice is a no-op, not an error: a
+    /// method that sites a bank re-commits its own members on a replan.
+    pub fn commit_machine(&mut self, position: &Position) {
+        self.committed_machines.insert(Pos::from(position));
     }
 
     /// Bind claims made from here on to `runner`'s timeline, and answer

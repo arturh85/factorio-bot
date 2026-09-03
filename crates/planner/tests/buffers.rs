@@ -213,15 +213,26 @@ fn two_goals_cannot_both_spend_the_same_plates() {
             },
         ])],
     );
-    // Removes from *that furnace*, not every remove in the plan: the second
-    // goal legitimately smelts its own shortfall and takes those plates out of
-    // a furnace of its own, which is a different entity at a different tile.
+    // Withdrawals from *that furnace*, and only withdrawals — the ones
+    // carrying `Effect::BufferLose`, which is what spends the overlay.
+    //
+    // **Not every remove at that tile**, which is what this counted until
+    // `Smelt` learned to adopt a furnace that already stands. The second goal
+    // legitimately smelts its own shortfall, and it may now do so *in this
+    // furnace*: it loads ore and takes five plates it made itself. Ten plates
+    // leave the tile and both takes are honest, because ten plates were there
+    // to take — five left over and five smelted. Counting removes by tile
+    // could not tell those apart, and the invariant was never about the tile.
     let taken: u32 = net
         .actions()
+        .filter(|a| {
+            a.eff.iter().any(|e| {
+                matches!(e, factorio_bot_planner::action::Effect::BufferLose { pos, .. }
+                    if pos.x == FURNACE.x && pos.y == FURNACE.y)
+            })
+        })
         .filter_map(|a| match &a.kind {
-            ActionKind::Remove {
-                item, count, pos, ..
-            } if item == "iron-plate" && pos.x == FURNACE.x && pos.y == FURNACE.y => Some(*count),
+            ActionKind::Remove { item, count, .. } if item == "iron-plate" => Some(*count),
             _ => None,
         })
         .sum();

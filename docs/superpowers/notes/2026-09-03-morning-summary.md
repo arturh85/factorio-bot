@@ -193,6 +193,23 @@ had 6. Something re-seeded it in between and I could not attribute it. What is
 not in doubt is that run 4's *game* had the old mod — Factorio loads mods at
 server start, and the game itself raised the missing-function error.
 
+## The walk refusal reproduces to the decimal place — so the fix is checkable
+
+Run 10 produced a **seventh** sub-tile refusal, and it is **byte-identical to
+run 9's**: same start `(-28.6640625, -26.8046875)`, same destination
+`(-28.5, -27.5)`. Three independent runs (8, 9, 10) refuse the same destination;
+two of them from the same start to the last decimal.
+
+Two things follow, and both are useful:
+
+1. **The planner really is deterministic run-to-run in the game, not just in
+   tests.** Identical worlds produce identical plans producing identical walks.
+2. **The `min_radius` fix is trivially verifiable.** It is not "does the failure
+   stop appearing eventually" — it is "does *this* walk, from that start to that
+   destination, succeed". A named coordinate to check against is worth more than
+   any amount of after-the-fact log reading, and this project has spent a whole
+   night on the difference.
+
 ## Plant adoption: both call sites asked the wrong question (fixed, `e5402fd8`)
 
 **Both places that need power asked "is there supply within 64 tiles *of the

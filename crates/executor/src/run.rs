@@ -320,7 +320,8 @@ async fn run_bot_signalled(
                 }
             }
             StepKind::Act { action, .. } => {
-                if let PredOutcome::Abandoned = await_preds(act, net, *action, receivers).await {
+                if let PredOutcome::Abandoned = await_preds(act, net, *action, log, receivers).await
+                {
                     abandon_rest(&mine[i..], senders);
                     return;
                 }
@@ -441,9 +442,10 @@ async fn await_preds(
     act: &dyn Actuator,
     net: &ActionNetwork,
     id: ActionId,
+    log: &Mutex<ExecutionLog>,
     receivers: &BTreeMap<ActionId, watch::Receiver<Status>>,
 ) -> PredOutcome {
-    let mut max_lag: Ticks = 0;
+    let mut wait = LagWait::default();
     for (pred, lag) in net.preds(id) {
         let Some(rx) = receivers.get(&pred) else {
             continue;
@@ -465,20 +467,92 @@ async fn await_preds(
                 return PredOutcome::Abandoned;
             }
         }
-        max_lag = max_lag.max(lag);
+        // Read *after* the signal, never before: the settle path writes the
+        // observation into the log and only then publishes `Success`, so a
+        // waiter that has seen `Success` is guaranteed to find the finish tick
+        // already there. Reading it any earlier would race the writer and get
+        // `None`, which this function would then quietly treat as "no clock".
+        let finished = lock(log).attempt(pred).and_then(|a| a.replied_tick);
+        wait.charge(lag, finished);
     }
 
     // A lag edge is machine time, not bot time: the furnace keeps working after
     // the bot walks away, and the plate is not there until it has. The
     // predecessor's own completion signal does not cover that wait, so honour
     // the lag once every predecessor has succeeded.
-    if max_lag > 0 {
-        wait_out_lag(act, max_lag).await;
+    if wait.owes_anything() {
+        wait_out_lag(act, wait).await;
     }
     // A predecessor's success is not the same fact as its *effect* having
     // landed. See `await_research`.
     await_research(act, net, id).await;
     PredOutcome::Ready
+}
+
+/// What this action's lag edges still owe, once every predecessor has
+/// succeeded.
+///
+/// # Why a lag is anchored to its own predecessor
+///
+/// The planner's semantics for a lag edge is
+/// `deps_ready = max over preds (finished[pred] + lag)`
+/// (`crates/planner/src/schedule.rs`), and a lag is machine time that starts
+/// running the moment the predecessor settles — the furnace begins smelting
+/// when the coal goes in, not when the bot comes back for the plates.
+///
+/// The executor used to collapse this to a single `max_lag` counted from the
+/// moment the dependent's bot *arrived*. The two agree only when the bot
+/// arrives on the exact tick its predecessor settled, and they diverge by
+/// exactly the time the bot spent doing something else in between — which is
+/// the parallelism the schedule was built to create. On
+/// `run-1788465258-49050` that cost bot 1 24,583 of its 27,853 idle ticks:
+/// 88% of its idle time was spent waiting out timers for machine time the
+/// world had already spent, with cumulative `iron-plate` production provably
+/// flat across the whole wait. See
+/// `docs/superpowers/notes/2026-09-03-the-lag-clock-starts-too-late.md`.
+///
+/// So each lag is charged against the tick *its own* predecessor finished, and
+/// only then maxed. Taking the max over lags alone and adding it to one
+/// arrival tick — what the old code did — charges an early-finishing
+/// predecessor's lag from a late-finishing predecessor's clock, which is the
+/// same defect one level down.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct LagWait {
+    /// The latest `finish(pred) + lag(pred)` over predecessors the game gave a
+    /// finish tick for. An absolute `game.tick`, directly comparable to
+    /// [`Actuator::game_tick`], and `None` when no predecessor supplied one.
+    deadline: Option<u64>,
+    /// The largest lag whose predecessor has **no** recorded finish tick — a
+    /// failure the game never stamped, a reply whose tick could not be parsed,
+    /// an actuator with no clock. There is no anchor to hang it on, so it can
+    /// only be served from now, which is the old behaviour and here is the
+    /// honest fallback rather than the rule.
+    unanchored: Ticks,
+    /// The largest lag of any predecessor, anchored or not. Used only when the
+    /// actuator cannot report a clock at all, where an absolute deadline is not
+    /// comparable to anything and this is the best claim available.
+    largest: Ticks,
+}
+
+impl LagWait {
+    /// Record one predecessor's lag against the tick that predecessor finished,
+    /// or against nothing if the game never said.
+    fn charge(&mut self, lag: Ticks, finished: Option<Ticks>) {
+        self.largest = self.largest.max(lag);
+        match finished {
+            Some(at) => {
+                let due = u64::from(at).saturating_add(u64::from(lag));
+                self.deadline = Some(self.deadline.map_or(due, |d| d.max(due)));
+            }
+            None => self.unanchored = self.unanchored.max(lag),
+        }
+    }
+
+    /// Whether any predecessor imposed a wait at all. A network with no lag
+    /// edges, or only zero-lag ones, must not cost a clock read.
+    fn owes_anything(&self) -> bool {
+        self.largest > 0
+    }
 }
 
 /// How long a dispatch may wait for a technology its own plan unlocks.
@@ -571,7 +645,20 @@ async fn await_research(act: &dyn Actuator, net: &ActionNetwork, id: ActionId) {
 /// a bot that never moves again.
 const LAG_CHASE_BUDGET: u32 = 1;
 
-/// Wait for `lag` ticks of machine time to actually pass.
+/// Wait until the machine time every lag edge names has actually passed.
+///
+/// # Which moment the clock starts from
+///
+/// The deadline is absolute and comes from [`LagWait`]: `finish(pred) + lag`,
+/// where `finish(pred)` is the `game.tick` the game reported for the
+/// predecessor's own outcome. It is emphatically **not** `now + lag`. Every
+/// tick the bot spent between its predecessor settling and arriving here — the
+/// other work the schedule gave it, and the walk that got it here — is machine
+/// time that has already elapsed, and is subtracted rather than added. A bot
+/// that arrives after the deadline waits **zero**. See [`LagWait`] for what
+/// counting from arrival cost, and note that this is what makes the
+/// walk-before-wait ordering (a `Walk` step precedes the `Act` step that waits)
+/// harmless: the walk is now spent *inside* the lag rather than before it.
 ///
 /// # The clock this reads, and the one it does not
 ///
@@ -598,20 +685,38 @@ const LAG_CHASE_BUDGET: u32 = 1;
 /// An actuator with no clock ([`Actuator::game_tick`] returning `None`) keeps
 /// the old wall-clock wait, which is the honest fallback: it is the best
 /// available claim when nobody can be asked what time it is.
-async fn wait_out_lag(act: &dyn Actuator, lag: Ticks) {
+async fn wait_out_lag(act: &dyn Actuator, wait: LagWait) {
     // A speed the actuator cannot report falls back to normal speed rather
     // than aborting the run over a missing nicety: a wrong-but-finite wait is
     // recoverable (recovery re-checks preconditions before dispatching the
     // next action), a hung run is not. It is only an estimate now either way.
     let speed = act.game_speed().await.unwrap_or(1.0);
     let Some(started) = act.game_tick().await.ok().flatten() else {
-        tokio::time::sleep(ticks_to_wall_clock(lag, speed)).await;
+        // No clock: an absolute deadline is a number with nothing to compare
+        // it against, so this falls all the way back to the arrival-based
+        // wait. It is the old behaviour and it is wrong in the same way, but
+        // it is the only claim available and it errs towards waiting.
+        tokio::time::sleep(ticks_to_wall_clock(wait.largest, speed)).await;
         return;
     };
-    let deadline = started.saturating_add(u64::from(lag));
+    // Anchored edges bring their own deadline; unanchored ones can only be
+    // served from now. Whichever is later governs.
+    let deadline = wait
+        .deadline
+        .unwrap_or(started)
+        .max(started.saturating_add(u64::from(wait.unanchored)));
 
-    let mut estimate = lag;
-    let mut budget = lag.saturating_mul(LAG_CHASE_BUDGET);
+    // The whole point of the change: what is owed is what is *left*, and a bot
+    // that arrived after the deadline owes nothing and dispatches at once.
+    let owed = deadline.saturating_sub(started);
+    if owed == 0 {
+        return;
+    }
+    // The budget is a multiple of the wait actually being served, not of the
+    // raw lag: a bot arriving with 200 of a 12,240-tick lag still to run gets
+    // 200 ticks of chase, not 12,240.
+    let mut estimate = u32::try_from(owed).unwrap_or(Ticks::MAX);
+    let mut budget = estimate.saturating_mul(LAG_CHASE_BUDGET);
     loop {
         tokio::time::sleep(ticks_to_wall_clock(estimate, speed)).await;
         // A clock that stops answering mid-wait leaves us with the wait we
@@ -895,6 +1000,44 @@ mod tests {
         (net, sched)
     }
 
+    fn third_action_id() -> ActionId {
+        ActionId(2)
+    }
+
+    /// Two predecessors whose lags belong to two different clocks.
+    ///
+    /// Action 0 (bot 0) settles immediately and carries `early_lag`; action 1
+    /// (bot 1) is whatever the script makes it and carries `late_lag`; action 2
+    /// (bot 2) waits on both and has nothing else to do, so it arrives the
+    /// instant the second of them settles.
+    ///
+    /// The point is that `early_lag` and `late_lag` are anchored to *different*
+    /// finish ticks. Any implementation that collapses the two lags before
+    /// pairing each with its own predecessor — `max(finish) + max(lag)`, or the
+    /// original `arrival + max(lag)` — gets a different answer from
+    /// `max(finish(pred) + lag(pred))`, which is the planner's.
+    fn two_pred_fixture(early_lag: Ticks, late_lag: Ticks) -> (ActionNetwork, Schedule) {
+        let mut net = ActionNetwork::new();
+        net.add(mine_of(first_action_id(), "iron-ore"));
+        net.add(mine_of(second_action_id(), "copper-ore"));
+        net.add(mine_of(third_action_id(), "coal"));
+        net.link(first_action_id(), third_action_id(), early_lag);
+        net.link(second_action_id(), third_action_id(), late_lag);
+
+        let sched = Schedule {
+            steps: vec![
+                walk_step(BotId(0), 0, 60),
+                act_step(first_action_id(), BotId(0), 60, 120),
+                walk_step(BotId(1), 0, 60),
+                act_step(second_action_id(), BotId(1), 60, 120),
+                walk_step(BotId(2), 0, 60),
+                act_step(third_action_id(), BotId(2), 120, 180),
+            ],
+            makespan: 180,
+        };
+        (net, sched)
+    }
+
     /// The shape run 30's milestone 6 had: a craft whose recipe a technology
     /// unlocks, ordered behind the craft that triggers that technology.
     ///
@@ -1108,11 +1251,39 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(ms)).await;
             }
         }
+
+        /// The tick this actuator's own clock reads, or `None` when the script
+        /// gives it no clock.
+        fn tick_now(&self) -> Option<u64> {
+            self.script
+                .ticks_per_second
+                .map(|rate| (self.origin.elapsed().as_secs_f64() * rate) as u64)
+        }
+
+        /// What a dispatch reports as having happened *now*.
+        ///
+        /// With a clock, both halves are read off that same clock, so the
+        /// finish tick a predecessor writes into the log and the tick
+        /// `wait_out_lag` later compares it against come from one source. They
+        /// used to not: every dispatch reported the fixed [`some_ticks`] pair
+        /// while `game_tick` counted from zero, which is harmless for a wait
+        /// measured from arrival and nonsense for one measured from a
+        /// predecessor's finish.
+        ///
+        /// With no clock it stays [`some_ticks`], which is what every test
+        /// written before this existed sees.
+        fn ticks_now(&self) -> ActionTicks {
+            match self.tick_now() {
+                Some(t) => ActionTicks::new(Some(t), Some(t)),
+                None => some_ticks(),
+            }
+        }
     }
 
-    /// Reports [`some_ticks`] for every dispatch. The numbers are far outside
-    /// anything these fixtures schedule, so a test can tell an observation from
-    /// a plan value without knowing the schedule.
+    /// Reports [`RecordingAct::ticks_now`] for every dispatch: the script's own
+    /// clock when it has one, and otherwise [`some_ticks`], whose numbers are
+    /// far outside anything these fixtures schedule so a test can tell an
+    /// observation from a plan value without knowing the schedule.
     #[async_trait::async_trait]
     impl Actuator for RecordingAct {
         async fn walk(
@@ -1127,7 +1298,7 @@ mod tests {
             if self.script.fail_walk.contains(&bot) {
                 return Err(ActuatorError::Rejected("blocked".into()).into());
             }
-            Ok(some_ticks())
+            Ok(self.ticks_now())
         }
 
         async fn mine(
@@ -1138,12 +1309,20 @@ mod tests {
             _count: u32,
         ) -> Result<ActionTicks, ActuatorFailure> {
             self.record(Dispatch::MineStart(item.to_string()));
+            let dispatched = self.tick_now();
             Self::delay(self.script.mine_delay_ms.get(item).copied().unwrap_or(0)).await;
             self.record(Dispatch::MineEnd(item.to_string()));
             if self.script.fail_mine.contains(item) {
                 return Err(ActuatorError::Rejected("no ore".into()).into());
             }
-            Ok(some_ticks())
+            // A mine that took time reports the tick it started and the tick
+            // it finished, not one tick twice: this is the only fixture verb
+            // whose dispatch and reply can be far apart, and a lag edge behind
+            // it is anchored to the *reply*.
+            Ok(match (dispatched, self.tick_now()) {
+                (Some(from), Some(to)) => ActionTicks::new(Some(from), Some(to)),
+                _ => some_ticks(),
+            })
         }
 
         async fn craft(
@@ -1157,7 +1336,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((recipe.to_string(), asked));
-            Ok(some_ticks())
+            Ok(self.ticks_now())
         }
 
         async fn place(
@@ -1167,7 +1346,7 @@ mod tests {
             _at: Position,
             _direction: u8,
         ) -> Result<ActionTicks, ActuatorFailure> {
-            Ok(some_ticks())
+            Ok(self.ticks_now())
         }
 
         async fn insert(
@@ -1180,9 +1359,9 @@ mod tests {
             _count: u32,
         ) -> Result<ActionTicks, ActuatorFailure> {
             if let Some(why) = &self.script.fail_insert {
-                return Err(ActuatorError::Rejected(why.clone()).at(some_ticks()));
+                return Err(ActuatorError::Rejected(why.clone()).at(self.ticks_now()));
             }
-            Ok(some_ticks())
+            Ok(self.ticks_now())
         }
 
         async fn remove(
@@ -1194,11 +1373,11 @@ mod tests {
             _item: &str,
             _count: u32,
         ) -> Result<ActionTicks, ActuatorFailure> {
-            Ok(some_ticks())
+            Ok(self.ticks_now())
         }
 
         async fn research(&self, _tech: &str) -> Result<ActionTicks, ActuatorFailure> {
-            Ok(some_ticks())
+            Ok(self.ticks_now())
         }
 
         async fn set_recipe(
@@ -1208,7 +1387,7 @@ mod tests {
             _at: Position,
             _recipe: &str,
         ) -> Result<ActionTicks, ActuatorFailure> {
-            Ok(some_ticks())
+            Ok(self.ticks_now())
         }
 
         async fn game_speed(&self) -> Result<f64, ActuatorError> {
@@ -1223,10 +1402,7 @@ mod tests {
         /// no test that derives the tick from the sleep it just did can tell
         /// the two apart.
         async fn game_tick(&self) -> Result<Option<u64>, ActuatorError> {
-            let Some(rate) = self.script.ticks_per_second else {
-                return Ok(None);
-            };
-            Ok(Some((self.origin.elapsed().as_secs_f64() * rate) as u64))
+            Ok(self.tick_now())
         }
 
         /// Answers `Some(false)` until it has been asked
@@ -2075,6 +2251,141 @@ mod tests {
             gap <= Duration::from_millis(2_100),
             "LAG_CHASE_BUDGET caps the chase at one extra estimate, so this \
              may not exceed ~2x the 1s estimate: got {gap:?}"
+        );
+    }
+
+    // ------------------------------------- where the lag clock starts from
+    //
+    // The four tests above pin the *duration* of a lag wait. These pin its
+    // *origin*, which is what `run-1788465258-49050` proved nothing was
+    // holding: `cross_bot_fixture` with no delays has the dependent bot arrive
+    // on the exact tick its predecessor settled, so arrival-based and
+    // finish-based timing produce identical numbers there and a wait counted
+    // from the wrong moment passes every one of them.
+    //
+    // All three run at 60 ticks/second, so a tick is a millisecond of virtual
+    // wall clock at 1/60th scale and the arithmetic below is exact rather than
+    // approximate: under `start_paused` tokio advances straight to each timer.
+
+    /// 60 ticks per second — a game keeping up exactly, so `n` ticks is `n/60`
+    /// seconds and every deadline in these three tests is a round number.
+    fn on_time_clock() -> Script {
+        Script {
+            ticks_per_second: Some(60.0),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_lag_clock_starts_when_the_predecessor_finished_not_when_the_bot_arrived() {
+        // 600 ticks (10 s) of machine time, and a bot that spends 4 s of it
+        // walking to the site — which is exactly what the schedule intends a
+        // lag to be overlapped with. The furnace started when the coal went
+        // in, not when the bot came back, so 240 of the 600 ticks are already
+        // spent on arrival and only 360 are owed.
+        //
+        // Counting from arrival instead dispatches at 14 s and calls the extra
+        // 4 s machine time. It is not: nothing is running that was not already
+        // running, so those 4 s are the parallelism the schedule created being
+        // handed straight back.
+        let script = Script {
+            walk_delay_ms: [(BotId(1), 4_000)].into_iter().collect(),
+            ..on_time_clock()
+        };
+        let act = RecordingAct::new(script);
+        let (net, sched) = cross_bot_fixture(600);
+        within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
+
+        let iron = act.mine_started_at("iron-ore").expect("iron-ore mined");
+        let copper = act.mine_started_at("copper-ore").expect("copper-ore mined");
+        assert_eq!(iron, Duration::ZERO, "the predecessor settles at tick 0");
+        // The whole assertion, and it is arithmetic rather than an inequality:
+        // 600 ticks after the predecessor finished, not 600 after the bot got
+        // there. "Waits less than before" would also be satisfied by shaving an
+        // arbitrary amount off, which is why the number is pinned.
+        assert!(
+            (Duration::from_millis(9_950)..=Duration::from_millis(10_050)).contains(&copper),
+            "the take is due 600 ticks after the predecessor settled at tick 0, \
+             i.e. at 10s; dispatching at {copper:?} means the lag was counted \
+             from somewhere else (4s walk + 10s lag = 14s is the arrival-based \
+             answer)"
+        );
+        // And the part of the lag that had *not* elapsed is still served: a
+        // fix that simply stopped waiting would pass the bound above only by
+        // accident of these numbers, and would dispatch at 4s.
+        assert!(
+            copper > Duration::from_millis(4_000),
+            "the 360 ticks still owed on arrival must still be waited out, \
+             but the take went out at {copper:?}, which is when the bot arrived"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_bot_arriving_after_the_deadline_waits_not_at_all() {
+        // The live case from `run-1788465258-49050`. Bot 1 reached the cell
+        // 5,131 ticks *after* the plates were due and then waited the full
+        // 12,240 ticks over again, standing still next to a fuel-exhausted
+        // furnace while cumulative iron-plate production stayed flat.
+        //
+        // Here: a 600-tick lag and a 12 s (720-tick) walk. The deadline passed
+        // 120 ticks before the bot arrived, so the correct wait is zero and the
+        // take goes out the moment the walk returns.
+        let script = Script {
+            walk_delay_ms: [(BotId(1), 12_000)].into_iter().collect(),
+            ..on_time_clock()
+        };
+        let act = RecordingAct::new(script);
+        let (net, sched) = cross_bot_fixture(600);
+        within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
+
+        let copper = act.mine_started_at("copper-ore").expect("copper-ore mined");
+        assert!(
+            copper < Duration::from_millis(12_050),
+            "the deadline (tick 600) had passed 120 ticks before the bot \
+             arrived (tick 720), so the correct wait is zero and the take is \
+             due at 12s; it went out at {copper:?}, which is a second, \
+             redundant lag for machine time already spent"
+        );
+        assert!(
+            copper >= Duration::from_millis(12_000),
+            "the take cannot precede the walk that gets the bot there: {copper:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn each_lag_is_charged_to_the_predecessor_it_belongs_to() {
+        // `await_preds` used to collapse the lags of all predecessors into one
+        // `max_lag` before waiting, which loses which predecessor each lag came
+        // from. That is harmless when the wait starts at arrival — there is
+        // only one clock then — and wrong the moment each lag is anchored to
+        // its own predecessor's finish tick.
+        //
+        // Action 2 waits on action 0 (settles at tick 0, lag 900 -> due 900)
+        // and action 1 (settles at tick 540, lag 60 -> due 600). The planner's
+        // answer is max(900, 600) = 900, i.e. 15s. Every collapsing variant
+        // gives something else: max(finish) + max(lag) = 1440 (24s), the old
+        // arrival + max(lag) = 1440 (24s), and max(finish) + min(lag) = 600
+        // (10s). Only the correct pairing lands on 15s.
+        let script = Script {
+            mine_delay_ms: [("copper-ore".to_string(), 9_000)].into_iter().collect(),
+            ..on_time_clock()
+        };
+        let act = RecordingAct::new(script);
+        let (net, sched) = two_pred_fixture(900, 60);
+        within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
+
+        let coal = act.mine_started_at("coal").expect("coal mined");
+        assert!(
+            (Duration::from_millis(14_950)..=Duration::from_millis(15_050)).contains(&coal),
+            "action 2 is due at max(0 + 900, 540 + 60) = tick 900, i.e. 15s; \
+             {coal:?} means the lags were maxed before being paired with the \
+             predecessors they belong to"
         );
     }
 

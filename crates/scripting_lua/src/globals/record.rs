@@ -17,13 +17,14 @@ use super::position_from_lua;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::parking_lot::Mutex;
+use factorio_bot_core::process::instance_setup::{installed_factorio_version, read_map_gen_seed};
 use factorio_bot_core::record::map::{
     Divergence, EntitySnapshot, MapKind, MapRecord, Placement, bounds_around, divergence_between,
 };
 use factorio_bot_core::record::video::Resolution;
 use factorio_bot_core::record::{
-    ActionFailure, EventKind, FailureKind, PlannedStep, RunRecorder, SatisfiedReason, VideoOptions,
-    VideoRecorder, WalkFailure, WalkFailureKind,
+    ActionFailure, EventKind, FailureKind, PlannedStep, Provenance, RunRecorder, SatisfiedReason,
+    VideoOptions, VideoRecorder, WalkFailure, WalkFailureKind, git_provenance,
 };
 use factorio_bot_core::types::{AreaFilter, EntityType, PlayerId, Position, Rect};
 use std::collections::BTreeSet;
@@ -877,15 +878,91 @@ end
                     // the archive current between milestone boundaries, which
                     // are as far apart as a milestone is long.
                     recorder.watch_samples(workspace.as_path());
+
+                    // Provenance, written before the first event and before
+                    // anything below can fail.
+                    //
+                    // `seed`, `factorio` and `git` are three fields that have
+                    // existed on `run_started` since it was introduced and were
+                    // hardcoded `None` here the whole time -- all 24 archived
+                    // runs carry `seed: null, factorio: null, git: null`, so no
+                    // archived run can be attributed to a map or to a commit.
+                    // This is where that stops.
+                    //
+                    // The server instance directory is `<workspace>/server`,
+                    // the default `instance_name` every CLI path uses
+                    // (`process_control.rs`). A workspace set up under another
+                    // name reads as "seed unknown", which is true of it.
+                    let instance = workspace.join("server");
+                    let seed = read_map_gen_seed(&instance);
+                    let factorio = installed_factorio_version(&workspace.join("data"));
+                    // The working tree of the process's own directory. See
+                    // `GitProvenance`: this is where the code is *now*, which
+                    // is what built the binary only if nobody has moved since,
+                    // and `dirty` is what stops that being read as an identity.
+                    let git = std::env::current_dir()
+                        .ok()
+                        .and_then(|cwd| git_provenance(&cwd));
+                    let provenance = Provenance {
+                        schema: Provenance::SCHEMA,
+                        run_id: run_id.clone(),
+                        started_unix: recorder.started_unix(),
+                        started_tick: opened_at,
+                        seed: seed.clone(),
+                        map_exchange_string: std::fs::read_to_string(
+                            instance.join("map-exchange-string.txt"),
+                        )
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty()),
+                        map: world.entity_graph.resource_fingerprint(),
+                        factorio: factorio.clone(),
+                        git: git.clone(),
+                        profile: if cfg!(debug_assertions) {
+                            "debug".to_string()
+                        } else {
+                            "release".to_string()
+                        },
+                        roster_requested: bots.clone(),
+                        workspace: workspace
+                            .canonicalize()
+                            .ok()
+                            .map(|p| p.to_string_lossy().into_owned()),
+                        // Nothing resumes from a save yet.
+                        resumed_from: None,
+                    };
+                    // Never fatal. A run that cannot write its provenance is
+                    // still a run worth recording, and the reader's rule is
+                    // that an absent file means "unknown" -- which is exactly
+                    // what this failure leaves behind, honestly.
+                    if let Err(error) = recorder.record_provenance(&provenance) {
+                        factorio_bot_core::tracing::warn!(
+                            %error,
+                            "could not write provenance.json; this run will not be \
+                             attributable to a map or a commit"
+                        );
+                    }
+
                     recorder
                         .record(
                             opened_at,
                             EventKind::RunStarted {
                                 run_id: run_id.clone(),
                                 bots,
-                                seed: None,
-                                factorio: None,
-                                git: None,
+                                // The event carries the seed as a number
+                                // because it always has. A seed that does not
+                                // parse stays `None` here and survives in full
+                                // in `provenance.json`, rather than being
+                                // rounded into something that looks like data.
+                                seed: seed.as_deref().and_then(|s| s.parse::<u64>().ok()),
+                                factorio,
+                                git: git.map(|g| {
+                                    if g.dirty {
+                                        format!("{}-dirty", g.commit)
+                                    } else {
+                                        g.commit
+                                    }
+                                }),
                             },
                         )
                         .map_err(record_error)?;

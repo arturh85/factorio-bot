@@ -18,11 +18,13 @@ use crate::types::Position;
 
 pub mod lanes;
 pub mod map;
+pub mod provenance;
 pub mod retention;
 pub mod samples;
 pub mod splits;
 pub mod video;
 pub use lanes::{Lane, derive_lanes};
+pub use provenance::{GitProvenance, PROVENANCE_FILE, Provenance, git_provenance, read_provenance};
 pub use retention::{DEFAULT_KEEP, KEEP_MARKER, Reaped, reap};
 pub use samples::{
     BotSample, IngestProgress, MachineSample, NetworkPower, PowerSample, ProductionSample,
@@ -1070,6 +1072,31 @@ impl RunRecorder {
     /// samples the mod had already written.
     pub fn watch_samples(&mut self, workspace: impl Into<PathBuf>) {
         self.samples_workspace = Some(workspace.into());
+    }
+
+    /// Writes `provenance.json` -- what this run was launched with.
+    ///
+    /// Call this once, immediately after [`RunRecorder::start`], before
+    /// anything that can fail. That timing is the whole design: `manifest.json`
+    /// is written in [`RunRecorder::finish`] and so exists only for runs that
+    /// finished, and of the 24 runs archived when this was added, nine had no
+    /// manifest at all -- the killed and crashed ones, which are exactly the
+    /// runs whose identity someone later needs. See [`provenance`].
+    ///
+    /// Written once and never rewritten. Everything in it describes what was
+    /// launched, so no later moment knows any of it better, and a file updated
+    /// at finish would lose both halves to a process killed mid-rewrite.
+    pub fn record_provenance(&self, provenance: &Provenance) -> io::Result<()> {
+        fs::write(
+            self.dir.join(provenance::PROVENANCE_FILE),
+            serde_json::to_vec_pretty(provenance).map_err(io::Error::other)?,
+        )
+    }
+
+    /// The `started_unix` this recorder stamped, so a caller building a
+    /// [`Provenance`] states the same instant the manifest will.
+    pub fn started_unix(&self) -> u64 {
+        self.started_unix
     }
 
     /// Ingests samples if the run has advanced far enough since the last time,

@@ -55,6 +55,20 @@ pub enum ResourceDepletion {
     Exhausted,
 }
 
+/// What [`EntityGraph::resource_fingerprint`] found: an identity for the map,
+/// and the human-readable counts behind it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceFingerprint {
+    /// FNV-1a over every charted resource tile, sorted by name and position.
+    /// Equal digests mean the same map; unequal digests mean **unknown**, since
+    /// charting grows as bots explore. See the method's own documentation.
+    pub digest: String,
+    /// How many tiles of each resource were charted, by name. This is the half
+    /// a person reads: "one map had coal and the other did not" is visible here
+    /// and nowhere else in a run record.
+    pub tiles: BTreeMap<String, usize>,
+}
+
 pub struct EntityGraph {
     entity_graph: RwLock<EntityGraphInner>,
     blocked_tree: RwLock<BlockedQuadTree>,
@@ -733,6 +747,80 @@ impl EntityGraph {
         self.resources
             .get(resource_name)
             .is_some_and(|tiles| !tiles.is_empty())
+    }
+
+    /// A stable identity for the **map**, derived from every charted resource
+    /// tile.
+    ///
+    /// # Why this exists
+    ///
+    /// Two runs are only comparable if they ran on the same map, and until
+    /// 2026-09-03 nothing recorded which map a run used. `--seed` is the
+    /// control that would answer it going forward, but it cannot answer it for
+    /// a map that already exists: every one of the 24 archived runs was made on
+    /// a `level.zip` whose seed nobody wrote down, and no amount of later
+    /// carefulness recovers it. This is the one identity that can still be
+    /// computed from such a map -- it reads what is there rather than what was
+    /// asked for.
+    ///
+    /// It is also the difference that actually mattered. The retracted "four
+    /// bots do double the work of one" compared two runs whose maps differed by
+    /// a resource patch about 100 tiles east; that shows up here as a different
+    /// digest and a different tile count, and in nothing else the record keeps.
+    ///
+    /// # What it can and cannot conclude
+    ///
+    /// **A matching digest means the same map. A differing digest means
+    /// `unknown`, not "a different map".** The resource table holds *charted*
+    /// tiles, and charting grows as bots walk around, so the same map read at
+    /// two different moments legitimately gives two digests. Taken at the start
+    /// of a run the charted area is essentially the generated spawn region and
+    /// two runs on one map agree, but that is a strong tendency rather than a
+    /// guarantee, and a comparison tool must treat a mismatch as inconclusive
+    /// in the same way [`crate::record`] treats a missing run id as unknown.
+    ///
+    /// Returns `None` when nothing is charted at all, which is a world that has
+    /// not been read yet rather than a map with no ore.
+    pub fn resource_fingerprint(&self) -> Option<ResourceFingerprint> {
+        // Sorted by name, and each name's tiles already sorted: `resources` is
+        // a `DashMap` (iteration order is not stable) of `BTreeMap` (which is).
+        // Collecting into a `BTreeMap` here is what makes the digest a property
+        // of the map rather than of this process's allocator.
+        let mut tiles: BTreeMap<String, Vec<Pos>> = BTreeMap::new();
+        for entry in self.resources.iter() {
+            if entry.value().is_empty() {
+                continue;
+            }
+            tiles.insert(entry.key().clone(), entry.value().keys().cloned().collect());
+        }
+        if tiles.is_empty() {
+            return None;
+        }
+        // FNV-1a, written out rather than taken from `DefaultHasher`, whose
+        // output std explicitly does not promise to keep stable across
+        // releases. A fingerprint that changes when the toolchain changes would
+        // report every run as a different map after an upgrade -- the exact
+        // false negative this is meant to remove.
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut feed = |bytes: &[u8]| {
+            for byte in bytes {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x100_0000_01b3);
+            }
+        };
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for (name, positions) in &tiles {
+            feed(name.as_bytes());
+            for pos in positions {
+                feed(&pos.0.to_le_bytes());
+                feed(&pos.1.to_le_bytes());
+            }
+            counts.insert(name.clone(), positions.len());
+        }
+        Some(ResourceFingerprint {
+            digest: format!("{hash:016x}"),
+            tiles: counts,
+        })
     }
 
     pub fn resource_patches(&self, resource_name: &str) -> Vec<ResourcePatch> {

@@ -9,6 +9,13 @@ failures, what was built, and which bots stopped moving.
     python3 tools/run_analysis.py workspace/runs/run-1788449752-46541
     python3 tools/run_analysis.py --all --summary
     python3 tools/run_analysis.py --json workspace/runs/run-1788449752-46541
+    python3 tools/run_analysis.py --compare workspace/runs/run-A workspace/runs/run-B
+
+``--compare`` puts two runs side by side with deltas, under a comparability
+block that refuses (exit 3) when the two runs were not produced under the same
+conditions and flags every other way they might not be measuring the same
+thing. See the comment above :func:`comparability` for what it refuses and
+which wrong conclusion each guard prevents.
 
 Stdlib only, and read-only: it never writes into the run directory, so it is
 safe to point at a run that is still being written. A truncated final line is
@@ -97,6 +104,57 @@ GAP_ROWS = 20
 # by hand. Every archived run is now checked for it on every run of this tool.
 SAMPLE_COVERAGE_SLACK_TICKS = 6000
 
+# What world and what build a run came from, read from two places and merged.
+#
+# `run_started` carries `seed`, `factorio` and `git`; they are in the schema and
+# null in every one of the twenty-four archived runs. `provenance.json` beside
+# the events (`crates/core/src/record/provenance.rs`) carries the same three in
+# richer form plus the map fingerprint, the build profile, the workspace and
+# the save a run was resumed from. Both are read with `.get()`, a missing file
+# is not an error, and a missing or null field is UNKNOWN -- never a match.
+PROVENANCE_FILE = "provenance.json"
+
+# Every provenance field `--compare` knows, and what a *difference* in it means
+# when both runs recorded one. The severities are not uniform and the
+# asymmetry is the point:
+#
+# `seed`, `git`, `factorio`, `profile`, `resumed_from` -- REFUSE. Each is a
+#     difference in what was run or what it was run on, and the numbers cannot
+#     be attributed to the change under test. `resumed_from` is on this list on
+#     the record's own instruction: a resumed run begins with built furnaces
+#     and charged chests, so its timings measure a different thing, and
+#     `Some(_)` against `None` is to be treated exactly like two seeds.
+#     `profile` is here because a debug and a release build resolve mods and
+#     scripts from different places, so the same commit runs different Lua.
+#
+# `map` -- UNKNOWN, deliberately NOT a refusal. The fingerprint is a digest
+#     over the *charted* resource tiles, and charting grows as bots explore, so
+#     two runs on the same map diverge as soon as one of them walks further.
+#     `ResourceFingerprint`'s own words: equal digests mean the same map,
+#     unequal digests mean unknown. Refusing on it would refuse nearly every
+#     honest pair and teach the reader to type --force by reflex, which is a
+#     worse outcome than the flag it replaced.
+#
+# `workspace` -- FLAG. A different workspace is a different `level.zip` and a
+#     different copy of the mods, which usually shows up in `map` or `seed` as
+#     well; it is named separately because when it is the *only* difference,
+#     the map identity above may simply not have been recorded.
+PROVENANCE_SEVERITY = {
+    "seed": "refuse",
+    "git": "refuse",
+    "factorio": "refuse",
+    "profile": "refuse",
+    "resumed_from": "refuse",
+    "map": "unknown",
+    "workspace": "flag",
+}
+PROVENANCE_FIELDS = tuple(PROVENANCE_SEVERITY)
+
+# What `resumed_from: null` means when the file that defines it is present:
+# a run that started on a fresh world. Absent that file it means nothing at
+# all, and the field reads as unknown instead.
+FRESH_WORLD = "fresh world (not resumed)"
+
 
 # --------------------------------------------------------------------------
 # loading
@@ -140,6 +198,116 @@ def load_jsonl(path: str) -> Loaded:
         else:
             bad += 1
     return Loaded(rows, present=True, bad_lines=bad, truncated_tail=truncated)
+
+
+def _norm_git(raw: Any) -> str | None:
+    """A commit id from either shape `git` is written in.
+
+    `provenance.json` writes `{commit, dirty, source}`; `run_started` writes a
+    bare string. The dirty bit is deliberately NOT folded into the returned
+    value -- two runs from the same commit with uncommitted edits are not the
+    same build, and folding "+dirty" into the string would make them compare
+    equal to each other. It is read separately, and equal-but-dirty is reported
+    as unknown rather than as a match.
+    """
+    if isinstance(raw, dict):
+        commit = raw.get("commit")
+        return str(commit) if commit else None
+    return str(raw) if raw is not None else None
+
+
+def _norm_map(raw: Any) -> str | None:
+    """The map's identity: `ResourceFingerprint.digest` when there is one.
+
+    Falls back to the canonical JSON of whatever was written, so a future shape
+    still compares field-for-field instead of silently reading as unknown.
+    """
+    if isinstance(raw, dict):
+        digest = raw.get("digest")
+        return str(digest) if digest else json.dumps(raw, sort_keys=True)
+    return str(raw) if raw is not None else None
+
+
+def read_provenance(run_dir: str, run_started: dict | None) -> dict:
+    """What world and what build produced this run, merged from both writers.
+
+    `provenance.json` wins where it exists because it is the richer record; a
+    run that has no such file falls back to `run_started`'s three fields, and a
+    run that has neither reports every field as UNKNOWN. That last case is not
+    a defect to route around: it is what all twenty-four archived runs are, and
+    `--compare` says so in as many words rather than letting two absences read
+    as a match.
+
+    The seed is normalised through `str` on both paths on purpose --
+    `provenance.json` writes it as a string and `run_started` as an integer, so
+    an un-normalised comparison would report the same seed as two different
+    ones the first time a run recorded both.
+
+    Every value is a string or None. None means "nobody recorded this", and no
+    caller may treat two Nones as agreement.
+    """
+    sidecar = load_json(os.path.join(run_dir, PROVENANCE_FILE))
+    if not isinstance(sidecar, dict):
+        sidecar = {}
+    started = run_started or {}
+
+    def pick(*candidates) -> dict:
+        for source, raw, norm in candidates:
+            if raw is None:
+                continue
+            value = norm(raw)
+            if value is not None:
+                return {"value": value, "source": source, "raw": raw}
+        return {"value": None, "source": None, "raw": None}
+
+    def text(raw: Any) -> str | None:
+        return str(raw) if raw is not None else None
+
+    out: dict[str, Any] = {
+        "seed": pick(
+            (PROVENANCE_FILE, sidecar.get("seed"), text),
+            ("run_started", started.get("seed"), text),
+        ),
+        "git": pick(
+            (PROVENANCE_FILE, sidecar.get("git"), _norm_git),
+            ("run_started", started.get("git"), _norm_git),
+        ),
+        "factorio": pick(
+            (PROVENANCE_FILE, sidecar.get("factorio"), text),
+            ("run_started", started.get("factorio"), text),
+        ),
+        "map": pick(
+            (PROVENANCE_FILE, sidecar.get("map"), _norm_map),
+            ("run_started", started.get("map"), _norm_map),
+        ),
+        "profile": pick((PROVENANCE_FILE, sidecar.get("profile"), text)),
+        "workspace": pick((PROVENANCE_FILE, sidecar.get("workspace"), text)),
+        # Null-with-meaning, but ONLY when the file that defines it is present:
+        # `resumed_from: null` there means the run started on a fresh world,
+        # where no file at all means nobody ever recorded whether it did.
+        "resumed_from": pick(
+            (
+                PROVENANCE_FILE,
+                sidecar.get("resumed_from") or (FRESH_WORLD if sidecar else None),
+                text,
+            )
+        ),
+    }
+    out["git_dirty"] = bool(
+        isinstance(sidecar.get("git"), dict) and sidecar["git"].get("dirty")
+    )
+    # What the run *asked* for, against `run_started.bots` which is what it
+    # got. The pair is the only evidence a run degraded.
+    requested = sidecar.get("roster_requested")
+    out["roster_requested"] = list(requested) if isinstance(requested, list) else None
+    out["file_present"] = bool(sidecar)
+    out["schema"] = sidecar.get("schema")
+    # Any schema is accepted: the file's whole value is that archived runs stay
+    # readable, and refusing a newer one would break that from this end.
+    out["map_tiles"] = (
+        (sidecar.get("map") or {}).get("tiles") if isinstance(sidecar.get("map"), dict) else None
+    )
+    return out
 
 
 def load_json(path: str) -> Any | None:
@@ -428,6 +596,7 @@ def analyse(run_dir: str, freeze_ticks: int = DEFAULT_FREEZE_TICKS) -> dict:
     lo = run_started["tick"] if run_started else (events[0]["tick"] if events else 0)
     hi = run_finished["tick"] if run_finished else (events[-1]["tick"] if events else 0)
     result["roster"] = (run_started or {}).get("bots")
+    result["provenance"] = read_provenance(run_dir, run_started)
     result["outcome"] = (run_finished or {}).get("outcome", "OPEN (no run_finished)")
     result["tick_lo"] = lo
     result["tick_hi"] = hi
@@ -659,6 +828,13 @@ def score_window(w: Window, events: list[dict], joined: list[dict], map_rows: li
     settles_by_bot = collections.Counter()
     status_counts = collections.Counter()
     action_failures = collections.Counter()
+    # What the *actions* claim was built, kept beside what `map.jsonl` saw go
+    # up. The two answer different questions and `--compare` prints both: a
+    # settle says the executor believed the placement succeeded, a map row says
+    # an entity exists. `only_ghosts` runs, and placements the game silently
+    # refused, are exactly where they disagree.
+    place_ok = collections.Counter()
+    place_failed = collections.Counter()
 
     for e in events:
         if not w.contains(e.get("tick", 0)):
@@ -677,6 +853,8 @@ def score_window(w: Window, events: list[dict], joined: list[dict], map_rows: li
         action_ticks_by_bot[j["bot"]] += j["ticks"]
         settles_by_bot[j["bot"]] += 1
         status_counts[j["status"]] += 1
+        if j["verb"] == "place":
+            (place_ok if j["status"] == "success" else place_failed)[j["subject"]] += 1
         if j["status"] != "success":
             recorded = j["failure_kind"] or "none"
             derived = classify(j["error"], ACTION_TEXT_RULES)
@@ -787,6 +965,8 @@ def score_window(w: Window, events: list[dict], joined: list[dict], map_rows: li
             if c >= 2
         ],
         "placements": dict(placements.most_common()),
+        "placed_by_action": dict(place_ok.most_common()),
+        "place_failures": dict(place_failed.most_common()),
         "idle_gaps": idle_gaps(w, events, joined, critical),
     }
 
@@ -1582,6 +1762,922 @@ def summary_line(a: dict) -> str:
     return "  ".join(parts)
 
 
+# --------------------------------------------------------------------------
+# comparing two runs
+# --------------------------------------------------------------------------
+#
+# WHY THIS MODE CAN REFUSE
+# ------------------------
+# Reading two of the reports above side by side is what a person does after
+# changing something, and doing it by eye produced several retracted
+# conclusions in a single day. The worst of them is the reason this mode has
+# an exit code: two runs recorded thirteen hours and about twenty commits
+# apart, on different maps, were read side by side as though the only
+# difference between them was the change under test, and every difference in
+# the numbers was attributed to that change.
+#
+# So the numbers here are printed *under* a comparability block, never beside
+# it, and a comparison that cannot be controlled is refused rather than
+# footnoted. The three rules the block encodes:
+#
+# * A DIFFERENT SEED, COMMIT, GAME VERSION, BUILD PROFILE OR RESUMED SAVE IS A
+#   REFUSAL, not a caveat. A caveat at the bottom of a report is a caveat
+#   nobody reads. A different MAP FINGERPRINT is not on that list and must not
+#   be: the digest covers charted tiles only and grows as bots explore, so two
+#   runs on one map diverge honestly -- see `PROVENANCE_SEVERITY`.
+# * ABSENT PROVENANCE IS UNKNOWN, never a match. Every run archived when this
+#   was written records `null` for seed, git and factorio and carries no map
+#   fingerprint at all; saying "same seed" about two nulls would manufacture
+#   the exact confidence this exists to withhold.
+# * AN INCOMPLETE RUN IS NAMED IN `batch_execution`'s OWN VOCABULARY --
+#   `dispatched`, `never_dispatched`, `cut_short`, `unknown` -- and `unknown`
+#   is reported as "this record cannot say", never as a stall. Inferring a
+#   stall from "a plan with nothing after it" is itself one of the retracted
+#   conclusions.
+
+
+def _milestone_index(label: str) -> int | None:
+    m = re.match(r"m(\d+)\b", label or "")
+    return int(m.group(1)) if m else None
+
+
+def _milestone_windows_by_index(a: dict) -> dict[int, list[dict]]:
+    """The scored windows of one analysis, grouped by milestone index.
+
+    A *list* per index, not a single window: ``milestone_windows`` pairs by
+    index precisely because a milestone can be re-entered, so two windows for
+    ``m2`` are two spans that must be summed, not one correcting the other.
+    """
+    out: dict[int, list[dict]] = collections.defaultdict(list)
+    for w in (a.get("windows") or [])[1:]:
+        idx = _milestone_index(w.get("label", ""))
+        if idx is not None:
+            out[idx].append(w)
+    return dict(out)
+
+
+def _whole(a: dict) -> dict:
+    """The whole-run window, or an empty one for a run with nothing in it."""
+    windows = a.get("windows") or []
+    return windows[0] if windows else {}
+
+
+def _last_execution(a: dict) -> dict:
+    """``batch_execution``'s entry for the last plan of a run, or ``{}``."""
+    plans = a.get("plans") or []
+    return (plans[-1].get("execution") or {}) if plans else {}
+
+
+def _num(va: Any, vb: Any) -> dict:
+    """One comparable figure: A, B, and B-A when both are actually numbers."""
+    delta = None
+    if isinstance(va, (int, float)) and isinstance(vb, (int, float)):
+        delta = vb - va
+    return {"a": va, "b": vb, "delta": delta}
+
+
+def _cell(v: Any) -> str:
+    if v is None:
+        return "n/a"
+    if isinstance(v, float):
+        return f"{v:.1f}"
+    return str(v)
+
+
+def _delta_cell(v: Any) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, float):
+        return f"{v:+.1f}"
+    return f"{v:+d}"
+
+
+def comparability(a: dict, b: dict) -> list[dict]:
+    """Every reason these two runs might not be measuring the same thing.
+
+    Each guard is ``{"id", "severity", "headline", "detail"}`` with severity
+    one of:
+
+    ``refuse``   the comparison is not controlled and the numbers are withheld
+                 (``--force`` overrides, and says so in the output).
+    ``flag``     the runs differ in a way that changes what the numbers mean.
+    ``unknown``  the record cannot establish whether they are comparable. NOT
+                 the same as ``ok`` and never rendered as one.
+    ``ok``       checked, and the two agree.
+
+    Printed above the numbers in that order of severity. Ordering matters:
+    the guard that would have prevented the worst error of the day is the one
+    a reader must hit before the first figure, not after the last.
+    """
+    guards: list[dict] = []
+
+    for name, r in (("A", a), ("B", b)):
+        if r.get("error"):
+            guards.append(
+                {
+                    "id": "readable",
+                    "severity": "refuse",
+                    "headline": f"run {name} ({r['run_id']}) cannot be read: {r['error']}",
+                    "detail": [
+                        "There is nothing here to compare. Refused rather than reported as",
+                        "zeroes, because zero is a measurement and 'never recorded' is not.",
+                    ],
+                }
+            )
+    if guards:
+        # Nothing below can say anything about a run with no events: every
+        # other guard would read `.get()` off an empty analysis and report
+        # "different outcome: None vs stuck", which is an artefact of the
+        # missing file and not a fact about the runs.
+        return guards
+
+    # --- 1. provenance: same world, same build? -------------------------
+    pa = a.get("provenance") or {}
+    pb = b.get("provenance") or {}
+
+    def value(prov: dict, field: str) -> str | None:
+        return (prov.get(field) or {}).get("value")
+
+    def line(field: str, mark: str) -> str:
+        va, vb = value(pa, field), value(pb, field)
+        return (
+            f"{field:<13} A={'null/absent' if va is None else va}"
+            f"   B={'null/absent' if vb is None else vb}   {mark}"
+        )
+
+    # The refusal-grade fields, judged together: one difference among them is
+    # enough, and every one of them is listed so the reader sees which.
+    hard = [f for f in PROVENANCE_FIELDS if PROVENANCE_SEVERITY[f] == "refuse"]
+    differing = [f for f in hard if None not in (value(pa, f), value(pb, f))
+                 and value(pa, f) != value(pb, f)]
+    unknown = [f for f in hard if None in (value(pa, f), value(pb, f))]
+    agreeing = [f for f in hard if f not in differing and f not in unknown]
+    dirty = [
+        name for name, prov in (("A", pa), ("B", pb)) if prov.get("git_dirty")
+    ]
+    detail = (
+        [line(f, "<-- DIFFERENT") for f in differing]
+        + [line(f, "<-- unknown") for f in unknown]
+        + [line(f, "") for f in agreeing]
+    )
+    if dirty:
+        detail.append(
+            f"git in {' and '.join(dirty)} ran from a DIRTY working tree: the commit "
+            "does not identify what ran"
+        )
+    if differing:
+        guards.append(
+            {
+                "id": "provenance",
+                "severity": "refuse",
+                "headline": (
+                    "these two runs were NOT produced under the same conditions "
+                    f"({', '.join(differing)} differ)"
+                ),
+                "detail": detail
+                + [
+                    "",
+                    "Any difference in the numbers would include differences the change",
+                    "under test did not make. This is a refusal and not a warning because it",
+                    "has already been got wrong: two runs thirteen hours and about twenty",
+                    "commits apart, on different maps, were compared as if controlled, and the",
+                    "whole difference was credited to the change under test.",
+                    "Pass --force if you genuinely mean to compare them anyway.",
+                ],
+            }
+        )
+    elif unknown or dirty:
+        if unknown:
+            headline = "UNKNOWN comparability -- provenance is missing, not matching"
+            explain = [
+                "A run recorded before provenance existed CANNOT BE SHOWN TO BE",
+                "COMPARABLE to anything. That is not the same as being comparable:",
+                "absence is unknown, never a match. Every run archived when this was",
+                "written records null for seed, factorio and git and has no",
+                "provenance.json at all, so a comparison between two of them rests",
+                "entirely on the operator remembering what they ran -- which is the",
+                "memory that already failed once.",
+            ]
+        else:
+            headline = (
+                "UNKNOWN comparability -- every field matches, but a DIRTY working "
+                "tree means the commit does not identify what ran"
+            )
+            explain = [
+                "Uncommitted edits are not in the commit id, so two runs at one commit",
+                "can have run different code. This is the one case where every recorded",
+                "field agrees and the runs still cannot be shown to be comparable.",
+            ]
+        guards.append(
+            {
+                "id": "provenance",
+                "severity": "unknown",
+                "headline": headline,
+                "detail": detail + [""] + explain,
+            }
+        )
+    else:
+        guards.append(
+            {
+                "id": "provenance",
+                "severity": "ok",
+                "headline": f"same {', '.join(agreeing)}",
+                "detail": detail,
+            }
+        )
+
+    # --- 1b. the map, whose inequality is NOT proof of anything ---------
+    ma, mb = value(pa, "map"), value(pb, "map")
+    if ma is not None and mb is not None and ma == mb:
+        guards.append(
+            {
+                "id": "map",
+                "severity": "ok",
+                "headline": f"same map fingerprint ({ma})",
+                "detail": [],
+            }
+        )
+    elif ma is not None and mb is not None:
+        detail_map = [
+            f"A={ma}",
+            f"B={mb}",
+            "The fingerprint is a digest over the CHARTED resource tiles, and charting",
+            "grows as bots explore -- so two runs on one map diverge the moment one of",
+            "them walks further. Equal digests mean the same map; unequal digests mean",
+            "unknown. Flagged rather than refused because refusing here would refuse",
+            "nearly every honest pair and teach the reader to type --force by reflex.",
+            "The seed is the field that settles it.",
+        ]
+        if pa.get("map_tiles") or pb.get("map_tiles"):
+            # The half a person can actually read: "one map had coal and the
+            # other did not" is visible here and nowhere else in a run record.
+            detail_map += [
+                f"charted tiles A: {pa.get('map_tiles')}",
+                f"charted tiles B: {pb.get('map_tiles')}",
+            ]
+        guards.append(
+            {
+                "id": "map",
+                "severity": "unknown",
+                "headline": "map fingerprints DIFFER, which does not establish two maps",
+                "detail": detail_map,
+            }
+        )
+    else:
+        guards.append(
+            {
+                "id": "map",
+                "severity": "unknown",
+                "headline": "map identity unknown for at least one run",
+                "detail": [
+                    f"A={'null/absent' if ma is None else ma}   "
+                    f"B={'null/absent' if mb is None else mb}",
+                    "Nothing here says the two runs shared a world. Absence is unknown.",
+                ],
+            }
+        )
+
+    # --- 1c. workspace --------------------------------------------------
+    wsa, wsb = value(pa, "workspace"), value(pb, "workspace")
+    if wsa is not None and wsb is not None and wsa != wsb:
+        guards.append(
+            {
+                "id": "workspace",
+                "severity": "flag",
+                "headline": "DIFFERENT WORKSPACE",
+                "detail": [
+                    f"A={wsa}",
+                    f"B={wsb}",
+                    "Different workspaces hold different level.zip files and separate copies",
+                    "of the mods and scripts, so this is a different world and possibly",
+                    "different Lua even at one commit.",
+                ],
+            }
+        )
+
+    # --- 2. roster ------------------------------------------------------
+    # `run_started.bots` is what the run GOT. `provenance.json` records what it
+    # asked for, and the pair is the only evidence a run degraded -- a four-bot
+    # request that obtained one bot reads as an ordinary one-bot run in every
+    # other artefact.
+    ra, rb = a.get("roster"), b.get("roster")
+    for name, r, prov in (("A", a, pa), ("B", b, pb)):
+        want = prov.get("roster_requested")
+        got = r.get("roster")
+        if want is not None and got is not None and list(want) != list(got):
+            guards.append(
+                {
+                    "id": "roster",
+                    "severity": "flag",
+                    "headline": (
+                        f"run {name} DEGRADED: asked for {want!r}, obtained {got!r}"
+                    ),
+                    "detail": [
+                        "Clients that never connected are missing from the run without",
+                        "anything else saying so. Every per-bot figure below is over the",
+                        "bots it actually had.",
+                    ],
+                }
+            )
+    if ra is None or rb is None:
+        guards.append(
+            {
+                "id": "roster",
+                "severity": "unknown",
+                "headline": f"roster unknown for at least one run (A={ra!r} B={rb!r})",
+                "detail": [
+                    "No run_started, so nothing says how many bots the run actually got.",
+                ],
+            }
+        )
+    elif ra != rb:
+        guards.append(
+            {
+                "id": "roster",
+                "severity": "flag",
+                "headline": f"DIFFERENT ROSTER: A ran {ra!r}, B ran {rb!r}",
+                "detail": [
+                    "A run that degraded to one bot is not comparable to a four-bot run.",
+                    "steps/bot, planned ticks/bot, walks/bot and fleet utilisation are all",
+                    "per-bot figures, and every one of them means something else when the",
+                    "denominator changes. `bots: []` is a run that obtained no roster at all.",
+                ],
+            }
+        )
+    else:
+        guards.append(
+            {
+                "id": "roster",
+                "severity": "ok",
+                "headline": f"same roster obtained: {ra!r}",
+                "detail": [],
+            }
+        )
+
+    # --- 3. incomplete runs, in `batch_execution`'s own words ------------
+    for name, r in (("A", a), ("B", b)):
+        if not str(r.get("outcome", "")).startswith("OPEN"):
+            continue
+        ex = _last_execution(r)
+        verdict = ex.get("verdict")
+        beat = ex.get("last_beat") or {}
+        plans = r.get("plans") or []
+        last = plans[-1] if plans else {}
+        head = (
+            f"run {name} ({r['run_id']}) has no run_finished and ends on a "
+            f"plan_created (m{last.get('milestone')}, {last.get('steps')} steps)"
+        )
+        if verdict == "cut_short":
+            guards.append(
+                {
+                    "id": "incomplete",
+                    "severity": "flag",
+                    "headline": f"{head} -- batch_execution says `cut_short`",
+                    "detail": [
+                        "`cut_short`: heartbeats show dispatches, but the batch's own",
+                        "per-action lines never arrived -- the run stopped while it was",
+                        f"working. Last heartbeat, {beat.get('elapsed_ms', 0) / 1000:.0f}s in: "
+                        f"{beat.get('dispatched')}/{beat.get('total')} dispatched, "
+                        f"{beat.get('settled')} settled.",
+                        "Whatever this run's totals are, they are the totals of a run that",
+                        "was still working when the record stopped. The comparison rests on",
+                        "an incomplete run.",
+                    ],
+                }
+            )
+        elif verdict == "unknown":
+            guards.append(
+                {
+                    "id": "incomplete",
+                    "severity": "flag",
+                    "headline": f"{head} -- batch_execution says `unknown`",
+                    "detail": [
+                        "`unknown`: no heartbeat and no dispatch. Either the build predates",
+                        "batch_progress or the run stopped inside the first interval; this",
+                        "record cannot say whether the plan ran.",
+                        "THIS IS NOT EVIDENCE OF A STALL. Per-action lines are written only",
+                        "when a batch finishes, so a run killed mid-batch looks exactly like",
+                        "a run that dispatched nothing forever. Reading it as a stall is a",
+                        "conclusion that has already been retracted once.",
+                        "The comparison rests on an incomplete run.",
+                    ],
+                }
+            )
+        elif verdict == "never_dispatched":
+            guards.append(
+                {
+                    "id": "incomplete",
+                    "severity": "flag",
+                    "headline": f"{head} -- batch_execution says `never_dispatched`",
+                    "detail": [
+                        "`never_dispatched`: a heartbeat looked and found nothing dispatched",
+                        f"at all ({ex.get('beats')} heartbeat(s), counter at zero -- no",
+                        "threshold decides this).",
+                        "The run's own numbers are real, but it never finished: the",
+                        "comparison rests on an incomplete run.",
+                    ],
+                }
+            )
+        else:
+            guards.append(
+                {
+                    "id": "incomplete",
+                    "severity": "flag",
+                    "headline": (
+                        f"run {name} ({r['run_id']}) has no run_finished "
+                        f"(batch_execution: {verdict or 'no plan to judge'})"
+                    ),
+                    "detail": [
+                        "Its totals are 'so far', not final. The comparison rests on an",
+                        "incomplete run.",
+                    ],
+                }
+            )
+
+    # --- 4. outcome -----------------------------------------------------
+    oa, ob = a.get("outcome"), b.get("outcome")
+    if oa != ob:
+        guards.append(
+            {
+                "id": "outcome",
+                "severity": "flag",
+                "headline": f"DIFFERENT OUTCOME: A={oa!r}, B={ob!r}",
+                "detail": [
+                    "A run that finished and a run that got stuck are not two measurements",
+                    "of the same thing. 'B was faster' is trivially true of a run that",
+                    "stopped early, and every total below is over a different amount of",
+                    "attempted work.",
+                ],
+            }
+        )
+    else:
+        guards.append(
+            {"id": "outcome", "severity": "ok", "headline": f"same outcome: {oa}", "detail": []}
+        )
+
+    # --- 5. the milestones themselves -----------------------------------
+    goals_a = {
+        _milestone_index(m["label"]): m["label"].split(" ", 1)[-1]
+        for m in a.get("milestones") or []
+    }
+    goals_b = {
+        _milestone_index(m["label"]): m["label"].split(" ", 1)[-1]
+        for m in b.get("milestones") or []
+    }
+    mismatched = [i for i in sorted(set(goals_a) & set(goals_b)) if goals_a[i] != goals_b[i]]
+    if mismatched:
+        guards.append(
+            {
+                "id": "goals",
+                "severity": "flag",
+                "headline": f"milestone {mismatched} pursued a DIFFERENT GOAL in each run",
+                "detail": [f"  m{i}: A {goals_a[i]!r}  B {goals_b[i]!r}" for i in mismatched]
+                + [
+                    "Milestone durations are lined up by index below; where the goal differs",
+                    "the two rows are not the same milestone and the delta means nothing.",
+                ],
+            }
+        )
+    if set(goals_a) != set(goals_b):
+        guards.append(
+            {
+                "id": "goals",
+                "severity": "flag",
+                "headline": (
+                    f"different milestone sets: A reached m{sorted(goals_a)}, "
+                    f"B reached m{sorted(goals_b)}"
+                ),
+                "detail": [
+                    "Only the indices present in both are compared; the rest are listed as",
+                    "'A only' / 'B only' and are not deltas.",
+                ],
+            }
+        )
+    return guards
+
+
+def _plan_totals(a: dict) -> tuple[collections.Counter, collections.Counter]:
+    """Steps and planned ticks per bot, summed over every plan in the run.
+
+    Summed over plans on purpose: a run replans per milestone, so a single
+    plan's steps/bot describes one batch, and it is the run total that answers
+    "did the planner spread the work differently this time".
+    """
+    steps: collections.Counter = collections.Counter()
+    work: collections.Counter = collections.Counter()
+    for pl in a.get("plans") or []:
+        for bot, n in (pl.get("steps_per_bot") or {}).items():
+            steps[bot] += n
+        for bot, n in (pl.get("planned_work_per_bot") or {}).items():
+            work[bot] += n
+    return steps, work
+
+
+def _bot_keys(*dicts: dict) -> list:
+    keys: set = set()
+    for d in dicts:
+        keys |= set(d or {})
+    return sorted(keys, key=lambda k: (k is None, k))
+
+
+def compare_numbers(a: dict, b: dict) -> dict:
+    """Every figure the two runs both have, as ``{a, b, delta}`` triples.
+
+    Deltas are ``B - A`` and exist only where both sides are numbers -- a
+    delta against a missing figure would be a subtraction against zero, which
+    reads as a real change of exactly the wrong size.
+
+    Durations are GAME TICKS throughout, and minutes derived from ticks. Wall
+    clock is deliberately absent: the two runs' wall times include Factorio
+    start-up, sprite loading and whatever else the host was doing, and the
+    game speed of a run is not a property of the change under test.
+    """
+    wa, wb = _whole(a), _whole(b)
+
+    steps_a, work_a = _plan_totals(a)
+    steps_b, work_b = _plan_totals(b)
+    plan_rows = []
+    for bot in _bot_keys(steps_a, steps_b, work_a, work_b):
+        plan_rows.append(
+            {
+                "bot": bot,
+                "steps": _num(steps_a.get(bot), steps_b.get(bot)),
+                "planned_ticks": _num(work_a.get(bot), work_b.get(bot)),
+            }
+        )
+
+    plans_a, plans_b = a.get("plans") or [], b.get("plans") or []
+    per_plan = []
+    for i in range(max(len(plans_a), len(plans_b))):
+        pa = plans_a[i] if i < len(plans_a) else None
+        pb = plans_b[i] if i < len(plans_b) else None
+        per_plan.append(
+            {
+                "ordinal": i + 1,
+                "a": pa
+                and {
+                    "tick": pa.get("tick"),
+                    "milestone": pa.get("milestone"),
+                    "steps": pa.get("steps"),
+                    "makespan": pa.get("makespan"),
+                    "steps_per_bot": pa.get("steps_per_bot"),
+                    "planned_work_per_bot": pa.get("planned_work_per_bot"),
+                    "execution": (pa.get("execution") or {}).get("verdict"),
+                },
+                "b": pb
+                and {
+                    "tick": pb.get("tick"),
+                    "milestone": pb.get("milestone"),
+                    "steps": pb.get("steps"),
+                    "makespan": pb.get("makespan"),
+                    "steps_per_bot": pb.get("steps_per_bot"),
+                    "planned_work_per_bot": pb.get("planned_work_per_bot"),
+                    "execution": (pb.get("execution") or {}).get("verdict"),
+                },
+            }
+        )
+
+    va, vb = wa.get("verb_ticks") or {}, wb.get("verb_ticks") or {}
+    na, nb = wa.get("verbs") or {}, wb.get("verbs") or {}
+    verbs = [
+        {
+            "verb": verb,
+            "n": _num(na.get(verb), nb.get(verb)),
+            "ticks": _num(va.get(verb), vb.get(verb)),
+        }
+        for verb in sorted(
+            set(va) | set(vb), key=lambda v: -(va.get(v, 0) + vb.get(v, 0))
+        )
+    ]
+
+    mw_a, mw_b = _milestone_windows_by_index(a), _milestone_windows_by_index(b)
+
+    def span_of(by_idx: dict[int, list[dict]], idx: int) -> int | None:
+        ws = by_idx.get(idx)
+        return sum(w.get("span_ticks") or 0 for w in ws) if ws else None
+
+    def outcome_of(by_idx: dict[int, list[dict]], idx: int) -> str | None:
+        ws = by_idx.get(idx)
+        return "; ".join(str(w.get("outcome")) for w in ws) if ws else None
+
+    def goal_of(r: dict, idx: int) -> str | None:
+        for m in r.get("milestones") or []:
+            if _milestone_index(m["label"]) == idx:
+                return m["label"].split(" ", 1)[-1]
+        return None
+
+    milestones = []
+    for idx in sorted(set(mw_a) | set(mw_b)):
+        ticks = _num(span_of(mw_a, idx), span_of(mw_b, idx))
+        milestones.append(
+            {
+                "index": idx,
+                "goal_a": goal_of(a, idx),
+                "goal_b": goal_of(b, idx),
+                "windows_a": len(mw_a.get(idx, [])),
+                "windows_b": len(mw_b.get(idx, [])),
+                "ticks": ticks,
+                "minutes": _num(
+                    None if ticks["a"] is None else ticks["a"] / TICKS_PER_MINUTE,
+                    None if ticks["b"] is None else ticks["b"] / TICKS_PER_MINUTE,
+                ),
+                "outcome_a": outcome_of(mw_a, idx),
+                "outcome_b": outcome_of(mw_b, idx),
+            }
+        )
+
+    def placements(ws: list[dict]) -> tuple[collections.Counter, collections.Counter]:
+        m: collections.Counter = collections.Counter()
+        act: collections.Counter = collections.Counter()
+        for w in ws:
+            m.update(w.get("placements") or {})
+            act.update(w.get("placed_by_action") or {})
+        return m, act
+
+    built = []
+    scopes: list[tuple[str, list[dict], list[dict]]] = [
+        ("whole run", [wa] if wa else [], [wb] if wb else [])
+    ]
+    for idx in sorted(set(mw_a) | set(mw_b)):
+        scopes.append((f"m{idx}", mw_a.get(idx, []), mw_b.get(idx, [])))
+    for label, ws_a, ws_b in scopes:
+        map_a, act_a = placements(ws_a)
+        map_b, act_b = placements(ws_b)
+        names = sorted(set(map_a) | set(map_b) | set(act_a) | set(act_b))
+        if not names:
+            continue
+        built.append(
+            {
+                "label": label,
+                "rows": [
+                    {
+                        "name": n,
+                        "map_rows": _num(map_a.get(n), map_b.get(n)),
+                        "place_actions": _num(act_a.get(n), act_b.get(n)),
+                    }
+                    for n in names
+                ],
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # WALKS. `per_bot` is built in `score_window` from `walk_settled`'s own
+    # `bot` field with NO join to `walk_dispatched`, which has no `id`. The
+    # naive join keys every walk under None and hands every failure to
+    # whichever bot dispatched last; that is how "all twelve failed walks were
+    # bot 1's" was reported about a run in which bot 1 failed none.
+    # ------------------------------------------------------------------
+    pb_a, pb_b = wa.get("per_bot") or {}, wb.get("per_bot") or {}
+    walks = [
+        {
+            "bot": bot,
+            "walks": _num((pb_a.get(bot) or {}).get("walks"), (pb_b.get(bot) or {}).get("walks")),
+            "failed": _num(
+                (pb_a.get(bot) or {}).get("walk_failed"), (pb_b.get(bot) or {}).get("walk_failed")
+            ),
+            "lost": _num(
+                (pb_a.get(bot) or {}).get("walk_lost"), (pb_b.get(bot) or {}).get("walk_lost")
+            ),
+            "walk_ticks": _num(
+                (pb_a.get(bot) or {}).get("walk_ticks"), (pb_b.get(bot) or {}).get("walk_ticks")
+            ),
+            "busy_pct": _num(
+                (pb_a.get(bot) or {}).get("busy_pct"), (pb_b.get(bot) or {}).get("busy_pct")
+            ),
+        }
+        for bot in _bot_keys(pb_a, pb_b)
+    ]
+
+    span = _num(a.get("span_ticks"), b.get("span_ticks"))
+    return {
+        "shape": {
+            "roster": {"a": a.get("roster"), "b": b.get("roster")},
+            "outcome": {"a": a.get("outcome"), "b": b.get("outcome")},
+            "span_ticks": span,
+            "span_minutes": _num(
+                None if span["a"] is None else span["a"] / TICKS_PER_MINUTE,
+                None if span["b"] is None else span["b"] / TICKS_PER_MINUTE,
+            ),
+            "events_read": _num(a.get("events_read"), b.get("events_read")),
+            "plans": _num(len(plans_a), len(plans_b)),
+            "milestones": _num(len(a.get("milestones") or []), len(b.get("milestones") or [])),
+            "walks_dispatched": _num(wa.get("walks_dispatched"), wb.get("walks_dispatched")),
+        },
+        "plan_totals": plan_rows,
+        "per_plan": per_plan,
+        "verbs": verbs,
+        "milestones": milestones,
+        "built": built,
+        "walks": walks,
+    }
+
+
+def compare(a: dict, b: dict, force: bool = False) -> dict:
+    """Guards first, numbers second -- and no numbers at all after a refusal.
+
+    ``--force`` prints them anyway, and the output says it was forced, because
+    a forced comparison pasted into a note is indistinguishable from a clean
+    one unless the output itself carries the fact.
+
+    An unreadable run withholds the numbers even under ``--force``: there is
+    nothing to print.
+    """
+    guards = comparability(a, b)
+    refused = any(g["severity"] == "refuse" for g in guards)
+    unreadable = any(g["id"] == "readable" for g in guards)
+    out: dict[str, Any] = {
+        "a": a.get("run_id"),
+        "b": b.get("run_id"),
+        "guards": guards,
+        "refused": refused,
+        "forced": bool(force and refused),
+        "numbers_withheld": (refused and not force) or unreadable,
+    }
+    if not out["numbers_withheld"]:
+        out["numbers"] = compare_numbers(a, b)
+    return out
+
+
+SEVERITY_MARK = {
+    "refuse": "!! REFUSE ",
+    "flag": "!! FLAG   ",
+    "unknown": "?? UNKNOWN",
+    "ok": "ok        ",
+}
+SEVERITY_ORDER = {"refuse": 0, "flag": 1, "unknown": 2, "ok": 3}
+
+
+def report_compare(c: dict, out=sys.stdout, top: int = 12) -> None:
+    p = lambda *args: print(*args, file=out)
+    a_id, b_id = str(c["a"]), str(c["b"])
+
+    p(f"\n{'=' * 78}")
+    p(f"COMPARE   A = {a_id}")
+    p(f"          B = {b_id}")
+    p(f"{'=' * 78}")
+
+    p(hr("  COMPARABILITY  (read this before any number below)"))
+    for g in sorted(c["guards"], key=lambda g: SEVERITY_ORDER.get(g["severity"], 9)):
+        p(f"  {SEVERITY_MARK.get(g['severity'], '?')}  {g['headline']}")
+        for line in g["detail"]:
+            p(f"              {line}".rstrip())
+    if c["numbers_withheld"] and any(g["id"] == "readable" for g in c["guards"]):
+        p("\n  Nothing to print: one of these runs recorded no events at all.")
+        p("  --force does not help here -- there is no other side to the comparison.")
+        return
+    if c["numbers_withheld"]:
+        p("\n  REFUSED: the numbers are not printed, because printing them under this")
+        p("  block is how they get quoted without it. Re-run with --force if you mean")
+        p("  to compare these two runs anyway.")
+        return
+    if c["forced"]:
+        p("\n  !! FORCED: a REFUSE above was overridden with --force. Every figure below")
+        p("  !! includes whatever else changed between these two runs.")
+
+    n = c["numbers"]
+    s = n["shape"]
+
+    def row(label: str, va: Any, vb: Any, d: Any = None) -> None:
+        p(f"    {label:<24} {_cell(va):>22} {_cell(vb):>22} {_delta_cell(d):>12}")
+
+    p(hr("  RUN SHAPE"))
+    p(f"    {'':<24} {('A ' + a_id)[-22:]:>22} {('B ' + b_id)[-22:]:>22} {'B - A':>12}")
+    row("roster obtained", s["roster"]["a"], s["roster"]["b"])
+    row("outcome", s["outcome"]["a"], s["outcome"]["b"])
+    for label, key in (
+        ("span (game ticks)", "span_ticks"),
+        ("span (game minutes)", "span_minutes"),
+        ("events recorded", "events_read"),
+        ("plans created", "plans"),
+        ("milestones entered", "milestones"),
+        ("walks dispatched", "walks_dispatched"),
+    ):
+        row(label, s[key]["a"], s[key]["b"], s[key]["delta"])
+    p("    (game time throughout -- wall clock is never compared here: it includes")
+    p("     Factorio start-up and whatever else the host was doing.)")
+
+    p(hr("  PLANNED WORK PER BOT  (summed over every plan in the run)"))
+    p(f"    {'bot':>4} {'steps A':>9} {'steps B':>9} {'delta':>8}   "
+      f"{'planned tk A':>13} {'planned tk B':>13} {'delta':>9}")
+    for r in n["plan_totals"]:
+        st, pt = r["steps"], r["planned_ticks"]
+        p(f"    {str(r['bot']):>4} {_cell(st['a']):>9} {_cell(st['b']):>9} "
+          f"{_delta_cell(st['delta']):>8}   {_cell(pt['a']):>13} {_cell(pt['b']):>13} "
+          f"{_delta_cell(pt['delta']):>9}")
+    if not n["plan_totals"]:
+        p("    no plans in either run")
+
+    if len(n["per_plan"]) > 1 or any(r["a"] is None or r["b"] is None for r in n["per_plan"]):
+        p("\n    per plan, aligned by ordinal (NOT by milestone -- two runs that replan a")
+        p("    different number of times do not line up, and this says so rather than")
+        p("    quietly pairing plan 3 of one with plan 3 of the other):")
+        for r in n["per_plan"]:
+            for side, key in (("A", "a"), ("B", "b")):
+                pl = r[key]
+                if pl is None:
+                    p(f"      #{r['ordinal']} {side}  -- no such plan in this run")
+                    continue
+                p(f"      #{r['ordinal']} {side}  tick {pl['tick']:>7} m{pl['milestone']} "
+                  f"steps={pl['steps']:<5} makespan={pl['makespan']:<7} "
+                  f"{pl['execution'] or 'no verdict'}")
+                p(f"           steps/bot {pl['steps_per_bot']}  "
+                  f"planned ticks/bot {pl['planned_work_per_bot']}")
+
+    p(hr("  ACTION COST BY VERB  (dispatch -> settle ticks, whole run, summed over bots)"))
+    p(f"    {'verb':<12} {'n A':>6} {'n B':>6} {'delta':>7}   "
+      f"{'ticks A':>9} {'ticks B':>9} {'delta':>9} {'delta min':>10}")
+    for v in n["verbs"]:
+        cnt, tk = v["n"], v["ticks"]
+        dmin = None if tk["delta"] is None else tk["delta"] / TICKS_PER_MINUTE
+        p(f"    {v['verb']:<12} {_cell(cnt['a']):>6} {_cell(cnt['b']):>6} "
+          f"{_delta_cell(cnt['delta']):>7}   {_cell(tk['a']):>9} {_cell(tk['b']):>9} "
+          f"{_delta_cell(tk['delta']):>9} {_delta_cell(dmin):>10}")
+    if not n["verbs"]:
+        p("    no actions settled in either run")
+    else:
+        p("    Verbs that settle in the tick they dispatch contribute 0 ticks in both")
+        p("    columns; a 0 delta there means 'never measured', not 'no change'.")
+
+    p(hr("  MILESTONE DURATIONS  (GAME TIME -- ticks and game minutes, never wall clock)"))
+    p(f"    {'ms':<4} {'ticks A':>9} {'min A':>7} {'ticks B':>9} {'min B':>7} "
+      f"{'delta tk':>9} {'delta min':>10}  goal")
+    for m in n["milestones"]:
+        tk, mi = m["ticks"], m["minutes"]
+        goal = m["goal_a"] or m["goal_b"] or ""
+        note = ""
+        if m["goal_a"] and m["goal_b"] and m["goal_a"] != m["goal_b"]:
+            note = f"   <-- DIFFERENT GOAL: A {m['goal_a']!r} vs B {m['goal_b']!r}"
+            goal = ""
+        elif tk["a"] is None:
+            note = "   <-- B only"
+        elif tk["b"] is None:
+            note = "   <-- A only"
+        if m["windows_a"] > 1 or m["windows_b"] > 1:
+            note += f"   (re-entered: {m['windows_a']} window(s) A, {m['windows_b']} B, summed)"
+        p(f"    m{m['index']:<3} {_cell(tk['a']):>9} {_cell(mi['a']):>7} "
+          f"{_cell(tk['b']):>9} {_cell(mi['b']):>7} {_delta_cell(tk['delta']):>9} "
+          f"{_delta_cell(mi['delta']):>10}  {goal[:28]}{note}")
+        if m["outcome_a"] != m["outcome_b"]:
+            p(f"         outcome A: {m['outcome_a']}")
+            p(f"         outcome B: {m['outcome_b']}")
+    if not n["milestones"]:
+        p("    no milestones recorded in either run")
+
+    p(hr("  ENTITIES BUILT  (map.jsonl keyframes, and what the place actions claimed)"))
+    p("    map rows are entities the mod saw exist; place actions are settles the")
+    p("    executor called a success. They disagree for ghosts and for placements the")
+    p("    game refused, so both are shown rather than one standing in for the other.")
+    for scope in n["built"]:
+        p(f"    {scope['label']}:")
+        p(f"      {'entity':<24} {'map A':>6} {'map B':>6} {'delta':>7}   "
+          f"{'act A':>6} {'act B':>6} {'delta':>7}")
+        for r in scope["rows"][:top]:
+            mr, ac = r["map_rows"], r["place_actions"]
+            p(f"      {r['name'][:24]:<24} {_cell(mr['a']):>6} {_cell(mr['b']):>6} "
+              f"{_delta_cell(mr['delta']):>7}   {_cell(ac['a']):>6} {_cell(ac['b']):>6} "
+              f"{_delta_cell(ac['delta']):>7}")
+        if len(scope["rows"]) > top:
+            p(f"      ... and {len(scope['rows']) - top} more entity type(s); raise --top")
+    if not n["built"]:
+        p("    nothing placed in either run")
+
+    p(hr("  WALKS PER BOT  (bot read off walk_settled -- NEVER joined on a missing id)"))
+    p(f"    {'bot':>4} {'walks A':>8} {'walks B':>8} {'fail A':>7} {'fail B':>7} "
+      f"{'lost A':>7} {'lost B':>7} {'busy% A':>8} {'busy% B':>8}")
+    for r in n["walks"]:
+        p(f"    {str(r['bot']):>4} {_cell(r['walks']['a']):>8} {_cell(r['walks']['b']):>8} "
+          f"{_cell(r['failed']['a']):>7} {_cell(r['failed']['b']):>7} "
+          f"{_cell(r['lost']['a']):>7} {_cell(r['lost']['b']):>7} "
+          f"{_cell(r['busy_pct']['a']):>8} {_cell(r['busy_pct']['b']):>8}")
+    if not n["walks"]:
+        p("    no bot activity recorded in either run")
+    else:
+        p("    `walk_dispatched` carries no id, so these counts come from walk_settled's")
+        p("    own `bot` field. Joining on id keys every walk under None and blames one")
+        p("    bot for all of them -- that is how twelve failures were once attributed to")
+        p("    a bot that had none.")
+    p("")
+
+
+def compare_main(args: argparse.Namespace) -> int:
+    """Exit 0 when the comparison stands, 3 when it was refused, 2 on usage."""
+    for d in args.compare:
+        if not os.path.isdir(d):
+            print(f"no such run directory: {d}", file=sys.stderr)
+            return 2
+    a = analyse(args.compare[0], args.freeze_ticks)
+    b = analyse(args.compare[1], args.freeze_ticks)
+    c = compare(a, b, force=args.force)
+    if args.json:
+        json.dump(c, sys.stdout, indent=2, default=str)
+        print()
+    else:
+        report_compare(c, top=args.top)
+    # Non-zero whenever the numbers were withheld -- which is a refusal that
+    # was not forced, and an unreadable run whether it was forced or not.
+    return 3 if c["numbers_withheld"] else 0
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__.split("\n\n")[0],
@@ -1596,10 +2692,24 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--summary", action="store_true",
                     help="one line per run instead of the full report")
     ap.add_argument("--json", action="store_true", help="dump the analysis as JSON")
+    ap.add_argument("--compare", nargs=2, metavar=("A", "B"),
+                    help="two run directories, side by side with deltas. Prints a "
+                         "comparability block first and REFUSES (exit 3) when the two "
+                         "runs were not produced under the same conditions")
+    ap.add_argument("--force", action="store_true",
+                    help="with --compare, print the numbers even after a REFUSE "
+                         "(the output says it was forced)")
     ap.add_argument("--freeze-ticks", type=int, default=DEFAULT_FREEZE_TICKS,
                     help=f"frozen-position threshold in ticks (default {DEFAULT_FREEZE_TICKS})")
     ap.add_argument("--top", type=int, default=12, help="rows in the by-subject breakdown")
     args = ap.parse_args(argv)
+
+    if args.compare:
+        if args.all or args.dirs:
+            print("--compare takes exactly the two runs to compare; drop --all and any "
+                  "positional directories", file=sys.stderr)
+            return 2
+        return compare_main(args)
 
     dirs = list(args.dirs)
     if args.all:

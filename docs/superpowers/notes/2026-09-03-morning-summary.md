@@ -151,6 +151,44 @@ had 6. Something re-seeded it in between and I could not attribute it. What is
 not in doubt is that run 4's *game* had the old mod — Factorio loads mods at
 server start, and the game itself raised the missing-function error.
 
+## The rung-2 refusal: the chain owner was lost one level above `bill()`
+
+**Fixed in `60ade9de`.** My hypothesis was right about the shape and the actor
+and wrong about the site: `bill()` does emit `Holder::Share(ctx.chain_actor)`
+and `HandCraft` does propagate it — the actor is not lost on the way down. What
+is lost is the **chain owner**, one level higher.
+
+`AssembleCell::converges` returns `true` (`assemble.rs:1314`), and the
+owner-recording block sat inside `if ctx.chain.is_none()` (`method/mod.rs:605`),
+so a converging method opened a chain with `owner = None` — `stated_holder` of a
+`Producing` goal is `None`. Every bill ingredient then expanded with
+`ctx.chain` already `Some(...)`, so the recording branch never ran and **no
+owner was recorded for any of them**. Measured, not inferred: **86 of 98 actions
+in `ChainId(0)` had `owner=None`**.
+
+`schedule.rs:342-350` then bound the ownerless chain to whichever bot could run
+its first ready action cheapest — three bots parked on the ore patch made that
+bot 2 — while `expand_goal` had sized the work against bot 1, who held 48 iron
+ore. Hence "has 3 iron-ore does not hold for bot 2".
+
+**A diagnostic worth keeping:** `schedule.rs:452` raises
+`PreconditionUnsatisfied` rather than `ChainOwnerInfeasible` *only* when the
+chain has no owner. The error variant, not just its text, fingerprints an
+unowned chain.
+
+Fix: an `else if` arm so a `Holder::Bot`/`Holder::Share` goal met inside an
+ownerless chain names that chain's owner. First holder wins; an owned chain is
+untouched; `Step::Owned` opens its own chain so a supplier's share never reaches
+the arm. No pin moved.
+
+**`even_shares` reachability — the earlier agent's claim was wrong.**
+`SplitAcrossBots` is indeed unreachable from a `Producing` goal, but
+`worth_converging` (`have.rs:2340`) *is* reachable: `SharedSmelt::claims` is
+`!top_level && in_chain && !converging`, and `ctx.converging` stays false because
+`AssembleCell` overrides `converges`, not `split_probe`. The red-science plan
+contains six `Step::Owned` supplier chains owned by bots 2, 3 and 4. Reachable —
+but **not causal here**, and the poorest-first ordering remains unexamined.
+
 ## A process pattern matches the process doing the matching (three times tonight)
 
 Every `pgrep -f`/`pkill -f` I wrote tonight matched my own tooling, because the
@@ -207,10 +245,16 @@ poorest-first split is "unreachable from a `Producing` goal" — rung 2 *is* a
 `Producing` goal. Either the reachability claim is wrong or this is a different
 mechanism; an agent is settling which.
 
-**Reconstructing the state for a red test is harder than it should be**, because
-the run record still carries **no inventories** — the same gap that forced the
-wood RCA to be inferred from craft/place actions. That open item has now cost
-two investigations.
+**CORRECTION — the run record DOES carry inventories, and I was wrong twice.**
+I claimed here and in the wood RCA that the record has none, and ranked
+"run-record enrichment" as a top open item on that basis. I had only ever looked
+at `events.jsonl`. **`samples.jsonl` carries `kind: "bots"` rows with a full
+per-bot `inventory` and `position`, sampled throughout, plus `kind: "force"`
+rows with production totals.** The rung-2 fixture was read straight off the
+sample at tick 107,820 — exactly as the precedent test read its own run's
+samples. The wood RCA did not need reconstructing from craft/place actions
+either. The open item stands only in the much weaker form of "events.jsonl
+alone is not enough, and nothing says so".
 
 ## `min_radius` is dropped at lowering — the same bug this file already fixed once
 

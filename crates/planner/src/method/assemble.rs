@@ -391,8 +391,7 @@ pub struct CellPart {
 /// (The machines are three tiles wide and centred on `x = 0`, so they occupy
 /// `x = -1 .. 1`; the pole `P` at `(-1, 2)` sits in the one-tile gap between
 /// them, where a 5x5 supply area reaches every consumer in the cell.)
-const LAYOUT: [(Role, (f64, f64), Direction); 8] = [
-    (Role::Pole, (-1., 2.), Direction::North),
+const LAYOUT: [(Role, (f64, f64), Direction); 7] = [
     (Role::Intermediate, (0., 0.), Direction::North),
     (Role::Product, (0., 4.), Direction::North),
     (Role::FeedChest, (-3., 0.), Direction::North),
@@ -401,6 +400,27 @@ const LAYOUT: [(Role, (f64, f64), Direction); 8] = [
     (Role::LinkInserter, (0., 2.), Direction::North),
     (Role::SupplyInserter, (-2., 4.), Direction::West),
 ];
+
+/// Where the cell puts a pole of its **own**, when it has to bring one.
+///
+/// The one-tile gap between the two machines, from which a 5x5 supply area
+/// reaches all five consumers -- which is the whole reason the layout is an L
+/// and not a row (`tests::the_cells_own_pole_covers_every_consumer_in_it`).
+///
+/// **It is not in [`LAYOUT`], and that is the point.** A small electric pole
+/// costs one wood, the planner cannot make wood, and every bot a run starts
+/// carries exactly one: four bots, four wood, **eight poles ever**. Run
+/// `run-1788396958-07935` spent both of bot 1's on power plants -- one craft
+/// yields two, a replan re-sited the plant, and both went into the ground --
+/// and the cell was then refused with `no method can satisfy goal: have 1
+/// wood`, with three other bots each still holding one that
+/// `Holder::Share(chain_actor)` cannot reach.
+///
+/// So [`fit`] asks for the cell **without** a pole first, and only brings one
+/// when no existing network already covers the ground. A cell sited in the
+/// plant's own supply area genuinely does not need a pole, and asking for one
+/// spends an irreplaceable item to duplicate something already standing.
+const POLE_OFFSET: (f64, f64) = (-1., 2.);
 
 /// Where a bot has to be able to stand to fill this cell's chests.
 ///
@@ -420,7 +440,9 @@ pub struct Cell {
     /// The intermediate machine's position — the origin every offset is from.
     pub origin: Position,
     pub facing: Direction,
-    /// Every building, in build order.
+    /// Every building, in build order. Includes a pole of the cell's own only
+    /// when no existing network already covers the ground -- see
+    /// [`POLE_OFFSET`].
     pub parts: Vec<CellPart>,
     /// Every tile a bot must be able to stand on to charge this cell.
     pub lane: Vec<Position>,
@@ -434,6 +456,25 @@ impl Cell {
     /// drop a role should refuse a plan rather than take a process down.
     pub fn at(&self, role: Role) -> Option<&CellPart> {
         self.parts.iter().find(|part| part.role == role)
+    }
+
+    /// Does this cell have to place a pole of its own?
+    ///
+    /// `false` when it stands inside a supply area that already exists, which
+    /// is the cheap case and the one [`plan_cell`] looks for first. The bill
+    /// reads this rather than assuming: a pole nobody needs is one wood spent
+    /// out of a lifetime supply of four.
+    pub fn brings_pole(&self) -> bool {
+        self.at(Role::Pole).is_some()
+    }
+
+    /// The ground whose electric network this cell is on.
+    ///
+    /// The product machine, because it is a consumer by construction whether
+    /// or not the cell brought a pole. Asking about the pole would answer
+    /// `None` for exactly the cells that adopted somebody else's.
+    pub fn on_network_at(&self) -> Option<&Position> {
+        self.at(Role::Product).map(|part| &part.position)
     }
 }
 
@@ -459,14 +500,17 @@ fn compose(direction: Direction, by: Direction) -> Option<Direction> {
 /// their own build grid at all four facings, and it is
 /// `tests::every_facing_puts_every_building_on_its_own_grid` rather than a
 /// comment.
-fn layout(origin: &Position, facing: Direction) -> Option<Vec<CellPart>> {
+fn layout(origin: &Position, facing: Direction, with_pole: bool) -> Option<Vec<CellPart>> {
+    let pole = with_pole.then_some((Role::Pole, POLE_OFFSET, Direction::North));
     LAYOUT
         .iter()
+        .copied()
+        .chain(pole)
         .map(|(role, offset, direction)| {
             Some(CellPart {
-                role: *role,
+                role,
                 position: origin.add(&Position::new(offset.0, offset.1).turn(facing)?),
-                direction: compose(*direction, facing)?,
+                direction: compose(direction, facing)?,
             })
         })
         .collect()
@@ -555,10 +599,15 @@ fn consumers(state: &PlanState, cell: &Cell) -> Vec<(Position, &'static str, f64
 ///    the cell's own pole joins. Not "is there a pole": twelve assembling
 ///    machines on one 900 kW engine each pass a coverage test individually;
 /// 4. and, implied by 3 through the union-find in `electric_network`, the
-///    cell's pole is actually wired to a generator — which is what bounds the
-///    search to the anchor's wire reach without stating a distance here.
-fn fit(state: &PlanState, origin: &Position, facing: Direction) -> Option<Cell> {
-    let parts = layout(origin, facing)?;
+///    cell is actually wired to a generator — which is what bounds the search
+///    to the anchor's wire reach without stating a distance here.
+///
+/// `with_pole` decides whether the cell brings a pole of its own. Asked
+/// `false` first by [`plan_cell`]: question 3 then has to be answered by a
+/// network that already exists, and a cell that passes it needs no pole at
+/// all. See [`POLE_OFFSET`] for what one costs.
+fn fit(state: &PlanState, origin: &Position, facing: Direction, with_pole: bool) -> Option<Cell> {
+    let parts = layout(origin, facing, with_pole)?;
     let lane = lane(origin, facing)?;
     for part in &parts {
         if !state.is_area_free_facing(part.role.name(), &part.position, part.direction) {
@@ -628,25 +677,32 @@ pub fn plan_cell(
     spec: &AssemblySpec,
 ) -> Result<Cell, PlannerError> {
     let base = Pos::from(anchor);
-    for radius in 0..=CELL_SEARCH_RADIUS {
-        for dy in -radius..=radius {
-            for dx in -radius..=radius {
-                // Only the ring at exactly this radius; inner ones were done.
-                if dx.abs() != radius && dy.abs() != radius {
-                    continue;
-                }
-                for facing in Direction::orthogonal() {
-                    // The intermediate machine's own build grid, read rather
-                    // than assumed: it is the tile-centre grid for a 3x3 at
-                    // every cardinal, and reading it is what keeps this
-                    // correct the day a cell's first machine is not 3x3.
-                    let (offset_x, offset_y) = tile_alignment_facing(state, MACHINE, facing);
-                    let candidate = Position::new(
-                        f64::from(base.0 + dx) + offset_x,
-                        f64::from(base.1 + dy) + offset_y,
-                    );
-                    if let Some(cell) = fit(state, &candidate, facing) {
-                        return Ok(cell);
+    // The cheap pass first, and the whole ring search is repeated rather than
+    // interleaved: a cell twelve tiles out that needs no pole beats one beside
+    // the anchor that costs a wood, because wood is the one resource this
+    // project has four of and cannot make more. Two full passes in a fixed
+    // order are as deterministic as one.
+    for with_pole in [false, true] {
+        for radius in 0..=CELL_SEARCH_RADIUS {
+            for dy in -radius..=radius {
+                for dx in -radius..=radius {
+                    // Only the ring at exactly this radius; inner ones were done.
+                    if dx.abs() != radius && dy.abs() != radius {
+                        continue;
+                    }
+                    for facing in Direction::orthogonal() {
+                        // The intermediate machine's own build grid, read rather
+                        // than assumed: it is the tile-centre grid for a 3x3 at
+                        // every cardinal, and reading it is what keeps this
+                        // correct the day a cell's first machine is not 3x3.
+                        let (offset_x, offset_y) = tile_alignment_facing(state, MACHINE, facing);
+                        let candidate = Position::new(
+                            f64::from(base.0 + dx) + offset_x,
+                            f64::from(base.1 + dy) + offset_y,
+                        );
+                        if let Some(cell) = fit(state, &candidate, facing, with_pole) {
+                            return Ok(cell);
+                        }
                     }
                 }
             }
@@ -796,12 +852,11 @@ pub fn holds_assembling(state: &PlanState, item: &str, per_minute: u32) -> bool 
 /// `Holder::Share`, for the same reason `power::bill` uses it: one bot places
 /// these, so one bot has to be holding them, and `Anyone` sizes its shortfall
 /// against the sum across the roster.
-fn bill(spec: &AssemblySpec, count: u32, coal: u32) -> Vec<(ItemId, u32)> {
+fn bill(spec: &AssemblySpec, count: u32, poles: u32, coal: u32) -> Vec<(ItemId, u32)> {
     let mut out = vec![
         (MACHINE.to_string(), 2 * count),
         (INSERTER.to_string(), 3 * count),
         (CHEST.to_string(), 2 * count),
-        (POLE.to_string(), count),
         (
             spec.intermediate.ingredient.0.clone(),
             spec.feed_charge().saturating_mul(count),
@@ -811,6 +866,11 @@ fn bill(spec: &AssemblySpec, count: u32, coal: u32) -> Vec<(ItemId, u32)> {
             spec.supply_charge().saturating_mul(count),
         ),
     ];
+    // Only the cells that could not adopt supply that already stands. A pole
+    // in a bill nobody places is one of four wood, spent for nothing.
+    if poles > 0 {
+        out.push((POLE.to_string(), poles));
+    }
     if coal > 0 {
         out.push(("coal".to_string(), coal));
     }
@@ -967,7 +1027,8 @@ fn cell_steps(
     let product_gate = gate_pre(&spec.recipe, &mut steps);
     let intermediate_gate = gate_pre(&spec.intermediate.recipe, &mut steps);
 
-    for (item, amount) in bill(spec, count, coal) {
+    let poles = cells.iter().filter(|cell| cell.brings_pole()).count() as u32;
+    for (item, amount) in bill(spec, count, poles, coal) {
         steps.push(Step::Subgoal(Goal::Have {
             item,
             count: amount,
@@ -1333,10 +1394,10 @@ fn fuel_for(state: &PlanState, anchor: &Position, cells: &[Cell]) -> (u32, Optio
             trial.create_entity(entity_for(state, part));
         }
     }
-    let Some(pole) = cells.first().and_then(|cell| cell.at(Role::Pole)) else {
+    let Some(ground) = cells.first().and_then(Cell::on_network_at) else {
         return (0, None);
     };
-    let Some(area) = trial.collision_area(POLE, &pole.position) else {
+    let Some(area) = trial.collision_area(MACHINE, ground) else {
         return (0, None);
     };
     let demand = trial.electric_demand_kw(&area, None);
@@ -1597,7 +1658,7 @@ mod tests {
         let s = bare(&[BotId(1)]);
         for facing in Direction::orthogonal() {
             let origin = Position::new(10.5, 10.5);
-            for part in layout(&origin, facing).expect("a cardinal facing") {
+            for part in layout(&origin, facing, true).expect("a cardinal facing") {
                 let name = part.role.name();
                 let (offset_x, offset_y) = tile_alignment_facing(&s, name, part.direction);
                 assert!(
@@ -1614,7 +1675,7 @@ mod tests {
     fn no_two_buildings_of_a_cell_overlap_at_any_facing() {
         let s = bare(&[BotId(1)]);
         for facing in Direction::orthogonal() {
-            let parts = layout(&Position::new(10.5, 10.5), facing).unwrap();
+            let parts = layout(&Position::new(10.5, 10.5), facing, true).unwrap();
             for (i, a) in parts.iter().enumerate() {
                 for b in parts.iter().skip(i + 1) {
                     let a_box = s
@@ -1651,7 +1712,7 @@ mod tests {
             let cell = Cell {
                 origin: origin.clone(),
                 facing,
-                parts: layout(&origin, facing).unwrap(),
+                parts: layout(&origin, facing, true).unwrap(),
                 lane: lane(&origin, facing).unwrap(),
             };
             let mut trial = s.fork();
@@ -1678,7 +1739,7 @@ mod tests {
         for role in [Role::FeedInserter, Role::LinkInserter, Role::SupplyInserter] {
             let s = bare(&[BotId(1)]);
             let origin = Position::new(10.5, 10.5);
-            let mut parts = layout(&origin, Direction::North).unwrap();
+            let mut parts = layout(&origin, Direction::North, true).unwrap();
             for part in parts.iter_mut() {
                 if part.role == role {
                     part.direction = compose(part.direction, Direction::South).unwrap();
@@ -1725,7 +1786,7 @@ mod tests {
         let margin = 1. / 64.;
         for facing in Direction::orthogonal() {
             let origin = Position::new(10.5, 10.5);
-            let parts = layout(&origin, facing).unwrap();
+            let parts = layout(&origin, facing, true).unwrap();
             let lane = lane(&origin, facing).unwrap();
             assert_eq!(lane.len(), 5);
             for tile in &lane {
@@ -1746,7 +1807,7 @@ mod tests {
         }
         // And the lane really does reach both chests: a bot standing on it is
         // within a vanilla reach distance of each.
-        let parts = layout(&Position::new(10.5, 10.5), Direction::North).unwrap();
+        let parts = layout(&Position::new(10.5, 10.5), Direction::North, true).unwrap();
         let lane = lane(&Position::new(10.5, 10.5), Direction::North).unwrap();
         for role in [Role::FeedChest, Role::SupplyChest] {
             let chest = parts.iter().find(|p| p.role == role).unwrap();
@@ -1760,6 +1821,118 @@ mod tests {
         }
     }
 
+    /// A pole and a steam engine on one network, with **clear ground around
+    /// the pole** for a cell to be sited in.
+    ///
+    /// The generator is seven tiles south, on a second pole wired to the first
+    /// (a small pole reaches 7.5), which is what leaves the first pole's own
+    /// supply area empty. That is not contrivance: it is the difference
+    /// between a plant whose engine sits in the ground a cell wants and one
+    /// whose does not, and `powered()` above is the first case.
+    fn powered_with_room(bots: &[BotId]) -> PlanState {
+        let mut state = bare(bots);
+        for bot in bots {
+            state.gain(*bot, "wood", 1);
+        }
+        for (name, entity_type, position) in [
+            (POLE, "electric-pole", Position::new(30.5, 32.5)),
+            (POLE, "electric-pole", Position::new(30.5, 39.5)),
+            ("steam-engine", "generator", Position::new(32.5, 39.5)),
+        ] {
+            state.create_entity(FactorioEntity {
+                name: name.into(),
+                entity_type: entity_type.into(),
+                position,
+                ..Default::default()
+            });
+        }
+        state
+    }
+
+    /// **A cell inside supply that already stands brings no pole of its own.**
+    ///
+    /// The finding of run `run-1788396958-07935`, as a test. That run
+    /// researched `automation` and then refused the cell with `no method can
+    /// satisfy goal: have 1 wood (a share sized for bot 1)`: one craft yields
+    /// two poles, a replan re-sited the power plant, both of bot 1's went into
+    /// the ground, and the planner has no way to hand it one of the three the
+    /// other bots were each still carrying. Four bots, four wood, eight poles
+    /// ever -- so a pole the cell does not need is not a rounding error.
+    #[test]
+    fn a_cell_inside_an_existing_supply_area_brings_no_pole_of_its_own() {
+        let bots = [BotId(1)];
+        let state = powered_with_room(&bots);
+        let cell = plan_cell(&state, &Position::new(30.5, 32.5), &spec())
+            .expect("there is room beside that pole");
+        assert!(
+            !cell.brings_pole(),
+            "an existing pole covers this cell; bringing another spends a wood to duplicate it"
+        );
+        assert_eq!(
+            cell.parts.len(),
+            7,
+            "the eight-building cell minus the pole"
+        );
+
+        // ...and it is genuinely powered, so this is adoption rather than the
+        // check being skipped.
+        let mut trial = state.fork();
+        for part in &cell.parts {
+            trial.create_entity(entity_for(&state, part));
+        }
+        for (position, name, kw) in consumers(&trial, &cell) {
+            assert!(
+                (Condition::Powered {
+                    pos: position,
+                    entity: name.into(),
+                    kw,
+                })
+                .holds(&trial, BotId(0)),
+                "{name} is not actually on the network it adopted"
+            );
+        }
+
+        // The whole point: the bill does not ask for one either.
+        let net = expand(
+            &[Goal::Producing {
+                item: PACK.into(),
+                per_minute: 6,
+            }],
+            &state,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a cell that needs no pole plans");
+        // Nothing about a pole anywhere in the plan -- not a placement and not
+        // a craft. Asserting only on placements would pass against a bill that
+        // still asks for one and simply never puts it down, which spends the
+        // wood just the same.
+        let mentions: Vec<&str> = net
+            .actions()
+            .filter(|a| a.label.contains(POLE))
+            .map(|a| a.label.as_str())
+            .collect();
+        assert!(
+            mentions.is_empty(),
+            "no pole is placed and none is crafted, so no wood is spent: {mentions:?}"
+        );
+    }
+
+    /// And a cell no existing pole reaches still brings one.
+    ///
+    /// The control for the test above: in `powered()` the steam engine stands
+    /// in exactly the ground a pole-less cell would need, so the cheap pass
+    /// finds nothing and the cell pays for its own supply. Without this, the
+    /// test above would pass just as well against a planner that never places
+    /// a pole at all.
+    #[test]
+    fn a_cell_no_existing_pole_reaches_brings_one() {
+        let cell = plan_cell(&powered(&[BotId(1)]), &Position::new(10.5, 10.5), &spec())
+            .expect("the fixture has room for a cell that carries its own pole");
+        assert!(cell.brings_pole());
+        assert_eq!(cell.parts.len(), 8);
+    }
+
     /// One pole, and it reaches every consumer in the cell.
     ///
     /// The reason the layout is this shape and not a row: a small pole's
@@ -1770,7 +1943,7 @@ mod tests {
     fn the_cells_own_pole_covers_every_consumer_in_it() {
         let s = bare(&[BotId(1)]);
         for facing in Direction::orthogonal() {
-            let parts = layout(&Position::new(10.5, 10.5), facing).unwrap();
+            let parts = layout(&Position::new(10.5, 10.5), facing, true).unwrap();
             let pole = parts.iter().find(|p| p.role == Role::Pole).unwrap();
             let consumers = parts
                 .iter()

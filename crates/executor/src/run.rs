@@ -678,6 +678,14 @@ async fn perform<A: Actuator + ?Sized>(
                 .await
         }
         ActionKind::Research { tech } => act.research(tech).await,
+        ActionKind::SetRecipe {
+            pos,
+            entity,
+            recipe,
+        } => {
+            act.set_recipe(bot, entity, pos.clone(), recipe.as_str())
+                .await
+        }
     }
 }
 
@@ -701,6 +709,7 @@ mod tests {
             async fn insert(&self, bot: BotId, entity: &str, at: Position, slot: InventorySlot, item: &str, count: u32) -> Result<ActionTicks, ActuatorFailure>;
             async fn remove(&self, bot: BotId, entity: &str, at: Position, slot: InventorySlot, item: &str, count: u32) -> Result<ActionTicks, ActuatorFailure>;
             async fn research(&self, tech: &str) -> Result<ActionTicks, ActuatorFailure>;
+            async fn set_recipe(&self, bot: BotId, entity: &str, at: Position, recipe: &str) -> Result<ActionTicks, ActuatorFailure>;
         }
     }
 
@@ -1126,6 +1135,16 @@ mod tests {
         }
 
         async fn research(&self, _tech: &str) -> Result<ActionTicks, ActuatorFailure> {
+            Ok(some_ticks())
+        }
+
+        async fn set_recipe(
+            &self,
+            _bot: BotId,
+            _entity: &str,
+            _at: Position,
+            _recipe: &str,
+        ) -> Result<ActionTicks, ActuatorFailure> {
             Ok(some_ticks())
         }
 
@@ -1678,6 +1697,38 @@ mod tests {
             slot: InventorySlot::FurnaceSource,
             item: "iron-ore".into(),
             count: 4,
+        };
+        perform(&act, BotId(0), &kind).await.unwrap();
+    }
+
+    /// The dispatch arm's whole contract: the machine's **name**, its
+    /// **position** and the **recipe** all reach the actuator unchanged.
+    ///
+    /// Three separate strings, and two of them are recipe-shaped. An arm that
+    /// passed the recipe where the entity name belongs would set a recipe on
+    /// nothing -- `surface.find_entity` would answer `nil` and the mod would
+    /// refuse -- but the reverse mistake is the dangerous one, because
+    /// `assembling-machine-1` is also a recipe name and the game would take
+    /// it.
+    #[tokio::test]
+    async fn set_recipe_dispatches_the_machine_and_the_recipe_the_action_named() {
+        use mockall::predicate::eq;
+
+        let mut act = MockAct::new();
+        act.expect_set_recipe()
+            .with(
+                eq(BotId(0)),
+                eq("assembling-machine-1"),
+                eq(Position::new(12.5, 8.5)),
+                eq("automation-science-pack"),
+            )
+            .times(1)
+            .returning(|_, _, _, _| Ok(some_ticks()));
+
+        let kind = ActionKind::SetRecipe {
+            pos: Position::new(12.5, 8.5),
+            entity: "assembling-machine-1".into(),
+            recipe: "automation-science-pack".into(),
         };
         perform(&act, BotId(0), &kind).await.unwrap();
     }

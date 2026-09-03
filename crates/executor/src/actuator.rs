@@ -187,6 +187,33 @@ pub trait Actuator: Send + Sync {
     /// Research is server-wide in Factorio: it takes no player id.
     async fn research(&self, tech: &str) -> Result<ActionTicks, ActuatorFailure>;
 
+    /// Put `recipe` on the crafting machine named `entity` at `at`.
+    ///
+    /// `entity` as well as `at` for the same reason [`Actuator::insert`] takes
+    /// both: the mod addresses an existing building with
+    /// `surface.find_entity(name, position)`.
+    ///
+    /// **A required method, not a default.** Every other dispatch here is
+    /// required, and a default that returned `Ok` would let an actuator report
+    /// a recipe set on a machine it never touched -- the placed-but-dead
+    /// machine this verb exists to prevent, arriving from the one direction
+    /// nothing downstream can check.
+    ///
+    /// # The one idempotent dispatch on this trait
+    ///
+    /// `insert` moves items, `remove` moves them back, `place` builds; running
+    /// any of them twice is not running it once. This one assigns, so a
+    /// re-dispatch of a recipe already set is a no-op in the game as well as
+    /// in the plan -- which is what makes it safe under `recover.rs`'s tier 1,
+    /// where its neighbours are the counter-examples.
+    async fn set_recipe(
+        &self,
+        bot: BotId,
+        entity: &str,
+        at: Position,
+        recipe: &str,
+    ) -> Result<ActionTicks, ActuatorFailure>;
+
     /// The game's simulation speed multiplier — Factorio's own `game.speed`,
     /// where `1.0` is normal (60 ticks/second) and the game accepts anything
     /// from `0.01` up.
@@ -436,6 +463,15 @@ mod tests {
                 unreachable!()
             }
             async fn research(&self, _: &str) -> Result<ActionTicks, ActuatorFailure> {
+                unreachable!()
+            }
+            async fn set_recipe(
+                &self,
+                _: BotId,
+                _: &str,
+                _: Position,
+                _: &str,
+            ) -> Result<ActionTicks, ActuatorFailure> {
                 unreachable!()
             }
         }

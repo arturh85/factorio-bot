@@ -185,6 +185,37 @@ pub enum Condition {
         item: ItemId,
         count: u32,
     },
+    /// The crafting machine standing at `pos` is set to make `recipe`.
+    ///
+    /// **The condition an assembling machine is not finished without.** A
+    /// machine placed, powered and fed with no recipe on it is the
+    /// placed-but-dead machine this planner spent 2026-09-02 eliminating in
+    /// its other forms: it costs materials, occupies ground, reads as built by
+    /// every geometry check, and produces nothing at all.
+    ///
+    /// Read against [`crate::state::PlanState::entity_at`], so it sees the
+    /// plan's overlay as well as the world -- `FactorioEntity::recipe` is
+    /// carried out of the game by `serialize_entity`
+    /// (`mods/BotBridge/types.lua`) for every `assembling-machine`, and
+    /// [`Effect::SetRecipe`] writes the same field in the overlay.
+    ///
+    /// # This condition says nothing about whether the recipe is *available*
+    ///
+    /// It is a statement about one machine, not about the force. A recipe the
+    /// force has not unlocked can be named here and the condition simply will
+    /// not hold, because the game will not have set it. A method emitting
+    /// [`ActionKind::SetRecipe`] must gate the recipe itself with
+    /// [`crate::method::util::recipe_gate`] and honour all four of its
+    /// answers -- in particular it must not read
+    /// [`crate::method::util::RecipeGate::PlannedResearch`] as `Open`, which
+    /// is what dispatched three crafts of a locked recipe at tick zero in
+    /// `run-1788338409-63794`. `PlannedResearch` costs no research subgoal and
+    /// still needs its `Condition::Researched`, because that condition is the
+    /// only thing that orders the recipe after the unlock.
+    RecipeSet {
+        pos: Position,
+        recipe: ItemId,
+    },
 }
 
 impl Condition {
@@ -247,6 +278,9 @@ impl Condition {
                 state.resource_available(pos, item) >= *count
             }
             Condition::BufferHas { pos, item, count } => state.buffered(pos, item) >= *count,
+            Condition::RecipeSet { pos, recipe } => {
+                matches!(state.entity_at(pos), Some(e) if e.recipe.as_deref() == Some(recipe.as_str()))
+            }
         }
     }
 
@@ -309,6 +343,9 @@ impl std::fmt::Display for Condition {
             Condition::BufferHas { pos, item, count } => {
                 write!(f, "{} {} in the buffer at {}", count, item, pos)
             }
+            Condition::RecipeSet { pos, recipe } => {
+                write!(f, "the machine at {} is set to {}", pos, recipe)
+            }
         }
     }
 }
@@ -359,6 +396,26 @@ pub enum Effect {
         count: u32,
     },
     Researched(String),
+    /// The crafting machine standing at `pos` is switched to `recipe`.
+    ///
+    /// The other half of [`Condition::RecipeSet`], and the reason a stage-2
+    /// cell can order its inserters after the recipe rather than hoping.
+    /// Applying it rewrites `FactorioEntity::recipe` in the plan's overlay,
+    /// which is the same field the game reports out of `serialize_entity`.
+    ///
+    /// # Idempotent, unlike every other effect here
+    ///
+    /// `GainItem`, `LoseItem`, `CreateEntity` and `BufferLose` all *change* a
+    /// count or a tile, so applying one twice is not applying it once. This
+    /// one assigns: setting the same recipe on the same machine again lands on
+    /// the same state. That is what makes the matching
+    /// [`ActionKind::SetRecipe`] safe to re-dispatch under `recover.rs`'s
+    /// tier 1, where a re-run `Insert` would move a second batch of items and
+    /// a re-run `Place` would fail on its own building.
+    SetRecipe {
+        pos: Position,
+        recipe: ItemId,
+    },
 }
 
 impl Effect {
@@ -385,6 +442,7 @@ impl Effect {
                 state.set_researched(tech);
                 Ok(())
             }
+            Effect::SetRecipe { pos, recipe } => state.set_recipe(pos, recipe),
         }
     }
 
@@ -401,6 +459,13 @@ impl Effect {
                 Pos::from(pos) == Pos::from(want)
             }
             (Effect::Researched(t), Condition::Researched(want)) => t == want,
+            (
+                Effect::SetRecipe { pos, recipe },
+                Condition::RecipeSet {
+                    pos: want,
+                    recipe: wanted,
+                },
+            ) => Pos::from(pos) == Pos::from(want) && recipe == wanted,
             _ => false,
         }
     }
@@ -502,6 +567,19 @@ pub enum ActionKind {
     Research {
         tech: String,
     },
+    /// Put `recipe` on the crafting machine named `entity` standing at `pos`.
+    ///
+    /// `entity` is carried for the same reason [`ActionKind::Insert`] carries
+    /// it: the mod addresses an existing building with
+    /// `surface.find_entity(name, position)`, which needs both.
+    ///
+    /// **The one idempotent dispatch in this enum.** See
+    /// [`Effect::SetRecipe`].
+    SetRecipe {
+        pos: Position,
+        entity: String,
+        recipe: ItemId,
+    },
 }
 
 impl ActionKind {
@@ -532,7 +610,8 @@ impl ActionKind {
         match self {
             ActionKind::Mine { pos, .. }
             | ActionKind::Insert { pos, .. }
-            | ActionKind::Remove { pos, .. } => Some(pos.clone()),
+            | ActionKind::Remove { pos, .. }
+            | ActionKind::SetRecipe { pos, .. } => Some(pos.clone()),
             ActionKind::Place { entity } => Some(entity.position.clone()),
             ActionKind::Craft { .. } | ActionKind::Research { .. } => None,
         }
@@ -1088,6 +1167,247 @@ mod tests {
                 "lab_input"
             ]
         );
+    }
+
+    // ---- set_recipe ------------------------------------------------------
+
+    /// An assembling machine at `pos`, with whatever recipe it already carries.
+    fn machine(s: &mut PlanState, pos: &Position, recipe: Option<&str>) {
+        s.create_entity(FactorioEntity {
+            name: "assembling-machine-1".into(),
+            entity_type: "assembling-machine".into(),
+            position: pos.clone(),
+            recipe: recipe.map(str::to_string),
+            ..Default::default()
+        });
+    }
+
+    /// **A machine with no recipe on it is not finished**, and this is the
+    /// condition that says so. Every other check a stage-2 cell makes --
+    /// placed, powered, fed -- passes for a machine that produces nothing.
+    #[test]
+    fn a_machine_with_no_recipe_does_not_satisfy_recipe_set() {
+        let mut s = state();
+        let pos = Position::new(12.5, 8.5);
+        machine(&mut s, &pos, None);
+        let cond = Condition::RecipeSet {
+            pos: pos.clone(),
+            recipe: "automation-science-pack".into(),
+        };
+        assert!(
+            !cond.holds(&s, BotId(1)),
+            "a machine the game reports no recipe for is not set to one"
+        );
+    }
+
+    /// The world's own reading counts: a machine that already carries the
+    /// recipe satisfies the condition with no action in the plan at all.
+    #[test]
+    fn a_machine_already_carrying_the_recipe_satisfies_it() {
+        let mut s = state();
+        let pos = Position::new(12.5, 8.5);
+        machine(&mut s, &pos, Some("automation-science-pack"));
+        assert!(
+            Condition::RecipeSet {
+                pos,
+                recipe: "automation-science-pack".into(),
+            }
+            .holds(&s, BotId(1))
+        );
+    }
+
+    /// The recipe is compared, not merely its presence. A machine set to gears
+    /// is not a machine set to science packs, and a condition that answered
+    /// yes to both would call a wrongly-configured cell finished.
+    #[test]
+    fn a_machine_carrying_another_recipe_does_not_satisfy_it() {
+        let mut s = state();
+        let pos = Position::new(12.5, 8.5);
+        machine(&mut s, &pos, Some("iron-gear-wheel"));
+        assert!(
+            !Condition::RecipeSet {
+                pos,
+                recipe: "automation-science-pack".into(),
+            }
+            .holds(&s, BotId(1))
+        );
+    }
+
+    /// No machine, no recipe. Deliberately `false` rather than a panic and
+    /// deliberately not "vacuously true": an empty tile is exactly the state a
+    /// cell is in before its assembler is placed, and reporting the recipe set
+    /// there would let the plan's checks pass on ground with nothing on it.
+    #[test]
+    fn an_empty_tile_does_not_satisfy_recipe_set() {
+        let s = state();
+        assert!(
+            !Condition::RecipeSet {
+                pos: Position::new(12.5, 8.5),
+                recipe: "automation-science-pack".into(),
+            }
+            .holds(&s, BotId(1))
+        );
+    }
+
+    /// Applying the effect makes the condition hold -- the pairing the plan
+    /// rests on. Without it a method could emit the action, the state would
+    /// never move, and expansion would emit it again for ever.
+    #[test]
+    fn setting_a_recipe_makes_the_condition_hold() {
+        let mut s = state();
+        let pos = Position::new(12.5, 8.5);
+        machine(&mut s, &pos, None);
+        let eff = Effect::SetRecipe {
+            pos: pos.clone(),
+            recipe: "automation-science-pack".into(),
+        };
+        eff.apply(&mut s, BotId(1)).expect("a machine is there");
+        assert!(
+            Condition::RecipeSet {
+                pos,
+                recipe: "automation-science-pack".into(),
+            }
+            .holds(&s, BotId(1)),
+            "the overlay must carry what the effect claims"
+        );
+    }
+
+    /// **Idempotent, and its neighbours are the counter-examples.** Applying
+    /// `GainItem` twice gains twice; applying this twice lands on the same
+    /// state. That is what makes the matching dispatch safe to re-run under
+    /// `recover.rs`'s tier 1, where a repeated `Insert` moves a second batch.
+    #[test]
+    fn setting_the_same_recipe_twice_changes_nothing() {
+        let mut s = state();
+        let pos = Position::new(12.5, 8.5);
+        machine(&mut s, &pos, None);
+        let eff = Effect::SetRecipe {
+            pos: pos.clone(),
+            recipe: "automation-science-pack".into(),
+        };
+        eff.apply(&mut s, BotId(1)).expect("a machine is there");
+        let once = s.entity_at(&pos).expect("the machine");
+        eff.apply(&mut s, BotId(1)).expect("still there");
+        let twice = s.entity_at(&pos).expect("the machine");
+        assert_eq!(once, twice, "a second application is a no-op");
+    }
+
+    /// A recipe replaces the one before it rather than being added beside it:
+    /// a machine has exactly one.
+    #[test]
+    fn setting_a_recipe_replaces_the_one_before_it() {
+        let mut s = state();
+        let pos = Position::new(12.5, 8.5);
+        machine(&mut s, &pos, Some("iron-gear-wheel"));
+        Effect::SetRecipe {
+            pos: pos.clone(),
+            recipe: "automation-science-pack".into(),
+        }
+        .apply(&mut s, BotId(1))
+        .expect("a machine is there");
+        assert_eq!(
+            s.entity_at(&pos).expect("the machine").recipe.as_deref(),
+            Some("automation-science-pack")
+        );
+        assert!(
+            !Condition::RecipeSet {
+                pos,
+                recipe: "iron-gear-wheel".into(),
+            }
+            .holds(&s, BotId(1)),
+            "the old recipe is gone, not kept alongside"
+        );
+    }
+
+    /// Setting a recipe on empty ground is a **fault in the plan**, not a
+    /// silent no-op. A method that emits this without ordering it after the
+    /// placement has written a plan whose later checks would pass against a
+    /// machine nobody built, and the error names the tile so the method that
+    /// wrote it can be found.
+    #[test]
+    fn setting_a_recipe_where_there_is_no_machine_is_an_error() {
+        let mut s = state();
+        let err = Effect::SetRecipe {
+            pos: Position::new(12.5, 8.5),
+            recipe: "automation-science-pack".into(),
+        }
+        .apply(&mut s, BotId(1))
+        .expect_err("nothing stands there");
+        let text = err.to_string();
+        assert!(
+            text.contains("automation-science-pack"),
+            "the refusal names the recipe, got {text}"
+        );
+        assert!(
+            text.contains("12.5") && text.contains("8.5"),
+            "and the tile it was aimed at, got {text}"
+        );
+    }
+
+    /// The ordering half. `ActionNetwork::infer_edges` draws an edge from an
+    /// effect to a condition it satisfies, so a `SetRecipe` must satisfy the
+    /// `RecipeSet` for the same machine and the same recipe -- otherwise an
+    /// inserter loading a machine could be scheduled before the recipe that
+    /// decides what goes in it.
+    #[test]
+    fn a_set_recipe_effect_satisfies_the_matching_condition() {
+        let pos = Position::new(12.5, 8.5);
+        let eff = Effect::SetRecipe {
+            pos: pos.clone(),
+            recipe: "automation-science-pack".into(),
+        };
+        assert!(eff.satisfies(&Condition::RecipeSet {
+            pos,
+            recipe: "automation-science-pack".into(),
+        }));
+    }
+
+    /// ...and satisfies neither another machine's nor another recipe's.
+    /// An edge drawn on a mismatch would order two unrelated actions and,
+    /// worse, report a condition as achievable that nothing in the plan
+    /// achieves.
+    #[test]
+    fn a_set_recipe_effect_satisfies_nothing_else() {
+        let eff = Effect::SetRecipe {
+            pos: Position::new(12.5, 8.5),
+            recipe: "automation-science-pack".into(),
+        };
+        assert!(
+            !eff.satisfies(&Condition::RecipeSet {
+                pos: Position::new(20.5, 8.5),
+                recipe: "automation-science-pack".into(),
+            }),
+            "another machine's recipe is not this one"
+        );
+        assert!(
+            !eff.satisfies(&Condition::RecipeSet {
+                pos: Position::new(12.5, 8.5),
+                recipe: "iron-gear-wheel".into(),
+            }),
+            "another recipe on this machine is not this one"
+        );
+        assert!(
+            !eff.satisfies(&Condition::EntityAt {
+                pos: Position::new(12.5, 8.5),
+                name: "assembling-machine-1".into(),
+            }),
+            "setting a recipe does not build the machine"
+        );
+    }
+
+    /// `target_position` is what the executor's log and `recover.rs` read to
+    /// ask "where did this act". A `SetRecipe` acts at the machine, and
+    /// answering `None` would put it in the same class as `Craft` -- an action
+    /// that touches no tile.
+    #[test]
+    fn a_set_recipe_acts_at_the_machine() {
+        let pos = Position::new(12.5, 8.5);
+        let kind = ActionKind::SetRecipe {
+            pos: pos.clone(),
+            entity: "assembling-machine-1".into(),
+            recipe: "automation-science-pack".into(),
+        };
+        assert_eq!(kind.target_position(), Some(pos));
     }
 
     #[test]

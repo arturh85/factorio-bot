@@ -3558,6 +3558,7 @@ mod tests {
                 ActionKind::Insert { .. } => "insert",
                 ActionKind::Remove { .. } => "remove",
                 ActionKind::Research { .. } => "research",
+                ActionKind::SetRecipe { .. } => "set_recipe",
             })
             .collect();
         assert!(
@@ -3862,6 +3863,7 @@ mod tests {
                 ActionKind::Insert { .. } => "insert",
                 ActionKind::Remove { .. } => "remove",
                 ActionKind::Research { .. } => "research",
+                ActionKind::SetRecipe { .. } => "set_recipe",
             })
             .collect();
         assert_eq!(kinds.iter().filter(|k| **k == "place").count(), 1);

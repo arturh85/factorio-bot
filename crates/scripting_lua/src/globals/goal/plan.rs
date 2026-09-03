@@ -914,6 +914,16 @@ fn step_to_lua(lua: &Lua, net: &ActionNetwork, step: &ScheduledStep) -> LuaResul
                     t.set("kind", "research")?;
                     t.set("tech", tech.clone())?;
                 }
+                ActionKind::SetRecipe {
+                    pos,
+                    entity,
+                    recipe,
+                } => {
+                    t.set("kind", "set_recipe")?;
+                    t.set("pos", position_to_lua(lua, pos)?)?;
+                    t.set("entity", entity.clone())?;
+                    t.set("recipe", recipe.clone())?;
+                }
             }
         }
     }

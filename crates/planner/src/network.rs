@@ -613,6 +613,161 @@ mod tests {
         }
     }
 
+    /// Put `recipe` on the assembling machine at `pos`. `gate` is whatever
+    /// `crate::method::util::recipe_gate` told the caller to state -- empty
+    /// for an open recipe, a `Researched` for one this plan is going to
+    /// unlock.
+    fn set_recipe(
+        id_gen: &mut ActionIdGen,
+        pos: Position,
+        recipe: &str,
+        gate: Vec<Condition>,
+    ) -> Action {
+        let mut pre = vec![Condition::EntityAt {
+            pos: pos.clone(),
+            name: "assembling-machine-1".into(),
+        }];
+        pre.extend(gate);
+        Action {
+            id: id_gen.next(),
+            kind: ActionKind::SetRecipe {
+                pos: pos.clone(),
+                entity: "assembling-machine-1".into(),
+                recipe: recipe.into(),
+            },
+            pre,
+            eff: vec![Effect::SetRecipe {
+                pos,
+                recipe: recipe.into(),
+            }],
+            duration: 10,
+            pinned: None,
+            label: format!("set recipe {recipe}"),
+        }
+    }
+
+    /// Load the assembling machine at `pos`, which only makes sense once it
+    /// knows what it is making.
+    fn load_machine(id_gen: &mut ActionIdGen, pos: Position, recipe: &str) -> Action {
+        Action {
+            id: id_gen.next(),
+            kind: ActionKind::Insert {
+                pos: pos.clone(),
+                entity: "assembling-machine-1".into(),
+                slot: crate::action::InventorySlot::AssemblerInput,
+                item: "iron-plate".into(),
+                count: 1,
+            },
+            pre: vec![Condition::RecipeSet {
+                pos,
+                recipe: recipe.into(),
+            }],
+            eff: vec![],
+            duration: 10,
+            pinned: None,
+            label: "insert iron-plate".into(),
+        }
+    }
+
+    /// A machine is placed, then given a recipe, then loaded -- and every edge
+    /// is inferred from the conditions rather than stated.
+    ///
+    /// The middle one is the new link. Without it the inserter that decides
+    /// what goes into the machine could be scheduled before the recipe that
+    /// decides what belongs there.
+    #[test]
+    fn inference_orders_a_load_after_the_recipe_that_decides_it() {
+        let mut id_gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let pos = Position::new(12.5, 8.5);
+        let machine = FactorioEntity {
+            name: "assembling-machine-1".into(),
+            entity_type: "assembling-machine".into(),
+            position: pos.clone(),
+            ..Default::default()
+        };
+        let p = net.add(Action {
+            id: id_gen.next(),
+            kind: ActionKind::Place {
+                entity: Box::new(machine.clone()),
+            },
+            pre: vec![],
+            eff: vec![Effect::CreateEntity(Box::new(machine))],
+            duration: 30,
+            pinned: None,
+            label: "place assembling-machine-1".into(),
+        });
+        let r = net.add(set_recipe(
+            &mut id_gen,
+            pos.clone(),
+            "automation-science-pack",
+            vec![],
+        ));
+        let i = net.add(load_machine(&mut id_gen, pos, "automation-science-pack"));
+        net.infer_edges();
+        assert_eq!(
+            net.preds(r),
+            vec![(p, 0)],
+            "the recipe waits for the machine"
+        );
+        assert_eq!(net.preds(i), vec![(r, 0)], "the load waits for the recipe");
+    }
+
+    /// **`RecipeGate::PlannedResearch` is not `Open`, and this is the edge
+    /// that difference buys.**
+    ///
+    /// A recipe the world has disabled and a *sibling of this expansion* is
+    /// going to unlock costs no second research subgoal -- the work is already
+    /// in the network -- but the `Condition::Researched` is still mandatory,
+    /// because it is the only thing that keeps the assignment after the
+    /// unlock. Reading `PlannedResearch` as `Open` is what dispatched three
+    /// crafts of a locked recipe at tick zero in `run-1788338409-63794`; the
+    /// same conflation here would dispatch a recipe assignment the game
+    /// refuses by name, on a machine the plan then treats as configured.
+    #[test]
+    fn a_planned_unlock_orders_the_recipe_after_the_research_that_enables_it() {
+        let mut id_gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let pos = Position::new(12.5, 8.5);
+        let t = net.add(research(&mut id_gen, "automation"));
+        let r = net.add(set_recipe(
+            &mut id_gen,
+            pos,
+            "automation-science-pack",
+            vec![Condition::Researched("automation".into())],
+        ));
+        net.infer_edges();
+        assert_eq!(
+            net.preds(r),
+            vec![(t, 0)],
+            "the gate condition is what orders the assignment after the unlock"
+        );
+    }
+
+    /// The control, and the reason the test above is about the *condition*
+    /// rather than about anything the network knows on its own: an identical
+    /// action that states no gate gets no edge, and would be dispatched at
+    /// tick zero.
+    #[test]
+    fn a_recipe_that_states_no_gate_is_ordered_by_nothing() {
+        let mut id_gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let pos = Position::new(12.5, 8.5);
+        let _t = net.add(research(&mut id_gen, "automation"));
+        let r = net.add(set_recipe(
+            &mut id_gen,
+            pos,
+            "automation-science-pack",
+            vec![],
+        ));
+        net.infer_edges();
+        assert!(
+            net.preds(r).is_empty(),
+            "nothing but the stated condition can order this, which is why \
+             a caller must not read PlannedResearch as Open"
+        );
+    }
+
     #[test]
     fn inference_links_a_placement_to_what_needs_the_entity() {
         let mut id_gen = ActionIdGen::new();

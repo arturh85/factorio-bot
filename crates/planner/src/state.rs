@@ -2350,6 +2350,44 @@ impl PlanState {
         self.added.insert(key, entity);
     }
 
+    /// Put `recipe` on the crafting machine standing at `position`.
+    ///
+    /// The overlay half of [`crate::action::Effect::SetRecipe`]. It reads the
+    /// machine through [`Self::entity_at`], so a machine this plan placed and
+    /// one the world already had are treated the same, and writes the modified
+    /// copy back under the tile that was asked about -- the same key
+    /// [`Self::create_entity`] and [`Self::remove_entity`] use, and the same
+    /// one `entity_at` will read it back from.
+    ///
+    /// **Assignment, not accumulation.** A machine has exactly one recipe, so
+    /// setting the same one twice lands on the same state and setting a
+    /// different one replaces rather than adds. That is what makes the
+    /// matching `ActionKind::SetRecipe` the one dispatch in this planner that
+    /// is safe to re-run under `recover.rs`'s tier 1.
+    ///
+    /// # Empty ground is an error, not a no-op
+    ///
+    /// Nothing here checks whether the acting force may *use* the recipe:
+    /// that is [`crate::method::util::recipe_gate`]'s question and it is about
+    /// the force, not about this tile. What is checked is that there is a
+    /// machine to set it on at all, because a method that emits this without
+    /// ordering it after the placement has written a plan whose later
+    /// `Condition::RecipeSet` would otherwise pass against a machine nobody
+    /// built.
+    pub fn set_recipe(&mut self, position: &Position, recipe: &str) -> Result<(), PlannerError> {
+        let Some(mut entity) = self.entity_at(position) else {
+            return Err(PlannerError::NoMachineForRecipe {
+                position: position.to_string(),
+                recipe: recipe.to_string(),
+            });
+        };
+        entity.recipe = Some(recipe.to_string());
+        let key = Pos::from(position);
+        self.removed.remove(&key);
+        self.added.insert(key, entity);
+        Ok(())
+    }
+
     pub fn remove_entity(&mut self, position: &Position) {
         let key = Pos::from(position);
         self.added.remove(&key);

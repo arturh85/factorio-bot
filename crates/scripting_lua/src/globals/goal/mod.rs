@@ -273,6 +273,7 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::ExpansionTooDeep { .. }
         | PlannerError::BufferShort { .. }
         | PlannerError::UnknownTechnology { .. }
+        | PlannerError::NoMachineForRecipe { .. }
         | PlannerError::TooManyCells { .. } => false,
     };
     verdict.then(|| PlanRefusal {
@@ -1128,6 +1129,15 @@ mod tests {
         async fn research(&self, _tech: &str) -> Result<ActionTicks, ActuatorFailure> {
             self.act().await
         }
+        async fn set_recipe(
+            &self,
+            _bot: BotId,
+            _entity: &str,
+            _at: Position,
+            _recipe: &str,
+        ) -> Result<ActionTicks, ActuatorFailure> {
+            self.act().await
+        }
     }
 
     /// Wraps a stub as the factory `create_lua_goal_with` takes.
@@ -1782,6 +1792,15 @@ mod tests {
         }
         async fn research(&self, _tech: &str) -> Result<ActionTicks, ActuatorFailure> {
             Ok(ActionTicks::UNKNOWN)
+        }
+        async fn set_recipe(
+            &self,
+            bot: BotId,
+            _entity: &str,
+            _at: Position,
+            _recipe: &str,
+        ) -> Result<ActionTicks, ActuatorFailure> {
+            self.note(bot)
         }
     }
 

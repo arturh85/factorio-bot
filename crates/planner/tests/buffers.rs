@@ -102,6 +102,9 @@ fn kinds(net: &ActionNetwork) -> Vec<String> {
                 ..
             } => format!("take {count} {item} from {entity} at {pos}"),
             ActionKind::Research { tech } => format!("research {tech}"),
+            ActionKind::SetRecipe { entity, recipe, .. } => {
+                format!("set recipe {recipe} on {entity}")
+            }
         })
         .collect();
     out.sort();

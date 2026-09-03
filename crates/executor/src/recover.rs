@@ -551,6 +551,68 @@ mod tests {
         }
     }
 
+    /// **A failed `SetRecipe` is exactly what tier 1 is for, and it is the one
+    /// action kind for which that is unconditionally safe.**
+    ///
+    /// Tier 1 keeps the network and re-dispatches whatever has not succeeded.
+    /// For its neighbours that is a bet: a repeated `Insert` moves a second
+    /// batch of items, a repeated `Remove` takes a second batch out, a
+    /// repeated `Place` runs into the building the first one made -- which is
+    /// why the test above exists at all, carving out the one `Place` the game
+    /// has already judged.
+    ///
+    /// Setting a recipe *assigns*. Re-dispatching one already set leaves the
+    /// machine exactly as it is and evicts nothing
+    /// (`crates/core/tests/botbridge_set_recipe.rs`), and re-applying the
+    /// matching `Effect::SetRecipe` leaves the plan state exactly as it is
+    /// (`crates/planner`'s `setting_the_same_recipe_twice_changes_nothing`).
+    /// So there is nothing here for a carve-out to protect, and this test is
+    /// the pin that says so: a `SetRecipe` must never grow the kind of
+    /// exclusion `Place` needs.
+    #[test]
+    fn a_failed_set_recipe_is_retried_at_tier_one() {
+        let site = Position::new(3., 3.);
+        let mut id_gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let failed = net.add(Action {
+            id: id_gen.next(),
+            kind: ActionKind::SetRecipe {
+                pos: site.clone(),
+                entity: "assembling-machine-1".into(),
+                recipe: "automation-science-pack".into(),
+            },
+            pre: vec![Condition::EntityAt {
+                pos: site.clone(),
+                name: "assembling-machine-1".into(),
+            }],
+            eff: vec![],
+            duration: 10,
+            pinned: None,
+            label: "set recipe automation-science-pack".into(),
+        });
+        let mut log = ExecutionLog::default();
+        log.start(failed, 0);
+        log.fail(failed, 10, "game rejected the command".to_string());
+
+        // The machine is standing there: the precondition holds, so the only
+        // question this test asks is which tier answers.
+        let mut state = PlanState::from_world(Arc::new(fixture_world()), &BOTS);
+        state.create_entity(factorio_bot_core::types::FactorioEntity {
+            name: "assembling-machine-1".into(),
+            entity_type: "assembling-machine".into(),
+            position: site.clone(),
+            ..Default::default()
+        });
+
+        assert!(
+            matches!(
+                recover(&ore_goal(1), &net, &state, &BOTS, &log),
+                Recovery::Rescheduled { .. }
+            ),
+            "a failed recipe assignment is an ordinary retry, not an escalation"
+        );
+    }
+
     /// Tier 1 does not retry a placement the *game* has refused.
     ///
     /// The distinction the escalation rests on: an ordinary failure is
@@ -666,6 +728,15 @@ mod tests {
             _: BotId,
             _: &str,
             _: u32,
+        ) -> Result<crate::actuator::ActionTicks, crate::ActuatorFailure> {
+            Ok(crate::actuator::ActionTicks::UNKNOWN)
+        }
+        async fn set_recipe(
+            &self,
+            _: BotId,
+            _: &str,
+            _: Position,
+            _: &str,
         ) -> Result<crate::actuator::ActionTicks, crate::ActuatorFailure> {
             Ok(crate::actuator::ActionTicks::UNKNOWN)
         }

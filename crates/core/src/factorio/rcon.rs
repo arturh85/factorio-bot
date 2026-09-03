@@ -282,6 +282,45 @@ fn judge_transfer_reply(
     Ok(ActionTicks::at(tick))
 }
 
+/// Judges the reply to a `set_recipe` RPC.
+///
+/// Same rule as [`judge_transfer_reply`] and the same reason it is strong:
+/// `rcon_set_recipe` (`mods/BotBridge/control.lua`) prints **only** its
+/// `§tick§` stamp when the recipe is set, and a sentence when it is not. So an
+/// empty reply once the stamp is off is the mod asserting all of it -- the
+/// player exists, the recipe exists and the force has unlocked it, an
+/// assembling machine is standing where the plan said, the game took the
+/// recipe (checked by reading it back with `get_recipe`, because
+/// `LuaEntity.set_recipe` returns evicted items rather than a verdict), and
+/// whatever it evicted reached the bot's inventory.
+///
+/// Anything left over is a verdict of failure, carried through verbatim: the
+/// mod's line is where "this recipe is not enabled for this force" and "there
+/// is no machine there" are told apart, and re-deriving that distinction from
+/// an error kind up here would be a second, weaker copy of a judgement the mod
+/// already made.
+///
+/// A separate function from [`judge_transfer_reply`] despite the identical
+/// body: that one's `Success` means "the requested count is the count that
+/// moved", and this one's means the paragraph above. Merging them would leave
+/// one doc comment claiming both.
+fn judge_set_recipe_reply(
+    lines: Option<Vec<String>>,
+    tick: Option<u64>,
+) -> Result<ActionTicks, ActionFailure> {
+    if let Some(lines) = lines {
+        // The game answered, so it saw the command and judged it.
+        return Err(ActionFailure::refused(
+            RconUnexpectedOutput {
+                output: lines.join("\n"),
+            }
+            .into(),
+            ActionTicks::at(tick),
+        ));
+    }
+    Ok(ActionTicks::at(tick))
+}
+
 /// The radius Factorio's `LuaSurface.request_path` uses when none is given.
 ///
 /// Documented as "how close we need to get to the goal. Default 1." The mod
@@ -2671,6 +2710,90 @@ impl FactorioRcon {
         judge_transfer_reply(lines, tick)
     }
 
+    /// Put `recipe` on the crafting machine named `entity_name` at
+    /// `entity_position`, reporting the game tick it ran at.
+    ///
+    /// Synchronous, so both ends of [`ActionTicks`] are that tick: the game
+    /// assigns a recipe inside the call, and there is no later event to wait
+    /// for. Shaped like [`FactorioRcon::insert_to_inventory_timed`] -- a
+    /// player, a named entity at a position, a walk first if the machine is
+    /// out of reach -- because it is the same kind of action: a bot standing
+    /// at a machine and operating it.
+    ///
+    /// # What the game actually returns, and why that matters here
+    ///
+    /// `LuaEntity.set_recipe` does **not** return a success flag. Per
+    /// `workspace/factorio-api-docs/runtime-api.json` (Factorio 2.1.17) it
+    /// returns an *array of `ItemWithQualityCount`*: "Any items removed from
+    /// this entity as a result of setting the recipe" -- the old recipe's
+    /// ingredients and products, evicted because they no longer belong in the
+    /// machine. Dropping that array destroys those items, which is the same
+    /// discarded-return-value defect that `remove_item`, `create_entity` and
+    /// `player.teleport` each cost this project once. The mod
+    /// (`rcon_set_recipe`) hands them to the acting player and refuses in the
+    /// reply body if it cannot, so a caller here never has to know.
+    ///
+    /// Because the return value is not a verdict, the mod's success check is
+    /// `entity.get_recipe()` afterwards, and *that* is what an empty reply
+    /// asserts.
+    ///
+    /// # A refusal is a sentence in the reply body
+    ///
+    /// The mod prints nothing but its `§tick§` stamp when the recipe is set,
+    /// so any surviving line is the game -- or the mod -- saying no, and it is
+    /// classified [`Dispatch::Refused`]: the game saw the command and judged
+    /// it. Same shape as [`FactorioRcon::add_research_timed`], and for the
+    /// same reason it is not left to `?`, which would claim
+    /// [`Dispatch::NotDispatched`] and throw the dispatch tick away.
+    ///
+    /// The refusals worth telling apart are told apart **by the mod, in the
+    /// line it prints**, and they are carried through here verbatim rather
+    /// than being re-derived from an error kind: a recipe the acting force has
+    /// not unlocked names itself and says it is not enabled, and that is a
+    /// durable fact about the force -- it will keep being true until the
+    /// unlocking technology is researched -- while "no such player" is a
+    /// failure to ask at all. Nothing here records a durable refusal the way
+    /// [`note_placement_refusal`] does for a build site: the planner already
+    /// models recipe availability from the world's own `enabled` flags
+    /// (`crates/planner`'s `recipe_gate`), so a locked recipe is a plan that
+    /// should never have been dispatched rather than ground to be remembered.
+    pub async fn set_recipe_timed(
+        &self,
+        player_id: PlayerId,
+        entity_name: String,
+        entity_position: Position,
+        recipe: String,
+        world: &Arc<FactorioWorld>,
+    ) -> Result<ActionTicks, ActionFailure> {
+        let player = world.players.get(&player_id);
+        if player.is_none() {
+            return Err(ActionFailure::not_dispatched(
+                RconPlayerNotFound { player_id }.into(),
+            ));
+        }
+        let player = player.unwrap();
+        let reach_distance = player.reach_distance as f64;
+        let distance = calculate_distance(&player.position, &entity_position);
+        drop(player); // wow, without this factorio (?) freezes (!)
+        if distance > reach_distance {
+            warn!("too far away, moving first!");
+            self.move_player(world, player_id, &entity_position, Some(reach_distance))
+                .await?;
+        }
+        let (lines, tick) = self
+            .remote_call_timed(
+                "set_recipe",
+                vec![
+                    player_id.to_string(),
+                    str_to_lua(&entity_name),
+                    position_to_lua(&entity_position),
+                    str_to_lua(&recipe),
+                ],
+            )
+            .await?;
+        judge_set_recipe_reply(lines, tick)
+    }
+
     pub async fn is_area_empty(&self, area_filter: &AreaFilter) -> Result<bool> {
         let entities = self.find_entities_filtered(area_filter, None, None).await?;
         if !entities.is_empty() {
@@ -4941,6 +5064,147 @@ mod transfer_guarantee_tests {
             ),
             "the clamp wording is parsed by `classify_failure` in \
              crates/scripting_lua"
+        );
+    }
+
+    /// Enough of the API for `rcon_set_recipe` to reach the game, with the
+    /// force's `enabled` flag as the one variable.
+    ///
+    /// `set_recipe` here is the game's real contract: it returns the items it
+    /// evicted (none, for a fresh machine) and never a verdict, so the only
+    /// thing that distinguishes success from a silent no-op is the
+    /// `get_recipe` read the handler does afterwards.
+    fn stub_set_recipe(enabled: bool) -> String {
+        format!(
+            r#"
+            local function auto()
+                local t = {{}}
+                setmetatable(t, {{ __index = function(tbl, k)
+                    local v = auto(); rawset(tbl, k, v); return v
+                end }})
+                return t
+            end
+            defines = auto()
+            local function noop() end
+            local function nooptable()
+                return setmetatable({{}}, {{ __index = function() return noop end }})
+            end
+            script = nooptable()
+            remote = nooptable()
+            commands = nooptable()
+            helpers = nooptable()
+            require = function() return {{}} end
+            print = noop
+
+            _rcon_lines = {{}}
+            rcon = {{ print = function(s) _rcon_lines[#_rcon_lines + 1] = tostring(s) end }}
+
+            local entity = {{
+                name = "assembling-machine-1",
+                type = "assembling-machine",
+                position = {{ x = 12.5, y = 8.5 }},
+                recipe = nil,
+            }}
+            entity.set_recipe = function(name) entity.recipe = name; return {{}} end
+            entity.get_recipe = function()
+                if entity.recipe == nil then return nil end
+                return {{ name = entity.recipe }}
+            end
+            local surface = {{
+                find_entity = function(name, pos) return entity end,
+            }}
+            local force = {{
+                recipes = {{ ["automation-science-pack"] =
+                    {{ name = "automation-science-pack", enabled = {enabled} }} }},
+                print = noop,
+            }}
+            local player = {{
+                index = 1,
+                name = "bot1",
+                force = force,
+                surface = surface,
+                position = {{ x = 12.5, y = 10.5 }},
+                insert = function(stack) return stack.count end,
+                print = noop,
+            }}
+            prototypes = {{ item = {{}}, entity = {{}}, recipe = {{}} }}
+            game = {{
+                tick = {tick},
+                players = {{ player }},
+                forces = {{ player = force }},
+            }}
+        "#,
+            enabled = if enabled { "true" } else { "false" },
+            tick = STUB_TICK,
+        )
+    }
+
+    const SET_ASP: &str = r#"rcon_set_recipe(
+        1, "assembling-machine-1", {x=12.5, y=8.5}, "automation-science-pack")"#;
+
+    /// Drives the real mod handler and the real judgement across the real
+    /// reply-splitting, so the seam between them is what is tested rather than
+    /// either half's idea of the other.
+    fn set_recipe(enabled: bool) -> (Result<ActionTicks, ActionFailure>, String) {
+        let printed = run_handler(stub_set_recipe(enabled), SET_ASP);
+        let body = reply_body(&printed);
+        let (lines, tick) = take_tick_stamp(split_reply(&body, true));
+        (judge_set_recipe_reply(lines, tick), printed.join("\n"))
+    }
+
+    /// A recipe that was set prints its stamp and nothing else, and the
+    /// judgement reads that as success at the game's own tick.
+    #[test]
+    fn a_recipe_that_was_set_succeeds_at_the_games_tick() {
+        let (verdict, printed) = set_recipe(true);
+        assert_eq!(
+            printed,
+            format!("§tick§{STUB_TICK}"),
+            "a set recipe prints its stamp and nothing else"
+        );
+        assert_eq!(
+            verdict.expect("a set recipe must succeed"),
+            ActionTicks::at(Some(STUB_TICK))
+        );
+    }
+
+    /// **A recipe the force has not unlocked is a refusal that names it.**
+    ///
+    /// The gate is force-scoped -- `player.force.recipes[name].enabled` -- and
+    /// `automation-science-pack` is `false` until its trigger technology
+    /// fires. `Dispatch::Refused`, not `NotDispatched`: the game saw the
+    /// command and judged it, which is the stronger and truer claim, and the
+    /// one that lets `crates/executor`'s `classify` keep it out of
+    /// `NoVerdict`.
+    ///
+    /// Note what does **not** happen here: nothing is written to
+    /// `FactorioWorld`'s placement-refusal ledger. A locked recipe is not
+    /// ground to avoid; it is a plan that should never have been dispatched,
+    /// and `crates/planner`'s `recipe_gate` already models it from the same
+    /// `enabled` flag the world carries.
+    #[test]
+    fn a_locked_recipe_is_refused_and_the_reply_names_it() {
+        let (verdict, printed) = set_recipe(false);
+        let failure = verdict.expect_err(
+            "a recipe the force has not unlocked reported success -- the machine \
+             would then be dead and the plan would believe it finished",
+        );
+        assert!(
+            matches!(failure.dispatch, Dispatch::Refused),
+            "the game judged this one: got {:?}",
+            failure.dispatch
+        );
+        assert_eq!(
+            printed, "Error: recipe automation-science-pack is not enabled for this force",
+            "the refusal names the recipe and why, and carries no tick stamp"
+        );
+        assert!(
+            failure
+                .error
+                .to_string()
+                .contains("automation-science-pack"),
+            "and the name survives all the way out: got {}",
+            failure.error
         );
     }
 

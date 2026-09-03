@@ -437,6 +437,25 @@ impl Actuator for RconActuator {
             .map_err(classify)
     }
 
+    async fn set_recipe(
+        &self,
+        bot: BotId,
+        entity: &str,
+        at: Position,
+        recipe: &str,
+    ) -> Result<ActionTicks, ActuatorFailure> {
+        let p = self.player(bot)?;
+        // No `InventoryDefines` lookup and no `Placement` to record: this
+        // names a recipe, not a slot, and it builds nothing. The whole of the
+        // work -- the reach check, the walk if the machine is out of reach,
+        // and the judgement of the reply -- is `set_recipe_timed`'s, exactly
+        // as `craft` and `research` delegate theirs.
+        self.rcon
+            .set_recipe_timed(p, entity.to_string(), at, recipe.to_string(), &self.world)
+            .await
+            .map_err(classify)
+    }
+
     /// Read from the world, not asked over RCON.
     ///
     /// The mod already tells us: `on_research_finished` calls

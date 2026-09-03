@@ -359,6 +359,30 @@ pub enum PlannerError {
     )]
     NoPatchForCell { item: ItemId, ore: ItemId },
 
+    /// A recipe aimed at ground with no machine on it.
+    ///
+    /// **A fault in the plan, not a verdict about the world** -- the same
+    /// class as [`PlannerError::BufferShort`]. A `SetRecipe` is only ever
+    /// emitted for a machine the same expansion placed or the world already
+    /// had, so reaching empty ground means the effect was written without the
+    /// ordering that puts it after the placement. Silently doing nothing would
+    /// leave a later `Condition::RecipeSet` passing against a machine nobody
+    /// built, which is exactly the placed-but-dead failure the condition
+    /// exists to catch.
+    ///
+    /// The recipe being locked for the acting force is a *different* refusal
+    /// and is not this: see `crate::method::util::recipe_gate`, and the mod's
+    /// own by-name refusal in `rcon_set_recipe`.
+    #[error("no crafting machine at {position} to set the recipe {recipe} on")]
+    #[diagnostic(
+        code(planner::no_machine_for_recipe),
+        help(
+            "a SetRecipe must be ordered after the placement that builds the machine; the \
+             condition that does it is EntityAt on the same tile"
+        )
+    )]
+    NoMachineForRecipe { position: String, recipe: ItemId },
+
     #[error(
         "expansion of {goal} exceeded {depth} levels; a method is probably expanding into itself"
     )]

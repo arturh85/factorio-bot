@@ -274,18 +274,28 @@ So the run says three things plainly, and only one of them is about this cell:
    a row (`a character is standing in the footprint`) driving the replans that
    spent the poles.
 
-### 4.2 Runs 3 and 4: not evidence about anything
+### 4.2 Runs 3 and 4
 
 Recorded so the count is honest rather than flattering. **Run 3 aborted with no
 bots**: the four graphical clients never obtained a character inside the 90 s
 wait (`0/4 have a character`), the script's own roster guard caught it, and it
-stopped without planning. **Run 4 never started**: `Couldn't acquire exclusive
-lock` — another agent in this shared checkout had begun its own run of
-`factory_stage2.lua` fourteen seconds earlier.
+stopped without planning. It says nothing about the cell.
 
-Neither says anything about the cell. They are here because "we tried four
-times" is a different sentence from "two runs reached a verdict", and only the
-second one is true.
+**Run 4 got one bot of four** — three clients again failed to obtain a
+character, one succeeded, and `wait_for_roster`'s deliberate "proceed and say
+who is missing" branch let the run go ahead with it. That is a *better* test of
+this cell than a four-bot run, for a reason worth stating: with one bot there is
+no handover to fail, so `Holder::Share(chain_actor)` is trivially satisfiable
+and the wood question the first two runs died on cannot arise at all. It is a
+worse test of everything else, because one bot does four bots' walking.
+
+**A correction, since this file briefly said otherwise.** An earlier version of
+this section recorded run 4 as never having started, on the strength of a
+`Couldn't acquire exclusive lock` line at the top of its log. That line is one
+client failing to take a lock, not the run failing to launch; the run went on to
+plan and execute. The mistake is left visible here rather than quietly rewritten
+because it is the same mistake this whole note is about — reading a partial
+signal as a verdict.
 
 **Wood stopped being a cap while this was being written.** Another agent landed
 `b0e3e12e feat(planner): wood comes off a tree, so the eight-pole cap is gone`

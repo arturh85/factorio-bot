@@ -110,6 +110,52 @@ Four times tonight I suspected a false success and was **wrong** — including
 run 33 itself, where I misread a settle because `action_settled` carries no
 action name. Erring that way round is right, but the ratio is worth watching.
 
+## Run 2 never tested the fix it appeared to disprove
+
+**Run 2 halted on the identical wood error and it is not evidence against the
+tree fix.** The tree fix (`b0e3e12e`) was committed at **01:50:18 UTC**; run 2
+started at **01:31:22 UTC** — nineteen minutes earlier, on a binary that did
+not contain it. What run 2 actually tested was a *different* agent's
+pole-optional fix, which could not clear the halt either, because rung 1 was
+rebuilding the plant from scratch and so had no existing network for the cell
+to adopt.
+
+**The cause was mine: two agents in one checkout with no run interlock.** I
+enforced "no run while an agent builds" on myself and never enforced it
+*between* agents. The wood agent explicitly held and asked before running; the
+other agent, which I had resumed with a status question, kept working and
+started a run against a tree the first agent was still editing. A near-clean
+tree is not evidence that a run is safe, and neither is one agent's promise.
+
+**Consecutive runs also collide on ports.** Run 3 died on `Host address is
+already in use` — run 2's server had not released 34197 — and its own server
+then bound anyway and sat there orphaned with four clients. Wait for
+34197/udp and 4321/tcp to be free before launching, and check for orphans
+afterwards: the CLI exiting does not take the game down with it.
+
+## Three corrections to what I believed (2026-09-03)
+
+1. **My proposed share-allocation fix would have changed correct code.** I
+   filed the wood bug as `SplitAcrossBots` mis-sizing a share. It is provably
+   not in the path: its `claims` is `site.top_level && !site.in_chain`
+   (`method/have.rs:1884`) and its `applicable` requires `Holder::Anyone`
+   (`:1890`), while the failing goal was an in-chain `Share`. The real
+   producer is `method/assemble.rs:997`, where `bill()` emits every cell
+   ingredient as `Holder::Share(ctx.chain_actor)`. (There *is* a latent bug
+   nearby — `even_shares` sorts poorest-first and would hand a one-unit split
+   to the bot holding none — but it is unreachable from a `Producing` goal.)
+2. **Two more dropped return values, both live.** `resource_mined`'s answer was
+   discarded at `factorio/rcon.rs:2163`; it returns `Absent` for exactly a tree
+   or a rock, so a chopped stump would have been re-offered for ever. And the
+   mod counted delivery as `mined[mining.prototype.name]` (`control.lua:1309`),
+   which is nil for a tree — `tree-01` yields `wood` — so a successful chop
+   reported "the target was gone before mining finished". That is **six**
+   instances of this class now.
+3. **`EntityGraph`'s hand-written `Serialize` cannot round-trip JSON at all** —
+   `resources` keys a `BTreeMap` by `Pos`, a tuple struct, and `serde_json`
+   refuses non-string map keys. Pre-existing, found by a round-trip test, not
+   fixed.
+
 ## A transient refusal costs a whole batch (found 2026-09-03)
 
 **Two findings from tonight's runs meet here, and together they are a real

@@ -602,11 +602,11 @@ fn expand_goal_body(
     // all this exactly as a `Goal::Have` does. Reading it off `Have` alone is
     // how a trigger technology's fifty iron plates came to be smelted by
     // whoever, out of ore mined by someone else — see `stated_holder`.
+    let owner = match stated_holder(goal) {
+        Some(Holder::Bot(bot) | Holder::Share(bot)) => Some(*bot),
+        _ => None,
+    };
     if ctx.chain.is_none() {
-        let owner = match stated_holder(goal) {
-            Some(Holder::Bot(bot) | Holder::Share(bot)) => Some(*bot),
-            _ => None,
-        };
         let one_inventory = matches!(stated_holder(goal), Some(Holder::Bot(_) | Holder::Share(_)));
         if one_inventory || method.converges(goal, &ctx.state) {
             let chain = ctx.chains.next();
@@ -630,6 +630,45 @@ fn expand_goal_body(
             });
             ctx.state.set_claim_runner(runner);
         }
+    } else if let (Some(chain), Some(bot)) = (ctx.chain, owner)
+        && net.owner_of(chain).is_none()
+    {
+        // **A chain that inherits a bot-sized goal is owned by that bot.**
+        //
+        // The other half of the rule above, and the half that was missing.
+        // Opening a chain is not the only way a `Holder::Share` reaches one:
+        // a method that `converges` opens a chain *unowned* — nothing named
+        // a bot for it, only the shape of the decomposition — and everything
+        // it decomposes into then lands inside that chain, where the branch
+        // above cannot see it. `AssembleCell::converges` is `true` and
+        // `Goal::Producing` names no holder, so the whole red-science bill —
+        // `Goal::Have { whose: Holder::Share(ctx.chain_actor) }`, every
+        // machine, inserter, chest, plate and coal of it — was expanded into
+        // one ownerless chain.
+        //
+        // `expand_goal` still rebinds `chain_actor`, so the *sizing* was done
+        // against that bot's inventory: a bot already carrying 48 iron-ore is
+        // asked to mine none. But the scheduler was free to bind the chain to
+        // whoever could run its first action cheapest, and on
+        // `run-1788405365-21697` — four bots, three of them parked on the ore
+        // patch — that was bot 2. Every later action followed the binding, and
+        // the first insert sized against bot 1's stock refused with
+        // `precondition has 3 iron-ore of action ActionId(41) does not hold for
+        // bot 2`. It is the same defect `stated_holder` records, one level
+        // further in: sizing against a bot that nothing then commits to.
+        //
+        // First holder wins, and only an ownerless chain is claimed: a chain
+        // that already names an owner is not up for reinterpretation, and
+        // `Step::Owned` — the one place a *different* bot's share is
+        // deliberately handed out inside a chain — opens a chain of its own
+        // and so never reaches here.
+        //
+        // The claim runner is deliberately left as it is. `ClaimRunner::Chain`
+        // is the weaker but sound reading of the same fact (see the comment
+        // above), so keeping it costs a little crowding and asserts nothing
+        // untrue, where re-pointing it mid-expansion would move mining tiles
+        // that sibling goals have already been sited against.
+        net.set_chain_owner(chain, bot);
     }
 
     // Whether *this* frame opened the chain, and so owes the ledger entry at

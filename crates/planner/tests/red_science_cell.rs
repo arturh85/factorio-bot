@@ -321,3 +321,158 @@ fn the_cell_count_follows_the_rate_and_nothing_else() {
     assert_eq!(machines(6), 2, "one cell");
     assert_eq!(machines(7), 4, "two cells");
 }
+
+/// **The four-bot run of 2026-09-03, reduced to a test.**
+///
+/// `run-1788405365-21697` cleared rung 1 (`researched("automation")`) and then
+/// refused rung 2 three seconds after the goal was accepted, at plan time:
+///
+/// ```text
+/// precondition has 3 iron-ore of action ActionId(41) does not hold for bot 2
+/// ```
+///
+/// Everything here is taken from that run's `samples.jsonl` at tick 107,820 —
+/// the last `bots` sample before `milestone_stuck` at 107,837 — so the
+/// inventories are the ones the four bots really carried: **unequal**, and
+/// unequal in the way that matters, one bot holding no ore at all. The same
+/// goal plans fine against a roster holding nothing, which is why every
+/// existing `Producing` test passes.
+#[test]
+fn the_live_four_bot_red_science_run_plans_and_schedules() {
+    let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+    let mut state = PlanState::from_world(Arc::new(world_that_can_build_an_assembler()), &bots);
+    // The plant, arranged so its own supply area has room for the cell --
+    // `assemble.rs`' `powered_with_room`. A cell that had to bring its own
+    // pole would refuse for want of wood before ever reaching the ore, which
+    // is the *previous* run's defect (`run-1788396958-07935`) and not this
+    // one.
+    for (name, entity_type, position) in [
+        (
+            "small-electric-pole",
+            "electric-pole",
+            Position::new(30.5, 32.5),
+        ),
+        (
+            "small-electric-pole",
+            "electric-pole",
+            Position::new(30.5, 39.5),
+        ),
+        ("steam-engine", "generator", Position::new(32.5, 39.5)),
+    ] {
+        state.create_entity(FactorioEntity {
+            name: name.into(),
+            entity_type: entity_type.into(),
+            position,
+            ..Default::default()
+        });
+    }
+    // samples.jsonl, tick 107820. Bot 1 has spent its wood on the plant's pole
+    // and its furnace on the smelting; bot 3 mined nothing in the last stretch
+    // and holds no ore at all.
+    for (bot, items) in [
+        (
+            BotId(1),
+            &[
+                ("burner-mining-drill", 1u32),
+                ("copper-cable", 30),
+                ("iron-ore", 48),
+            ][..],
+        ),
+        (
+            BotId(2),
+            &[
+                ("burner-mining-drill", 1),
+                ("copper-ore", 4),
+                ("iron-ore", 14),
+                ("iron-plate", 8),
+                ("stone-furnace", 1),
+                ("wood", 1),
+            ][..],
+        ),
+        (
+            BotId(3),
+            &[
+                ("burner-mining-drill", 1),
+                ("iron-plate", 8),
+                ("stone-furnace", 1),
+                ("wood", 1),
+            ][..],
+        ),
+        (
+            BotId(4),
+            &[
+                ("burner-mining-drill", 1),
+                ("copper-ore", 3),
+                ("iron-ore", 14),
+                ("iron-plate", 8),
+                ("stone-furnace", 1),
+                ("wood", 1),
+            ][..],
+        ),
+    ] {
+        for (item, count) in items {
+            state.gain(bot, item, *count);
+        }
+    }
+
+    // Where the run left them. Bot 1 had walked back to the plant to smelt;
+    // bots 2, 3 and 4 were still standing on the ore patch they had spent
+    // rung 1 mining — `samples.jsonl` reports one position each for the last
+    // 25,000 ticks. That is not decoration either: the cell's bill is sized
+    // against bot 1, and the scheduler binds a chain to whichever bot can run
+    // its *first* action cheapest. With three bots parked on the ore, the
+    // cheapest bot for the plan's first mine is bot 2.
+    for (bot, x, y) in [
+        (BotId(2), -29.0, 45.0),
+        (BotId(3), -29.0, 46.0),
+        (BotId(4), -29.0, 47.0),
+    ] {
+        state.set_position(bot, Position::new(x, y));
+    }
+
+    let net = expand(
+        &[Goal::Producing {
+            item: PACK.into(),
+            per_minute: 6,
+        }],
+        &state,
+        &registry_for(&bots),
+        BotId(1),
+    )
+    .expect("the cell expands");
+
+    // And the run's actual failure: `precondition has 3 iron-ore of action
+    // ActionId(41) does not hold for bot 2`, raised three seconds after the
+    // goal was accepted.
+    let result = factorio_bot_planner::schedule::schedule(&net, &state, &bots)
+        .expect("and every action it emitted has a bot that can run it");
+    // The mechanism, stated where it broke. `AssembleCell::converges` is
+    // `true` and `Goal::Producing` names no holder, so the cell's chain opens
+    // *unowned*; every `Goal::Have { whose: Holder::Share(BotId(1)) }` in
+    // `bill()` is then expanded inside it and used to record no owner at all.
+    // The sizing said bot 1 and nothing committed the chain to bot 1.
+    let cell_chain = net
+        .actions()
+        .find(|a| {
+            matches!(&a.kind, ActionKind::Place { entity } if entity.name == "assembling-machine-1")
+        })
+        .and_then(|a| net.chain_of(a.id))
+        .expect("the machines are placed inside a chain");
+    assert_eq!(
+        net.owner_of(cell_chain),
+        Some(BotId(1)),
+        "the cell's bill is sized against bot 1's inventory, so bot 1 has to be the bot \
+         committed to running it"
+    );
+
+    for action in net.actions() {
+        if net.chain_of(action.id) == Some(cell_chain) {
+            assert_eq!(
+                result.assignment(action.id),
+                Some(BotId(1)),
+                "{} belongs to the cell's chain and must run on the bot it was sized for",
+                action.label
+            );
+        }
+    }
+}

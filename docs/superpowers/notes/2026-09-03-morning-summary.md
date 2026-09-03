@@ -151,6 +151,26 @@ had 6. Something re-seeded it in between and I could not attribute it. What is
 not in doubt is that run 4's *game* had the old mod — Factorio loads mods at
 server start, and the game itself raised the missing-function error.
 
+## Two corrections, and a reproducible site for the `min_radius` fix
+
+**The world does not persist between runs — corrected.** I wrote earlier that it
+did, on the evidence that run 4 planned 131 steps for rung 1 against 322 and
+337. That was true only while an older `level.zip` had accumulated state. The
+server reloads `level.zip`, not the autosaves, so once the map was regenerated
+each run replays rung 1 from scratch: runs 8 and 9 both planned **314**. Runs
+are therefore independent trials now, which is what a repeatability claim
+needs, at a cost of ~29 minutes of rung 1 per attempt.
+
+**The sub-tile pathfinder refusal is deterministic, and that is useful.** Run 9
+produced a fourth instance — and it refused the *same destination* as run 8,
+`(-28.5, -27.5)`, from a different start (`(-28.664, -26.805)`, 0.70 tiles).
+Four instances now, all aimed at a tile centre from inside that tile.
+
+Because it reproduces at an identical site across independent runs on the same
+map, the `min_radius` fix can be **verified against a known coordinate** rather
+than by waiting to see whether the failure stops appearing. That turns a
+"seems better" change into a checkable one.
+
 ## The rung-2 refusal: the chain owner was lost one level above `bill()`
 
 **Fixed in `60ade9de`.** My hypothesis was right about the shape and the actor

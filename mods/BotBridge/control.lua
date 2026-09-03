@@ -3550,6 +3550,118 @@ function rcon_remove_from_inventory(player_id, entity_name, entity_pos, inventor
 	stamp_tick()
 end
 
+-- Put a recipe on a crafting machine.
+--
+-- Stage 2 of the starter factory is an assembling machine *with a recipe on
+-- it*. A machine placed, powered and fed with no recipe is dead: it costs
+-- materials, occupies ground, passes every geometry check the planner makes,
+-- and produces nothing.
+--
+-- **`LuaEntity.set_recipe` does not return a success flag.** The API
+-- (`workspace/factorio-api-docs/runtime-api.json`, 2.1.17) says it returns an
+-- array of `ItemWithQualityCount`: "Any items removed from this entity as a
+-- result of setting the recipe" -- the old recipe's leftovers, evicted because
+-- they no longer belong in the machine. Dropping that array deletes those
+-- items from the game with nothing anywhere saying so, which is exactly what
+-- discarding `remove_item`'s count, `create_entity`'s optional entity and
+-- `player.teleport`'s boolean each cost this project once. So they are handed
+-- to the acting bot, who is standing at the machine to operate it.
+--
+-- And because the return value is not a verdict, the verdict comes from
+-- reading the recipe back with `get_recipe()`. Without that read a machine
+-- that ignored the call would be reported as configured.
+--
+-- Three refusals before the game is touched at all, each a sentence rather
+-- than a raise inside the remote call:
+--
+--  * **an unknown recipe** -- the name refers to nothing;
+--  * **a recipe the force has not unlocked** -- `enabled` is force-scoped, and
+--    `automation-science-pack` is `false` until its trigger technology fires.
+--    Naming the recipe matters: a refusal that does not say which recipe and
+--    why sends a reader looking at the machine instead of at the research;
+--  * **an entity that is not an assembling machine** -- `set_recipe` is
+--    defined on the `AssemblingMachine` subclass only, so calling it on a
+--    furnace raises, and a raise reaches the executor as an unreadable reply
+--    rather than as a refusal it can act on.
+--
+-- Everything printed here goes through `rcon.print`, which *is* the reply body
+-- the executor reads as this action's result. That is why there is no
+-- narration on this path: a debug line here would turn a success into a
+-- reported failure. Use `writeout` (stdout) if one is ever needed.
+function rcon_set_recipe(player_id, entity_name, entity_pos, recipe)
+	local player = game.players[player_id]
+	if player == nil then
+		rcon.print("Error: no such player: " .. tostring(player_id))
+		return
+	end
+	local known = player.force.recipes[recipe]
+	if known == nil then
+		rcon.print("Error: no such recipe: " .. tostring(recipe))
+		return
+	end
+	if not known.enabled then
+		rcon.print("Error: recipe " .. tostring(recipe) .. " is not enabled for this force")
+		return
+	end
+	local entity = player.surface.find_entity(entity_name, entity_pos)
+	if entity == nil then
+		rcon.print("Error: cannot set a recipe on nonexisting entity " ..
+			tostring(entity_name) .. " at " .. pos_str(entity_pos))
+		return
+	end
+	if entity.type ~= "assembling-machine" then
+		rcon.print("Error: cannot set a recipe on " .. tostring(entity_name) .. " at " ..
+			pos_str(entity_pos) .. ": it is a " .. tostring(entity.type) ..
+			", not an assembling-machine")
+		return
+	end
+
+	local removed = entity.set_recipe(recipe)
+
+	-- The verdict. `set_recipe` answered with items, not with a yes, so this
+	-- read is the only thing that distinguishes it having worked from it
+	-- having quietly done nothing.
+	local current = entity.get_recipe()
+	if current == nil or current.name ~= recipe then
+		local got = "nothing"
+		if current ~= nil then got = tostring(current.name) end
+		rcon.print("Error: setting recipe " .. tostring(recipe) .. " on " ..
+			tostring(entity_name) .. " at " .. pos_str(entity_pos) ..
+			" left it making " .. got)
+		return
+	end
+
+	-- Whatever the change evicted goes to the bot. `player.insert` returns how
+	-- many it actually took -- another return value that must not be dropped,
+	-- for the same reason.
+	local lost = {}
+	if removed ~= nil then
+		for _, stack in pairs(removed) do
+			local count = stack.count or 0
+			if count > 0 then
+				local taken = player.insert({name=stack.name, count=count})
+				if taken < count then
+					table.insert(lost, (count - taken) .. "x " .. tostring(stack.name))
+				end
+			end
+		end
+	end
+	if #lost > 0 then
+		-- The recipe **is** set; what failed is carrying away what the change
+		-- threw out. Reporting success would leave the executor believing the
+		-- bot holds items it does not, for the rest of the run. Reporting
+		-- failure is safe here and nowhere else in this file: setting a recipe
+		-- is idempotent, so the retry finds the recipe already set, evicts
+		-- nothing and comes back clean.
+		rcon.print("Error: recipe " .. tostring(recipe) .. " was set on " ..
+			tostring(entity_name) .. " at " .. pos_str(entity_pos) ..
+			", but player #" .. tostring(player_id) ..
+			" could not carry what it displaced: " .. table.concat(lost, ", "))
+		return
+	end
+	stamp_tick()
+end
+
 function rcon_whoami(who)
 	if client_local_data.whoami == nil then
 		client_local_data.whoami = who
@@ -4495,6 +4607,7 @@ remote.add_interface("botbridge", {
 	find_tiles_filtered=rcon_find_tiles_filtered,
 	insert_to_inventory=rcon_insert_to_inventory,
 	remove_from_inventory=rcon_remove_from_inventory,
+	set_recipe=rcon_set_recipe,
 	parse_map_exchange_string=rcon_parse_map_exchange_string,
 	revive_ghost=rcon_revive_ghost,
 	async_request_player_path=rcon_async_request_player_path,

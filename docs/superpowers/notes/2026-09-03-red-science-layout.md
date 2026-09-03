@@ -5,7 +5,39 @@ could ship dead is refused. `docs/superpowers/specs/2026-09-03-starter-factory-d
 §14 says stage 2 is done when `Producing{automation-science-pack, ..}` holds
 **and a witness shows packs accumulating with every bot idle**.
 
-> **RUN STATUS PLACEHOLDER**
+> **RUN STATUS: the cell was never built. No witness. Stage 2 is NOT done.**
+>
+> Live run `run-1788396958-07935`, 2026-09-03 00:54–01:20 UTC, four graphical
+> clients, video recorded. Rung 1 `researched("automation")` **SATISFIED** — the
+> ladder reproducing a fourth time. Rung 2 then halted at tick 92,446:
+>
+> ```
+> HALTED: stuck -- refused: no method can satisfy goal: have 1 wood
+>                           (a share sized for bot 1)
+> ```
+>
+> **The blocker is the pole's wood, and the model's premise is the bug.** From
+> the run record: bot 1 performed all 235 action dispatches and *every* craft;
+> bots 2, 3 and 4 did 10–11 actions each and crafted nothing. Bot 1 dispatched
+> `craft 1 small-electric-pole` **once** and `place small-electric-pole`
+> **twice** — the recipe yields two poles from one wood, so that single craft
+> spent bot 1's entire starting wood on exactly the plant's two poles. The cell
+> needs a third. Bot 1 has none; bots 2/3/4 never touched theirs, so **three
+> wood sat idle in other pockets while the plan refused for want of one.**
+>
+> So §1's "four bots, four wood, eight poles ever" is a cap this planner
+> invented. Factorio renews wood — you mine a tree — and the pieces are already
+> here: `mods/BotBridge/control.lua:1158` *already* deforests (labelled a HACK),
+> `crates/core/src/graph/entity_graph.rs:43` contemplates "Mining a tree or a
+> rock", and tree prototypes are in the live capture. The §1 argument that a
+> second pole per cell "would halve how many cells this project can ever build"
+> rests on that invented cap and does not survive it.
+>
+> Two things this run did prove, both previously only modelled: **zero
+> teleports** across both execution batches, so the teleport removal holds under
+> a real game; and a live `cannot place item 'stone-furnace' because a character
+> is standing in the footprint`, which is the first live evidence for the
+> `PLACEMENT_STEP_ASIDE_ACTION_ID = 4712` item.
 
 ---
 
@@ -192,7 +224,7 @@ cell pays the whole minute.
 `tile_capacity.rs`, `tile_occupancy.rs`, `tile_reservation.rs`,
 `split_capacity.rs`, `smelt_roots.rs`, `seeded_roster.rs`, `buffers.rs`,
 `ore_underfoot.rs`, `recipe_probability.rs` and `produce.rs`'s
-`the_whole_of_stage_one_costs_this_much` are all green, together with 465
+`the_whole_of_stage_one_costs_this_much` are all green, together with 467
 planner unit tests and the whole workspace (`cargo test --workspace`, zero
 failures; `cargo clippy --workspace --all-features --all-targets --deny
 warnings`, clean).
@@ -276,7 +308,7 @@ a number derived rather than read.
 ## 7. Mutation battery
 
 Each applied alone to the fixed tree, the whole `-p factorio-bot-planner` suite
-run with `--no-fail-fast` (465 unit tests plus every integration binary), the
+run with `--no-fail-fast` (467 unit tests plus every integration binary), the
 tree restored between each. Test names are abbreviated; all are in
 `method::assemble::tests` unless marked.
 

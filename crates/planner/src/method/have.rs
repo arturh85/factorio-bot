@@ -3215,6 +3215,25 @@ pub fn worth_converging(
     bots: &[BotId],
     seats: u32,
 ) -> Option<BTreeMap<BotId, u32>> {
+    worth_converging_with(state, item, need, taker, bots, seats, 0)
+}
+
+/// [`worth_converging`], plus whatever the buffer itself costs to stand up.
+///
+/// Stage 1 handed over through a furnace the smelt was placing anyway, so its
+/// buffer was free and `extra` is zero for it. Stage 2's chest is not free, and
+/// charging it here rather than inside [`Stockpile`] is what keeps the whole
+/// predicate -- the seat gate, the share arithmetic and the pay-off test -- in
+/// one function that a method's `applicable` and its `expand` both call.
+pub fn worth_converging_with(
+    state: &PlanState,
+    item: &str,
+    need: u32,
+    taker: BotId,
+    bots: &[BotId],
+    seats: u32,
+    extra: Ticks,
+) -> Option<BTreeMap<BotId, u32>> {
     // G1. Known bots only, so `even_shares` below cannot fail.
     let known: Vec<BotId> = distinct_bots(bots)
         .into_iter()
@@ -3276,7 +3295,8 @@ pub fn worth_converging(
     let handover = TRANSFER_TICKS
         .saturating_add(HANDOVER_WALK_TICKS)
         .saturating_mul(k)
-        .saturating_add(TRANSFER_TICKS);
+        .saturating_add(TRANSFER_TICKS)
+        .saturating_add(extra);
     if (solo / k).saturating_add(handover) >= solo {
         return None;
     }
@@ -3436,6 +3456,687 @@ impl Method for SharedSmelt {
     }
 }
 
+/// The chest a stockpile gathers into.
+///
+/// **Wooden, not iron**, and the choice is measured rather than aesthetic. An
+/// `iron-chest` costs eight iron plates, which on the reference map plans as
+/// 2,965 ticks -- place a furnace, mine eight ore, mine coal, fuel, wait out
+/// the smelt, craft. A `wooden-chest` costs two wood, and a `Chop` of one dead
+/// tree yields exactly two: 372 ticks on the same map, walk included. The
+/// buffer has to be cheaper than the work it moves or it is not a buffer, and
+/// a factor of eight is the difference between a stockpile paying for a
+/// thirteen-coal bill and only paying for a fifty-ore one.
+///
+/// It does not compete with the power plant for the wood every bot starts
+/// holding: the plant's `small-electric-pole` wants one wood, a chest wants
+/// two, and `Chop` supplies the shortfall from a map with 6,656 trees standing.
+pub(crate) const BUFFER_CHEST: &str = "wooden-chest";
+
+/// How far from the anchor a chest already standing counts as *this*
+/// stockpile's chest.
+///
+/// A radius rather than an exact tile, because two stockpiles for the same
+/// item are anchored on `nearest_resource_tile` with different amounts asked
+/// for, and nothing guarantees they resolve to the same tile. Wide enough that
+/// a second bill for the same patch reuses the first chest -- building one per
+/// bill is how a plan comes to place nine chests and pay for all of them --
+/// and narrow enough that a chest beside a *different* patch is not adopted,
+/// since the whole cost model assumes the suppliers are working next to it.
+const CHEST_REUSE_RADIUS: f64 = 24.0;
+
+/// How much room a chest wants around it, in tiles between centres.
+///
+/// A stone furnace is 1.398 tiles across and a wooden chest 0.8, so 1.1 tiles
+/// of separation is all the *geometry* needs. This is deliberately wider,
+/// because the sites that have to be avoided are the ones the plan has
+/// committed to and not yet placed -- a furnace bank is sited into a fork one
+/// ring at a time, and a chest dropped into the middle of that ring is a
+/// collision the world does not yet show. Three tiles clears a bank of eight
+/// without pushing the chest off the patch the suppliers are mining.
+const CHEST_CLEARANCE: f64 = 3.0;
+
+/// Gather a raw material into a chest, so that several bots can produce what
+/// one bot has to hold.
+///
+/// # The convergence this undoes
+///
+/// `SharedSmelt` (R3) can hand a furnace's stone, its craft, its placement and
+/// its coal to another bot, because each of those consumers names a
+/// **position** -- `Condition::EntityAt`, a world fact any bot can satisfy. It
+/// could not hand over the ore, and the reason generalises: an
+/// `Effect::GainItem { who: Actor::Role }` puts the items in whichever bot ran
+/// the action, and a downstream `Condition::HasItem { who: Actor::Role }` then
+/// reads *that* bot's inventory. Material like that is **inventory-convergent**
+/// and cannot move.
+///
+/// A chest converts it. "Thirteen coal in the taker's inventory" becomes
+/// "thirteen coal in the chest at P": any bot can fill it, and the taker draws
+/// the whole bill out in one ten-tick `Remove`. What the roster parallelises is
+/// the *mining*, which is the largest single activity in a rung-1 run.
+///
+/// # Where the buffer lives, and why there
+///
+/// **Beside the resource patch the bill is mined from** -- the same anchor
+/// `Mine` and `smelt_steps` already use (`nearest_resource_tile` from the
+/// taker's position), and for the same reason: it is the one position both
+/// halves of the handover can derive from the goal alone, without this method
+/// having to learn what the items are eventually *for*. A `Have` goal does not
+/// say where its consumer stands, and inventing a site near the consumer would
+/// mean guessing.
+///
+/// The consequence is worth stating plainly, because it bounds what this can
+/// buy: the taker still walks to the patch, exactly as it does today. What it
+/// no longer does is *mine* there. On the reference map that is the whole of
+/// the difference -- the walk was already on the critical path and the mining
+/// was on top of it.
+///
+/// A chest already standing within [`CHEST_REUSE_RADIUS`] of the anchor is
+/// adopted rather than duplicated, so a second bill against the same patch
+/// costs nothing.
+///
+/// # Sizing and binding agree, by construction
+///
+/// Each supplier's bill is stated as `Holder::Share(supplier)` and emitted
+/// inside a `Step::Owned { whose: Holder::Share(supplier) }` block -- **one
+/// value, read once, used for both**, exactly as R3's furnace handover does.
+/// `schedule` treats a chain owner as a hard single-candidate constraint with
+/// no fallback tier, so a bill sized against one bot and bound to another is
+/// not a slow plan, it is a plan that fails at a precondition. The chest's own
+/// bill is handed to the first supplier the same way, so the taker does not pay
+/// for the buffer either.
+///
+/// # Ordering is stated by `Effect::satisfies`, not left to the scheduler
+///
+/// `ActionNetwork::infer_edges` deliberately omits the producer -> consumer
+/// edge for a role-scoped `Condition::HasItem` in a different chain, because
+/// the scheduler's per-bot feasibility check re-derives it from that one bot's
+/// ordered slice of the schedule. **That argument does not extend to a
+/// buffer**: the depositors and the withdrawer are different bots by
+/// construction, so there is no single slice to re-derive from.
+/// `Effect::BufferGain` therefore satisfies `Condition::BufferHas`, and every
+/// deposit gets a real edge to the take. See `Effect::BufferGain`'s own doc.
+///
+/// # Registered between `HandCraft` and `Mine`
+///
+/// It claims raw-material `Have` goals, which is `Mine`'s territory, and it
+/// falls through to `Mine` whenever the split does not pay -- `applicable` and
+/// `expand` share [`worth_stockpiling`], so the two cannot answer differently.
+/// Nothing ahead of it in the registry claims a raw ore: `Withdraw` needs a
+/// standing buffer, `PlaceDrill`/`SharedSmelt`/`Smelt`/`HandCraft` all need a
+/// recipe, and ore has none.
+pub struct Stockpile {
+    pub bots: Vec<BotId>,
+}
+
+/// Who builds the chest: the first supplier, which -- since the taker never
+/// supplies its own stockpile -- is the lowest `BotId` in the share map.
+///
+/// One function, called by [`worth_stockpiling`] to decide whether the chest is
+/// affordable and by [`Stockpile::expand`] to emit its bill, so the bot the
+/// chest is *sized against* and the bot it is *bound to* are the same value
+/// read once. `schedule` treats a chain owner as a hard single-candidate
+/// constraint, so those two disagreeing is a failed precondition rather than a
+/// slow plan.
+fn stockpile_builder(shares: &BTreeMap<BotId, u32>, taker: BotId) -> Option<BotId> {
+    shares.keys().copied().find(|bot| *bot != taker)
+}
+
+/// What standing a new [`BUFFER_CHEST`] costs the bot that has to build it, or
+/// `None` when that bot cannot build one at all.
+///
+/// **One function for both questions**, because they have the same answer:
+/// a chest is unaffordable if any part of its bill has no source, and priced by
+/// the parts that do.
+///
+/// # Why the affordability question has to be asked at all
+///
+/// [`Stockpile`] emits the chest's bill as a *subgoal*, and a subgoal no method
+/// can satisfy fails the **whole expansion** rather than falling back to
+/// `Mine`. A world with no trees standing and no bot holding two wood is
+/// exactly that -- and it is not hypothetical, it is this crate's own fixture,
+/// where adding a stockpile turned four passing tests into
+/// `no method can satisfy goal: have 2 wood`.
+///
+/// # It is the *builder's* inventory, not the roster's
+///
+/// `Holder::Share(builder)` sizes the chest's bill against one named bot, so a
+/// different bot holding the wood is wood this chain can never reach. Measured:
+/// bot 1 had chopped the only tree and was holding its yield, bot 2 was the
+/// builder, and a roster-wide test said "obtainable" for a bill bot 2 could not
+/// fill.
+///
+/// # What it prices, and what it admits it does not
+///
+/// The craft, the placement, and the shortfall of each ingredient -- mined at
+/// [`mining_ticks`] for a resource, chopped off the cheapest standing source
+/// for a minable -- plus one [`HANDOVER_WALK_TICKS`] for the trip out to that
+/// source and back. It does **not** recurse into an ingredient's own recipe:
+/// one level, which is exact for a wooden chest (two wood, chopped) and would
+/// be optimistic for a chest whose ingredients themselves need making.
+///
+/// It deliberately does not use `produce::craft_ticks`, which prices *wood* at
+/// zero -- that function reaches for a resource patch and then a recipe, and a
+/// tree is neither, so a chest came out at sixty ticks and the gate below
+/// stopped guarding anything.
+fn chest_ticks(state: &PlanState, builder: BotId) -> Option<Ticks> {
+    let held = |item: &str| state.available(&Holder::Share(builder), item);
+    if held(BUFFER_CHEST) >= 1 {
+        return Some(PLACE_TICKS);
+    }
+    let recipe = recipe_for(state, BUFFER_CHEST)?;
+    let mut ticks = recipe_ticks(&recipe).saturating_add(PLACE_TICKS);
+    for (item, amount) in ingredients_of(&recipe) {
+        let short = amount.saturating_sub(held(&item));
+        if short == 0 {
+            continue;
+        }
+        ticks = ticks.saturating_add(HANDOVER_WALK_TICKS);
+        if state.has_resource_patches(&item) {
+            ticks = ticks.saturating_add(mining_ticks(state, &item).saturating_mul(short));
+            continue;
+        }
+        // A minable source -- a tree. Ordered by `(ticks, yield)`, an integer
+        // key, so the cheapest source is the same one on every expansion.
+        let mut sources: Vec<(Ticks, u32)> = state
+            .minable_sources(&item)
+            .into_iter()
+            .map(|(entity, _, yields)| (mining_ticks(state, &entity), yields.max(1)))
+            .collect();
+        sources.sort_unstable();
+        let (per, yields) = *sources.first()?;
+        ticks = ticks.saturating_add(per.saturating_mul(short.div_ceil(yields)));
+    }
+    Some(ticks)
+}
+
+/// The supplier shares for a stockpile, or `None` when one does not pay.
+///
+/// # It does **not** reuse `worth_converging`'s pay-off test, and that is the
+/// whole of the difference
+///
+/// [`worth_converging`] compares `solo / k + handover` against `solo` in
+/// **bot-ticks**, charging a supplier's detour at the same rate as the taker's
+/// own work. That is the right model for a shared smelt, whose suppliers are
+/// bots with their own bills to get back to. It is the wrong model here, for
+/// two independent reasons:
+///
+/// * **The detour is not 45 tiles.** [`HANDOVER_WALK_TICKS`] prices a walk from
+///   wherever a supplier is working to a furnace sited somewhere else. A
+///   stockpile's chest stands *on the patch the supplier is mining*, so the
+///   supplier's incremental cost over simply mining is one transfer and a few
+///   tiles.
+/// * **The bot-tick model prices an idle bot's time as scarce**, which on this
+///   plan it is not. The reference plan gives bots 2, 3 and 4 roughly 39,000
+///   idle ticks each against the busiest bot's 28,000 of work; the makespan is
+///   one bot's chain, and a tick moved off it is worth more than a tick added
+///   to a bot that was standing still. Applying `worth_converging`'s test here
+///   refuses **every** bill in a `researched:automation` plan -- the largest is
+///   thirteen coal at 1,560 ticks against a break-even near 2,200 -- so the
+///   chest fires nowhere and buys nothing.
+///
+/// So the test is stated in **taker ticks**: the taker stops mining `need` and
+/// pays one `Remove` instead. It still walks to the patch, because that is
+/// where the chest is, so the walk cancels on both sides and does not appear.
+///
+/// # What still bounds it
+///
+/// * `need >= 2` and `k >= 2`, from [`even_shares`] -- a shortfall of one is
+///   one bot's errand however many bots there are.
+/// * **Mining seats**, the gate that makes over-firing an outright failure
+///   rather than a slow plan: a split claims one working spot per supplier
+///   where a solo mine claims one in total, and a claim is never released
+///   during an expansion. Same term as `worth_converging`'s G6, and it is why
+///   this cannot simply fire on everything.
+/// * **The buffer has to pay for itself.** A chest that must be built costs its
+///   own bill plus a placement, so the taker's saving has to exceed that;
+///   `already_standing` drops the term for a chest a sibling stockpile already
+///   put on this patch, which is what makes the second and later bills against
+///   one patch nearly free.
+fn worth_stockpiling(
+    state: &PlanState,
+    item: &str,
+    need: u32,
+    taker: BotId,
+    bots: &[BotId],
+    seats: u32,
+    already_standing: bool,
+) -> Option<BTreeMap<BotId, u32>> {
+    let known: Vec<BotId> = distinct_bots(bots)
+        .into_iter()
+        .filter(|b| state.bot(*b).is_some())
+        .collect();
+    // **The taker does not supply its own stockpile**, which is where this
+    // parts company with [`even_shares`]' other two callers.
+    //
+    // `SplitAcrossBots` and `SharedSmelt` both deal the taker a share, and for
+    // them that is right: a split has no handover, and a shared smelt's taker
+    // is loading a furnace it stands beside anyway. Here the taker's share is
+    // precisely the work the chest exists to take off it. Measured on the
+    // reference map: with the taker included it still mined four of the cell's
+    // thirteen coal, two of its own iron ore and eight of its own stone, and
+    // every one of those sat on the critical path in front of the fuel load
+    // the whole plan waits on.
+    let suppliers: Vec<BotId> = known.iter().copied().filter(|b| *b != taker).collect();
+    if suppliers.is_empty() {
+        return None;
+    }
+    if need < 2 {
+        return None;
+    }
+    let shares = even_shares(state, item, need, &suppliers, seats).ok()?;
+    // **One supplier is enough**, unlike `worth_converging`'s `k >= 2`. That
+    // gate exists because a *split* of one is not a split; a handover of one
+    // still moves the whole bill off the bot the makespan is measured on.
+    if shares.is_empty() {
+        return None;
+    }
+    let k = shares.len() as u32;
+    // The seat gate, `worth_converging`'s G6 verbatim -- see it for the
+    // measurement behind the slack term.
+    if seats < k.saturating_add(known.len() as u32) {
+        return None;
+    }
+
+    // Integer ticks throughout, so the verdict cannot depend on a rounding
+    // mode. `solo_ticks` is the same shallow estimate `worth_converging` uses
+    // and under-states the work, which makes this under-fire -- the direction
+    // to err in.
+    let saved = solo_ticks(state, item, need);
+    // `None` is a chest the builder cannot get hold of, and that is a refusal
+    // rather than a price -- see `chest_ticks`. Asked here, inside the one
+    // predicate `applicable` and `expand` share, so the two cannot disagree,
+    // and *after* the shares are known, because who builds the chest is read
+    // off them.
+    let chest = if already_standing {
+        0
+    } else {
+        chest_ticks(state, stockpile_builder(&shares, taker)?)?
+    };
+    if saved <= TRANSFER_TICKS.saturating_add(chest) {
+        return None;
+    }
+    Some(shares)
+}
+
+impl Stockpile {
+    /// The bot the gathered items have to end up with.
+    ///
+    /// `Holder::Anyone` is refused for [`SharedSmelt::taker`]'s reason: there
+    /// is no named consumer to hand anything to, and guessing `chain_actor`
+    /// would size the handover against a bot the goal never mentioned. A
+    /// top-level `Anyone` goal is `SplitAcrossBots`', which splits with no
+    /// handover at all and is strictly better.
+    fn taker(goal: &Goal) -> Option<BotId> {
+        match goal {
+            Goal::Have { whose, .. } => match whose {
+                Holder::Bot(b) | Holder::Share(b) => Some(*b),
+                Holder::Anyone => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The patch this bill is mined from, and the chest that serves it.
+    ///
+    /// `Some((anchor, Some(pos)))` when a chest already stands close enough to
+    /// adopt; `Some((anchor, None))` when one has to be built. `None` when the
+    /// item is not mined from a patch this world knows, which is what makes
+    /// this method refuse everything that is not raw.
+    fn site(state: &PlanState, item: &str, taker: BotId) -> Option<(Position, Option<Position>)> {
+        if !state.has_resource_patches(item) {
+            return None;
+        }
+        let from = state.bot(taker).map(|b| b.position.clone())?;
+        let anchor = nearest_resource_tile(state, item, &from, 1)?;
+        // Ordered by `(x, y)` rather than by distance: two chests equally far
+        // from the anchor must resolve the same way on every expansion, and
+        // `entities_within` merges an overlay with a spatial index.
+        let mut standing: Vec<Position> = state
+            .entities_within(&anchor, CHEST_REUSE_RADIUS)
+            .into_iter()
+            .filter(|entity| entity.name == BUFFER_CHEST)
+            .map(|entity| entity.position)
+            .collect();
+        standing.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+        Some((anchor, standing.into_iter().next()))
+    }
+}
+
+impl Method for Stockpile {
+    fn name(&self) -> &'static str {
+        "stockpile"
+    }
+
+    /// `SharedSmelt::claims`' rule, and for the same three reasons.
+    ///
+    /// `!top_level` and `in_chain` together say that one inventory downstream
+    /// is waiting for this count -- the situation a split cannot help with and
+    /// a handover can. `!converging` is the termination guard: the supplier
+    /// shares this emits are ordinary `Have` goals, and without it they would
+    /// stockpile in their turn, for ever.
+    fn claims(&self, site: GoalSite) -> bool {
+        !site.top_level && site.in_chain && !site.converging
+    }
+
+    fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
+        let Some(taker) = Self::taker(goal) else {
+            return false;
+        };
+        let Some(Demand { item, need, .. }) = demand(goal, state) else {
+            return false;
+        };
+        if need == 0 {
+            return false;
+        }
+        let Some((_, standing)) = Self::site(state, item, taker) else {
+            return false;
+        };
+        worth_stockpiling(
+            state,
+            item,
+            need,
+            taker,
+            &self.bots,
+            u32::MAX,
+            standing.is_some(),
+        )
+        .is_some()
+    }
+
+    /// The item itself: unlike a shared smelt, which is asked about a plate
+    /// and splits the ore beneath it, a stockpile splits exactly the goal it
+    /// was given. Answering this is also what marks the subtree
+    /// [`GoalSite::converging`], which is the termination guard.
+    fn split_probe(&self, goal: &Goal, state: &PlanState) -> Option<Goal> {
+        let taker = Self::taker(goal)?;
+        let Demand { item, need, .. } = demand(goal, state)?;
+        Self::site(state, item, taker)?;
+        Some(Goal::Have {
+            item: item.clone(),
+            count: need,
+            whose: Holder::Anyone,
+        })
+    }
+
+    fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+        let refuse = || PlannerError::NoApplicableMethod {
+            goal: goal.to_string(),
+        };
+        let taker = Self::taker(goal).ok_or_else(refuse)?;
+        let Demand {
+            item, need, whose, ..
+        } = demand(goal, &ctx.state).ok_or_else(refuse)?;
+        let item = item.clone();
+        let whose = whose.clone();
+        let count = match goal {
+            Goal::Have { count, .. } => *count,
+            // Unreachable: `taker` refuses everything that is not a `Have`.
+            _ => need,
+        };
+        let (anchor, standing) = Self::site(&ctx.state, &item, taker).ok_or_else(refuse)?;
+        let seats = ctx.concurrency.unwrap_or(u32::MAX);
+        let shares = worth_stockpiling(
+            &ctx.state,
+            &item,
+            need,
+            taker,
+            &self.bots,
+            seats,
+            standing.is_some(),
+        );
+        // `applicable` said yes with `seats = u32::MAX`; the real number can
+        // narrow the split below two. Falling through to `Mine` here rather
+        // than refusing keeps `applicable` honest, exactly as `SharedSmelt`
+        // does -- and the fallback is byte-identical to `Mine`'s own
+        // expansion, because it *is* a subgoal `Mine` will claim.
+        let Some(shares) = shares else {
+            return Ok(vec![Step::Subgoal(Goal::Have { item, count, whose })]);
+        };
+
+        let mut steps: Vec<Step> = Vec::new();
+        let reach = ctx
+            .state
+            .bot(taker)
+            .map(|b| b.reach_distance)
+            .unwrap_or(10.0);
+
+        // The same value `worth_stockpiling` priced the chest against -- see
+        // `stockpile_builder`. `worth_stockpiling` returned `Some`, so the
+        // share map is non-empty and has no taker in it.
+        let builder = stockpile_builder(&shares, taker).ok_or_else(refuse)?;
+
+        // Sited and placed **before** anything else is emitted, for
+        // `smelt_steps`' reason: `run_steps` applies effects as it emits them,
+        // and `PlanState::resource_tile_blocked` only sees entities already
+        // added -- so a placement emitted after the supplier blocks would let
+        // a supplier's `Mine` pick the very tile the chest is about to stand
+        // on.
+        let chest = match standing {
+            Some(pos) => pos,
+            None => {
+                // Not merely a free tile: one clear of everything the plan has
+                // *committed* to but not yet placed. See
+                // `PlanState::machine_committed_near` for the failure that is
+                // otherwise, and `CHEST_CLEARANCE` for the number.
+                let pos = free_area_near_where(&ctx.state, &anchor, BUFFER_CHEST, |candidate| {
+                    !ctx.state.machine_committed_near(candidate, CHEST_CLEARANCE)
+                        && ctx
+                            .state
+                            .entities_within(candidate, CHEST_CLEARANCE)
+                            .is_empty()
+                })
+                .ok_or_else(refuse)?;
+                let build = ctx
+                    .state
+                    .bot(builder)
+                    .map(|b| b.build_distance)
+                    .unwrap_or(10.0);
+                let min_radius = ctx.state.placement_clearance(BUFFER_CHEST).unwrap_or(0.0);
+                let place_id = ctx.ids.next();
+                steps.push(Step::Owned {
+                    whose: Holder::Share(builder),
+                    steps: vec![
+                        Step::Subgoal(Goal::Have {
+                            item: BUFFER_CHEST.into(),
+                            count: 1,
+                            whose: Holder::Share(builder),
+                        }),
+                        Step::Act(Box::new(Action {
+                            id: place_id,
+                            kind: ActionKind::Place {
+                                entity: Box::new(FactorioEntity {
+                                    name: BUFFER_CHEST.into(),
+                                    entity_type: "container".into(),
+                                    position: pos.clone(),
+                                    ..Default::default()
+                                }),
+                            },
+                            pre: vec![
+                                Condition::AtPosition {
+                                    who: Actor::Role,
+                                    pos: pos.clone(),
+                                    radius: build,
+                                    min_radius,
+                                },
+                                Condition::AreaFree {
+                                    pos: pos.clone(),
+                                    entity: BUFFER_CHEST.into(),
+                                    direction: 0,
+                                },
+                                Condition::HasItem {
+                                    who: Actor::Role,
+                                    item: BUFFER_CHEST.into(),
+                                    count: 1,
+                                },
+                            ],
+                            eff: vec![
+                                Effect::LoseItem {
+                                    who: Actor::Role,
+                                    item: BUFFER_CHEST.into(),
+                                    count: 1,
+                                },
+                                Effect::CreateEntity(Box::new(FactorioEntity {
+                                    name: BUFFER_CHEST.into(),
+                                    entity_type: "container".into(),
+                                    position: pos.clone(),
+                                    ..Default::default()
+                                })),
+                            ],
+                            duration: PLACE_TICKS,
+                            pinned: None,
+                            label: format!("place {} at {}", BUFFER_CHEST, pos),
+                        })),
+                    ],
+                });
+                pos
+            }
+        };
+
+        // Everything put in this chest from here on is spoken for by the take
+        // below, so `Withdraw` must not offer it to anybody else -- see
+        // `PlanState::stockpiled` for the expansion failure that is otherwise.
+        // Stated before the first deposit is emitted, because `run_steps`
+        // applies effects as it goes and the supplier *after* the first one
+        // would already see a full chest.
+        ctx.state.commit_stockpile(&chest);
+
+        // One block per supplier: its own share of the bill, sized against its
+        // own inventory, and the deposit that ends it.
+        let mut deposited = 0u32;
+        for (supplier, share) in &shares {
+            if *share == 0 {
+                continue;
+            }
+            let supplier_reach = ctx
+                .state
+                .bot(*supplier)
+                .map(|b| b.reach_distance)
+                .unwrap_or(reach);
+            let id = ctx.ids.next();
+            deposited = deposited.saturating_add(*share);
+            steps.push(Step::Owned {
+                whose: Holder::Share(*supplier),
+                steps: vec![
+                    Step::Subgoal(Goal::Have {
+                        item: item.clone(),
+                        count: ctx
+                            .state
+                            .available(&Holder::Share(*supplier), &item)
+                            .saturating_add(*share),
+                        whose: Holder::Share(*supplier),
+                    }),
+                    Step::Act(Box::new(Action {
+                        id,
+                        kind: ActionKind::Insert {
+                            pos: chest.clone(),
+                            entity: BUFFER_CHEST.into(),
+                            slot: InventorySlot::Chest,
+                            item: item.clone(),
+                            count: *share,
+                        },
+                        pre: vec![
+                            Condition::AtPosition {
+                                who: Actor::Role,
+                                pos: chest.clone(),
+                                radius: supplier_reach,
+                                min_radius: 0.0,
+                            },
+                            Condition::EntityAt {
+                                pos: chest.clone(),
+                                name: BUFFER_CHEST.into(),
+                            },
+                            Condition::HasItem {
+                                who: Actor::Role,
+                                item: item.clone(),
+                                count: *share,
+                            },
+                        ],
+                        eff: vec![
+                            Effect::LoseItem {
+                                who: Actor::Role,
+                                item: item.clone(),
+                                count: *share,
+                            },
+                            Effect::BufferGain {
+                                pos: chest.clone(),
+                                entity: BUFFER_CHEST.into(),
+                                slot: InventorySlot::Chest,
+                                item: item.clone(),
+                                count: *share,
+                            },
+                        ],
+                        duration: TRANSFER_TICKS,
+                        pinned: None,
+                        label: format!("stock the {} with {} {}", BUFFER_CHEST, share, item),
+                    })),
+                ],
+            });
+        }
+
+        // The taker draws the whole stockpile out in one transfer. Its
+        // `Condition::BufferHas` is satisfied by every deposit above, so
+        // `infer_edges` orders it after all of them -- see this type's doc for
+        // why that edge has to be real rather than left to the scheduler.
+        if deposited > 0 {
+            steps.push(Step::Act(Box::new(Action {
+                id: ctx.ids.next(),
+                kind: ActionKind::Remove {
+                    pos: chest.clone(),
+                    entity: BUFFER_CHEST.into(),
+                    slot: InventorySlot::Chest,
+                    item: item.clone(),
+                    count: deposited,
+                },
+                pre: vec![
+                    Condition::AtPosition {
+                        who: Actor::Role,
+                        pos: chest.clone(),
+                        radius: reach,
+                        min_radius: 0.0,
+                    },
+                    Condition::EntityAt {
+                        pos: chest.clone(),
+                        name: BUFFER_CHEST.into(),
+                    },
+                    Condition::BufferHas {
+                        pos: chest.clone(),
+                        item: item.clone(),
+                        count: deposited,
+                    },
+                ],
+                eff: vec![
+                    Effect::BufferLose {
+                        pos: chest.clone(),
+                        item: item.clone(),
+                        count: deposited,
+                    },
+                    Effect::GainItem {
+                        who: Actor::Role,
+                        item: item.clone(),
+                        count: deposited,
+                    },
+                ],
+                duration: TRANSFER_TICKS,
+                pinned: None,
+                label: format!("take {} {} from the {}", deposited, item, BUFFER_CHEST),
+            })));
+        }
+
+        // Whatever the stockpile could not cover is ordinary work, stated with
+        // the goal's own `count` rather than with the remainder: `run_steps`
+        // has already simulated the take into the taker's inventory, so
+        // `shortfall` recomputes the difference itself and a pre-subtracted
+        // number would subtract twice. This is `Withdraw`'s construction and
+        // it terminates for the same reason -- the effects have landed, so the
+        // subgoal's own `need` is smaller and cannot come back here for the
+        // same items.
+        if deposited < need {
+            steps.push(Step::Subgoal(Goal::Have { item, count, whose }));
+        }
+        Ok(steps)
+    }
+}
+
 /// The registry to use for a given bot roster.
 pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
     MethodRegistry::new()
@@ -3459,6 +4160,14 @@ pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
         }))
         .with(Box::new(Smelt))
         .with(Box::new(HandCraft))
+        // Ahead of `Mine`, and only just: both claim a raw-material `Have`,
+        // and this one is the same goal with the mining dealt across the
+        // roster and gathered in a chest. It falls through to `Mine` whenever
+        // the split does not pay, so `Mine` still answers every goal it used
+        // to -- see `Stockpile`'s own doc.
+        .with(Box::new(Stockpile {
+            bots: bots.to_vec(),
+        }))
         .with(Box::new(Mine))
         // After `Mine`, and the order is load-bearing rather than tidy -- see
         // the type's own doc. Anything with an ore patch, a recipe, a smelt or
@@ -9482,6 +10191,525 @@ mod owned_gathering {
         assert!(
             checked > 0,
             "no handed fuel load reached a take; this test stopped testing anything"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod stockpiling {
+    //! **Workstream B: a shared chest, so gathering can move between bots.**
+    //!
+    //! R3 (`c0c3bc5c`) could hand a furnace's stone, its craft, its placement
+    //! and its coal to another bot, and could not hand over the ore. The
+    //! reason is in the conditions: a placement's precondition is
+    //! `Condition::EntityAt`, a world fact any bot can satisfy, while ore is
+    //! read back out of one bot's inventory by a role-scoped
+    //! `Condition::HasItem`. Material of the second kind is
+    //! *inventory-convergent* and cannot move, however idle the roster is.
+    //!
+    //! A chest converts one into the other. Every test here is about one
+    //! question: does a bill the chain owner would otherwise mine end up mined
+    //! by somebody else?
+    //!
+    //! Measured on the real map (`workspace/scripts/map.json`,
+    //! `researched:automation`, bots 1-4): makespan **44,548 -> 30,077**
+    //! ticks, roster utilisation **24.7% -> 38.8%**, the chain owner's planned
+    //! ticks 27,999 -> 24,709 and its *idle* ticks 16,549 -> 5,368. The plan
+    //! builds four chests, one per resource patch.
+
+    use super::*;
+    use crate::ids::BotId;
+    use crate::method::expand;
+    use crate::network::ActionNetwork;
+    use crate::schedule::{StepKind, schedule};
+    use crate::state::PlanState;
+    use factorio_bot_core::types::Pos;
+    use std::sync::Arc;
+
+    /// Rung 1's fixture with trees the planner can read a bill off.
+    ///
+    /// The shared fixture's hundred `tree-42`s carry no `mine_result` and
+    /// yield nothing (see `test_world::with_trees`), which is exactly why
+    /// every R3 test is unaffected by this workstream: with no wood there is
+    /// no chest, and `Stockpile` refuses. These four `tree-01`s are what turn
+    /// the same fixture into one a stockpile can be built on.
+    fn wooded_rung_one(bots: &[BotId]) -> PlanState {
+        let world = crate::test_world::with_trees(
+            crate::test_world::world_with_trigger_prerequisite(),
+            &[
+                Position::new(6., 6.),
+                Position::new(8., 6.),
+                Position::new(10., 6.),
+                Position::new(12., 6.),
+            ],
+        );
+        let mut state = PlanState::from_world(Arc::new(world), bots);
+        for bot in bots {
+            state.gain(*bot, "wood", 1);
+            state.gain(*bot, "stone-furnace", 1);
+            state.gain(*bot, "burner-mining-drill", 1);
+            state.gain(*bot, "iron-plate", 8);
+        }
+        state
+    }
+
+    /// The same fixture with the trees taken away, which is the same plan with
+    /// the chest taken away: `Stockpile` needs wood and refuses without it.
+    /// The control for every "did the chest move anything" claim here.
+    fn treeless_rung_one(bots: &[BotId]) -> PlanState {
+        let mut state = PlanState::from_world(
+            Arc::new(crate::test_world::world_with_trigger_prerequisite()),
+            bots,
+        );
+        for bot in bots {
+            state.gain(*bot, "wood", 1);
+            state.gain(*bot, "stone-furnace", 1);
+            state.gain(*bot, "burner-mining-drill", 1);
+            state.gain(*bot, "iron-plate", 8);
+        }
+        state
+    }
+
+    fn plan_rung_one(bots: &[BotId]) -> (ActionNetwork, crate::schedule::Schedule) {
+        let state = wooded_rung_one(bots);
+        let net = expand(
+            &[Goal::Researched("automation".into())],
+            &state,
+            &registry_for(bots),
+            BotId(1),
+        )
+        .expect("rung 1 expands");
+        let plan = schedule(&net, &state, bots).expect("rung 1 schedules");
+        (net, plan)
+    }
+
+    fn chests_placed(net: &ActionNetwork) -> usize {
+        net.actions()
+            .filter(
+                |a| matches!(&a.kind, ActionKind::Place { entity } if entity.name == BUFFER_CHEST),
+            )
+            .count()
+    }
+
+    /// **The headline claim.** A chest is built, other bots fill it, and the
+    /// chain owner takes the bill out instead of mining it.
+    ///
+    /// Stated as the three facts that together mean "the material moved",
+    /// rather than as a makespan: a chest exists, at least one bot that is not
+    /// the chain owner deposits into it, and the chain owner withdraws.
+    #[test]
+    fn a_chest_lets_other_bots_gather_what_the_chain_owner_needs() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let (net, plan) = plan_rung_one(&bots);
+
+        assert!(chests_placed(&net) > 0, "no chest was built at all");
+
+        let mut depositors: BTreeSet<BotId> = BTreeSet::new();
+        let mut withdrawals = 0usize;
+        for step in &plan.steps {
+            let StepKind::Act { action, .. } = step.what else {
+                continue;
+            };
+            let Some(action) = net.action(action) else {
+                continue;
+            };
+            match &action.kind {
+                ActionKind::Insert { entity, .. } if entity == BUFFER_CHEST => {
+                    depositors.insert(step.bot);
+                }
+                ActionKind::Remove { entity, .. } if entity == BUFFER_CHEST => withdrawals += 1,
+                _ => {}
+            }
+        }
+        assert!(
+            depositors.iter().any(|bot| *bot != BotId(1)),
+            "only the chain owner stocked the chest, which moves nothing: {depositors:?}"
+        );
+        assert!(withdrawals > 0, "nothing was ever taken back out");
+    }
+
+    /// **A chest is never overdrawn**: at the moment each take runs, enough
+    /// has already been deposited into that chest to cover it.
+    ///
+    /// This is what the inferred edge buys, checked as the property rather
+    /// than as the edge. `ActionNetwork::infer_edges` deliberately omits the
+    /// producer -> consumer edge for a role-scoped `Condition::HasItem` in a
+    /// different chain, on the stated grounds that the scheduler's per-bot
+    /// feasibility check re-derives the ordering from that one bot's ordered
+    /// slice of the schedule. **That argument does not survive the move to a
+    /// chest**: a stockpile's depositors and its withdrawer are different bots
+    /// by construction, so there is no single slice to re-derive from, and
+    /// nothing else in the network would order the take after the fills. So
+    /// `Effect::BufferGain` satisfies `Condition::BufferHas` and the edge is
+    /// real.
+    ///
+    /// Asserted against the *schedule* rather than against the edge set,
+    /// because a second stockpile that adopts the same chest correctly gets no
+    /// edge from its deposits to the *first* stockpile's take -- that edge is a
+    /// cycle and `infer_edges` drops it. The invariant that survives both
+    /// cases is the balance.
+    #[test]
+    fn a_chest_is_never_drawn_on_before_it_has_been_filled() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let (net, plan) = plan_rung_one(&bots);
+
+        let mut ordered: Vec<(&ActionKind, Ticks)> = Vec::new();
+        for step in &plan.steps {
+            let StepKind::Act { action, .. } = step.what else {
+                continue;
+            };
+            let Some(action) = net.action(action) else {
+                continue;
+            };
+            ordered.push((&action.kind, step.end));
+        }
+        // `(end, ...)` is the order the game sees them settle in. Ties are
+        // broken by the order the schedule lists them, which is the same total
+        // order `schedule` itself used.
+        ordered.sort_by_key(|(_, end)| *end);
+
+        let mut held: BTreeMap<Pos, BTreeMap<ItemId, i64>> = BTreeMap::new();
+        let mut takes = 0usize;
+        for (kind, _) in ordered {
+            match kind {
+                ActionKind::Insert {
+                    entity,
+                    pos,
+                    item,
+                    count,
+                    ..
+                } if entity == BUFFER_CHEST => {
+                    *held
+                        .entry(Pos::from(pos))
+                        .or_default()
+                        .entry(item.clone())
+                        .or_default() += i64::from(*count);
+                }
+                ActionKind::Remove {
+                    entity,
+                    pos,
+                    item,
+                    count,
+                    ..
+                } if entity == BUFFER_CHEST => {
+                    let entry = held
+                        .entry(Pos::from(pos))
+                        .or_default()
+                        .entry(item.clone())
+                        .or_default();
+                    *entry -= i64::from(*count);
+                    assert!(
+                        *entry >= 0,
+                        "the chest at {pos} is {} short of {item} when {count} is taken out",
+                        -*entry
+                    );
+                    takes += 1;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            takes > 0,
+            "no chest was ever drawn on; this test stopped testing anything"
+        );
+    }
+
+    /// **The chest makes the plan shorter**, measured against the same fixture
+    /// with the trees taken away -- which is the same plan with the chest
+    /// taken away, so this is a control rather than a threshold and it moves
+    /// with the rest of the crate without needing to be re-tuned.
+    ///
+    /// Makespan is the assertion, and deliberately not the mining split. A
+    /// per-bot mining share was tried first and says the opposite of the
+    /// truth: on this fixture bot 1 digs *more* raw units with the chest (79
+    /// of 134 against 67 of 134) while the plan finishes **5,338 ticks
+    /// sooner** (35,541 against 40,879), because what the chest moves off the
+    /// critical path is the digging that stood in front of the cell's fuel
+    /// load, not digging in general. Counting units answers a question nobody
+    /// is asking.
+    #[test]
+    fn the_chest_makes_the_plan_shorter_than_it_is_without_one() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+
+        let (_, with_chest) = plan_rung_one(&bots);
+
+        let state = treeless_rung_one(&bots);
+        let net = expand(
+            &[Goal::Researched("automation".into())],
+            &state,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("rung 1 expands with no wood");
+        let without = schedule(&net, &state, &bots).expect("rung 1 schedules with no wood");
+
+        assert!(
+            with_chest.makespan < without.makespan,
+            "the chest did not shorten the plan: {} with it, {} without",
+            with_chest.makespan,
+            without.makespan
+        );
+    }
+
+    /// **A stockpile never asks the taker to supply itself.**
+    ///
+    /// The taker's share is precisely the work the chest exists to remove, and
+    /// with it included the reference plan still had bot 1 mining four of the
+    /// cell's thirteen coal -- in front of the fuel load the whole plan waits
+    /// on. This is the one place `Stockpile` departs from `even_shares`' other
+    /// two callers, so it is asserted directly rather than through a plan.
+    #[test]
+    fn the_taker_supplies_none_of_its_own_stockpile() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let state = wooded_rung_one(&bots);
+        let shares = worth_stockpiling(&state, "iron-ore", 40, BotId(1), &bots, u32::MAX, true)
+            .expect("forty iron ore is worth stockpiling across four bots");
+        assert!(
+            !shares.contains_key(&BotId(1)),
+            "the taker was dealt a share of its own stockpile: {shares:?}"
+        );
+        assert_eq!(
+            shares.values().sum::<u32>(),
+            40,
+            "the whole bill still has to be covered: {shares:?}"
+        );
+    }
+
+    /// One bot is enough, where a *split* of one would be no split at all.
+    ///
+    /// `worth_converging` requires `k >= 2` because splitting a bill onto one
+    /// bot is a no-op. A handover onto one bot is not: the bill still leaves
+    /// the inventory the makespan is measured on.
+    #[test]
+    fn a_single_supplier_is_a_handover_even_though_it_is_not_a_split() {
+        let bots = [BotId(1), BotId(2)];
+        let state = wooded_rung_one(&bots);
+        let shares = worth_stockpiling(&state, "iron-ore", 20, BotId(1), &bots, u32::MAX, true)
+            .expect("one other bot can still take the whole bill");
+        assert_eq!(shares.keys().copied().collect::<Vec<_>>(), vec![BotId(2)]);
+    }
+
+    /// A roster of one has nobody to hand anything to, and plans exactly as
+    /// it did before this method existed.
+    #[test]
+    fn a_solo_roster_stockpiles_nothing() {
+        let bots = [BotId(1)];
+        let state = wooded_rung_one(&bots);
+        assert!(
+            worth_stockpiling(&state, "iron-ore", 40, BotId(1), &bots, u32::MAX, true).is_none(),
+            "a solo bot cannot hand its own bill to itself"
+        );
+        let net = expand(
+            &[Goal::Researched("automation".into())],
+            &state,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("rung 1 expands for one bot");
+        assert_eq!(
+            chests_placed(&net),
+            0,
+            "a solo plan built a chest, so it is no longer the plan it was"
+        );
+    }
+
+    /// **A chest nothing can build is not planned for.**
+    ///
+    /// `Stockpile` emits the chest's bill as a *subgoal*, and a subgoal no
+    /// method can satisfy fails the whole expansion rather than falling back
+    /// to `Mine`. The shared fixture -- no `tree-01` anywhere, so no wood --
+    /// is exactly that world, and adding this method without the guard turned
+    /// four passing tests into `no method can satisfy goal: have 2 wood`.
+    #[test]
+    fn a_world_with_no_wood_plans_exactly_as_it_did_before() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let state = treeless_rung_one(&bots);
+        assert!(
+            worth_stockpiling(&state, "iron-ore", 40, BotId(1), &bots, u32::MAX, false).is_none(),
+            "a treeless world has no chest to stockpile into"
+        );
+        let net = expand(
+            &[Goal::Researched("automation".into())],
+            &state,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("rung 1 still expands where no chest can be built");
+        assert_eq!(chests_placed(&net), 0);
+    }
+
+    /// The chest is priced against the bot that has to build it, not against
+    /// whichever bot in the roster happens to hold the wood.
+    ///
+    /// `Holder::Share(builder)` sizes the chest's bill against one named bot,
+    /// so wood in a *different* inventory is wood this chain can never reach.
+    /// Measured: bot 1 had chopped the only tree and was holding its yield,
+    /// bot 2 was the builder, and a roster-wide test said "obtainable" for a
+    /// bill bot 2 could not fill.
+    #[test]
+    fn the_chest_is_priced_against_its_builder_and_not_the_roster() {
+        let bots = [BotId(1), BotId(2)];
+        let mut state = PlanState::from_world(
+            Arc::new(crate::test_world::world_with_trigger_prerequisite()),
+            &bots,
+        );
+        // Bot 1 -- the taker, and so never the builder -- is the only one with
+        // wood, and there are no trees.
+        state.gain(BotId(1), "wood", 8);
+        assert!(
+            worth_stockpiling(&state, "iron-ore", 40, BotId(1), &bots, u32::MAX, false).is_none(),
+            "the taker's wood is not the builder's wood"
+        );
+        state.gain(BotId(2), "wood", 8);
+        assert!(
+            worth_stockpiling(&state, "iron-ore", 40, BotId(1), &bots, u32::MAX, false).is_some(),
+            "the builder's own wood does make the chest affordable"
+        );
+    }
+
+    /// A bill too small to pay for the chest falls through to `Mine`, and the
+    /// same bill does pay once the chest already stands.
+    ///
+    /// The threshold is computed from the fixture's own numbers rather than
+    /// written down: `mining_ticks` and a wooden chest's bill are both
+    /// fixture-dependent, and a hardcoded count would be pinning the fixture
+    /// instead of the rule.
+    #[test]
+    fn a_bill_smaller_than_the_chest_is_mined_the_old_way() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let state = wooded_rung_one(&bots);
+        let chest = chest_ticks(&state, BotId(2)).expect("the fixture has trees to chop");
+        // The largest bill whose saving does not cover a chest that has to be
+        // built. At least two, because `need < 2` is refused for its own
+        // reason and would make this test pass without testing anything.
+        let per = mining_ticks(&state, "iron-ore").max(1);
+        let small = (TRANSFER_TICKS.saturating_add(chest) / per).max(2);
+        assert!(
+            solo_ticks(&state, "iron-ore", small) <= TRANSFER_TICKS.saturating_add(chest),
+            "the fixture's chest is too cheap for this test to mean anything"
+        );
+        assert!(
+            worth_stockpiling(&state, "iron-ore", small, BotId(1), &bots, u32::MAX, false)
+                .is_none(),
+            "{small} ore does not pay for a chest that has to be built"
+        );
+        assert!(
+            worth_stockpiling(&state, "iron-ore", small, BotId(1), &bots, u32::MAX, true).is_some(),
+            "but it does once the chest already stands"
+        );
+        assert!(
+            worth_stockpiling(&state, "iron-ore", 1, BotId(1), &bots, u32::MAX, true).is_none(),
+            "a shortfall of one is one bot's errand however many bots there are"
+        );
+    }
+
+    /// **`Withdraw` must not raid a stockpile this plan is still filling.**
+    ///
+    /// The deposits are spoken for by the take that follows them.
+    /// `Withdraw` is registered ahead of everything and asks only whether
+    /// *some* buffer holds the item, so without this the second supplier's
+    /// bill was satisfied by taking the first supplier's deposit straight back
+    /// out -- and the stockpile's own take then asked for more than the chest
+    /// held. Measured, before the ledger existed:
+    /// `the buffer at [-57.5, 13.5] holds 3 copper-ore, and the plan wants 10`.
+    #[test]
+    fn a_stockpile_being_filled_is_hidden_from_withdraw() {
+        let bots = [BotId(1), BotId(2)];
+        let mut state = wooded_rung_one(&bots);
+        let chest = Position::new(3., 3.);
+        state.stock_buffer(&chest, BUFFER_CHEST, InventorySlot::Chest, "iron-ore", 5);
+        assert_eq!(
+            state
+                .buffers_holding(&Position::new(0., 0.), "iron-ore")
+                .len(),
+            1,
+            "an ordinary buffer is offered to Withdraw"
+        );
+        state.commit_stockpile(&chest);
+        assert!(
+            state
+                .buffers_holding(&Position::new(0., 0.), "iron-ore")
+                .is_empty(),
+            "a committed stockpile must not be offered to Withdraw"
+        );
+        assert_eq!(
+            state.buffered(&chest, "iron-ore"),
+            5,
+            "the items are reserved, not spent: the stockpile's own take reads them"
+        );
+    }
+
+    /// A second bill against the same patch adopts the chest the first one
+    /// built rather than paying for another.
+    #[test]
+    fn a_second_bill_on_one_patch_reuses_the_first_chest() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let state = wooded_rung_one(&bots);
+        let net = expand(
+            &[
+                Goal::Have {
+                    item: "iron-plate".into(),
+                    count: 30,
+                    whose: Holder::Bot(BotId(1)),
+                },
+                Goal::Have {
+                    item: "iron-plate".into(),
+                    count: 30,
+                    whose: Holder::Bot(BotId(2)),
+                },
+            ],
+            &state,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("two smelting bills expand");
+        let chests = chests_placed(&net);
+        assert!(chests > 0, "no chest was built at all");
+        assert!(
+            chests <= 2,
+            "{chests} chests for one iron patch; the reuse radius is not working"
+        );
+    }
+
+    /// A deposit satisfies a withdrawal, so `infer_edges` draws the real
+    /// producer -> consumer edge.
+    ///
+    /// A role-scoped `Condition::HasItem` deliberately gets no such edge
+    /// across chains, because the scheduler re-derives the ordering from one
+    /// bot's ordered slice of the schedule. A stockpile's depositors and its
+    /// withdrawer are different bots by construction, so there is no single
+    /// slice to re-derive from and the edge has to be real.
+    #[test]
+    fn a_deposit_satisfies_the_withdrawal_that_reads_it() {
+        let chest = Position::new(4., 4.);
+        let deposit = Effect::BufferGain {
+            pos: chest.clone(),
+            entity: BUFFER_CHEST.into(),
+            slot: InventorySlot::Chest,
+            item: "iron-ore".into(),
+            count: 5,
+        };
+        assert!(deposit.satisfies(&Condition::BufferHas {
+            pos: chest.clone(),
+            item: "iron-ore".into(),
+            count: 5,
+        }));
+        assert!(
+            !deposit.satisfies(&Condition::BufferHas {
+                pos: chest.clone(),
+                item: "copper-ore".into(),
+                count: 5,
+            }),
+            "a different item is a different buffer claim"
+        );
+        assert!(
+            !deposit.satisfies(&Condition::BufferHas {
+                pos: Position::new(40., 40.),
+                item: "iron-ore".into(),
+                count: 5,
+            }),
+            "a different chest is a different buffer claim"
         );
     }
 }

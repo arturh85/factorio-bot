@@ -382,16 +382,55 @@ pub enum Effect {
     /// `Withdraw`, find the buffer still full, and expand into itself until
     /// the depth guard fired.
     ///
-    /// **There is no `BufferGain`.** Nothing this planner emits puts items
-    /// into a buffer *and expects a later goal to count them* -- `smelt_steps`
-    /// inserts ore and takes plates inside one method, holding both action ids
-    /// and stating the edge itself. A `BufferGain` would exist only to make
-    /// that edge inferable, which it already is by other means, and would then
-    /// sit in the enum unpaired with anything. Stage 2's chest handover is
-    /// where it earns its place; it can be added then, with the method that
-    /// needs it.
+    /// Paired with [`Effect::BufferGain`], which stage 2's chest handover
+    /// added -- see that variant for why it did not exist before.
     BufferLose {
         pos: Position,
+        item: ItemId,
+        count: u32,
+    },
+    /// `count` of `item` are put *into* the buffer at `pos`.
+    ///
+    /// **This is what makes work movable between bots.** A
+    /// `Effect::GainItem { who: Actor::Role }` says the items are in whichever
+    /// bot ran the action, so anything downstream that reads them has to run
+    /// on that same bot: the material is *inventory-convergent*, and R3
+    /// (`c0c3bc5c`) could hand a furnace's stone, craft, placement and coal to
+    /// another bot only because each of those consumers names a **position**
+    /// instead. This effect says the items are at a *tile*, which is a world
+    /// fact any bot can read -- so the producer and the consumer no longer
+    /// have to be the same pair of hands.
+    ///
+    /// # It carries the entity and the slot, unlike its sibling
+    ///
+    /// [`Effect::BufferLose`] spends from a buffer that already exists, so the
+    /// overlay already knows what stands there and which of its inventories
+    /// the reading came from. This one may be the *first* thing the plan ever
+    /// puts in a chest it placed a moment ago, and
+    /// [`crate::state::PlanState::from_world`] only ever learns those two
+    /// fields from a live `inventory_contents_at` reading. Guessing them at
+    /// apply time would mean guessing which inventory a later
+    /// [`ActionKind::Remove`] must address.
+    ///
+    /// # It satisfies `BufferHas`, and that is deliberate
+    ///
+    /// [`Effect::satisfies`] pairs the two, so `ActionNetwork::infer_edges`
+    /// draws a real producer -> consumer edge from every deposit to the
+    /// withdrawal that reads it. A role-scoped `Condition::HasItem` gets no
+    /// such edge across chains, on the stated grounds that the scheduler's
+    /// per-bot feasibility check re-derives the ordering from one bot's
+    /// *ordered slice* of the schedule. **That reasoning does not survive the
+    /// move to a chest**: the depositors and the withdrawer are, by
+    /// construction, different bots, so there is no single bot's slice for the
+    /// ordering to be re-derived from and nothing else in the network would
+    /// order the take after the fills. The edge has to be real.
+    BufferGain {
+        pos: Position,
+        /// The entity standing at `pos`, as a later `Remove` must name it.
+        entity: ItemId,
+        /// Which of that entity's inventories the items go into, and so which
+        /// one a later `Remove` has to address.
+        slot: InventorySlot,
         item: ItemId,
         count: u32,
     },
@@ -438,6 +477,16 @@ impl Effect {
                 state.consume_resource(pos, item, *count)
             }
             Effect::BufferLose { pos, item, count } => state.take_from_buffer(pos, item, *count),
+            Effect::BufferGain {
+                pos,
+                entity,
+                slot,
+                item,
+                count,
+            } => {
+                state.stock_buffer(pos, entity, *slot, item, *count);
+                Ok(())
+            }
             Effect::Researched(tech) => {
                 state.set_researched(tech);
                 Ok(())
@@ -458,6 +507,16 @@ impl Effect {
             | (Effect::RemoveEntity { pos }, Condition::AreaFree { pos: want, .. }) => {
                 Pos::from(pos) == Pos::from(want)
             }
+            (
+                Effect::BufferGain {
+                    pos, item: made, ..
+                },
+                Condition::BufferHas {
+                    pos: want,
+                    item: wanted,
+                    ..
+                },
+            ) => Pos::from(pos) == Pos::from(want) && made == wanted,
             (Effect::Researched(t), Condition::Researched(want)) => t == want,
             (
                 Effect::SetRecipe { pos, recipe },

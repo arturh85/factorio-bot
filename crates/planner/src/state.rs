@@ -710,6 +710,30 @@ pub struct PlanState {
     /// Keyed by `Pos`, which floors — sound here because every entry is an
     /// entity position tested only for equality, never for distance.
     committed_machines: BTreeSet<Pos>,
+    /// Buffers this plan is *filling*, whose contents are therefore already
+    /// spoken for.
+    ///
+    /// A stockpile deposits into a chest and then withdraws the whole lot in
+    /// one `Remove` (see [`crate::method::have::Stockpile`]). Between those two
+    /// emissions the chest holds items, and `Withdraw` -- which is registered
+    /// ahead of everything and asks only whether *some* buffer holds the item
+    /// -- would happily plan a second bot to take them straight back out. That
+    /// is not a slow plan: the stockpile's own take then asks for more than the
+    /// chest still holds and [`PlanState::take_from_buffer`] refuses the whole
+    /// expansion. It was measured as
+    /// `the buffer at [-57.5, 13.5] holds 3 copper-ore, and the plan wants 10`.
+    ///
+    /// So a committed buffer is hidden from [`PlanState::buffers_holding`],
+    /// which is `Withdraw`'s only door, and stays visible to
+    /// [`PlanState::buffered`], which is what `Condition::BufferHas` and the
+    /// stockpile's own arithmetic read. Reserved rather than emptied, for the
+    /// same reason every other ledger here reserves: the items really are in
+    /// the chest, and only *other* goals need to be told they are taken.
+    ///
+    /// Keyed by `Pos`, which floors -- sound for the same reason
+    /// `committed_machines` is: every entry is an entity position tested only
+    /// for equality.
+    stockpiled: BTreeSet<Pos>,
     /// Whose serial timeline a claim made **now** sits on, and whose timeline
     /// a crowding question is being asked *for*.
     ///
@@ -1217,6 +1241,7 @@ impl PlanState {
             consumed: Default::default(),
             claimed: Default::default(),
             committed_machines: Default::default(),
+            stockpiled: Default::default(),
             claim_runner: None,
             force,
             researched: Default::default(),
@@ -1543,6 +1568,7 @@ impl PlanState {
         let mut out: Vec<(f64, Buffer)> = self
             .buffers
             .values()
+            .filter(|buffer| !self.stockpiled.contains(&Pos::from(&buffer.position)))
             .filter(|buffer| buffer.contents.get(item).copied().unwrap_or(0) > 0)
             .map(|buffer| (calculate_distance(&buffer.position, from), buffer.clone()))
             .collect();
@@ -1567,6 +1593,60 @@ impl PlanState {
     /// `judge_transfer_reply` reads any complaint as a failed action) -- but a
     /// plan that is arithmetically wrong should fail at the planner, not four
     /// minutes later on a bot that has walked there.
+    /// Put `count` of `item` into the buffer on `position`'s tile, creating
+    /// the buffer if this is the first thing the plan has put there.
+    ///
+    /// **Infallible, where [`PlanState::take_from_buffer`] is not**, and the
+    /// asymmetry is the point. Taking more than a buffer holds is the plan
+    /// having counted the same items twice, which is an arithmetic error worth
+    /// an error value. Adding to one cannot be wrong in that way: whether the
+    /// depositing bot really has the items is a separate question, asked and
+    /// answered by the `Condition::HasItem` on the action carrying the
+    /// [`Effect::BufferGain`] and by the `Effect::LoseItem` beside it.
+    ///
+    /// `name` and `slot` are taken from the caller rather than looked up,
+    /// because a chest the plan placed a moment ago has no reading behind it
+    /// -- see [`Effect::BufferGain`](crate::action::Effect::BufferGain). They
+    /// are only used when the entry is created; a later deposit into a buffer
+    /// the world reported keeps the name and slot that reading came with,
+    /// which is what a `Remove` against it has to address.
+    ///
+    /// Capacity is not modelled. A wooden chest holds sixteen stacks and the
+    /// bills this crate writes are far smaller, so a limit here would be a
+    /// number with no case behind it; the game refusing an insert is a
+    /// transfer failure the executor already reports.
+    pub fn stock_buffer(
+        &mut self,
+        position: &Position,
+        name: &str,
+        slot: InventorySlot,
+        item: &str,
+        count: u32,
+    ) {
+        if count == 0 {
+            return;
+        }
+        let buffer = self
+            .buffers
+            .entry(Pos::from(position))
+            .or_insert_with(|| Buffer {
+                name: name.to_string(),
+                position: position.clone(),
+                slot,
+                contents: BTreeMap::new(),
+            });
+        *buffer.contents.entry(item.to_string()).or_insert(0) += count;
+    }
+
+    /// Mark the buffer on `position`'s tile as one this plan is filling.
+    ///
+    /// See [`stockpiled`](PlanState#structfield.stockpiled). Idempotent, and
+    /// never undone within an expansion: the deposits it protects are emitted
+    /// once and consumed once.
+    pub fn commit_stockpile(&mut self, position: &Position) {
+        self.stockpiled.insert(Pos::from(position));
+    }
+
     pub fn take_from_buffer(
         &mut self,
         position: &Position,
@@ -3003,6 +3083,30 @@ impl PlanState {
     /// [`PlanState::resource_unclaimed`] draws.
     pub fn machine_committed(&self, position: &Position) -> bool {
         self.committed_machines.contains(&Pos::from(position))
+    }
+
+    /// Is any machine this plan has committed to standing within `radius` of
+    /// `position`?
+    ///
+    /// The tile-exact [`PlanState::machine_committed`] asks about adoption;
+    /// this asks about *ground*, and exists because a commitment is made
+    /// before the placement that realises it is emitted. `smelt_steps` sites a
+    /// whole furnace bank into a fork, commits each slot, and only then emits
+    /// the placements -- so between those two moments the tiles are spoken for
+    /// and [`PlanState::is_area_free`] cannot see it. A method siting anything
+    /// else in that window (a stockpile's chest is the case that found this)
+    /// picks a tile the bank is about to take, and the collision surfaces at
+    /// schedule time as an `AreaFree` precondition that "does not hold" for the
+    /// bot that owns the chain -- a message that says nothing about the cause.
+    ///
+    /// Deterministic: an ordered walk of a `BTreeSet` and one distance test.
+    pub fn machine_committed_near(&self, position: &Position, radius: f64) -> bool {
+        self.committed_machines.iter().any(|tile| {
+            calculate_distance(
+                &Position::new(tile.0 as f64 + 0.5, tile.1 as f64 + 0.5),
+                position,
+            ) <= radius
+        })
     }
 
     /// Commit the machine at `position` to this plan, so no later method

@@ -118,6 +118,12 @@ impl Subcommand for ThisCommand {
           .action(ArgAction::SetTrue)
           .help("print the report as JSON instead of a table"),
       )
+      .arg(
+        Arg::new("steps")
+          .long("steps")
+          .action(ArgAction::SetTrue)
+          .help("also list every scheduled step, per bot, with its start and end tick"),
+      )
   }
 
   fn build_callback(&self) -> SubcommandCallback {
@@ -231,7 +237,8 @@ fn plan_from_dump(
   specs: &[String],
   goal_json: &[String],
   roster: Option<&str>,
-) -> Result<(PlanReport, Vec<String>)> {
+  steps: bool,
+) -> Result<(PlanReport, Vec<String>, Vec<String>)> {
   let world = load_world(world_path)?;
 
   let mut goals: Vec<Goal> = Vec::new();
@@ -288,7 +295,43 @@ fn plan_from_dump(
   let scheduled =
     schedule(&net, &state, &bots).map_err(|err| miette!("the plan did not schedule: {err}"))?;
 
-  Ok((PlanReport::of(&net, &scheduled, &bots), notes))
+  let listing = if steps {
+    step_lines(&scheduled, &bots)
+  } else {
+    Vec::new()
+  };
+  Ok((PlanReport::of(&net, &scheduled, &bots), notes, listing))
+}
+
+/// Every scheduled step, per bot, with the gap that precedes it.
+///
+/// The report says a bot idled 39,892 ticks; this says *where*. Idle in a
+/// schedule is always a wait on somebody else's finish or on a lag edge, and
+/// which one it is decides whether the fix is more bots or a shorter lag --
+/// a distinction the aggregate cannot make.
+fn step_lines(scheduled: &factorio_bot_planner::Schedule, bots: &[BotId]) -> Vec<String> {
+  let mut out = Vec::new();
+  for bot in bots {
+    out.push(format!("--- {bot} ---"));
+    let mut previous_end = 0u32;
+    for step in scheduled.steps_for(*bot) {
+      let gap = step.start.saturating_sub(previous_end);
+      let label = match &step.what {
+        factorio_bot_planner::StepKind::Act { action, label } => format!("#{} {label}", action.0),
+        factorio_bot_planner::StepKind::Walk { to, .. } => format!("walk to {to}"),
+      };
+      out.push(format!(
+        "{:>7} {:>7} {:>7}  idle {:>6}  {}",
+        step.start,
+        step.end,
+        step.end.saturating_sub(step.start),
+        gap,
+        label
+      ));
+      previous_end = step.end;
+    }
+  }
+  out
 }
 
 /// Not `async`, and the callback below wraps it in `std::future::ready` --
@@ -309,10 +352,19 @@ fn run(args: &ArgMatches, _context: &mut Context) -> Result<()> {
     .unwrap_or_default();
   let roster = args.get_one::<String>("bots").map(String::as_str);
 
-  let (report, notes) = plan_from_dump(world_path, &specs, &goal_json, roster)?;
+  let (report, notes, listing) = plan_from_dump(
+    world_path,
+    &specs,
+    &goal_json,
+    roster,
+    args.get_flag("steps"),
+  )?;
 
   for note in &notes {
     eprintln!("{note}");
+  }
+  for line in &listing {
+    println!("{line}");
   }
   if args.get_flag("json") {
     println!(
@@ -408,11 +460,12 @@ mod tests {
   fn a_dump_and_a_goal_produce_a_plan() {
     let dir = tempfile::tempdir().expect("a directory");
     let path = dumped_world(&dir);
-    let (report, notes) = plan_from_dump(
+    let (report, notes, _) = plan_from_dump(
       &path,
       &["have:automation-science-pack:4".to_string()],
       &[],
       Some("1,2"),
+      false,
     )
     .expect("plans");
     assert!(report.actions > 10, "{} actions", report.actions);
@@ -433,8 +486,9 @@ mod tests {
     let dir = tempfile::tempdir().expect("a directory");
     let path = dumped_world(&dir);
     let goal = ["have:automation-science-pack:10".to_string()];
-    let (solo, _) = plan_from_dump(&path, &goal, &[], Some("1")).expect("plans for one");
-    let (four, _) = plan_from_dump(&path, &goal, &[], Some("1,2,3,4")).expect("plans for four");
+    let (solo, _, _) = plan_from_dump(&path, &goal, &[], Some("1"), false).expect("plans for one");
+    let (four, _, _) =
+      plan_from_dump(&path, &goal, &[], Some("1,2,3,4"), false).expect("plans for four");
     assert_ne!(
       solo.makespan, four.makespan,
       "four bots planned exactly like one, which is the finding, not the test"
@@ -455,19 +509,57 @@ mod tests {
   fn goal_json_can_name_a_holder_the_shorthand_cannot() {
     let dir = tempfile::tempdir().expect("a directory");
     let path = dumped_world(&dir);
-    let (anyone, _) =
-      plan_from_dump(&path, &["have:iron-plate:8".to_string()], &[], Some("1,2")).expect("plans");
-    let (bot_two, _) = plan_from_dump(
+    let (anyone, _, _) = plan_from_dump(
+      &path,
+      &["have:iron-plate:8".to_string()],
+      &[],
+      Some("1,2"),
+      false,
+    )
+    .expect("plans");
+    let (bot_two, _, _) = plan_from_dump(
       &path,
       &[],
       &[r#"{"Have":{"item":"iron-plate","count":8,"whose":{"Bot":2}}}"#.to_string()],
       Some("1,2"),
+      false,
     )
     .expect("plans");
     assert_ne!(
       anyone.bots, bot_two.bots,
       "naming bot 2 as the holder changed nothing, so --goal-json is not \
        reaching the planner"
+    );
+  }
+
+  /// `--steps` is the diagnostic this command was missing.
+  ///
+  /// The report says a bot idled 39,892 ticks; only a step listing says
+  /// *where*, and that distinction is what the buffer-chest workstream was
+  /// read off -- the reference plan's 12,240-tick gap turned out to be one
+  /// wait on one lag edge, in front of which sat every raw unit the chain
+  /// owner had to mine itself.
+  #[test]
+  fn steps_lists_every_scheduled_step_and_the_gap_before_it() {
+    let dir = tempfile::tempdir().expect("a directory");
+    let path = dumped_world(&dir);
+    let goal = ["have:iron-plate:8".to_string()];
+    let (_, _, listing) =
+      plan_from_dump(&path, &goal, &[], Some("1,2"), true).expect("plans with steps");
+    assert!(
+      listing.iter().any(|line| line.starts_with("--- bot 1")),
+      "the listing is grouped by bot: {listing:?}"
+    );
+    assert!(
+      listing.iter().any(|line| line.contains("idle")),
+      "every step names the gap that precedes it: {listing:?}"
+    );
+
+    let (_, _, quiet) =
+      plan_from_dump(&path, &goal, &[], Some("1,2"), false).expect("plans without steps");
+    assert!(
+      quiet.is_empty(),
+      "the listing is opt-in and costs nothing when it is not asked for"
     );
   }
 
@@ -478,6 +570,7 @@ mod tests {
       &["have:iron-plate:1".to_string()],
       &[],
       Some("1"),
+      false,
     )
     .unwrap_err()
     .to_string();
@@ -489,9 +582,15 @@ mod tests {
     let dir = tempfile::tempdir().expect("a directory");
     let path = dir.path().join("nope.json");
     std::fs::write(&path, "{}").expect("written");
-    let err = plan_from_dump(&path, &["have:iron-plate:1".to_string()], &[], Some("1"))
-      .unwrap_err()
-      .to_string();
+    let err = plan_from_dump(
+      &path,
+      &["have:iron-plate:1".to_string()],
+      &[],
+      Some("1"),
+      false,
+    )
+    .unwrap_err()
+    .to_string();
     assert!(err.contains("is not a world dump"), "{err}");
   }
 
@@ -499,7 +598,7 @@ mod tests {
   fn no_goal_at_all_is_refused_rather_than_planned_as_nothing() {
     let dir = tempfile::tempdir().expect("a directory");
     let path = dumped_world(&dir);
-    let err = plan_from_dump(&path, &[], &[], Some("1"))
+    let err = plan_from_dump(&path, &[], &[], Some("1"), false)
       .unwrap_err()
       .to_string();
     assert!(err.contains("nothing to plan"), "{err}");
@@ -511,7 +610,7 @@ mod tests {
   fn a_playerless_dump_asks_for_a_roster() {
     let dir = tempfile::tempdir().expect("a directory");
     let path = dumped_world(&dir);
-    let err = plan_from_dump(&path, &["have:iron-plate:1".to_string()], &[], None)
+    let err = plan_from_dump(&path, &["have:iron-plate:1".to_string()], &[], None, false)
       .unwrap_err()
       .to_string();
     assert!(err.contains("--bots"), "{err}");

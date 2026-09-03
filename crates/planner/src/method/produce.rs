@@ -832,7 +832,7 @@ impl Method for BuildCell {
 /// role `crate::method::MAX_EXPANSION_DEPTH` plays for the driver's own
 /// recursion -- a guard against a cyclic (modded) recipe table, not a number
 /// this crate's own data ever reaches.
-const CRAFT_TICKS_MAX_DEPTH: u32 = 8;
+pub(crate) const CRAFT_TICKS_MAX_DEPTH: u32 = 8;
 
 /// Character-speed ticks to acquire `count` of `item` starting from nothing --
 /// no inventory, no furnace already standing, nothing another share already
@@ -859,7 +859,7 @@ const CRAFT_TICKS_MAX_DEPTH: u32 = 8;
 /// in vanilla reaches this) is priced at `Ticks::MAX / 4`, not `0`:
 /// unpriceable must never look free, or an item this function cannot cost
 /// would make building look cheap by omission.
-fn craft_ticks(state: &PlanState, item: &str, count: u32, depth: u32) -> Ticks {
+pub(crate) fn craft_ticks(state: &PlanState, item: &str, count: u32, depth: u32) -> Ticks {
     if count == 0 {
         return 0;
     }

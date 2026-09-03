@@ -52,16 +52,32 @@ use std::sync::Arc;
 /// fresh `PlanState` with no memory of the plan before it, and the stranded
 /// items this exists to recover are stranded by exactly that discontinuity.
 ///
-/// What it is: **the entities this planner builds and unloads itself**. Today
-/// that is one, `stone-furnace`, because `method::have::smelt_steps` is the
-/// only thing that places a container-like entity and takes items back out of
-/// it. A furnace's *result* slot is also the least ambiguous inventory in the
-/// game to help yourself from: nobody stores things there, so anything in it
-/// was smelted by whoever's plan put the ore in.
+/// What it is: **the entities this planner builds and unloads itself**. Two,
+/// and each is here for a stated reason:
 ///
-/// Add `iron-chest` here when the chest handover lands, and nothing else
+/// * `stone-furnace`, because `method::have::smelt_steps` places one and takes
+///   items back out of it. A furnace's *result* slot is also the least
+///   ambiguous inventory in the game to help yourself from: nobody stores
+///   things there, so anything in it was smelted by whoever's plan put the ore
+///   in.
+/// * `wooden-chest`, because `method::have::Stockpile` places one per resource
+///   patch and has the roster fill it. Without this line a replan is blind to
+///   every chest the previous plan built, which is precisely the discontinuity
+///   the paragraph above says this list exists to bridge -- the ore those
+///   items came from is gone from the ground, so a plan that cannot see them
+///   plans to mine it again.
+///
+/// **Not `iron-chest`**, which an earlier draft of this comment expected. The
+/// chest handover landed on wooden chests instead: two wood off one dead tree
+/// against eight iron plates, measured on the reference map at 372 planned
+/// ticks against 2,965. Add it the day something places one, and nothing else
 /// without saying why.
-pub const BUFFER_ENTITIES: [&str; 1] = ["stone-furnace"];
+///
+/// A wooden chest is more ambiguous than a furnace result slot -- a person
+/// could put something in one -- and that is accepted for the same reason the
+/// whitelist is narrow: these are chests *the bots built*, sited by
+/// `free_area_near` beside an ore patch, not chests found lying about.
+pub const BUFFER_ENTITIES: [&str; 2] = ["stone-furnace", "wooden-chest"];
 
 pub struct Planner {
     pub rcon: Option<Arc<FactorioRcon>>,
@@ -568,14 +584,20 @@ mod tests {
     /// Only [`BUFFER_ENTITIES`] are asked about.
     ///
     /// This is the whole of the "what counts as a buffer" decision, so it is
-    /// pinned rather than left to the constant's doc comment: a chest a person
-    /// placed is never asked about, so the planner can never withdraw from it.
+    /// pinned rather than left to the constant's doc comment: a container the
+    /// bots never place is never asked about, so the planner can never
+    /// withdraw from it.
+    ///
+    /// The example is an **iron** chest. It used to be a wooden one, until the
+    /// stockpile handover started placing wooden chests and they joined the
+    /// whitelist -- an example has to be something the roster genuinely never
+    /// builds, or the test passes for the wrong reason.
     #[tokio::test]
     async fn a_container_that_is_not_a_buffer_entity_is_never_asked_about() {
         let world = Arc::new(FactorioWorld::new());
         world
             .on_some_entity_created(crate::types::FactorioEntity {
-                name: "wooden-chest".into(),
+                name: "iron-chest".into(),
                 entity_type: "container".into(),
                 position: Position::new(5., 5.),
                 bounding_box: crate::factorio::util::add_to_rect(
@@ -594,7 +616,7 @@ mod tests {
         assert_eq!(
             planner.refresh_buffers().await.expect("nothing to ask"),
             0,
-            "a wooden chest is not a buffer, so there is nothing to ask about"
+            "an iron chest is not a buffer, so there is nothing to ask about"
         );
 
         // The discriminating half: with a furnace present the same world

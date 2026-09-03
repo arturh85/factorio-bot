@@ -7,6 +7,14 @@ could ship dead is refused. `docs/superpowers/specs/2026-09-03-starter-factory-d
 
 > **RUN STATUS: the cell was never built. No witness. Stage 2 is NOT done.**
 >
+> **Two runs, and neither reached the cell.** Run 2
+> (`run-1788399150-53956`, §4.1) halted one rung *earlier* than run 1, on the
+> same wood refusal, with the power plant spending the poles. The blocker was
+> never the layout; it was that this planner could not obtain wood and could
+> not hand an item between bots. The first half of that landed on `master`
+> while this was being written (`b0e3e12e`, `Mine` fells a tree); the second
+> half has not.
+>
 > Live run `run-1788396958-07935`, 2026-09-03 00:54–01:20 UTC, four graphical
 > clients, video recorded. Rung 1 `researched("automation")` **SATISFIED** — the
 > ladder reproducing a fourth time. Rung 2 then halted at tick 92,446:
@@ -233,6 +241,44 @@ A third thing the run showed, also outside these files: **rung 1 built two
 power plants.** `Researched` builds one inline whenever `lab_site` cannot show
 60 kW, and the replan after a failed batch asked again. That is what turned "one
 spare pole" into "none", and it is a separate finding.
+
+### 4.1 Run 2, with the fix in: the same refusal, one rung earlier
+
+`run-1788399150-53956`, same script, same four bots, 92,235 ticks. It did **not**
+reach the cell: it halted on **rung 1**, `researched("automation")`, with the
+identical message.
+
+```
+milestone 1: stuck after 3 iteration(s), best 180 steps,
+  refused: no method can satisfy goal: have 1 wood (a share sized for bot 1)
+```
+
+Its record shows the mechanism without the cell anywhere near it: three
+dispatched `craft 1 small-electric-pole` and **five** `place
+small-electric-pole` across the replans, at `[-44.5, 10.5]`, `[-45.5, 10.5]` and
+`[-44.5, -2.5]` — the power plant re-sited three times, each siting spending
+poles. Final inventories: bot 1 empty, **bots 2, 3 and 4 each still holding one
+wood**.
+
+So the run says three things plainly, and only one of them is about this cell:
+
+1. **The cell's pole was never the whole problem.** `power.rs` spends poles on
+   every re-site and hits the same wall one rung earlier. §4's change is still
+   right — a cell should not spend a wood to duplicate supply three tiles away —
+   but it was never going to be sufficient on its own.
+2. **The blocker is the handover gap**, exactly as §4 said, and it is worth more
+   than the pole fix: four wood in a roster and a plan that cannot reach three
+   of them.
+3. **Rung 1 is not as reproducible as run 1 made it look.** It closed in run 1
+   and failed in run 2 on a different map, three transient placement refusals in
+   a row (`a character is standing in the footprint`) driving the replans that
+   spent the poles.
+
+**Wood stopped being a cap while this was being written.** Another agent landed
+`b0e3e12e feat(planner): wood comes off a tree, so the eight-pole cap is gone`
+on `master` — `Mine` can now fell a tree, which is the fix the run-status block
+above pointed at. That removes the refusal both runs died on; it does not by
+itself say the cell works, and this note does not claim it does.
 
 ## 5. What the witness watches, and whether it needed generalising
 

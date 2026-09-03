@@ -777,12 +777,13 @@ fn expand_goal_body(
     //
     // Expansion simulates every chain's effects into the *same* notional
     // inventory — `chain_actor`, one bot — while the scheduler is free to put
-    // two sibling chains on two different bots. So the moment a chain closes,
-    // what it produced is stock some *other* runner may be carrying, and a
-    // sibling that sizes itself against it plans work it cannot do: research
-    // `steam-power` (whose trigger is "craft 50 iron plates"), then craft a
-    // lab, and the lab chain sees fifty plates sitting there, smelts none of
-    // its own, and the schedule then hands the two chains to two bots.
+    // an *unowned* chain on any bot it likes. So the moment such a chain
+    // closes, what it produced is stock some other runner may be carrying, and
+    // a sibling that sizes itself against it plans work it cannot do.
+    //
+    // Which goals are told that, and which are not, is `owner`'s question and
+    // is answered in `reserve_chain_produce` — it is the whole of this fix, so
+    // read it there rather than assuming "hidden from everyone".
     //
     // Reserved, not spent, for the same reason as every other entry in this
     // ledger: `inventory_count` and `lose` still see the items, so the chain's
@@ -799,7 +800,7 @@ fn expand_goal_body(
     // Inert on its own — a plan with no chains has nothing to reserve — so
     // this is the other half of chaining a share rather than a change in its
     // own right.
-    reserve_chain_produce(ctx, produce_before);
+    reserve_chain_produce(ctx, produce_before, owner);
     result
 }
 
@@ -816,15 +817,67 @@ fn expand_goal_body(
 /// the roster is one bot, which is exempt — see the caller), and the whole
 /// thing is then a no-op. Reserved against `ctx.chain_actor`, so it must be
 /// called *before* a caller restores that field.
-fn reserve_chain_produce(ctx: &mut ExpansionCtx, produce_before: Option<BTreeMap<ItemId, u32>>) {
+///
+/// # Which holder the entry is filed under, and why it is not always the bot
+///
+/// `owner` is the chain's owner as the caller recorded it in the network:
+/// `Some` for a chain a `Holder::Bot`, a `Holder::Share` or a [`Step::Owned`]
+/// named a bot for, `None` for one a `converges`ing method opened, where
+/// nothing named anybody and the scheduler will pick whoever is cheapest.
+/// That distinction decides everything here.
+///
+/// **An unowned chain is hidden from everyone** — `Holder::Bot(chain_actor)`,
+/// the original entry. Expansion simulated its effects into `chain_actor`'s
+/// notional inventory, but nothing binds the chain to that bot, so at run time
+/// the items are wherever the scheduler put the chain. No later goal, however
+/// it is stated, may size itself against them.
+///
+/// **An owned chain is hidden only from `Holder::Anyone`.** The items really
+/// are in the owner's hands: an owner is a hard, single-candidate constraint
+/// in `schedule`, so the chain runs on that bot and nowhere else. A later goal
+/// stated for *that same bot* — `Holder::Bot(b)` or `Holder::Share(b)`, which
+/// opens a chain owned by `b` in its turn — is therefore asking about the one
+/// inventory the items are provably in, and telling it otherwise makes it
+/// re-mine and re-smelt stock its own runner is already carrying. A goal
+/// stated for a *different* bot reads that bot's inventory and never saw these
+/// items anyway; a `Holder::Anyone` goal reads the roster total and could be
+/// run by anybody, so for it the stock stays spoken for — which is exactly
+/// what an `Anyone` entry in this ledger means (see [`PlanState::available`]:
+/// an `Anyone` reservation lowers the roster total and no individual bot's
+/// figure).
+///
+/// The defect the ledger was added for is untouched by that narrowing, because
+/// its premise is gone. `9a9cdd46` wrote it against "research `steam-power`
+/// (craft 50 iron plates), then craft a lab, and the lab chain sees fifty
+/// plates sitting there, smelts none of its own, **and the schedule then hands
+/// the two chains to two bots**". The last clause stopped being possible on
+/// 2026-09-02, when a `Holder::Share` began to *own* the chain it opens (see
+/// the owner-binding comment in [`expand_goal_body`]): both chains state
+/// `Holder::Share(chain_actor)`, so both are owned by that one bot and the
+/// scheduler has no choice left to get wrong.
+///
+/// What the narrowing costs is measured, and it is the reason for it. That
+/// exact shape — `world_with_trigger_prerequisite`, four bots — planned 157
+/// steps and mined 91 iron-ore against the 113 steps and 41 iron-ore one bot
+/// planned for the same goal, because every chain after the trigger's re-mined
+/// what the trigger's had already made. See
+/// `four_bots_do_not_re_mine_what_an_earlier_chain_of_theirs_produced`.
+fn reserve_chain_produce(
+    ctx: &mut ExpansionCtx,
+    produce_before: Option<BTreeMap<ItemId, u32>>,
+    owner: Option<BotId>,
+) {
     let Some(before) = produce_before else {
         return;
+    };
+    let whose = match owner {
+        Some(_) => Holder::Anyone,
+        None => Holder::Bot(ctx.chain_actor),
     };
     for (item, count) in ctx.state.item_totals() {
         let gained = count.saturating_sub(before.get(&item).copied().unwrap_or(0));
         if gained > 0 {
-            ctx.state
-                .reserve(&Holder::Bot(ctx.chain_actor), &item, gained);
+            ctx.state.reserve(&whose, &item, gained);
         }
     }
 }
@@ -951,7 +1004,12 @@ fn run_steps(
                 for (whose, item, count) in &inner_promised {
                     ctx.state.release(whose, item, *count);
                 }
-                reserve_chain_produce(ctx, produce_before);
+                // Always owned — `net.set_chain_owner(chain, bot)` above — so
+                // the entry is filed under `Holder::Anyone`: the supplier's
+                // output is provably in *this* bot's hands, hidden from any
+                // goal that could run anywhere and visible to one stated for
+                // this bot. See `reserve_chain_produce`.
+                reserve_chain_produce(ctx, produce_before, Some(bot));
 
                 ctx.chain_actor = previous_actor;
                 ctx.chain = previous_chain;
@@ -1553,6 +1611,98 @@ mod tests {
         ));
     }
 
+    /// **Rung 1, one bot against four.** Four bots must not mine twice what
+    /// one bot mines for the same goal.
+    ///
+    /// `researched("automation")` over `world_with_trigger_prerequisite` --
+    /// `steam-power` ("craft 50 iron plates") sitting under `automation`, the
+    /// vanilla 2.0 shape -- with the freeplay starting inventory on every bot
+    /// and no power standing, so the plan builds its own plant. That is the
+    /// milestone `scripts/factory_stage2.lua` opens with, reduced to a
+    /// fixture.
+    ///
+    /// **Why this shape and not a simpler one.** The duplication needs a chain
+    /// that *closes with surplus in it* and a later chain of the same owner
+    /// that could have spent the surplus. A plain pack bill has neither: every
+    /// chain in it consumes what it makes. The trigger is what supplies the
+    /// surplus -- fifty iron plates crafted to fire `steam-power`, still in
+    /// hand when the lab bill starts -- which is why `world_with_technologies`
+    /// reproduces nothing here however many bots it is given, and why this
+    /// fixture is the one the regression is pinned against.
+    ///
+    /// Before the fix this fixture planned, at four bots, 157 steps and 91
+    /// iron-ore, 70 stone and 35 coal, against one bot's 113 steps, 41
+    /// iron-ore, 50 stone and 29 coal -- 2.2x the iron for the same ten
+    /// science packs, because every chain after the trigger's re-made what the
+    /// trigger's had already made. `workspace/runs/run-1788449752-46541`'s
+    /// first rung-1 plan is the same defect at a real map's scale: 244 steps
+    /// and 179 iron-ore, with the whole lab bill emitted twice (two
+    /// `craft 1 lab`, twenty electronic circuits, one lab placed). See
+    /// `reserve_chain_produce`.
+    #[test]
+    fn four_bots_do_not_re_mine_what_an_earlier_chain_of_theirs_produced() {
+        /// Every resource the plan commits to digging, by item.
+        fn mined(net: &ActionNetwork) -> BTreeMap<ItemId, u32> {
+            let mut out: BTreeMap<ItemId, u32> = BTreeMap::new();
+            for action in net.actions() {
+                if let ActionKind::Mine { item, count, .. } = &action.kind {
+                    *out.entry(item.clone()).or_default() += count;
+                }
+            }
+            out
+        }
+
+        fn plan(bots: &[BotId]) -> ActionNetwork {
+            let mut state = PlanState::from_world(
+                Arc::new(crate::test_world::world_with_trigger_prerequisite()),
+                bots,
+            );
+            for bot in bots {
+                // `initiate_missing_players_with_default_inventory`, plus the
+                // eight iron plates freeplay really starts a player with.
+                state.gain(*bot, "wood", 1);
+                state.gain(*bot, "stone-furnace", 1);
+                state.gain(*bot, "burner-mining-drill", 1);
+                state.gain(*bot, "iron-plate", 8);
+            }
+            expand(
+                &[Goal::Researched("automation".into())],
+                &state,
+                &have::registry_for(bots),
+                BotId(1),
+            )
+            .expect("rung 1 expands")
+        }
+
+        let solo = plan(&[BotId(1)]);
+        let fleet = plan(&[BotId(1), BotId(2), BotId(3), BotId(4)]);
+
+        // The single-bot path is the efficient one and must stay exactly where
+        // it is: a "fix" that made four bots match one by making one worse
+        // would pass the comparison below and be a regression.
+        assert_eq!(
+            mined(&solo),
+            BTreeMap::from([
+                ("coal".to_string(), 29),
+                ("copper-ore".to_string(), 29),
+                ("iron-ore".to_string(), 41),
+                ("stone".to_string(), 50),
+            ]),
+            "one bot's rung-1 bill"
+        );
+        assert_eq!(solo.len(), 113, "one bot's rung-1 step count");
+
+        // The defect, stated as the property it breaks. Four bots plan the
+        // same *bill* as one -- they may split it differently and they may
+        // schedule it differently, but there is no more ore in the ground to
+        // dig for the same ten science packs.
+        assert_eq!(
+            mined(&fleet),
+            mined(&solo),
+            "four bots must dig exactly what one bot digs for the same goal"
+        );
+    }
+
     #[test]
     fn expanding_against_a_bot_the_state_does_not_know_is_an_error() {
         // `registry_for(bots)`, `expand(.., chain_actor)` and `schedule(.., bots)`
@@ -2086,31 +2236,150 @@ mod tests {
         );
     }
 
-    /// A chain's produce is not stock a *sibling* chain may count on.
+    /// How many cogs a plan for `goals` actually makes.
+    fn cogs_made(net: &ActionNetwork) -> u32 {
+        net.actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Craft { item, count } if item == "cog" => Some(*count),
+                _ => None,
+            })
+            .sum()
+    }
+
+    /// A chain's produce **is** stock a later chain of the *same owner* may
+    /// count on.
     ///
-    /// Expansion simulates every chain into the same notional inventory while
-    /// the scheduler may put two chains on two bots, so a sibling that sizes
-    /// itself against what another chain made plans work it cannot do. This is
-    /// the ledger half of chaining a share; `a_share_welds_…` is the other.
+    /// Two shares of five cogs each, deliberately sized against the same bot.
+    /// That is what makes this bite: the second share asks whether that bot
+    /// can already count five towards it, and the five the first chain made
+    /// are sitting right there in the simulated inventory. Two different bots
+    /// would have proved nothing — the second would have looked at an empty
+    /// inventory whatever the ledger said.
+    ///
+    /// Until 2026-09-03 this asserted the opposite, on the grounds that "the
+    /// first chain's cogs may end up in hands the second chain never reaches".
+    /// That was true when it was written and stopped being true on 2026-09-02,
+    /// when a `Holder::Share` began to own the chain it opens: both goals here
+    /// state `Holder::Share(BotId(1))`, so both chains are owned by bot 1, and
+    /// an owner is a single-candidate constraint in `schedule` with no
+    /// fallback tier. There are no two hands for the cogs to be split between.
+    ///
+    /// Believing otherwise is expensive rather than merely pedantic — it is
+    /// what made a four-bot rung-1 plan mine 91 iron-ore where one bot mined
+    /// 41, every chain after the first re-making what the first had made.
     #[test]
-    fn what_one_chain_made_is_not_offered_to_the_next() {
+    fn what_one_owned_chain_made_is_offered_to_a_later_chain_of_the_same_owner() {
         let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1), BotId(2)]);
         let reg = MethodRegistry::new()
             .with(Box::new(Enough))
             .with(Box::new(Produce));
 
-        // Two shares of five cogs each, deliberately sized against the *same*
-        // bot. That is what makes this bite: the second share asks whether
-        // that bot can already count five towards it, and the five the first
-        // chain made are sitting right there in the simulated inventory. Two
-        // different bots would have proved nothing — the second would have
-        // looked at an empty inventory whatever the ledger said.
+        let share = |count| Goal::Have {
+            item: "cog".into(),
+            count,
+            whose: Holder::Share(BotId(1)),
+        };
+        let net = expand(&[share(5), share(5)], &state, &reg, BotId(1)).expect("expands");
+        assert_eq!(
+            cogs_made(&net),
+            5,
+            "the second share is satisfied by the first chain's five, which its \
+             own runner is provably carrying"
+        );
+    }
+
+    /// …and it is still **not** stock a goal *any* bot could run may count on.
+    ///
+    /// The half of the ledger that the narrowing above leaves standing, and
+    /// the reason the entry is filed under `Holder::Anyone` rather than
+    /// dropped. The same first share, followed by a `Holder::Anyone` goal:
+    /// nothing says which bot will run that one, so the five cogs sitting in
+    /// bot 1's simulated inventory are not five it can count on, and it makes
+    /// its own.
+    #[test]
+    fn what_one_chain_made_is_not_offered_to_a_goal_any_bot_could_run() {
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1), BotId(2)]);
+        let reg = MethodRegistry::new()
+            .with(Box::new(Enough))
+            .with(Box::new(Produce));
+
         let net = expand(
             &[
                 Goal::Have {
                     item: "cog".into(),
                     count: 5,
                     whose: Holder::Share(BotId(1)),
+                },
+                Goal::Have {
+                    item: "cog".into(),
+                    count: 5,
+                    whose: Holder::Anyone,
+                },
+            ],
+            &state,
+            &reg,
+            BotId(1),
+        )
+        .expect("expands");
+        assert_eq!(
+            cogs_made(&net),
+            10,
+            "an unaddressed goal may be run by a bot that never sees the first \
+             chain's cogs, so it makes its own five"
+        );
+    }
+
+    /// An **unowned** chain's produce is hidden from everyone, the same bot
+    /// included.
+    ///
+    /// The other arm of `reserve_chain_produce`, and the one the narrowing
+    /// must not touch. A chain a `converges`ing method opens has no owner —
+    /// nothing named a bot for it, only the shape of the decomposition — so
+    /// the scheduler will put it on whoever is cheapest and expansion's
+    /// `chain_actor` is a simulation convenience, not a commitment. A later
+    /// goal stated for that very bot therefore may **not** count on what it
+    /// made.
+    ///
+    /// `Widget` is written for exactly this: it converges, so it opens a
+    /// chain, and it takes no holder, so that chain gets no owner.
+    #[test]
+    fn what_an_unowned_chain_made_is_offered_to_nobody() {
+        struct Widget;
+        impl Method for Widget {
+            fn name(&self) -> &'static str {
+                "widget"
+            }
+            fn applicable(&self, goal: &Goal, _s: &PlanState) -> bool {
+                matches!(goal, Goal::Have { item, .. } if item == "widget")
+            }
+            fn converges(&self, _goal: &Goal, _state: &PlanState) -> bool {
+                true
+            }
+            fn expand(
+                &self,
+                _goal: &Goal,
+                _ctx: &mut ExpansionCtx,
+            ) -> Result<Vec<Step>, PlannerError> {
+                Ok(vec![Step::Subgoal(Goal::Have {
+                    item: "cog".into(),
+                    count: 5,
+                    whose: Holder::Anyone,
+                })])
+            }
+        }
+
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1), BotId(2)]);
+        let reg = MethodRegistry::new()
+            .with(Box::new(Enough))
+            .with(Box::new(Widget))
+            .with(Box::new(Produce));
+
+        let net = expand(
+            &[
+                Goal::Have {
+                    item: "widget".into(),
+                    count: 1,
+                    whose: Holder::Anyone,
                 },
                 Goal::Have {
                     item: "cog".into(),
@@ -2123,17 +2392,11 @@ mod tests {
             BotId(1),
         )
         .expect("expands");
-        let made: u32 = net
-            .actions()
-            .filter_map(|a| match &a.kind {
-                ActionKind::Craft { item, count } if item == "cog" => Some(*count),
-                _ => None,
-            })
-            .sum();
         assert_eq!(
-            made, 10,
-            "each share makes its own five: the first chain's cogs may end up in \
-             hands the second chain never reaches"
+            cogs_made(&net),
+            10,
+            "the widget's chain names no runner, so its cogs are not bot 1's to \
+             count even though bot 1 is who they were simulated onto"
         );
     }
 
@@ -2478,9 +2741,22 @@ mod tests {
         assert_eq!(
             ctx.state.available(&Holder::Anyone, "iron-ore"),
             0,
-            "and it is spoken for: a later goal must not plan against it"
+            "and it is spoken for: a goal any bot could run must not plan \
+             against it"
         );
-        assert_eq!(ctx.state.available(&Holder::Bot(BotId(2)), "iron-ore"), 0);
+        assert_eq!(
+            ctx.state.available(&Holder::Bot(BotId(1)), "iron-ore"),
+            0,
+            "the taker is a different bot and never saw the ore at all"
+        );
+        // The one figure that is deliberately *not* zero. A `Step::Owned`
+        // always owns its chain, so the ore is provably in bot 2's hands and
+        // stays there: a later goal stated for bot 2 — which opens a chain
+        // owned by bot 2 in its turn, and so runs on bot 2 — is asking about
+        // the one inventory the ore is in. Hiding it there is what made a
+        // four-bot plan re-mine what it had already mined; see
+        // `reserve_chain_produce`.
+        assert_eq!(ctx.state.available(&Holder::Bot(BotId(2)), "iron-ore"), 5);
     }
 
     /// The inertness wedge, stated as a test rather than as an argument.

@@ -3,7 +3,8 @@
 
 Reads one archived run directory (``workspace/runs/run-<unix>-<pid>/``) and
 reports the time accounting: milestone spans, action cost by verb, per-bot
-utilisation, walk failures, what was built, and which bots stopped moving.
+utilisation, the busiest bot's idle gaps and what each was waiting for, walk
+failures, what was built, and which bots stopped moving.
 
     python3 tools/run_analysis.py workspace/runs/run-1788449752-46541
     python3 tools/run_analysis.py --all --summary
@@ -73,6 +74,10 @@ KNOWN_FILES = ("events.jsonl", "manifest.json", "splits.json", "samples.jsonl", 
 # reporting. 3000 ticks is 50 seconds of game time -- far longer than any walk
 # or mine, and short enough to catch a bot that froze near the end.
 DEFAULT_FREEZE_TICKS = 3000
+
+# Individual idle gaps kept per window. Enough for the long waits; the rest is
+# dispatch overhead and is rolled into a stated tail.
+GAP_ROWS = 20
 
 
 # --------------------------------------------------------------------------
@@ -575,6 +580,13 @@ def score_window(w: Window, events: list[dict], joined: list[dict], map_rows: li
             "busy_pct": (100.0 * busy / span) if span else None,
         }
 
+    # The busiest bot is the one whose timeline the window's span is made of, so
+    # it is the one whose *gaps* are the window's lost time. Chosen, not
+    # hardcoded to bot 1: which bot that is, is a finding.
+    critical = max(
+        per_bot.items(), key=lambda kv: kv[1]["busy_ticks"], default=(None, None)
+    )[0]
+
     placements = collections.Counter()
     for m in map_rows:
         if m.get("kind") != "placed" or not w.contains(m.get("tick", 0)):
@@ -617,6 +629,90 @@ def score_window(w: Window, events: list[dict], joined: list[dict], map_rows: li
             if c >= 2
         ],
         "placements": dict(placements.most_common()),
+        "idle_gaps": idle_gaps(w, events, joined, critical),
+    }
+
+
+def idle_gaps(w: Window, events: list[dict], joined: list[dict], bot: int | None) -> dict | None:
+    """Partition one bot's window into merged busy intervals and the gaps between.
+
+    Busy is every dispatch->settle interval for that bot, actions and walks
+    alike, overlaps merged; a gap is what is left. The two sum to the span
+    exactly, which is the point: it turns "39% of the milestone is unaccounted
+    for" into a list of waits with a name on each.
+
+    A gap is attributed to the action dispatched at the tick it *ends* -- what
+    the bot was waiting for, not what it had just finished.
+
+    ZERO-LENGTH INTERVALS ARE KEPT. ``place``/``insert``/``take``/``fuel``
+    settle in the tick they dispatch, so as intervals they are points, and
+    dropping a point for having no width runs the gap past the very action the
+    bot was waiting for and onto whatever it did next. In
+    ``run-1788459085-32452`` that reported "waited 12,246 ticks for
+    ``craft 3 pipe``" in place of "waited 12,244 for
+    ``take 50 iron-plate from the cell``" -- the right magnitude blamed on the
+    wrong step.
+    """
+    if bot is None or not w.span:
+        return None
+    spans = [(j["start"], j["tick"]) for j in joined if j.get("bot") == bot and "start" in j]
+    spans += [
+        (e["tick"] - (e.get("elapsed_ticks") or 0), e["tick"])
+        for e in events
+        if e.get("kind") == "walk_settled" and e.get("bot") == bot
+    ]
+    clipped = sorted(
+        (max(a, w.lo), min(b, w.hi)) for a, b in spans if max(a, w.lo) <= min(b, w.hi)
+    )
+    merged: list[list[int]] = []
+    for a, b in clipped:
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+
+    # What a dispatch at tick T was; walks are the fallback because a walk's
+    # busy interval starts at settle-minus-elapsed, not at its dispatch tick.
+    labels = {
+        e["tick"]: (e.get("action") or "?")
+        for e in events
+        if e.get("kind") == "action_dispatched" and e.get("bot") == bot
+    }
+    for e in events:
+        if e.get("kind") == "walk_dispatched" and e.get("bot") == bot:
+            to = e.get("to") or {}
+            labels.setdefault(e["tick"], f"walk to [{to.get('x')}, {to.get('y')}]")
+
+    gaps = []
+    edges = [(w.lo, w.lo)] + merged + [(w.hi, w.hi)]
+    for (_, end), (start, _) in zip(edges, edges[1:]):
+        if start > end:
+            gaps.append(
+                {
+                    "ticks": start - end,
+                    "from_tick": end,
+                    "to_tick": start,
+                    "waiting_for": labels.get(start),
+                }
+            )
+    gaps.sort(key=lambda g: (-g["ticks"], g["from_tick"]))
+    busy = sum(b - a for a, b in merged)
+    by_verb = collections.Counter()
+    for g in gaps:
+        by_verb[verb_of(g["waiting_for"])] += g["ticks"]
+    return {
+        "bot": bot,
+        "busy_ticks": busy,
+        "idle_ticks": w.span - busy,
+        "idle_pct": 100.0 * (w.span - busy) / w.span,
+        "gaps": len(gaps),
+        "idle_ticks_by_waited_verb": dict(by_verb.most_common()),
+        # Truncated, but the tail is stated rather than dropped: the shape of
+        # this list is a handful of long waits and a long tail of ~10-tick
+        # dispatch overhead, and conflating the two is the whole error.
+        "top_gaps": gaps[:GAP_ROWS],
+        "tail_gaps": max(0, len(gaps) - GAP_ROWS),
+        "tail_ticks": sum(g["ticks"] for g in gaps[GAP_ROWS:]),
     }
 
 
@@ -884,6 +980,21 @@ def report(a: dict, out=sys.stdout, top: int = 12) -> None:
             p("      repeated (bot, destination) failures -- the same site re-selected:")
             for r in w["repeated_walk_failures"]:
                 p(f"        bot {r['bot']} -> [{r['to'][0]}, {r['to'][1]}]  x{r['count']}")
+
+        g = w.get("idle_gaps")
+        if g:
+            p(f"\n    idle gaps of bot {g['bot']} (the busiest bot -- its timeline IS this window):")
+            p(f"      busy {g['busy_ticks']} + idle {g['idle_ticks']} = {span} ticks; "
+              f"idle is {g['idle_pct']:.1f}% of span across {g['gaps']} gap(s)")
+            p(f"      {'ticks':>7} {'window':>19}  waiting for")
+            for e in g["top_gaps"]:
+                at = "{}->{}".format(e["from_tick"], e["to_tick"])
+                what = e["waiting_for"] or "(nothing -- the window ended here)"
+                p(f"      {e['ticks']:>7} {at:>19}  {what[:52]}")
+            if g["tail_gaps"]:
+                tail = f"({g['tail_gaps']} shorter gaps)"
+                p(f"      {g['tail_ticks']:>7} {tail:>19}  dispatch overhead and other")
+            p(f"      idle by the verb waited for: {g['idle_ticks_by_waited_verb']}")
 
         if w["placements"]:
             p(f"\n    entities placed: {w['placements']}")

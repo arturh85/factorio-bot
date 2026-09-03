@@ -59,8 +59,20 @@ Two structural facts establish *why* nothing fills the idle:
    demand-driven. There is no way to say "and if you have nothing to do,
    do this."
 
-Every large idle gap sits immediately before a `take … from the furnace`.
-The idle is smelting lag with nothing scheduled against it.
+**The idle is not all smelting lag — a fifth of the run is walking.**
+`walk_settled` accounts for **15,969 ticks (4.4 min) over 50 walks**, of
+which bot 1 owns **14,330 ticks (3.98 min) over 42 walks**. Walking is not
+an action with its own `elapsed_ticks` in the action stream, so it sits
+inside the idle figure above. Bot 1's 19 minutes resolve as:
+
+| | time | share |
+|---|---|---|
+| executing actions | 6.5 min | 34% |
+| **walking** | **4.0 min** | **21%** |
+| waiting (neither acting nor walking) | 8.5 min | 45% |
+
+The remaining 8.5 minutes is the smelting lag: every large gap that is not
+a walk sits immediately before a `take … from the furnace`.
 
 ---
 
@@ -109,6 +121,45 @@ workstream rather than discovering it later.
 **Payoff:** planner iteration drops from ~20 minutes to seconds, and every
 workstream below can be evaluated before a run is spent on it. It also
 makes the paused experiments cheap to resume.
+
+### 0b. A reasonable starting seed — resources close to spawn
+
+**Walking is 21% of bot 1's run.** Against a 6:12 target, 4 minutes of
+walking would consume two thirds of the entire budget. No amount of
+planner improvement compensates for a spawn whose ore is far away, so a
+comparison against WR times is meaningless until the map is a fair one.
+
+**Scope: deliberately modest.** Not a search for a global optimum — a
+reasonable seed where everything rung 1 needs is close to spawn. Required
+within a short radius: **iron ore, copper ore, coal, stone**, and **water**
+(the run places a boiler and steam engine to power the lab). Trees nearby
+are a bonus, for the wood the owner wants gathered during idle time.
+
+**Workstream 0 makes this cheap, and removes the blocker that gated the
+existing tool.** `roll-seed` exists as a CLI surface but is deliberately
+disabled (`app/src-tauri/src/cli/roll_seed.rs`): its old fitness function
+(`-shortest_path()`, minus 10,000 per resource type not found within 3,000
+tiles) died with the task-graph planner, and its doc says resurrection
+needs "a fitness function for the current planner — `Schedule::makespan` is
+the plausible candidate — and the cross-boundary plumbing to read a
+`Schedule` back out of the handle-based Lua runtime."
+
+**That plumbing is exactly what a world dump removes.** Generate a map →
+dump `FactorioWorld` → `expand()` + `schedule()` → read `makespan`. A
+direct function call on a deserialized world; no Lua runtime involved.
+
+Two tiers, and the cheap one is probably enough:
+- **Distance scoring** — nearest patch of each required resource from
+  spawn, read straight off `EntityGraph::resources` on a dumped world. No
+  planner needed at all.
+- **Makespan scoring** — free once workstream 0 lands, and strictly better,
+  since it prices the actual plan rather than a proxy.
+
+**Record the chosen seed and freeze it.** Note that `--seed` was silently
+ignored until `61ec7364`, so every earlier run used an uncontrolled map;
+`20260903` is documented as the benchmark seed but has never been run and
+has not been scored by any of the above. Scoring it is part of this
+workstream — it may well not be a good map.
 
 ### A. Fill idle time — worth up to 12.5 min
 
@@ -262,9 +313,11 @@ Two constraints established:
 
 ## Sequencing
 
-**0 before everything.** Offline planning is what makes the rest
+**0 before everything, then 0b.** Offline planning is what makes the rest
 cheap to evaluate; without it each workstream below costs a 20-minute run
-to judge.
+to judge. Seed selection (0b) comes straight after, because every timing
+below is measured against a map, and comparisons across different maps are
+worthless — that error was already made once this session.
 
 **B before A before E.** The chest (B) is what makes work movable; filler
 work (A) is what consumes the freed capacity; drills (E) only pay once a
@@ -273,6 +326,13 @@ a re-measurement that only becomes meaningful after A and B. F should be
 diagnosed early — it is 17% of the run and might be a defect, in which case
 it changes the arithmetic above.
 
-**No live runs until B, A and C are in.** The next run should be the first
-honest before/after, on seed `20260903`, with provenance recorded and
-`--compare` against this plan's reference run.
+**No live runs until 0, 0b, B, A and C are in.** The next run should be the
+first honest before/after: on the seed chosen and scored in 0b, with
+provenance recorded and `--compare` guarding the comparison.
+
+Note that this plan's reference run (`run-1788465258-49050`) was itself made
+on an **uncontrolled map**, since `--seed` did nothing before `61ec7364`.
+Its *proportions* — 34% acting, 21% walking, 45% waiting — are what the plan
+rests on, and those are structural. Its absolute 21.4 minutes is not a
+baseline any later run can be compared against, and `--compare` will refuse
+to try.

@@ -2770,6 +2770,82 @@ mod tests {
         assert_eq!(patches.len(), 2);
     }
 
+    /// Builds a graph holding one 4x4 iron patch at `at`, plus whatever else.
+    fn graph_with_iron_at(at: Position, extra: Option<(Position, &str)>) -> EntityGraph {
+        let mut entities: Vec<FactorioEntity> = vec![];
+        spawn_ore(
+            &mut entities,
+            add_to_rect(&Rect::from_wh(4., 4.), &at),
+            &EntityName::IronOre.to_string(),
+        );
+        if let Some((pos, name)) = extra {
+            spawn_ore(
+                &mut entities,
+                add_to_rect(&Rect::from_wh(4., 4.), &pos),
+                name,
+            );
+        }
+        entity_graph_from(entities).unwrap()
+    }
+
+    #[test]
+    fn the_fingerprint_of_the_same_map_is_the_same_every_time() {
+        // The property the whole comparison guard rests on. `resources` is a
+        // `DashMap`, whose iteration order is not stable, so this would fail if
+        // the digest were taken over it directly rather than over a sorted
+        // copy.
+        let a = graph_with_iron_at(Position::new(0., 0.), None)
+            .resource_fingerprint()
+            .expect("charted ore fingerprints");
+        for _ in 0..8 {
+            let b = graph_with_iron_at(Position::new(0., 0.), None)
+                .resource_fingerprint()
+                .expect("charted ore fingerprints");
+            assert_eq!(a, b, "the same map must fingerprint identically");
+        }
+    }
+
+    #[test]
+    fn a_map_with_a_patch_the_other_lacks_fingerprints_differently() {
+        // This is the difference that actually mattered: the retracted "four
+        // bots do double the work of one" compared two maps that differed by a
+        // resource patch about 100 tiles east.
+        let near = graph_with_iron_at(Position::new(0., 0.), None)
+            .resource_fingerprint()
+            .unwrap();
+        let with_extra = graph_with_iron_at(
+            Position::new(0., 0.),
+            Some((Position::new(100., 0.), &EntityName::CopperOre.to_string())),
+        )
+        .resource_fingerprint()
+        .unwrap();
+        assert_ne!(near.digest, with_extra.digest);
+        assert_eq!(near.tiles.get("copper-ore"), None);
+        assert_eq!(with_extra.tiles.get("copper-ore"), Some(&25));
+    }
+
+    #[test]
+    fn moving_a_patch_changes_the_digest_even_with_the_same_tile_count() {
+        // Counts alone are not an identity: two maps can hold the same amount
+        // of ore in different places, and that is a different map.
+        let here = graph_with_iron_at(Position::new(0., 0.), None)
+            .resource_fingerprint()
+            .unwrap();
+        let there = graph_with_iron_at(Position::new(100., 100.), None)
+            .resource_fingerprint()
+            .unwrap();
+        assert_eq!(here.tiles, there.tiles, "same counts");
+        assert_ne!(here.digest, there.digest, "different places");
+    }
+
+    #[test]
+    fn a_world_with_nothing_charted_has_no_fingerprint_rather_than_an_empty_one() {
+        // "Not read yet" is not "a map with no ore", and a digest over an empty
+        // table would make every unread world look like the same map.
+        let graph = entity_graph_from(vec![]).unwrap();
+        assert_eq!(graph.resource_fingerprint(), None);
+    }
+
     // helper: sort each patch's elements (as Pos, for a total order) and sort the
     // patches themselves so repeated calls can be compared for equality even
     // though patch id assignment order is not guaranteed to be stable.

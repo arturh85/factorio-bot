@@ -26,7 +26,8 @@ use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_executor::{Actuator, RconActuator};
 use factorio_bot_planner::{
-    ActionNetwork, BotId, Goal, PlanState, PlannerError, expand, holds, registry_for,
+    ActionNetwork, BotId, Goal, PlanState, PlannerError, expand, holds, pick_chain_actor,
+    registry_for,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -887,12 +888,20 @@ fn install_goal_holds(
 /// names, so the network it produces only makes sense scheduled on that same
 /// roster. `goal.plan` passes one roster to this and to `schedule`, which is
 /// what makes the old expand-here-assign-there mismatch unrepresentable.
+///
+/// The `chain_actor` is the roster's first bot **that can walk somewhere**, not
+/// simply its first bot. A goal naming no holder — `Researched`, `BuildCell`,
+/// `Producing` — is both sized against the chain actor's inventory and, through
+/// the `Holder::Share(chain_actor)` bills the methods state, run by it; pinning
+/// that to a walled-in bot is work no other bot may take over and no replan can
+/// move. `pick_chain_actor` makes the choice and argues it; the state has to be
+/// built before it can be asked, which is the only reason the two lines below
+/// swapped order.
 fn expand_goal(goal: Goal, world: &Arc<FactorioWorld>, bots: &[BotId]) -> LuaResult<ActionNetwork> {
-    let chain_actor = *bots
-        .first()
-        .ok_or_else(|| goal_error("no bots in this run; goals need at least one"))?;
     let state = PlanState::from_world(world.clone(), bots);
     refuse_unknown_bots(&state)?;
+    let chain_actor = pick_chain_actor(&state, bots)
+        .ok_or_else(|| goal_error("no bots in this run; goals need at least one"))?;
     // No rewriting of the planner's own errors. There used to be one here,
     // because `registry_for` held no method for `Goal::Researched` and every
     // research goal came back as `NoApplicableMethod` — "no method can satisfy
@@ -2129,6 +2138,101 @@ mod tests {
         assert!(
             message.contains("bot 2") && message.contains("not connected players"),
             "the error must be this refusal, naming the unknown bot: {message}"
+        );
+    }
+
+    /// **The top-level chain does not pin to a bot that cannot walk.**
+    ///
+    /// `expand_goal` used to hand `expand` the roster's first bot outright, so
+    /// a walled-in bot 1 took the whole of a `Researched` or `Producing` goal
+    /// with it: the methods state those bills as `Holder::Share(chain_actor)`,
+    /// which both sizes the bill against that bot and welds the chain to it,
+    /// and `schedule` treats a chain owner as a hard constraint with no
+    /// fallback tier. `crates/planner`'s `pick_chain_actor` decides it now, and
+    /// this is the seam that proves this caller asks.
+    ///
+    /// The geometry and the argument are
+    /// `crates/planner/tests/unreachable_memory.rs`'; here only the wiring is
+    /// at stake, so the goal is the cheapest one that states a
+    /// `Holder::Share(chain_actor)` bill.
+    #[test]
+    fn expand_goal_does_not_pin_the_chain_to_a_walled_in_first_bot() {
+        use factorio_bot_core::factorio::world::Enclosure;
+        use factorio_bot_core::types::{FactorioEntity, FactorioPlayer};
+        use factorio_bot_planner::ActionKind;
+
+        let boxed_in = Position::new(-56.2421875, 14.28125);
+        let outside = Position::new(-23.1875, -37.90625);
+        let world = fixture_world();
+        // A closed square ring of trees, spaced half a tile so nothing a
+        // character-sized box could slip through is left between two of them --
+        // the same construction the planner's own walled-in tests use, and for
+        // the reason they argue: the obstacles that actually box a bot in are
+        // structurally absent from a fixture and have to be built.
+        let mut ring = Vec::new();
+        let mut offset = -3.0_f64;
+        while offset <= 3.0 {
+            for pos in [
+                Position::new(boxed_in.x() + offset, boxed_in.y() - 3.),
+                Position::new(boxed_in.x() + offset, boxed_in.y() + 3.),
+                Position::new(boxed_in.x() - 3., boxed_in.y() + offset),
+                Position::new(boxed_in.x() + 3., boxed_in.y() + offset),
+            ] {
+                ring.push(FactorioEntity::new_tree(&pos));
+            }
+            offset += 0.5;
+        }
+        world.update_chunk_entities(ring).expect("the ring loads");
+        for (id, position) in [(1u8, boxed_in.clone()), (2, outside)] {
+            world.players.insert(
+                id,
+                FactorioPlayer {
+                    player_id: id,
+                    position,
+                    ..Default::default()
+                },
+            );
+        }
+        // The first witness: the game's own pathfinder refused a route from
+        // where bot 1 stands. Without it nothing is inferred at all.
+        world.record_enclosure(Enclosure {
+            tick: None,
+            player: 1,
+            at: boxed_in,
+            pocket_tiles: 24.,
+            searched_tiles: 24.,
+        });
+        let world = Arc::new(world);
+
+        let bots = [BotId(1), BotId(2)];
+        let state = PlanState::from_world(world.clone(), &bots);
+        assert!(
+            state.is_walled_in(BotId(1)) && !state.is_walled_in(BotId(2)),
+            "the premise: bot 1 is sealed in and bot 2 is not; got {:?}",
+            state.walled_in()
+        );
+
+        let net = expand_goal(
+            Goal::Producing {
+                item: "iron-plate".into(),
+                per_minute: 10,
+            },
+            &world,
+            &bots,
+        )
+        .expect("a burner cell needs no power and the fixture has ore");
+        let cell_chain = net
+            .actions()
+            .find(|a| {
+                matches!(&a.kind, ActionKind::Place { entity } if entity.name == "stone-furnace")
+            })
+            .and_then(|a| net.chain_of(a.id))
+            .expect("the furnace is placed inside a chain");
+        assert_eq!(
+            net.owner_of(cell_chain),
+            Some(BotId(2)),
+            "bot 1 cannot walk anywhere, so the cell may neither be sized against its \
+             inventory nor welded to it"
         );
     }
 

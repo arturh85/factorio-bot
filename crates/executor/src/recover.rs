@@ -8,8 +8,8 @@
 
 use crate::log::{ExecutionLog, Status};
 use factorio_bot_planner::{
-    ActionId, ActionKind, ActionNetwork, BotId, Goal, PlanState, Schedule, expand, registry_for,
-    schedule,
+    ActionId, ActionKind, ActionNetwork, BotId, Goal, PlanState, Schedule, expand,
+    pick_chain_actor, registry_for, schedule,
 };
 use std::collections::BTreeSet;
 
@@ -346,7 +346,16 @@ pub fn recover(
     // stable no matter what order the caller listed its bots in. An empty
     // roster has no such bot, and `schedule` would refuse it anyway, so tier 2
     // is skipped entirely.
-    if let Some(chain_actor) = bots.iter().copied().min()
+    //
+    // Ascending `BotId` is therefore the *preference*, and `pick_chain_actor`
+    // is what turns a preference into a choice: it takes the lowest id that is
+    // not walled in, because an owned chain has no fallback tier and one bound
+    // to a bot that cannot walk is precisely what recovery is here to get out
+    // of. It falls back to the lowest id when every bot is walled in, so this
+    // tier never stops proposing a plan.
+    let mut preference: Vec<BotId> = bots.to_vec();
+    preference.sort_unstable();
+    if let Some(chain_actor) = pick_chain_actor(state, &preference)
         && let Ok(fresh) = expand(
             std::slice::from_ref(goal),
             state,

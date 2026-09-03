@@ -31,7 +31,7 @@ use factorio_bot_planner::ids::{ActionId, BotId};
 use factorio_bot_planner::method::produce::{cell_spec, cells_for, cells_standing};
 use factorio_bot_planner::{
     ActionKind, ActionNetwork, Goal, InventorySlot, PlanState, Schedule, ScheduledStep, StepKind,
-    Ticks, graphviz, mermaid_gantt, schedule,
+    Ticks, graphviz, mermaid_gantt, pick_chain_actor, schedule,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -570,7 +570,18 @@ fn narrate_production_goals(goal: &Goal, state: &PlanState) {
 /// Both halves of the answer are narrated. Staying silent when a bot *stops*
 /// being walled in would leave a reader unable to tell "the pocket opened"
 /// from "nobody ever looked".
-fn narrate_walled_in_bots(state: &PlanState) {
+///
+/// The chain actor is narrated here too, for the same reason and by the same
+/// rule. A goal that names no bot -- `Researched`, `BuildCell`, `Producing` --
+/// is sized against the chain actor's inventory *and* run by it, so
+/// `expand_goal` skips a walled-in bot when it picks one
+/// (`crates/planner`'s `pick_chain_actor`). That silently changes which bot
+/// does the run's headline work and which inventory its bill is measured
+/// against, which is exactly the class of decision this function exists to
+/// stop being silent. Only the *move* is reported: saying "the chain actor is
+/// bot 1" on every plan where nothing happened would bury the line that
+/// matters.
+fn narrate_walled_in_bots(state: &PlanState, roster: &[BotId]) {
     let walled_in = state.walled_in();
     if walled_in.is_empty() {
         return;
@@ -605,6 +616,23 @@ fn narrate_walled_in_bots(state: &PlanState) {
         factorio_bot_core::paris::info!(
             "gathering shares this plan are sized across bot(s) <bright-blue>{}</>",
             working.join(", ")
+        );
+    }
+    // `expand_goal` asks the same question of the same state and the same
+    // roster, so this reports the pick that plan is actually made with rather
+    // than a second guess at it.
+    if let (Some(preferred), Some(chosen)) =
+        (roster.first().copied(), pick_chain_actor(state, roster))
+        && preferred != chosen
+    {
+        factorio_bot_core::paris::warn!(
+            "the chain actor moves from bot <bright-blue>{}</> to bot <bright-blue>{}</>: bot \
+             {} is walled in, and a goal that names no bot is both sized against the chain \
+             actor's inventory and welded to it, so leaving it there would be work no other \
+             bot could take over",
+            preferred.0,
+            chosen.0,
+            preferred.0,
         );
     }
 }
@@ -742,7 +770,7 @@ async fn plan_verified(
         // same standing machines, and saying it three times would be noise.
         if round == 0 {
             narrate_production_goals(goal, &state);
-            narrate_walled_in_bots(&state);
+            narrate_walled_in_bots(&state, roster);
         }
         let net = expand_goal(goal.clone(), world, roster)?;
         let scheduled = schedule(&net, &state, roster).map_err(planner_error)?;

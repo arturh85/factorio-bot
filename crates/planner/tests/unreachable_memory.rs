@@ -65,9 +65,13 @@ use factorio_bot_planner::goal::{Goal, Holder};
 use factorio_bot_planner::ids::{ActionIdGen, ChainId};
 use factorio_bot_planner::method::expand;
 use factorio_bot_planner::method::have::registry_for;
-use factorio_bot_planner::{ActionNetwork, BotId, PlanState, Schedule, StepKind, schedule};
+use factorio_bot_planner::{
+    ActionNetwork, BotId, PlanState, Schedule, StepKind, pick_chain_actor, schedule,
+};
 use std::collections::BTreeSet;
 use std::sync::Arc;
+
+mod common;
 
 /// Bot 3's position for the last 158 000 ticks of `run-1788432181-42528`,
 /// verbatim from `samples.jsonl`. It never changed by a single bit.
@@ -710,4 +714,277 @@ fn a_bot_whose_pocket_has_opened_is_sized_a_share_again() {
          fresh answer is the one that counts; got {:?}",
         state.walled_in()
     );
+}
+
+// ---------------------------------------------------------------------------
+// The third half: the top-level chain actor.
+// ---------------------------------------------------------------------------
+//
+// Everything above is about *shares* — the goals `SplitAcrossBots` hands out,
+// one per bot. It left one bot untouched on purpose. A goal that names no
+// holder at all (`Researched`, `Producing`, `BuildCell`) is stated by its
+// method as `Holder::Share(ctx.chain_actor)`, and the chain actor was always
+// whichever bot the caller happened to list first. So if *bot 1* were walled
+// in, the run's headline chain pinned to a bot that could not move and the
+// share filter above never got a chance to help: the chain is not a share.
+//
+// `pick_chain_actor` closes that, and these tests are about the property that
+// makes it safe — that the chain actor decides **both** who runs the chain and
+// whose inventory its bill is measured against, so moving it moves both.
+
+/// The same geometry as [`frozen_run_world`], with the roles swapped: **bot 1**
+/// is the one inside the ring, and bots 2, 3 and 4 are the ones with somewhere
+/// to be.
+///
+/// The case the run data does not contain. `run-1788449752-46541` froze bots 2
+/// and 3 and left bot 1 working, so every observation this file is built on
+/// happens to exonerate the bot that gets picked. That is exactly why the hole
+/// has to be closed against a fixture rather than against a log.
+fn world_with_the_first_bot_walled_in() -> Arc<FactorioWorld> {
+    let world = fixture_world();
+    let ring_centre = Position::new(FROZEN_BOT_2.0, FROZEN_BOT_2.1);
+    world
+        .update_chunk_entities(tree_ring(&ring_centre, 3.))
+        .expect("the ring loads");
+    for (id, at_) in [
+        (1u8, FROZEN_BOT_2),
+        (2, ELSEWHERE),
+        (3, (ELSEWHERE.0 + 2., ELSEWHERE.1)),
+        (4, (ELSEWHERE.0 + 4., ELSEWHERE.1)),
+    ] {
+        world.players.insert(
+            id,
+            FactorioPlayer {
+                player_id: id,
+                position: at(at_),
+                ..Default::default()
+            },
+        );
+    }
+    world.record_enclosure(Enclosure {
+        tick: None,
+        player: 1,
+        at: at(FROZEN_BOT_2),
+        pocket_tiles: 24.,
+        searched_tiles: 24.,
+    });
+    Arc::new(world)
+}
+
+/// The premise, checked before anything is asserted about a plan — the mirror
+/// of [`the_two_frozen_bots_read_as_walled_in_and_the_other_two_do_not`].
+#[test]
+fn the_first_bot_reads_as_walled_in_and_the_rest_do_not() {
+    let state = PlanState::from_world(world_with_the_first_bot_walled_in(), &roster());
+    assert!(
+        state.is_walled_in(BotId(1)),
+        "bot 1 is inside the ring and the ledger records it enclosed there; got {:?}",
+        state.walled_in()
+    );
+    assert!(
+        [BotId(2), BotId(3), BotId(4)]
+            .iter()
+            .all(|bot| !state.is_walled_in(*bot)),
+        "the other three are out in the open; got {:?}",
+        state.walled_in()
+    );
+}
+
+/// **The gap this closes.** The roster's first bot cannot walk, so it is not
+/// the chain actor.
+#[test]
+fn the_chain_actor_skips_a_walled_in_first_bot() {
+    let state = PlanState::from_world(world_with_the_first_bot_walled_in(), &roster());
+    assert_eq!(
+        pick_chain_actor(&state, &roster()),
+        Some(BotId(2)),
+        "bot 1 is walled in, so the next bot in the caller's own order takes the chain"
+    );
+}
+
+/// The control. With nothing in the ledger the pick is the caller's first
+/// choice, byte for byte what it was before this existed — which is what makes
+/// every healthy run and every fixture unaffected.
+#[test]
+fn with_nothing_recorded_the_chain_actor_is_the_rosters_first_bot() {
+    let state = PlanState::from_world(frozen_run_world(), &roster());
+    assert!(
+        !state.is_walled_in(BotId(1)),
+        "the premise: this world walls in bots 2 and 3, not bot 1"
+    );
+    assert_eq!(
+        pick_chain_actor(&state, &roster()),
+        Some(BotId(1)),
+        "a walled-in bot that is not the first one changes nothing about the pick"
+    );
+    // And the caller's order is honoured, not silently replaced by ascending
+    // id: `crates/scripting_lua` passes the roster the script wrote.
+    assert_eq!(
+        pick_chain_actor(&state, &[BotId(4), BotId(1)]),
+        Some(BotId(4)),
+        "the preference is the caller's, and bot 4 can walk"
+    );
+}
+
+/// **The exclusion may never leave a plan with no actor** — the same rule
+/// [`when_every_bot_is_walled_in_the_split_is_unchanged`] keeps, restated for
+/// the chain actor because this is a different decision made in a different
+/// place.
+#[test]
+fn when_every_bot_is_walled_in_the_chain_actor_is_the_first_bot_anyway() {
+    let world = fixture_world();
+    let midpoint = Position::new(
+        (FROZEN_BOT_2.0 + FROZEN_BOT_3.0) / 2.,
+        (FROZEN_BOT_2.1 + FROZEN_BOT_3.1) / 2.,
+    );
+    world
+        .update_chunk_entities(tree_ring(&midpoint, 3.))
+        .expect("the ring loads");
+    let positions = [
+        (1u8, (midpoint.x() - 1., midpoint.y() - 1.)),
+        (2, FROZEN_BOT_2),
+        (3, FROZEN_BOT_3),
+        (4, (midpoint.x() + 1., midpoint.y() + 1.)),
+    ];
+    for (id, at_) in positions {
+        world.players.insert(
+            id,
+            FactorioPlayer {
+                player_id: id,
+                position: at(at_),
+                ..Default::default()
+            },
+        );
+        world.record_enclosure(Enclosure {
+            tick: None,
+            player: id,
+            at: at(at_),
+            pocket_tiles: 24.,
+            searched_tiles: 24.,
+        });
+    }
+    let state = PlanState::from_world(Arc::new(world), &roster());
+    assert_eq!(
+        state.walled_in().len(),
+        4,
+        "the premise: every bot is stuck, got {:?}",
+        state.walled_in()
+    );
+    assert_eq!(
+        pick_chain_actor(&state, &roster()),
+        Some(BotId(1)),
+        "with no bot better than any other the pick is unchanged: a plan that dispatches \
+         and fails leaves a record and a recovery tier, one that was never made leaves neither"
+    );
+}
+
+/// An empty roster has no chain actor, and that stays the caller's error to
+/// name — `crates/scripting_lua` says "goals need at least one" and
+/// `crates/executor` skips its re-expansion tier.
+#[test]
+fn an_empty_roster_has_no_chain_actor() {
+    let state = PlanState::from_world(world_with_the_first_bot_walled_in(), &roster());
+    assert_eq!(pick_chain_actor(&state, &[]), None);
+}
+
+/// **Sizing and binding move together, or not at all.**
+///
+/// This is the assertion the whole change turns on, and the reason it was not
+/// smuggled into the share fix. `run-1788405365-21697` died with `precondition
+/// has 3 iron-ore of action ActionId(41) does not hold for bot 2`: a chain
+/// sized against bot 1's stock and bound to bot 2. Any change that moves who
+/// runs the top-level chain without also moving whose inventory its bill is
+/// measured against reproduces that exactly.
+///
+/// So bot 1 — the walled-in one — is given the whole cell's bill outright and
+/// nobody else is given anything. Two plans are built from that one state:
+/// the one the old pick produced, and the one the new pick produces. If sizing
+/// followed the chain actor, they differ in a way only the inventories explain,
+/// and the plan that is actually made is the one measured against the bot that
+/// is actually going to run it.
+#[test]
+fn the_chain_actors_bill_is_sized_against_the_bot_it_is_welded_to() {
+    let bots = roster();
+    let mut state = PlanState::from_world(world_with_the_first_bot_walled_in(), &bots);
+    // Everything a one-cell `Producing` bill asks for -- a drill, a furnace and
+    // fuel for both -- in the pocket of the bot that cannot leave it.
+    for (item, count) in [
+        ("burner-mining-drill", 4u32),
+        ("stone-furnace", 4),
+        ("coal", 60),
+    ] {
+        state.gain(BotId(1), item, count);
+    }
+
+    let goal = Goal::Producing {
+        item: "iron-plate".into(),
+        per_minute: 10,
+    };
+    let plan = |actor: BotId| {
+        expand(
+            std::slice::from_ref(&goal),
+            &state,
+            &registry_for(&bots),
+            actor,
+        )
+        .expect("a burner cell needs no power and the fixture has ore")
+    };
+    // What a plan has to go and get before it can build the cell. Sized
+    // against a bot that already holds the bill, this is empty.
+    let acquired = |net: &ActionNetwork| -> u32 {
+        net.actions()
+            .map(|a| match &a.kind {
+                ActionKind::Mine { count, .. } | ActionKind::Craft { count, .. } => *count,
+                _ => 0,
+            })
+            .sum()
+    };
+
+    let actor = pick_chain_actor(&state, &bots).expect("a non-empty roster");
+    assert_eq!(actor, BotId(2), "bot 1 is walled in");
+    let net = plan(actor);
+
+    // Binding: the cell's chain is welded to the bot the pick named.
+    let cell_chain = net
+        .actions()
+        .find(|a| matches!(&a.kind, ActionKind::Place { entity } if entity.name == "stone-furnace"))
+        .and_then(|a| net.chain_of(a.id))
+        .expect("the furnace is placed inside a chain");
+    assert_eq!(
+        net.owner_of(cell_chain),
+        Some(actor),
+        "a `Holder::Share(chain_actor)` bill owns its chain, and the owner is a hard \
+         constraint with no fallback tier"
+    );
+    assert!(
+        net.actions()
+            .filter(|a| net.chain_of(a.id) == Some(cell_chain))
+            .count()
+            > 1,
+        "the cell is a chain of work, not a single action; anything else would make the \
+         owner assertion above vacuous"
+    );
+
+    // Sizing: measured against bot 2's empty pockets, not bot 1's full ones.
+    let sized_against_the_walled_in_bot = plan(BotId(1));
+    assert_eq!(
+        acquired(&sized_against_the_walled_in_bot),
+        0,
+        "the premise of the comparison: bot 1 holds the entire bill, so a plan sized \
+         against bot 1 fetches nothing"
+    );
+    assert!(
+        acquired(&net) > 0,
+        "the plan that is made is sized against bot {}, which holds none of the bill, so it \
+         has to go and get it -- if this is zero the bill is still being read off bot 1's \
+         inventory while the chain runs on bot {}, which is `run-1788405365-21697`",
+        actor.0,
+        actor.0
+    );
+
+    // And the agreement, checked the way the run that broke it would have
+    // been: replay the schedule in time order and require every precondition
+    // to hold for the bot the schedule actually assigned.
+    let scheduled = schedule(&net, &state, &bots).expect("every action has a bot that can run it");
+    common::assert_preconditions_hold_over_time(&net, &state, &scheduled);
 }

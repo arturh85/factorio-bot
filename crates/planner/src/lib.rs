@@ -22,7 +22,7 @@ pub use method::have::default_registry;
 pub use method::have::holds;
 pub use method::have::registry_for;
 pub use method::{ExpansionCtx, GoalSite, Method, MethodRegistry, Step};
-pub use method::{MAX_EXPANSION_DEPTH, expand};
+pub use method::{MAX_EXPANSION_DEPTH, expand, pick_chain_actor};
 pub use network::{ActionNetwork, Edge};
 pub use render::{graphviz, mermaid_gantt, ticks_to_timestamp};
 pub use schedule::{

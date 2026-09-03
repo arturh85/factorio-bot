@@ -354,6 +354,76 @@ use crate::network::ActionNetwork;
 /// Raise it when a real tree is shown not to fit, and say which one.
 pub const MAX_EXPANSION_DEPTH: u32 = 32;
 
+/// Which bot to hand [`expand`] as its `chain_actor`, given the order the
+/// caller would otherwise have taken them in.
+///
+/// Returns the first bot in `preference` that is not walled in; the first bot
+/// in `preference` if every one of them is; and `None` only for an empty
+/// slice, which is the caller's own error to report — `expand` has no goal to
+/// name and `schedule` would refuse such a roster anyway.
+///
+/// # Why the pick is not a formality
+///
+/// `chain_actor` is what a goal naming no holder is stated against, and
+/// [`ExpansionCtx`]'s own doc spells out that the methods state those goals as
+/// `Holder::Share(ctx.chain_actor)` — `Researched`'s trigger and pack bills,
+/// `produce`'s and `assemble`'s cell bills. Two things follow from *one* value,
+/// which is the whole point of choosing it here rather than downstream:
+///
+/// * the bill is **sized** against that bot's inventory (`state.available(&
+///   Holder::Share(bot), ..)`), and
+/// * the chain that expands from it is **owned** by that same bot
+///   (`expand_goal_body`), which `crate::schedule` treats as a hard constraint
+///   with no fallback tier.
+///
+/// So a top-level chain pinned to a bot that cannot walk anywhere is work no
+/// other bot may ever take over and no replan can move — the same trap
+/// `have::participants_that_can_work` argues at length for a gathering share,
+/// arriving by the other road. That fix left this one open on purpose: it is
+/// scoped to shares, and the top-level chain is not a share.
+///
+/// Sizing and binding stay in agreement *because* they are both read off this
+/// one value. `run-1788405365-21697` is what disagreement costs — a chain sized
+/// against bot 1's stock and bound to bot 2, which died with `precondition has
+/// 3 iron-ore … does not hold for bot 2` — and that came from relaxing the
+/// owner after expansion, not from the pick. Moving the pick moves both halves
+/// together; nothing else here may move only one.
+///
+/// # Why it can never leave a plan with no actor
+///
+/// The same rule `participants_that_can_work` keeps, for the same reason: with
+/// every bot walled in there is no better bot to move the work to, and a plan
+/// that dispatches and fails leaves a record, a failed walk and a recovery
+/// tier, where a plan that was never made leaves none of those. So the fallback
+/// is the caller's own first choice, not `None`.
+///
+/// # Determinism
+///
+/// A function of the slice's order and a `BTreeMap` lookup, with no floats and
+/// no iteration over an unordered collection. Callers that have no meaningful
+/// preference of their own should pass a roster sorted by `BotId`, which is
+/// what `crates/executor`'s tier 2 does; `crates/scripting_lua` passes the
+/// roster the script wrote, because that is the order it already picked from.
+/// A bot the state has never heard of is *not* skipped here — `expand` reports
+/// it as `UnknownBot`, and silently planning around a caller's mistake would
+/// hide it.
+pub fn pick_chain_actor(state: &PlanState, preference: &[BotId]) -> Option<BotId> {
+    let first = preference.first().copied()?;
+    // The overwhelmingly common case, and the cheap one: no ledger, no
+    // question. Stated rather than left to the `find` below so that a healthy
+    // run provably takes the same path it always did.
+    if state.walled_in().is_empty() {
+        return Some(first);
+    }
+    Some(
+        preference
+            .iter()
+            .copied()
+            .find(|bot| !state.is_walled_in(*bot))
+            .unwrap_or(first),
+    )
+}
+
 /// Expand `goals` into a schedulable network.
 ///
 /// Each goal is expanded by the first applicable method, recursively, until

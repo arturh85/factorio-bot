@@ -26,9 +26,10 @@
 
 use factorio_bot_core::errors::RconPathRequestFailed;
 use factorio_bot_core::factorio::rcon::{ActionFailure, path_request_was_busy};
-use factorio_bot_core::factorio::world::{FactorioWorld, WalkRefusal};
-use factorio_bot_core::graph::enclosure::enclosure_at;
+use factorio_bot_core::factorio::world::{Enclosure, FactorioWorld, WalkRefusal};
+use factorio_bot_core::graph::enclosure::{Escape, SEARCH_RADIUS, escape_from};
 use factorio_bot_core::miette::Report;
+use factorio_bot_core::tracing::{info, warn};
 use factorio_bot_core::types::{PlayerId, Position};
 
 /// Whether the pathfinder searched and reported that there is no way there.
@@ -79,6 +80,22 @@ pub fn pathfinder_found_nothing(error: &Report) -> bool {
 /// The tick is whatever the game stamped, which for this refusal is nothing at
 /// all: the path request is answered before the walk is dispatched. `None` is
 /// recorded rather than a zero, for the reason [`WalkRefusal::tick`] gives.
+///
+/// # Every branch says so out loud
+///
+/// This module shipped with no logging and nothing in the run record, and the
+/// cost was immediate: three consecutive live runs repeated the same refused
+/// `(bot, destination)` pairs, and nobody could tell from outside the source
+/// whether the ledger had ever been written to. "It did not fire", "it fired
+/// and wrote to a world nobody reads" and "it fired, was read, and the
+/// scheduler had no second candidate to offer" are three different defects
+/// with one appearance, and separating them took a day.
+///
+/// So every path out of this function emits exactly one `tracing` line naming
+/// which one it took. `tracing` and not `paris` because these explain a
+/// planner decision to whoever reads the log afterwards, which is the
+/// distinction `CLAUDE.md` draws -- **they land on stderr, so a run capture
+/// that keeps only stdout will not have them**.
 pub fn note_walk_refusal(
     world: &FactorioWorld,
     player: PlayerId,
@@ -87,9 +104,24 @@ pub fn note_walk_refusal(
     failure: &ActionFailure,
 ) -> bool {
     if !pathfinder_found_nothing(&failure.error) {
+        info!(
+            player,
+            to = %to,
+            error = %failure.error,
+            "walk failure teaches nothing about the map: the pathfinder never \
+             answered that there is no way there, so nothing is remembered"
+        );
         return false;
     }
     let Some(from) = from else {
+        warn!(
+            player,
+            to = %to,
+            "the pathfinder refused this walk but the world does not know where \
+             the character was standing, so the refusal cannot be remembered -- \
+             recording it without an origin would claim the destination is dead \
+             for this bot wherever it stands"
+        );
         return false;
     };
     let learned = world.record_walk_refusal(WalkRefusal {
@@ -98,6 +130,14 @@ pub fn note_walk_refusal(
         from: from.clone(),
         to: to.clone(),
     });
+    warn!(
+        player,
+        from = %from,
+        to = %to,
+        learned,
+        "the pathfinder refused this walk; the ledger the next plan reads now \
+         holds it (learned=false means this exact question was already in it)"
+    );
     note_enclosure(world, player, from, failure.ticks.dispatched);
     learned
 }
@@ -127,9 +167,55 @@ pub fn note_walk_refusal(
 /// and mining a way out are both worth doing and neither can be designed
 /// against a run archive that has never once said when this happens -- which is
 /// the entire finding of `run-1788432181-42528`.
+///
+/// # Why all three answers are logged, and separately
+///
+/// [`Escape`] has three variants and the module that defines it is emphatic
+/// that they must never be collapsed: "there is a way out within the window"
+/// and "I could not tell" are different facts. That distinction is the whole
+/// value of the log line here. When this detector stays silent through a run
+/// with two frozen bots, "the fill found an escape" and "the window fell
+/// outside the occupancy model" point at completely different follow-ups, and
+/// a single "no enclosure" line would have said neither.
+///
+/// [`escape_from`] is called directly rather than through
+/// `enclosure_at`, which folds `Open` and `Unknown` into one `None` --
+/// exactly the collapse this needs to avoid.
 fn note_enclosure(world: &FactorioWorld, player: PlayerId, from: &Position, tick: Option<u64>) {
-    if let Some(found) = enclosure_at(&world.entity_graph, player, from, tick) {
-        world.record_enclosure(found);
+    match escape_from(&world.entity_graph, from) {
+        Escape::Enclosed { pocket_tiles } => {
+            let fresh = world.record_enclosure(Enclosure {
+                tick,
+                player,
+                at: from.clone(),
+                pocket_tiles,
+                searched_tiles: SEARCH_RADIUS,
+            });
+            warn!(
+                player,
+                at = %from,
+                pocket_tiles,
+                searched_tiles = SEARCH_RADIUS,
+                fresh,
+                "WALLED IN: this character cannot reach open ground -- every \
+                 point it can walk to is inside this pocket"
+            );
+        }
+        Escape::Open => info!(
+            player,
+            at = %from,
+            searched_tiles = SEARCH_RADIUS,
+            "the walk was refused but the character is not boxed in: the free \
+             region around it reaches the edge of the searched window, so what \
+             is unreachable is the destination, not the bot"
+        ),
+        Escape::Unknown(why) => info!(
+            player,
+            at = %from,
+            why = ?why,
+            "the escape search declined to answer, which is not the same as \
+             finding a way out"
+        ),
     }
 }
 

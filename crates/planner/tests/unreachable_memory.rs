@@ -43,7 +43,7 @@ use factorio_bot_core::factorio::world::{FactorioWorld, WalkRefusal};
 use factorio_bot_core::test_utils::fixture_world;
 use factorio_bot_core::types::Position;
 use factorio_bot_planner::action::{Action, ActionKind, Actor, Condition, Effect};
-use factorio_bot_planner::ids::ActionIdGen;
+use factorio_bot_planner::ids::{ActionIdGen, ChainId};
 use factorio_bot_planner::{ActionNetwork, BotId, PlanState, Schedule, StepKind, schedule};
 use std::sync::Arc;
 
@@ -293,5 +293,60 @@ fn the_order_the_game_refused_things_in_does_not_reach_the_plan() {
         a.steps.iter().map(|s| (s.bot, s.start)).collect::<Vec<_>>(),
         b.steps.iter().map(|s| (s.bot, s.start)).collect::<Vec<_>>(),
         "same inputs, same plan"
+    );
+}
+
+/// **Why none of the above fired in a live run.**
+///
+/// Every test in this file builds its mine as a *free* action — no chain, no
+/// owner — and in that shape the ledger works exactly as designed: `schedule`
+/// splits the roster into open and refused, and the refused bot loses.
+///
+/// A real run does not have that shape. Gathering goals are sized per bot
+/// (`Holder::Share`), and `crates/planner/src/method/mod.rs` gives such a
+/// chain an **owner**; `schedule` treats an owner as a hard constraint —
+/// `None if owner.is_some() => vec![vec![owner]]`
+/// (`crates/planner/src/schedule.rs`) — with no fallback tier, by design,
+/// because the chain's bill was sized against that bot's inventory and nobody
+/// else's. The refusal split then partitions a one-element tier and puts it
+/// back together unchanged. There is nothing to reorder, so the ledger cannot
+/// change the outcome.
+///
+/// That is what `run-1788449752-46541` shows and what the ledger was believed
+/// to have fixed: bot 2 was sent at `(-46.5, -9.5)` on four separate plans,
+/// bot 3 at `(-54.5, -12.5)` on five, from positions that never changed by a
+/// bit — while every test above passed. The memory is written, read and
+/// matched correctly; it just has one candidate to choose from.
+///
+/// This test pins the live behaviour, not the desired one. It should be
+/// *inverted* — not deleted — by whatever change lets an owned chain react to
+/// a refusal (re-siting the destination at expansion, or refusing to size a
+/// share against a bot that cannot reach the work). Deleting it would remove
+/// the only statement in the crate that these two features do not compose.
+#[test]
+fn an_owned_chain_has_one_candidate_so_the_ledger_cannot_reorder_it() {
+    let state = state_with(&[]);
+    let pos = ore_near_the_boxed_in_bots(&state);
+    // Bot 3 asked from where it stands and was told no, exactly as in
+    // `a_bot_the_pathfinder_refused_is_not_sent_there_again` above.
+    let state = state_with(&[refusal(3, BOXED_IN, &pos)]);
+
+    let mut id_gen = ActionIdGen::new();
+    let mut net = ActionNetwork::new();
+    let mine = net.add(mine_at(&mut id_gen, &pos));
+    // The one difference from the passing test: the mine belongs to a chain
+    // that a `Holder::Share` goal named bot 3 for.
+    let chain = ChainId(0);
+    net.set_chain(mine, chain);
+    net.set_chain_owner(chain, BotId(3));
+
+    let scheduled = schedule(&net, &state, &roster()).expect("one mine, four bots");
+    assert_eq!(
+        walker(&scheduled, &pos),
+        Some(BotId(3)),
+        "an owner is a hard constraint with no fallback tier, so the bot the \
+         game refused is still the only candidate -- this is the live \
+         behaviour, and it is why the ledger changed nothing in \
+         run-1788449752-46541"
     );
 }

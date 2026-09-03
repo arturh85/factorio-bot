@@ -79,9 +79,22 @@ pub fn scripts_dir(workspace_path: &Path) -> Result<PathBuf> {
 /// per process, since callers such as the HTTP script routes call this on
 /// every request) and warns if any script is stale, naming
 /// [`REFRESH_SCRIPTS_ENV`]
-/// as the way to refresh it. Debug builds deliberately skip the extraction
-/// and the check: `include_dir!` bundles this repository's own `scripts/`
-/// directory, and a developer checkout already has them.
+/// as the way to refresh it. Debug builds skip the *extraction* -- a
+/// developer checkout has `scripts/` already, and `scripts_dir` falls back to
+/// it -- but **not the staleness check**.
+///
+/// That exemption used to cover both, on the reasoning that a checkout
+/// "already has them". It does not, in the way that matters: the CLI resolves
+/// a script by bare name against `<workspace>/scripts`, never against the repo
+/// (unlike `mods/`, which does fall back to the checkout in a debug build), so
+/// a workspace copy left over from an earlier release build is what actually
+/// runs. `run-1788449752-46541` spent an hour looking for an enclosure report
+/// that could not appear: `workspace/scripts/factory_stage2.lua` predated the
+/// `record.enclosures()` call by five hours, the debug build compiled the
+/// check out, and the run said nothing about either. The comparison is against
+/// the snapshot `include_dir!` baked in at compile time, which in a debug
+/// build is this checkout as it stood when the binary was built -- exactly the
+/// question a developer is asking.
 ///
 /// Takes [`crate::paths::ResolvedWorkspace`], not a bare `&Path`: this
 /// function joins `workspace_path` straight onto `scripts` with no
@@ -110,7 +123,6 @@ pub fn ensure_scripts_dir(workspace_path: &crate::paths::ResolvedWorkspace) -> R
         #[cfg(debug_assertions)]
         std::fs::create_dir_all(&workspace_scripts).into_diagnostic()?;
     } else {
-        #[cfg(not(debug_assertions))]
         check_scripts_staleness_once(&workspace_scripts)?;
     }
     std::fs::canonicalize(&workspace_scripts).into_diagnostic()
@@ -154,6 +166,96 @@ fn check_scripts_staleness_once(workspace_scripts: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The debug-build counterpart of the release staleness check above, and the
+/// reason it exists at all.
+///
+/// A debug build embeds nothing, so there is no snapshot to compare against --
+/// which is why this check used to be compiled out entirely, on the reasoning
+/// that a developer checkout "already has" the scripts. It does, and that is
+/// beside the point: **the CLI resolves a script by bare name against
+/// `<workspace>/scripts`, never against the repo.** Unlike `mods/`, which a
+/// debug build symlinks to the checkout, `workspace/scripts/` is a separate
+/// copy with no fallback and no refresh path, ordinarily left behind by an
+/// earlier release build. Editing `scripts/foo.lua` in the repo and running
+/// `factorio-bot lua foo.lua` runs the *other* file.
+///
+/// `run-1788449752-46541` is what that costs. `scripts/factory_stage2.lua` had
+/// gained a `record.enclosures()` call five hours before the run; the workspace
+/// copy had not, so the enclosure detector -- landed, wired and unit-tested the
+/// same afternoon -- could not produce a single line, and the run was read as
+/// evidence that the detector did not work.
+///
+/// So the comparison here is against the checkout on disk rather than an
+/// embed, which is both cheaper (no `include_dir!` in a debug build, and so no
+/// core rebuild every time a `.lua` changes) and more truthful: in a debug
+/// build the checkout *is* the reference, exactly as it is for `mods/`.
+/// Silent when no checkout can be found -- an installed debug binary has
+/// nothing to compare against, and inventing a complaint would be noise.
+#[cfg(debug_assertions)]
+fn check_scripts_staleness_once(workspace_scripts: &Path) -> Result<()> {
+    use std::sync::OnceLock;
+    static CHECKED: OnceLock<()> = OnceLock::new();
+    if CHECKED.set(()).is_err() {
+        return Ok(());
+    }
+    let Some(checkout) = repo_scripts_checkout() else {
+        return Ok(());
+    };
+    // A canonical `workspace/scripts` that *is* the checkout (someone pointed
+    // the workspace at the repo) can never be stale against itself.
+    if std::fs::canonicalize(&checkout).ok().as_deref() == Some(workspace_scripts) {
+        return Ok(());
+    }
+    let stale = stale_against_checkout(&checkout, workspace_scripts);
+    if stale.is_empty() {
+        return Ok(());
+    }
+    warn!(
+        "<bright-blue>scripts</> workspace copy at <bright-blue>{:?}</> is STALE: {} file(s) differ from <bright-blue>{:?}</>: {:?}. A script is resolved by bare name against the WORKSPACE copy, so edits in the checkout will not run until you copy them over.",
+        workspace_scripts,
+        stale.len(),
+        checkout,
+        stale
+    );
+    Ok(())
+}
+
+/// The repository's own `scripts/` directory, by the same probe
+/// [`scripts_dir`] uses, or `None` when this process is not running from a
+/// checkout.
+#[cfg(debug_assertions)]
+fn repo_scripts_checkout() -> Option<PathBuf> {
+    [PathBuf::from("./scripts"), PathBuf::from("../../scripts")]
+        .into_iter()
+        .find(|candidate| candidate.is_dir())
+}
+
+/// File names present in `checkout` whose copy under `workspace_scripts` is
+/// missing or differs, sorted.
+///
+/// Top-level files only, which is the whole of `scripts/` today, and extra
+/// files the workspace has grown on its own are not reported -- both matching
+/// [`crate::process::asset_sync::stale_paths`], whose question this is asking
+/// with a directory in place of an embed.
+#[cfg(debug_assertions)]
+fn stale_against_checkout(checkout: &Path, workspace_scripts: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(checkout) else {
+        return Vec::new();
+    };
+    let mut stale: Vec<String> = entries
+        .flatten()
+        .filter(|entry| entry.path().is_file())
+        .filter(|entry| {
+            let reference = std::fs::read(entry.path());
+            let copied = std::fs::read(workspace_scripts.join(entry.file_name()));
+            !matches!((reference, copied), (Ok(a), Ok(b)) if a == b)
+        })
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    stale.sort();
+    stale
 }
 
 /// Resolves a client-supplied script path against the scripts root.
@@ -622,5 +724,61 @@ mod tests {
         fs::write(root.join("my..script.lua"), "-- ok").expect("write");
         let resolved = resolve_script_path(&root, "/my..script.lua").expect("resolves");
         assert_eq!(resolved, root.join("my..script.lua"));
+    }
+
+    /// The defect this whole check exists for, in miniature.
+    ///
+    /// `run-1788449752-46541` ran a `factory_stage2.lua` five hours older than
+    /// the checkout's, which was missing the `record.enclosures()` call the
+    /// run was being watched for. Nothing said so.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_workspace_copy_older_than_the_checkout_is_reported_by_name() {
+        let checkout = tempfile::tempdir().expect("tempdir");
+        let workspace = tempfile::tempdir().expect("tempdir");
+        fs::write(checkout.path().join("lib.lua"), "-- shared").expect("write");
+        fs::write(workspace.path().join("lib.lua"), "-- shared").expect("write");
+        fs::write(
+            checkout.path().join("factory_stage2.lua"),
+            "record.enclosures()",
+        )
+        .expect("write");
+        fs::write(workspace.path().join("factory_stage2.lua"), "").expect("write");
+        // A script only the workspace has is the developer's own, not drift.
+        fs::write(workspace.path().join("mine.lua"), "-- local").expect("write");
+
+        assert_eq!(
+            super::stale_against_checkout(checkout.path(), workspace.path()),
+            vec!["factory_stage2.lua".to_string()]
+        );
+    }
+
+    /// A script the checkout has and the workspace does not is stale too: in a
+    /// debug build `workspace/scripts` starts empty, so "missing" is the
+    /// ordinary first state and the one most likely to be mistaken for "the
+    /// feature does not work".
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_script_the_workspace_never_received_is_stale() {
+        let checkout = tempfile::tempdir().expect("tempdir");
+        let workspace = tempfile::tempdir().expect("tempdir");
+        fs::write(checkout.path().join("new_thing.lua"), "-- new").expect("write");
+
+        assert_eq!(
+            super::stale_against_checkout(checkout.path(), workspace.path()),
+            vec!["new_thing.lua".to_string()]
+        );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn an_identical_copy_is_not_reported() {
+        let checkout = tempfile::tempdir().expect("tempdir");
+        let workspace = tempfile::tempdir().expect("tempdir");
+        for dir in [checkout.path(), workspace.path()] {
+            fs::write(dir.join("lib.lua"), "-- shared").expect("write");
+        }
+
+        assert!(super::stale_against_checkout(checkout.path(), workspace.path()).is_empty());
     }
 }

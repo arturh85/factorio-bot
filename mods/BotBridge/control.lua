@@ -2168,6 +2168,14 @@ end
 -- `storage.p` entries are kept but emptied: `get_player` uses the presence of
 -- a key as "this player is known", so deleting the table would make every bot
 -- unknown until it happened to be re-created by the tick handler.
+--
+-- `storage.n_clients` is deliberately left alone even though it *is*
+-- run-scoped and does drift upward across a resume (it counts joins and
+-- leaves, and a resumed world starts from the count the save was taken at).
+-- Nothing reads it: `on_load` copies it into `my_client_id`, whose only
+-- surviving use is one debug `print` -- the three `if my_client_id ~= 1`
+-- guards below it are commented out. Resetting it would look like a fix and
+-- change nothing, and the honest note is worth more than the line of code.
 function rcon_session_reset()
 	local dropped = { walking = 0, mining = 0, crafts = 0, research = 0 }
 	for _, p in pairs(storage.p or {}) do

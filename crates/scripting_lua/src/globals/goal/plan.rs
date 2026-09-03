@@ -555,6 +555,60 @@ fn narrate_production_goals(goal: &Goal, state: &PlanState) {
     }
 }
 
+/// Says which bots this plan will not size a gathering share against, and why.
+///
+/// A share sized against a bot that cannot walk anywhere is work no other bot
+/// can pick up (`crates/planner`'s `participants_that_can_work` argues the
+/// whole case), so the planner leaves such a bot out of the split. That is a
+/// visible change in how much of the map the run uses, and it has to be
+/// visible in the run's own output too: `crates/executor`'s walk memory
+/// originally shipped with no logging and nobody could tell whether it had
+/// fired, which cost real diagnostic time. `crates/planner` carries no logger
+/// on purpose -- it is a pure crate -- so the line is written here, where the
+/// plan is actually made.
+///
+/// Both halves of the answer are narrated. Staying silent when a bot *stops*
+/// being walled in would leave a reader unable to tell "the pocket opened"
+/// from "nobody ever looked".
+fn narrate_walled_in_bots(state: &PlanState) {
+    let walled_in = state.walled_in();
+    if walled_in.is_empty() {
+        return;
+    }
+    let working: Vec<String> = state
+        .bot_ids()
+        .into_iter()
+        .filter(|bot| !state.is_walled_in(*bot))
+        .map(|bot| bot.0.to_string())
+        .collect();
+    for (bot, pocket_tiles) in walled_in {
+        factorio_bot_core::paris::warn!(
+            "bot <bright-blue>{}</> is walled in at <bright-blue>{}</>: every point it can \
+             reach is inside a pocket of {:.1} square tiles. It gets no gathering share this \
+             plan -- a share names one owner and no other bot may take it over -- and it is \
+             back in the split the moment the pocket opens",
+            bot.0,
+            state
+                .bot(*bot)
+                .map(|b| b.position.to_string())
+                .unwrap_or_else(|| "an unknown position".into()),
+            pocket_tiles,
+        );
+    }
+    if working.is_empty() {
+        factorio_bot_core::paris::warn!(
+            "every bot is walled in, so the split is sized across all of them anyway: a plan \
+             that dispatches and fails leaves a record and a recovery tier, one that was never \
+             made leaves neither"
+        );
+    } else {
+        factorio_bot_core::paris::info!(
+            "gathering shares this plan are sized across bot(s) <bright-blue>{}</>",
+            working.join(", ")
+        );
+    }
+}
+
 /// How far along one `Goal::Producing` is: what it asks for, and what stands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Production {
@@ -688,6 +742,7 @@ async fn plan_verified(
         // same standing machines, and saying it three times would be noise.
         if round == 0 {
             narrate_production_goals(goal, &state);
+            narrate_walled_in_bots(&state);
         }
         let net = expand_goal(goal.clone(), world, roster)?;
         let scheduled = schedule(&net, &state, roster).map_err(planner_error)?;

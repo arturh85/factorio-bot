@@ -2220,6 +2220,10 @@ fn distinct_bots(bots: &[BotId]) -> Vec<BotId> {
 /// capacity makes narrow splits ordinary rather than exceptional. A roster
 /// naming a bot the state has never heard of is a caller's mistake whoever wins
 /// a seat, so it is answered before anything is sized.
+///
+/// **A bot that cannot walk anywhere does not participate.** See
+/// [`participants_that_can_work`] for why that decision belongs here and
+/// nowhere else, and for the three separate reasons it cannot strand a bot.
 pub fn even_shares(
     state: &PlanState,
     item: &str,
@@ -2234,7 +2238,9 @@ pub fn even_shares(
         }
     }
 
-    let mut candidates: Vec<(u32, BotId)> = distinct
+    let participants = participants_that_can_work(state, distinct);
+
+    let mut candidates: Vec<(u32, BotId)> = participants
         .into_iter()
         .map(|bot| (state.available(&Holder::Share(bot), item), bot))
         .collect();
@@ -2252,6 +2258,62 @@ pub fn even_shares(
         shares.insert(bot, base + if (index as u32) < remainder { 1 } else { 0 });
     }
     Ok(shares)
+}
+
+/// `candidates` without the bots that cannot reach any work from where they
+/// stand — unless that would leave nobody, in which case every candidate is
+/// kept.
+///
+/// # Why a share, specifically, must not go to a walled-in bot
+///
+/// A share is not a preference. `SplitAcrossBots` hands a bot a `Holder::Share`
+/// goal, `crates/planner/src/method/mod.rs` gives the chain that expands from
+/// it an **owner**, and `crate::schedule` treats an owner as a hard constraint
+/// with no fallback tier — deliberately, because the chain's whole bill was
+/// sized against that one bot's inventory. So a share sized against a bot that
+/// cannot walk anywhere is work that no other bot can ever pick up, and no
+/// amount of re-planning moves it: the plan re-expands, re-derives the same
+/// tiles, and the walk is refused before dispatch again.
+///
+/// `run-1788449752-46541` is that, measured. Bots 2 and 3 stopped moving at
+/// tick 47 100 and reported byte-identical positions until the run ended at
+/// 211 002 — 78% of the run — while every replan went on sizing them six iron
+/// ore each. Bot 1 made 563 of the run's 617 dispatches. The walk-refusal
+/// ledger (`crate::schedule`'s candidate split) could not help, because an
+/// owned chain's candidate list has exactly one bot in it and reordering a
+/// one-element list is a no-op; `crates/planner/tests/unreachable_memory.rs`
+/// pins that. The decision has to be made here, before the chain exists.
+///
+/// # Why it can never strand a bot
+///
+/// Three separate guarantees, and the first two are the ones that matter:
+///
+/// * **The verdict is re-derived from the world on every plan**, never
+///   remembered. [`PlanState::walled_in`] requires a fresh flood fill to agree
+///   with the recorded observation, so the moment anything opens the pocket —
+///   a tree mined, a machine deconstructed, the bot teleported by recovery —
+///   the bot is back in the split. It does not have to move first, which is
+///   important, because being unable to move is the condition.
+/// * **This is the only place the exclusion applies.** A walled-in bot is
+///   still in the roster `schedule` ranks, can still be named by
+///   `Holder::Bot`, and still gets every free action it is the cheapest
+///   candidate for. It loses shares, not membership.
+/// * **It never empties the split.** If every candidate is walled in, all of
+///   them participate exactly as before. A plan that dispatches and fails
+///   leaves a record, a failed walk and a recovery tier; a plan that was never
+///   made leaves none of those — the same rule `crate::schedule`'s refusal
+///   tier keeps, stated again here because this is a filter and that is a
+///   reordering.
+fn participants_that_can_work(state: &PlanState, candidates: Vec<BotId>) -> Vec<BotId> {
+    if state.walled_in().is_empty() {
+        return candidates;
+    }
+    let able: Vec<BotId> = candidates
+        .iter()
+        .copied()
+        .filter(|bot| !state.is_walled_in(*bot))
+        .collect();
+    if able.is_empty() { candidates } else { able }
 }
 
 /// How long one supplier's detour to the buffer costs.

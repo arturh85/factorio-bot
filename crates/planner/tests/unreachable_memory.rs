@@ -38,13 +38,35 @@
 //! can reach is still scheduled: the ledger reorders candidates, it does not
 //! remove them. Erring the other way would turn a run that limps into a run
 //! that stops.
+//!
+//! # And the half the ledger could never reach
+//!
+//! Everything above is about `schedule`, and `schedule` can only choose
+//! between the candidates an action has. A gathering share has exactly one:
+//! `SplitAcrossBots` hands a bot a `Holder::Share` goal,
+//! `crates/planner/src/method/mod.rs` gives the resulting chain that bot as
+//! **owner**, and `schedule` treats an owner as a hard constraint with no
+//! fallback tier. Reordering a one-element list is a no-op, so a share sized
+//! against a frozen bot is work nothing can move —
+//! [`an_owned_chains_candidate_list_is_one_bot_by_design`] pins that, and it is
+//! still true.
+//!
+//! What changed is that expansion no longer *creates* such a chain. The second
+//! half of this file is that: run `run-1788449752-46541`'s own geometry, and
+//! the assertion that the work lands on the bots that can do it. See
+//! `even_shares` / `participants_that_can_work` in
+//! `crates/planner/src/method/have.rs`.
 
-use factorio_bot_core::factorio::world::{FactorioWorld, WalkRefusal};
+use factorio_bot_core::factorio::world::{Enclosure, FactorioWorld, WalkRefusal};
 use factorio_bot_core::test_utils::fixture_world;
-use factorio_bot_core::types::Position;
+use factorio_bot_core::types::{FactorioEntity, FactorioPlayer, Position};
 use factorio_bot_planner::action::{Action, ActionKind, Actor, Condition, Effect};
+use factorio_bot_planner::goal::{Goal, Holder};
 use factorio_bot_planner::ids::{ActionIdGen, ChainId};
+use factorio_bot_planner::method::expand;
+use factorio_bot_planner::method::have::registry_for;
 use factorio_bot_planner::{ActionNetwork, BotId, PlanState, Schedule, StepKind, schedule};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// Bot 3's position for the last 158 000 ticks of `run-1788432181-42528`,
@@ -296,11 +318,11 @@ fn the_order_the_game_refused_things_in_does_not_reach_the_plan() {
     );
 }
 
-/// **Why none of the above fired in a live run.**
+/// **Why none of the above fired in a live run**, and why that is still true.
 ///
-/// Every test in this file builds its mine as a *free* action — no chain, no
-/// owner — and in that shape the ledger works exactly as designed: `schedule`
-/// splits the roster into open and refused, and the refused bot loses.
+/// Every test above builds its mine as a *free* action — no chain, no owner —
+/// and in that shape the ledger works exactly as designed: `schedule` splits
+/// the roster into open and refused, and the refused bot loses.
 ///
 /// A real run does not have that shape. Gathering goals are sized per bot
 /// (`Holder::Share`), and `crates/planner/src/method/mod.rs` gives such a
@@ -318,13 +340,17 @@ fn the_order_the_game_refused_things_in_does_not_reach_the_plan() {
 /// bit — while every test above passed. The memory is written, read and
 /// matched correctly; it just has one candidate to choose from.
 ///
-/// This test pins the live behaviour, not the desired one. It should be
-/// *inverted* — not deleted — by whatever change lets an owned chain react to
-/// a refusal (re-siting the destination at expansion, or refusing to size a
-/// share against a bot that cannot reach the work). Deleting it would remove
-/// the only statement in the crate that these two features do not compose.
+/// **This test is deliberately unchanged, and it now pins a decision rather
+/// than a defect.** The obvious way to "fix" it here — give the owner arm a
+/// fallback tier — re-breaks `run-1788405365-21697`, where the scheduler bound
+/// a share's chain to whichever bot was cheapest rather than the one its bill
+/// was sized against and a downstream action failed for a bot that did not
+/// hold the items. The owner has to stay hard. So the fix went one level up,
+/// to where the chain is created rather than where it is assigned:
+/// [`a_walled_in_bot_is_not_sized_a_share`] is the other half, and the two
+/// together are what the file used to say could not compose.
 #[test]
-fn an_owned_chain_has_one_candidate_so_the_ledger_cannot_reorder_it() {
+fn an_owned_chains_candidate_list_is_one_bot_by_design() {
     let state = state_with(&[]);
     let pos = ore_near_the_boxed_in_bots(&state);
     // Bot 3 asked from where it stands and was told no, exactly as in
@@ -345,8 +371,343 @@ fn an_owned_chain_has_one_candidate_so_the_ledger_cannot_reorder_it() {
         walker(&scheduled, &pos),
         Some(BotId(3)),
         "an owner is a hard constraint with no fallback tier, so the bot the \
-         game refused is still the only candidate -- this is the live \
-         behaviour, and it is why the ledger changed nothing in \
-         run-1788449752-46541"
+         game refused is still the only candidate -- kept deliberately: the \
+         chain's bill was sized against this bot's inventory, and handing it to \
+         another is what broke run-1788405365-21697"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The other half: expansion, and `run-1788449752-46541`'s own geometry.
+// ---------------------------------------------------------------------------
+
+/// Bot 2's position from tick 47 100 to the end of `run-1788449752-46541`,
+/// verbatim from `samples.jsonl`. 164 000 ticks — 78% of the run — without
+/// moving by a bit.
+const FROZEN_BOT_2: (f64, f64) = (-56.2421875, 14.28125);
+
+/// Bot 3's, for the same 164 000 ticks. Forty centimetres from bot 2 and just
+/// as stuck.
+const FROZEN_BOT_3: (f64, f64) = (-56.26953125, 14.68359375);
+
+/// A closed square ring of trees `radius` tiles out from `around`, spaced half
+/// a tile so nothing a character-sized box could slip through is left between
+/// two of them.
+///
+/// The same construction `crates/planner/tests/enclosure_prevention.rs` and
+/// `crates/core/tests/enclosure_run13.rs` use, and for the reason those files
+/// argue at length: the class of obstacle that actually boxes a bot in — trees,
+/// rocks, cliffs, water — reaches `blocked_tree` only and is structurally
+/// absent from a run's archived keyframe, so a scenario that needs a wall has
+/// to build one.
+fn tree_ring(around: &Position, radius: f64) -> Vec<FactorioEntity> {
+    let mut ring = Vec::new();
+    let mut offset = -radius;
+    while offset <= radius {
+        for pos in [
+            Position::new(around.x() + offset, around.y() - radius),
+            Position::new(around.x() + offset, around.y() + radius),
+            Position::new(around.x() - radius, around.y() + offset),
+            Position::new(around.x() + radius, around.y() + offset),
+        ] {
+            ring.push(FactorioEntity::new_tree(&pos));
+        }
+        offset += 0.5;
+    }
+    ring
+}
+
+/// The run's roster as the world saw it: four real players, two of them frozen
+/// inside a ring of trees, and the enclosure ledger `crates/executor`'s walk
+/// memory would have written for those two.
+///
+/// `record_enclosure` is called with the same numbers `note_enclosure` uses —
+/// no tick (the pathfinder answers before the walk is dispatched), the position
+/// the character was standing at, and `SEARCH_RADIUS` for the window. The
+/// `pocket_tiles` value is not read by anything under test; it is carried into
+/// the plan's own narration.
+fn frozen_run_world() -> Arc<FactorioWorld> {
+    let world = fixture_world();
+    let midpoint = Position::new(
+        (FROZEN_BOT_2.0 + FROZEN_BOT_3.0) / 2.,
+        (FROZEN_BOT_2.1 + FROZEN_BOT_3.1) / 2.,
+    );
+    world
+        .update_chunk_entities(tree_ring(&midpoint, 3.))
+        .expect("the ring loads");
+    for (id, at_) in [
+        (1u8, ELSEWHERE),
+        (2, FROZEN_BOT_2),
+        (3, FROZEN_BOT_3),
+        (4, (ELSEWHERE.0 + 2., ELSEWHERE.1)),
+    ] {
+        world.players.insert(
+            id,
+            FactorioPlayer {
+                player_id: id,
+                position: at(at_),
+                ..Default::default()
+            },
+        );
+    }
+    for player in [2, 3] {
+        world.record_enclosure(Enclosure {
+            tick: None,
+            player,
+            at: at(if player == 2 {
+                FROZEN_BOT_2
+            } else {
+                FROZEN_BOT_3
+            }),
+            pocket_tiles: 24.,
+            searched_tiles: 24.,
+        });
+    }
+    Arc::new(world)
+}
+
+/// Which bot, if any, owns the chain this action belongs to.
+fn owner_of(net: &ActionNetwork, action: &Action) -> Option<BotId> {
+    net.chain_of(action.id)
+        .and_then(|chain| net.owner_of(chain))
+}
+
+/// The premise, checked before anything is asserted about a plan.
+///
+/// Two witnesses are required and the test needs both to be present, or it
+/// would pass for the wrong reason: a state where nobody is walled in makes
+/// every assertion below trivially true. This is also the statement that the
+/// two witnesses agree — the game's recorded observation and the planner's own
+/// fill — which is the whole basis for excluding a bot at all.
+#[test]
+fn the_two_frozen_bots_read_as_walled_in_and_the_other_two_do_not() {
+    let state = PlanState::from_world(frozen_run_world(), &roster());
+    assert!(
+        state.is_walled_in(BotId(2)) && state.is_walled_in(BotId(3)),
+        "bots 2 and 3 are inside the ring and the run recorded them enclosed \
+         there; got {:?}",
+        state.walled_in()
+    );
+    assert!(
+        !state.is_walled_in(BotId(1)) && !state.is_walled_in(BotId(4)),
+        "bots 1 and 4 worked freely all run and no enclosure was ever recorded \
+         for them; got {:?}",
+        state.walled_in()
+    );
+}
+
+/// **The defect, at the level where it can actually be fixed.**
+///
+/// `plan_created` at tick 136 430 gave bot 2 "mine 6 iron-ore" and bot 3 the
+/// same, to tiles neither had been able to reach for 89 000 ticks. Both walks
+/// were refused before dispatch, `abandon_rest` cut the rest of each chain, and
+/// the next plan derived the same shares from the same inputs. Bot 1 made 563
+/// of the run's 617 dispatches.
+///
+/// So: no chain in this plan may be owned by a bot that cannot walk, and the
+/// ore must still be gathered — by the bots that can.
+#[test]
+fn a_walled_in_bot_is_not_sized_a_share() {
+    let state = PlanState::from_world(frozen_run_world(), &roster());
+    let bots = roster();
+    let goal = Goal::Have {
+        item: "iron-ore".into(),
+        count: 8,
+        whose: Holder::Anyone,
+    };
+    let net = expand(&[goal], &state, &registry_for(&bots), BotId(1))
+        .expect("eight iron ore, four bots, a fixture patch with room for them");
+
+    let owners: BTreeSet<BotId> = net.actions().filter_map(|a| owner_of(&net, a)).collect();
+    assert!(
+        !owners.contains(&BotId(2)) && !owners.contains(&BotId(3)),
+        "a share names an owner and no other bot may ever take it over, so a \
+         share sized against a bot that cannot walk is work the run can never \
+         do; owners were {owners:?}"
+    );
+    assert!(
+        owners.contains(&BotId(1)) && owners.contains(&BotId(4)),
+        "the work must land on the bots that can do it, not evaporate; owners \
+         were {owners:?}"
+    );
+
+    let mined: u32 = net
+        .actions()
+        .filter_map(|a| match &a.kind {
+            ActionKind::Mine { item, count, .. } if item == "iron-ore" => Some(*count),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(
+        mined, 8,
+        "the same eight ore are still gathered; the split is narrower, not smaller"
+    );
+}
+
+/// The control, and the reason the assertion above is about walling-in rather
+/// than about walk refusals.
+///
+/// The same world with the enclosure ledger empty — a run where the pathfinder
+/// has never been asked, or has been asked and found a way. Every bot is sized
+/// a share, exactly as before this change. Without this, a bug that made
+/// `is_walled_in` answer `true` for everybody would leave every assertion above
+/// passing.
+#[test]
+fn with_nothing_recorded_every_bot_is_still_sized_a_share() {
+    let world = fixture_world();
+    for (id, at_) in [
+        (1u8, ELSEWHERE),
+        (2, FROZEN_BOT_2),
+        (3, FROZEN_BOT_3),
+        (4, (ELSEWHERE.0 + 2., ELSEWHERE.1)),
+    ] {
+        world.players.insert(
+            id,
+            FactorioPlayer {
+                player_id: id,
+                position: at(at_),
+                ..Default::default()
+            },
+        );
+    }
+    let bots = roster();
+    let state = PlanState::from_world(Arc::new(world), &bots);
+    assert!(
+        state.walled_in().is_empty(),
+        "nothing wrote the enclosure ledger, so nothing may be inferred from it"
+    );
+    let goal = Goal::Have {
+        item: "iron-ore".into(),
+        count: 8,
+        whose: Holder::Anyone,
+    };
+    let net = expand(&[goal], &state, &registry_for(&bots), BotId(1)).expect("expands");
+    let owners: BTreeSet<BotId> = net.actions().filter_map(|a| owner_of(&net, a)).collect();
+    assert_eq!(
+        owners,
+        bots.iter().copied().collect::<BTreeSet<_>>(),
+        "with no evidence of anything wrong, the whole roster shares the work"
+    );
+}
+
+/// **The exclusion may never empty the split.**
+///
+/// With every bot walled in there is no better bot to move the work to, and
+/// refusing to plan is strictly worse than planning a walk that may fail: a
+/// plan that dispatches and fails leaves a record, a failed walk and a recovery
+/// tier; a plan that was never made leaves none of those, and the supervisor
+/// closes the milestone `stuck` on the strength of a memory. Same rule the
+/// scheduler's own refusal tier keeps, restated here because this one is a
+/// filter and that one is a reordering.
+#[test]
+fn when_every_bot_is_walled_in_the_split_is_unchanged() {
+    let world = fixture_world();
+    let midpoint = Position::new(
+        (FROZEN_BOT_2.0 + FROZEN_BOT_3.0) / 2.,
+        (FROZEN_BOT_2.1 + FROZEN_BOT_3.1) / 2.,
+    );
+    world
+        .update_chunk_entities(tree_ring(&midpoint, 3.))
+        .expect("the ring loads");
+    // All four inside the one ring, and all four on record as enclosed there.
+    let positions = [
+        (1u8, (midpoint.x() - 1., midpoint.y() - 1.)),
+        (2, FROZEN_BOT_2),
+        (3, FROZEN_BOT_3),
+        (4, (midpoint.x() + 1., midpoint.y() + 1.)),
+    ];
+    for (id, at_) in positions {
+        world.players.insert(
+            id,
+            FactorioPlayer {
+                player_id: id,
+                position: at(at_),
+                ..Default::default()
+            },
+        );
+        world.record_enclosure(Enclosure {
+            tick: None,
+            player: id,
+            at: at(at_),
+            pocket_tiles: 24.,
+            searched_tiles: 24.,
+        });
+    }
+    let bots = roster();
+    let state = PlanState::from_world(Arc::new(world), &bots);
+    assert_eq!(
+        state.walled_in().len(),
+        4,
+        "the premise: every bot is stuck, got {:?}",
+        state.walled_in()
+    );
+    let goal = Goal::Have {
+        item: "iron-ore".into(),
+        count: 8,
+        whose: Holder::Anyone,
+    };
+    let net = expand(&[goal], &state, &registry_for(&bots), BotId(1))
+        .expect("a plan is still made when nobody can walk");
+    let owners: BTreeSet<BotId> = net.actions().filter_map(|a| owner_of(&net, a)).collect();
+    assert_eq!(
+        owners,
+        bots.iter().copied().collect::<BTreeSet<_>>(),
+        "with no bot better than any other, the split is what it always was"
+    );
+}
+
+/// **Un-exclusion does not wait for the bot to move**, which matters because
+/// being unable to move is the condition.
+///
+/// `FactorioWorld::enclosures` is append-only and never drained — a standing
+/// fact, not an event — so the observation for bot 2 and bot 3 is still in the
+/// ledger here. What is gone is the wall. `PlanState` re-runs the fill on every
+/// `from_world` and the second witness disagrees, so both bots are back in the
+/// split from the very next plan, without having taken a single step.
+///
+/// This is the guarantee that keeps a slow run from becoming a stuck one. Run
+/// `run-1788449752-46541`'s bot 4 is the case it is written for: refused a path
+/// from `(-51.25, 13.23)` on three consecutive plans and then, at tick 160 440,
+/// simply walked away — because the world around it had changed, not because it
+/// had.
+#[test]
+fn a_bot_whose_pocket_has_opened_is_sized_a_share_again() {
+    // The same world and the same ledger rows, with no ring built.
+    let world = fixture_world();
+    for (id, at_) in [
+        (1u8, ELSEWHERE),
+        (2, FROZEN_BOT_2),
+        (3, FROZEN_BOT_3),
+        (4, (ELSEWHERE.0 + 2., ELSEWHERE.1)),
+    ] {
+        world.players.insert(
+            id,
+            FactorioPlayer {
+                player_id: id,
+                position: at(at_),
+                ..Default::default()
+            },
+        );
+    }
+    for player in [2, 3] {
+        world.record_enclosure(Enclosure {
+            tick: None,
+            player,
+            at: at(if player == 2 {
+                FROZEN_BOT_2
+            } else {
+                FROZEN_BOT_3
+            }),
+            pocket_tiles: 24.,
+            searched_tiles: 24.,
+        });
+    }
+    let bots = roster();
+    let state = PlanState::from_world(Arc::new(world), &bots);
+    assert!(
+        state.walled_in().is_empty(),
+        "the ledger still remembers, but the fill no longer agrees, and the \
+         fresh answer is the one that counts; got {:?}",
+        state.walled_in()
     );
 }

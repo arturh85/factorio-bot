@@ -974,6 +974,53 @@ pub struct PlanState {
     /// refused by a real game, so every existing test world has none of these
     /// and scheduling is bit-for-bit what it was.
     refused_walks: Vec<WalkRefusal>,
+    /// Bots that cannot reach open ground from where they are standing, with
+    /// the size of the pocket each is sealed into, in square tiles of
+    /// configuration space.
+    ///
+    /// # Two independent witnesses, and why both are required
+    ///
+    /// A row is here only when *both* of these hold at the moment the plan is
+    /// built:
+    ///
+    /// * `FactorioWorld::enclosures` — written by
+    ///   `crates/executor::walk_memory::note_enclosure` — carries an
+    ///   observation for this player within
+    ///   [`WalkRefusal::SAME_PLACE_TOLERANCE`] of where the bot is *now*. That
+    ///   ledger is only ever written when the game's own pathfinder has
+    ///   already refused a route from that spot, so it is the game's evidence,
+    ///   not ours.
+    /// * [`PlanState::escape_from`] run against *this* state agrees, right
+    ///   now. The ledger is append-only and never drained, so on its own it
+    ///   would keep a bot excluded long after somebody mined the tree that
+    ///   trapped it. Re-asking is what un-excludes a bot without requiring it
+    ///   to move first — which it cannot do, that being the condition.
+    ///
+    /// [`crate::enclosure::Escape::Unknown`] is never folded into this: an
+    /// unmodelled window is not proof a bot is stuck, and the whole of the
+    /// rest of this type treats "I could not tell" as a reason to do the
+    /// ordinary thing.
+    ///
+    /// # What reads it
+    ///
+    /// [`crate::method::have::even_shares`], and nothing else. A walled-in bot
+    /// is still a full member of the roster everywhere else — `schedule` may
+    /// still pick it, `Holder::Bot` may still name it, and every free action
+    /// still ranks it. What it must not get is a *share*: a share opens a
+    /// chain that names it as owner (`crates/planner/src/method/mod.rs`), and
+    /// `schedule` treats an owner as a hard constraint with no fallback tier,
+    /// so a share handed to a walled-in bot is work no other bot can ever pick
+    /// up. That is what `run-1788449752-46541` measured — bots 2 and 3 frozen
+    /// at one spot for 75 000 ticks, still being sized six iron ore each on
+    /// every replan.
+    ///
+    /// # Determinism
+    ///
+    /// A `BTreeMap`, keyed by `BotId`, built from a ledger read once at
+    /// construction — the same discipline `refused_walks` keeps, and for the
+    /// same reason. Empty in every fixture: nothing writes
+    /// `FactorioWorld::enclosures` unless a real game refused a real walk.
+    walled_in: BTreeMap<BotId, f64>,
 }
 
 impl PlanState {
@@ -1129,7 +1176,7 @@ impl PlanState {
                 },
             );
         }
-        PlanState {
+        let mut state = PlanState {
             base,
             bots: map,
             unknown_bots,
@@ -1148,7 +1195,52 @@ impl PlanState {
             refused,
             buffers,
             refused_walks,
+            walled_in: BTreeMap::new(),
+        };
+        state.walled_in = state.find_walled_in();
+        state
+    }
+
+    /// Which of this state's bots are sealed into a pocket where they stand.
+    ///
+    /// Run once, from [`PlanState::from_world`], on a state that is complete
+    /// except for this field. See the field's own doc for why the answer needs
+    /// two witnesses rather than one.
+    ///
+    /// # Cost
+    ///
+    /// One flood fill per bot the *game* has already reported walled in at
+    /// (about) its current spot — which is zero for every fixture in this
+    /// workspace and for every healthy run, because the ledger this reads is
+    /// only ever written from a `failed to path find`. It is deliberately not
+    /// "a fill per bot": that would be four fills on every plan for a question
+    /// nobody has a reason to ask.
+    fn find_walled_in(&self) -> BTreeMap<BotId, f64> {
+        let observed = self.base.enclosures();
+        if observed.is_empty() {
+            return BTreeMap::new();
         }
+        let mut out = BTreeMap::new();
+        for (bot, state) in &self.bots {
+            let reported = observed.iter().any(|found| {
+                found.player == bot.0
+                    && (found.at.x - state.position.x)
+                        .hypot(found.at.y - state.position.y)
+                        .total_cmp(&WalkRefusal::SAME_PLACE_TOLERANCE)
+                        .is_le()
+            });
+            if !reported {
+                continue;
+            }
+            // The second witness. `Open` and `Unknown` both mean "do not
+            // exclude"; only a fill that closes inside the window does.
+            if let crate::enclosure::Escape::Enclosed { pocket_tiles } =
+                self.escape_from(&state.position)
+            {
+                out.insert(*bot, pocket_tiles);
+            }
+        }
+        out
     }
 
     pub fn fork(&self) -> PlanState {
@@ -2194,6 +2286,22 @@ impl PlanState {
     /// failure mode this memory would otherwise introduce.
     pub fn refused_walks(&self) -> &[WalkRefusal] {
         &self.refused_walks
+    }
+
+    /// Whether this bot is sealed into a pocket where it is standing — see the
+    /// [`PlanState::walled_in`] field.
+    pub fn is_walled_in(&self, bot: BotId) -> bool {
+        self.walled_in.contains_key(&bot)
+    }
+
+    /// Every walled-in bot with the size of its pocket, in square tiles.
+    ///
+    /// Exposed for the same reason [`PlanState::refused_walks`] is: a plan
+    /// that quietly sizes a gathering goal for two bots out of four and cannot
+    /// say why is the failure mode this exclusion would otherwise introduce.
+    /// `crates/scripting_lua`'s planning entry point narrates it.
+    pub fn walled_in(&self) -> &BTreeMap<BotId, f64> {
+        &self.walled_in
     }
 
     /// Whether this tile is clear.

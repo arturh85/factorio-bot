@@ -1100,3 +1100,34 @@ because neither was the constraint.
 all moved in directions that looked like progress or regression and were
 neither. `steps/bot` was the number that mattered and it has been flat all
 session.
+
+## Run 8 hung in milestone 2: planned 198 steps, dispatched none, for two hours
+
+`run-1788465258-49050` satisfied rung 1 cleanly (two epochs, 21.4 min game
+time), planned milestone 2 at 198 steps at tick 81,514 -- and then **dispatched
+nothing at all for over two hours of wall clock**. `events.jsonl` static at
+92,427 bytes, last event the `plan_created` itself, all five game processes
+alive the whole time.
+
+Same *signature* as run 11 (plan created, zero dispatches, indefinite silence)
+but a different cause: run 11 had silently degraded to a one-bot roster after a
+client-connect timeout, and this run's roster was `[1, 2, 3, 4]` throughout.
+Cause unknown.
+
+**Two guards failed to catch it.** The monitor's 18-minute no-output check did
+not fire, and nothing in the run itself noticed that a plan had been created and
+never started. A run that plans and then does nothing is indistinguishable, from
+outside, from a run doing slow work -- which is the same "silence is not
+success" problem that has now appeared in three different forms today
+(the mods-directory line that never printed, the `"other"` failure
+classification, and archived samples ending at the last closed milestone).
+
+Worth considering: the executor knows both when a plan was created and when it
+last dispatched. The gap between those two is a directly observable
+"planned but never started" condition, and unlike a wall-clock stall it does
+not need a threshold tuned against batch length.
+
+**Note on this run's data**: `workspace/mods/BotBridge` was redirected at a
+worktree copy (`/tmp/furnace-run/mods/BotBridge`) for its whole duration, so it
+carries no machine samples even though `4a7fbdca` had landed. My error, from
+launching the run out of a worktree. Symlink restored afterwards.

@@ -3,6 +3,7 @@ use crate::error::PlannerError;
 use crate::goal::Holder;
 use crate::ids::{BotId, ChainId, ItemId};
 use crate::method::util::rotated_collision_box;
+use factorio_bot_core::constants::BOT_FORCE;
 use factorio_bot_core::factorio::util::{add_to_rect, calculate_distance};
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::num_traits::FromPrimitive;
@@ -51,19 +52,6 @@ const TILE_HALF_SIDE: f64 = 0.5;
 /// pins it), and it is the same number `mine_step_aside_waypoint` in
 /// `mods/BotBridge/control.lua` falls back to.
 const VANILLA_RESOURCE_REACH: f64 = 2.7;
-
-/// The force the bots play for, and the only one this planner reasons about.
-///
-/// `"player"` is Factorio's own name for the default player force, and it is
-/// what `mods/BotBridge/control.lua`'s `collect_player_force` and
-/// `collect_recipes` both already hardcode. `crates/executor`'s
-/// `rcon_actuator::BOT_FORCE` names the same string for the same reason, with
-/// its own test guarding it; the two are deliberately *not* one shared
-/// constant yet, because the only place both crates can see is
-/// `crates/core`, which belongs to other work right now. Unifying them is a
-/// one-line follow-up and is named in
-/// `docs/superpowers/notes/2026-09-02-research-needs-power.md`.
-pub const BOT_FORCE: &str = "player";
 
 /// How far from an entity [`PlanState::electric_supply_kw`] looks for the poles
 /// and generators that might power it, in tiles.

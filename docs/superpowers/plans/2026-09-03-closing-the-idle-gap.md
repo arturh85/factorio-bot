@@ -295,10 +295,26 @@ Two constraints established:
 ## Open items not on the critical path
 
 - **Flaky test**: `crates/planner/tests/red_science.rs::every_expansion_replays_in_time_order`
-  failed once under a full `--workspace` run, passes 12/12 in isolation and
-  3/3 under repeated workspace runs since. In a crate whose contract is
-  byte-identical determinism this must be understood, not waited out. No
-  error text was captured from the original failure.
+  failed once under a full `--workspace` run, reported by the provenance
+  agent. **Not reproduced in 18 subsequent attempts** — 12 isolated runs and
+  6 full workspace passes (70 `ok` result lines each, zero failures) at
+  `20323fd0`.
+
+  **This is unresolved, not resolved.** No error text was captured from the
+  original failure, so there is nothing to diagnose from, and the test body
+  contains no wall-clock, no randomness and no shared state — reading it
+  suggests nothing that *could* vary. In a crate whose whole contract is
+  byte-identical determinism, "it stopped happening" is not an answer. If it
+  recurs, **capture the failure output before doing anything else**; that is
+  the missing input.
+
+  One hypothesis worth recording rather than testing blindly: the failure
+  was seen under full-workspace parallelism, and the only load-sensitive
+  failure mode available to a pure test is stack depth in `expand()`'s
+  recursion, since test threads get a smaller default stack than main. That
+  would abort the process rather than fail one test, which does not match —
+  so it is a weak hypothesis, offered only so the next reader does not start
+  from zero.
 - **Benchmark seed `20260903`** is documented but **has never been run**.
   The recipe is destructive (`--new` deletes the map) and unvalidated.
 - Mod-side walk re-path defect (`walk_repath_finished` quoting the original

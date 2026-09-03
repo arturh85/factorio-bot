@@ -583,12 +583,15 @@ end
 --
 -- Every entry of `plan.steps` carries `bot`, `start`, `finish` and `kind`.
 -- `finish`, never `end`: `end` is a Lua keyword, so `step.end` does not parse.
--- A `kind == "walk"` step also carries `to` -- a `types.Position` -- and
--- `radius`, the tolerance that walk's own precondition asked for. `radius` is
--- what tells "stand on this tile" from "stand near it", which for a place,
--- insert or remove is the difference between a reachable request and the
--- entity's own tile; a walk that only has to get close carries a non-zero one.
--- Both `radius` and the other scalar fields are accepted by `plan:count{...}`
+-- A `kind == "walk"` step also carries `to` -- a `types.Position` -- and the
+-- two bounds that walk's own precondition asked for. `radius` is what tells
+-- "stand on this tile" from "stand near it", which for a place, insert or
+-- remove is the difference between a reachable request and the entity's own
+-- tile; a walk that only has to get close carries a non-zero one.
+-- `min_radius` is the other end: how close is *too* close. It is non-zero
+-- only for a walk serving a placement, where `to` is the ground the building
+-- will stand on and the acting bot must be clear of it.
+-- Both radii and the other scalar fields are accepted by `plan:count{...}`
 -- and `plan:find{...}`; `to` and `pos` are not, being tables rather than
 -- comparable values.
 --
@@ -1063,6 +1066,7 @@ mod tests {
             &self,
             _bot: BotId,
             _to: Position,
+            _min_radius: f64,
             _radius: f64,
         ) -> Result<ActionTicks, ActuatorFailure> {
             if self.fail_walks {
@@ -1746,6 +1750,7 @@ mod tests {
             &self,
             bot: BotId,
             _to: Position,
+            _min_radius: f64,
             _radius: f64,
         ) -> Result<ActionTicks, ActuatorFailure> {
             self.note(bot)

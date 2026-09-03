@@ -118,6 +118,7 @@ mod tests {
                 ScheduledStep {
                     what: StepKind::Walk {
                         to: Position::new(10., 0.),
+                        min_radius: 0.0,
                         radius: 3.0,
                     },
                     bot: BotId(1),
@@ -204,6 +205,7 @@ mod tests {
             steps: vec![ScheduledStep {
                 what: StepKind::Walk {
                     to: Position::new(1., 0.),
+                    min_radius: 0.0,
                     radius: 3.0,
                 },
                 bot: BotId(1),

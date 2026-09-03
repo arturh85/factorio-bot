@@ -129,19 +129,22 @@ impl From<ActuatorError> for ActuatorFailure {
 /// looking identical downstream.
 #[async_trait]
 pub trait Actuator: Send + Sync {
-    /// Go stand within `radius` of `to`.
+    /// Go stand in the annulus `(min_radius, radius]` around `to`.
     ///
     /// `to` is the position the plan's `AtPosition` precondition names, which
     /// for a place, an insert or a remove is the **entity's own tile** — a
-    /// tile the bot cannot occupy. `radius` is the tolerance that makes the
-    /// request satisfiable, and an implementation that ignores it is asking
-    /// the game to path onto an obstacle. See
-    /// [`factorio_bot_core::factorio::rcon::approach_radius`] for how far
-    /// inside the tolerance to actually aim.
+    /// tile the bot cannot occupy. The two radii are that condition's own
+    /// bounds, and an implementation that ignores either is asking the game to
+    /// path onto an obstacle: `radius` alone would accept the centre, and a
+    /// positive `min_radius` is exactly the statement that the centre is
+    /// forbidden ground. See
+    /// [`factorio_bot_core::factorio::rcon::approach_annulus`] for what to ask
+    /// the game for given both.
     async fn walk(
         &self,
         bot: BotId,
         to: Position,
+        min_radius: f64,
         radius: f64,
     ) -> Result<ActionTicks, ActuatorFailure>;
     async fn mine(
@@ -410,6 +413,7 @@ mod tests {
                 &self,
                 _: BotId,
                 _: Position,
+                _: f64,
                 _: f64,
             ) -> Result<ActionTicks, ActuatorFailure> {
                 unreachable!()

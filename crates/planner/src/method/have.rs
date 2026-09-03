@@ -4141,24 +4141,38 @@ mod tests {
             result.steps
         );
         match &result.steps[place_index - 1].what {
-            StepKind::Walk { to, .. } => {
-                assert!(
-                    (calculate_distance(to, &pos) - min_radius).abs() < 1e-9,
-                    "the walk must land exactly at the annulus's inner edge, \
-                     {min_radius} from the furnace site; landed {} away",
-                    calculate_distance(to, &pos)
+            StepKind::Walk {
+                to,
+                min_radius: walk_min,
+                radius: walk_radius,
+            } => {
+                // The walk carries the placement's own annulus, unaltered.
+                // It deliberately does *not* name a point on it: choosing one
+                // needs to know which ground is walkable, and the planner does
+                // not. Run 10's refusal is what naming one costs -- the point
+                // it picked along a fixed `+x` was inside a collision box the
+                // planner could not see (`StepKind::Walk`).
+                assert_eq!(*to, pos, "the walk names the site, not a stand-point");
+                assert_eq!(
+                    *walk_min, min_radius,
+                    "the walk must carry the placement's own inner bound"
                 );
-                // The replay-time check the whole fix exists to pass: what
-                // the walk claims must actually satisfy the placement's own
-                // precondition, not just the ticks `schedule()` charged for
-                // it internally.
+                assert!(
+                    *walk_radius >= min_radius,
+                    "and an outer bound the inner one fits inside: \
+                     ({walk_min}, {walk_radius}]"
+                );
+                // The replay-time check the whole fix exists to pass: the
+                // annulus the walk claims must be exactly the one the
+                // placement's own precondition demands, so a bot that lands
+                // anywhere in it can build.
                 let mut replay = s.fork();
-                replay.set_position(BotId(1), to.clone());
+                replay.set_position(BotId(1), Position::new(pos.x() + *walk_min, pos.y()));
                 for condition in &place.pre {
                     assert!(
                         condition.holds(&replay, BotId(1)),
-                        "precondition `{condition}` does not hold at the walk's own \
-                         destination `{to}` -- the plan would fail replay just as \
+                        "precondition `{condition}` does not hold at the annulus \
+                         the walk carries -- the plan would fail replay just as \
                          milestone 4 did"
                     );
                 }

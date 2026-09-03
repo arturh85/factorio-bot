@@ -7,7 +7,7 @@
 //! semantics here, change them there too, and vice versa.
 
 use factorio_bot_core::types::Position;
-use factorio_bot_planner::schedule::StepKind;
+use factorio_bot_planner::schedule::{StepKind, arrival_point};
 use factorio_bot_planner::{ActionId, ActionNetwork, BotId, PlanState, Schedule, Ticks};
 
 /// Replay a schedule in **time** order and assert the property the design asks
@@ -34,8 +34,18 @@ pub fn assert_preconditions_hold_over_time(
     let mut timeline: Vec<(Ticks, u8, BotId, Event)> = Vec::new();
     for step in &result.steps {
         match &step.what {
-            StepKind::Walk { to, .. } => {
-                timeline.push((step.end, 0, step.bot, Event::Arrive(to.clone())));
+            StepKind::Walk { to, min_radius, .. } => {
+                // A `Walk` names the annulus, not a point in it -- the point
+                // is the game's to choose. What the *plan* believes it reached
+                // is `arrival_point`, the same function `schedule()` advances
+                // its own simulation with, so a replay that used anything else
+                // would be checking a different plan than the one scheduled.
+                timeline.push((
+                    step.end,
+                    0,
+                    step.bot,
+                    Event::Arrive(arrival_point(to, *min_radius)),
+                ));
             }
             StepKind::Act { action, .. } => {
                 timeline.push((step.end, 0, step.bot, Event::Apply(*action)));

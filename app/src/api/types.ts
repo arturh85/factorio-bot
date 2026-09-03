@@ -808,6 +808,67 @@ export type EventKind =
           plan: PlannedStep[];
       }
     | {
+          /**
+           * A plan is being executed **right now**, and this is how far it has
+           * got -- a heartbeat with counters, written on a fixed wall-clock
+           * interval while the batch is in flight.
+           *
+           * Every other event about a plan's execution is written *after* the
+           * whole batch finished, so between `plan_created` and the first
+           * `action_dispatched` the record used to say nothing at all, for
+           * however long the batch took -- a quarter of an hour is ordinary
+           * for a four-bot plan. That made "executing a long plan perfectly
+           * well" and "planned, then dispatched nothing, ever" identical from
+           * outside, and one archived run was killed as hung while its bots
+           * were demonstrably still crafting.
+           *
+           * It states **no verdict**: there is no `stalled` flag and no
+           * threshold anywhere in the writer, because `dispatched: 0` on a
+           * plan of 152 steps needs none -- it is unambiguous at any
+           * duration. The interval decides the resolution of the answer,
+           * never its correctness, and a batch shorter than one interval
+           * writes none of these.
+           */
+          kind: 'batch_progress';
+          /** Wall-clock milliseconds since the executor was handed this batch.
+           *  Wall clock and not ticks, because a stopped game is exactly the
+           *  case where the tick clock cannot say whether anything is
+           *  happening. */
+          elapsed_ms: number;
+          /** How many actions the plan has in total -- the denominator for
+           *  every count below. Actions only; walks are counted separately. */
+          total: number;
+          /** How many actions have been dispatched at least once. **The
+           *  number the whole event is for**: `dispatched: 0` beside a
+           *  `plan_created` with steps is a plan nothing is executing. */
+          dispatched: number;
+          /** Dispatched, no verdict yet. */
+          in_flight: number;
+          /** Reached a verdict of any kind. */
+          settled: number;
+          /** Of the settled, how many the game judged and refused. */
+          failed: number;
+          /** Of the settled, how many were acknowledged and never answered --
+           *  kept apart from `failed` for the same reason `action_settled`
+           *  keeps them apart. */
+          lost: number;
+          /** Walks are counted separately because a walk has no action id and
+           *  appears in none of the counts above. Without them a batch whose
+           *  every bot is walking reports `in_flight: 0` and reads as four
+           *  idle bots. */
+          walks_dispatched: number;
+          walks_settled: number;
+          /** Wall-clock milliseconds since `dispatched` last went up, or
+           *  since the batch began when it never has. Measured against
+           *  dispatches, not settles: a bot waiting out a modelled lag edge
+           *  settles nothing and dispatches nothing, and this growing is the
+           *  honest report of that rather than an accusation. */
+          since_last_dispatch_ms: number;
+          /** Which bots have an action in flight, ascending. Empty is not by
+           *  itself a problem -- see `walks_dispatched`. */
+          bots_in_flight: number[];
+      }
+    | {
           kind: 'action_dispatched';
           id: number;
           bot: number;

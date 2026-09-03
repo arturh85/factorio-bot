@@ -754,6 +754,24 @@ const SCHEMAS: Record<string, SchemaContract> = {
             bots: {required: false, type: 'array', nullable: true},
             plan: {required: false, arrayOf: 'PlannedStep'}
         },
+        // The heartbeat a batch in flight writes, and the only event the
+        // record produces while a plan is executing. Every field is required:
+        // it is written live, so there is no "we did not observe this" case
+        // for any of them -- a counter that could not be read would mean the
+        // log itself could not be read.
+        batch_progress: {
+            elapsed_ms: {required: true, type: 'integer'},
+            total: {required: true, type: 'integer'},
+            dispatched: {required: true, type: 'integer'},
+            in_flight: {required: true, type: 'integer'},
+            settled: {required: true, type: 'integer'},
+            failed: {required: true, type: 'integer'},
+            lost: {required: true, type: 'integer'},
+            walks_dispatched: {required: true, type: 'integer'},
+            walks_settled: {required: true, type: 'integer'},
+            since_last_dispatch_ms: {required: true, type: 'integer'},
+            bots_in_flight: {required: true, type: 'array'}
+        },
         action_dispatched: {
             id: {required: true, type: 'integer'},
             bot: {required: true, type: 'integer'},

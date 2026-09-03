@@ -1101,33 +1101,78 @@ all moved in directions that looked like progress or regression and were
 neither. `steps/bot` was the number that mattered and it has been flat all
 session.
 
-## Run 8 hung in milestone 2: planned 198 steps, dispatched none, for two hours
+## Run 8 did NOT hang: it was executing, and the record could not say so
 
-`run-1788465258-49050` satisfied rung 1 cleanly (two epochs, 21.4 min game
-time), planned milestone 2 at 198 steps at tick 81,514 -- and then **dispatched
-nothing at all for over two hours of wall clock**. `events.jsonl` static at
-92,427 bytes, last event the `plan_created` itself, all five game processes
-alive the whole time.
+**Corrected 2026-09-03 evening. The section this replaces was wrong in every
+load-bearing claim**, and it is left described here rather than deleted because
+the way it was wrong is the finding.
 
-Same *signature* as run 11 (plan created, zero dispatches, indefinite silence)
-but a different cause: run 11 had silently degraded to a one-bot roster after a
-client-connect timeout, and this run's roster was `[1, 2, 3, 4]` throughout.
-Cause unknown.
+What it said: `run-1788465258-49050` satisfied rung 1 cleanly, planned milestone
+2 at tick 81,514, and then dispatched nothing at all for over two hours, with
+`events.jsonl` static and all five game processes alive. Cause unknown.
 
-**Two guards failed to catch it.** The monitor's 18-minute no-output check did
-not fire, and nothing in the run itself noticed that a plan had been created and
-never started. A run that plans and then does nothing is indistinguishable, from
-outside, from a run doing slow work -- which is the same "silence is not
-success" problem that has now appeared in three different forms today
-(the mods-directory line that never printed, the `"other"` failure
-classification, and archived samples ending at the last closed milestone).
+What the data says:
 
-Worth considering: the executor knows both when a plan was created and when it
-last dispatched. The gap between those two is a directly observable
-"planned but never started" condition, and unlike a wall-clock stall it does
-not need a threshold tuned against batch length.
+* **It was executing normally when it was killed.** The mod's own
+  `workspace/server/script-output/botbridge/samples.jsonl` -- which the run
+  archive does not read and nothing in the report surfaces -- runs to tick
+  126,360, 44,846 ticks *past* the plan. At tick 126,300 bot 1 has
+  `crafting_queue: 1` and a copper-cable count climbing 14 -> 18 -> 22 -> 26 ->
+  28 over consecutive samples, and is moving (`y` 12.27 -> 6.93). The force's
+  totals grew across the same window: iron-plate 105 -> 204, iron-ore 132 ->
+  231, stone-furnace 12 -> 20. Bots were working the whole time.
+* **It was not two hours, it was fourteen minutes.**
+  `workspace/server/factorio-current.log` stamps `Received SIGTERM` at
+  t+2441.2 s against a server started at 21:51:52 -- so 22:32:34, which is also
+  that file's mtime to the second. `events.jsonl` was last written at
+  22:18:49. That is 13m45s of silence. For comparison, the *previous* batch of
+  the same run (milestone 1, iteration 2) also wrote nothing for its whole
+  execution: ticks 23,092 -> 81,297, 58,205 ticks, about eighteen minutes of
+  wall clock at the ~54 ticks/s this run was managing. The silence that got the
+  run killed was **shorter** than the silence it had already survived once.
+* **The mod redirect is ruled out.** The run was launched from
+  `/tmp/furnace-run` at `f013f350`, which is four commits before `4a7fbdca`, so
+  the absent machine samples are the binary's age and not the symlink's.
+
+**The real defect is the record's, and it is structural.** Every event about a
+plan's execution except one is written *after* the batch finishes: the driver
+calls `record.actions()`/`record.walks()` on the supervisor's "ran" transition,
+once `goal.run` has returned (`scripts/factory_stage2.lua`). So between
+`plan_created` and the end of a batch, `events.jsonl` says nothing at all, for
+however long the batch takes -- and a run killed mid-batch is byte-identical to
+a run that planned and then dispatched nothing forever. Nine of the twenty-four
+runs archived at the time end that way, and not one of them can be told apart
+from the others.
+
+That is the same "silence is not success" shape as the other three found the
+same day (the mods-directory line that never printed, the `"other"` failure
+classification, archived samples ending at the last closed milestone) -- with
+the sign flipped: here silence read as *failure*, and cost the run anyway.
+
+**The guard**: `EventKind::BatchProgress` (`batch_progress`), written every
+30 s while a batch is in flight by `beat_batch_progress`
+(`crates/scripting_lua/src/globals/goal/run.rs`) through a `LiveRecord` handle
+published into the Lua state's app data by the `record` bindings. It carries
+counters and no verdict -- `dispatched`, `in_flight`, `settled`, `failed`,
+`lost`, `walks_dispatched`/`walks_settled`, `elapsed_ms`,
+`since_last_dispatch_ms`, `bots_in_flight` -- because "planned 152 steps and
+dispatched 0 of them" needs no threshold to read, at any duration, whereas a
+wall-clock stall limit would need tuning against batch length. The interval
+decides the resolution of the answer, never its correctness. It also narrates
+each beat to stdout, so a person watching a run can see it is alive.
+
+`tools/run_analysis.py` reads it and says one of four things per plan:
+`executed: yes`, `NO -- N heartbeat(s) counted zero`, `started, then the record
+stops` (with how far it got), or `UNKNOWN -- no dispatches and no heartbeat`.
+The last is deliberately not a stall verdict: it is what every pre-existing
+archived run reads as, and calling those stalls would be the same confident-
+wrong answer this whole thing exists to stop giving. `--summary` marks them
+`!dispatched-nothing`, `!killed-mid-batch` and `?ends-on-a-plan`.
+
+A side effect worth having: `RunRecorder::record` ingests the mod's samples on
+the way past, so a heartbeat during a long batch keeps `samples.jsonl` current
+instead of leaving it frozen at the last closed milestone.
 
 **Note on this run's data**: `workspace/mods/BotBridge` was redirected at a
-worktree copy (`/tmp/furnace-run/mods/BotBridge`) for its whole duration, so it
-carries no machine samples even though `4a7fbdca` had landed. My error, from
-launching the run out of a worktree. Symlink restored afterwards.
+worktree copy (`/tmp/furnace-run/mods/BotBridge`) for its whole duration.
+Symlink restored afterwards. Not causal -- see above.

@@ -467,6 +467,7 @@ def analyse(run_dir: str, freeze_ticks: int = DEFAULT_FREEZE_TICKS) -> dict:
     joined, join_stats = join_actions(events)
     result["join"] = join_stats
 
+    execution = batch_execution(events)
     result["plans"] = []
     for e in events:
         if e.get("kind") != "plan_created":
@@ -488,6 +489,11 @@ def analyse(run_dir: str, freeze_ticks: int = DEFAULT_FREEZE_TICKS) -> dict:
                 "steps_per_bot": dict(sorted(per_bot_steps.items(), key=lambda kv: (kv[0] is None, kv[0]))),
                 "planned_work_per_bot": dict(sorted(per_bot_work.items(), key=lambda kv: (kv[0] is None, kv[0]))),
                 "planned_verbs": dict(verbs.most_common()),
+                # Zipped by position: `batch_execution` walks the same event
+                # list in the same order, so the nth plan there is this one.
+                "execution": execution[len(result["plans"])]
+                if len(result["plans"]) < len(execution)
+                else None,
             }
         )
 
@@ -510,6 +516,78 @@ def analyse(run_dir: str, freeze_ticks: int = DEFAULT_FREEZE_TICKS) -> dict:
         result["production"] = None
         result["machines"] = None
     return result
+
+
+def batch_execution(events: list[dict]) -> list[dict]:
+    """What happened to each ``plan_created`` -- did anything ever run it?
+
+    This is the question two whole runs were thrown away over. Every event
+    about a plan's execution except one is written *after* the batch finishes
+    (the driver calls ``record.actions()`` on the supervisor's "ran"
+    transition), so a run killed or crashed mid-batch ends on a
+    ``plan_created`` with nothing after it -- and so does a run that planned
+    and then genuinely dispatched nothing. Nine of the twenty-four runs
+    archived when this was written end that way, and the archive alone cannot
+    tell which kind each one was.
+
+    ``batch_progress`` is the one event written *while* a batch runs, and it
+    is what makes the two separable. This function does the separating, and it
+    is careful about the third answer:
+
+    ``dispatched``      something was dispatched from this plan; the batch ran.
+    ``never_dispatched`` a heartbeat looked and found nothing dispatched at
+                        all. No threshold decides this -- the counter is zero.
+    ``cut_short``       heartbeats show dispatches, but the batch's own
+                        per-action lines never arrived: the run stopped while
+                        it was working. The last heartbeat says how far it got.
+    ``unknown``         no heartbeat and no dispatch. Either the build predates
+                        ``batch_progress`` or the run stopped inside the first
+                        interval. **Not** reported as a stall: that is exactly
+                        the confident-wrong answer this whole function exists
+                        to stop giving.
+
+    Attribution is positional: a heartbeat belongs to the ``plan_created`` it
+    follows. That is exact while one batch runs at a time, which every shipped
+    driver does -- each waits on its run before planning the next.
+    """
+    plans: list[dict] = []
+    current: dict | None = None
+    for e in events:
+        kind = e.get("kind")
+        if kind == "plan_created":
+            current = {
+                "tick": e.get("tick"),
+                "milestone": e.get("milestone_index"),
+                "steps": e.get("steps"),
+                "dispatched": 0,
+                "walks": 0,
+                "beats": 0,
+                "last_beat": None,
+                "first_dispatch_tick": None,
+            }
+            plans.append(current)
+            continue
+        if current is None:
+            continue
+        if kind == "batch_progress":
+            current["beats"] += 1
+            current["last_beat"] = e
+        elif kind in ("action_dispatched", "walk_dispatched"):
+            current["dispatched" if kind == "action_dispatched" else "walks"] += 1
+            if current["first_dispatch_tick"] is None:
+                current["first_dispatch_tick"] = e.get("tick")
+    for pl in plans:
+        beat = pl["last_beat"] or {}
+        beat_dispatched = (beat.get("dispatched") or 0) + (beat.get("walks_dispatched") or 0)
+        if pl["dispatched"] or pl["walks"]:
+            pl["verdict"] = "dispatched"
+        elif pl["beats"] and beat_dispatched == 0:
+            pl["verdict"] = "never_dispatched"
+        elif pl["beats"]:
+            pl["verdict"] = "cut_short"
+        else:
+            pl["verdict"] = "unknown"
+    return plans
 
 
 def sample_coverage(samples: list[dict], lo: int, hi: int, present: bool) -> dict:
@@ -1141,6 +1219,31 @@ def report(a: dict, out=sys.stdout, top: int = 12) -> None:
         p(f"  ! splits.json says milestone {d['index']} took {d['splits']} ticks; "
           f"events say {d['events']}")
 
+    # Said high up, because "the record just stops" is what a reader is trying
+    # to interpret when they open one of these at all, and the answer changed
+    # two runs' diagnoses. It is only said when the run has no `run_finished`:
+    # a run that closed cleanly has nothing to explain here.
+    last_plan = (a["plans"] or [None])[-1]
+    if a["outcome"].startswith("OPEN") and last_plan:
+        ex = last_plan.get("execution") or {}
+        beat = ex.get("last_beat") or {}
+        if ex.get("verdict") == "never_dispatched":
+            p(f"  ! this run ends on a plan of {last_plan['steps']} step(s) that dispatched "
+              f"NOTHING -- {ex['beats']} heartbeat(s) counted zero")
+        elif ex.get("verdict") == "cut_short":
+            p(f"  ! this run stopped while a batch was executing: "
+              f"{beat.get('dispatched')}/{beat.get('total')} dispatched at the last "
+              f"heartbeat, {beat.get('elapsed_ms', 0) / 1000:.0f}s in")
+        elif ex.get("verdict") == "unknown":
+            p(f"  ! this run ends on a plan_created (m{last_plan['milestone']}, "
+              f"{last_plan['steps']} steps) with nothing after it, and no heartbeat.")
+            p("    That is NOT evidence of a stall: per-action lines are written only "
+              "when a batch")
+            p("    finishes, so a run killed mid-batch looks exactly like this. Compare "
+              "the mod's")
+            p("    workspace/server/script-output/botbridge/samples.jsonl, which keeps "
+              "writing either way.")
+
     # Said before anything derived from the samples is printed, because
     # everything below that is derived from them -- FROZEN BOTS and PRODUCTION
     # both read the stream, and both describe only the part of the run it
@@ -1177,6 +1280,33 @@ def report(a: dict, out=sys.stdout, top: int = 12) -> None:
         p(f"    tick {pl['tick']:>7}  m{pl['milestone']}  steps={pl['steps']:<4} makespan={pl['makespan']:<7} roster={pl['roster']}")
         p(f"        steps/bot        {pl['steps_per_bot']}")
         p(f"        planned ticks/bot {pl['planned_work_per_bot']}")
+        ex = pl.get("execution") or {}
+        verdict = ex.get("verdict")
+        beat = ex.get("last_beat") or {}
+        if verdict == "dispatched":
+            p(f"        executed:         yes -- first dispatch at tick "
+              f"{ex['first_dispatch_tick']}, {ex['dispatched']} action(s) and "
+              f"{ex['walks']} walk(s) recorded")
+        elif verdict == "never_dispatched":
+            # The only place this tool says a plan was not executed, and it
+            # says it only because a heartbeat looked and counted zero.
+            p(f"        executed:         NO -- {ex['beats']} heartbeat(s) over "
+              f"{beat.get('elapsed_ms', 0) / 1000:.0f}s and NOTHING was ever dispatched "
+              f"from this plan")
+        elif verdict == "cut_short":
+            p(f"        executed:         started, then the record stops -- last heartbeat "
+              f"{beat.get('elapsed_ms', 0) / 1000:.0f}s in had "
+              f"{beat.get('dispatched')}/{beat.get('total')} dispatched, "
+              f"{beat.get('settled')} settled, {beat.get('in_flight')} in flight "
+              f"(bots {beat.get('bots_in_flight')}), {beat.get('walks_dispatched')} walk(s)")
+            p("                          the batch was running when the run stopped; "
+              "its per-action lines are only written when it finishes")
+        else:
+            p("        executed:         UNKNOWN -- no dispatches and no heartbeat. "
+              "Either this build")
+            p("                          predates batch_progress or the run stopped "
+              "inside the first interval;")
+            p("                          this record cannot say whether the plan ran.")
 
     for w in a["windows"]:
         span = w["span_ticks"]
@@ -1421,6 +1551,15 @@ def summary_line(a: dict) -> str:
     # Carried into the one-line form too: `--all --summary` is how a whole
     # archive gets scanned, and a truncated sample stream is exactly the kind
     # of defect nobody goes looking for run by run.
+    last_plan = (a["plans"] or [None])[-1]
+    if a["outcome"].startswith("OPEN") and last_plan:
+        verdict = (last_plan.get("execution") or {}).get("verdict")
+        if verdict == "never_dispatched":
+            parts.append("!dispatched-nothing")
+        elif verdict == "cut_short":
+            parts.append("!killed-mid-batch")
+        elif verdict == "unknown":
+            parts.append("?ends-on-a-plan")
     cov = a.get("samples_coverage") or {}
     if cov.get("verdict") == "no_samples":
         parts.append("!nosamples")

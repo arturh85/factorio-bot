@@ -14,12 +14,14 @@
 
 use super::plan::{Dispatch, PlanOrigin, PlanValue, RunSlot, position_to_lua};
 use super::{ActuatorFactory, goal_error, lock};
+use crate::globals::record::LiveRecord;
 use crate::lua_runner::{PendingWork, ReplaySink};
 use factorio_bot_core::mlua::prelude::*;
+use factorio_bot_core::record::EventKind;
 use factorio_bot_core::record::map::{EntitySnapshot, Placement};
 use factorio_bot_core::tokio::sync::watch;
 use factorio_bot_executor::{Actuator, ExecutionLog, Replay, Status, run_into};
-use factorio_bot_planner::{ActionNetwork, Schedule};
+use factorio_bot_planner::{ActionNetwork, Schedule, StepKind};
 use factorio_bot_scripting::OutputSink;
 use std::sync::{Arc, Mutex};
 
@@ -521,6 +523,223 @@ fn emit_replay(
     }
 }
 
+/// How often a batch in flight writes down where it has got to.
+///
+/// **This number decides the resolution of the answer, not the answer.** It is
+/// not a stall threshold and nothing compares anything against it: the event
+/// it paces carries counters and no verdict, so "planned 152 steps and
+/// dispatched none of them" reads the same whether it is noticed after thirty
+/// seconds or after thirty minutes. Making it smaller buys precision at the
+/// cost of lines in `events.jsonl`; making it larger costs precision and
+/// nothing else. A batch shorter than one interval writes none of these, which
+/// is correct -- its `action_dispatched` lines land moments later.
+///
+/// Thirty seconds against batches that routinely run for a quarter of an hour
+/// is roughly thirty lines per batch, beside a `plan_created` that already
+/// carries the whole DAG.
+const BATCH_PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What a batch looks like at one instant: the counters
+/// [`EventKind::BatchProgress`] publishes, read off the live log.
+///
+/// Counted over the **network**, not over the log, for the same reason
+/// [`build_observation`] is: an action nothing has dispatched yet has no log
+/// entry at all, so `total` read off the log would be the number of actions
+/// already started rather than the number the plan has -- and the whole point
+/// of this event is the ratio between those two.
+struct BatchSnapshot {
+    total: u32,
+    dispatched: u32,
+    in_flight: u32,
+    settled: u32,
+    failed: u32,
+    lost: u32,
+    walks_dispatched: u32,
+    walks_settled: u32,
+    bots_in_flight: Vec<u32>,
+}
+
+impl BatchSnapshot {
+    /// Reads the shared log once, under one guard, with no `.await` inside.
+    ///
+    /// The guard is a `std::sync::Mutex` the executor writes into from four
+    /// bot futures at a time; holding it across an await would stall the run
+    /// this is only supposed to be watching.
+    fn read(
+        net: &ActionNetwork,
+        log: &Mutex<ExecutionLog>,
+        bot_of: &std::collections::BTreeMap<factorio_bot_planner::ActionId, u32>,
+    ) -> Self {
+        let log = lock(log);
+        let mut snap = BatchSnapshot {
+            total: 0,
+            dispatched: 0,
+            in_flight: 0,
+            settled: 0,
+            failed: 0,
+            lost: 0,
+            walks_dispatched: 0,
+            walks_settled: 0,
+            bots_in_flight: Vec::new(),
+        };
+        let mut in_flight: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+        for action in net.actions() {
+            snap.total = snap.total.saturating_add(1);
+            let status = log.status(action.id);
+            if status == Status::Pending {
+                continue;
+            }
+            snap.dispatched = snap.dispatched.saturating_add(1);
+            match status {
+                Status::Running => {
+                    snap.in_flight = snap.in_flight.saturating_add(1);
+                    // The bot comes from the *schedule*. Neither of the two
+                    // things this function reads knows it: an `Action` says
+                    // what to do and an `Attempt` says what happened, and
+                    // assigning work to a bot is the scheduler's job alone.
+                    if let Some(bot) = bot_of.get(&action.id) {
+                        in_flight.insert(*bot);
+                    }
+                }
+                Status::Failed => {
+                    snap.settled = snap.settled.saturating_add(1);
+                    snap.failed = snap.failed.saturating_add(1);
+                }
+                Status::Lost => {
+                    snap.settled = snap.settled.saturating_add(1);
+                    snap.lost = snap.lost.saturating_add(1);
+                }
+                Status::Success => snap.settled = snap.settled.saturating_add(1),
+                Status::Pending => {}
+            }
+        }
+        snap.bots_in_flight = in_flight.into_iter().collect();
+        for (_bot, _step, walk) in log.walks() {
+            snap.walks_dispatched = snap.walks_dispatched.saturating_add(1);
+            if !matches!(walk.status, Status::Pending | Status::Running) {
+                snap.walks_settled = snap.walks_settled.saturating_add(1);
+            }
+        }
+        snap
+    }
+}
+
+/// Writes an [`EventKind::BatchProgress`] every [`BATCH_PROGRESS_INTERVAL`]
+/// for as long as this batch is executing, and narrates the same thing to
+/// whoever is watching the run happen.
+///
+/// # Why this is here and not in `crates/executor`
+///
+/// The executor is the one that knows a dispatch went out, and putting the
+/// heartbeat there was the obvious shape. It would mean handing `run_into` a
+/// recorder, though -- and the executor is driven by stubs in its own tests,
+/// by `goal.start`, and by recovery proposals that share a log with the run
+/// they recover. This function needs exactly two things the executor already
+/// publishes for other readers (`run:progress()` reads the same log the same
+/// way), so it can watch from outside without the executor growing a
+/// dependency on the run archive.
+///
+/// # It states no verdict, on purpose
+///
+/// There is no threshold in here. It does not decide that a batch is stuck,
+/// does not warn differently after some number of minutes, and does not stop
+/// beating when nothing is happening -- the run that prompted it was killed
+/// *because* a reader had to guess, and a guess written into the record would
+/// only move the guessing. What it writes is what was true when it looked:
+/// `dispatched: 0` out of 152 is a plan nothing is executing, and that reads
+/// the same at thirty seconds as at two hours.
+///
+/// The narration is `paris` on stdout because it is narration -- a line a
+/// person reads while the tool runs, telling them the run is alive and how far
+/// it has got. The record event is the durable half and the one a reader comes
+/// back to.
+async fn beat_batch_progress(
+    live: LiveRecord,
+    net: Arc<ActionNetwork>,
+    sched: Arc<Schedule>,
+    log: Arc<Mutex<ExecutionLog>>,
+    mut finished_rx: watch::Receiver<bool>,
+) {
+    // Built once: the schedule does not change while it is being executed, and
+    // this is the only place the "who is running this action" question can be
+    // answered from (see `BatchSnapshot::read`).
+    let bot_of: std::collections::BTreeMap<factorio_bot_planner::ActionId, u32> = sched
+        .steps
+        .iter()
+        .filter_map(|step| match &step.what {
+            StepKind::Act { action, .. } => Some((*action, u32::from(step.bot.0))),
+            StepKind::Walk { .. } => None,
+        })
+        .collect();
+    // `tokio::time::Instant`, not `std::time`: it is the clock the sleep below
+    // is measured against, so the two cannot disagree -- and a test that pauses
+    // time gets durations that match the intervals it advanced through instead
+    // of a run of zeroes.
+    let started = factorio_bot_core::tokio::time::Instant::now();
+    let mut last_dispatch_at = started;
+    let mut last_dispatched = 0u32;
+    loop {
+        // `wait_for` is cancel-safe, so losing this race leaves nothing
+        // half-consumed; and it returns immediately once the run has already
+        // published `true`, which is what makes a finished batch stop beating
+        // within one poll rather than within one interval.
+        let done = factorio_bot_core::tokio::select! {
+            _ = finished_rx.wait_for(|done| *done) => true,
+            () = factorio_bot_core::tokio::time::sleep(BATCH_PROGRESS_INTERVAL) => false,
+        };
+        if done {
+            return;
+        }
+        let snap = BatchSnapshot::read(&net, &log, &bot_of);
+        let now = factorio_bot_core::tokio::time::Instant::now();
+        if snap.dispatched > last_dispatched {
+            last_dispatched = snap.dispatched;
+            last_dispatch_at = now;
+        }
+        let elapsed_ms = u64::try_from(now.duration_since(started).as_millis()).unwrap_or(u64::MAX);
+        let since_last_dispatch_ms =
+            u64::try_from(now.duration_since(last_dispatch_at).as_millis()).unwrap_or(u64::MAX);
+        // Narrated whichever way it reads, because a run that is working and a
+        // run that is not are exactly the two things a watcher cannot tell
+        // apart, and printing only one of them would leave the other silent
+        // again.
+        if snap.dispatched == 0 {
+            factorio_bot_core::paris::warn!(
+                "<bright-red>nothing dispatched</> after {}s: {} planned steps, 0 dispatched, {} walks",
+                elapsed_ms / 1000,
+                snap.total,
+                snap.walks_dispatched,
+            );
+        } else {
+            factorio_bot_core::paris::info!(
+                "executing: <bright-blue>{}/{}</> dispatched, {} settled ({} failed, {} lost), \
+                 {} in flight, {} walks -- {}s in",
+                snap.dispatched,
+                snap.total,
+                snap.settled,
+                snap.failed,
+                snap.lost,
+                snap.in_flight,
+                snap.walks_dispatched,
+                elapsed_ms / 1000,
+            );
+        }
+        live.record(EventKind::BatchProgress {
+            elapsed_ms,
+            total: snap.total,
+            dispatched: snap.dispatched,
+            in_flight: snap.in_flight,
+            settled: snap.settled,
+            failed: snap.failed,
+            lost: snap.lost,
+            walks_dispatched: snap.walks_dispatched,
+            walks_settled: snap.walks_settled,
+            since_last_dispatch_ms,
+            bots_in_flight: snap.bots_in_flight,
+        });
+    }
+}
+
 /// Spawns `sched` against `act`, returning the run immediately and the
 /// task's own `JoinHandle` so the caller can register it into
 /// [`PendingWork`] -- the same split `Runs::spawn` used to make in `mod.rs`,
@@ -540,6 +759,7 @@ fn spawn(
     seed: ExecutionLog,
     origin: Option<Arc<PlanOrigin>>,
     sink: Option<Arc<dyn OutputSink>>,
+    live: Option<LiveRecord>,
 ) -> (RunValue, factorio_bot_core::tokio::task::JoinHandle<()>) {
     let log = Arc::new(Mutex::new(seed));
     let start_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -547,7 +767,21 @@ fn spawn(
     let task_log = log.clone();
     let task_net = net.clone();
     let task_error = start_error.clone();
+    let beat_rx = finished_rx.clone();
+    let beat_log = log.clone();
+    let beat_net = net.clone();
+    let beat_sched = sched.clone();
     let join = factorio_bot_core::tokio::spawn(async move {
+        // Started inside the run's own task and awaited by it below, so it is
+        // impossible for the heartbeat to outlive the batch it describes --
+        // no second registration, and nothing left beating over a run that is
+        // over. A missing recorder means no heartbeat at all rather than a
+        // task that wakes up to discover it has nowhere to write.
+        let beat = live.map(|live| {
+            factorio_bot_core::tokio::spawn(beat_batch_progress(
+                live, beat_net, beat_sched, beat_log, beat_rx,
+            ))
+        });
         // A run refused outright dispatched nothing, so the log stays exactly
         // as empty as it started. Recording *why* is what keeps the
         // observation from reading as a finished run with everything still
@@ -566,6 +800,13 @@ fn spawn(
         // No receiver is an ordinary outcome, not a failure: it just means
         // nothing (`:wait()`, `PendingWork`'s drain) is waiting on this run.
         let _ = finished_tx.send(true);
+        // After the signal, never before: the heartbeat stops on that very
+        // signal, so awaiting it here costs one scheduler poll and buys the
+        // guarantee that this task does not finish while a child of it is
+        // still writing to the run's record.
+        if let Some(beat) = beat {
+            let _ = beat.await;
+        }
     });
     (
         RunValue {
@@ -654,6 +895,11 @@ async fn start_impl(
     // listening for a replay. See [`ReplaySink`] for why the two absences are
     // treated differently.
     let sink = lua.app_data_ref::<ReplaySink>().map(|sink| sink.0.clone());
+    // Optional for the same reason the sink is, and with the same reading:
+    // absence means nobody is recording. `record` is installed only alongside
+    // `rcon` (`lua_runner.rs`), so a planning-only interpreter legitimately
+    // has none.
+    let live = lua.app_data_ref::<LiveRecord>().map(|live| live.clone());
     // Last: nothing below this line can fail, so the plan is spent only by a
     // start that really does dispatch.
     let Dispatch {
@@ -662,7 +908,7 @@ async fn start_impl(
         seed,
         origin,
     } = reserved.take()?;
-    let (run, join) = spawn(act, schedule, net, seed, Some(origin), sink);
+    let (run, join) = spawn(act, schedule, net, seed, Some(origin), sink, live);
     pending.register(join);
     Ok(run)
 }
@@ -746,7 +992,7 @@ mod tests {
         net: Arc<ActionNetwork>,
         sink: Option<Arc<dyn OutputSink>>,
     ) -> (RunValue, factorio_bot_core::tokio::task::JoinHandle<()>) {
-        spawn(act, sched, net, ExecutionLog::default(), None, sink)
+        spawn(act, sched, net, ExecutionLog::default(), None, sink, None)
     }
 
     // Every test here drives the table `create_lua_goal_with` really
@@ -2381,6 +2627,175 @@ mod tests {
         let success: u32 = progress.get("success").expect("success");
         assert!(done, "the run must have finished once drain() returned");
         assert!(success > 0, "the run must have actually executed something");
+    }
+
+    // ------------------------------------------------------------------
+    // The batch heartbeat: what a reader sees while a plan is executing.
+    //
+    // These cover the gap `run-1788465258-49050` was killed inside. Its last
+    // record line was a `plan_created`; fourteen minutes later it was killed
+    // as hung, and the mod's own samples showed it had been crafting the whole
+    // time. The record could not say so because it says nothing at all
+    // between a plan and the end of the batch that executes it.
+    // ------------------------------------------------------------------
+
+    /// A recorder over a throwaway directory, plus that directory, so a test
+    /// can read back exactly what the heartbeat wrote.
+    fn live_record() -> (LiveRecord, tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let recorder = factorio_bot_core::record::RunRecorder::start(tmp.path(), "run-beat")
+            .expect("recorder starts");
+        let run_dir = recorder.dir().to_path_buf();
+        (LiveRecord::for_tests(recorder), tmp, run_dir)
+    }
+
+    /// Every `batch_progress` line in a run directory, in the order written.
+    fn batch_progress_lines(run_dir: &std::path::Path) -> Vec<Value> {
+        let text = std::fs::read_to_string(run_dir.join("events.jsonl")).expect("events");
+        text.lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|e| e.get("kind").and_then(Value::as_str) == Some("batch_progress"))
+            .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_batch_still_in_flight_writes_down_where_it_got_to() {
+        let (live, _tmp, run_dir) = live_record();
+        let (gate_tx, gate_rx) = watch::channel(false);
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+        let stub = StubActuator {
+            entered: Some(entered_tx),
+            gate: Some(gate_rx),
+            ..StubActuator::new(Failure::Never)
+        };
+        let (net, sched) = mining_plan();
+        let total = net.len();
+        let (_run, join) = spawn(
+            Arc::new(stub),
+            sched,
+            net,
+            ExecutionLog::default(),
+            None,
+            None,
+            Some(live),
+        );
+
+        // The bots are now blocked on a gate nobody will open for a while --
+        // which is what an ordinary long batch looks like from outside, and
+        // exactly what used to leave the record silent.
+        entered_rx.recv().await.expect("an action was dispatched");
+        factorio_bot_core::tokio::time::sleep(BATCH_PROGRESS_INTERVAL + Duration::from_secs(5))
+            .await;
+
+        let beats = batch_progress_lines(&run_dir);
+        assert_eq!(
+            beats.len(),
+            1,
+            "one interval elapsed, so exactly one heartbeat: {beats:?}"
+        );
+        let beat = &beats[0];
+        assert_eq!(
+            beat["total"].as_u64(),
+            Some(total as u64),
+            "the denominator is the plan's action count, not the log's: {beat}"
+        );
+        assert!(
+            beat["dispatched"].as_u64().unwrap_or(0) > 0,
+            "the run had dispatched something by the time this was written: {beat}"
+        );
+        assert_eq!(
+            beat["settled"].as_u64(),
+            Some(0),
+            "nothing can have settled: the gate is shut: {beat}"
+        );
+        assert!(
+            beat["in_flight"].as_u64().unwrap_or(0) > 0,
+            "and what was dispatched is still in flight: {beat}"
+        );
+        assert!(
+            !beat["bots_in_flight"]
+                .as_array()
+                .expect("bots_in_flight is an array")
+                .is_empty(),
+            "the bots holding that work are named: {beat}"
+        );
+        assert!(
+            beat["elapsed_ms"].as_u64().unwrap_or(0) >= 30_000,
+            "elapsed_ms is wall clock since the batch began: {beat}"
+        );
+
+        gate_tx.send(true).expect("gate has a receiver");
+        join.await.expect("the run's task finished");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_finished_batch_stops_beating() {
+        // The heartbeat must not outlive the batch it describes: a run that
+        // ended and kept writing would put lines about a dead plan next to the
+        // next plan's.
+        let (live, _tmp, run_dir) = live_record();
+        let (net, sched) = mining_plan();
+        let (_run, join) = spawn(
+            Arc::new(StubActuator::new(Failure::Never)),
+            sched,
+            net,
+            ExecutionLog::default(),
+            None,
+            None,
+            Some(live),
+        );
+        join.await.expect("the run's task finished");
+        factorio_bot_core::tokio::time::sleep(BATCH_PROGRESS_INTERVAL * 4).await;
+        assert!(
+            batch_progress_lines(&run_dir).is_empty(),
+            "a batch that finished inside one interval writes no heartbeat, and \
+             none afterwards either"
+        );
+    }
+
+    #[test]
+    fn an_untouched_log_reports_a_plan_that_has_dispatched_nothing() {
+        // The reading the whole event exists to make possible, isolated: a
+        // plan with steps and a log with nothing in it is `dispatched: 0`, and
+        // that is unambiguous at any duration -- no threshold decides it.
+        let (net, sched) = mining_plan();
+        let bot_of: std::collections::BTreeMap<ActionId, u32> = sched
+            .steps
+            .iter()
+            .filter_map(|step| match &step.what {
+                StepKind::Act { action, .. } => Some((*action, u32::from(step.bot.0))),
+                StepKind::Walk { .. } => None,
+            })
+            .collect();
+        let log = Mutex::new(ExecutionLog::default());
+        let snap = BatchSnapshot::read(&net, &log, &bot_of);
+        assert_eq!(snap.dispatched, 0);
+        assert_eq!(snap.in_flight, 0);
+        assert_eq!(snap.settled, 0);
+        assert_eq!(snap.walks_dispatched, 0);
+        assert!(snap.bots_in_flight.is_empty());
+        assert_eq!(
+            snap.total,
+            net.len() as u32,
+            "and the plan's own size is still reported, so the ratio is readable"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_with_no_recorder_runs_exactly_as_before() {
+        // Every planning-only interpreter is in this state. Absence of a
+        // recorder is an ordinary condition, not a refusal.
+        let (net, sched) = mining_plan();
+        let (_run, join) = spawn(
+            Arc::new(StubActuator::new(Failure::Never)),
+            sched,
+            net,
+            ExecutionLog::default(),
+            None,
+            None,
+            None,
+        );
+        join.await.expect("the run's task finished");
     }
 
     #[tokio::test]

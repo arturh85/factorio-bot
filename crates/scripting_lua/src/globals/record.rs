@@ -631,6 +631,52 @@ fn video_options(options: Option<&LuaTable>) -> LuaResult<Option<VideoOptions>> 
     }
 }
 
+/// The run recorder, published into the Lua state's app data so a binding
+/// *below* the Lua seam can write a live event without a script asking it to.
+///
+/// The same seam [`crate::lua_runner::ReplaySink`] uses, for the same reason:
+/// the thing that needs it is `goal.start`'s batch heartbeat, and threading a
+/// recorder through `create_lua_goal` would put it in the signature of every
+/// binding that has nothing to do with recording.
+///
+/// **Absence is an ordinary state, not an error.** `record` is installed only
+/// alongside `rcon` (see `lua_runner.rs`), so a planning-only interpreter has
+/// no recorder at all and a heartbeat that cannot find one simply does not
+/// write. That is the same reading as `ReplaySink`'s: nobody is listening.
+///
+/// It holds the `rcon` handle as well as the slot because a live event's tick
+/// is `FactorioRcon::last_tick` -- an event stamped by anything else would be
+/// stamping the record's one shared axis with a number nobody observed.
+#[derive(Clone)]
+pub struct LiveRecord {
+    slot: Slot,
+    rcon: Arc<factorio_bot_core::factorio::rcon::FactorioRcon>,
+}
+
+impl LiveRecord {
+    /// Writes `kind` now, stamped with the game's clock.
+    ///
+    /// Returns whether it was written. `false` means no recording is running
+    /// -- a script that never called `record.start()` -- which is a state a
+    /// caller may ignore, unlike an I/O failure, which is logged here because
+    /// the caller (a background heartbeat) has nobody to report it to.
+    pub fn record(&self, kind: EventKind) -> bool {
+        let mut guard = self.slot.lock();
+        let Some(recorder) = guard.as_mut() else {
+            return false;
+        };
+        let tick = recorder.not_before(self.rcon.last_tick().unwrap_or(0));
+        if let Err(err) = recorder.record(tick, kind) {
+            factorio_bot_core::tracing::error!(
+                error = %err,
+                "failed to write a live event to the run record"
+            );
+            return false;
+        }
+        true
+    }
+}
+
 /// Records a *live* event: stamped with the game's clock, never earlier than
 /// something already in the log. See [`RunRecorder::not_before`].
 fn record_live(
@@ -679,6 +725,15 @@ fn create_lua_record_with_slot(
     all_bots: Vec<PlayerId>,
     slot: Slot,
 ) -> LuaResult<LuaTable> {
+    // Published before any binding is installed, so a run started on the
+    // script's very first line already has a recorder to beat into. It shares
+    // the slot rather than copying anything out of it: `record.start()` fills
+    // that slot later, and a heartbeat holding a snapshot taken now would be
+    // holding the `None` it was created with forever.
+    lua.set_app_data(LiveRecord {
+        slot: slot.clone(),
+        rcon: rcon.clone(),
+    });
     let map_table = lua.create_table()?;
     map_table.set(
         "__doc__header",
@@ -1807,6 +1862,29 @@ fn mint_run_id() -> String {
     format!("run-{}-{:05}", now.as_secs(), now.subsec_nanos() % 100_000)
 }
 
+// Deliberately at the bottom of the file, below every `.set("name", ...)`
+// above. `doc_guard`'s `production_half` cuts a source at its FIRST
+// `\n#[cfg(test)]` and scans only what precedes it, so a test-only item placed
+// higher up hides every binding registration under it and
+// `every_doc_block_matches_the_closure_its_binding_is_installed_with` reports
+// twelve bindings as uninstalled. That failure names the bindings and says
+// nothing about the `#[cfg(test)]` that caused it.
+#[cfg(test)]
+impl LiveRecord {
+    /// A handle over an already-open recorder.
+    ///
+    /// For the tests of the bindings *below* the Lua seam that write through
+    /// this: they need somewhere real for an event to land, and they cannot
+    /// get there through `record.start()`, which always makes a live RCON call
+    /// (`sampling_start`) that no test has a game to answer.
+    pub(crate) fn for_tests(recorder: RunRecorder) -> Self {
+        LiveRecord {
+            slot: Arc::new(Mutex::new(Some(recorder))),
+            rcon: Arc::new(factorio_bot_core::factorio::rcon::FactorioRcon::new_empty()),
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -1825,6 +1903,54 @@ mod tests {
     /// own directory, so a test can read `map.jsonl` back off disk.
     fn recording_lua() -> (Lua, tempfile::TempDir, std::path::PathBuf) {
         recording_lua_for(vec![])
+    }
+
+    #[test]
+    fn a_live_record_with_no_recording_running_declines_rather_than_failing() {
+        // The state every planning-only interpreter is in, and the state a run
+        // started before `record.start()` is in. A heartbeat that treated this
+        // as an error would turn "nobody is recording" into a failed run.
+        let live = LiveRecord {
+            slot: Arc::new(Mutex::new(None)),
+            rcon: Arc::new(FactorioRcon::new_empty()),
+        };
+        assert!(
+            !live.record(EventKind::RunFinished {
+                outcome: "test".to_string(),
+                elapsed_ticks: 0,
+            }),
+            "a live record with an empty slot writes nothing and says so"
+        );
+    }
+
+    #[test]
+    fn a_live_record_writes_through_the_same_slot_the_bindings_use() {
+        // The seam's whole point: `record.start()` fills the slot later, so a
+        // handle taken now must see the recorder that arrives afterwards --
+        // which it does only because it holds the slot rather than a snapshot
+        // of what was in it.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let recorder = RunRecorder::start(tmp.path(), "run-live").expect("recorder starts");
+        let run_dir = recorder.dir().to_path_buf();
+        let slot: Slot = Arc::new(Mutex::new(None));
+        let live = LiveRecord {
+            slot: slot.clone(),
+            rcon: Arc::new(FactorioRcon::new_empty()),
+        };
+        assert!(!live.record(EventKind::RunFinished {
+            outcome: "too early".to_string(),
+            elapsed_ticks: 0,
+        }));
+        *slot.lock() = Some(recorder);
+        assert!(live.record(EventKind::RunFinished {
+            outcome: "recorded".to_string(),
+            elapsed_ticks: 7,
+        }));
+        let text = std::fs::read_to_string(run_dir.join("events.jsonl")).expect("events");
+        assert!(
+            text.contains("\"outcome\":\"recorded\"") && !text.contains("too early"),
+            "only the event written once a recorder was in the slot is on disk: {text}"
+        );
     }
 
     /// [`recording_lua`] with a stated roster, for the bindings that report one.

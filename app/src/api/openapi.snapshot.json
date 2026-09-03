@@ -457,6 +457,100 @@
             "type": "object"
           },
           {
+            "description": "A plan is being executed **right now**, and this is how far it has got.\n\n# The silence this exists to break\n\nEvery other event about a plan's execution is written *after* the whole\nbatch has finished: the driver calls `record.actions()`/`record.walks()`\non the supervisor's \"ran\" transition, once `goal.run` has returned\n(`scripts/factory_stage2.lua`). So between `plan_created` and the first\n`action_dispatched` the record says **nothing at all**, for however long\nthe batch takes -- sixteen minutes is an ordinary figure for a\nfour-bot plan.\n\nThat made two entirely different situations byte-identical from outside:\n\n  * a run executing a long plan perfectly well, and\n  * a run that planned and then dispatched nothing, ever.\n\n`run-1788465258-49050` is the second one being diagnosed and killed when\nit was in fact the first. Its last line was a `plan_created` for a\n152-step plan; fourteen minutes later it was killed as hung. The mod's\nown `script-output/botbridge/samples.jsonl` -- which nothing in the run\nrecord reads -- showed bot 1 crafting copper-cable and the force's\niron-plate production climbing at the moment of the kill. Nine of the\ntwenty-four runs archived at the time end on a `plan_created` with\nnothing after it, and not one of them can be told apart from that run.\n\n# What it is, and what it is not\n\nIt is a heartbeat with counters: written on a fixed wall-clock interval\nwhile a batch is in flight, carrying only facts that were true when it\nwas written. It states **no verdict** -- there is no `stalled` flag and\nno threshold anywhere in the writer, deliberately, because \"how long is\ntoo long\" depends on the batch and would need tuning, whereas\n`dispatched: 0` on a plan of 152 steps needs none: it is unambiguous at\nany duration.\n\nThe interval decides the *resolution* of the answer, never its\ncorrectness. A batch shorter than one interval writes none of these and\nis none the worse for it -- its `action_dispatched` lines arrive\nimmediately afterwards.\n\nIt names no milestone and no plan, because the thing that writes it --\nthe executor's side of `goal.start` -- knows neither: a milestone is a\nconcept of the supervisor script, and `milestone_index` reaches\n[`EventKind::PlanCreated`] from Lua. A reader attributes one of these to\nthe `plan_created` it follows in the log, which is exact **while one\nbatch runs at a time** -- the shipped drivers all wait on each run\nbefore planning the next. A script that ran two plans concurrently with\n`goal.start` would interleave two heartbeats with nothing to tell them\napart, and that is the case to fix here if it ever arises rather than to\npaper over in the reader.\n\nIts `tick` is the game's own clock, like every live event's (see\n[`RunRecorder::not_before`]) -- and unlike the batched\n`action_dispatched`/`action_settled` lines, which carry the tick each\naction really happened at rather than the moment they were flushed. The\nwall-clock durations below are on the variant rather than on\n[`Event`] for that exact reason: `Event::wall_ms` was removed because a\nbatched event's write time is not its happening time, and these two\nnumbers are honest only because this event *is* written at the moment\nit describes.",
+            "properties": {
+              "bots_in_flight": {
+                "description": "Which bots have an action in flight, ascending. Empty is not by\nitself a problem -- see `walks_dispatched`.",
+                "items": {
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              "dispatched": {
+                "description": "How many actions have been dispatched at least once, i.e. are no\nlonger `pending`. **This is the number the whole event is for.**\n`dispatched: 0` beside a `plan_created` with steps is a plan that\nis not being executed, whatever else the run looks like.",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "elapsed_ms": {
+                "description": "Wall-clock milliseconds since the executor was handed this batch.\n\nWall clock, not ticks: the question this event answers is \"is\nanything happening\", and a stopped game is exactly the case where\nthe tick clock cannot answer it.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "failed": {
+                "description": "Of the settled, how many the game judged and refused.",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "in_flight": {
+                "description": "How many are in flight right now: dispatched, no verdict yet.",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "enum": [
+                  "batch_progress"
+                ],
+                "type": "string"
+              },
+              "lost": {
+                "description": "Of the settled, how many were acknowledged and never answered.\nKept apart from `failed` here for the same reason\n[`EventKind::ActionSettled`] keeps them apart.",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "settled": {
+                "description": "How many have reached a verdict of any kind (succeeded, failed or\nlost).",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "since_last_dispatch_ms": {
+                "description": "Wall-clock milliseconds since `dispatched` last went up, or since\nthe batch began when it has never gone up at all.\n\nDeliberately measured against *dispatches* and not against settles:\na bot waiting out a legitimate lag edge (a furnace working, machine\ntime the plan modelled) settles nothing and dispatches nothing, and\nthis number growing is the honest report of that. It is a\nmeasurement, not an accusation -- nothing here decides what value of\nit is too large.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "total": {
+                "description": "How many actions the plan has in total -- the denominator for\nevery count below. Actions only: walks have no `ActionId` and are\ncounted separately.",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "walks_dispatched": {
+                "description": "Walks dispatched and walks settled, counted separately because a\nwalk has no `ActionId` and appears in none of the counts above.\n\nWithout these a batch whose every bot is walking reports\n`in_flight: 0` and reads as four idle bots, which is the misreading\nthis event exists to prevent rather than to introduce. Walking is\nmost of the wall clock in these plans.",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "walks_settled": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "elapsed_ms",
+              "total",
+              "dispatched",
+              "in_flight",
+              "settled",
+              "failed",
+              "lost",
+              "walks_dispatched",
+              "walks_settled",
+              "since_last_dispatch_ms",
+              "bots_in_flight",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "action": {
                 "type": "string"

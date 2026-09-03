@@ -151,6 +151,40 @@ had 6. Something re-seeded it in between and I could not attribute it. What is
 not in doubt is that run 4's *game* had the old mod — Factorio loads mods at
 server start, and the game itself raised the missing-function error.
 
+## Run 9: furthest yet — and a standing plant was re-sited to death
+
+**Run 9 (`run-1788408407-02764`) is the high-water mark.** Rung 1 SATISFIED
+(the ladder's sixth consecutive reproduction), and **rung 2 passed plan time for
+the first time ever** — 107 steps planned, where run 8 refused in three seconds.
+The chain-owner fix (`60ade9de`) holds in a real game.
+
+Then a walk was refused, the milestone replanned, and the run died:
+
+```
+HALTED: stuck -- refused: the nearest water is 66.7 tiles away, but no shoreline
+within 10 tiles of it has room for a pump, a boiler, a steam engine and the pipes
+between them
+```
+
+**A working plant already stood.** From the action stream at tick ~127,098:
+`place offshore-pump at [-5.5, -57.5]`, `place steam-engine at [-11.5, -54.5]`,
+a boiler, pipes, and `place lab at [-15.5, -58.5]` — which is *how rung 1 got
+satisfied*. The replan nevertheless tried to site a **brand-new** plant,
+anchored far from the water the first one used, and refused because no shoreline
+near that new anchor had room.
+
+So the earlier report that "`Researched` re-sites the power plant on replan,
+spending a pole each time" understates it: re-siting is not merely wasteful, it
+is **fatal**, because a replan can refuse work that has already been done and
+is standing in the world. An agent is fixing it to adopt a standing plant.
+
+**Six sub-tile walk refusals now**, and this one was the trigger for the fatal
+replan — which is the argument for the `min_radius` fix being load-bearing
+rather than cosmetic. The chain runs: walk refused -> bot's whole remaining
+chain abandoned (`run.rs:258`) -> replan -> plant re-sited -> refusal -> run
+dead. Run 9's replan also came back **194 steps against a best of 107**, so a
+refusal leaves the plan worse as well as shorter-staffed.
+
 ## Two corrections, and a reproducible site for the `min_radius` fix
 
 **The world does not persist between runs — corrected.** I wrote earlier that it

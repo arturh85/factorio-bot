@@ -2195,6 +2195,24 @@ impl PlanState {
         total
     }
 
+    /// What one machine of `name` draws, in kW, as the demand ledger charges it.
+    ///
+    /// The same [`consumer_kw`] table [`electric_demand_kw`](Self::electric_demand_kw)
+    /// sums over, exposed so a method stating a
+    /// [`Condition::Powered`](crate::action::Condition::Powered) can state the
+    /// number the budget will actually charge it rather than a second copy of
+    /// it. A cell that budgeted 75 kW for a machine the ledger charges 150 for
+    /// would pass its own check and brown out the network, which is the
+    /// *coverage is not capacity* failure with the two halves swapped.
+    ///
+    /// `None` for a name the table does not carry, and callers must treat that
+    /// as "not something this planner may put on a network" rather than as
+    /// zero — that table is the one in this file whose unknown name errs
+    /// towards permitting, and its own doc says so.
+    pub fn consumer_draw_kw(&self, name: &str) -> Option<f64> {
+        consumer_kw(name)
+    }
+
     /// How much draw, in kW, is already committed on the network that reaches
     /// `area` — the *other* half of the question
     /// [`electric_supply_kw`](Self::electric_supply_kw) answers.

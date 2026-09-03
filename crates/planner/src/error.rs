@@ -321,9 +321,10 @@ pub enum PlannerError {
     #[diagnostic(
         code(planner::no_cell_produces),
         help(
-            "stage 1 builds a burner mining drill dropping into a stone furnace, so it can \
-             produce the plates that smelt from one ore and nothing else; assembling machines \
-             and their recipes are stage 2"
+            "the two cell shapes are a burner drill dropping into a stone furnace (anything \
+             that smelts from one ore) and an assembling machine fed by inserters (anything \
+             crafted from two ingredients, one of which is itself crafted from one); a bot \
+             can still make this by hand through `goal.have`"
         )
     )]
     NoCellProduces { item: ItemId },
@@ -358,6 +359,31 @@ pub enum PlannerError {
         )
     )]
     NoPatchForCell { item: ItemId, ore: ItemId },
+
+    /// There is power, but no legal ground for an assembly cell inside it.
+    ///
+    /// A stage-2 cell is eight buildings and a five-tile servicing lane, and
+    /// it has to sit close enough to a supplying pole for its own pole to be
+    /// wired to that one -- a small pole reaches 7.5 tiles. So this is "the
+    /// ground beside your power plant is taken", and the answers are to clear
+    /// it, to build the plant somewhere with room, or to ask for fewer cells.
+    ///
+    /// Distinct from [`PlannerError::NoRoomForCell`], which is about an *ore
+    /// patch* having no edge: nothing in this refusal is about ore, and a
+    /// caller that conflated the two would chart more map to fix a problem
+    /// standing next to a boiler.
+    #[error(
+        "no room for a {item} cell within {radius} tiles of the pole that would supply it: a \
+         cell needs eight clear tiles of ground and a lane to reach its chests from"
+    )]
+    #[diagnostic(
+        code(planner::no_room_for_cell_near_power),
+        help(
+            "clear the ground beside the power plant, or put the plant somewhere with room \
+             around it; a cell must be within one pole's wire reach of a supplied network"
+        )
+    )]
+    NoRoomForCellNearPower { item: ItemId, radius: i32 },
 
     /// A recipe aimed at ground with no machine on it.
     ///

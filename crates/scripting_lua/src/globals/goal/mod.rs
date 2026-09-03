@@ -230,7 +230,8 @@ impl std::error::Error for PlanRefusal {}
 ///   construction error since it was written, and this keeps that promise.
 /// - The three cell variants -- [`NoCellProduces`](PlannerError::NoCellProduces),
 ///   [`NoPatchForCell`](PlannerError::NoPatchForCell) and
-///   [`NoRoomForCell`](PlannerError::NoRoomForCell) -- verdicts, the first for
+///   [`NoRoomForCell`](PlannerError::NoRoomForCell) and
+///   [`NoRoomForCellNearPower`](PlannerError::NoRoomForCellNearPower) -- verdicts, the first for
 ///   `NoApplicableMethod`'s reason and the other two for the `PowerPlant*`
 ///   ones'. "No machine I can build makes this", "this map has no such ore"
 ///   and "this patch has no edge with room" are all facts a different world
@@ -261,7 +262,8 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::ChainOwnerInfeasible { .. }
         | PlannerError::NoCellProduces { .. }
         | PlannerError::NoPatchForCell { .. }
-        | PlannerError::NoRoomForCell { .. } => true,
+        | PlannerError::NoRoomForCell { .. }
+        | PlannerError::NoRoomForCellNearPower { .. } => true,
 
         PlannerError::InsufficientItems { .. }
         | PlannerError::UnknownBot(_)

@@ -219,11 +219,15 @@ pub fn holds(goal: &Goal, state: &PlanState) -> Option<bool> {
         // Structural, and narrower than the goal's name: enough cells stand,
         // on the right ore, each delivering into its furnace. Nothing here
         // reads a fuel level or an output inventory.
-        Goal::Producing { item, per_minute } => Some(crate::method::produce::holds_producing(
-            state,
-            item,
-            *per_minute,
-        )),
+        // Two shapes of cell answer this, and they are disjoint: stage 1's
+        // wants a smelting recipe taking one ore, stage 2's a crafting recipe
+        // taking two ingredients. An item neither shape makes is `false` --
+        // the arrangement does not exist, which is a fact about the world and
+        // not an absence of one.
+        Goal::Producing { item, per_minute } => Some(
+            crate::method::produce::holds_producing(state, item, *per_minute)
+                || crate::method::assemble::holds_assembling(state, item, *per_minute),
+        ),
         Goal::All(goals) => {
             let mut answer = Some(true);
             for g in goals {
@@ -1818,6 +1822,11 @@ pub fn default_registry() -> MethodRegistry {
         .with(Box::new(Mine))
         .with(Box::new(Researched))
         .with(Box::new(crate::method::produce::BuildCell))
+        // Its sibling, and disjoint from it by construction: `BuildCell`
+        // claims a `Producing` whose item smelts from one ore, this one claims
+        // a `Producing` whose item is crafted from two ingredients. No item is
+        // claimed by both, so the order between them changes no plan.
+        .with(Box::new(crate::method::assemble::BuildAssemblyCell))
 }
 
 /// Split a shared goal into one independent chain per bot.
@@ -2404,6 +2413,11 @@ pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
         // `AlreadySatisfied`, which now has a real answer for a production
         // goal, so a factory that already stands expands to nothing.
         .with(Box::new(crate::method::produce::BuildCell))
+        // Its sibling, and disjoint from it by construction: `BuildCell`
+        // claims a `Producing` whose item smelts from one ore, this one claims
+        // a `Producing` whose item is crafted from two ingredients. No item is
+        // claimed by both, so the order between them changes no plan.
+        .with(Box::new(crate::method::assemble::BuildAssemblyCell))
 }
 
 #[cfg(test)]

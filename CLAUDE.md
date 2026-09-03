@@ -516,8 +516,19 @@ entry over a log line:
 - archived samples stopped at the last closed milestone while the mod sampled
   the whole run -- one run lost 199,449 ticks, the entire window its cell
   existed in, and it was only recovered from the mod's live file;
-- a run created a 198-step plan and dispatched **nothing for two hours**, with
-  all processes alive and the record static.
+- a batch's events are written only **after** `goal.run` returns, so while one
+  is in flight the record cannot tell "working" from "stalled". This one bit
+  hard: a run that was executing normally -- 44,846 ticks of progress past its
+  last recorded event, bot inventories climbing across consecutive samples --
+  was read as a two-hour hang from the record's silence and **killed**. It had
+  been running 13m45s, and an earlier batch of the same run had already gone
+  ~18 minutes silent without incident. `EventKind::BatchProgress` (`83c42346`)
+  now beats every 30 s with counters and **no verdict**; `just analyse`
+  distinguishes executed / never-dispatched / killed-mid-batch / **UNKNOWN**,
+  and says explicitly when absence "is NOT evidence of a stall".
+  **9 of 24 archived runs end on a `plan_created` with nothing after it**; only
+  the newest can ever be cross-checked, because the mod's live sample file is
+  overwritten per run.
 
 ### Working alongside other agents
 

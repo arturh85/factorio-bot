@@ -68,6 +68,37 @@ pub(crate) fn widen_ore_front(world: FactorioWorld) -> FactorioWorld {
     world
 }
 
+/// `world` with a stand of real trees in it, at `positions`.
+///
+/// **`fixture_world`'s own hundred trees are useless for this.** They are
+/// `FactorioEntity::new_tree`, which names every one of them `tree-42`, and
+/// the prototype fixture has no `tree-42` -- so they carry no `mine_result`,
+/// yield nothing, and `PlanState::minable_sources` steps over them. That is
+/// exactly why every existing test is unaffected by chopping: the shared
+/// fixture's forest is, to the planner, a hundred obstacles and no wood.
+///
+/// `tree-01` is a prototype the fixture really has (`mine_result {wood: 4}`,
+/// `mining_time` 0.55), so these are trees the planner can read a bill off.
+/// Added to the *base* world rather than through `PlanState::create_entity`:
+/// `minables` lives in `EntityGraph`, and the overlay only ever hides entities
+/// from it, never adds one.
+pub(crate) fn with_trees(world: FactorioWorld, positions: &[Position]) -> FactorioWorld {
+    let entities: Vec<FactorioEntity> = positions
+        .iter()
+        .map(|position| FactorioEntity {
+            name: "tree-01".into(),
+            entity_type: "tree".into(),
+            position: position.clone(),
+            bounding_box: add_to_rect(&Rect::from_wh(0.8, 0.8), position),
+            ..Default::default()
+        })
+        .collect();
+    world
+        .update_chunk_entities(entities)
+        .expect("a fixture world accepts trees");
+    world
+}
+
 /// One force, `player`, with a small technology tree.
 ///
 /// * `automation` — the real thing: no prerequisites, 10 units of one

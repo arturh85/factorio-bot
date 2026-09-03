@@ -101,6 +101,39 @@ pub struct EntityGraph {
     /// `PlanState::resource_available`.
     resources: DashMap<String, BTreeMap<Pos, Option<u32>>>,
     resource_tree: RwLock<ResourceQuadTree>,
+    /// Every minable entity that is *not* a resource: trees and rocks, by
+    /// entity name, by the tile they stand on, holding the position the game
+    /// itself reported.
+    ///
+    /// # Why this is a third map and not a widened `resources`
+    ///
+    /// A resource is a *tile* with an amount that a drill can sit on and that
+    /// `any_resource_at` reports as ground-with-ore. A tree is an *entity*
+    /// that yields a fixed bill once and then is gone. Putting trees into
+    /// `resources` would make every forest read as ore underfoot to
+    /// `PlanState::stands_on_resources` and to the drill siting behind it,
+    /// which is a different claim about the world than the one being made
+    /// here. Admitting them to `entity_tree` instead was the other candidate
+    /// and is worse: that tree feeds `find_entities_in_radius`, the entity
+    /// graph's own nodes and `snapshot_within`'s keyframe comparison, so the
+    /// map's ~10,500 trees would become ~10,500 petgraph nodes and a standing
+    /// diff against a keyframe query that filters trees out by type.
+    ///
+    /// # The position is the game's, not the tile's
+    ///
+    /// The key is floored, as everywhere else in this struct, but the *value*
+    /// is the position the mod serialised. The mod's own
+    /// `surface.find_entity(name, position)` matches exactly, so handing back
+    /// a floored corner would be the same half-tile fault that made every ore
+    /// mine fail with "no entity to mine" -- and unlike ore, a tree is not
+    /// obliged to sit on a tile centre, so there is no offset to restore it
+    /// with afterwards.
+    ///
+    /// Two entities of the same name in one tile collapse to one entry. That
+    /// under-reports what is there, which refuses work that could have been
+    /// done rather than sending a bot at a tree that is not there -- the
+    /// conservative direction, and the same one `resources` takes.
+    minables: DashMap<String, BTreeMap<Pos, Position>>,
 }
 
 impl EntityGraph {
@@ -120,6 +153,7 @@ impl EntityGraph {
             tile_tree: RwLock::new(QuadTree::new(max_area, false, 32, 128, 128, 8)),
             entity_nodes: DashMap::new(),
             resources: DashMap::new(),
+            minables: DashMap::new(),
         }
     }
     pub fn inner_graph(&self) -> RwLockReadGuard<'_, EntityGraphInner> {
@@ -264,6 +298,99 @@ impl EntityGraph {
         let entity = FactorioEntity::new_resource(&centre, Direction::North, resource_name);
         if let Err(err) = self.remove(&entity) {
             warn!("failed to retire mined-out {resource_name} at {centre:?}: {err}");
+            return false;
+        }
+        true
+    }
+
+    /// Every position at which a minable entity called `entity_name` stands,
+    /// in tile order.
+    ///
+    /// Ordered because the planner picks from this and its output has to be
+    /// byte-identical across runs; the order is the `BTreeMap`'s, i.e. the
+    /// data's, not a hash seed's.
+    pub fn minable_positions(&self, entity_name: &str) -> Vec<Position> {
+        self.minables
+            .get(entity_name)
+            .map(|tiles| tiles.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Which minable entities in the model yield `item`, and how much each
+    /// one yields, in entity-name order.
+    ///
+    /// Read from the prototype's own `mine_result` -- the game's answer to
+    /// "what does mining this give you" -- rather than from a table here. An
+    /// entity the model holds but has no prototype for yields nothing, which
+    /// refuses the work rather than guessing a bill.
+    ///
+    /// Name order, not discovery order: the backing map is a `DashMap`, whose
+    /// iteration order is a hash seed's and would otherwise reach the planner.
+    pub fn minables_yielding(&self, item: &str) -> Vec<(String, u32)> {
+        let mut out: Vec<(String, u32)> = self
+            .minables
+            .iter()
+            .filter(|entry| !entry.value().is_empty())
+            .filter_map(|entry| {
+                let name = entry.key().clone();
+                let yields = self
+                    .entity_prototypes
+                    .get(&name)?
+                    .mine_result
+                    .as_ref()?
+                    .get(item)
+                    .copied()?;
+                (yields > 0).then_some((name, yields))
+            })
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// Takes one mined-out tree or rock out of the model. Answers whether
+    /// there was one to take.
+    ///
+    /// The sibling of [`EntityGraph::retire_resource`], and needed for the
+    /// same reason: nothing else removes it. A tree is destroyed by the swing
+    /// that mines it and the mod emits no event for it, so without this the
+    /// planner keeps offering a stump, the bot walks there, and
+    /// `surface.find_entity` answers nil -- "Error: no entity to mine" for a
+    /// tree that really was there when the plan was made.
+    ///
+    /// Unlike a resource tile there is no partial state to weigh: one swing
+    /// takes the whole entity, so there is no `mined` count and no
+    /// [`ResourceDepletion`] to report.
+    pub fn retire_minable(&self, entity_name: &str, position: &Position) -> bool {
+        let pos: Pos = position.into();
+        // Cloned out and the guard dropped before `remove` runs: `remove`
+        // takes `get_mut` on this same map, and holding a read guard across it
+        // deadlocks the calling task. The same trap `resource_mined` documents.
+        let centre = self
+            .minables
+            .get(entity_name)
+            .and_then(|tiles| tiles.get(&pos).cloned());
+        let Some(centre) = centre else {
+            return false;
+        };
+        // The prototype's own collision box, so the rectangle handed to
+        // `remove` is the one `add` put into `blocked_tree`. A guessed box that
+        // is too small leaves the stump blocking placements for ever.
+        let Some(collision) = self
+            .entity_prototypes
+            .get(entity_name)
+            .map(|proto| proto.collision_box.clone())
+        else {
+            warn!("cannot retire minable {entity_name} at {centre}: no prototype for it");
+            return false;
+        };
+        let entity = FactorioEntity {
+            name: entity_name.to_string(),
+            position: centre.clone(),
+            bounding_box: add_to_rect(&collision, &centre),
+            ..Default::default()
+        };
+        if let Err(err) = self.remove(&entity) {
+            warn!("failed to retire mined {entity_name} at {centre}: {err}");
             return false;
         }
         true
@@ -774,6 +901,18 @@ impl EntityGraph {
                 && entity.entity_type != EntityType::CurvedRail.to_string()
             {
                 blocked.insert_with_box(entity.is_minable(), entity.bounding_box.clone().into());
+                // The same `is_minable` the line above hands to the blocked
+                // tree, kept here by name and position as well. `blocked_tree`
+                // stores a bare rectangle, so a caller reading it back can say
+                // "something minable is in the way" and nothing else -- not
+                // what it is, not where its centre is, and therefore not
+                // enough to ask the game to mine it.
+                if entity.is_minable() {
+                    self.minables
+                        .entry(entity.name.clone())
+                        .or_default()
+                        .insert((&entity.position).into(), entity.position.clone());
+                }
             }
             if entity.name == EntityName::Pumpjack.to_string() {
                 // for some reason pumpjacks report their drop position at their position so we fix it
@@ -1144,6 +1283,15 @@ impl EntityGraph {
             }
         }
 
+        // Unconditional, and not behind an `is_minable()` check on the entity
+        // handed in: a caller that rebuilt this entity from a name and a
+        // position (`retire_minable` does exactly that) has no entity type to
+        // check, and a name that is in `minables` is by construction one that
+        // `add` put there.
+        if let Some(mut tiles) = self.minables.get_mut(&entity.name) {
+            tiles.remove(&(&entity.position).into());
+        }
+
         Ok(())
     }
 
@@ -1512,7 +1660,7 @@ impl Serialize for EntityGraph {
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct("EntityGraph", 9)?;
+        let mut state = serializer.serialize_struct("EntityGraph", 10)?;
         state.serialize_field("entity_graph", &*self.entity_graph.read())?;
         state.serialize_field("blocked_tree", &*self.blocked_tree.read())?;
         state.serialize_field("entity_tree", &*self.entity_tree.read())?;
@@ -1522,6 +1670,7 @@ impl Serialize for EntityGraph {
         state.serialize_field("recipes", &*self.recipes)?;
         state.serialize_field("resources", &self.resources)?;
         state.serialize_field("resource_tree", &*self.resource_tree.read())?;
+        state.serialize_field("minables", &self.minables)?;
         state.end()
     }
 }
@@ -1541,6 +1690,7 @@ impl<'de> Deserialize<'de> for EntityGraph {
             Recipes,
             Resources,
             ResourceTree,
+            Minables,
         }
 
         // This part could also be generated independently by:
@@ -1576,6 +1726,7 @@ impl<'de> Deserialize<'de> for EntityGraph {
                             "recipes" => Ok(Field::Recipes),
                             "resources" => Ok(Field::Resources),
                             "resource_tree" => Ok(Field::ResourceTree),
+                            "minables" => Ok(Field::Minables),
                             _ => Err(de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -1607,6 +1758,7 @@ impl<'de> Deserialize<'de> for EntityGraph {
                 let mut recipes = None;
                 let mut resources = None;
                 let mut resource_tree = None;
+                let mut minables = None;
 
                 while let Some(key) = map.next_key()? {
                     match key {
@@ -1664,6 +1816,12 @@ impl<'de> Deserialize<'de> for EntityGraph {
                             }
                             resource_tree = Some(map.next_value()?);
                         }
+                        Field::Minables => {
+                            if minables.is_some() {
+                                return Err(de::Error::duplicate_field("minables"));
+                            }
+                            minables = Some(map.next_value()?);
+                        }
                     }
                 }
                 let entity_graph =
@@ -1681,6 +1839,12 @@ impl<'de> Deserialize<'de> for EntityGraph {
                 let resources = resources.ok_or_else(|| de::Error::missing_field("resources"))?;
                 let resource_tree =
                     resource_tree.ok_or_else(|| de::Error::missing_field("resource_tree"))?;
+                // Defaulted rather than required, unlike every field above it.
+                // Every graph serialised before this map existed is still a
+                // valid graph -- it just knows of no trees -- and refusing to
+                // load one would turn a new planner capability into a failure
+                // to read yesterday's snapshot.
+                let minables = minables.unwrap_or_default();
 
                 Ok(EntityGraph {
                     entity_graph: RwLock::new(entity_graph),
@@ -1692,6 +1856,7 @@ impl<'de> Deserialize<'de> for EntityGraph {
                     recipes: Arc::new(recipes),
                     resources,
                     resource_tree: RwLock::new(resource_tree),
+                    minables,
                 })
             }
         }
@@ -1706,6 +1871,7 @@ impl<'de> Deserialize<'de> for EntityGraph {
             "recipes",
             "resources",
             "resource_tree",
+            "minables",
         ];
         deserializer.deserialize_struct("EntityGraph", FIELDS, EntityGraphVisitor)
     }
@@ -1723,6 +1889,7 @@ impl Clone for EntityGraph {
             recipes: Arc::new((*self.recipes).clone()),
             resources: self.resources.clone(),
             resource_tree: RwLock::new(self.resource_tree.read().clone()),
+            minables: self.minables.clone(),
         }
     }
 
@@ -1736,6 +1903,7 @@ impl Clone for EntityGraph {
         self.recipes = Arc::new((*source.recipes).clone());
         self.resources = source.resources.clone();
         self.resource_tree = RwLock::new(source.resource_tree.read().clone());
+        self.minables = source.minables.clone();
     }
 }
 
@@ -3063,5 +3231,162 @@ mod tests {
 
         let empty_bounds = Rect::new(&Position::new(50., 50.), &Position::new(60., 60.));
         assert!(graph.snapshot_within(&empty_bounds).is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Minables: the trees and rocks, by name and position
+    // -----------------------------------------------------------------------
+
+    fn tree_at(name: &str, position: Position) -> FactorioEntity {
+        FactorioEntity {
+            name: name.into(),
+            entity_type: EntityType::Tree.to_string(),
+            bounding_box: crate::factorio::util::add_to_rect(&Rect::from_wh(0.8, 0.8), &position),
+            position,
+            ..Default::default()
+        }
+    }
+
+    /// The position handed back is the one the game reported, not the tile
+    /// corner the key is derived from.
+    ///
+    /// The mod matches with `surface.find_entity(name, position)`, which is
+    /// exact. Handing back `(-41, -49)` for a tree at `(-40.5, -48.5)` is the
+    /// same half-tile fault that once made mining fail on every real map while
+    /// every test passed -- and unlike a resource tile, a tree is under no
+    /// obligation to sit on a centre, so there is no offset to restore it with
+    /// after the fact.
+    #[test]
+    fn a_minable_keeps_the_position_the_game_reported() {
+        let graph = entity_graph_from(vec![tree_at("tree-01", Position::new(-40.5, -48.5))])
+            .expect("adding must not fail");
+        assert_eq!(
+            graph.minable_positions("tree-01"),
+            vec![Position::new(-40.5, -48.5)]
+        );
+    }
+
+    /// A tree is *not* a resource, and must not become one: the ground it
+    /// stands on is not ore.
+    #[test]
+    fn a_minable_does_not_land_in_the_resource_model() {
+        let graph = entity_graph_from(vec![tree_at("tree-01", Position::new(5.5, 5.5))])
+            .expect("adding must not fail");
+        assert!(!graph.any_resource_at(&Pos(5, 5)));
+        assert!(!graph.resource_contains("tree-01", Pos(5, 5)));
+    }
+
+    /// The item-to-entity direction, read off the prototype's own
+    /// `mine_result`, in name order.
+    #[test]
+    fn minables_yielding_reads_the_prototypes_mine_result() {
+        let graph = entity_graph_from(vec![
+            tree_at("tree-02", Position::new(9.5, 0.5)),
+            tree_at("tree-01", Position::new(5.5, 5.5)),
+            FactorioEntity::new_rock(&Position::new(20.5, 20.5), "rock-big"),
+        ])
+        .expect("adding must not fail");
+        assert_eq!(
+            graph.minables_yielding("wood"),
+            vec![("tree-01".to_string(), 4), ("tree-02".to_string(), 4)],
+            "name order, because the backing map is a DashMap and its own \
+             order is a hash seed's"
+        );
+        assert_eq!(
+            graph.minables_yielding("stone"),
+            vec![("rock-big".to_string(), 20)],
+            "a rock yields stone, and the tree does not"
+        );
+        assert!(
+            graph.minables_yielding("iron-plate").is_empty(),
+            "nothing standing yields a crafted item"
+        );
+    }
+
+    /// An entity the model holds but has no prototype for yields nothing --
+    /// refusing the work rather than guessing a bill.
+    ///
+    /// This is not a hypothetical: `FactorioEntity::new_tree` names every tree
+    /// it makes `tree-42`, and no prototype fixture carries that name, so the
+    /// shared test world's hundred trees are exactly this case.
+    #[test]
+    fn a_minable_with_no_prototype_yields_nothing() {
+        let graph = entity_graph_from(vec![FactorioEntity::new_tree(&Position::new(5.5, 5.5))])
+            .expect("adding must not fail");
+        assert_eq!(graph.minable_positions("tree-42").len(), 1, "it is stored");
+        assert!(
+            graph.minables_yielding("wood").is_empty(),
+            "but nothing can be claimed from it"
+        );
+    }
+
+    /// Retiring a chopped tree takes it out of the model *and* unblocks the
+    /// ground it stood on.
+    ///
+    /// Nothing else does either. The mod destroys the entity and emits no
+    /// event for it, so a stump left here is offered to the planner for ever
+    /// and the second visit fails with "no entity to mine" about ground the
+    /// bot itself cleared.
+    #[test]
+    fn retiring_a_minable_removes_it_and_frees_its_ground() {
+        let at = Position::new(5.5, 5.5);
+        let graph =
+            entity_graph_from(vec![tree_at("tree-01", at.clone())]).expect("adding must not fail");
+        assert!(
+            !graph
+                .blocking_boxes_within(&Rect::new(&Position::new(4., 4.), &Position::new(7., 7.)))
+                .is_empty()
+        );
+
+        assert!(graph.retire_minable("tree-01", &at));
+        assert!(graph.minable_positions("tree-01").is_empty());
+        assert!(
+            graph
+                .blocking_boxes_within(&Rect::new(&Position::new(4., 4.), &Position::new(7., 7.)))
+                .is_empty(),
+            "a chopped tree stops blocking placements"
+        );
+        assert!(
+            !graph.retire_minable("tree-01", &at),
+            "a second report is answered honestly rather than pretended into a removal"
+        );
+    }
+
+    /// Retiring by a position anywhere in the tile finds the entity, and the
+    /// entity handed to `remove` is rebuilt on the position the game gave --
+    /// so the box cleared out of `blocked_tree` is the one `add` put there.
+    #[test]
+    fn a_minable_is_retired_from_any_position_in_its_tile() {
+        let at = Position::new(5.75, 5.25);
+        let graph = entity_graph_from(vec![tree_at("tree-01", at)]).expect("adding must not fail");
+        assert!(graph.retire_minable("tree-01", &Position::new(5.0, 5.0)));
+        assert!(graph.minable_positions("tree-01").is_empty());
+    }
+
+    /// `Clone` carries the map. `FactorioWorld` clones its graph, so a map
+    /// this did not copy would leave a cloned world holding a forest it could
+    /// not name.
+    ///
+    /// **Not a serde round trip**, deliberately. `EntityGraph`'s hand-written
+    /// `Serialize` predates this map and cannot go through JSON at all: both
+    /// `resources` and this one key a `BTreeMap` by `Pos`, which is a tuple
+    /// struct and not a string, so `serde_json` refuses the map key. That is a
+    /// pre-existing property of `resources` and not something this map
+    /// introduced; the deserialiser still *accepts* a payload with no
+    /// `minables` field, so a graph written by an older build stays loadable
+    /// through whatever format does carry it.
+    #[test]
+    fn cloning_a_graph_carries_its_minables() {
+        let graph = entity_graph_from(vec![tree_at("tree-01", Position::new(5.5, 5.5))])
+            .expect("adding must not fail");
+        let copy = graph.clone();
+        assert_eq!(
+            copy.minable_positions("tree-01"),
+            vec![Position::new(5.5, 5.5)]
+        );
+        assert_eq!(
+            copy.minables_yielding("wood"),
+            vec![("tree-01".to_string(), 4)]
+        );
     }
 }

@@ -543,6 +543,34 @@ pub enum ActionKind {
         item: ItemId,
         count: u32,
     },
+    /// Swing at one standing entity that is not a resource -- a tree, a rock --
+    /// and take what it yields.
+    ///
+    /// # Why this is not a `Mine`
+    ///
+    /// The game makes no distinction: both reach
+    /// `rcon_action_start_mining(action_id, player, name, position, count)`,
+    /// which does `surface.find_entity(name, position)` and checks
+    /// `ent.minable`. The planner does, because [`ActionKind::Mine`] carries
+    /// **one** name that is both the entity to swing at and the item that
+    /// arrives -- true of every ore and of nothing else. A tree named
+    /// `tree-01` yields `wood`. Folding that into `Mine` would mean either
+    /// putting `"tree-01"` in a field called `item`, which is a lie a reader
+    /// cannot see, or putting `"wood"` there, which the executor would hand
+    /// to `find_entity` and the game would answer "no entity to mine".
+    ///
+    /// `count` is a number of **entities**, not of items: one tree is one
+    /// swing and one fixed bill. What arrives is stated by the action's
+    /// `Effect::GainItem` and is never inferred from this field.
+    Chop {
+        pos: Position,
+        /// The prototype name the game is asked to find at `pos`.
+        entity: String,
+        /// What mining it yields -- for the label and for the reader; the
+        /// arithmetic lives in the effects.
+        item: ItemId,
+        count: u32,
+    },
     Craft {
         item: ItemId,
         count: u32,
@@ -609,6 +637,7 @@ impl ActionKind {
     pub fn target_position(&self) -> Option<Position> {
         match self {
             ActionKind::Mine { pos, .. }
+            | ActionKind::Chop { pos, .. }
             | ActionKind::Insert { pos, .. }
             | ActionKind::Remove { pos, .. }
             | ActionKind::SetRecipe { pos, .. } => Some(pos.clone()),

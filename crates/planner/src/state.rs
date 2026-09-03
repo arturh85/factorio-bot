@@ -2840,6 +2840,55 @@ impl PlanState {
         }
         patches
     }
+
+    /// Every standing tree or rock that yields `item`, as
+    /// `(entity name, position, what one of them yields)`.
+    ///
+    /// The renewable half of "where do items come from". `resource_patches`
+    /// answers for ore, which is a tile with an amount; this answers for an
+    /// entity that yields a fixed bill once and is then gone. Wood is the item
+    /// that made it necessary: it has no recipe and no ore, so before this the
+    /// planner's only wood was whatever the bots happened to start the run
+    /// holding -- four items, for ever, across a whole game.
+    ///
+    /// Ordered by entity name and then by tile, both from `BTreeMap`s in
+    /// `core`, so the order is the data's. Callers still sort by distance
+    /// themselves; this only guarantees the *input* to that sort does not move
+    /// between runs.
+    ///
+    /// Trees this plan has already chopped are gone from the answer:
+    /// `Effect::RemoveEntity` puts them in `removed`, which is what stops two
+    /// actions of one plan swinging at the same tree.
+    pub fn minable_sources(&self, item: &str) -> Vec<(String, Position, u32)> {
+        let mut out: Vec<(String, Position, u32)> = Vec::new();
+        for (name, yields) in self.base.entity_graph.minables_yielding(item) {
+            for position in self.base.entity_graph.minable_positions(&name) {
+                if self.removed.contains(&Pos::from(&position)) {
+                    continue;
+                }
+                out.push((name.clone(), position, yields));
+            }
+        }
+        out
+    }
+
+    /// Whether [`PlanState::minable_sources`] would answer with anything.
+    ///
+    /// Short-circuits, so the common answer costs one map lookup rather than a
+    /// walk of every tree on the map.
+    pub fn has_minable_source(&self, item: &str) -> bool {
+        self.base
+            .entity_graph
+            .minables_yielding(item)
+            .iter()
+            .any(|(name, _)| {
+                self.base
+                    .entity_graph
+                    .minable_positions(name)
+                    .iter()
+                    .any(|position| !self.removed.contains(&Pos::from(position)))
+            })
+    }
 }
 
 #[cfg(test)]
@@ -3606,6 +3655,46 @@ mod tests {
             !s.stands_on_resources("not-a-real-entity"),
             "an unknown name is not vouched for"
         );
+    }
+
+    /// A tree the plan has chopped is no longer a source of wood.
+    ///
+    /// This is the whole of what stops two chops in one plan swinging at the
+    /// same tree: `Effect::RemoveEntity` puts the tile in `removed`, and this
+    /// is where `removed` is honoured. Without it a plan needing eight wood
+    /// would emit two actions at one position, and the second would fail at
+    /// the game with "no entity to mine" -- about a tree the first action had
+    /// just taken.
+    #[test]
+    fn a_chopped_tree_stops_being_a_source() {
+        let at = Position::new(5.5, 5.5);
+        let world = factorio_bot_core::test_utils::fixture_world();
+        world
+            .update_chunk_entities(vec![FactorioEntity {
+                name: "tree-01".into(),
+                entity_type: "tree".into(),
+                bounding_box: factorio_bot_core::factorio::util::add_to_rect(
+                    &factorio_bot_core::types::Rect::from_wh(0.8, 0.8),
+                    &at,
+                ),
+                position: at.clone(),
+                ..Default::default()
+            }])
+            .expect("a fixture world accepts a tree");
+        let mut s = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+
+        assert_eq!(
+            s.minable_sources("wood"),
+            vec![("tree-01".to_string(), at.clone(), 4)]
+        );
+        assert!(s.has_minable_source("wood"));
+
+        s.remove_entity(&at);
+        assert!(
+            s.minable_sources("wood").is_empty(),
+            "the overlay hides it even though the base world still holds it"
+        );
+        assert!(!s.has_minable_source("wood"));
     }
 
     /// A tree the plan has already mined out of the way must stop blocking.

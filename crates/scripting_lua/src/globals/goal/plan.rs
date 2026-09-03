@@ -872,6 +872,24 @@ fn step_to_lua(lua: &Lua, net: &ActionNetwork, step: &ScheduledStep) -> LuaResul
                     t.set("item", item.clone())?;
                     t.set("count", *count)?;
                 }
+                // Its own kind rather than a second `"mine"`, and it carries
+                // `entity` as well as `item`: for an ore the two are one name
+                // and a script reading `item` learns everything, for a tree
+                // they differ and collapsing them would tell the script either
+                // the wrong name or the wrong item. `count` is entities here,
+                // which is why the kind has to be distinguishable at all.
+                ActionKind::Chop {
+                    pos,
+                    entity,
+                    item,
+                    count,
+                } => {
+                    t.set("kind", "chop")?;
+                    t.set("pos", position_to_lua(lua, pos)?)?;
+                    t.set("entity", entity.clone())?;
+                    t.set("item", item.clone())?;
+                    t.set("count", *count)?;
+                }
                 ActionKind::Craft { item, count } => {
                     t.set("kind", "craft")?;
                     t.set("item", item.clone())?;

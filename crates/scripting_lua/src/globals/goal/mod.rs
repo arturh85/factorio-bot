@@ -592,6 +592,12 @@ end
 -- and `plan:find{...}`; `to` and `pos` are not, being tables rather than
 -- comparable values.
 --
+-- A `kind == "chop"` step is a swing at a standing tree or rock rather than at
+-- an ore tile, and it is its own kind because its `entity` and its `item` are
+-- different names -- `tree-01` yields `wood` -- where a `kind == "mine"`
+-- step's one `item` is both. Its `count` counts entities, not items; what
+-- arrives is the entity's own fixed yield.
+--
 -- **This asks the game before it hands the plan back.** Once the sites are
 -- chosen, one RCON call puts every placement in the plan to
 -- `surface.can_place_entity`; any the game would refuse is remembered for the

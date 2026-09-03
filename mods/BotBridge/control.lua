@@ -1305,7 +1305,36 @@ function on_mined_entity(event)
 			if recent_item_additions[idx] == nil then recent_item_additions[idx] = {} end
 			table.insert(recent_item_additions[idx], tmp_recent_item_addition)
 			print("mining: " .. helpers.table_to_json(mining))
-			local delivered = (mined and mined[mining.prototype.name]) or 0
+			-- **Keyed by what this entity YIELDS, not by what it is called.**
+			-- The two are the same name for every ore -- mining `iron-ore`
+			-- gives `iron-ore` -- and for nothing else. A tree called
+			-- `tree-01` fills the buffer with `wood`, so the old
+			-- `mined[mining.prototype.name]` read nil, `left` never reached
+			-- zero, and the very next tick found the entity destroyed and
+			-- reported "the target tree-01 was gone before mining finished --
+			-- something else mined it first" about a tree this player had just
+			-- successfully chopped. Every rock has the same shape.
+			--
+			-- Still read out of `event.buffer`, which is what this swing
+			-- actually produced: the products list supplies the *names* to
+			-- look up and never the amounts, so a productivity or quality
+			-- bonus is counted as it happened rather than as the prototype
+			-- predicted. That is the distinction the paragraph above is about,
+			-- and it survives.
+			local delivered = 0
+			local products = mining.prototype.mineable_properties
+				and mining.prototype.mineable_properties.products
+			if products then
+				for _, product in pairs(products) do
+					if product.name then
+						delivered = delivered + ((mined and mined[product.name]) or 0)
+					end
+				end
+			else
+				-- No products list at all: fall back to the old key rather
+				-- than to zero, because zero is the answer that hangs.
+				delivered = (mined and mined[mining.prototype.name]) or 0
+			end
 			mining.left = mining.left - delivered
 			if mining.left <= 0 then
 				action_completed(event.tick, mining.action_id)

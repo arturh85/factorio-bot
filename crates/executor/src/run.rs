@@ -652,6 +652,14 @@ async fn perform<A: Actuator + ?Sized>(
         ActionKind::Mine { pos, item, count } => {
             act.mine(bot, item.as_str(), pos.clone(), *count).await
         }
+        // The same actuator call: the mod's `rcon_action_start_mining` finds
+        // its target with `surface.find_entity(name, position)` and asks only
+        // that it be `minable`, so an ore tile and a tree take the same route
+        // to the game. What differs is which field carries the name -- see
+        // `ActionKind::Chop`.
+        ActionKind::Chop {
+            pos, entity, count, ..
+        } => act.mine(bot, entity.as_str(), pos.clone(), *count).await,
         ActionKind::Craft { item, count } => act.craft(bot, item.as_str(), *count).await,
         ActionKind::Place { entity } => {
             act.place(bot, &entity.name, entity.position.clone(), entity.direction)

@@ -1147,6 +1147,143 @@ impl Method for Mine {
     }
 }
 
+/// Chop down what the world is standing on: a tree, a rock -- anything the
+/// game will let a character mine that is not an ore tile.
+///
+/// # Why this exists, and why it is last
+///
+/// `Mine` sources `EntityGraph::resources`, which `add` fills only for
+/// `entity_type == "resource"`. Wood is not a resource, has no recipe and is
+/// not smelted from anything, so before this method every wood in a run was
+/// wood a bot had been holding since it spawned: four bots, four wood, and --
+/// since one craft of `small-electric-pole` turns one wood into two poles --
+/// eight poles for the whole life of a game. That cap was a property of this
+/// model and of nothing else. Live run `run-1788396958-07935` halted on it,
+/// refusing `have 1 wood (a share sized for bot 1)` while bots 2, 3 and 4 each
+/// stood holding one they had never touched.
+///
+/// It is registered **after** `Withdraw`, `Smelt`, `HandCraft` and `Mine`, and
+/// that ordering is the whole of its guard. `MethodRegistry::find` takes the
+/// first applicable method, so an item that can be withdrawn, smelted,
+/// crafted or mined never reaches this one. Stone is the case that makes the
+/// difference visible: `rock-big` yields stone, so this method *could* supply
+/// it, and never does while a stone patch exists. Chopping is what is left
+/// when nothing else can supply the item at all -- which today means wood, and
+/// tomorrow means whatever else the game hands out only this way.
+///
+/// # One action per entity
+///
+/// A tree is not a tile with an amount in it. One swing takes the whole thing
+/// and yields the prototype's fixed bill, so a need for eight wood off trees
+/// that yield four is two actions at two positions, not one action with
+/// `count: 8`. Each action's `Effect::RemoveEntity` takes its tree out of the
+/// plan's overlay as it is emitted, which is what stops the second action
+/// picking the first one's tree -- and, as a side effect that is real rather
+/// than incidental, frees the ground it stood on for a later placement.
+pub struct Chop;
+
+impl Method for Chop {
+    fn name(&self) -> &'static str {
+        "chop"
+    }
+
+    fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
+        let Some(Demand { item, need, .. }) = demand(goal, state) else {
+            return false;
+        };
+        need > 0 && state.has_minable_source(item)
+    }
+
+    fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+        let Some(Demand {
+            item,
+            need,
+            unlocks,
+            ..
+        }) = demand(goal, &ctx.state)
+        else {
+            return Err(PlannerError::NoApplicableMethod {
+                goal: goal.to_string(),
+            });
+        };
+        let item = item.to_string();
+        let bot = ctx.state.bot(ctx.chain_actor);
+        let from = bot.map(|b| b.position.clone()).unwrap_or_default();
+        let reach = bot.map(|b| b.resource_reach_distance).unwrap_or(3.0);
+
+        // Nearest first, ties broken by `(x, y)` and then by name, exactly as
+        // `nearest_resource_tile` breaks them: the answer must depend only on
+        // the standing entities and the origin, never on the order they were
+        // discovered in.
+        let mut sources = ctx.state.minable_sources(&item);
+        sources.sort_by(|a, b| {
+            factorio_bot_core::factorio::util::calculate_distance(&from, &a.1)
+                .total_cmp(&factorio_bot_core::factorio::util::calculate_distance(
+                    &from, &b.1,
+                ))
+                .then(a.1.x.total_cmp(&b.1.x))
+                .then(a.1.y.total_cmp(&b.1.y))
+                .then(a.0.cmp(&b.0))
+        });
+
+        let mut steps: Vec<Step> = Vec::new();
+        let mut got: u32 = 0;
+        for (entity, position, yields) in sources {
+            if got >= need {
+                break;
+            }
+            got = got.saturating_add(yields);
+            let action = Action {
+                id: ctx.ids.next(),
+                kind: ActionKind::Chop {
+                    pos: position.clone(),
+                    entity: entity.clone(),
+                    item: item.clone(),
+                    count: 1,
+                },
+                pre: vec![Condition::AtPosition {
+                    who: Actor::Role,
+                    pos: position.clone(),
+                    radius: reach,
+                    min_radius: 0.0,
+                }],
+                eff: vec![
+                    Effect::RemoveEntity {
+                        pos: position.clone(),
+                    },
+                    // The whole bill, not the shortfall. A tree yields what it
+                    // yields; pretending the last one of a run gave less than
+                    // the others would leave the plan believing in wood the
+                    // bot is actually carrying, and the next goal would go and
+                    // fetch it again.
+                    Effect::GainItem {
+                        who: Actor::Role,
+                        item: item.clone(),
+                        count: yields,
+                    },
+                ],
+                // Read against the *entity's* prototype, not the item's:
+                // `mining_ticks` looks its argument up in `entity_prototypes`,
+                // where `tree-01` carries `mining_time` and `wood` is not a key
+                // at all. Passing the item would silently take the 1.0s
+                // default for every chop.
+                duration: mining_ticks(&ctx.state, &entity),
+                pinned: None,
+                label: format!("chop {} at {} for {} {}", entity, position, yields, item),
+            };
+            steps.push(Step::Act(Box::new(action)));
+        }
+
+        if steps.is_empty() {
+            return Err(PlannerError::NoApplicableMethod {
+                goal: goal.to_string(),
+            });
+        }
+        attach_unlock(&mut steps, &item, unlocks);
+        Ok(steps)
+    }
+}
+
 /// Craft the shortfall by hand, expanding each ingredient as a subgoal.
 pub struct HandCraft;
 
@@ -1820,6 +1957,10 @@ pub fn default_registry() -> MethodRegistry {
         .with(Box::new(Smelt))
         .with(Box::new(HandCraft))
         .with(Box::new(Mine))
+        // After `Mine`, and the order is load-bearing rather than tidy -- see
+        // the type's own doc. Anything with an ore patch, a recipe, a smelt or
+        // a buffer has already been claimed by the time a goal reaches here.
+        .with(Box::new(Chop))
         .with(Box::new(Researched))
         .with(Box::new(crate::method::produce::BuildCell))
         // Its sibling, and disjoint from it by construction: `BuildCell`
@@ -2407,6 +2548,10 @@ pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
         .with(Box::new(Smelt))
         .with(Box::new(HandCraft))
         .with(Box::new(Mine))
+        // After `Mine`, and the order is load-bearing rather than tidy -- see
+        // the type's own doc. Anything with an ore patch, a recipe, a smelt or
+        // a buffer has already been claimed by the time a goal reaches here.
+        .with(Box::new(Chop))
         .with(Box::new(Researched))
         // Last: it claims `Goal::Producing`, which nothing else claims, so
         // where it sits changes no other goal's method. Behind
@@ -3567,6 +3712,7 @@ mod tests {
             .actions()
             .map(|a| match &a.kind {
                 ActionKind::Mine { .. } => "mine",
+                ActionKind::Chop { .. } => "chop",
                 ActionKind::Craft { .. } => "craft",
                 ActionKind::Place { .. } => "place",
                 ActionKind::Insert { .. } => "insert",
@@ -3872,6 +4018,7 @@ mod tests {
             .actions()
             .map(|a| match &a.kind {
                 ActionKind::Mine { .. } => "mine",
+                ActionKind::Chop { .. } => "chop",
                 ActionKind::Craft { .. } => "craft",
                 ActionKind::Place { .. } => "place",
                 ActionKind::Insert { .. } => "insert",
@@ -7522,6 +7669,309 @@ mod tests {
             COAL_MJ < research_mj,
             "control: one coal must genuinely be short of the research, or the bound above \
              is satisfied by any number at all"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Chopping
+    // -----------------------------------------------------------------------
+
+    /// A world with three real trees standing near the origin, and nothing
+    /// else changed.
+    fn wooded_state(bots: &[BotId], trees: &[Position]) -> PlanState {
+        let world = crate::test_world::with_trees(fixture_world(), trees);
+        PlanState::from_world(Arc::new(world), bots)
+    }
+
+    /// Where a bill's ingredient goal sits: asked for by a method, inside the
+    /// chain that method opened. Not `GoalSite::root()` -- a root site lets
+    /// `SplitAcrossBots` claim, which is a different question from the one
+    /// these tests ask.
+    const SUBGOAL_SITE: GoalSite = GoalSite {
+        top_level: false,
+        in_chain: true,
+        converging: false,
+    };
+
+    fn chops(net: &[Step]) -> Vec<(String, Position, u32)> {
+        net.iter()
+            .filter_map(|step| match step {
+                Step::Act(action) => match &action.kind {
+                    ActionKind::Chop { pos, entity, .. } => {
+                        Some((entity.clone(), pos.clone(), action.duration))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn expand_with(registry: &MethodRegistry, goal: &Goal, state: &PlanState) -> Vec<Step> {
+        let mut ctx = ExpansionCtx::new(state.fork(), BotId(1));
+        let method = registry
+            .find(goal, &ctx.state, SUBGOAL_SITE)
+            .unwrap_or_else(|| panic!("no method claims {goal}"));
+        method
+            .expand(goal, &mut ctx)
+            .unwrap_or_else(|err| panic!("{goal} refused: {err}"))
+    }
+
+    /// The headline: wood comes off a tree.
+    ///
+    /// Before this, `have 1 wood` had no method at all — the refusal that
+    /// halted live run `run-1788396958-07935` at rung 2 — because `Mine`
+    /// sources ore tiles and wood is not an ore.
+    #[test]
+    fn a_wood_goal_is_satisfied_by_chopping_a_tree() {
+        let bots = [BotId(1)];
+        let state = wooded_state(&bots, &[Position::new(5., 5.)]);
+        let steps = expand_with(
+            &registry_for(&bots),
+            &Goal::Have {
+                item: "wood".into(),
+                count: 1,
+                whose: Holder::Share(BotId(1)),
+            },
+            &state,
+        );
+        let chopped = chops(&steps);
+        assert_eq!(chopped.len(), 1, "one tree covers a one-wood goal");
+        assert_eq!(chopped[0].0, "tree-01", "the entity, not the item");
+        assert_eq!(
+            chopped[0].1,
+            Position::new(5., 5.),
+            "the position the game reported, which is what `find_entity` matches on"
+        );
+    }
+
+    /// The gain is the tree's whole bill, and it is stated by the effect
+    /// rather than inferred from the action's `count`.
+    #[test]
+    fn a_chop_gains_the_prototypes_whole_yield() {
+        let bots = [BotId(1)];
+        let state = wooded_state(&bots, &[Position::new(5., 5.)]);
+        let steps = expand_with(
+            &registry_for(&bots),
+            &Goal::Have {
+                item: "wood".into(),
+                count: 1,
+                whose: Holder::Share(BotId(1)),
+            },
+            &state,
+        );
+        let Some(Step::Act(action)) = steps.first() else {
+            panic!("expected an action, got {steps:?}");
+        };
+        assert!(
+            action.eff.contains(&Effect::GainItem {
+                who: Actor::Role,
+                item: "wood".into(),
+                count: 4,
+            }),
+            "`tree-01` yields four wood in the prototype fixture; got {:?}",
+            action.eff
+        );
+        assert!(
+            action.eff.contains(&Effect::RemoveEntity {
+                pos: Position::new(5., 5.),
+            }),
+            "a chopped tree stops standing — which is also what stops a second \
+             chop picking it, and what frees the ground under it"
+        );
+        assert!(
+            matches!(&action.kind, ActionKind::Chop { count, .. } if *count == 1),
+            "`count` is entities, not items"
+        );
+    }
+
+    /// Two trees, not one tree asked for eight wood.
+    ///
+    /// A tree is an entity that yields its bill once, so a shortfall bigger
+    /// than one yield is more swings at more positions.
+    #[test]
+    fn a_shortfall_bigger_than_one_tree_chops_a_second_one() {
+        let bots = [BotId(1)];
+        let state = wooded_state(&bots, &[Position::new(5., 5.), Position::new(6., 5.)]);
+        let steps = expand_with(
+            &registry_for(&bots),
+            &Goal::Have {
+                item: "wood".into(),
+                count: 5,
+                whose: Holder::Share(BotId(1)),
+            },
+            &state,
+        );
+        let chopped = chops(&steps);
+        assert_eq!(
+            chopped.len(),
+            2,
+            "four wood from one tree is one short of five"
+        );
+        assert_ne!(
+            chopped[0].1, chopped[1].1,
+            "two actions must not swing at the same tree"
+        );
+    }
+
+    /// Nearest first, and the same answer whichever order the trees were
+    /// delivered in.
+    #[test]
+    fn the_nearest_tree_is_chopped_first_whatever_order_the_world_reported_them() {
+        let far = Position::new(40., 40.);
+        let near = Position::new(3., 3.);
+        let mut answers = Vec::new();
+        for order in [[far.clone(), near.clone()], [near.clone(), far.clone()]] {
+            let bots = [BotId(1)];
+            let state = wooded_state(&bots, &order);
+            let steps = expand_with(
+                &registry_for(&bots),
+                &Goal::Have {
+                    item: "wood".into(),
+                    count: 1,
+                    whose: Holder::Share(BotId(1)),
+                },
+                &state,
+            );
+            answers.push(chops(&steps)[0].1.clone());
+        }
+        assert_eq!(answers[0], near, "the bot starts at the origin");
+        assert_eq!(
+            answers[0], answers[1],
+            "the answer must not depend on delivery order"
+        );
+    }
+
+    /// The duration is read off the *entity's* prototype.
+    ///
+    /// `mining_ticks` looks its argument up in `entity_prototypes`, where
+    /// `wood` is not a key at all; passing the item would silently take the
+    /// 1.0-second default for every chop. `tree-01` is 0.55 s, and a vanilla
+    /// character's mining speed is 0.5, so 1.1 s — 66 ticks.
+    #[test]
+    fn a_chop_takes_the_trees_mining_time_not_the_default() {
+        let bots = [BotId(1)];
+        let state = wooded_state(&bots, &[Position::new(5., 5.)]);
+        let steps = expand_with(
+            &registry_for(&bots),
+            &Goal::Have {
+                item: "wood".into(),
+                count: 1,
+                whose: Holder::Share(BotId(1)),
+            },
+            &state,
+        );
+        assert_eq!(
+            chops(&steps)[0].2,
+            mining_ticks(&state, "tree-01"),
+            "read against the tree, not against `wood`"
+        );
+        assert_ne!(
+            mining_ticks(&state, "tree-01"),
+            mining_ticks(&state, "wood"),
+            "control: the two really do differ, or the assertion above proves nothing"
+        );
+    }
+
+    /// Chopping never displaces a route that already exists.
+    ///
+    /// The fixture stands two `rock-big` and three `rock-huge`, which between
+    /// them yield stone — so `Chop` *could* supply it. It must not, while
+    /// there is a stone patch: `Mine` is registered first and claims the goal.
+    /// This is the whole of the guard that keeps this method out of every
+    /// existing plan.
+    #[test]
+    fn a_stone_goal_still_mines_the_patch_rather_than_smashing_a_rock() {
+        let bots = [BotId(1)];
+        let state = wooded_state(&bots, &[Position::new(5., 5.)]);
+        assert!(
+            !state.minable_sources("stone").is_empty(),
+            "control: the fixture's rocks really do yield stone, so this test \
+             is about the ordering and not about an empty answer"
+        );
+        let steps = expand_with(
+            &registry_for(&bots),
+            &Goal::Have {
+                item: "stone".into(),
+                count: 4,
+                whose: Holder::Share(BotId(1)),
+            },
+            &state,
+        );
+        assert!(chops(&steps).is_empty(), "got {steps:?}");
+        assert!(
+            steps.iter().any(
+                |step| matches!(step, Step::Act(a) if matches!(a.kind, ActionKind::Mine { .. }))
+            ),
+            "the stone patch is still what supplies stone"
+        );
+    }
+
+    /// A world with no trees the planner can read a bill off still refuses
+    /// wood, rather than inventing it.
+    ///
+    /// The shared fixture's own hundred trees are `tree-42`, a name the
+    /// prototype fixture does not carry, so they yield nothing — which is both
+    /// the control here and the reason no existing test moved.
+    #[test]
+    fn wood_is_still_refused_in_a_world_whose_trees_have_no_prototype() {
+        let bots = [BotId(1)];
+        let state = state(&bots);
+        assert!(
+            state.minable_sources("wood").is_empty(),
+            "the fixture's `tree-42` carries no `mine_result`"
+        );
+        let goal = Goal::Have {
+            item: "wood".into(),
+            count: 1,
+            whose: Holder::Share(BotId(1)),
+        };
+        assert!(
+            registry_for(&bots)
+                .find(&goal, &state, SUBGOAL_SITE)
+                .is_none(),
+            "no method may claim wood that nothing in the world yields"
+        );
+    }
+
+    /// The live failure, end to end: the bot the cell's bill is sized against
+    /// holds no wood, and the plan no longer dies for it.
+    ///
+    /// `assemble::bill` asks for its pole as `Holder::Share(chain_actor)`, and
+    /// `HandCraft` passes that holder straight down to the ingredients — so
+    /// the wood goal is bound to one named bot and the three other bots'
+    /// wood is unreachable to it by construction. Making wood *obtainable* is
+    /// what removes the dead end; nothing here reaches into another
+    /// inventory.
+    #[test]
+    fn a_pole_is_craftable_by_a_bot_that_starts_with_no_wood() {
+        let bots = [BotId(1), BotId(2)];
+        let mut state = wooded_state(&bots, &[Position::new(5., 5.)]);
+        // Bot 2 holds the roster's only starting wood, exactly as the live run
+        // left it. Bot 1 is the chain actor and holds none.
+        state.gain(BotId(2), "wood", 1);
+        assert_eq!(state.inventory_count(BotId(1), "wood"), 0);
+        let net = expand(
+            &[Goal::Have {
+                item: "small-electric-pole".into(),
+                count: 1,
+                whose: Holder::Share(BotId(1)),
+            }],
+            &state,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a bot standing in a forest can make itself a pole");
+        assert!(
+            net.actions()
+                .any(|a| matches!(&a.kind, ActionKind::Chop { item, .. } if item == "wood")),
+            "the wood comes off a tree"
+        );
+        assert!(
+            net.actions().any(
+                |a| matches!(&a.kind, ActionKind::Craft { item, .. } if item == "small-electric-pole")
+            ),
+            "and the pole is crafted from it"
         );
     }
 }

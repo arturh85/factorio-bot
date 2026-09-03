@@ -13,6 +13,7 @@ use crate::factorio::util::{
     vector_substract,
 };
 use crate::factorio::world::{FactorioWorld, PlacementRefusal, RefusalSource};
+use crate::graph::entity_graph::ResourceDepletion;
 use crate::settings::FactorioSettings;
 use crate::types::{
     ActionId, AreaFilter, Direction, FactorioEntity, FactorioForce, FactorioPlayer, FactorioTile,
@@ -2157,12 +2158,33 @@ impl FactorioRcon {
         // without this the planner keeps choosing a tile a bot already mined
         // dry and the bot walks back to nothing. See
         // `EntityGraph::resource_mined`.
+        //
+        // **The answer is read, not discarded.** `resource_mined` reports
+        // `Absent` for a target the resource model has no tile for, and its
+        // own doc says which targets those are: a tree or a rock. That is the
+        // whole population of `EntityGraph::minables`, and nothing else in
+        // this process removes a chopped tree -- the mod destroys the entity
+        // and emits no event for it. Dropping this return value therefore
+        // leaves a stump in the model that the planner re-offers for ever, and
+        // the second visit fails with "no entity to mine" about ground the
+        // bot itself cleared. `Absent` for a resource whose tile was already
+        // retired is the harmless other reader of this branch:
+        // `retire_minable` finds no such name and answers `false`.
         match &outcome {
             Ok(_) => {
-                world.entity_graph.resource_mined(name, position, count);
+                if world.entity_graph.resource_mined(name, position, count)
+                    == ResourceDepletion::Absent
+                {
+                    world.entity_graph.retire_minable(name, position);
+                }
             }
             Err(failure) if mine_reports_target_gone(&failure.error.to_string()) => {
-                world.entity_graph.retire_resource(name, position);
+                // Gone is gone, whichever model held it. `retire_resource`
+                // answers `false` for a name that is not a resource, so the
+                // second call is the one that does the work for a tree.
+                if !world.entity_graph.retire_resource(name, position) {
+                    world.entity_graph.retire_minable(name, position);
+                }
             }
             Err(_) => {}
         }

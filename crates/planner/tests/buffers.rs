@@ -86,6 +86,12 @@ fn kinds(net: &ActionNetwork) -> Vec<String> {
         .actions()
         .map(|a| match &a.kind {
             ActionKind::Mine { item, count, .. } => format!("mine {count} {item}"),
+            ActionKind::Chop {
+                entity,
+                item,
+                count,
+                ..
+            } => format!("chop {count} {entity} for {item}"),
             ActionKind::Craft { item, count } => format!("craft {count} {item}"),
             ActionKind::Place { entity } => format!("place {}", entity.name),
             ActionKind::Insert {

@@ -151,6 +151,44 @@ had 6. Something re-seeded it in between and I could not attribute it. What is
 not in doubt is that run 4's *game* had the old mod — Factorio loads mods at
 server start, and the game itself raised the missing-function error.
 
+## Run 8: the first clean run, and a recurrence of an already-fixed class
+
+**Run 8 (`run-1788405365-21697`) was the first attempt with a fresh world AND a
+verified mod, and it got further than anything before it:** rung 1
+`researched("automation")` **SATISFIED** — the ladder's fifth consecutive
+reproduction — on **323 action dispatches and 103 walks**, against 267 in run 1.
+
+Rung 2 then refused **three seconds after the goal was accepted**, so this is a
+plan-time refusal and not an execution failure:
+
+```
+HALTED: stuck -- refused: precondition has 3 iron-ore of action ActionId(41)
+                          does not hold for bot 2
+```
+
+**This class was diagnosed and fixed once already.** `method/have.rs:6139-6157`
+documents `run-1788300756-94802` raising `precondition has 50 iron-ore of action
+ActionId(8) does not hold for bot 2` — the identical shape — and records the
+cause: *"the production's `insert 50 iron-ore` was welded to nothing while the
+mining under it opened a chain of its own, and the two landed on different
+bots"*, fixed by having the driver read `whose` off `Produced` as well as
+`Have`. It has recurred through the **new `Goal::Producing` / assemble path**,
+which did not exist when that fix was made.
+
+The same note carries the warning that matters for the retest: the defect needed
+**unequal** per-bot inventories, and *"the same goal planned fine against bots
+holding nothing, which is why every existing test passed."*
+
+It also puts a question mark over an earlier agent's claim that `even_shares`'
+poorest-first split is "unreachable from a `Producing` goal" — rung 2 *is* a
+`Producing` goal. Either the reachability claim is wrong or this is a different
+mechanism; an agent is settling which.
+
+**Reconstructing the state for a red test is harder than it should be**, because
+the run record still carries **no inventories** — the same gap that forced the
+wood RCA to be inferred from craft/place actions. That open item has now cost
+two investigations.
+
 ## `min_radius` is dropped at lowering — the same bug this file already fixed once
 
 **Three live refusals, one mechanism, and the precedent is documented in the

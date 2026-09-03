@@ -193,6 +193,68 @@ had 6. Something re-seeded it in between and I could not attribute it. What is
 not in doubt is that run 4's *game* had the old mod — Factorio loads mods at
 server start, and the game itself raised the missing-function error.
 
+## CORRECTION: six of the eight "walk refusals" are a different defect
+
+**I built an elaborate case on a misreading, and it was wrong in a way worth
+recording.** I counted eight sub-tile refusals, asserted a shared invariant,
+called one pair "byte-identical across runs" and declared the fix "verifiable at
+a named coordinate". Six of those eight are not this defect at all.
+
+That message —
+
+```
+ERROR: stuck while walking, the destination is unreachable:
+the game's pathfinder found no path from (-28.6640625/-26.8046875) to (-28.5/-27.5)
+```
+
+— is emitted by `mods/BotBridge/control.lua`'s `walk_repath_finished`: a
+**mid-walk re-path, after dispatch**. Their `walk_settled` records carry
+non-null `elapsed_ticks` (106–471) and a `to` of `{-31, -31}` — *not* the
+coordinate in the message. So `(-28.5, -27.5)` is the original path's **last
+waypoint**, and the 0.70 tiles I kept quoting is bot→waypoint, not bot→goal.
+`start_walk_repath` re-paths to `w.waypoints[#w.waypoints]` at
+`WALK_REPATH_RADIUS = 0.5` — a waypoint that was clear when the path was
+computed and has since been **built on**. Those walks all have
+`min_radius == 0`, so carrying `min_radius` cannot reach them; fixing them is a
+mod-side change.
+
+Also: only **one** event in all of `workspace/runs` carries the executor's own
+`failed to path find`. The rest are the mod's stuck-walk message, which I read
+as the same thing.
+
+**The lesson is not "count more carefully".** Every number I quoted was real;
+what was wrong was assuming two coordinates in one message were the walk's start
+and goal. A shared *format* looked like a shared *cause*, and the invariant I
+derived from it ("sub-tile distance") was an artefact of measuring the wrong
+pair of points. The run record could have settled it at any time —
+`walk_settled` carries the actual `to`.
+
+## The real defect, sharper than I had it (fixed, `c0d4f87a`)
+
+The old lowering did not merely *drop* `min_radius` — it **baked it into `to`**
+via `arrival_point`, at exactly `min_radius` along a fixed `+x`, and forced
+`radius` to `0.0`. So the bug was that **the planner named a stand-point at
+all**, in a direction chosen without knowing what is walkable.
+
+And `+x` was worse than arbitrary: every placement in these runs sits at
+`x = -53` or `x = -63` because the plan builds in **columns**, so "one clearance
+east of the site" points straight down the next column — at a tree in run 10,
+and at the plan's own buildings in general. That is why it reproduced to the
+decimal place.
+
+Fix: `StepKind::Walk` now carries the `AtPosition` verbatim (`{ to, min_radius,
+radius }`) and names no point; `approach_annulus` picks a goal
+`min_radius + slack` from the target **towards the bot**, with the whole path
+disc inside the annulus. `min_radius == 0` is byte-identical to before, so every
+mine, insert, remove and craft is untouched. **No pin moved** — `arrival_point`
+still drives the plan's own simulation, so the model is bit-identical.
+
+Two follow-ups the agent named and deliberately did not do, both stop-and-report:
+`Insert`/`Remove`/`Mine` set `min_radius: 0.0` although a bot cannot stand on a
+furnace either (would move pins), and `approach_radius(10) = 5.0` lets a path
+stop five tiles short of an insert's furnace — whose fix is the first item, not
+a smaller constant.
+
 ## The cell was BUILT and both recipes were SET — all nine actions succeeded
 
 From run 10's record, every cell action settled `success`:

@@ -408,8 +408,11 @@ const LAYOUT: [(Role, (f64, f64), Direction); 7] = [
 /// and not a row (`tests::the_cells_own_pole_covers_every_consumer_in_it`).
 ///
 /// **It is not in [`LAYOUT`], and that is the point.** A small electric pole
-/// costs one wood, the planner cannot make wood, and every bot a run starts
-/// carries exactly one: four bots, four wood, **eight poles ever**. Run
+/// costs one wood; *this planner* cannot make wood, because `Mine` sources
+/// only `EntityGraph::resources` and a tree is not one; and every bot a run
+/// starts carries exactly one. So four bots is four wood and eight poles for
+/// the whole run -- **a limit of the model rather than of the game**, which
+/// renews wood perfectly well and which the mod already deforests. Run
 /// `run-1788396958-07935` spent both of bot 1's on power plants -- one craft
 /// yields two, a replan re-sited the plant, and both went into the ground --
 /// and the cell was then refused with `no method can satisfy goal: have 1

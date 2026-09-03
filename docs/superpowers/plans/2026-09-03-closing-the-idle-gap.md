@@ -143,7 +143,69 @@ about the roster, not about the busiest bot.
 
 ## Workstreams, in value order
 
-### 0. Offline planning on a real map — do this FIRST
+### 0. Offline planning on a real map — **DONE** (`db612be9`)
+
+**Landed.** `world.dump(path)` (a Lua binding, bounded by the same
+`resolve_write_path` that gates `world.draw`) writes a world; `factorio-bot
+plan --world map.json --goal researched:automation --bots 1,2,3,4` plans
+against it. **Measured at 0.26 s against a ~20-minute run.** No Factorio,
+RCON, workspace or settings file needed. `PlanReport`
+(`crates/planner/src/report.rs`) reports actions, makespan, steps/acts/walks
+per bot, planned and idle ticks per bot, and roster utilisation — it lives in
+the planner because 0b's makespan scoring needs the same numbers.
+
+The Lua binding was chosen over a CLI flag because **the dump that matters is
+mid-run**: at t=0 all the ledgers are empty, so a setup-time dump is trivially
+faithful and worth little. Only a script knows when a milestone closed.
+
+#### This plan's central premise was FALSE, and it matters
+
+I wrote that "`FactorioWorld` already round-trips through serde", citing the
+two `impl` blocks. **Both halves existed and neither had ever been run against
+a world containing anything.** `EntityGraph`'s `resources` and `minables` key
+their inner maps by `Pos`, a two-field tuple struct, and `serde_json` refuses
+the whole document with `key must be a string` the moment one appears in key
+position. **Serializing any world that had ever seen a single ore tile or one
+tree failed outright.** A test comment in `entity_graph.rs` even recorded JSON
+as impossible there.
+
+It went unnoticed for exactly the reason this plan gave for the feature being
+easy: nothing wrote a world to disk, so the only worlds ever serialized were
+empty ones. **The presence of an `impl` is not evidence that it works** —
+I checked that the code existed and reported that as a working round-trip.
+Both maps now travel as sorted `[pos, value]` pair lists, with a regression
+test and a byte-stability test.
+
+#### Four ledgers were missing, not two
+
+This plan named `inventories` and `placement_refusals`. `PlanState::from_world`
+also reads `walk_refusals` (`refused_walks`) and `enclosures`
+(`find_walled_in`). All four are now serialized — `inventories` through
+`observed_inventories()` in tile order, which determinism requires *and* which
+is required at all, since `Pos` cannot be a key. All four load as optional,
+because absent is what a pre-change dump means by empty, and that is what a
+t=0 world genuinely is.
+
+#### The identical-plan property holds
+
+`crates/planner/tests/world_round_trip.rs` compares every `Action` (id, kind,
+pre, eff, duration, label), every action's chain, every chain's owner, and
+every `ScheduledStep` with bot/start/end — not merely the makespan. Kept from
+being vacuous by a sibling test that strips the four ledger fields back out
+(exactly what the old serialization wrote) and asserts the plan **moves**.
+
+#### Caveat: a dump is not byte-stable across processes
+
+The maps the planner depends on are sorted, but `players`, `forces`,
+`graphics`, `item_prototypes`, `actions`, `path_requests`,
+`entity_prototypes` and `recipes` are still `DashMap`s written in hash order —
+stable within a process, not across two. Two dumps of one world can differ as
+bytes while loading to the same world and giving an identical plan. **Do not
+checksum a dump to decide whether two runs saw the same map**;
+`EntityGraph::resource_fingerprint` answers that.
+
+<details><summary>Original workstream text (retained)</summary>
+
 
 **Today a plan cannot be made without launching Factorio**, so every planner
 change costs a 20-minute run to evaluate. This is the single biggest tax on
@@ -186,6 +248,8 @@ workstream rather than discovering it later.
 **Payoff:** planner iteration drops from ~20 minutes to seconds, and every
 workstream below can be evaluated before a run is spent on it. It also
 makes the paused experiments cheap to resume.
+
+</details>
 
 ### 0b. A reasonable starting seed — resources close to spawn
 

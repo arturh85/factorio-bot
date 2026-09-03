@@ -554,14 +554,22 @@ pub struct ActionFailure {
 ///
 /// The distinction the run record exists to preserve is
 /// [`WalkFailureKind::NoPath`] against [`WalkFailureKind::PathfinderBusy`].
-/// BotBridge's `walk_repath_finished` (`mods/BotBridge/control.lua`) branches
-/// on exactly that: `try again later` means the request queue was full and
-/// **nothing was searched**, so asking again is the right thing to do and the
-/// mod does; `failed to path find` means the pathfinder searched and found
+/// `FactorioRcon::player_path_attempt` (`crates/core/src/factorio/rcon.rs`)
+/// branches on exactly that: `try again later` means the request queue was full
+/// and **nothing was searched**, so asking again is the right thing to do and
+/// it does; `failed to path find` means the pathfinder searched and found
 /// nothing, which is a fact about the destination that no amount of repeating
 /// will change. A record that collapsed them would say "the walk failed" for
 /// both and leave the reader to guess which of "try again" and "this place is
 /// unreachable" applies.
+///
+/// **Two of these variants are archive-only.** BotBridge used to re-path a
+/// stalled walk for itself, and produced `PathfinderBusy` and `RepathLimit`
+/// from wordings of its own; that machinery is gone -- retrying a stuck walk
+/// lives in `FactorioRcon::move_player_timed`, where the goal, the radius and
+/// the standability judgement are. The variants stay because
+/// `workspace/runs` is full of runs that used them, and this enum is what
+/// reads those runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WalkFailureKind {
@@ -581,14 +589,29 @@ pub enum WalkFailureKind {
     /// answered within the mod's budget. **Nothing was learned about whether
     /// the destination is reachable**, which is exactly what separates this
     /// from [`WalkFailureKind::NoPath`], and it is worth trying again.
+    ///
+    /// **Archive only.** Both wordings came from the mod's own re-path, which
+    /// no longer exists. A full queue is now retried inside
+    /// `FactorioRcon::player_path_attempt` before any walk is dispatched, so it
+    /// reaches a walk failure only as an ordinary pre-dispatch error.
     PathfinderBusy,
     /// Re-paths kept succeeding and the bot kept not arriving, until the mod's
     /// `WALK_REPATH_LIMIT` ran out. Distinct from both of the above: a path
     /// existed every time it was asked for, so this is a fact about the
     /// walking, not about the map.
+    ///
+    /// **Archive only**, for the same reason as
+    /// [`WalkFailureKind::PathfinderBusy`]. Its successor is
+    /// [`WalkFailureKind::Stalled`], which a walk now reaches only after
+    /// `move_player_timed` has spent its whole retry budget on fresh paths.
     RepathLimit,
-    /// A leg timed out and the walk was abandoned without a re-path answer to
-    /// blame -- the mod's `aborted before reaching last waypoint`.
+    /// A leg stopped progressing and the walk was abandoned -- the mod's
+    /// `made no progress for <t> ticks`, or, from an older build,
+    /// `aborted before reaching last waypoint`.
+    ///
+    /// Says the *walking* was stuck, not that the map is: every fresh path
+    /// `FactorioRcon::move_player_timed` asked for was found and judged
+    /// arrivable, and the character still did not get there.
     Stalled,
     /// No verdict ever arrived: the executor's deadline expired. Pairs with
     /// `status: "lost"`, and is the one kind here that says nothing at all

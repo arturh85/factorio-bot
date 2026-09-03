@@ -26,11 +26,13 @@ use tokio::sync::Mutex;
 /// blueprint's bounding box before reviving it.
 ///
 /// There used to be a third, the stuck-walk timeout, and it was the only one
-/// that carried an `action_id`. It was removed in favour of re-pathing, because
-/// teleporting a stalled walk reports *arrival* at a destination the character
-/// could not reach -- so the planner never learned a site was unreachable and
-/// kept choosing it. `action_id` is therefore always absent now: both remaining
-/// sites are synchronous RCON calls with no dispatched action to attach to.
+/// that carried an `action_id`. It was removed, because teleporting a stalled
+/// walk reports *arrival* at a destination the character could not reach -- so
+/// the planner never learned a site was unreachable and kept choosing it. A
+/// stalled leg now fails the walk, and `FactorioRcon::move_player_timed` asks
+/// the game for a fresh path. `action_id` is therefore always absent now: both
+/// remaining sites are synchronous RCON calls with no dispatched action to
+/// attach to.
 ///
 /// The field stays because 1,619 archived teleport events carry it and must
 /// remain readable.

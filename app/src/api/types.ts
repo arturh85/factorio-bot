@@ -570,9 +570,17 @@ export interface ActionFailure {
 export type WalkFailureKind =
     | 'no_path'
     | 'pathfinder_busy'
-    /** Re-paths kept succeeding and the bot kept not arriving, until the mod gave up. */
+    /**
+     * Re-paths kept succeeding and the bot kept not arriving, until the mod
+     * gave up. **Archive only**: the mod no longer re-paths for itself, and
+     * this variant's successor is `stalled`.
+     */
     | 'repath_limit'
-    /** A leg timed out and the walk was abandoned with no re-path answer to blame. */
+    /**
+     * A leg stopped progressing and the walk was abandoned. Reached only after
+     * the Rust side has already spent its retry budget asking the game for
+     * fresh paths, so it says the walking was stuck, not that the map is.
+     */
     | 'stalled'
     /** No verdict ever arrived -- pairs with `status: 'lost'`. */
     | 'timeout'

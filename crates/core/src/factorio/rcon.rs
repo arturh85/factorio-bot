@@ -1050,6 +1050,90 @@ fn path_search_found_nothing(err: &Report) -> bool {
         .is_some_and(|failed| !path_request_was_busy(&failed.reason))
 }
 
+/// The mod's wording for a walk whose current leg stopped making progress.
+///
+/// Owned by `mods/BotBridge/control.lua`'s walk follower, which fails a walk
+/// with `ERROR: stuck while walking, leg <i> of <n> made no progress for <t>
+/// ticks from (x/y) to (x/y)` once a leg outlives its timeout.
+///
+/// Both halves are matched, and the second one is the point. `stuck while
+/// walking` prefixes every stuck verdict this mod has ever produced, including
+/// two that are *answers*: `the destination is unreachable ... found no path`
+/// and `gave up after 4 re-paths on one walk` both come from a build whose
+/// pathfinder had already searched. `made no progress` is specifically the
+/// stall -- nothing was searched, nothing was learned about reachability -- and
+/// that is the only walk failure worth putting to the game again. A save
+/// carrying an in-flight walk from an older build therefore does not get its
+/// definitive answer retried into oblivion.
+const WALK_STUCK: &str = "stuck while walking";
+const WALK_LEG_STALLED: &str = "made no progress";
+
+/// Whether a failed walk's verdict says a leg stalled, as opposed to saying
+/// anything about whether the destination can be reached.
+///
+/// Matched on the mod's text because there is nothing else to match on -- the
+/// verdict reaches Rust as one opaque string in [`crate::errors::RconError`] --
+/// the same way [`mine_reports_target_gone`] is, and split out as a free
+/// function so a reword in `control.lua` fails a test in this crate instead of
+/// quietly retiring the retry below.
+pub fn walk_reports_stalled_leg(message: &str) -> bool {
+    message.contains(WALK_STUCK) && message.contains(WALK_LEG_STALLED)
+}
+
+/// [`walk_reports_stalled_leg`] against the failure a walk actually comes back
+/// with.
+///
+/// Two conditions, and the [`Dispatch`] one is load-bearing in both directions:
+///
+/// - [`Dispatch::NotDispatched`] is never retried. Everything raised before the
+///   walk is sent -- a [`judge_path`] refusal, a `failed to path find`, an
+///   unknown player -- is a fact about the ground or the map that asking again
+///   does not change. That is what keeps the pathfinder's definitive answer
+///   definitive.
+/// - [`Dispatch::NoVerdict`] is never retried either, and this one is a safety
+///   property rather than an honesty one: the game took that walk and never
+///   said how it ended, so the bot may still be walking. A second dispatch
+///   would put two walks on one character.
+///
+/// Only [`Dispatch::Refused`] -- the game answered, and the answer was a
+/// stalled leg -- is retried.
+fn is_stalled_walk(failure: &ActionFailure) -> bool {
+    failure.dispatch == Dispatch::Refused
+        && failure
+            .error
+            .downcast_ref::<RconError>()
+            .is_some_and(|refused| walk_reports_stalled_leg(&refused.message))
+}
+
+/// How many times one [`FactorioRcon::move_player_timed`] call may be put to the
+/// game before its stall is reported as a failure.
+///
+/// # Why the budget is a count and not a clock
+///
+/// Every retry is spent on an attempt the game *answered*, because
+/// [`is_stalled_walk`] refuses to retry anything else. So an attempt cannot
+/// both consume [`ACTION_RESULT_DEADLINE`] and be retried: a walk the game goes
+/// quiet on is [`Dispatch::NoVerdict`] and ends the loop. What a retry actually
+/// costs is one path request round trip plus the mod's own leg timeout
+/// (`walk_leg_timeout_ticks`, 3x the straight-line time of one leg, floored at
+/// 60 ticks) -- seconds, not minutes. Three attempts therefore bound a
+/// hopelessly stuck walk to the same order the mod's re-path budget did, which
+/// is the property that must not regress: being told in seconds instead of
+/// after the executor's 360-second deadline is the whole point.
+///
+/// # Why three
+///
+/// The mod's `WALK_REPATH_LIMIT` was 4 for a *weaker* retry -- it re-pathed to
+/// the last node of the stale path at a radius of 0.5, judged against nothing.
+/// This one re-asks for the caller's own goal at the caller's own radius and
+/// puts the answer through [`judge_path`], so it both succeeds more often and
+/// fails faster when it is going to fail: the second attempt of an unreachable
+/// destination is refused *before* dispatch rather than walked and stalled.
+/// The observed need across the 23 archived runs was one re-path; 3 keeps the
+/// headroom the mod's note argued for -- the world changing again while the new
+/// route is being walked -- without paying for four stalls.
+const WALK_ATTEMPTS: u32 = 3;
+
 /// How many times one path request is put to a pathfinder that keeps saying its
 /// queue is full.
 ///
@@ -2053,15 +2137,72 @@ impl FactorioRcon {
     /// flagged `needs_destroy_to_reach: false`. All three of that run's failed
     /// walks are exactly the ones whose last waypoint was one of those, and
     /// each cost four re-paths and a leg timeout before reporting the terrain
-    /// as unreachable — while the re-path could not have succeeded, since
-    /// `WALK_REPATH_RADIUS` is 0.5 and standing clear of a stone furnace needs
+    /// as unreachable — while the mod's re-path could not have succeeded, since
+    /// its radius was 0.5 and standing clear of a stone furnace needs
     /// 0.8984375.
     ///
     /// So the destination is also checked for standability, against the entity
     /// graph, and refused as [`RconWalkEndsWhereNobodyCanStand`] naming the
     /// obstruction. Only a *provable* overlap refuses: see
     /// [`StandingVerdict`] for why "cannot tell" has to be allowed through.
+    ///
+    /// # A walk whose leg stalls is asked again, from here
+    ///
+    /// The waypoints a walk follows were chosen once, at dispatch time, by a
+    /// run that is *building things* — so they go stale as a matter of course,
+    /// and the mod's follower wedges against whatever appeared across the
+    /// route. Recovering from that used to live in the mod, first as a teleport
+    /// and then as a re-path, and both were the wrong place for it: all
+    /// `control.lua` has is the waypoint list, so the best goal it could name
+    /// was the last node of the path that had just gone stale, at a tolerance
+    /// nobody asked for, judged against nothing. Every retry was strictly
+    /// harder than the request that had already failed.
+    ///
+    /// The retry is here instead, because *here* is where the goal, the radius
+    /// and the judgement above already are. A stalled leg — and only a stalled
+    /// leg, see [`is_stalled_walk`] — costs a fresh [`FactorioRcon::player_path`]
+    /// from where the character actually stands, put through the same
+    /// [`judge_path`] as the first attempt, up to [`WALK_ATTEMPTS`] times. The
+    /// second attempt of a destination that has since been built on is
+    /// therefore refused *before* it is walked, rather than stalling again.
     pub async fn move_player_timed(
+        &self,
+        world: &Arc<FactorioWorld>,
+        player_id: PlayerId,
+        goal: &Position,
+        radius: Option<f64>,
+    ) -> Result<ActionTicks, ActionFailure> {
+        let mut attempts_left = WALK_ATTEMPTS;
+        loop {
+            let outcome = self
+                .move_player_attempt(world, player_id, goal, radius)
+                .await;
+            match outcome {
+                Err(failure) if attempts_left > 1 && is_stalled_walk(&failure) => {
+                    attempts_left -= 1;
+                    warn!(
+                        "#{} stalled walking to {}/{} ({}), asking the game for a fresh path ({} attempts left)",
+                        player_id,
+                        goal.x(),
+                        goal.y(),
+                        failure.error,
+                        attempts_left
+                    );
+                }
+                other => return other,
+            }
+        }
+    }
+
+    /// One dispatch of [`FactorioRcon::move_player_timed`]: path, judge, send,
+    /// wait.
+    ///
+    /// Split out so the retry above is a loop over a whole attempt rather than
+    /// a branch inside one. Every attempt takes a **fresh** action id and asks
+    /// for a **fresh** path, which is the entire reason a retry here is worth
+    /// more than the mod's was: `player_path` starts from where the character
+    /// stands now, against the world as it is now.
+    async fn move_player_attempt(
         &self,
         world: &Arc<FactorioWorld>,
         player_id: PlayerId,
@@ -4237,6 +4378,99 @@ mod positioning_tests {
             "a reply that never came is not a search that found nothing"
         );
     }
+
+    /// The wording that decides whether a failed walk is worth asking again is
+    /// the mod's, not ours.
+    ///
+    /// Read out of `control.lua` for the same reason the mining verdict and the
+    /// busy pathfinder are: a cross-language contract with nothing but a string
+    /// on either side. A reword that went unnoticed here would retire the whole
+    /// retry silently -- walks would simply start failing on the first stall
+    /// again, and every test in this file would still pass.
+    #[test]
+    fn a_stalled_leg_is_recognised_from_the_mods_own_wording() {
+        use crate::process::instance_setup::repo_mods_path;
+        const CONTROL_LUA: &str = include_str!(repo_mods_path!("/BotBridge/control.lua"));
+        assert!(
+            CONTROL_LUA.contains(WALK_STUCK) && CONTROL_LUA.contains(WALK_LEG_STALLED),
+            "the mod no longer says {WALK_STUCK:?} .. {WALK_LEG_STALLED:?}, so no              stalled walk is ever asked again"
+        );
+        assert!(walk_reports_stalled_leg(
+            "ERROR: stuck while walking, leg 3 of 12 made no progress for 187 ticks              from (6.9/30.1) to (-22.3/18.2)"
+        ));
+    }
+
+    /// **A stall is worth asking again; an answer is not.**
+    ///
+    /// The mod's older stuck verdicts came from a build that re-pathed for
+    /// itself, and two of them are the pathfinder's own answer about the world:
+    /// it searched and there is no way there. A save carrying an in-flight walk
+    /// from such a build must not have that answer retried into oblivion, so
+    /// the match is on the stall specifically and not on `stuck while walking`,
+    /// which prefixes all of them.
+    #[test]
+    fn only_a_stall_is_worth_asking_the_game_again() {
+        assert!(!walk_reports_stalled_leg(
+            "ERROR: stuck while walking, the destination is unreachable: the game's              pathfinder found no path from (6.9/30.1) to (-22.3/18.2)"
+        ));
+        assert!(!walk_reports_stalled_leg(
+            "ERROR: stuck while walking, gave up after 4 re-paths on one walk"
+        ));
+        assert!(!walk_reports_stalled_leg(
+            "ERROR: stuck while walking, aborted before reaching last waypoint"
+        ));
+        assert!(
+            !walk_reports_stalled_leg("ERROR: cannot place item 'stone-furnace'"),
+            "and nothing that is not a walk failure at all"
+        );
+    }
+
+    /// **How far the dispatch got decides this as much as the wording does.**
+    ///
+    /// A refusal the game handed down is the only one worth repeating.
+    /// `NotDispatched` covers every pre-dispatch judgement -- `judge_path`'s
+    /// two refusals and `failed to path find` -- which are facts about the
+    /// ground and the map that asking again does not change; that is what keeps
+    /// the pathfinder's definitive answer definitive. `NoVerdict` is worse: the
+    /// game took that walk and never said how it ended, so the bot may still be
+    /// walking, and a second dispatch would put two walks on one character.
+    #[test]
+    fn a_stall_is_only_retried_when_the_game_actually_answered() {
+        let stall = || -> Report {
+            RconError {
+                message: "ERROR: stuck while walking, leg 3 of 12 made no progress for                           187 ticks from (6.9/30.1) to (-22.3/18.2)"
+                    .to_string(),
+            }
+            .into()
+        };
+        assert!(is_stalled_walk(&ActionFailure::refused(
+            stall(),
+            ActionTicks::UNKNOWN
+        )));
+        assert!(
+            !is_stalled_walk(&ActionFailure::not_dispatched(stall())),
+            "nothing was sent, so there is no stall to have happened"
+        );
+        assert!(
+            !is_stalled_walk(&ActionFailure::no_verdict(stall(), ActionTicks::UNKNOWN)),
+            "the walk may still be running; a second dispatch would double it up"
+        );
+
+        // The negative control that matters most: the pre-dispatch standability
+        // refusal. It is a fact about the ground, and run 30 spent four
+        // re-paths and a leg timeout per walk relearning it.
+        let unstandable: Report = RconWalkEndsWhereNobodyCanStand {
+            goal_x: -23.5,
+            goal_y: 18.5,
+            end_x: -22.30078125,
+            end_y: 18.22265625,
+            blocker: "stone-furnace at [-22, 18]".to_string(),
+        }
+        .into();
+        assert!(!is_stalled_walk(&ActionFailure::not_dispatched(
+            unstandable
+        )));
+    }
 }
 
 /// The guarantee a green transfer row rests on, driven through the real mod.
@@ -6043,8 +6277,9 @@ mod approach_annulus_tests {
     /// walk 9 — bot 2, step 9, `to [-31, -31]` — is one of those, and its
     /// refusal is **not** this defect: the game accepted the request, walked
     /// the bot, and the *mod* then failed a mid-walk re-path to the path's own
-    /// last waypoint at `WALK_REPATH_RADIUS` (0.5). Nothing here would have
-    /// changed it, and this test says so by pinning that nothing here changed.
+    /// last waypoint at a radius of 0.5 -- machinery since deleted, in favour
+    /// of the retry in `move_player_timed`. Nothing here would have changed it,
+    /// and this test says so by pinning that nothing here changed.
     #[test]
     fn a_plain_disc_asks_for_exactly_what_it_always_did() {
         let target = Position::new(-31., -31.);

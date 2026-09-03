@@ -298,10 +298,6 @@ function on_init()
 	storage.p = {} -- player-private data
 	storage.pathfinding = {}
 	storage.pathfinding.map = {}
-	-- Handles of the path requests the mod makes for its own stalled walks;
-	-- see `walk_repath_registry`, which also creates this lazily for a save
-	-- written before it existed.
-	storage.pathfinding.walk_repaths = {}
 	storage.n_clients = 1
 end
 
@@ -357,74 +353,6 @@ function walk_leg_timeout_ticks(player, from_pos, to_pos)
 	local leg_length = distance(from_pos, to_pos)
 	return math.max(60, math.ceil((leg_length / speed) * 3))
 end
-
---- How close the pathfinder has to get to the destination for a re-path to
---- count as having found one.
----
---- 0.5 is the smallest radius that does not collapse onto the goal's own tile,
---- which is the request shape that makes `request_path` fail outright --- the
---- same floor `approach_radius` clamps to on the Rust side
---- (crates/core/src/factorio/rcon.rs). Asking for less would report a
---- reachable destination as unreachable; asking for Factorio's default of 1
---- would let the pathfinder stop a tile short, and a re-path that ends
---- somewhere else is the "reported arrival" the teleport used to manufacture.
-WALK_REPATH_RADIUS = 0.5
-
---- How many times one walk may be re-pathed before it is failed instead.
----
---- **This bound is not the thing that makes a bad walk fail fast.** The common
---- case --- the destination is behind something we built --- is answered on the
---- FIRST re-path, because the pathfinder says there is no path and the walk
---- fails immediately. What this bounds is only the pathological case where the
---- pathfinder keeps finding a route and the bot keeps not arriving.
----
---- A re-path is strictly stronger than the teleport it replaces: the teleport
---- hopped one leg, so a route blocked for its whole length needed one teleport
---- per tile, while a re-path replaces every remaining leg at once. That shows
---- up directly in the archive. Across the 23 runs in `workspace/runs`, 151
---- stuck-walk episodes were recorded, and in every single one the teleport
---- destinations march tile by tile along one route: run-1788325660-10154's
---- walk 234 was conveyed across 16 consecutive tiles of the corridor at
---- y = 18.5, walk 312 across 17, and run-1788315106-86443's walk 255 across 9
---- tiles of a straight line at y = -6.5. Not one episode shows two separate
---- blockages. One re-path covers all 151.
----
---- 4 is that observed need (1) with headroom for the case re-pathing has that
---- teleporting did not: the world changing again *while* the new route is
---- being walked. It can --- `place` actions are dispatched in bursts, with a
---- 25th-percentile gap between consecutive placements of 18 ticks across those
---- same runs --- so a second and third re-path are real, and a fourth is
---- slack.
----
---- The cost side agrees. One re-path cycle costs the leg timeout that detects
---- the stall (>= 60 ticks) plus one pathfinder round trip, so four of them
---- bound a walk that keeps re-pathing without arriving to a few hundred ticks
---- --- the same order as the 488 ticks the old teleport cap bounded, and two
---- orders of magnitude below the executor's 360-second ACTION_RESULT_DEADLINE
---- (crates/core/src/factorio/rcon.rs). Being told in seconds is the whole
---- point: run-1788358260-07659 stuck on milestone 7 with plans of 84, 55, 119
---- and 118 steps that completed 46, 19, 1 and 0 of them --- 78 steps pending
---- behind one walk --- while 25 teleports across 10 walks rescued none of
---- them. Four of those teleports went to (-22.0, 19.0) in four DIFFERENT
---- walks, which is the whole argument in one number: reporting arrival at a
---- tile nothing can reach is what let the planner keep choosing it.
-WALK_REPATH_LIMIT = 4
-
---- How long a walk may wait for an answer to a re-path request.
----
---- The pathfinder has two failure modes and they are not the same
---- (`on_script_path_request_finished` below): `try again later` means the
---- request queue was full, which is worth repeating, and `failed to path find`
---- means it searched and found nothing, which is not. So a busy pathfinder is
---- retried rather than counted against WALK_REPATH_LIMIT --- and something has
---- to stop *that* being forever.
----
---- A tick budget rather than a retry count, because "worth repeating" is a
---- statement about the queue draining, not about how many times we asked. 300
---- ticks (5s) is the same bound MINE_BLOCKED_TIMEOUT_TICKS puts on the other
---- place this mod waits for the world to become workable, and it is far longer
---- than a path request takes when the queue is not saturated.
-WALK_REPATH_PENDING_TIMEOUT_TICKS = 300
 
 --- Where a bot standing in a refused footprint is asked to stand instead, and
 --- how hard the game is asked to find it somewhere.
@@ -544,9 +472,10 @@ end
 -- sites -- synchronous RCON calls with no action to attach to.
 --
 -- There used to be a third site, the stuck-walk recovery, and it was the only
--- one that moved a bot the executor had asked to *walk*. It is gone: a stalled
--- leg is re-pathed now (see WALK_REPATH_LIMIT), because teleporting turned an
--- unreachable destination into a reported arrival.
+-- one that moved a bot the executor had asked to *walk*. It is gone, because
+-- teleporting turned an unreachable destination into a reported arrival. A
+-- stalled leg now fails the walk promptly and Rust retries it against the live
+-- world (`move_player_timed`, crates/core/src/factorio/rcon.rs).
 function teleport_writeout(tick, player_id, reason, from, to, action_id)
 	writeout(tick, "teleport", helpers.table_to_json({
 		player_id = player_id,
@@ -990,26 +919,6 @@ function on_tick(event)
 					else
 						action_completed(event.tick, w.action_id)
 					end
-				elseif w.repath ~= nil then
-					-- A re-path is outstanding. Hold still and steer nothing:
-					-- the waypoints this walk is following are about to be
-					-- replaced wholesale, and a character that keeps walking
-					-- into whatever stopped it is walking away from the
-					-- position the new path will be computed from.
-					--
-					-- The leg timer is deliberately NOT consulted here, so a
-					-- walk cannot stack a second request on top of the first.
-					-- What bounds the wait instead is the pathfinder's own
-					-- budget: `try again later` is retried without restamping
-					-- `since`, and this is where that budget runs out.
-					player.walking_state = {walking=false}
-					if event.tick - w.repath.since > WALK_REPATH_PENDING_TIMEOUT_TICKS then
-						print("Player is stuck and the pathfinder never answered the re-path, aborting the walk")
-						w.stuck = "ERROR: stuck while walking, the pathfinder did not answer a re-path within "
-							.. WALK_REPATH_PENDING_TIMEOUT_TICKS .. " ticks"
-						w.repath = nil
-						w.waypoints[w.idx] = nil
-					end
 				else
 					local dx = dest.x - pos.x
 					local dy = dest.y - pos.y
@@ -1076,40 +985,43 @@ function on_tick(event)
 						-- spanning x in [-23, -21], squarely across the route. We are the
 						-- thing changing the world, so a stale path is the normal case.
 						--
-						-- This used to TELEPORT the character onto the next waypoint,
-						-- and that was worse than useless: it turned an unreachable
-						-- destination into a reported arrival. The planner never learned
-						-- a site was unreachable, so it kept choosing it, and the one
-						-- piece of information the system needed -- "there is no way
-						-- there" -- was destroyed at the exact moment the game had
-						-- offered it. Asking for a fresh path from where the character
-						-- actually stands answers the same question honestly: either
-						-- there is a way round, or there is not and the walk says so.
+						-- **The recovery does not live here, and it never should
+						-- have.** This branch used to teleport the character onto the
+						-- next waypoint, and then it re-pathed instead; both were
+						-- attempts to rescue the walk from inside the mod, which is the
+						-- worst-placed part of the system to try. All this code has is
+						-- `w.waypoints`, so the best goal it can name is the last node
+						-- of the path that has just gone stale -- not the goal the
+						-- caller asked for, at a tolerance the caller never chose,
+						-- judged against nothing. The re-path was therefore strictly
+						-- harder than the request that had already failed, and in its
+						-- most common case arithmetically impossible: run 30's three
+						-- failed walks all ended inside a stone furnace, whose clearance
+						-- needs 0.8984375 against a re-path radius of 0.5.
 						--
-						-- The last leg is not special any more. It used to abort here
-						-- without saying why; it is the leg most likely to be blocked by
-						-- something the run built at the destination, and it is exactly
-						-- the leg whose failure the planner most needs to be honest.
-						if (w.repaths or 0) >= WALK_REPATH_LIMIT then
-							-- A re-path that keeps succeeding but never arrives has to
-							-- terminate. Failing here gives the supervisor something to
-							-- replan against, in seconds instead of the executor's
-							-- 360-second deadline.
-							print("Player has been re-pathed "..WALK_REPATH_LIMIT.." times on one walk, giving up")
-							w.stuck = "ERROR: stuck while walking, gave up after "
-								.. WALK_REPATH_LIMIT .. " re-paths on one walk"
-							w.waypoints[w.idx] = nil
-						elseif start_walk_repath(event.tick, idx, player, w) then
-							print("Player is stuck on leg "..w.idx.." of "..#w.waypoints..", asking for a fresh path from "..coord(pos))
-							-- Do not steer this tick. `dx`, `dy` and `direction` above
-							-- were computed for a leg that is about to be replaced.
-							direction = ""
-							player.walking_state = {walking=false}
-						else
-							print("Player is stuck and the game would not accept a re-path request, aborting the walk")
-							w.stuck = "ERROR: stuck while walking, the game refused a re-path request"
-							w.waypoints[w.idx] = nil
-						end
+						-- Rust has the goal, the radius and the standability judgement
+						-- (`move_player_timed`, crates/core/src/factorio/rcon.rs), and
+						-- it retries there against the *live* world. So the honest and
+						-- useful thing to do here is to report the stall promptly and
+						-- let the side that can ask a better question ask it.
+						--
+						-- The last leg is not special. It is the leg most likely to be
+						-- blocked by something the run built at the destination, and it
+						-- is exactly the leg whose failure the planner most needs to be
+						-- honest about.
+						print("Player is stuck on leg "..w.idx.." of "..#w.waypoints.." at "..coord(pos)..", failing the walk")
+						w.stuck = "ERROR: stuck while walking, leg " .. w.idx .. " of "
+							.. #w.waypoints .. " made no progress for "
+							.. (event.tick - w.idx_tick) .. " ticks from "
+							.. coord(pos) .. " to " .. coord(dest)
+						-- Nil the waypoint being steered at rather than advancing past
+						-- it: the `dest == nil` arm above then clears `walking` and
+						-- reports `w.stuck` on the next tick, which is the one exit a
+						-- failed walk has. Stop steering now -- `direction` above was
+						-- computed for a leg this walk is no longer walking.
+						direction = ""
+						player.walking_state = {walking=false}
+						w.waypoints[w.idx] = nil
 					end
 
 					if direction ~= "" then
@@ -2208,14 +2120,12 @@ end
 -- id :: uint: Handle to associate the callback with a particular call to LuaSurface::request_path.
 -- try_again_later :: boolean: Indicates that the pathfinder failed because it is too busy, and you can retry later.
 function on_script_path_request_finished(event)
-	-- The mod asks for paths of its own now (a stalled walk leg re-paths), and
-	-- those answers belong to `walk_repath_finished`, not to a Rust caller.
-	-- Writing them out anyway would leave an entry in `world.path_requests`
-	-- (`sleep_for_path_request_result`, crates/core/src/factorio/rcon.rs) keyed
-	-- by a handle nobody is waiting on, which nothing ever removes.
-	if walk_repath_finished(event) then
-		return
-	end
+	-- Every path request in this mod is somebody's: a Rust caller is waiting on
+	-- the handle in `world.path_requests` (`sleep_for_path_request_result`,
+	-- crates/core/src/factorio/rcon.rs). The mod used to ask for paths of its
+	-- own, for a stalled walk, and had to filter those answers out here; that
+	-- re-path is gone -- retrying a stuck walk lives in `move_player_timed`,
+	-- where the goal, the radius and the standability judgement are.
 	local result = "Error: failed to path find"
 	if event.path ~= nil then
 		local positions = {}
@@ -2451,134 +2361,6 @@ function start_walk_waypoints(action_id, player_id, waypoints, step_aside)
 		leg_timeout = leg_timeout,
 		step_aside = step_aside,
 	}
-	return true
-end
-
---- The path requests this mod made for its own walks, keyed by handle.
----
---- `storage.pathfinding` predates this and a save made before it existed will
---- not have it, so this creates what it needs rather than assuming `on_init`
---- ran in this version of the mod.
-function walk_repath_registry()
-	if storage.pathfinding == nil then storage.pathfinding = { map = {} } end
-	if storage.pathfinding.walk_repaths == nil then storage.pathfinding.walk_repaths = {} end
-	return storage.pathfinding.walk_repaths
-end
-
---- Asks for a fresh path from where a stalled character actually stands to
---- where its walk is going, and remembers the handle so the answer can be
---- routed back to this walk.
----
---- Answers whether the game accepted the request. It does not wait: the answer
---- arrives on `on_script_path_request_finished`, which is pushed with a real
---- `game.tick`, so nothing here polls.
-function start_walk_repath(tick, player_id, player, w)
-	local goal = w.waypoints[#w.waypoints]
-	if goal == nil then
-		return false
-	end
-	local handle = request_player_path(player, goal, WALK_REPATH_RADIUS)
-	if handle == nil then
-		return false
-	end
-	walk_repath_registry()[handle] = player_id
-	w.repath = { id = handle, since = tick, goal = { x = goal.x, y = goal.y } }
-	return true
-end
-
---- Consumes a path request answer that belongs to a stalled walk.
----
---- Answers whether the request was one of ours; a `false` sends the event on
---- to the ordinary writeout for whoever asked over RCON.
----
---- **The pathfinder's two failures are not the same failure.** `try again
---- later` means the request queue was full and the question was never asked,
---- so it is asked again. `failed to path find` means it searched and found
---- nothing, which is the answer the teleport used to throw away and the answer
---- the planner needs: this destination is unreachable from here.
-function walk_repath_finished(event)
-	local reg = storage.pathfinding and storage.pathfinding.walk_repaths
-	if reg == nil then
-		return false
-	end
-	local player_id = reg[event.id]
-	if player_id == nil then
-		return false
-	end
-	reg[event.id] = nil
-
-	local p = storage.p and storage.p[player_id]
-	local w = p and p.walking
-	if w == nil or w.repath == nil or w.repath.id ~= event.id then
-		-- The walk this answer belongs to has already ended -- it ran out of
-		-- pending budget, or its action was settled some other way. Adopting
-		-- the answer would restart a walk whose verdict has been reported.
-		return true
-	end
-
-	local player = game.players[player_id]
-	if player == nil or not player.connected or player.character == nil then
-		-- Nothing to steer. Dropping the pending marker lets the leg timer
-		-- run again if the player comes back, on the same re-path budget.
-		w.repath = nil
-		return true
-	end
-
-	if event.path ~= nil then
-		local waypoints = {}
-		for _, wp in pairs(event.path) do
-			waypoints[#waypoints + 1] = { x = wp.position.x, y = wp.position.y }
-		end
-		-- **The walk's destination is not negotiable.** WALK_REPATH_RADIUS
-		-- lets the pathfinder stop short of it, and the Rust side checked the
-		-- *dispatched* path's last waypoint against what the caller asked for
-		-- before any of this began (`move_player_timed`,
-		-- crates/core/src/factorio/rcon.rs) -- nothing re-checks it
-		-- afterwards. Keeping that same waypoint as the terminal one keeps
-		-- "the walk completed" meaning what it has always meant: the
-		-- character stood inside the 0.3 arrival box of it. A final leg that
-		-- then cannot be walked stalls, re-paths, and eventually fails, which
-		-- is the honest outcome; substituting a nearby endpoint instead would
-		-- be the teleport's reported-arrival lie wearing a different hat.
-		local goal = w.repath.goal
-		local last = waypoints[#waypoints]
-		if last == nil or math.abs(last.x - goal.x) >= 0.3 or math.abs(last.y - goal.y) >= 0.3 then
-			waypoints[#waypoints + 1] = { x = goal.x, y = goal.y }
-		end
-		w.waypoints = waypoints
-		w.idx = 1
-		w.idx_tick = event.tick
-		w.leg_timeout = walk_leg_timeout_ticks(player, player.character.position, waypoints[1])
-		w.repaths = (w.repaths or 0) + 1
-		w.repath = nil
-		print("Player re-pathed ("..w.repaths.." of "..WALK_REPATH_LIMIT.."), "..#waypoints.." waypoints from "..coord(player.character.position).." to "..coord(goal))
-	elseif event.try_again_later then
-		-- The queue was full, not "there is no way there". Ask again on the
-		-- same budget: `since` is deliberately not restamped, so
-		-- WALK_REPATH_PENDING_TIMEOUT_TICKS bounds the retrying even though
-		-- retrying is the right thing to do. This does not count against
-		-- WALK_REPATH_LIMIT either -- nothing was searched.
-		local handle = request_player_path(player, w.repath.goal, WALK_REPATH_RADIUS)
-		if handle == nil then
-			print("Player is stuck and the game would not accept a re-path request, aborting the walk")
-			w.stuck = "ERROR: stuck while walking, the game refused a re-path request"
-			w.repath = nil
-			w.waypoints[w.idx] = nil
-		else
-			walk_repath_registry()[handle] = player_id
-			w.repath.id = handle
-		end
-	else
-		-- The pathfinder searched and found nothing. This is the fact the
-		-- teleport used to destroy by hopping over it.
-		local why = "ERROR: stuck while walking, the destination is unreachable: "
-			.. "the game's pathfinder found no path from "
-			.. coord(player.character.position) .. " to " .. coord(w.repath.goal)
-		print("Player cannot reach its destination, the pathfinder found no path")
-		w.stuck = why
-		w.repath = nil
-		w.waypoints[w.idx] = nil
-	end
 	return true
 end
 
@@ -3994,10 +3776,12 @@ end
 -- Asks the game for a path a *character* can walk, from where that character
 -- stands to `goal`, and answers with the request handle.
 --
--- Split out of `rcon_async_request_player_path` so the stuck-walk re-path can
--- reuse it instead of building a second request. The bounding box, the
--- collision mask and `entity_to_ignore` are what make this a character's path
--- rather than a generic one, and two copies of that would drift.
+-- Split out of `rcon_async_request_player_path` so the request shape has one
+-- home. The bounding box, the collision mask and `entity_to_ignore` are what
+-- make this a character's path rather than a generic one, and two copies of
+-- that would drift. It had a second caller once, the mod's own stuck-walk
+-- re-path; that is gone, and retrying a stuck walk lives in `move_player_timed`
+-- (crates/core/src/factorio/rcon.rs) where the goal and the radius are.
 --
 -- **No RCON output of any kind**, for the same reason `start_walk_waypoints`
 -- has none: this is called from `on_tick`, where there is no calling RCON

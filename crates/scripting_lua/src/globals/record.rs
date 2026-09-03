@@ -410,21 +410,40 @@ fn parse_coord(text: &str) -> Option<Position> {
     ))
 }
 
-/// The two **observed** positions BotBridge names when the pathfinder finds no
-/// path: `... found no path from (<x>/<y>) to (<x>/<y>)`.
+/// The two **observed** positions BotBridge names when it gives up on a walk:
+/// `... made no progress for <t> ticks from (<x>/<y>) to (<x>/<y>)`, and --
+/// from a build whose mod still re-pathed -- `... found no path from (<x>/<y>)
+/// to (<x>/<y>)`.
 ///
 /// The first is the character's real position at the instant the mod gave up
 /// (`player.character.position`, not an inference from the last tile boundary
 /// crossed), and the second is the destination the mod was actually steering
-/// to -- the terminal waypoint of the path *the game returned*, which is not
-/// necessarily the `to` the schedule asked for. Both were reconstructed by hand
-/// from `workspace/server-log.txt` to diagnose run 30; this is what puts them
-/// in the run directory instead.
+/// to -- the waypoint of the path *the game returned*, which is not necessarily
+/// the `to` the schedule asked for. Both were reconstructed by hand from
+/// `workspace/server-log.txt` to diagnose run 30; this is what puts them in the
+/// run directory instead.
+///
+/// Two accepted prefixes rather than one, because the mod's re-path was
+/// retired: a stalled leg now fails immediately and Rust retries it
+/// (`move_player_timed`, crates/core/src/factorio/rcon.rs). Keeping the older
+/// prefix keeps the archived runs readable, which is the whole job of this
+/// file.
+const WALK_ENDPOINT_PREFIXES: [&str; 2] = ["found no path from ", "no progress for "];
+
 fn walk_endpoints(error: &str) -> (Option<Position>, Option<Position>) {
-    let Some((_, tail)) = error.split_once("found no path from ") else {
+    let Some(tail) = WALK_ENDPOINT_PREFIXES
+        .iter()
+        .find_map(|prefix| error.split_once(prefix).map(|(_, tail)| tail))
+    else {
         return (None, None);
     };
-    let Some((from, rest)) = tail.strip_prefix('(').and_then(|t| t.split_once(')')) else {
+    // The stalled wording puts the tick count between its prefix and the first
+    // coordinate; the no-path wording puts nothing there. Skipping to the `(`
+    // reads both without a second parser.
+    let Some((_, tail)) = tail.split_once('(') else {
+        return (None, None);
+    };
+    let Some((from, rest)) = tail.split_once(')') else {
         return (None, None);
     };
     let destination = rest
@@ -452,9 +471,22 @@ fn classify_walk_failure(error: &str) -> WalkFailure {
         || error.contains("no readable outcome")
     {
         WalkFailureKind::Timeout
-    } else if error.contains("the destination is unreachable") || error.contains("found no path") {
+    } else if error.contains("the destination is unreachable")
+        || error.contains("found no path")
+        || error.contains("the best one found ends")
+    {
         // The pathfinder searched. This is the fact the stuck-walk teleport
         // used to destroy by hopping over it.
+        //
+        // Three wordings, from three eras and two sides. The first two are the
+        // mod's, from the build that re-pathed for itself. The third is Rust's
+        // own `RconWalkFallsShort` (crates/core/src/errors.rs), which is how an
+        // unreachable goal reads now that the retry lives in
+        // `move_player_timed`: the fresh path request comes back
+        // `failed to path find`, the offset-goal fallback finds somewhere
+        // *near* it, and `judge_path` refuses that for landing outside the
+        // caller's tolerance. Same searched-and-there-is-no-way-there fact,
+        // raised one layer up.
         WalkFailureKind::NoPath
     } else if error.contains("refused a re-path request")
         || error.contains("did not answer a re-path")
@@ -462,10 +494,19 @@ fn classify_walk_failure(error: &str) -> WalkFailure {
         // It never searched: `try again later` on a full request queue, or a
         // request accepted and never answered. Nothing was learned about the
         // destination, which is the whole reason this is not `NoPath`.
+        //
+        // The mod no longer produces either wording. Kept because the archived
+        // runs do, and this classifier is read against them.
         WalkFailureKind::PathfinderBusy
     } else if error.contains("re-paths on one walk") {
         WalkFailureKind::RepathLimit
-    } else if error.contains("aborted before reaching last waypoint") {
+    } else if error.contains("made no progress")
+        || error.contains("aborted before reaching last waypoint")
+    {
+        // A leg stopped progressing. `made no progress` is the current mod's
+        // wording and reaches the record only after `move_player_timed` has
+        // already spent its whole retry budget on fresh paths, so it means the
+        // walking itself is stuck rather than that the map is.
         WalkFailureKind::Stalled
     } else {
         WalkFailureKind::Other
@@ -1234,11 +1275,11 @@ end
 --
 -- `failed` and `lost` stay apart. The game refusing a walk and the game never
 -- answering are different facts with different fixes, and the classified
--- `failure` keeps the distinction the mod's own re-path logic makes: a request
--- queue that would not take the search (`pathfinder_busy`, worth repeating)
--- against a search that came back empty (`no_path`, a fact about the
--- destination). Where the mod named positions, the failure carries them --
--- observed ones, taken at the instant it gave up.
+-- `failure` keeps the distinction the pathfinder itself makes: a request queue
+-- that would not take the search (`pathfinder_busy`, worth repeating) against a
+-- search that came back empty (`no_path`, a fact about the destination). Where
+-- the mod named positions, the failure carries them -- observed ones, taken at
+-- the instant it gave up.
 --
 -- Call it once per loop iteration, alongside `record.actions`.
 -- @tparam table walks `observation.walks`
@@ -3189,13 +3230,17 @@ mod tests {
 
     /// **`no_path` and `pathfinder_busy` are not the same failure.**
     ///
-    /// BotBridge's `walk_repath_finished` branches on exactly this and so must
+    /// `FactorioRcon::player_path_attempt` branches on exactly this and so must
     /// the record: `try again later` means the request queue was full and
     /// nothing was searched, so repeating the walk is the right move; `failed
     /// to path find` means the pathfinder searched and came back empty, which
     /// is a fact about the destination that repeating will not change.
     /// Collapsing them into one "the walk failed" leaves the reader to guess
     /// which of two opposite responses applies.
+    ///
+    /// Most of these wordings are **historical**: they come from the build
+    /// whose mod re-pathed for itself, and the archived runs are full of them.
+    /// The two a current run can produce are the last two.
     #[test]
     fn a_queue_that_would_not_search_is_not_a_search_that_found_nothing() {
         let cases = [
@@ -3223,6 +3268,17 @@ mod tests {
             (
                 "game rejected the command: Unexpected Response: ERROR: stuck while walking, \
                  aborted before reaching last waypoint",
+                WalkFailureKind::Stalled,
+            ),
+            (
+                "no path to [-22.5, 17.5] — the best one found ends [9.301] tiles away at \
+                 [-13.5, 15.5], outside the [1.000] tile arrival tolerance",
+                WalkFailureKind::NoPath,
+            ),
+            (
+                "game rejected the command: Unexpected Response: ERROR: stuck while walking, \
+                 leg 3 of 12 made no progress for 187 ticks from (6.90234375/30.09765625) to \
+                 (-22.30078125/18.22265625)",
                 WalkFailureKind::Stalled,
             ),
         ];
@@ -3287,6 +3343,34 @@ mod tests {
             }
             other => panic!("expected walk_settled, got {other:?}"),
         }
+    }
+
+    /// The current mod's stall wording names the same two positions, and they
+    /// have to survive the same way.
+    ///
+    /// This is the wording a *new* run produces: the mod's re-path is gone, so
+    /// `found no path` above can only come out of the archive now, and a
+    /// stalled leg is what a walk that has already exhausted
+    /// `move_player_timed`'s retry budget looks like. Losing `from` and
+    /// `destination` here would quietly retire the one place the run record
+    /// states a real observed position of a bot.
+    #[test]
+    fn a_stalled_walk_carries_the_two_positions_the_mod_named() {
+        let stalled = "game rejected the command: Unexpected Response: ERROR: stuck while \
+                       walking, leg 3 of 12 made no progress for 187 ticks from \
+                       (6.90234375/30.09765625) to (-22.30078125/18.22265625)";
+        let failure = classify_walk_failure(stalled);
+        assert_eq!(failure.kind, WalkFailureKind::Stalled);
+        assert_eq!(
+            failure.from,
+            Some(Position::new(6.902_343_75, 30.097_656_25)),
+            "where the character actually stood when the mod gave up"
+        );
+        assert_eq!(
+            failure.destination,
+            Some(Position::new(-22.300_781_25, 18.222_656_25)),
+            "the waypoint the walk was really steering at"
+        );
     }
 
     /// A walk that arrived carries no failure, and a wording nothing

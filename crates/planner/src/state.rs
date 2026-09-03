@@ -1003,16 +1003,28 @@ pub struct PlanState {
     ///
     /// # What reads it
     ///
-    /// [`crate::method::have::even_shares`], and nothing else. A walled-in bot
-    /// is still a full member of the roster everywhere else — `schedule` may
-    /// still pick it, `Holder::Bot` may still name it, and every free action
-    /// still ranks it. What it must not get is a *share*: a share opens a
-    /// chain that names it as owner (`crates/planner/src/method/mod.rs`), and
+    /// Two callers, and both are asking the *same* question — "may this bot be
+    /// given work that no other bot could ever take over?" — at the two places
+    /// such work is created:
+    ///
+    /// * [`crate::method::have::even_shares`], for a gathering share; and
+    /// * [`crate::method::pick_chain_actor`], for the `chain_actor` a caller
+    ///   hands [`crate::method::expand`], which is what a goal naming no holder
+    ///   is both sized against and (through the `Holder::Share(chain_actor)`
+    ///   bills the methods state) welded to.
+    ///
+    /// Nothing else, and in particular nothing at schedule time. A walled-in
+    /// bot is still a full member of the roster everywhere else — `schedule`
+    /// may still pick it, `Holder::Bot` may still name it, and every free
+    /// action still ranks it. What it must not get is a *share*: a share opens
+    /// a chain that names it as owner (`crates/planner/src/method/mod.rs`), and
     /// `schedule` treats an owner as a hard constraint with no fallback tier,
     /// so a share handed to a walled-in bot is work no other bot can ever pick
     /// up. That is what `run-1788449752-46541` measured — bots 2 and 3 frozen
     /// at one spot for 75 000 ticks, still being sized six iron ore each on
-    /// every replan.
+    /// every replan. The chain actor is the same trap by the other road, and it
+    /// was left open by that fix on purpose: the top-level chain is not a
+    /// share, so the share filter never sees it.
     ///
     /// # Determinism
     ///

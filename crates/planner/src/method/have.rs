@@ -2299,7 +2299,11 @@ pub fn even_shares(
 ///   a tree mined, a machine deconstructed, the bot teleported by recovery —
 ///   the bot is back in the split. It does not have to move first, which is
 ///   important, because being unable to move is the condition.
-/// * **This is the only place the exclusion applies.** A walled-in bot is
+/// * **The exclusion applies here and at one other place, both of them in
+///   expansion.** [`crate::method::pick_chain_actor`] keeps the same rule for
+///   the `chain_actor`, because a goal that names no holder is stated as
+///   `Holder::Share(chain_actor)` and so opens an owned chain by exactly the
+///   argument above. Nothing at schedule time reads it: a walled-in bot is
 ///   still in the roster `schedule` ranks, can still be named by
 ///   `Holder::Bot`, and still gets every free action it is the cheapest
 ///   candidate for. It loses shares, not membership.

@@ -151,6 +151,29 @@ had 6. Something re-seeded it in between and I could not attribute it. What is
 not in doubt is that run 4's *game* had the old mod — Factorio loads mods at
 server start, and the game itself raised the missing-function error.
 
+## A process pattern matches the process doing the matching (three times tonight)
+
+Every `pgrep -f`/`pkill -f` I wrote tonight matched my own tooling, because the
+monitor's or the shell's command line **contains the pattern as a literal**:
+
+1. `pkill -f "stage2-run4.log"` killed the monitor watching that log, not just
+   the run.
+2. A monitor keyed to the process *name* stayed "alive" when a later run
+   started, so it watched a dead log for ever.
+3. A monitor keyed to the log *name* never exited when its run finished —
+   `pgrep -f "s2r8"` matched the monitor itself — so it reported a stall
+   instead of `RUN 8 GONE`.
+
+Keying to a more specific string does not fix this; it makes the self-match more
+certain, because the more specific the pattern the more likely it appears
+verbatim in the watcher.
+
+**Use a PID, not a pattern.** Capture the run's PID at launch and test
+`kill -0 "$PID"`. Where a pattern is unavoidable, break the literal so it cannot
+match itself — the classic `pgrep -f "factorio-bot lu[a]"` — but a PID is
+better, because it is exact and cannot drift onto a later run that happens to
+share a name.
+
 ## Run 8: the first clean run, and a recurrence of an already-fixed class
 
 **Run 8 (`run-1788405365-21697`) was the first attempt with a fresh world AND a

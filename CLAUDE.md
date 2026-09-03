@@ -118,6 +118,29 @@ of Factorio. For the viewer specifically, use `just serve` or
 *LSP tools**: Prefer `mcp__rust__lsp_*` tools for refactoring (rename_symbol, find_references, get_definitions)
 These leverage rust-analyzer for accuracy with macros and trait implementations
 
+### The shell here is aliased, and the aliases fail in ways that look like data
+
+Three commands do not mean what they say, and each has silently produced a
+wrong answer in this repo rather than an error you would notice.
+
+- **`ls` is `eza`.** `ls -t` does not sort by time -- `-t` is eza's
+  `--time <FIELD>` and wants a value, so `ls -1t <dir>` dies with
+  `invalid value '<dir>' for '--time <FIELD>'`. Worse, under `zsh` a
+  command whose glob fails aborts the whole line, so
+  `ls -1t runs/*/events.jsonl 2>/dev/null | xargs ...` prints **nothing at
+  all** and looks exactly like "no runs matched". Three separate analyses
+  returned empty this way before the alias was noticed. Use `command ls`.
+- **`cat` is `bat`**, so `cat -v` and `cat -A` fail rather than showing
+  non-printing characters.
+- **`git diff` is difftastic**, so `git diff | git apply` cannot work. Use
+  `git diff --no-ext-diff` when something machine-readable is wanted, or
+  `git revert`.
+
+The general shape: **an aliased command that fails still exits into a pipe**,
+and a pipe that receives nothing reads as an empty result rather than as a
+broken command. When an analysis over run records comes back empty, check the
+command before concluding anything about the data.
+
 ## Architecture
 
 ```

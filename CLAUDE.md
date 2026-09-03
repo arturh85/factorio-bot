@@ -136,6 +136,13 @@ wrong answer in this repo rather than an error you would notice.
   `git diff --no-ext-diff` when something machine-readable is wanted, or
   `git revert`.
 
+**A pipeline reports the LAST command's exit code, not the interesting one.**
+`cargo test --workspace | grep -E "^test result"` exits 0 whenever *grep*
+matched something, even with a failing test in the output. That has already
+shown a green `[exited with code 0]` over a genuinely red run. Redirect to a
+file and test the exit code, or set `pipefail`; never read a pipeline's status
+as the tool's status.
+
 The general shape: **an aliased command that fails still exits into a pipe**,
 and a pipe that receives nothing reads as an empty result rather than as a
 broken command. When an analysis over run records comes back empty, check the

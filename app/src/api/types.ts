@@ -353,6 +353,121 @@ export interface PowerSample {
     consumed_kw: number;
     /** Consumed over demanded. */
     satisfaction: number;
+    /**
+     * The same figures per electric network, keyed by the smallest
+     * sub-network id under each parent.
+     *
+     * The totals above hide the failure they are most often consulted about:
+     * `generated_kw: 900` against `consumed_kw: 60` looks powered even when
+     * the 900 kW is on one network and the machines that matter sit on an
+     * island generating nothing. That island is its own entry here, and
+     * `MachineSample.network` says which entry each machine is on.
+     *
+     * Published `required: false` only because `#[serde(default)]` lets a
+     * pre-schema-2 archive decode without it; a live server always serialises
+     * it, so it is declared present rather than optional -- the same reading
+     * as `EventKind`'s `plan`, `reason` and `failure`.
+     */
+    networks: Record<string, NetworkPower>;
+}
+
+/** One electric network's own generation and demand. */
+export interface NetworkPower {
+    /**
+     * Every electric *sub*-network under this parent, ascending. A machine
+     * belongs here when its `MachineSample.network` is one of these. A closed
+     * power switch puts several sub-networks under one parent, which is why
+     * this is a set and not a single id -- and why the map key, the smallest
+     * of them, is only a handle and never the thing to match on.
+     */
+    sub_ids: number[];
+    generated_kw: number;
+    consumed_kw: number;
+    /** What consumers asked for, as opposed to what they got. */
+    demanded_kw: number;
+    /** Consumed over demanded, 1.0 when nothing is demanded. */
+    satisfaction: number;
+}
+
+/**
+ * One machine's state at the sample's tick.
+ *
+ * Fields that do not apply to an entity's type are `null`: `recipe`,
+ * `crafting`, `progress` and `products_finished` are declared by the Factorio
+ * API for crafting machines only, so on a lab or a boiler the question does
+ * not exist rather than having an answer.
+ */
+export interface MachineSample {
+    /** Prototype name, e.g. `assembling-machine-1`. */
+    name: string;
+    /**
+     * Entity type. The sampled set is exactly `assembling-machine`,
+     * `furnace`, `mining-drill`, `lab`, `boiler`, `generator`, `container`
+     * and `logistic-container` -- the machines a run's plan places, plus the
+     * chests it feeds them from.
+     */
+    type: string;
+    /** As the game reports it. A tile centre stays `-40.5`; nothing rounds. */
+    position: Position;
+    /**
+     * `LuaEntity.status`, by name -- the game's own verdict on why this
+     * machine is or is not running. `working`, `no_power`, `low_power`,
+     * `no_ingredients`, `full_output`, `not_enough_space_in_output`,
+     * `no_recipe`, `no_fuel`, `not_plugged_in_electric_network` and
+     * `no_minable_resources` are the ones this project actually hits. A value
+     * the mod could not name arrives as `unmapped_<n>`.
+     */
+    status: string | null;
+    /**
+     * `LuaEntity.electric_network_id`. `null` means connected to no electric
+     * network at all -- for an assembling machine, that is the answer to
+     * "did the pole we placed actually connect it".
+     *
+     * Join against `NetworkPower.sub_ids` in the same tick's force sample. An
+     * id matching no sampled network means no *pole* on the force reached it,
+     * since `PowerSample.networks` is enumerated from poles.
+     */
+    network: number | null;
+    /**
+     * What `get_recipe()` reports -- the only honest verdict on what a
+     * machine is set to, because `set_recipe` returns the items it *removed*
+     * rather than a success flag.
+     */
+    recipe: string | null;
+    /** `is_crafting()`. Null on a non-crafting machine. */
+    crafting: boolean | null;
+    /** 0.0 to 1.0, rounded mod-side to a thousandth. */
+    progress: number | null;
+    /**
+     * Lifetime completed crafts. Often the fastest read in the file: an
+     * assembler still reporting `0` after twenty minutes did not produce,
+     * whatever else its row says.
+     */
+    products_finished: number | null;
+    /**
+     * For a mining drill, the resource under it -- what separates
+     * `no_minable_resources` on a depleted patch from a drill that was never
+     * placed over ore.
+     */
+    mining: string | null;
+    /**
+     * Ingredient inventory. Empty for a type that has none.
+     *
+     * The mod omits an empty inventory on the wire and the server restores it,
+     * so these three are `required: false` in the spec but never actually
+     * absent from a response.
+     */
+    input: Record<string, number>;
+    /**
+     * Output inventory, and for a chest its whole contents.
+     *
+     * Non-empty with `status: full_output` is a cell that produced and then
+     * jammed; empty on the chest feeding a machine reporting
+     * `no_ingredients` is a cell that ran dry. Opposite repairs.
+     */
+    output: Record<string, number>;
+    /** Fuel inventory, for burners. Empty with `status: no_fuel` is the whole story. */
+    fuel: Record<string, number>;
 }
 
 /**
@@ -371,6 +486,26 @@ export type SampleKind =
           techs_unlocked: number;
           production: ProductionSample;
           power: PowerSample;
+      }
+    /**
+     * Per-machine state, on the same 300-tick beat as `force` and written from
+     * the same handler -- so a machine's `network` joins to that tick's
+     * `power.networks` without interpolating.
+     *
+     * `machines` is keyed by `unit_number`, not an array: the mod's
+     * `table_to_json` cannot tell an empty array from an empty object, which
+     * is why a `bots` line from a run with no connected players is
+     * unparseable, and a run's first minutes legitimately have no machines.
+     *
+     * `truncated` counts machines seen but not written, when a base exceeds
+     * the mod's per-line cap. Zero on every run so far; non-zero means this
+     * line is a prefix, which a reader must be able to tell from "this is all
+     * of them".
+     */
+    | {
+          kind: 'machines';
+          machines: Record<string, MachineSample>;
+          truncated: number;
       }
     /** A kind this build does not know. The server never emits it, but a
      *  future variant decodes to this rather than failing to parse. */

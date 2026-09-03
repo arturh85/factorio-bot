@@ -348,7 +348,7 @@ describe('inventoryAtFailure', () => {
             research: null,
             techs_unlocked: 0,
             production: {made: {}, consumed: {}},
-            power: {generated_kw: 0, consumed_kw: 0, satisfaction: 1}
+            power: {generated_kw: 0, consumed_kw: 0, satisfaction: 1, networks: {}}
         };
         const rows = inventoryAtFailure([failedSettle(0, 1, 50)], [force]);
         expect(rows[0].inventory).toBeNull();

@@ -79,6 +79,24 @@ DEFAULT_FREEZE_TICKS = 3000
 # dispatch overhead and is rolled into a stated tail.
 GAP_ROWS = 20
 
+# How far `samples.jsonl` may fall short of the run's own tick span before it
+# is reported as a hole rather than a rounding difference.
+#
+# The mod samples bots every 60 ticks and the force every 300, and the recorder
+# archives on a 1800-tick interval (`SAMPLE_INGEST_INTERVAL_TICKS` in
+# `crates/core/src/record/mod.rs`), so a healthy run's last sample sits within
+# a couple of thousand ticks of its last event -- in either direction, since
+# the two clocks are read at different moments. 6000 ticks is 100 seconds:
+# comfortably past all of that, and nowhere near the failures it exists to
+# catch.
+#
+# It exists because those failures were invisible. `run-1788459085-32452`
+# sampled its whole 281,000 ticks and archived the first 78,840; nothing in
+# this report, in the run's own manifest (it never wrote one) or in any log
+# line said so, and the loss was found by comparing the last tick of two files
+# by hand. Every archived run is now checked for it on every run of this tool.
+SAMPLE_COVERAGE_SLACK_TICKS = 6000
+
 
 # --------------------------------------------------------------------------
 # loading
@@ -478,15 +496,77 @@ def analyse(run_dir: str, freeze_ticks: int = DEFAULT_FREEZE_TICKS) -> dict:
 
     samples = load_jsonl(os.path.join(run_dir, "samples.jsonl"))
     result["samples_present"] = samples.present
+    result["samples_coverage"] = sample_coverage(samples.rows, lo, hi, samples.present)
 
     result["windows"] = [score_window(w, events, joined, placed.rows) for w in windows]
     if samples.present:
         result["frozen"] = frozen_bots(samples.rows, freeze_ticks, placed.rows)
         result["production"] = production_at(samples.rows, windows)
+        # `None` when the run predates sample schema 2, which is not the same
+        # fact as "no machines were idle" -- see `machines_at`.
+        result["machines"] = machines_at(samples.rows)
     else:
         result["frozen"] = None
         result["production"] = None
+        result["machines"] = None
     return result
+
+
+def sample_coverage(samples: list[dict], lo: int, hi: int, present: bool) -> dict:
+    """Does the sample stream span the run the events describe?
+
+    Reported per kind, because the two beats fail independently: the bots
+    sampler and the force sampler are separate handlers on separate ticks
+    (60 and 300), so one can die while the other keeps writing, and a single
+    "last sample" figure would hide that.
+
+    ``verdict`` is one of:
+
+    ``no_samples``  the run archived none at all
+    ``covered``     every kind reaches the end of the run
+    ``short``       at least one kind stops more than
+                    :data:`SAMPLE_COVERAGE_SLACK_TICKS` before it
+    ``late``        sampling started well after the run did
+    """
+    coverage: dict[str, Any] = {
+        "run_lo": lo,
+        "run_hi": hi,
+        "by_kind": {},
+        "verdict": "no_samples" if not (present and samples) else "covered",
+        "worst_lag_ticks": None,
+        "worst_lead_ticks": None,
+    }
+    if not (present and samples):
+        return coverage
+
+    by_kind: dict[str, list[int]] = collections.defaultdict(list)
+    for s in samples:
+        tick = s.get("tick")
+        if isinstance(tick, int):
+            by_kind[str(s.get("kind", "?"))].append(tick)
+
+    worst_lag = 0
+    worst_lead = 0
+    for kind, ticks in sorted(by_kind.items()):
+        first, last = min(ticks), max(ticks)
+        lag = max(0, hi - last)
+        lead = max(0, first - lo)
+        worst_lag = max(worst_lag, lag)
+        worst_lead = max(worst_lead, lead)
+        coverage["by_kind"][kind] = {
+            "count": len(ticks),
+            "first_tick": first,
+            "last_tick": last,
+            "lag_ticks": lag,
+            "lead_ticks": lead,
+        }
+    coverage["worst_lag_ticks"] = worst_lag
+    coverage["worst_lead_ticks"] = worst_lead
+    if worst_lag > SAMPLE_COVERAGE_SLACK_TICKS:
+        coverage["verdict"] = "short"
+    elif worst_lead > SAMPLE_COVERAGE_SLACK_TICKS:
+        coverage["verdict"] = "late"
+    return coverage
 
 
 def score_window(w: Window, events: list[dict], joined: list[dict], map_rows: list[dict]) -> dict:
@@ -853,6 +933,164 @@ def production_at(samples: list[dict], windows: list[Window]) -> list[dict]:
     return out
 
 
+# Machines listed individually in the report before the tail is rolled up.
+MACHINE_ROWS = 24
+
+# Entity types that are storage, not production. Sampled with the machines
+# because an empty input chest is the commonest reason a working cell stops,
+# but scored separately: a chest has no `status` and can never be `working`.
+CONTAINER_TYPES = ("container", "logistic-container")
+
+
+def machines_at(samples: list[dict]) -> dict | None:
+    """Per-machine verdicts, from the ``machines`` sample kind (schema 2+).
+
+    This is the half of the record that answers "is this machine actually
+    working?". Before it existed the archive held bot inventories and
+    force-wide totals and nothing in between, so a run that placed a cell, set
+    both recipes, charged the chests three times and produced nothing could not
+    say whether the assemblers had power, held ingredients, or ever ran.
+
+    The verdict per machine is ``LuaEntity.status`` *over the whole run*, not
+    at the end. A machine that spent 40 samples ``no_ingredients`` and then
+    1,200 ``working`` is a different animal from one that never left
+    ``no_power``, and the final sample cannot tell them apart -- both may read
+    ``working`` at the last tick, or neither. So every status a machine was
+    ever seen in is counted, and ``products_finished`` (lifetime completed
+    crafts, monotonic) settles whether it ever actually produced.
+
+    When there are no ``machines`` lines at all, returns ``{"absent": ...}``
+    rather than ``None``, carrying the highest sample schema the file actually
+    contains. Three different facts hide behind "no machine rows" and the
+    report must not merge them:
+
+    * every line is schema 1 -- the run predates this data. We never looked.
+    * lines are schema 2 but none is a ``machines`` line -- the sampler ran and
+      wrote nothing, or the stream was cut before the first 300-tick beat.
+    * no samples at all -- handled by the caller, before this is reached.
+
+    Reporting the first wording for the second case would be a lie of exactly
+    the kind this tool exists to catch, and the second case is a live
+    suspicion in this project (sampling has been seen to stop mid-run).
+    """
+    rows = [s for s in samples if s.get("kind") == "machines"]
+    if not rows:
+        return {
+            "absent": True,
+            "schema_seen": max((s.get("schema") or 0) for s in samples) if samples else 0,
+            "sample_lines": len(samples),
+        }
+
+    seen: dict[str, dict] = {}
+    truncated = 0
+    for s in rows:
+        truncated = max(truncated, s.get("truncated") or 0)
+        for key, m in (s.get("machines") or {}).items():
+            entry = seen.get(key)
+            if entry is None:
+                entry = seen[key] = {
+                    "name": m.get("name"),
+                    "type": m.get("type"),
+                    "position": m.get("position"),
+                    "statuses": collections.Counter(),
+                    "recipes": set(),
+                    "networks": set(),
+                    "products_finished": 0,
+                    "ever_crafting": False,
+                    "samples": 0,
+                    # For a chest, the count that matters: how much of the run
+                    # it spent with nothing in it.
+                    "empty_samples": 0,
+                    "last_tick": s.get("tick"),
+                }
+            entry["samples"] += 1
+            entry["last_tick"] = s.get("tick")
+            entry["statuses"][m.get("status") or "unreported"] += 1
+            if m.get("recipe"):
+                entry["recipes"].add(m["recipe"])
+            if m.get("network") is not None:
+                entry["networks"].add(m["network"])
+            # Monotonic, so max is the run total even across a dropped sample.
+            entry["products_finished"] = max(
+                entry["products_finished"], m.get("products_finished") or 0
+            )
+            entry["ever_crafting"] = entry["ever_crafting"] or bool(m.get("crafting"))
+            if not (m.get("output") or m.get("input") or m.get("fuel")):
+                entry["empty_samples"] += 1
+            entry["last"] = m
+
+    # Every sub-network the last force sample knew about, and what it
+    # generated. A machine whose `network` is in none of these sits on an
+    # island no *pole* reaches -- `power.networks` is enumerated from poles, so
+    # that is a real finding and not a gap in the sampling.
+    force = [s for s in samples if s.get("kind") == "force"]
+    networks = {}
+    if force:
+        networks = ((force[-1].get("power") or {}).get("networks")) or {}
+    sub_to_net = {}
+    for net_key, net in networks.items():
+        for sub_id in net.get("sub_ids") or []:
+            sub_to_net[sub_id] = net_key
+
+    machines = []
+    containers = []
+    for key, entry in seen.items():
+        statuses = entry["statuses"]
+        # "Worked" means the game said so, or the counter moved. Either alone
+        # is enough: a machine can finish a craft between two samples without
+        # ever being caught mid-craft, and `working` can be true for a machine
+        # whose output is blocked before anything completes.
+        worked = statuses.get("working", 0) > 0 or entry["products_finished"] > 0
+        nets = sorted(entry["networks"])
+        # A chest is sampled alongside the machines because an empty one is
+        # why a working cell stops, but it has no `status` and can never be
+        # `working` -- so scoring it as "never produced" would file every
+        # chest in the run under the same heading as a dead assembler.
+        if entry["type"] in CONTAINER_TYPES:
+            last = entry.get("last") or {}
+            containers.append(
+                {
+                    "key": key,
+                    "name": entry["name"],
+                    "position": entry["position"],
+                    "samples": entry["samples"],
+                    "empty_samples": entry["empty_samples"],
+                    "last_contents": last.get("output") or {},
+                }
+            )
+            continue
+        machines.append(
+            {
+                "key": key,
+                "name": entry["name"],
+                "type": entry["type"],
+                "position": entry["position"],
+                "samples": entry["samples"],
+                "statuses": dict(statuses.most_common()),
+                "dominant_status": statuses.most_common(1)[0][0] if statuses else None,
+                "recipes": sorted(entry["recipes"]),
+                "networks": nets,
+                # `None` and `[]` differ: no network id at all versus one that
+                # matched nothing. The second is the island; the first is a
+                # machine that is not electric, or is wired to nothing.
+                "orphan_networks": [n for n in nets if n not in sub_to_net],
+                "products_finished": entry["products_finished"],
+                "worked": worked,
+            }
+        )
+    machines.sort(key=lambda m: (m["worked"], m["type"] or "", m["name"] or "", m["key"]))
+    return {
+        "samples": len(rows),
+        "first_tick": rows[0].get("tick"),
+        "last_tick": rows[-1].get("tick"),
+        "truncated": truncated,
+        "machines": machines,
+        "containers": sorted(containers, key=lambda c: -c["empty_samples"]),
+        "networks": networks,
+        "idle": [m for m in machines if not m["worked"]],
+    }
+
+
 # --------------------------------------------------------------------------
 # reporting
 # --------------------------------------------------------------------------
@@ -902,6 +1140,28 @@ def report(a: dict, out=sys.stdout, top: int = 12) -> None:
     for d in a.get("splits_disagreements") or []:
         p(f"  ! splits.json says milestone {d['index']} took {d['splits']} ticks; "
           f"events say {d['events']}")
+
+    # Said before anything derived from the samples is printed, because
+    # everything below that is derived from them -- FROZEN BOTS and PRODUCTION
+    # both read the stream, and both describe only the part of the run it
+    # covers while looking like they describe the run.
+    cov = a.get("samples_coverage") or {}
+    verdict = cov.get("verdict")
+    if verdict == "no_samples":
+        p("  ! no samples archived -- power, production and bot positions are "
+          "unavailable for this run")
+    elif verdict in ("short", "late"):
+        p(f"  ! samples do NOT cover this run: it spans ticks {cov['run_lo']} -> "
+          f"{cov['run_hi']}, and")
+        for kind, k in cov["by_kind"].items():
+            p(f"      {kind:<6} {k['count']:>6} samples, ticks {k['first_tick']} -> "
+              f"{k['last_tick']}  (starts {k['lead_ticks']} late, stops "
+              f"{k['lag_ticks']} early)")
+        missed = cov.get("worst_lag_ticks") or 0
+        if missed:
+            p(f"      the last {missed} ticks ({minutes(missed)}) of this run were never "
+              "sampled or never archived;")
+            p("      nothing below that reads samples describes them")
 
     p(hr("  MILESTONES"))
     if not a["milestones"]:
@@ -1040,6 +1300,117 @@ def report(a: dict, out=sys.stdout, top: int = 12) -> None:
             if made:
                 items = ", ".join(f"{k}={v}" for k, v in list(made.items())[:18])
                 p(f"        made in window: {items}")
+
+    mach = a.get("machines")
+    if mach and mach.get("absent"):
+        p(hr("  MACHINES"))
+        if mach["schema_seen"] < 2:
+            p(f"    no `machines` samples: every one of this run's {mach['sample_lines']} "
+              f"sample lines is schema {mach['schema_seen']},")
+            p("    written before per-machine state existed. That is 'we never looked',")
+            p("    NOT 'every machine was fine'.")
+        else:
+            p(f"    !! this run wrote schema {mach['schema_seen']} samples, which DO carry "
+              f"per-machine state,")
+            p("    but not one `machines` line is present. The sampler either never ran or")
+            p("    stopped before its first 300-tick beat -- a defect in the recording, not")
+            p("    a finding about the machines.")
+    elif mach:
+        p(hr("  POWER PER NETWORK  (at the last force sample)"))
+        if not mach["networks"]:
+            p("    none recorded -- the force owned no electric poles, or this")
+            p("    run predates the per-network split.")
+        for net_key, net in sorted(mach["networks"].items()):
+            on_it = [
+                m for m in mach["machines"]
+                if any(n in (net.get("sub_ids") or []) for n in m["networks"])
+            ]
+            flag = ""
+            if net.get("generated_kw", 0) <= 0 and net.get("demanded_kw", 0) > 0:
+                flag = "   <-- DEMAND WITH NO GENERATION"
+            elif net.get("satisfaction", 1.0) < 0.95:
+                flag = "   <-- BROWNING OUT"
+            p(f"    network {net_key} (sub {net.get('sub_ids')})  "
+              f"gen={net.get('generated_kw', 0):.0f}kW  "
+              f"used={net.get('consumed_kw', 0):.0f}kW  "
+              f"demand={net.get('demanded_kw', 0):.0f}kW  "
+              f"satisfaction={net.get('satisfaction', 0):.2f}  "
+              f"machines={len(on_it)}{flag}")
+        p("    A force-wide total cannot show this: 900 kW generated is still")
+        p("    900 kW when every one of them is on the network the cell is NOT on.")
+
+        p(hr("  MACHINES  (status over the whole run, not at the end)"))
+        worked = [m for m in mach["machines"] if m["worked"]]
+        p(f"    {mach['samples']} machine samples, ticks {mach['first_tick']} -> "
+          f"{mach['last_tick']};  {len(mach['machines'])} machines seen, "
+          f"{len(worked)} of them worked at some point")
+        if mach["truncated"]:
+            p(f"    !! {mach['truncated']} machine(s) exceeded the mod's per-sample cap "
+              f"and were never sampled")
+        if not mach["idle"]:
+            p("    every machine worked at least once")
+        else:
+            p(f"\n    NEVER PRODUCED ({len(mach['idle'])}) -- the game's own reason, counted "
+              f"across every sample:")
+            for m in mach["idle"][:MACHINE_ROWS]:
+                pos = m["position"] or {}
+                recipe = ", ".join(m["recipes"]) or "no recipe ever set"
+                p(f"      {(m['name'] or '?'):<22} [{pos.get('x')}, {pos.get('y')}]  "
+                  f"recipe: {recipe}")
+                p(f"        status: {m['statuses']}   over {m['samples']} samples")
+                if m["orphan_networks"]:
+                    p(f"        !! electric network {m['orphan_networks']} matches no network "
+                      f"any pole reached -- an isolated island")
+                elif not m["networks"] and m["type"] in ("assembling-machine", "lab"):
+                    p("        !! connected to NO electric network at all -- the pole "
+                      "did not reach it")
+            if len(mach["idle"]) > MACHINE_ROWS:
+                p(f"      ... and {len(mach['idle']) - MACHINE_ROWS} more")
+
+        # A machine that produced *and then stopped* is invisible in the two
+        # lists above: it is not "never produced", and its final sample may
+        # read `working`. It is also the commonest real outcome -- the cell in
+        # `run-1788459085-32452` made about 4 science per charge and then sat
+        # `no_ingredients` for ~76,000 ticks. So the run-long status counter is
+        # printed for anything that spent a fifth of its life not working.
+        stalled = [
+            m for m in worked
+            if m["statuses"].get("working", 0) < 0.8 * m["samples"]
+        ]
+        if stalled:
+            p(f"\n    WORKED BUT STALLED ({len(stalled)}) -- produced, then spent a fifth "
+              f"or more of the run not working:")
+            for m in stalled[:MACHINE_ROWS]:
+                pos = m["position"] or {}
+                pct = 100.0 * m["statuses"].get("working", 0) / m["samples"]
+                p(f"      {(m['name'] or '?'):<22} [{pos.get('x')}, {pos.get('y')}]  "
+                  f"working {pct:.0f}% of samples, finished {m['products_finished']}")
+                p(f"        status: {m['statuses']}")
+
+        if mach.get("containers"):
+            p(hr("  BUFFERS  (how much of the run each chest spent empty)"))
+            p("    A cell with power, a recipe and ingredients still stops when its input")
+            p("    chest runs dry, and that reads as an idle machine, not a broken one.")
+            for c in mach["containers"][:MACHINE_ROWS]:
+                pos = c["position"] or {}
+                pct = 100.0 * c["empty_samples"] / c["samples"] if c["samples"] else 0.0
+                contents = ", ".join(f"{k}={v}" for k, v in (c["last_contents"] or {}).items())
+                p(f"      {(c['name'] or '?'):<18} [{pos.get('x')}, {pos.get('y')}]  "
+                  f"empty for {pct:.0f}% of the run ({c['empty_samples']}/{c['samples']} "
+                  f"samples);  last held: {contents or 'nothing'}")
+
+        by_status: collections.Counter = collections.Counter()
+        for m in mach["machines"]:
+            by_status[m["dominant_status"]] += 1
+        p(f"\n    machines by dominant status: {dict(by_status.most_common())}")
+        finished = {
+            f"{m['name']}@[{(m['position'] or {}).get('x')}, {(m['position'] or {}).get('y')}]":
+            m["products_finished"]
+            for m in worked if m["products_finished"]
+        }
+        if finished:
+            top_finished = sorted(finished.items(), key=lambda kv: -kv[1])[:MACHINE_ROWS]
+            p(f"    products finished: {dict(top_finished)}")
     p("")
 
 
@@ -1047,6 +1418,14 @@ def summary_line(a: dict) -> str:
     if a.get("error"):
         return f"{a['run_id']}  ! {a['error']}"
     parts = [f"{a['run_id']}", f"{minutes(a['span_ticks'])}", f"{a['outcome'][:22]:<22}"]
+    # Carried into the one-line form too: `--all --summary` is how a whole
+    # archive gets scanned, and a truncated sample stream is exactly the kind
+    # of defect nobody goes looking for run by run.
+    cov = a.get("samples_coverage") or {}
+    if cov.get("verdict") == "no_samples":
+        parts.append("!nosamples")
+    elif cov.get("verdict") in ("short", "late"):
+        parts.append(f"!samples-short-by-{minutes(cov.get('worst_lag_ticks') or 0).strip()}")
     for m in a["milestones"]:
         word = m["outcome"].split()[0]
         parts.append(f"{m['label'].split()[0]}={minutes(m['span_ticks'])}/{word}")

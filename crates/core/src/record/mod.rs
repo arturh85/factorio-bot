@@ -25,8 +25,8 @@ pub mod video;
 pub use lanes::{Lane, derive_lanes};
 pub use retention::{DEFAULT_KEEP, KEEP_MARKER, Reaped, reap};
 pub use samples::{
-    BotSample, IngestProgress, PowerSample, ProductionSample, ReadSamples, ResearchSample, Sample,
-    SampleKind, ingest_samples_incremental, read_samples,
+    BotSample, IngestProgress, MachineSample, NetworkPower, PowerSample, ProductionSample,
+    ReadSamples, ResearchSample, Sample, SampleKind, ingest_samples_incremental, read_samples,
 };
 pub use splits::{Split, derive_splits};
 pub use video::{
@@ -802,7 +802,45 @@ pub struct Manifest {
     /// no map at all, and that is zero, not a parse failure.
     #[serde(default)]
     pub map: usize,
+    /// Ticks of the run's own span that the archived sample stream does *not*
+    /// cover: the closing tick minus the last sample archived, floored at
+    /// zero. `Some(0)` is a run whose samples reach its end; a large value is
+    /// a run that stopped being sampled -- or stopped being *ingested* --
+    /// while it went on running.
+    ///
+    /// Recorded because that failure is otherwise invisible. Run
+    /// `run-1788459085-32452` sampled cleanly for its whole 281,000 ticks and
+    /// archived only the first 78,840 of them, and nothing said so: the loss
+    /// was found by comparing the last tick of `samples.jsonl` against the
+    /// last tick of `events.jsonl` by hand. This is that comparison, made once
+    /// by the only party that knows both numbers for certain.
+    ///
+    /// `None` for a run with no samples at all, which is a different fact from
+    /// "the samples fell short" -- a planning-only run captures none by design
+    /// and a lag of zero would claim full coverage of nothing.
+    #[serde(default)]
+    pub samples_lag_ticks: Option<u64>,
 }
+
+/// How far behind the mod's live sample stream the archive is allowed to fall
+/// while a run is in progress, in game ticks (30 s at 60 UPS).
+///
+/// This exists because "at a milestone boundary" turned out not to be a
+/// cadence. Ingestion used to run only inside `finish()`, and run
+/// `run-1788315106-86443` -- killed by a wall-clock timeout -- left no
+/// `samples.jsonl` at all; the answer was to ingest at every milestone
+/// boundary too. That bounded the loss by the length of a milestone, which
+/// was fine until a milestone got long: `run-1788459085-32452` spent 199,449
+/// ticks (55 minutes) inside milestone 2, was killed before it closed, and
+/// lost every one of those ticks' samples -- including the entire window in
+/// which the thing the run was built to observe was built and fed. The mod
+/// had written all of them; nothing had copied them.
+///
+/// A tick interval is the fix because it does not depend on the run reaching
+/// anything. Ingestion is cheap by construction (it seeks to a remembered
+/// offset and reads only what is new), so the only cost of a short interval
+/// is more of those seeks.
+pub const SAMPLE_INGEST_INTERVAL_TICKS: u64 = 1800;
 
 /// Writes a run's event log.
 pub struct RunRecorder {
@@ -843,6 +881,24 @@ pub struct RunRecorder {
     /// than reread from disk at `finish`: this recorder is the only writer of
     /// that file, so it cannot disagree with what it just wrote.
     samples_count: usize,
+    /// The workspace holding the mod's live `samples.jsonl`, once a caller has
+    /// named it via [`RunRecorder::watch_samples`].
+    ///
+    /// Held rather than passed, unlike [`RunRecorder::ingest_samples`]'s
+    /// argument, because the periodic ingest is driven from
+    /// [`RunRecorder::record`], which is called from everywhere and must not
+    /// grow a parameter that every caller would have to know the answer to.
+    /// `None` keeps the pre-existing behaviour exactly: ingestion then happens
+    /// only where a caller passes the workspace in.
+    samples_workspace: Option<PathBuf>,
+    /// The tick at which the periodic ingest last ran. See
+    /// [`SAMPLE_INGEST_INTERVAL_TICKS`].
+    samples_ingested_at: u64,
+    /// The highest tick of any sample archived into this run, or `None` when
+    /// none has been. Tracked here rather than by rereading the archive at
+    /// `finish`, for the same reason `samples_count` is, and used for exactly
+    /// one thing: [`Manifest::samples_lag_ticks`].
+    samples_high_tick: Option<u64>,
     /// The run's video recorder, when one was asked for.
     ///
     /// Held here rather than beside the run in the caller so that the two
@@ -876,6 +932,9 @@ impl RunRecorder {
             placed_bounds: None,
             samples_offset: 0,
             samples_count: 0,
+            samples_workspace: None,
+            samples_ingested_at: 0,
+            samples_high_tick: None,
             video: None,
             started_unix: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -886,6 +945,51 @@ impl RunRecorder {
 
     pub fn run_id(&self) -> &str {
         &self.run_id
+    }
+
+    /// Names the workspace whose `server/script-output/botbridge/samples.jsonl`
+    /// this run is being sampled into, so that [`RunRecorder::record`] can keep
+    /// the archive within [`SAMPLE_INGEST_INTERVAL_TICKS`] of it on its own.
+    ///
+    /// Call this immediately after [`RunRecorder::start`] on any run that
+    /// started a sampling session. Without it the recorder still archives
+    /// everything at the moments a caller passes the workspace to
+    /// [`RunRecorder::ingest_samples`] -- but only at those moments, which is
+    /// how a run that never reached one of them came to lose 55 minutes of
+    /// samples the mod had already written.
+    pub fn watch_samples(&mut self, workspace: impl Into<PathBuf>) {
+        self.samples_workspace = Some(workspace.into());
+    }
+
+    /// Ingests samples if the run has advanced far enough since the last time,
+    /// and swallows -- after logging -- anything that goes wrong.
+    ///
+    /// Deliberately not fallible to its caller. This runs inside
+    /// [`RunRecorder::record`], whose job is to get the event on disk; a
+    /// problem reading the *mod's* sample file must not be able to stop the
+    /// event log, which is the artefact a diagnosis needs most and the one
+    /// that would still be readable if everything else failed.
+    ///
+    /// Nothing is lost by not raising here. A failed call leaves
+    /// `samples_offset` untouched (see [`samples::ingest_samples_incremental`]),
+    /// so the next attempt -- at the next interval, at a milestone boundary,
+    /// or at `finish`, where it *does* propagate -- reads the same bytes and
+    /// reports the same error.
+    fn ingest_samples_if_due(&mut self, tick: u64) {
+        if self.samples_workspace.is_none()
+            || tick.saturating_sub(self.samples_ingested_at) < SAMPLE_INGEST_INTERVAL_TICKS
+        {
+            return;
+        }
+        self.samples_ingested_at = tick;
+        let workspace = self.samples_workspace.clone();
+        if let Err(error) = self.ingest_samples(workspace.as_deref()) {
+            tracing::warn!(
+                %error,
+                "could not ingest the mod's samples mid-run; \
+                 the next attempt will re-read the same bytes"
+            );
+        }
     }
 
     /// Hands this run its video recorder.
@@ -941,7 +1045,12 @@ impl RunRecorder {
         let mut line = serde_json::to_string(&event).map_err(io::Error::other)?;
         line.push('\n');
         self.events.write_all(line.as_bytes())?;
-        self.events.flush()
+        self.events.flush()?;
+        // After the event is on disk, never before: sample ingestion is a
+        // convenience this call performs on the way past, and the event is the
+        // thing it was asked to do.
+        self.ingest_samples_if_due(tick);
+        Ok(())
     }
 
     /// Appends one line to `map.jsonl` and flushes it, for the same reason
@@ -1034,6 +1143,9 @@ impl RunRecorder {
         }
         self.samples_offset = progress.offset;
         self.samples_count += progress.appended;
+        if let Some(high) = progress.high_tick {
+            self.samples_high_tick = Some(self.samples_high_tick.map_or(high, |t| t.max(high)));
+        }
         Ok(progress.appended)
     }
 }
@@ -1132,6 +1244,41 @@ impl RunRecorder {
         self.ingest_samples(workspace)?;
         let samples = self.samples_count;
 
+        // Does the sample stream actually cover the run it belongs to?
+        //
+        // Asked here because this is the only place both numbers are known for
+        // certain, and because nobody was asking it. Sampling is the
+        // instrument every other diagnosis reads through -- power draw,
+        // production totals, whether a bot ever moved -- and it can stop
+        // without stopping the run: the mod goes quiet, or, as in
+        // `run-1788459085-32452`, keeps writing while nothing copies what it
+        // writes. Either way `samples.jsonl` simply ends early, which looks
+        // exactly like a short run until you compare it against something.
+        let samples_lag_ticks = self.samples_high_tick.map(|high| tick.saturating_sub(high));
+        if let Some(lag) = samples_lag_ticks
+            && lag > SAMPLE_INGEST_INTERVAL_TICKS
+        {
+            tracing::warn!(
+                lag_ticks = lag,
+                last_sample_tick = self.samples_high_tick,
+                run_tick = tick,
+                samples,
+                "this run's samples stop well before the run does -- \
+                 the last {} ticks of it were never sampled or never archived, \
+                 so nothing observed in that window can be read back",
+                lag
+            );
+        }
+        if samples_lag_ticks.is_none() && workspace.is_some() {
+            // A run with a workspace to sample from and not one sample to show
+            // for it. Distinct from the lag warning above, which needs at least
+            // one sample to measure from, and not derivable from it.
+            tracing::warn!(
+                "this run archived no samples at all, though it had a workspace \
+                 to read them from"
+            );
+        }
+
         let manifest = Manifest {
             run_id: self.run_id.clone(),
             started_unix: self.started_unix,
@@ -1147,6 +1294,7 @@ impl RunRecorder {
             splits: splits.len(),
             samples,
             map: self.map_count,
+            samples_lag_ticks,
         };
         fs::write(
             self.dir.join("manifest.json"),
@@ -1700,7 +1848,7 @@ mod finish_tests {
         fs::create_dir_all(&out).unwrap();
         fs::write(
             out.join("samples.jsonl"),
-            "{\"kind\":\"bots\",\"schema\":1,\"tick\":850,\"bots\":[]}\n",
+            "{\"kind\":\"bots\",\"schema\":2,\"tick\":850,\"bots\":[]}\n",
         )
         .unwrap();
 
@@ -1780,7 +1928,7 @@ mod finish_tests {
         fs::create_dir_all(&out).unwrap();
         fs::write(
             out.join("samples.jsonl"),
-            "{\"kind\":\"bots\",\"schema\":1,\"tick\":100,\"run\":\"r5\",\"bots\":[]}\n",
+            "{\"kind\":\"bots\",\"schema\":2,\"tick\":100,\"run\":\"r5\",\"bots\":[]}\n",
         )
         .unwrap();
 
@@ -1827,7 +1975,7 @@ mod finish_tests {
         let source = out.join("samples.jsonl");
         fs::write(
             &source,
-            "{\"kind\":\"bots\",\"schema\":1,\"tick\":100,\"run\":\"r6\",\"bots\":[]}\n",
+            "{\"kind\":\"bots\",\"schema\":2,\"tick\":100,\"run\":\"r6\",\"bots\":[]}\n",
         )
         .unwrap();
 
@@ -1853,7 +2001,7 @@ mod finish_tests {
             let mut f = fs::OpenOptions::new().append(true).open(&source).unwrap();
             writeln!(
                 f,
-                "{{\"kind\":\"bots\",\"schema\":1,\"tick\":200,\"run\":\"r6\",\"bots\":[]}}"
+                "{{\"kind\":\"bots\",\"schema\":2,\"tick\":200,\"run\":\"r6\",\"bots\":[]}}"
             )
             .unwrap();
         }
@@ -1873,6 +2021,169 @@ mod finish_tests {
             "no sample line may be archived twice: {:?}",
             archived.samples
         );
+    }
+
+    /// Appends one `bots` sample line for `run` at `tick` to the mod's file.
+    fn mod_writes_sample(source: &Path, run: &str, tick: u64) {
+        use std::io::Write as _;
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(source)
+            .unwrap();
+        writeln!(
+            f,
+            "{{\"kind\":\"bots\",\"schema\":2,\"tick\":{tick},\"run\":\"{run}\",\"bots\":[]}}"
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_long_milestone_does_not_hold_the_whole_run_s_samples_hostage() {
+        // Run `run-1788459085-32452`, verbatim in shape: milestone 1 closed at
+        // tick 78,885 and milestone 2 was still open 199,449 ticks later when
+        // the run was killed. Ingestion only ran at those boundaries and at
+        // `finish`, so the archive stopped at tick 78,840 and the entire
+        // window in which the red-science cell was built, powered and fed --
+        // the thing the run existed to observe -- was never copied out of the
+        // mod's own file, which had it all along.
+        //
+        // No `ingest_samples` call and no `finish` anywhere below: the point is
+        // that `record` alone keeps up.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let out = workspace.join("server/script-output/botbridge");
+        fs::create_dir_all(&out).unwrap();
+        let source = out.join("samples.jsonl");
+
+        let root = tmpdir("long-milestone");
+        let mut rec = RunRecorder::start(&root, "r7").unwrap();
+        rec.watch_samples(&workspace);
+
+        // One milestone, opened and never closed.
+        mod_writes_sample(&source, "r7", 4740);
+        rec.record(
+            4732,
+            EventKind::MilestoneStarted {
+                index: 1,
+                goal: "the long one".into(),
+            },
+        )
+        .unwrap();
+
+        // The mod samples on its beat; the run reports actions on its own.
+        // Neither of them is a milestone boundary.
+        let mut tick = 4732;
+        for step in 0..40u64 {
+            tick += 5_000;
+            mod_writes_sample(&source, "r7", tick - 20);
+            rec.record(
+                tick,
+                EventKind::ActionDispatched {
+                    id: step as u32,
+                    bot: 1,
+                    action: "mine 4 iron-ore".into(),
+                    target: None,
+                },
+            )
+            .unwrap();
+        }
+
+        // Killed here, exactly like run 32452: no milestone ever closed, so no
+        // keyframe ever ran, so `finish` never ran either.
+        assert!(!rec.dir().join("manifest.json").exists());
+
+        let archived = read_samples(&rec.dir().join("samples.jsonl")).unwrap();
+        let last = archived.samples.iter().map(|s| s.tick).max().unwrap();
+        assert!(
+            tick.saturating_sub(last) <= SAMPLE_INGEST_INTERVAL_TICKS,
+            "the archive must stay within {SAMPLE_INGEST_INTERVAL_TICKS} ticks of the run \
+             even with no milestone boundary to hang ingestion on -- \
+             run reached {tick}, last archived sample was {last}"
+        );
+    }
+
+    #[test]
+    fn finish_says_how_far_short_the_samples_fell() {
+        // The mod goes quiet at tick 1,000 and the run carries on to 90,000.
+        // Nothing else about the run looks wrong -- the events are complete,
+        // the outcome is `done` -- so the shortfall has to be stated, or it
+        // reads as a run that simply had less to say.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let out = workspace.join("server/script-output/botbridge");
+        fs::create_dir_all(&out).unwrap();
+        mod_writes_sample(&out.join("samples.jsonl"), "r8", 1_000);
+
+        let root = tmpdir("lag");
+        let mut rec = RunRecorder::start(&root, "r8").unwrap();
+        rec.record(
+            900,
+            EventKind::MilestoneStarted {
+                index: 1,
+                goal: "g".into(),
+            },
+        )
+        .unwrap();
+        let (manifest, _) = rec
+            .finish(90_000, "done", Some(&workspace), DEFAULT_KEEP)
+            .unwrap();
+
+        assert_eq!(
+            manifest.samples_lag_ticks,
+            Some(89_000),
+            "the manifest must carry the gap between the last sample and the run's end"
+        );
+    }
+
+    #[test]
+    fn a_fully_sampled_run_reports_no_lag_worth_the_name() {
+        // The other half of the guard: it must not cry wolf on a healthy run,
+        // or the warning becomes something to scroll past.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let out = workspace.join("server/script-output/botbridge");
+        fs::create_dir_all(&out).unwrap();
+        mod_writes_sample(&out.join("samples.jsonl"), "r9", 8_940);
+
+        let root = tmpdir("no-lag");
+        let mut rec = RunRecorder::start(&root, "r9").unwrap();
+        rec.record(
+            900,
+            EventKind::MilestoneStarted {
+                index: 1,
+                goal: "g".into(),
+            },
+        )
+        .unwrap();
+        let (manifest, _) = rec
+            .finish(9_000, "done", Some(&workspace), DEFAULT_KEEP)
+            .unwrap();
+
+        let lag = manifest.samples_lag_ticks.unwrap();
+        assert!(
+            lag <= SAMPLE_INGEST_INTERVAL_TICKS,
+            "a run sampled to its last beat must not be reported as short: lag was {lag}"
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_samples_reports_no_lag_rather_than_a_lag_of_zero() {
+        // A planning-only run captures nothing by design. `Some(0)` would
+        // claim its samples covered the whole run, which is a stronger
+        // statement than "there were none".
+        let root = tmpdir("no-samples");
+        let mut rec = RunRecorder::start(&root, "r10").unwrap();
+        rec.record(
+            10,
+            EventKind::MilestoneStarted {
+                index: 1,
+                goal: "g".into(),
+            },
+        )
+        .unwrap();
+        let (manifest, _) = rec.finish(500, "done", None, DEFAULT_KEEP).unwrap();
+        assert_eq!(manifest.samples_lag_ticks, None);
     }
 }
 

@@ -173,7 +173,7 @@ async fn a_runs_archived_samples_are_served() {
     seed_run(&ws, "alpha", MILESTONES, Some(MANIFEST), None);
     std::fs::write(
         ws.join("runs").join("alpha").join("samples.jsonl"),
-        r#"{"kind":"bots","schema":1,"tick":310,"run":"alpha","bots":[]}"#,
+        r#"{"kind":"bots","schema":2,"tick":310,"run":"alpha","bots":[]}"#,
     )
     .unwrap();
     let (status, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/alpha/samples").await;
@@ -195,9 +195,9 @@ async fn a_run_with_an_unparseable_sample_line_reports_its_skipped_count() {
     std::fs::write(
         ws.join("runs").join("alpha").join("samples.jsonl"),
         concat!(
-            r#"{"kind":"bots","schema":1,"tick":310,"run":"alpha","bots":[]}"#,
+            r#"{"kind":"bots","schema":2,"tick":310,"run":"alpha","bots":[]}"#,
             "\n",
-            r#"{"kind":"bots","schema":1,"tick":320,"run":"alpha","bots":{}}"#,
+            r#"{"kind":"bots","schema":2,"tick":320,"run":"alpha","bots":{}}"#,
             "\n"
         ),
     )

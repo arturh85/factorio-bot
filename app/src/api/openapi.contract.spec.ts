@@ -71,6 +71,8 @@ import type {
     MapRecord,
     PlannedStep,
     Position,
+    MachineSample,
+    NetworkPower,
     PowerSample,
     ProductionSample,
     ResearchSample,
@@ -900,6 +902,15 @@ const SCHEMAS: Record<string, SchemaContract> = {
             production: {required: true, ref: 'ProductionSample'},
             power: {required: true, ref: 'PowerSample'}
         },
+        // `machines` is a map keyed by `unit_number`, so `type: 'object'` and
+        // not `arrayOf: 'MachineSample'` -- the map shape is deliberate (the
+        // mod's `table_to_json` writes an empty Lua table as `{}`, which is
+        // what makes an empty `bots` array unparseable) and the element type
+        // is pinned by `MachineSample`'s own row below.
+        machines: {
+            machines: {required: true, type: 'object'},
+            truncated: {required: true, type: 'integer'}
+        },
         // A kind this build does not know. The server never emits it, but a
         // future variant must still decode rather than fail to parse.
         unknown: {}
@@ -923,7 +934,41 @@ const SCHEMAS: Record<string, SchemaContract> = {
     PowerSample: objectContract<PowerSample>({
         generated_kw: {required: true, type: 'number'},
         consumed_kw: {required: true, type: 'number'},
+        satisfaction: {required: true, type: 'number'},
+        // `required: false` purely because `#[serde(default)]` lets a
+        // pre-schema-2 archive decode without it; a live server always
+        // serialises it, so `types.ts` declares it present and this row
+        // carries no `nullable` -- the same reading as `EventKind`'s `plan`.
+        networks: {required: false, type: 'object'}
+    }),
+    NetworkPower: objectContract<NetworkPower>({
+        sub_ids: {required: true, type: 'array'},
+        generated_kw: {required: true, type: 'number'},
+        consumed_kw: {required: true, type: 'number'},
+        demanded_kw: {required: true, type: 'number'},
         satisfaction: {required: true, type: 'number'}
+    }),
+    MachineSample: objectContract<MachineSample>({
+        name: {required: true, type: 'string'},
+        type: {required: true, type: 'string'},
+        position: {required: true, ref: 'Position'},
+        // Present-and-null, every one of them: the six sampled entity types do
+        // not all answer the same questions, and "this machine is not a
+        // crafting machine" is a fact rather than a gap.
+        status: {required: false, type: 'string', nullable: true},
+        network: {required: false, type: 'integer', nullable: true},
+        recipe: {required: false, type: 'string', nullable: true},
+        crafting: {required: false, type: 'boolean', nullable: true},
+        progress: {required: false, type: 'number', nullable: true},
+        products_finished: {required: false, type: 'integer', nullable: true},
+        mining: {required: false, type: 'string', nullable: true},
+        // The three inventories are `required: false` for the same reason
+        // `PowerSample.networks` is: the *mod* omits an empty one to save
+        // forty bytes a row, and the server restores it, so a response never
+        // actually lacks them and `types.ts` declares them present.
+        input: {required: false, type: 'object'},
+        output: {required: false, type: 'object'},
+        fuel: {required: false, type: 'object'}
     }),
     Position: objectContract<Position>({
         x: {required: true, type: 'number'},

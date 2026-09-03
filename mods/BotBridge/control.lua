@@ -1364,9 +1364,10 @@ end
 -- The recording session
 -- ---------------------------------------------------------------------------
 --
--- A *session* is what makes this mod write anything about the world: both
--- samplers -- `sample_force` on the 300-tick beat and `sample_bots` on the
--- 60-tick one -- return early unless `storage.sampling` is set, and every
+-- A *session* is what makes this mod write anything about the world: all
+-- three samplers -- `sample_force` and `sample_machines` on the 300-tick beat,
+-- `sample_bots` on the 60-tick one -- return early unless `storage.sampling`
+-- is set, and every
 -- sample line is tagged with the session's opaque `run` id so a consumer can
 -- tell one run's stream from the next one's.
 --
@@ -1383,18 +1384,119 @@ end
 -- lost with them.
 --
 -- The session survived the screenshots on purpose: deleting it would have
--- taken `samples.jsonl` -- research, production, power, bot inventories --
--- with it, silently.
+-- taken `samples.jsonl` -- research, production, per-network power, bot
+-- inventories and per-machine state -- with it, silently.
 
 local SAMPLE_FORCE_INTERVAL = 300 -- game ticks between force samples (5 s at 60 UPS)
 
 -- Sample schema. Bumped deliberately on every field change, because
 -- info.json has read 0.0.1 since the project began and cannot tell a stale
 -- workspace/mods from a current one. Rust refuses a schema it does not know.
-local SAMPLE_SCHEMA = 1
+local SAMPLE_SCHEMA = 2
 local SAMPLE_DIR = "botbridge"
 local SAMPLE_FILE = SAMPLE_DIR .. "/samples.jsonl"
 local SAMPLE_BOT_INTERVAL = 60 -- 1 s at 60 UPS
+
+-- ---------------------------------------------------------------------------
+-- Machine telemetry
+-- ---------------------------------------------------------------------------
+--
+-- The record could say what every *bot* held and what the *force* totalled,
+-- and nothing whatsoever about any individual machine. So a run that built a
+-- red-science cell -- twelve actions all reporting success, both recipes set,
+-- chests charged three times, poles placed adjacent to both assemblers -- could
+-- not answer "did the assemblers have power, hold ingredients, or make
+-- anything". That is the gap `sample_machines` closes.
+--
+-- The one field that ends most of those arguments is `LuaEntity.status`. It is
+-- the game's own verdict on why a machine is or is not running, and it
+-- separates the cases that look identical from outside: `working`,
+-- `no_power`, `low_power`, `no_ingredients`, `full_output`,
+-- `not_enough_space_in_output`, `no_recipe`, `no_fuel`,
+-- `not_plugged_in_electric_network`, `no_minable_resources`. Confirmed present
+-- on `LuaEntity` in this install's `runtime-api.json` (2.1.17) with
+-- `subclasses: None` -- so it is readable off any entity -- and `optional:
+-- true`, so it can be nil and is written only when it is not.
+--
+-- NOTE the two names the brief for this work guessed wrong, both checked
+-- against `defines.entity_status` rather than assumed: there is no
+-- `output_full` (it is `full_output`, with `not_enough_space_in_output` as the
+-- separate "the output slot cannot take the next craft" case).
+
+-- Every `defines.entity_status` value, by number. Built once at load: the
+-- table has 72 members in 2.1.17 and none of them change at runtime.
+--
+-- Numbers are not written to the record. A status id is meaningless without
+-- this table, and a reader holding an archive from a future Factorio would
+-- have no way to resolve one -- so the *name* is what crosses the wire, and an
+-- id this build cannot name is written as `unmapped_<n>` rather than dropped.
+local ENTITY_STATUS_NAMES = {}
+for status_name, status_value in pairs(defines.entity_status) do
+	ENTITY_STATUS_NAMES[status_value] = status_name
+end
+
+-- The machine types worth a row. Deliberately a short list rather than "every
+-- entity": belts, inserters, chests and pipes are numerous, and none of them
+-- has the recipe/ingredient/output triple that the question "is this machine
+-- working" is about. `generator` is the steam engine and `boiler` its feeder --
+-- both are here so that "the assembler is on a different electric network from
+-- the thing generating the power" is answerable from one sample line.
+local MACHINE_TYPES = {
+	"assembling-machine",
+	"furnace",
+	"mining-drill",
+	"lab",
+	"boiler",
+	"generator",
+	-- Chests are here because of what a run actually died of, not because a
+	-- chest is a machine. `run-1788459085-32452`'s red-science cell had power,
+	-- had its recipes and did produce -- about 4 science and 16 gears per
+	-- charge -- and then sat idle for ~76,000 ticks because nothing refilled
+	-- its input chests. `status` on a container says nothing, but its
+	-- *contents* are the difference between "the cell is broken" and "the cell
+	-- ran dry", and those are opposite repairs. Six of them in that run, so the
+	-- cost is nil.
+	"container",
+	"logistic-container",
+}
+
+-- Container types, whose contents come from `defines.inventory.chest` rather
+-- than from an output or ingredient inventory.
+local CONTAINER_TYPES = {
+	["container"] = true,
+	["logistic-container"] = true,
+}
+
+-- Which of those are `CraftingMachine` in the API's subclass sense, and so
+-- accept `get_recipe`, `is_crafting`, `crafting_progress` and
+-- `products_finished`. Reading any of those off a `lab`, `boiler` or
+-- `mining-drill` raises, and a raise inside a sampler is what killed a live
+-- six-minute run once already (see `record_sample_failure`).
+local CRAFTING_MACHINE_TYPES = {
+	["assembling-machine"] = true,
+	["furnace"] = true,
+}
+
+-- Factorio 2.1.17 renamed the crafting-machine inventory defines: this
+-- install's `defines.inventory` has `crafter_input`/`crafter_output`/
+-- `crafter_modules` and has **no** `furnace_source`, `furnace_result`,
+-- `assembling_machine_input` or `assembling_machine_output` at all (verified
+-- against `runtime-api.json`, not assumed -- the dead `inventory_type_name`
+-- near the top of this file still indexes the removed names and would raise
+-- "table index is nil" if anything ever called it).
+--
+-- The fallback is for an older Factorio, not for this one, and `nil` is a
+-- supported outcome: `machine_inventory` below refuses a nil index instead of
+-- passing it to `get_inventory`.
+local CRAFTER_INPUT_INVENTORY = defines.inventory.crafter_input
+	or defines.inventory.assembling_machine_input
+local LAB_INPUT_INVENTORY = defines.inventory.lab_input
+
+-- A ceiling on rows per sample, so that a late-game base cannot turn a
+-- telemetry line into a megabyte. Overflow is *counted and reported*
+-- (`truncated`), never silently dropped: a reader must be able to tell "this
+-- is every machine" from "this is the first 400 of them".
+local MACHINE_SAMPLE_LIMIT = 400
 
 -- Appends one JSON line, on the server only.
 --
@@ -1462,9 +1564,32 @@ end
 -- (`LuaElectricSubNetwork` and `LuaElectricNetwork`), not just the one that
 -- owns `flow_last_tick` -- unverified against a live game, since this task is
 -- static-only by design (see the task brief).
+--
+-- ---------------------------------------------------------------------------
+--
+-- Since 2026-09-03 this also reports **each network separately**, and that is
+-- the half that answers a question the totals structurally cannot. A force
+-- reading `generated_kw: 900, consumed_kw: 60` looks healthy; if those 900 kW
+-- are on the network holding the lab and the assemblers sit on an island whose
+-- only pole reaches no generator, the force total says nothing at all about
+-- it. Per-network figures show the island as its own entry with
+-- `generated_kw = 0`, and `sample_machines`' `network` field says which
+-- entry each machine is on. Coverage is not capacity, and neither is a
+-- force-wide sum.
+--
+-- `networks` is keyed by the **smallest sub-network id under a parent**, not
+-- by a network id, because `LuaElectricNetwork` has no `id` attribute (the
+-- same absence the seen-set above works around). Each entry lists its whole
+-- `sub_ids` set, which is what a machine's `electric_network_id` is matched
+-- against -- so the key is only a handle, and nothing depends on it being the
+-- game's idea of a name. It is a map rather than an array on purpose:
+-- `helpers.table_to_json` renders an empty Lua table as `{}`, so an array here
+-- would decode as an object the moment a force owned no poles, which is
+-- exactly the defect that already makes `bots = {}` an unparseable line.
 local function power_totals(force)
 	local generated, consumed, demanded = 0.0, 0.0, 0.0
 	local seen_subnetworks = {}
+	local networks = {}
 	for _, surface in pairs(game.surfaces) do
 		for _, pole in pairs(surface.find_entities_filtered({
 			type = "electric-pole", force = force,
@@ -1482,13 +1607,39 @@ local function power_totals(force)
 					-- seen and every pole touching it would sum this parent
 					-- again, silently multiplying the power numbers.
 					seen_subnetworks[sub.id] = true
+					-- `sub.id` seeds the list for the same reason it is marked
+					-- seen explicitly above: a parent that did not list itself
+					-- in `sub_networks` must still contribute the id the pole
+					-- actually reached, or a machine on it would match no
+					-- entry and read as unpowered when it is not.
+					local sub_ids = { sub.id }
+					local listed = { [sub.id] = true }
 					for _, sibling in pairs(network.sub_networks) do
 						seen_subnetworks[sibling.id] = true
+						if not listed[sibling.id] then
+							listed[sibling.id] = true
+							sub_ids[#sub_ids + 1] = sibling.id
+						end
 					end
+					table.sort(sub_ids)
 					local flow = network.flow_last_tick
-					generated = generated + flow.maximum_production * 60 / 1000
-					consumed = consumed + flow.total_transfer * 60 / 1000
-					demanded = demanded + flow.maximum_consumption * 60 / 1000
+					local net_generated = flow.maximum_production * 60 / 1000
+					local net_consumed = flow.total_transfer * 60 / 1000
+					local net_demanded = flow.maximum_consumption * 60 / 1000
+					generated = generated + net_generated
+					consumed = consumed + net_consumed
+					demanded = demanded + net_demanded
+					local net_satisfaction = 1.0
+					if net_demanded > 0 then
+						net_satisfaction = math.min(1.0, net_consumed / net_demanded)
+					end
+					networks[tostring(sub_ids[1])] = {
+						sub_ids = sub_ids,
+						generated_kw = net_generated,
+						consumed_kw = net_consumed,
+						demanded_kw = net_demanded,
+						satisfaction = net_satisfaction,
+					}
 				end
 			end
 		end
@@ -1499,6 +1650,7 @@ local function power_totals(force)
 		generated_kw = generated,
 		consumed_kw = consumed,
 		satisfaction = satisfaction,
+		networks = networks,
 	}
 end
 
@@ -1525,8 +1677,9 @@ end
 -- for as long as the underlying bug lives -- itself a way to make a log
 -- unreadable.
 local function record_sample_failure(kind, tick, err)
-	storage.telemetry_failures = storage.telemetry_failures or { bots = 0, force = 0 }
-	storage.telemetry_failing = storage.telemetry_failing or { bots = false, force = false }
+	storage.telemetry_failures = storage.telemetry_failures or { bots = 0, force = 0, machines = 0 }
+	storage.telemetry_failing = storage.telemetry_failing
+		or { bots = false, force = false, machines = false }
 	storage.telemetry_failures[kind] = (storage.telemetry_failures[kind] or 0) + 1
 	if not storage.telemetry_failing[kind] then
 		storage.telemetry_failing[kind] = true
@@ -1536,7 +1689,8 @@ local function record_sample_failure(kind, tick, err)
 end
 
 local function record_sample_success(kind)
-	storage.telemetry_failing = storage.telemetry_failing or { bots = false, force = false }
+	storage.telemetry_failing = storage.telemetry_failing
+		or { bots = false, force = false, machines = false }
 	storage.telemetry_failing[kind] = false
 end
 
@@ -1687,6 +1841,202 @@ local function sample_force(tick)
 	end
 end
 
+-- Item counts in one of an entity's indexed inventories, or nil.
+--
+-- Refuses a nil index rather than passing it to `get_inventory`, because
+-- `CRAFTER_INPUT_INVENTORY` is resolved from `defines.inventory` with a
+-- fallback and is allowed to come out nil on a Factorio that has neither
+-- name. `get_inventory` also answers nil for an entity that simply has no such
+-- inventory, which is not an error either.
+local function machine_inventory(entity, index)
+	if index == nil then
+		return nil
+	end
+	local inventory = entity.get_inventory(index)
+	if inventory == nil or not inventory.valid then
+		return nil
+	end
+	return inventory_counts(inventory)
+end
+
+-- An inventory's counts, or nil when there is nothing in it.
+--
+-- Empty inventories are the common case -- most of a run's machines are idle
+-- most of the time -- and a row carrying `"input":{},"output":{},"fuel":{}`
+-- spends forty bytes saying nothing. Absence and emptiness mean the same thing
+-- here and there is no third state, so collapsing them loses nothing; the Rust
+-- and Python readers both default a missing key to an empty map.
+local function nonempty_counts(counts)
+	if counts == nil or next(counts) == nil then
+		return nil
+	end
+	return counts
+end
+
+-- One machine's row.
+--
+-- Everything read here is either `subclasses: None` on `LuaEntity` (so safe on
+-- any entity) or gated on `CRAFTING_MACHINE_TYPES` / an explicit type test.
+-- That gating is not defensive style, it is the difference between a sample
+-- and a dead server: `LuaEntity.crafting_progress` is declared for
+-- `CraftingMachine` only, exactly like the `mining_target` read that took a
+-- live run down from inside `sample_bots`.
+local function machine_row(entity)
+	local row = {
+		name = entity.name,
+		type = entity.type,
+		position = entity.position,
+	}
+	local status = entity.status
+	if status ~= nil then
+		-- Name, not number -- see `ENTITY_STATUS_NAMES`. An id this build
+		-- cannot name still reaches the record, labelled as unresolved, rather
+		-- than being written as a bare integer nobody can decode later.
+		row.status = ENTITY_STATUS_NAMES[status] or ("unmapped_" .. tostring(status))
+	end
+	-- Nil for anything not wired to a network at all, which is itself the
+	-- answer to "was the pole actually connected". Matched against the
+	-- `sub_ids` of `power.networks` on the same tick's force sample.
+	row.network = entity.electric_network_id
+	if CRAFTING_MACHINE_TYPES[entity.type] then
+		-- `get_recipe()` is the only honest verdict on what a machine is set
+		-- to: `set_recipe` returns the items it *removed*, not a success flag,
+		-- so a machine that ignored the call reads as configured everywhere
+		-- except here.
+		local recipe = entity.get_recipe()
+		if recipe ~= nil then
+			row.recipe = recipe.name
+		end
+		row.crafting = entity.is_crafting()
+		-- Rounded to a thousandth: the raw double serialises to seventeen
+		-- digits of noise, and no question anyone asks of this record needs
+		-- more than three.
+		row.progress = math.floor(entity.crafting_progress * 1000 + 0.5) / 1000
+		-- The blunt instrument, and often the fastest one: a cell whose
+		-- assemblers report `products_finished = 0` after twenty minutes did
+		-- not produce, whatever else the row says.
+		row.products_finished = entity.products_finished
+		row.input = nonempty_counts(machine_inventory(entity, CRAFTER_INPUT_INVENTORY))
+	elseif entity.type == "lab" then
+		row.input = nonempty_counts(machine_inventory(entity, LAB_INPUT_INVENTORY))
+	elseif entity.type == "mining-drill" then
+		-- Which patch it is on, so `no_minable_resources` can be told from a
+		-- drill that was never placed over ore at all.
+		local target = entity.mining_target
+		if target ~= nil and target.valid then
+			row.mining = target.name
+		end
+	elseif CONTAINER_TYPES[entity.type] then
+		-- Reported as `output`, not `input`: from the run's point of view a
+		-- chest is a thing the cell *draws from*, and putting it in the same
+		-- field as a furnace's result keeps "what is in this thing" one key
+		-- rather than two that mean the same and differ by entity type.
+		row.output = nonempty_counts(machine_inventory(entity, defines.inventory.chest))
+	end
+	-- Both `subclasses: None`, both nil-answering: an entity with no output or
+	-- no fuel inventory returns nil rather than raising, so both are checked
+	-- rather than assumed present.
+	if row.output == nil then
+		local output = entity.get_output_inventory()
+		if output ~= nil and output.valid then
+			row.output = nonempty_counts(inventory_counts(output))
+		end
+	end
+	local fuel = entity.get_fuel_inventory()
+	if fuel ~= nil and fuel.valid then
+		row.fuel = nonempty_counts(inventory_counts(fuel))
+	end
+	return row
+end
+
+-- Per-machine state on the 300-tick beat, alongside the force sample.
+--
+-- Shares the force cadence rather than inventing a third one: a machine's
+-- status, recipe and network membership change on the scale of a bot walking
+-- somewhere, not of a tick, and the ingredient counts that *do* move fast are
+-- readable from the bot beat's chest and inventory data anyway.
+--
+-- **Cost.** One `find_entities_filtered` per surface per 300 ticks with a
+-- six-member type filter, which is the same shape and the same beat as the
+-- `electric-pole` query `power_totals` has always made -- so this doubles an
+-- existing per-sample cost rather than introducing a new kind of one. Per
+-- machine it is roughly a dozen attribute reads and up to three inventory
+-- walks.
+--
+-- Measured against the base `run-1788459085-32452` actually built (66 stone
+-- furnaces, 6 assembling machines, 2 burner drills, a boiler, a steam engine
+-- and a lab -- 77 machines): under a thousand API reads every five seconds,
+-- amortising to about three per tick, and **14.8 KiB of JSON per sample**.
+-- Across that run's 247 force samples that is **3.6 MiB** on the wire, and
+-- about 4.3 MiB in the archive once Rust restores the empty inventories the
+-- rows here omit -- against the 1.06 MiB `samples.jsonl` the run wrote
+-- without this. So it roughly quadruples the record.
+--
+-- That is the honest number and it is worth paying. The comparison that
+-- settles it is the feature this one replaces in the budget: the per-camera
+-- screenshots retired on 2026-09-02 cost 947 MB for 45 minutes *and* rendered
+-- synchronously inside the game loop, once per camera per capture. This costs
+-- three thousandths of that and touches no renderer. If a base ever grows to
+-- where 4 MiB is the wrong trade, `MACHINE_SAMPLE_LIMIT` is the dial, and it
+-- reports what it cut.
+--
+-- `machines` is a map keyed by `unit_number`, not an array, for the reason
+-- given on `power_totals.networks`: `helpers.table_to_json` cannot tell an
+-- empty array from an empty object, and a run's first minutes legitimately
+-- have no machines at all. As a map, "nothing yet" is `{}` and parses.
+local function sample_machines_body(tick)
+	local session = storage.sampling
+	if session == nil then
+		return
+	end
+	local force = game.forces["player"]
+	local machines = {}
+	local seen, written = 0, 0
+	for _, surface in pairs(game.surfaces) do
+		for _, entity in pairs(surface.find_entities_filtered({
+			type = MACHINE_TYPES, force = force,
+		})) do
+			if entity.valid then
+				seen = seen + 1
+				if written < MACHINE_SAMPLE_LIMIT then
+					written = written + 1
+					-- `unit_number` is nil for a handful of entity kinds; none
+					-- of the six types sampled here is one of them, but a key
+					-- collision would silently drop a machine, so the fallback
+					-- is a position that cannot collide rather than a guess.
+					local key = entity.unit_number
+					if key == nil then
+						key = entity.name .. "@" .. entity.position.x .. "," .. entity.position.y
+					end
+					machines[tostring(key)] = machine_row(entity)
+				end
+			end
+		end
+	end
+	write_sample({
+		kind = "machines",
+		schema = SAMPLE_SCHEMA,
+		tick = tick,
+		run = session.run,
+		machines = machines,
+		-- Zero on every normal run. Non-zero says "this line is the first
+		-- MACHINE_SAMPLE_LIMIT of a larger base", which a reader must be able
+		-- to distinguish from "this is all of it".
+		truncated = seen - written,
+	})
+end
+
+-- `pcall` wrapper, for the reason spelled out above `record_sample_failure`:
+-- a bad attribute read in a sampler must cost one sample, not the server.
+local function sample_machines(tick)
+	local ok, err = pcall(sample_machines_body, tick)
+	if ok then
+		record_sample_success("machines")
+	else
+		record_sample_failure("machines", tick, err)
+	end
+end
+
 -- Registered with `script.on_nth_tick` rather than as a modulus inside
 -- `on_tick`: `on_tick` already runs real per-tick work for every client, and a
 -- counter or a remainder in there would both add to that and reintroduce the
@@ -1703,7 +2053,17 @@ function on_sample_force_tick(event)
 	end
 	-- `game.tick` rather than `event.tick`: they are the same value here, and
 	-- reading the one `stamp_tick` reads keeps a single source of "now".
-	sample_force(game.tick)
+	local tick = game.tick
+	sample_force(tick)
+	-- Called from here rather than registered separately, because
+	-- `script.on_nth_tick(300, ...)` *replaces* the handler for 300 instead of
+	-- adding to it -- a second registration would silently disable the force
+	-- sampler, which is the trap `SAMPLE_BOT_INTERVAL` is 60 to avoid.
+	--
+	-- Same tick as the force sample, deliberately: `machines[*].network` is
+	-- only meaningful against the `power.networks` written on the same tick,
+	-- and a reader joining the two should never have to interpolate.
+	sample_machines(tick)
 end
 
 -- `run_id` is an opaque tag for this session, stamped onto every sample line
@@ -1721,8 +2081,9 @@ end
 -- knows it cannot tell rather than being told something false.
 --
 -- Starting a session is what produces `samples.jsonl` -- research, production,
--- power, bot inventories. `sample_force` (the 300-tick beat) and `sample_bots`
--- (the 60-tick one) both return early when `storage.sampling` is nil.
+-- per-network power, bot inventories and per-machine state. `sample_force` and
+-- `sample_machines` (the 300-tick beat) and `sample_bots` (the 60-tick one)
+-- all return early when `storage.sampling` is nil.
 function rcon_sampling_start(run_id)
 	-- Checked before anything is written, so a call this function is going to
 	-- refuse cannot first truncate the previous run's samples. The check is on

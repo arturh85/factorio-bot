@@ -1604,6 +1604,119 @@
         ],
         "type": "object"
       },
+      "MachineSample": {
+        "description": "One machine's state at the sample's tick.\n\nFields that do not apply to an entity's type are **absent**, not null, and\nthat is a deliberate departure from this module's usual \"present-and-null,\nnever absent\" rule. That rule is for a value a producer always has an\nanswer for; here `recipe`, `crafting`, `progress` and `products_finished`\nare declared by the Factorio API for `CraftingMachine` only, so on a lab or\na boiler the question does not exist rather than having a null answer.\nReading them off one raises -- which is how a bad attribute read in\n`sample_bots` once took a live server down mid-run -- so the mod does not\nread them, and writes no key.",
+        "properties": {
+          "crafting": {
+            "description": "`is_crafting()`. Absent on a non-crafting machine.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "fuel": {
+            "additionalProperties": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "description": "`get_fuel_inventory()`, for burner machines -- stone furnaces, burner\ndrills, boilers. Empty with `status: no_fuel` is the whole story.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "input": {
+            "additionalProperties": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "description": "Ingredient inventory: `crafter_input` for a crafting machine,\n`lab_input` for a lab, empty for anything else.\n\n**The mod omits an empty one and this struct restores it.** Most\nmachines are idle most of the time, and `\"input\":{},\"output\":{},\n\"fuel\":{}` is forty bytes of nothing per machine per five seconds, so\nthe wire format drops them -- hence `#[serde(default)]` on all three.\nThey are still *serialised* unconditionally, because absence and\nemptiness mean the same thing here and normalising to one of them in\nthe archive is what lets the published schema, the TypeScript\ndeclaration and this struct all say the same thing.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "mining": {
+            "description": "For a mining drill, the resource it is mining. Absent for every other\ntype, and absent for a drill over nothing -- which is what separates\n`no_minable_resources` on a depleted patch from a drill that was never\nplaced over ore.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "Prototype name, e.g. `assembling-machine-1`.",
+            "type": "string"
+          },
+          "network": {
+            "description": "`LuaEntity.electric_network_id`, or `None` for a machine connected to\nno electric network -- which for an assembling machine is itself the\nanswer to \"did the pole we placed actually connect it\".\n\nJoin against [`NetworkPower::sub_ids`] in the same tick's force sample.\nAn id matching no sampled network means no *pole* on the force reached\nthat network, since [`PowerSample::networks`] is enumerated from poles.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "output": {
+            "additionalProperties": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "description": "`get_output_inventory()`, and for a chest its whole contents -- from\nthe run's point of view a chest is a thing the cell draws from, so\n\"what is in this thing\" stays one key rather than two that differ only\nby entity type.\n\nNon-empty with `status: full_output` is a cell that produced and then\njammed; empty on the chest feeding a machine reporting\n`no_ingredients` is a cell that ran dry. Opposite repairs, and the\nrecord could previously distinguish neither.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "position": {
+            "$ref": "#/components/schemas/Position",
+            "description": "As the game reports it. A tile centre stays `-40.5`; nothing rounds."
+          },
+          "products_finished": {
+            "description": "`products_finished`: lifetime completed crafts. The blunt instrument,\nand often the fastest one -- an assembler still reporting `0` after\ntwenty minutes did not produce, whatever else its row says. Absent on a\nnon-crafting machine.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "progress": {
+            "description": "`crafting_progress`, 0.0 to 1.0, rounded mod-side to a thousandth.\nAbsent on a non-crafting machine.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "recipe": {
+            "description": "What `get_recipe()` reports, which is the only honest verdict on what a\ncrafting machine is set to: `set_recipe` returns the items it *removed*\nrather than a success flag, so a machine that ignored the call reads as\nconfigured everywhere except here.\n\nAbsent on a non-crafting machine; present and `None` never happens --\na crafting machine with no recipe simply gets no key, and its `status`\nsays `no_recipe`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "description": "`LuaEntity.status`, by name -- the game's own verdict on why this\nmachine is or is not running, and the single field most of this data\nexists for. `working`, `no_power`, `low_power`, `no_ingredients`,\n`full_output`, `not_enough_space_in_output`, `no_recipe`, `no_fuel`,\n`not_plugged_in_electric_network` and `no_minable_resources` are the\nones a run of this project actually hits.\n\nThe name, not the number: a `defines.entity_status` id is meaningless\nwithout the table that produced it, and an archive outlives the\nFactorio version that wrote it. An id the mod could not name arrives as\n`unmapped_<n>` rather than being dropped.\n\n`None` when the entity has no status at all -- the attribute is\n`optional` in the API.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "description": "Entity type. The sampled set is exactly `assembling-machine`,\n`furnace`, `mining-drill`, `lab`, `boiler`, `generator`, `container`\nand `logistic-container` -- the machines a run's plan places, plus the\nchests it feeds them from.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "type",
+          "position"
+        ],
+        "type": "object"
+      },
       "MapKind": {
         "oneOf": [
           {
@@ -1773,6 +1886,46 @@
         ],
         "type": "object"
       },
+      "NetworkPower": {
+        "description": "One electric network's own generation and demand.",
+        "properties": {
+          "consumed_kw": {
+            "format": "double",
+            "type": "number"
+          },
+          "demanded_kw": {
+            "description": "What the network's consumers asked for, as opposed to what they got.\nPresent here and not in the force totals because the gap between demand\nand transfer is the whole diagnosis for a browning-out island.",
+            "format": "double",
+            "type": "number"
+          },
+          "generated_kw": {
+            "format": "double",
+            "type": "number"
+          },
+          "satisfaction": {
+            "description": "Consumed over demanded, 1.0 when nothing is demanded.",
+            "format": "double",
+            "type": "number"
+          },
+          "sub_ids": {
+            "description": "Every electric *sub*-network under this parent, ascending. A machine\nbelongs to this network when its [`MachineSample::network`] is one of\nthese. Several sub-networks share a parent when a closed power switch\njoins them, which is why this is a set and not a single id.",
+            "items": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "sub_ids",
+          "generated_kw",
+          "consumed_kw",
+          "demanded_kw",
+          "satisfaction"
+        ],
+        "type": "object"
+      },
       "OperationResult": {
         "properties": {
           "success": {
@@ -1898,6 +2051,16 @@
           "generated_kw": {
             "format": "double",
             "type": "number"
+          },
+          "networks": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/NetworkPower"
+            },
+            "description": "The same figures per electric network, keyed by the smallest\nsub-network id under each parent network.\n\nThe totals above sum every network the force owns, and that sum hides\nthe failure it is most often consulted about. A run reading\n`generated_kw: 900, consumed_kw: 60` looks powered; if the 900 kW is on\nthe network holding the lab and the assemblers sit on an island whose\npole reaches no generator, the totals never mention it. Here that\nisland is its own entry with `generated_kw: 0`, and\n[`MachineSample::network`] says which entry each machine is on.\n\nKeyed by a sub-network id because `LuaElectricNetwork` has no `id`\nattribute at all in 2.1.17; [`NetworkPower::sub_ids`] carries the real\nmembership, and the key is only a handle.\n\n`#[serde(default)]` for archives written before this field existed --\nempty then means \"not recorded\", where on a current line it means \"this\nforce owns no electric poles\". Both are honestly \"no networks known\".",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
           },
           "satisfaction": {
             "description": "Consumed over demanded. Coverage is not capacity: an under-supplied\nnetwork reads as dead rather than slow, so this is the field that makes\nthat visible after the fact.",
@@ -2298,6 +2461,39 @@
               "techs_unlocked",
               "production",
               "power",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Per-machine state, on the same 300-tick beat as [`SampleKind::Force`]\nand written from the same handler, so a machine's `network` can be\njoined to that tick's [`PowerSample::networks`] without interpolating.\n\nThis is what makes \"is this machine actually working?\" answerable. The\nrecord used to carry bot state and force totals and nothing in between,\nso a run that built a cell, set both recipes and charged the chests\ncould not say whether the assemblers had power, held ingredients or\nproduced anything.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "machines"
+                ],
+                "type": "string"
+              },
+              "machines": {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/MachineSample"
+                },
+                "description": "Keyed by `unit_number` as a string, not an array.\n\n`helpers.table_to_json` renders an empty Lua table as `{}`, which\nis why a `bots` line with no connected players is unparseable and\nlands in [`ReadSamples::skipped`]. A run's first minutes\nlegitimately have no machines at all, so this shape sidesteps that\ndefect rather than reproducing it: as a map, \"none yet\" is `{}` and\ndecodes.",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "truncated": {
+                "description": "Machines seen but not written, because the sample hit the mod's\nper-line cap. Zero on every run so far. Non-zero means this line is\na prefix of a larger base -- a reader must be able to tell that\nfrom \"this is all of them\", which is why it is a counted field and\nnot a dropped row.",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "machines",
+              "truncated",
               "kind"
             ],
             "type": "object"

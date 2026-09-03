@@ -815,6 +815,13 @@ end
 
                     let mut recorder =
                         RunRecorder::start(&runs_root, run_id.clone()).map_err(record_error)?;
+                    // Before the first event, so the very first `record()` can
+                    // already pull samples across. A sampling session was just
+                    // opened two calls up, so this run *is* being sampled --
+                    // and the recorder's own tick-interval ingest is what keeps
+                    // the archive current between milestone boundaries, which
+                    // are as far apart as a milestone is long.
+                    recorder.watch_samples(workspace.as_path());
                     recorder
                         .record(
                             opened_at,

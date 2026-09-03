@@ -3,6 +3,32 @@
 The detail is in `2026-09-02-morning-report.md`, which is 1,200 lines of
 append-only log. This is the two-minute version.
 
+## Run 14: cell stood a third time, died on crowding before reaching the boiler
+
+`run-1788438602-66074`, roster `[1,2,3,4]`, carrying `76ccb581` (full-vs-short
+insert judgement), `0e4e3bff` (walk-refusal ledger), `1f498593` (failure
+naming). **No witness.** The cell stood with both recipes set for the third
+time running — all 12 actions `success`, identical to runs 10 and 13 — and the
+run never reached the boiler top-up that killed run 13, so **the insert-judgement
+fix was not exercised this run.**
+
+`milestone 2: stuck after 8 iteration(s), best 39 steps, last error: ... the
+game's pathfinder returned no path: Error: failed to path find`, immediately
+preceded by `cannot place item 'stone-furnace' because a character is standing
+in the footprint`. Same class as run 13's crowding, different symptom: a bot
+blocked a placement rather than an ore tile.
+
+**The walk-refusal ledger showed no observable effect, and that is a finding
+about the ledger, not about the run.** `crates/executor/src/walk_memory.rs`
+emits no log line and writes nothing to the record — `git grep` for
+`info!\|warn!\|debug!` in that file returns nothing. So there is no way to
+tell, from outside the source, whether it fired and correctly deferred (per its
+own design: try un-refused bots first, fall through when none exist) or never
+matched anything this run. Filed as a gap: a mechanism this project cannot
+observe is a mechanism this project cannot evaluate, which is the exact failure
+mode `1f498593` exists to close for walk *failures* and now needs closing for
+walk *scheduling decisions* too.
+
 ## Run 13 (2026-09-03 midday): furthest ever, died on a full boiler
 
 **No witness. But the cell stood with both recipes and the charge was running**

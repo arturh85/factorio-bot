@@ -112,10 +112,28 @@ action name. Erring that way round is right, but the ratio is worth watching.
 
 ## Open, ranked
 
-1. `supervisor.witness` — the factory's definition of done. In progress.
+1. ~~`supervisor.witness` — the factory's definition of done.~~ **Done and
+   exercised** (run 37, stage 1). Its *dead-cell* cost is still unmeasured:
+   run 37 short-circuited at 480 of 2400 ticks, so nothing has yet paid the
+   full window against four graphical clients.
 2. Mod-side actions: the action deadline is a **360-second wall-clock sleep**;
    `control.lua:945` gates the per-player tick behind a `TODO FIXME`.
-3. `crates/planner`'s own `BOT_FORCE` copy, and a third `"player"` spelling.
+3. `crates/planner`'s own `BOT_FORCE` copy (`state.rs:66`) — **re-checked
+   2026-09-03, and the doc comment above it is now wrong on both counts.**
+   It cites `crates/executor`'s `rcon_actuator::BOT_FORCE` as a sibling
+   definition; `rcon_actuator.rs:3` *imports* it from
+   `factorio_bot_core::constants` and defines nothing. It gives the blocker
+   as "the only place both crates can see is `crates/core`, which belongs to
+   other work right now" — but `crates/planner` already depends on core
+   (`Cargo.toml:13`) and core already defines `BOT_FORCE`
+   (`constants.rs:25`). The shared home and the dependency both exist, so
+   the stated reason for the copy has evaporated and it really is the
+   one-line follow-up the comment promises.
+   The third `"player"` spelling is **not a hazard**: all three literals in
+   `crates/core/src/factorio/snapshot.rs` (`:219`, `:454`, `:476`) are inside
+   *test fixtures*. Production reads `forces.get(BOT_FORCE)`, so changing
+   `BOT_FORCE` makes those tests **fail** rather than drift. They are a
+   tripwire, and this item was filed backwards.
 4. `PLACEMENT_STEP_ASIDE_ACTION_ID = 4712` — a second magic id unknown to Rust.
 5. ~~`pole_wire_reach("big-electric-pole")` says 30.0; the prototype says 32.~~
    **Unverifiable here, and probably a false alarm.** We have Factorio 2.1.17's

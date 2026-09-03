@@ -219,18 +219,31 @@ test rcon_actuator::tests::the_other_forces_in_the_world_do_not_get_a_vote ... F
 
 with every other test in the crate green. Unification costs no coverage.
 
-### Not done: the planner's copy
+### ~~Not done: the planner's copy~~ — CLOSED 2026-09-03 (`4bfccea7`)
 
-`crates/planner/src/state.rs` is owned by another agent right now, so its
-`BOT_FORCE` is untouched and still a second definition. Pointing it at
-`factorio_bot_core::constants::BOT_FORCE` deletes a definition and changes no
-behaviour; its doc comment already says this is the intended follow-up and
-names `crates/core` as the home. Until then the two strings are still two, and
-the defect is only half closed.
+`crates/planner/src/state.rs` now imports `factorio_bot_core::constants::
+BOT_FORCE` and defines nothing. Net +1/-13, no behaviour change, no makespan
+pin moved. The defect is fully closed; the two strings are one.
 
-Also left: `crates/core/src/factorio/snapshot.rs:476` asserts
-`world.forces.contains_key("player")` against a literal. Same fact, third
-spelling, outside the scope granted here.
+The deleted doc comment had gone stale in both of its claims, which is worth
+recording because it is why this sat open longer than it needed to: it said
+`crates/executor` held a sibling *definition* (it does not — `rcon_actuator.rs:3`
+*imports* the constant), and it named the blocker as "the only place both crates
+can see is `crates/core`, which belongs to other work right now" — but the
+planner already depended on core and core already defined the constant. The
+stated reason for the copy had evaporated some time before anyone re-read it.
+The reasoning worth keeping lives in `crates/core/src/constants.rs:13-31`, and
+is deliberately not duplicated back into the planner.
+
+### `snapshot.rs`'s literal is a tripwire, not a third spelling — RESOLVED
+
+This note previously listed `crates/core/src/factorio/snapshot.rs:476` as "same
+fact, third spelling ... left". **That reading was wrong, and the item is
+closed as not-a-defect.** All three `"player"` literals in that file (`:219`,
+`:454`, `:476`) are inside *test fixtures*. Production reads
+`forces.get(BOT_FORCE)`, so changing `BOT_FORCE` makes those tests **fail
+loudly** rather than drift quietly. They are the thing that would catch a bad
+change, not an instance of the defect. Do not "unify" them.
 
 ---
 

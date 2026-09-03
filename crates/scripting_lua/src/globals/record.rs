@@ -471,16 +471,38 @@ fn classify_walk_failure(error: &str) -> WalkFailure {
         || error.contains("no readable outcome")
     {
         WalkFailureKind::Timeout
+    } else if error.contains("try again later") {
+        // **Ordering, and it is load-bearing.** `RconPathRequestFailed` renders
+        // as `the game's pathfinder returned no path: <the mod's own words>`
+        // for *both* of the mod's answers, so the wrapper's text alone cannot
+        // tell them apart and the inner wording has to be read first. Matched
+        // above the arm below rather than merged into the busy arm further
+        // down, because that arm is reached only when this one has already
+        // declined the string.
+        //
+        // What it means here is narrower than the two archived wordings below:
+        // `FactorioRcon::player_path_attempt` retries a full queue with
+        // backoff, so a `try again later` that survives to a record is one
+        // where *every* retry was refused. Still nothing learned about the
+        // map, which is the whole distinction.
+        WalkFailureKind::PathfinderBusy
     } else if error.contains("the destination is unreachable")
         || error.contains("found no path")
+        || error.contains("returned no path")
         || error.contains("the best one found ends")
     {
         // The pathfinder searched. This is the fact the stuck-walk teleport
         // used to destroy by hopping over it.
         //
-        // Three wordings, from three eras and two sides. The first two are the
-        // mod's, from the build that re-pathed for itself. The third is Rust's
-        // own `RconWalkFallsShort` (crates/core/src/errors.rs), which is how an
+        // Four wordings, from three eras and two sides. The first two are the
+        // mod's, from the build that re-pathed for itself. The third is
+        // `RconPathRequestFailed` (crates/core/src/errors.rs) carrying the
+        // mod's bare `Error: failed to path find` out of a *pre-dispatch* path
+        // request, which is what this build produces most: nineteen of the
+        // twenty failed walks in `run-1788432181-42528` read that way, and
+        // every one of them was classified `other` until this arm learned the
+        // wording -- a run whose dominant failure the record could not name.
+        // The fourth is Rust's own `RconWalkFallsShort`, which is how an
         // unreachable goal reads now that the retry lives in
         // `move_player_timed`: the fresh path request comes back
         // `failed to path find`, the offset-goal fallback finds somewhere
@@ -496,7 +518,11 @@ fn classify_walk_failure(error: &str) -> WalkFailure {
         // destination, which is the whole reason this is not `NoPath`.
         //
         // The mod no longer produces either wording. Kept because the archived
-        // runs do, and this classifier is read against them.
+        // runs do, and this classifier is read against them. The *variant* is
+        // not archive-only any more, though: the `try again later` arm above
+        // is a live producer of it, so `WalkFailureKind::PathfinderBusy`'s own
+        // "Archive only" note (crates/core/src/record/mod.rs) now describes
+        // these two wordings rather than the kind.
         WalkFailureKind::PathfinderBusy
     } else if error.contains("re-paths on one walk") {
         WalkFailureKind::RepathLimit
@@ -3280,6 +3306,24 @@ mod tests {
                  leg 3 of 12 made no progress for 187 ticks from (6.90234375/30.09765625) to \
                  (-22.30078125/18.22265625)",
                 WalkFailureKind::Stalled,
+            ),
+            // The wording nineteen of `run-1788432181-42528`'s twenty failed
+            // walks arrived with, and the one this build produces most: a
+            // pre-dispatch path request that searched and found nothing,
+            // wrapped by `RconPathRequestFailed` (crates/core/src/errors.rs).
+            (
+                "game rejected the command: the game's pathfinder returned no path: \
+                 Error: failed to path find",
+                WalkFailureKind::NoPath,
+            ),
+            // Same wrapper, opposite fact. `player_path_attempt` retries a
+            // full queue and only re-raises it when every retry was refused,
+            // so this does reach a record -- and it must not be read as a
+            // statement about the map.
+            (
+                "game rejected the command: the game's pathfinder returned no path: \
+                 Error: try again later!",
+                WalkFailureKind::PathfinderBusy,
             ),
         ];
         for (error, expected) in cases {

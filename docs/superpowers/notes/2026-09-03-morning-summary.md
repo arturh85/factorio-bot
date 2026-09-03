@@ -151,6 +151,33 @@ had 6. Something re-seeded it in between and I could not attribute it. What is
 not in doubt is that run 4's *game* had the old mod — Factorio loads mods at
 server start, and the game itself raised the missing-function error.
 
+## A save generated without the mod poisons every later run
+
+Runs 6 and 7 both hung at `start waiting` — 134-byte logs, no clients, forever.
+The server was *healthy*: BotBridge loaded with a checksum, RCON up on 4321,
+`InGame`, ten minutes in. The hang was on the CLI side, which waits by parsing
+the server's stdout into `workspace/server-log.txt` — a file still dated 01:09
+and not growing.
+
+**The cause chains back to my own mistake.** Run 6 ran with `BotBridge` deleted,
+and it *generated a fresh `level.zip` at 04:48 with no bridge mod in it* — a
+`script.dat` of 1,242 bytes. Runs 6 and 7 then loaded that save. Restoring the
+mod files afterwards does not repair it, because `info.json` stays at version
+`0.0.1`: **Factorio only migrates on a version bump, so a same-version content
+change leaves the old (here, absent) mod state in place.** The mod loads, the
+checksum is logged, and it never initialises.
+
+So a single run with a broken mod directory contaminates the workspace *save*,
+and every later run inherits it looking perfectly healthy in the server log.
+
+**Remedy:** move `workspace/server/saves/*.zip` aside and let a fresh map be
+generated with the mod present. Kept in `workspace/saves-backup-2026-09-03/`
+rather than deleted.
+
+**Worth considering:** bumping `mods/BotBridge/info.json`'s version whenever
+`control.lua` changes would make Factorio run `on_configuration_changed` and
+turn this class of silent staleness into a migration it can act on.
+
 ## Deleting the workspace mod is the WRONG remedy (corrected)
 
 I read CLAUDE.md's debug remedy as "delete `workspace/mods/BotBridge` and the

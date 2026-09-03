@@ -7,7 +7,12 @@ could ship dead is refused. `docs/superpowers/specs/2026-09-03-starter-factory-d
 
 > **RUN STATUS: the cell was never built. No witness. Stage 2 is NOT done.**
 >
-> **Two runs, and neither reached the cell.** Run 2
+> **Run 4 built the cell.** Every one of its eight buildings was placed by a
+> single bot and accepted by the game; what stopped it was
+> `No such function: botbridge.set_recipe` — the mod in `workspace/mods/` is a
+> stale copy predating the verb (§4.3). Still no witness.
+>
+> **Runs 1 and 2 never reached the cell.** Run 2
 > (`run-1788399150-53956`, §4.1) halted one rung *earlier* than run 1, on the
 > same wood refusal, with the power plant spending the poles. The blocker was
 > never the layout; it was that this planner could not obtain wood and could
@@ -296,6 +301,50 @@ client failing to take a lock, not the run failing to launch; the run went on to
 plan and execute. The mistake is left visible here rather than quietly rewritten
 because it is the same mistake this whole note is about — reading a partial
 signal as a verdict.
+
+### 4.3 Run 4: the cell was built, and the mod in the workspace was stale
+
+`run-1788401146-98497`. **This is the run that matters.** With
+`b0e3e12e` (wood off a tree) on `master` and one bot connected of four:
+
+* **rung 1 SATISFIED**, and cleanly — 131 steps planned, `success=104
+  pending=0 actions(failed=0 lost=0) walks(failed=0 lost=0)`. One bot mined,
+  smelted, hand-crafted ten red packs, built the whole power plant, placed and
+  powered a lab and researched `automation`, with **zero** failures of any kind.
+  One bot is also why: there is no handover to fail.
+* **rung 2 planned the cell** — 129 steps — and executed 102 of them. Every
+  placement succeeded. Then:
+
+```
+first error: game rejected the command: Unexpected Output: Cannot execute command.
+             Error: No such function: botbridge.set_recipe
+```
+
+**The mod running in `workspace/mods/` predates `3de64f62`.** The repo's
+`mods/BotBridge/control.lua` exports `set_recipe=rcon_set_recipe` at line 4639
+and mentions `set_recipe` six times; the workspace copy mentions it **zero**
+times. This is the trap CLAUDE.md states in as many words — *"once a workspace
+exists, that copy wins and there is NO refresh path — editing mods/BotBridge has
+no effect and the run silently uses the stale copy"* — and it is the first time
+this project has paid for it on a verb that only exists in the newer mod.
+
+Three things worth taking from it, beyond the fix (`cp` the repo mod over the
+workspace one):
+
+1. **The layout is not the problem.** Eight buildings, two chests, three
+   inserters and a pole were placed by one bot from a plan the cell produced,
+   and the game accepted every one of them. The first thing to fail was a verb
+   the mod did not have.
+2. **`every_remote_call_the_client_sends_is_exported_by_the_mod`** — the test
+   `2026-09-03-set-recipe.md` §4.3 calls "one red nobody wrote" — is a test
+   against the **repo's** mod. It cannot see a stale workspace copy, and this
+   run is the failure mode it was written for arriving through the one door it
+   does not watch.
+3. **It failed loudly, which is the good case.** `Cannot execute command. Error:
+   No such function` is the game refusing by name. Had the verb existed and
+   silently done nothing, the cell would have stood complete with two machines
+   holding no recipe — the placed-but-dead machine this whole stage is built
+   against — and only the witness would have caught it.
 
 **Wood stopped being a cap while this was being written.** Another agent landed
 `b0e3e12e feat(planner): wood comes off a tree, so the eight-pole cap is gone`

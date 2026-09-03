@@ -21,6 +21,7 @@ pub mod map;
 pub mod provenance;
 pub mod retention;
 pub mod samples;
+pub mod savepoint;
 pub mod splits;
 pub mod video;
 pub use lanes::{Lane, derive_lanes};
@@ -29,6 +30,9 @@ pub use retention::{DEFAULT_KEEP, KEEP_MARKER, Reaped, reap};
 pub use samples::{
     BotSample, IngestProgress, MachineSample, NetworkPower, PowerSample, ProductionSample,
     ReadSamples, ResearchSample, Sample, SampleKind, ingest_samples_incremental, read_samples,
+};
+pub use savepoint::{
+    ModCheck, ModFingerprint, SAVEPOINT_SCHEMA, Savepoint, SavepointError, check_mods,
 };
 pub use splits::{Split, derive_splits};
 pub use video::{
@@ -84,6 +88,36 @@ pub enum EventKind {
         outcome: String,
         best_steps: Option<u32>,
         last_error: Option<String>,
+    },
+    /// The world as it stood when a milestone closed was written to disk, and
+    /// a later run can start from it. See [`savepoint`].
+    ///
+    /// Recorded only once the file is *finished* -- `game.server_save` returns
+    /// long before the engine has written anything, and a savepoint announced
+    /// on the strength of the call returning would be a claim about a file
+    /// that may never appear.
+    SavepointWritten {
+        milestone_index: u32,
+        /// Path relative to the run directory, e.g.
+        /// `savepoints/milestone-3.zip`. Relative because the archive is
+        /// moved and copied, and an absolute path in it would name a machine.
+        file: String,
+        bytes: u64,
+        /// Wall-clock milliseconds between asking and the file being complete.
+        /// The one number that says whether saving is cheap enough to do at
+        /// every milestone; it is wall clock rather than ticks because the
+        /// engine writes outside the tick this was requested in.
+        wrote_ms: u64,
+    },
+    /// A savepoint was asked for and did not arrive.
+    ///
+    /// Present so that a milestone with no savepoint can be told apart from a
+    /// run that never asked for one. Four separate mechanisms in this project
+    /// have been found reporting nothing while broken; a failed save is not
+    /// going to be the fifth.
+    SavepointFailed {
+        milestone_index: u32,
+        error: String,
     },
     PlanCreated {
         milestone_index: u32,

@@ -1764,6 +1764,60 @@ impl FactorioRcon {
         sampling_verdict(self.remote_call_timed("sampling_stop", vec![]).await?)
     }
 
+    /// Asks the server to write the world out as `<instance>/saves/<name>.zip`,
+    /// reporting the game tick the request was stamped at.
+    ///
+    /// **Returning is not finishing.** The engine writes at the end of a tick
+    /// and the reply comes back long before the bytes land, so a caller that
+    /// treats this as done is describing a file that may not exist yet. Wait
+    /// for it with [`crate::record::savepoint::await_save`], which watches the
+    /// artefact rather than the log.
+    ///
+    /// Unlike [`FactorioRcon::server_save`] this always names a file, and so
+    /// can never overwrite the `level.zip` the instance is running on.
+    pub async fn savepoint(&self, name: &str) -> Result<Option<u64>> {
+        sampling_verdict(
+            self.remote_call_timed("savepoint", vec![str_to_lua(name)])
+                .await?,
+        )
+    }
+
+    /// Drops the mod's run-scoped `storage` -- walk and mining state, craft and
+    /// research waiters, the sampling session -- and reports what it dropped as
+    /// the mod's own JSON.
+    ///
+    /// Called when resuming from a savepoint, where the loaded world arrives
+    /// carrying the previous run's in-flight state. Action ids are minted
+    /// `% 1000` from zero every run, so a leftover waiter settles a *different*
+    /// action in the new run rather than merely lingering. See
+    /// `rcon_session_reset` in `mods/BotBridge/control.lua`.
+    ///
+    /// Harmless on a fresh world, where it drops nothing and says so.
+    ///
+    /// The reply is judged, not merely returned. Factorio writes
+    /// `Cannot execute command. Error: ...` into the reply *body* when the mod
+    /// raises or does not define the function -- so a caller that took the body
+    /// as the answer would report "cleared the mod's run-scoped state: Cannot
+    /// execute command" and read as a success. That is the exact shape of the
+    /// bug [`expect_silence`] exists for; here the counts are the payload, so
+    /// the check is that the payload is the JSON object the mod writes.
+    pub async fn session_reset(&self) -> Result<String> {
+        let (lines, _tick) = self.remote_call_timed("session_reset", vec![]).await?;
+        let reply = lines.unwrap_or_default().join("");
+        let trimmed = reply.trim();
+        if !trimmed.starts_with('{') {
+            return Err(RconUnexpectedOutput {
+                output: if trimmed.is_empty() {
+                    "session_reset answered nothing; the mod is older than this feature".to_string()
+                } else {
+                    trimmed.to_string()
+                },
+            }
+            .into());
+        }
+        Ok(trimmed.to_string())
+    }
+
     /// Print given message to all Clients as Chat Message from Server loudly using /c
     pub async fn print(&self, message: &str) -> Result<()> {
         self.send(&format!("/c print({})", str_to_lua(message)))
@@ -1778,7 +1832,14 @@ impl FactorioRcon {
         Ok(())
     }
 
-    /// Save the current game on server
+    /// Save the current game on server, **over the save it is running on**.
+    ///
+    /// `/server-save` with no name overwrites the file the instance was
+    /// started from -- `saves/level.zip` for every instance this project
+    /// starts, which is the map every measurement is taken against. Use
+    /// [`FactorioRcon::savepoint`] instead for anything that wants to keep a
+    /// world; this exists for the hand-operated "flush what I just did to
+    /// disk" endpoint and is the only caller.
     pub async fn server_save(&self) -> Result<()> {
         self.send("/server-save").await?;
         Ok(())

@@ -787,6 +787,32 @@ export type EventKind =
           last_error: string | null;
       }
     | {
+          /**
+           * The world as it stood when a milestone closed, written to disk so
+           * a later run can start from it rather than re-deriving twenty
+           * minutes of world. Recorded only once the file is *finished*:
+           * `game.server_save` returns long before the engine has written
+           * anything.
+           */
+          kind: 'savepoint_written';
+          milestone_index: number;
+          /** Relative to the run directory, e.g. `savepoints/milestone-3.zip`. */
+          file: string;
+          bytes: number;
+          /** Wall clock, not ticks: the engine writes outside the tick. */
+          wrote_ms: number;
+      }
+    | {
+          /**
+           * A savepoint was asked for and did not arrive. Present so that a
+           * milestone with no savepoint can be told apart from a run that
+           * never asked for one.
+           */
+          kind: 'savepoint_failed';
+          milestone_index: number;
+          error: string;
+      }
+    | {
           kind: 'plan_created';
           milestone_index: number;
           steps: number;

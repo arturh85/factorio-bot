@@ -2110,6 +2110,102 @@ function rcon_sampling_stop()
 	stamp_tick()
 end
 
+-- Ask the server to write the world out under `name`, producing
+-- `<instance>/saves/<name>.zip`.
+--
+-- **The name is required, and that is a safety property rather than a
+-- convenience.** `game.server_save()` with no argument "overwrites the
+-- currently running save" -- which for every instance this project starts is
+-- `saves/level.zip`, the map every measurement is taken on and, in this
+-- workspace, the only copy of a map whose seed was never recorded. There is
+-- deliberately no way to reach the nameless form through this interface.
+--
+-- The pattern is what keeps the save inside the saves directory: Factorio
+-- treats the name as a path relative to it, so a `/` or a `..` would escape.
+-- Refused by name rather than sanitised, because a caller that passed a path
+-- meant something by it and quietly saving somewhere else is worse than an
+-- error.
+--
+-- **The save is not written when this returns.** The engine writes at the end
+-- of the tick, into `<name>.tmp.zip`, and renames that onto `<name>.zip` when
+-- it is done. Whoever asked has to watch the file system to find out; see
+-- `crates/core/src/record/savepoint.rs`, which is the only caller and does
+-- exactly that.
+function rcon_savepoint(name)
+	if type(name) ~= "string" or name == "" then
+		error("savepoint name must be a non-empty string, got " .. type(name))
+	end
+	if not name:match("^[A-Za-z0-9_%-]+$") then
+		error("savepoint name must be [A-Za-z0-9_-] only, got \"" .. name .. "\"")
+	end
+	game.server_save(name)
+	stamp_tick()
+end
+
+-- Forget everything in `storage` that belonged to the *run* rather than to the
+-- *world*, and report what was dropped.
+--
+-- # Why this has to exist
+--
+-- A save carries `script.dat`, which is this mod's `storage`. Factorio runs
+-- migrations only when a mod's version changes, and `info.json` here is pinned
+-- at 0.0.1 precisely so that it does not -- so a world resumed from a
+-- savepoint arrives with the previous run's in-flight state fully intact and
+-- nothing anywhere says so.
+--
+-- That state is not inert. `craft_actions` and `research_actions` are indexed
+-- by the caller's `ActionId`, and those are minted `% 1000` from zero at the
+-- start of every run (`FactorioRcon`, `crates/core/src/factorio/rcon.rs`). A
+-- craft waiter left over from the run that took the save therefore does not
+-- merely linger: the *next* run's action 7 is settled by the *previous* run's
+-- action 7, silently and with a plausible-looking success.
+--
+-- # What is kept
+--
+-- `storage.resources`, `storage.map_area` and `storage.pathfinding` describe
+-- the map, which is the whole reason for resuming from a save. They stay.
+--
+-- `storage.p` entries are kept but emptied: `get_player` uses the presence of
+-- a key as "this player is known", so deleting the table would make every bot
+-- unknown until it happened to be re-created by the tick handler.
+function rcon_session_reset()
+	local dropped = { walking = 0, mining = 0, crafts = 0, research = 0 }
+	for _, p in pairs(storage.p or {}) do
+		if p.walking ~= nil then
+			dropped.walking = dropped.walking + 1
+			p.walking = nil
+		end
+		if p.mining ~= nil then
+			dropped.mining = dropped.mining + 1
+			p.mining = nil
+		end
+	end
+	for _, per_player in pairs(storage.craft_actions or {}) do
+		for _, bucket in pairs(per_player) do
+			dropped.crafts = dropped.crafts + #bucket
+		end
+	end
+	for _, waiting in pairs(storage.research_actions or {}) do
+		dropped.research = dropped.research + #waiting
+	end
+	storage.craft_actions = {}
+	storage.research_actions = {}
+	-- The sampling session carries the *previous* run's id, and every sample
+	-- line written before the new run calls `sampling_start` would be stamped
+	-- with it. Stopping is right even though `sampling_start` would overwrite
+	-- it: between load and that call there are ticks, and a sample written in
+	-- them would belong to a run that ended.
+	storage.sampling = nil
+	storage.telemetry_failures = nil
+	storage.telemetry_failing = nil
+	-- The tick stamp first, as every call answers with; then the counts, which
+	-- are the point. A reset that dropped nothing is the expected answer on a
+	-- fresh world and the interesting one on a resumed world -- reporting it
+	-- either way is what makes the difference visible.
+	stamp_tick()
+	rcon.print(helpers.table_to_json(dropped))
+end
+
 -- There is deliberately no settle-triggered sample here (an earlier
 -- `rcon_sample_bots()` called `sample_bots(game.tick)` on demand, but nothing
 -- ever called it -- it was not even reachable via the `botbridge` remote
@@ -4285,6 +4381,8 @@ remote.add_interface("botbridge", {
 	screenshot=rcon_screenshot,
 	sampling_start=rcon_sampling_start,
 	sampling_stop=rcon_sampling_stop,
+	savepoint=rcon_savepoint,
+	session_reset=rcon_session_reset,
 	whoami=rcon_whoami,
 
 	cheat_item=rcon_cheat_item,

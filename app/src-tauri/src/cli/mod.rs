@@ -19,7 +19,8 @@ use crate::settings::SettingsOverrides;
 use crate::{APP_ABOUT, APP_AUTHOR, APP_NAME};
 use clap::{Arg, ArgMatches, Command, value_parser};
 use clap_complete::{Generator, Shell, generate};
-use factorio_bot_core::miette::Result;
+use factorio_bot_core::miette::{Result, miette};
+use factorio_bot_core::record::savepoint::{ResumeMarker, list_savepoints, plan_resume};
 use std::future::Future;
 use std::io;
 use std::path::PathBuf;
@@ -98,6 +99,71 @@ pub async fn shutdown_signal() {
   {
     let _ = tokio::signal::ctrl_c().await;
   }
+}
+
+/// The two `--resume-from` flags, shared by `lua` and `start`.
+///
+/// Both commands boot a server, and the reason to resume differs -- `lua` to
+/// skip a prelude a run has already paid for, `start` to *look* at the world a
+/// milestone reached -- but the flags and their hazards are identical, and a
+/// second copy of them is a second place for the mod-mismatch refusal to be
+/// forgotten.
+pub fn resume_args(command: Command) -> Command {
+  command
+    .arg(
+      Arg::new("resume-from")
+        .long("resume-from")
+        .value_name("RUN[:MILESTONE] | PATH")
+        .required(false)
+        .value_parser(value_parser!(String))
+        .help("start from a milestone savepoint instead of the workspace map"),
+    )
+    .arg(
+      Arg::new("resume-force")
+        .long("resume-force")
+        .action(clap::ArgAction::SetTrue)
+        .requires("resume-from")
+        .help("resume even though the savepoint was written by different mod code"),
+    )
+}
+
+/// Resolves `--resume-from`, and when it cannot, says what *is* available.
+///
+/// A refusal that only says "no such savepoint" leaves the reader to go and
+/// list a directory by hand, and the answer is one call away.
+///
+/// Returns `None` when the flag was not given, which is also what makes the
+/// server start *clear* the resume marker -- a fresh run must never inherit
+/// the previous one's answer to "which world is this".
+pub fn resolve_resume(
+  matches: &ArgMatches,
+  workspace: &std::path::Path,
+) -> Result<Option<ResumeMarker>> {
+  let Some(reference) = matches.get_one::<String>("resume-from") else {
+    return Ok(None);
+  };
+  let marker =
+    plan_resume(workspace, reference, matches.get_flag("resume-force")).map_err(|err| {
+      let runs_root = workspace.join("runs");
+      let available: Vec<String> = list_savepoints(&runs_root)
+        .into_iter()
+        .map(|found| {
+          format!(
+            "  {}:{}  (tick {}, {} bytes)",
+            found.savepoint.run_id,
+            found.savepoint.milestone_index,
+            found.savepoint.tick,
+            found.savepoint.bytes
+          )
+        })
+        .collect();
+      if available.is_empty() {
+        miette!("{err}\nNo savepoints exist under {runs_root:?} yet.")
+      } else {
+        miette!("{err}\nAvailable savepoints:\n{}", available.join("\n"))
+      }
+    })?;
+  Ok(Some(marker))
 }
 
 pub fn subcommands() -> Vec<Box<dyn Subcommand>> {

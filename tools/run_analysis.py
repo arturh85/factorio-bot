@@ -432,6 +432,53 @@ class Window:
         return self.hi - self.lo
 
 
+def savepoint_rows(events: list[dict], run_dir: str) -> list[dict]:
+    """What each milestone's savepoint did, and whether the file is still there.
+
+    Three states, and they are not the same thing:
+
+      * written and present -- a later run can start from it with
+        ``--resume-from <run>:<milestone>``;
+      * written and **gone** -- the event says a file was made and the file is
+        not there, which means somebody deleted it by hand (the reaper deletes
+        whole runs, taking the event log with it, so a reaped savepoint cannot
+        show up here at all);
+      * failed -- the run asked and the engine never finished. This is the one
+        worth surfacing: without the ``savepoint_failed`` event, a milestone
+        with no savepoint and a run that never asked for one are the same
+        silence.
+    """
+    rows: list[dict] = []
+    for e in events:
+        kind = e.get("kind")
+        if kind == "savepoint_written":
+            rel = e.get("file") or ""
+            rows.append(
+                {
+                    "milestone": e.get("milestone_index"),
+                    "tick": e.get("tick"),
+                    "file": rel,
+                    "bytes": e.get("bytes"),
+                    "wrote_ms": e.get("wrote_ms"),
+                    "on_disk": os.path.exists(os.path.join(run_dir, rel)) if rel else False,
+                    "error": None,
+                }
+            )
+        elif kind == "savepoint_failed":
+            rows.append(
+                {
+                    "milestone": e.get("milestone_index"),
+                    "tick": e.get("tick"),
+                    "file": None,
+                    "bytes": None,
+                    "wrote_ms": None,
+                    "on_disk": False,
+                    "error": e.get("error"),
+                }
+            )
+    return rows
+
+
 def milestone_windows(events: list[dict], last_tick: int) -> list[Window]:
     """Pair each ``milestone_started`` with its own ``milestone_satisfied``/``_stuck``.
 
@@ -572,6 +619,7 @@ def analyse(run_dir: str, freeze_ticks: int = DEFAULT_FREEZE_TICKS) -> dict:
     )
 
     manifest = load_json(os.path.join(run_dir, "manifest.json"))
+    result["savepoints"] = savepoint_rows(events, run_dir)
     result["manifest"] = manifest
     started = manifest.get("started_unix") if manifest else None
     finished = manifest.get("finished_unix") if manifest else None
@@ -1405,6 +1453,21 @@ def report(a: dict, out=sys.stdout, top: int = 12) -> None:
           f"{j['never_settled']} dispatch(es) that never settled, "
           f"{j['null_duration']} settle(s) with no recorded duration "
           f"({j['derived_duration']} recovered from tick difference)")
+
+    for row in a.get("savepoints") or []:
+        if row["error"]:
+            p(f"  ! milestone {row['milestone']} was NOT saved: {row['error']}")
+        elif not row["on_disk"]:
+            p(f"  ! milestone {row['milestone']} recorded a savepoint at {row['file']}, "
+              f"which is no longer on disk")
+        else:
+            # `or 0` on both numbers: this tool reads archived files, some of
+            # them truncated mid-line, and a report that raises on a malformed
+            # event tells the reader nothing about the run at all.
+            p(f"  savepoint m{row['milestone']}: {row['file']} "
+              f"({(row['bytes'] or 0) / 1e6:.1f} MB, "
+              f"{(row['wrote_ms'] or 0) / 1000:.1f} s) "
+              f"-- resume with --resume-from {a['run_id']}:{row['milestone']}")
 
     for d in a.get("splits_disagreements") or []:
         p(f"  ! splits.json says milestone {d['index']} took {d['splits']} ticks; "

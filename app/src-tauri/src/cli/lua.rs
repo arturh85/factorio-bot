@@ -1,4 +1,7 @@
-use crate::cli::{SETTINGS_PRECEDENCE_HELP, Subcommand, SubcommandCallback, settings_overrides};
+use crate::cli::{
+  SETTINGS_PRECEDENCE_HELP, Subcommand, SubcommandCallback, resolve_resume, resume_args,
+  settings_overrides,
+};
 use crate::context::Context;
 use crate::scripting::run_script_file;
 use crate::settings::load_app_settings_with;
@@ -12,6 +15,7 @@ use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_core::process::process_control::{
   FactorioInstance, FactorioParams, FactorioStartCondition,
 };
+use std::path::Path;
 use std::sync::Arc;
 
 const LUA_AFTER_HELP: &str = "\
@@ -60,15 +64,39 @@ themselves:
     map with no lakes in it -- a wrong picture rather than an error.
   * No graphics. The map renderer's sprite atlas is not read.
 
-The server must have the BotBridge mod loaded and RCON enabled.";
+The server must have the BotBridge mod loaded and RCON enabled.
+
+--resume-from starts on a world a previous run already reached, instead of
+re-deriving it:
+
+  factorio-bot lua myscript.lua --resume-from run-1788465258-49050:3
+  factorio-bot lua myscript.lua --resume-from run-1788465258-49050   # its last
+
+Every milestone a run satisfies writes runs/<run>/savepoints/milestone-<n>.zip,
+so the twenty minutes to researched(\"automation\") is paid once rather than
+before every experiment behind it. The savepoint is copied into the server
+instance and started from the copy: neither the archived savepoint nor the
+workspace's level.zip is written to.
+
+Two things a resumed run is not:
+
+  * It is NOT benchmark-comparable with a fresh-world run. It begins with
+    built furnaces, charged chests and partly mined patches. `provenance.json`
+    records which savepoint it came from and `just analyse --compare` refuses
+    to measure the two against each other.
+  * It is NOT a clean mod state. The save carries BotBridge's `storage`, and
+    Factorio migrates that only on a mod version bump, which this project
+    pins. A resume clears the run-scoped half of it (walk state, craft and
+    research waiters, the sampling session) before anything else runs, and
+    refuses outright if the mod's code has changed since the savepoint was
+    written -- pass --resume-force to override that, which is recorded.";
 
 impl Subcommand for ThisCommand {
   fn name(&self) -> &'static str {
     "lua"
   }
   fn build_command(&self) -> Command {
-    Command::new("lua")
-      .about("Start Factorio and run a Lua script")
+    resume_args(Command::new("lua").about("Start Factorio and run a Lua script"))
       .after_help(format!("{LUA_AFTER_HELP}\n\n{SETTINGS_PRECEDENCE_HELP}"))
       .arg(
         Arg::new("script")
@@ -235,8 +263,17 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
     }
     info!("Starting Factorio to run script: {}", script_path);
 
+    // Resolved and judged before Factorio is touched: a refusal after the
+    // server is up costs a minute of startup to say something that was knowable
+    // from two files.
+    let resume_from = resolve_resume(
+      matches,
+      Path::new(app_settings.factorio.workspace_path.as_ref()),
+    )?;
+
     let params = FactorioParams {
       seed,
+      resume_from,
       server_host,
       client_count: clients,
       recreate,

@@ -16,11 +16,13 @@
 use super::position_from_lua;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::mlua::prelude::*;
+use factorio_bot_core::paris::{info, warn};
 use factorio_bot_core::parking_lot::Mutex;
 use factorio_bot_core::process::instance_setup::{installed_factorio_version, read_map_gen_seed};
 use factorio_bot_core::record::map::{
     Divergence, EntitySnapshot, MapKind, MapRecord, Placement, bounds_around, divergence_between,
 };
+use factorio_bot_core::record::savepoint;
 use factorio_bot_core::record::video::Resolution;
 use factorio_bot_core::record::{
     ActionFailure, EventKind, FailureKind, PlannedStep, Provenance, RunRecorder, SatisfiedReason,
@@ -693,6 +695,99 @@ fn record_live(
     recorder.record(tick, kind).map_err(record_error)
 }
 
+/// Writes the world out as this milestone's savepoint, and records what
+/// happened either way.
+///
+/// # Why this hangs off `milestone_satisfied` and not off the supervisor
+///
+/// `record.milestone_satisfied` is the single place every driver script closes
+/// a milestone through -- `research_run.lua`, `factory_stage1.lua` and
+/// `factory_stage2.lua` all reach it from the supervisor's `"satisfied"`
+/// transition. Hanging the savepoint off the Lua side instead would mean three
+/// copies of it, and a fourth script would silently have none.
+///
+/// # It never fails the run
+///
+/// A savepoint is a souvenir of a milestone, not part of reaching one. Every
+/// failure is recorded as [`EventKind::SavepointFailed`] and narrated, and the
+/// run continues -- but it *is* recorded, because a milestone with no
+/// savepoint and a milestone nobody tried to save look identical from the
+/// archive otherwise, and this project has already been bitten four times by
+/// checks that reported nothing while broken.
+///
+/// # Every milestone, not just the last
+///
+/// The milestone worth resuming *before* is the one that has never succeeded,
+/// so the interesting savepoint is the one taken at the milestone before it.
+/// Retention is [`factorio_bot_core::record::retention::reap`]'s, inherited by
+/// living inside the run directory.
+async fn take_savepoint(
+    slot: &Slot,
+    rcon: &factorio_bot_core::factorio::rcon::FactorioRcon,
+    workspace: &std::path::Path,
+    milestone_index: u32,
+) {
+    // The run directory and id are read and the lock released before anything
+    // is awaited: `slot` is a `parking_lot::Mutex`, which is not held across
+    // an await point anywhere in this file and must not start being.
+    let Some((run_dir, run_id)) = ({
+        let guard = slot.lock();
+        guard
+            .as_ref()
+            .map(|recorder| (recorder.dir().to_path_buf(), recorder.run_id().to_string()))
+    }) else {
+        // No recording is running, so there is no run directory to put a
+        // savepoint in and nothing that would ever read one. `record_live`
+        // above has already refused for the same reason.
+        return;
+    };
+
+    let instance = workspace.join("server");
+    let request = savepoint::CaptureRequest {
+        instance_dir: &instance,
+        mod_dir: &savepoint::bridge_mod_dir(workspace),
+        run_dir: &run_dir,
+        run_id: &run_id,
+        milestone_index,
+        timeout: savepoint::SAVE_TIMEOUT,
+    };
+    let outcome = savepoint::capture(rcon, request).await;
+    let event = match outcome {
+        Ok((savepoint, elapsed)) => {
+            info!(
+                "savepoint for milestone <bright-blue>{}</>: {} ({} bytes, {} ms)",
+                milestone_index,
+                savepoint.file,
+                savepoint.bytes,
+                elapsed.as_millis()
+            );
+            EventKind::SavepointWritten {
+                milestone_index,
+                file: format!("{}/{}", savepoint::SAVEPOINTS_DIR, savepoint.file),
+                bytes: savepoint.bytes,
+                wrote_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            }
+        }
+        Err(err) => {
+            warn!(
+                "no savepoint for milestone <bright-blue>{}</>: {}",
+                milestone_index, err
+            );
+            EventKind::SavepointFailed {
+                milestone_index,
+                error: err.to_string(),
+            }
+        }
+    };
+    // Recorded through the same path as everything else, and a failure to
+    // record it is itself narrated rather than swallowed: this function
+    // returns nothing, so a dropped `Result` here would be the silence the
+    // event exists to prevent.
+    if let Err(err) = record_live(slot, rcon, event) {
+        warn!("could not record the savepoint outcome: {}", err);
+    }
+}
+
 pub fn create_lua_record(
     lua: &Lua,
     rcon: Arc<factorio_bot_core::factorio::rcon::FactorioRcon>,
@@ -928,8 +1023,30 @@ end
                             .canonicalize()
                             .ok()
                             .map(|p| p.to_string_lossy().into_owned()),
-                        // Nothing resumes from a save yet.
-                        resumed_from: None,
+                        // Read from the instance rather than passed in: which
+                        // world the server loaded is a fact about the server,
+                        // known to whatever started it and to nothing in
+                        // between -- exactly like `map-gen-seed.txt` two
+                        // fields up, and read the same way. The marker is
+                        // *deleted* on every non-resuming start, so this is
+                        // null because this run is fresh and never because a
+                        // previous run's answer was left lying about.
+                        //
+                        // `Some(_)` here is what makes `--compare` refuse to
+                        // measure this run against a fresh-world one: it
+                        // starts on accumulated world state and its timings
+                        // are not the same quantity.
+                        //
+                        // Carries the same caveat as `seed` above, and for the
+                        // same reason: it describes `<workspace>/server`. A
+                        // run attached to somebody else's server with
+                        // `--connect` is not using that instance at all, so a
+                        // marker left there by a local resumed run would be
+                        // read as this run's. Nothing clears it in that case,
+                        // because clearing it would erase a true fact about an
+                        // instance this process did not start.
+                        resumed_from: savepoint::read_resume_marker(&instance)
+                            .map(|marker| marker.label),
                     };
                     // Never fatal. A run that cannot write its provenance is
                     // still a run worth recording, and the reader's rule is
@@ -1065,7 +1182,17 @@ end
         "__doc_entry_milestone_satisfied",
         String::from(
             r#"
---- records that a milestone was reached
+--- records that a milestone was reached, and saves the world it was reached in
+-- Writes `runs/<run>/savepoints/milestone-<index>.zip`, which a later run can
+-- start from with `--resume-from <run>:<index>` instead of spending twenty
+-- minutes re-deriving the same world. Every milestone gets one, because the
+-- milestone worth starting *before* is the one that has never succeeded.
+--
+-- Saving is asynchronous inside Factorio, so this waits for the file to be
+-- complete before returning -- ordinarily well under a second. If it cannot be
+-- saved the run carries on regardless and the record says why
+-- (`savepoint_failed`); a savepoint is a souvenir of a milestone, not part of
+-- reaching one.
 -- @number index the milestone's position in the run, from 1
 -- @number iterations how many plan/run cycles it took
 -- @string reason why no further work was needed: `"already_satisfied"` (the
@@ -1080,20 +1207,28 @@ end
     {
         let slot = slot.clone();
         let rcon = rcon.clone();
+        let workspace = workspace.clone();
         map_table.set(
             "milestone_satisfied",
-            lua.create_function(
+            lua.create_async_function(
                 move |_lua, (index, iterations, reason): (u32, u32, String)| {
-                    let reason = parse_satisfied_reason(&reason)?;
-                    record_live(
-                        &slot,
-                        &rcon,
-                        EventKind::MilestoneSatisfied {
-                            index,
-                            iterations,
-                            reason,
-                        },
-                    )
+                    let slot = slot.clone();
+                    let rcon = rcon.clone();
+                    let workspace = workspace.clone();
+                    async move {
+                        let reason = parse_satisfied_reason(&reason)?;
+                        record_live(
+                            &slot,
+                            &rcon,
+                            EventKind::MilestoneSatisfied {
+                                index,
+                                iterations,
+                                reason,
+                            },
+                        )?;
+                        take_savepoint(&slot, &rcon, &workspace, index).await;
+                        Ok(())
+                    }
                 },
             )?,
         )?;
@@ -2220,9 +2355,9 @@ mod tests {
         let events = read_events(&run_dir);
         let reasons: Vec<SatisfiedReason> = events
             .iter()
-            .map(|e| match e {
-                EventKind::MilestoneSatisfied { reason, .. } => *reason,
-                other => panic!("expected milestone_satisfied, got {other:?}"),
+            .filter_map(|e| match e {
+                EventKind::MilestoneSatisfied { reason, .. } => Some(*reason),
+                _ => None,
             })
             .collect();
         assert_eq!(
@@ -2232,6 +2367,41 @@ mod tests {
                 SatisfiedReason::PlanEmpty,
             ]
         );
+    }
+
+    /// Closing a milestone now also saves the world, and there is no game here
+    /// to save it -- so this is the failure path, which is the one that
+    /// matters: the milestone must still be recorded, the script must still
+    /// run, and the record must say a savepoint was attempted and lost.
+    ///
+    /// A savepoint is a souvenir of a milestone, not part of reaching one. If
+    /// this ever starts raising, every run loses its milestones the first time
+    /// a disk fills up.
+    #[test]
+    fn a_savepoint_that_cannot_be_taken_is_recorded_and_does_not_fail_the_milestone() {
+        let (lua, _tmp, run_dir) = recording_lua();
+        lua.load(r#"record.milestone_satisfied(1, 0, "already_satisfied")"#)
+            .exec()
+            .expect("a milestone closes even when its savepoint cannot be written");
+
+        let events = read_events(&run_dir);
+        assert!(
+            matches!(events.first(), Some(EventKind::MilestoneSatisfied { .. })),
+            "the milestone is recorded first, and unconditionally: {events:?}"
+        );
+        match events.get(1) {
+            Some(EventKind::SavepointFailed {
+                milestone_index,
+                error,
+            }) => {
+                assert_eq!(*milestone_index, 1);
+                assert!(
+                    !error.is_empty(),
+                    "a failure with no reason is the silence this event exists to break"
+                );
+            }
+            other => panic!("expected savepoint_failed beside the milestone, got {other:?}"),
+        }
     }
 
     #[test]

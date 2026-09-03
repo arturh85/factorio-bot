@@ -406,6 +406,70 @@
             "type": "object"
           },
           {
+            "description": "The world as it stood when a milestone closed was written to disk, and\na later run can start from it. See [`savepoint`].\n\nRecorded only once the file is *finished* -- `game.server_save` returns\nlong before the engine has written anything, and a savepoint announced\non the strength of the call returning would be a claim about a file\nthat may never appear.",
+            "properties": {
+              "bytes": {
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "file": {
+                "description": "Path relative to the run directory, e.g.\n`savepoints/milestone-3.zip`. Relative because the archive is\nmoved and copied, and an absolute path in it would name a machine.",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "savepoint_written"
+                ],
+                "type": "string"
+              },
+              "milestone_index": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "wrote_ms": {
+                "description": "Wall-clock milliseconds between asking and the file being complete.\nThe one number that says whether saving is cheap enough to do at\nevery milestone; it is wall clock rather than ticks because the\nengine writes outside the tick this was requested in.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "milestone_index",
+              "file",
+              "bytes",
+              "wrote_ms",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A savepoint was asked for and did not arrive.\n\nPresent so that a milestone with no savepoint can be told apart from a\nrun that never asked for one. Four separate mechanisms in this project\nhave been found reporting nothing while broken; a failed save is not\ngoing to be the fifth.",
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "savepoint_failed"
+                ],
+                "type": "string"
+              },
+              "milestone_index": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "milestone_index",
+              "error",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "bots": {
                 "description": "The **roster the planner expanded this plan against**, ascending --\nevery bot it was allowed to give work to, not the bots it happened\nto use. Present-and-null when the caller did not say, never absent.\n\nTwo wrong answers have been recorded here, in opposite directions,\nand the field's history is the reason it now comes from the caller:\n\n1. **The bots in the steps.** That deleted exactly the bots a reader\n   is asking about -- a live run of four recorded `bots: [2]`,\n   indistinguishable from a run of one, and \"why did bot 4 do\n   nothing\" could not be asked of it at all.\n2. **The binding's ambient roster**, i.e. the bots the *process* was\n   started with. That is not the roster either, whenever a script\n   plans with `goal.plan{bots = ...}` -- which the shipped driver\n   does, from `rcon.players()`. Run 30 recorded `bots: [1, 2]` for a\n   plan made for `[2]` alone (bot 1 was invisible to\n   `rcon.players()` for the 750 ticks of freeplay's crash-site\n   cutscene, during which `LuaPlayer::character` is nil), so the\n   record asserted that a bot had been offered work it was never\n   offered. See `docs/superpowers/notes/2026-09-02-bot-one-idle.md`.\n\nThe only thing that knows the answer is whatever called\n`goal.plan`, and `plan.bots` is where it reads it. So the Lua\nbinding takes it as an argument and writes `null` when it is not\ngiven: a plan whose roster nobody stated is a plan whose roster this\nrecord does not know, and the ambient value is a plausible-looking\nsubstitute for it rather than a weaker version of it.\n\nThis is also the field to be most careful with. `plan_created` is\nwritten at planning time and carries the whole DAG, which makes it\nthe part of an archived run that stays trustworthy where outcomes do\nnot -- a lie here is worse than a lie in a record already known to\nbe suspect.",

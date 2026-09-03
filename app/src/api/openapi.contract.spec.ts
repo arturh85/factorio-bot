@@ -742,6 +742,21 @@ const SCHEMAS: Record<string, SchemaContract> = {
             best_steps: {required: false, type: 'integer', nullable: true},
             last_error: {required: false, type: 'string', nullable: true}
         },
+        // Written at every milestone a run satisfies, once the engine has
+        // actually finished the file. `wrote_ms` is wall clock rather than
+        // ticks on purpose: the save happens outside the tick it was asked in.
+        savepoint_written: {
+            milestone_index: {required: true, type: 'integer'},
+            file: {required: true, type: 'string'},
+            bytes: {required: true, type: 'integer'},
+            wrote_ms: {required: true, type: 'integer'}
+        },
+        // A milestone with no savepoint and a run that never asked for one are
+        // otherwise the same silence.
+        savepoint_failed: {
+            milestone_index: {required: true, type: 'integer'},
+            error: {required: true, type: 'string'}
+        },
         plan_created: {
             milestone_index: {required: true, type: 'integer'},
             steps: {required: true, type: 'integer'},

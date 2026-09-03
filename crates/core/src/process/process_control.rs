@@ -7,6 +7,7 @@ use crate::process::connect_wait::{ConnectWait, ConnectWatcher, missing_clients}
 use crate::process::instance_setup::setup_factorio_instance;
 use crate::process::output_reader::read_output;
 use crate::process::{InteractiveProcess, io_utils};
+use crate::record::savepoint::{ResumeMarker, clear_resume_marker, write_resume_marker};
 use crate::settings::FactorioSettings;
 use crate::types::PlayerId;
 use miette::{IntoDiagnostic, Result};
@@ -46,6 +47,27 @@ pub struct FactorioParams {
     pub write_logs: bool,
     pub silent: bool,
     pub wait_until: FactorioStartCondition,
+    /// A savepoint to start this server from instead of the instance's own
+    /// `level.zip`.
+    ///
+    /// The file is **copied** into the instance's saves directory and the
+    /// server is started from the copy, so the archived savepoint is never the
+    /// file a running Factorio holds -- a resumed run that autosaves, or that
+    /// is asked for a nameless `/server-save`, cannot write back over the
+    /// record of the run that produced it. `level.zip` is not touched either:
+    /// in this workspace it is the only copy of the map every measurement so
+    /// far was taken on, and it predates `--seed`, so nothing could recreate
+    /// it.
+    ///
+    /// See [`crate::record::savepoint`] for what a resumed run costs: it is
+    /// not benchmark-comparable with a fresh one, and the marker this writes
+    /// is what makes `--compare` refuse to pretend otherwise.
+    ///
+    /// The whole marker rather than a path, because the caller is the only one
+    /// that can decide the two policy questions -- which savepoint, and what
+    /// to do when the mod code has changed since it was written -- and the
+    /// answer to the second has to be recorded whichever way it went.
+    pub resume_from: Option<ResumeMarker>,
 }
 
 impl Default for FactorioParams {
@@ -61,6 +83,7 @@ impl Default for FactorioParams {
             write_logs: false,
             silent: true,
             wait_until: FactorioStartCondition::Initialized,
+            resume_from: None,
         }
     }
 }
@@ -123,6 +146,28 @@ impl FactorioInstance {
         let mut server_child = None;
         let mut client_children = vec![];
 
+        // Which world the server is about to load, and saying so on disk.
+        //
+        // Both halves matter. Writing the marker is what lets `record.start()`
+        // fill in `provenance.resumed_from` without the fact being threaded
+        // through the Lua API; *clearing* it is what stops the next fresh run
+        // inheriting this one's answer, which is precisely the mistake
+        // `map-gen-seed.txt` made and the reason every run before 2026-09-03
+        // silently ran on an uncontrolled map.
+        let instance_dir =
+            Path::new(settings.workspace_path.as_ref()).join(PathBuf::from(&instance_name));
+        let resume_save = match (&params.server_host, &params.resume_from) {
+            (None, Some(marker)) => Some(Self::prepare_resume(&instance_dir, marker)?),
+            (None, None) => {
+                clear_resume_marker(&instance_dir).into_diagnostic()?;
+                None
+            }
+            // An attached server loaded whatever it loaded; this process did
+            // not choose it and must not claim to know.
+            (Some(_), _) => None,
+        };
+        let resumed = resume_save.is_some();
+
         let rcon = match params.server_host {
             None => {
                 let started = Instant::now();
@@ -135,6 +180,7 @@ impl FactorioInstance {
                     params.write_logs,
                     silent.clone(),
                     params.wait_until,
+                    resume_save,
                 )
                 .await?;
                 factorio_port = Some(used_factorio_port);
@@ -151,6 +197,45 @@ impl FactorioInstance {
             }
             Some(_) => Arc::new(FactorioRcon::new(&rcon_settings, silent.clone()).await?),
         };
+        if params.server_host.is_none() {
+            // Before anything else touches the game, on every server this
+            // process starts -- not only on a resumed one.
+            //
+            // A save carries `script.dat`, which is BotBridge's `storage`, and
+            // Factorio migrates that only on a mod version bump; `info.json`
+            // is pinned at 0.0.1 exactly so that it does not. So a world loaded
+            // from a savepoint arrives holding the previous run's walk state,
+            // craft and research waiters and sampling session. Those waiters
+            // are keyed by `ActionId`, minted `% 1000` from zero every run, so
+            // leaving them lets the previous run's action 7 settle this run's
+            // action 7 -- a plausible-looking success for something that never
+            // happened.
+            //
+            // Unconditional because a savepoint is not the only way a world
+            // arrives with someone else's `storage` in it: `POST
+            // /api/v1/game/server-save` writes over the instance's own
+            // `level.zip`, so an ordinary "fresh" start can load a mid-run
+            // save without anything saying so. On a genuinely fresh world this
+            // drops nothing and reports as much.
+            //
+            // Narrated rather than fatal: a mod too old to know
+            // `session_reset` is a real situation, and saying which one it is
+            // beats refusing to start.
+            let what = if resumed {
+                "resumed from a savepoint"
+            } else {
+                "started"
+            };
+            match rcon.session_reset().await {
+                Ok(dropped) => info!("{}; cleared the mod's run-scoped state: {}", what, dropped),
+                Err(err) => warn!(
+                    "{}, but could NOT clear the mod's run-scoped state ({:?}). If this world \
+                     came from a save, the previous run's craft and research waiters are still \
+                     in `storage` and share an action-id space with this run's.",
+                    what, err
+                ),
+            }
+        }
         // Everything past this point runs with a server process (or a remote
         // server) already live. Failures here used to propagate straight out,
         // dropping `server_child` without killing it -- `InteractiveProcess` has
@@ -312,6 +397,35 @@ impl FactorioInstance {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Puts a savepoint where the server can load it, and records that it
+    /// did.
+    ///
+    /// The savepoint is **copied**, never loaded in place: the archived file
+    /// lives inside the run record that explains it, and a running Factorio
+    /// writing back over it -- an autosave, a nameless `/server-save` -- would
+    /// destroy the only identifiable copy of that world. The copy is also not
+    /// `level.zip`: that file is the map this workspace's whole measurement
+    /// history rests on, it predates `--seed`, and nothing could recreate it.
+    fn prepare_resume(instance_dir: &Path, marker: &ResumeMarker) -> Result<PathBuf> {
+        let source = Path::new(&marker.source);
+        if !source.is_file() {
+            error!("savepoint missing at <bright-blue>{:?}</>", source);
+            return Err(FactorioSavesNotFound {}.into());
+        }
+        let saves_path = instance_dir.join(PathBuf::from("saves"));
+        std::fs::create_dir_all(&saves_path).into_diagnostic()?;
+        let destination = saves_path.join(PathBuf::from("resumed.zip"));
+        std::fs::copy(source, &destination).into_diagnostic()?;
+        write_resume_marker(instance_dir, marker).into_diagnostic()?;
+        info!(
+            "Resuming from savepoint <bright-blue>{}</> ({:?}); this run is NOT comparable with a \
+             fresh-world run, and --compare will refuse to try",
+            marker.label, source
+        );
+        Ok(destination)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn start_server(
         workspace_path: &str,
         rcon_settings: &RconSettings,
@@ -320,6 +434,10 @@ impl FactorioInstance {
         write_logs: bool,
         silent: Arc<parking_lot::RwLock<bool>>,
         wait_until: FactorioStartCondition,
+        // The save to start from, already copied into this instance's saves
+        // directory by `FactorioInstance::start`. `None` means the instance's
+        // own `level.zip`, which is every ordinary run.
+        resume_save: Option<PathBuf>,
     ) -> Result<(
         Arc<FactorioWorld>,
         Arc<FactorioRcon>,
@@ -359,7 +477,14 @@ impl FactorioInstance {
             error!("saves missing at <bright-blue>{:?}</>", saves_path);
             return Err(FactorioSavesNotFound {}.into());
         }
-        let saves_level_path = saves_path.join(PathBuf::from("level.zip"));
+        // The savepoint when one was named, otherwise the instance's own map.
+        // Named explicitly rather than by overwriting `level.zip`, which is
+        // this workspace's only copy of the map every measurement rests on and
+        // which no seed can recreate.
+        let saves_level_path = match resume_save {
+            Some(path) => path,
+            None => saves_path.join(PathBuf::from("level.zip")),
+        };
         if !saves_level_path.exists() {
             error!(
                 "save file missing at <bright-blue>{:?}</>",

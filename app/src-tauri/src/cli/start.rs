@@ -1,4 +1,7 @@
-use crate::cli::{SETTINGS_PRECEDENCE_HELP, Subcommand, SubcommandCallback, settings_overrides};
+use crate::cli::{
+  SETTINGS_PRECEDENCE_HELP, Subcommand, SubcommandCallback, resolve_resume, resume_args,
+  settings_overrides,
+};
 use crate::context::Context;
 use crate::settings::load_app_settings_with;
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
@@ -13,8 +16,11 @@ impl Subcommand for ThisCommand {
     "start"
   }
   fn build_command(&self) -> Command {
-    Command::new("start")
-      .about("start the factorio server and clients + web server")
+    // `start` resumes for a different reason than `lua` does: not to skip a
+    // prelude, but to *look* at the world a milestone reached -- open it, walk
+    // around it, query it over RCON. Same flags, same refusal on changed mod
+    // code.
+    resume_args(Command::new("start").about("start the factorio server and clients + web server"))
       .arg(
         Arg::new("clients")
           .short('c')
@@ -98,8 +104,14 @@ async fn run(matches: &ArgMatches, context: &mut Context) -> Result<()> {
   let server_host = matches.get_one::<String>("server").cloned();
   // let websocket_server = FactorioWebSocketServer { listeners: vec![] }.start();
 
+  let resume_from = resolve_resume(
+    matches,
+    std::path::Path::new(app_settings.factorio.workspace_path.as_ref()),
+  )?;
+
   let params = FactorioParams {
     seed,
+    resume_from,
     server_host,
     client_count: clients,
     recreate,

@@ -225,15 +225,61 @@ end
     )?;
     let root = scripts_root;
     let dir = script_dir;
+    let (draw_root, draw_dir) = (root.clone(), dir.clone());
     map_table.set(
         "draw",
+        lua.create_function(move |_lua, save_path: String| {
+            let resolved = resolve_write_path(
+                &draw_root,
+                &relative_to(&draw_root, &draw_dir, &save_path).map_err(path_error)?,
+            )
+            .map_err(path_error)?;
+            draw_world(world.clone(), &resolved)
+                .map_err(|err| LuaError::RuntimeError(format!("{err}")))
+        })?,
+    )?;
+
+    let world = _world.clone();
+    map_table.set(
+        "__doc_entry_dump",
+        String::from(
+            r#"
+--- write the whole world to a JSON file, for planning against it later
+-- What comes out is the input to offline planning:
+-- `factorio-bot plan --world <file> --goal <spec>` reads it back and runs the
+-- same `expand()` and `schedule()` a run does, with no Factorio, no RCON and
+-- no workspace -- which turns evaluating a planner change from a twenty-minute
+-- run into a fraction of a second. The plan made from the file is the plan
+-- that would have been made here; `crates/planner/tests/world_round_trip.rs`
+-- pins that.
+--
+-- **Call it where the interesting state is.** A dump taken at setup is a
+-- fresh map, which is worth having; a dump taken after a milestone also
+-- carries what is inside every furnace and chest the run has looked in, every
+-- site the game refused a build at and every walk it refused a route to, which
+-- is what makes replanning from that milestone mean anything.
+--
+-- Bounded to the scripts directory exactly like `world.draw` and
+-- `globals.file_write`: the path is relative to the calling script, its parent
+-- directory must already exist, an existing symlink at the target is refused,
+-- and a path that would leave the scripts directory is refused rather than
+-- clamped.
+-- @string save_path where to write the dump, relative to the scripts directory
+function world.dump(save_path)
+end
+"#,
+        ),
+    )?;
+    map_table.set(
+        "dump",
         lua.create_function(move |_lua, save_path: String| {
             let resolved = resolve_write_path(
                 &root,
                 &relative_to(&root, &dir, &save_path).map_err(path_error)?,
             )
             .map_err(path_error)?;
-            draw_world(world.clone(), &resolved)
+            world
+                .dump_to(&resolved)
                 .map_err(|err| LuaError::RuntimeError(format!("{err}")))
         })?,
     )?;
@@ -380,6 +426,100 @@ mod tests {
         assert_eq!(
             after, 10,
             "world.inventory is frozen: the plates the run smelted are invisible"
+        );
+    }
+    /// A dump is the world *now*, and it carries what the planner reads.
+    ///
+    /// The reason a dump exists is offline planning, and the reason it has to
+    /// be taken mid-run is that a fresh map's ledgers are all empty -- so the
+    /// two things worth asserting are that the file is live (not the pre-run
+    /// snapshot the other tests in this module were written for) and that an
+    /// observed inventory reaches it. `crates/planner/tests/world_round_trip.rs`
+    /// takes it from there and pins that the plan is unchanged.
+    #[test]
+    fn world_dump_writes_the_world_the_run_has_now() {
+        use factorio_bot_core::serde_json;
+        use factorio_bot_core::types::{Direction, FactorioEntity, InventoryResponse};
+
+        let world = Arc::new(FactorioWorld::new());
+        let root = tempfile::tempdir().expect("a scripts root");
+        let mut planner = Planner::new(world.clone(), None);
+        planner.initiate_missing_players_with_default_inventory(1);
+        planner.update_plan_world();
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        let table = create_lua_world(
+            &lua,
+            planner.plan_world.clone(),
+            root.path().to_path_buf(),
+            root.path().to_path_buf(),
+        )
+        .expect("world table");
+        lua.globals().set("world", table).expect("set global");
+
+        // After the bindings were built, exactly as a run does it.
+        let at = Position::new(-34., 40.);
+        world
+            .on_some_entity_created(FactorioEntity::new_stone_furnace(&at, Direction::North))
+            .expect("the furnace is placed");
+        world.observe_inventories(vec![InventoryResponse {
+            name: "stone-furnace".into(),
+            position: at.clone(),
+            output_inventory: Box::new(Some(vec![
+                factorio_bot_core::types::InventoryItemWithQuality {
+                    name: "iron-plate".into(),
+                    quality: "normal".into(),
+                    count: 40,
+                },
+            ])),
+            fuel_inventory: Box::new(None),
+        }]);
+
+        lua.load("world.dump('world.json')").exec().expect("dumps");
+
+        let written = std::fs::read_to_string(root.path().join("world.json")).expect("a file");
+        let back: FactorioWorld = serde_json::from_str(&written).expect("a readable world");
+        assert_eq!(
+            back.observed_inventories(),
+            world.observed_inventories(),
+            "the dump did not carry what the run had looked inside"
+        );
+        assert!(
+            back.entity_graph.entity_at(&at).is_some(),
+            "the dump did not carry the furnace the run placed"
+        );
+    }
+
+    /// The same boundary `world.draw` and `globals.file_write` keep.
+    ///
+    /// The script-execution endpoint is unauthenticated, so this is what
+    /// stands between an HTTP caller and the host filesystem; a binding that
+    /// writes a whole world is a bigger lever than most.
+    #[test]
+    fn world_dump_refuses_to_leave_the_scripts_directory() {
+        let world = Arc::new(FactorioWorld::new());
+        let root = tempfile::tempdir().expect("a scripts root");
+        let mut planner = Planner::new(world.clone(), None);
+        planner.update_plan_world();
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        let table = create_lua_world(
+            &lua,
+            planner.plan_world.clone(),
+            root.path().to_path_buf(),
+            root.path().to_path_buf(),
+        )
+        .expect("world table");
+        lua.globals().set("world", table).expect("set global");
+
+        let escaped = lua.load("world.dump('../escaped.json')").exec();
+        assert!(escaped.is_err(), "a path leaving the root was accepted");
+        assert!(
+            !root
+                .path()
+                .parent()
+                .expect("a parent")
+                .join("escaped.json")
+                .exists(),
+            "the refusal still wrote the file"
         );
     }
 }

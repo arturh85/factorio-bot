@@ -1,6 +1,7 @@
 mod config;
 #[cfg(feature = "lua")]
 mod lua;
+mod plan;
 #[cfg(debug_assertions)]
 mod playground;
 mod rcon;
@@ -108,6 +109,7 @@ pub fn subcommands() -> Vec<Box<dyn Subcommand>> {
     roll_seed::build(),
     #[cfg(debug_assertions)]
     playground::build(),
+    plan::build(),
     #[cfg(feature = "repl")]
     repl::build(),
     #[cfg(feature = "restapi")]

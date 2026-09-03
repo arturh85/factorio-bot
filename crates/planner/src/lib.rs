@@ -6,6 +6,7 @@ pub mod ids;
 pub mod method;
 pub mod network;
 pub mod render;
+pub mod report;
 pub mod schedule;
 pub mod state;
 
@@ -25,6 +26,7 @@ pub use method::{ExpansionCtx, GoalSite, Method, MethodRegistry, Step};
 pub use method::{MAX_EXPANSION_DEPTH, expand, pick_chain_actor};
 pub use network::{ActionNetwork, Edge};
 pub use render::{graphviz, mermaid_gantt, ticks_to_timestamp};
+pub use report::{BotReport, PlanReport};
 pub use schedule::{
     Schedule, ScheduledStep, StepKind, WALK_TILES_PER_TICK, schedule, travel_ticks,
 };

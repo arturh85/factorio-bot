@@ -31,6 +31,12 @@ factorio-bot-server = { path = "../../crates/server", optional = true }
 #factorio-bot-scripting-rune = { path = "../../crates/scripting_rune", optional = true }
 #factorio-bot-scripting-rhai = { path = "../../crates/scripting_rhai", optional = true }
 factorio-bot-scripting-lua = { path = "../../crates/scripting_lua", optional = true }
+# The `plan` subcommand plans against a dumped world with no Factorio, no RCON
+# and no Lua runtime involved, so it depends on the planner directly rather
+# than reaching it through `factorio-bot-scripting-lua`. Not optional: the
+# planner is pure, has no system dependencies, and `plan` is the whole reason
+# a world dump is worth taking.
+factorio-bot-planner = { path = "../../crates/planner" }
 
 # async
 tokio = { version = "1", features = ["full", "tracing"] }

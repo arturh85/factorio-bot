@@ -19,7 +19,7 @@ use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableGraph;
 use petgraph::visit::{Bfs, EdgeRef};
 use serde::de::{MapAccess, Visitor};
-use serde::ser::SerializeStruct;
+use serde::ser::{SerializeMap, SerializeStruct};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -1766,6 +1766,50 @@ impl EntityGraph {
     }
 }
 
+/// A `DashMap<String, BTreeMap<Pos, V>>` on its way onto the wire.
+///
+/// **`Pos` cannot be a JSON object key.** It is a two-field tuple struct, and
+/// `serde_json` refuses the whole document with `key must be a string` the
+/// moment one appears in key position -- so `resources` and `minables`, the
+/// two maps keyed that way, made *every* `FactorioWorld` serialization of a
+/// world containing a single ore tile fail. It never showed up because nothing
+/// wrote a world to disk: the only worlds that serialised were empty ones.
+///
+/// So the inner map travels as a list of `[pos, value]` pairs. A
+/// `BTreeMap<Pos, _>` already iterates in tile order, and the outer names are
+/// sorted here, which makes this half of a dump byte-stable for a given world
+/// -- the same discipline [`crate::factorio::world::FactorioWorld::observed_inventories`]
+/// exists to enforce, and for the same reason.
+struct TileMaps<'a, V>(&'a DashMap<String, BTreeMap<Pos, V>>);
+
+impl<V: Serialize> Serialize for TileMaps<'_, V> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut names: Vec<String> = self.0.iter().map(|entry| entry.key().clone()).collect();
+        names.sort();
+        let mut map = serializer.serialize_map(Some(names.len()))?;
+        for name in &names {
+            if let Some(tiles) = self.0.get(name) {
+                let pairs: Vec<(&Pos, &V)> = tiles.iter().collect();
+                map.serialize_entry(name, &pairs)?;
+            }
+        }
+        map.end()
+    }
+}
+
+/// A [`TileMaps`] as it arrives off the wire: names to `[pos, value]` pairs.
+type WireTileMaps<V> = BTreeMap<String, Vec<(Pos, V)>>;
+
+/// The other half of [`TileMaps`]: pair lists back into tile-keyed maps.
+fn tile_maps_from<V>(wire: WireTileMaps<V>) -> DashMap<String, BTreeMap<Pos, V>> {
+    wire.into_iter()
+        .map(|(name, pairs)| (name, pairs.into_iter().collect()))
+        .collect()
+}
+
 impl Serialize for EntityGraph {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
@@ -1779,9 +1823,9 @@ impl Serialize for EntityGraph {
         state.serialize_field("entity_nodes", &self.entity_nodes)?;
         state.serialize_field("entity_prototypes", &*self.entity_prototypes)?;
         state.serialize_field("recipes", &*self.recipes)?;
-        state.serialize_field("resources", &self.resources)?;
+        state.serialize_field("resources", &TileMaps(&self.resources))?;
         state.serialize_field("resource_tree", &*self.resource_tree.read())?;
-        state.serialize_field("minables", &self.minables)?;
+        state.serialize_field("minables", &TileMaps(&self.minables))?;
         state.end()
     }
 }
@@ -1867,9 +1911,9 @@ impl<'de> Deserialize<'de> for EntityGraph {
                 let mut entity_nodes = None;
                 let mut entity_prototypes = None;
                 let mut recipes = None;
-                let mut resources = None;
+                let mut resources: Option<WireTileMaps<Option<u32>>> = None;
                 let mut resource_tree = None;
-                let mut minables = None;
+                let mut minables: Option<WireTileMaps<Position>> = None;
 
                 while let Some(key) = map.next_key()? {
                     match key {
@@ -1947,7 +1991,8 @@ impl<'de> Deserialize<'de> for EntityGraph {
                 let entity_prototypes = entity_prototypes
                     .ok_or_else(|| de::Error::missing_field("entity_prototypes"))?;
                 let recipes = recipes.ok_or_else(|| de::Error::missing_field("recipes"))?;
-                let resources = resources.ok_or_else(|| de::Error::missing_field("resources"))?;
+                let resources =
+                    tile_maps_from(resources.ok_or_else(|| de::Error::missing_field("resources"))?);
                 let resource_tree =
                     resource_tree.ok_or_else(|| de::Error::missing_field("resource_tree"))?;
                 // Defaulted rather than required, unlike every field above it.
@@ -1955,7 +2000,7 @@ impl<'de> Deserialize<'de> for EntityGraph {
                 // valid graph -- it just knows of no trees -- and refusing to
                 // load one would turn a new planner capability into a failure
                 // to read yesterday's snapshot.
-                let minables = minables.unwrap_or_default();
+                let minables = tile_maps_from(minables.unwrap_or_default());
 
                 Ok(EntityGraph {
                     entity_graph: RwLock::new(entity_graph),
@@ -3585,14 +3630,12 @@ mod tests {
     /// this did not copy would leave a cloned world holding a forest it could
     /// not name.
     ///
-    /// **Not a serde round trip**, deliberately. `EntityGraph`'s hand-written
-    /// `Serialize` predates this map and cannot go through JSON at all: both
-    /// `resources` and this one key a `BTreeMap` by `Pos`, which is a tuple
-    /// struct and not a string, so `serde_json` refuses the map key. That is a
-    /// pre-existing property of `resources` and not something this map
-    /// introduced; the deserialiser still *accepts* a payload with no
-    /// `minables` field, so a graph written by an older build stays loadable
-    /// through whatever format does carry it.
+    /// A clone, not a serde round trip -- the round trip has its own test
+    /// below now. This one used to carry a note saying JSON was impossible
+    /// here, because both `resources` and this map key a `BTreeMap` by `Pos`,
+    /// a tuple struct `serde_json` refuses in key position. That was true and
+    /// it made every dump of a world containing one ore tile fail; both maps
+    /// now travel as lists of `[pos, value]` pairs (see `TileMaps`).
     #[test]
     fn cloning_a_graph_carries_its_minables() {
         let graph = entity_graph_from(vec![tree_at("tree-01", Position::new(5.5, 5.5))])
@@ -3606,5 +3649,74 @@ mod tests {
             copy.minables_yielding("wood"),
             vec![("tree-01".to_string(), 4)]
         );
+    }
+    /// A graph with ore in it survives a JSON round trip.
+    ///
+    /// It could not until 2026-09-03. `resources` and `minables` key their
+    /// inner maps by [`Pos`], a two-field tuple struct, and `serde_json`
+    /// refuses the whole document with `key must be a string` when one turns
+    /// up as a key -- so `FactorioWorld`'s hand-written `Serialize`, which
+    /// delegates here, failed on any world that had ever seen an ore tile or a
+    /// tree. Nothing noticed because nothing wrote a world to disk: the only
+    /// graphs that ever serialised were empty ones. Offline planning is
+    /// exactly the thing that writes one, so this is the regression test that
+    /// keeps it writable.
+    #[test]
+    fn a_graph_with_ore_and_trees_survives_a_json_round_trip() {
+        let mut entities = vec![tree_at("tree-01", Position::new(5.5, 5.5))];
+        crate::test_utils::spawn_ore(
+            &mut entities,
+            add_to_rect(&Rect::from_wh(4., 4.), &Position::new(-40., 40.)),
+            "iron-ore",
+        );
+        let graph = entity_graph_from(entities).expect("adding must not fail");
+
+        let json = serde_json::to_string(&graph).expect("a graph with ore serialises");
+        let back: EntityGraph = serde_json::from_str(&json).expect("and comes back");
+
+        assert_eq!(
+            back.minable_positions("tree-01"),
+            graph.minable_positions("tree-01")
+        );
+        assert_eq!(
+            back.resource_fingerprint(),
+            graph.resource_fingerprint(),
+            "the ore tiles and their amounts came back unchanged"
+        );
+    }
+
+    /// And the same graph serialises to the same bytes every time.
+    ///
+    /// `resources` and `minables` are `DashMap`s, which iterate in hash order;
+    /// a dump that wrote them in that order would differ between two processes
+    /// holding the identical world, which makes a dump useless as an identity
+    /// for a map. `TileMaps` sorts the names and the inner `BTreeMap`s are
+    /// already in tile order.
+    #[test]
+    fn two_dumps_of_one_graph_are_the_same_bytes() {
+        let mut entities = vec![
+            tree_at("tree-01", Position::new(5.5, 5.5)),
+            tree_at("tree-01", Position::new(-9.5, 3.5)),
+        ];
+        for (ore, at) in [
+            ("iron-ore", Position::new(-40., 40.)),
+            ("copper-ore", Position::new(-40., 0.)),
+            ("coal", Position::new(-60., 0.)),
+        ] {
+            crate::test_utils::spawn_ore(
+                &mut entities,
+                add_to_rect(&Rect::from_wh(4., 4.), &at),
+                ore,
+            );
+        }
+        let graph = entity_graph_from(entities).expect("adding must not fail");
+        let first = serde_json::to_string(&graph).expect("serialises");
+        for _ in 0..8 {
+            assert_eq!(
+                serde_json::to_string(&graph).expect("serialises"),
+                first,
+                "the same graph wrote different bytes"
+            );
+        }
     }
 }

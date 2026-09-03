@@ -77,7 +77,7 @@ pub struct TeleportEvent {
 /// that box blocks a build", which is why `entity` and `position` are kept
 /// rather than a bare tile — the box is recoverable from the prototype, and
 /// the box is the extent of what was actually tested.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlacementRefusal {
     /// The `game.tick` the refusal was stamped at, or `None` when the reply
     /// carried no stamp. Never defaulted to zero here: a record writing this
@@ -141,7 +141,8 @@ impl PlacementRefusal {
 /// Which also means the two carry different evidence: only `PreCheck` can say
 /// *what* was in the way, because only it asks a question that has room for
 /// an answer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RefusalSource {
     /// The game refused a build a bot actually attempted.
     #[default]
@@ -175,6 +176,42 @@ impl RefusalSource {
 pub struct PlacementRefusals {
     sites: Vec<PlacementRefusal>,
     reported: usize,
+}
+
+/// # Serialized as a bare list, and the cursor is not part of it
+///
+/// A dumped world is read back by something that has been told about none of
+/// these -- an offline planner, a seed scorer, a resumed record -- so
+/// `reported` restarts at zero on load, exactly as [`FactorioWorld::clone`]
+/// resets it and for the same reason it argues there: a second reader has
+/// heard nothing, and writing a site twice into two independent records is
+/// the honest answer. Nothing in `crates/planner` reads the cursor, so this
+/// cannot move a plan; see `crates/planner/tests/world_round_trip.rs`, which
+/// pins that.
+///
+/// Serializing the cursor would also hand a hostile file a `reported` past the
+/// end of `sites`, which the `sites[from..]` slice in
+/// [`FactorioWorld::unreported_placement_refusals`] would panic on. There is
+/// nothing to gain by carrying it and a panic to lose.
+impl Serialize for PlacementRefusals {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.sites.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PlacementRefusals {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(PlacementRefusals {
+            sites: Vec::deserialize(deserializer)?,
+            reported: 0,
+        })
+    }
 }
 
 impl PlacementRefusals {
@@ -239,7 +276,7 @@ impl PlacementRefusals {
 /// `(-46.5, -9.5)` four times, each from the same frozen position. Nothing
 /// carried the refusal from one plan to the next, which is exactly the gap
 /// [`PlacementRefusal`] was built to close one level down.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WalkRefusal {
     /// The `game.tick` the refusal was stamped at, or `None` -- which is the
     /// ordinary case, because a path request that finds nothing is refused
@@ -320,6 +357,29 @@ pub struct WalkRefusals {
     walks: Vec<WalkRefusal>,
 }
 
+/// Serialized as a bare list of the walks, for the reason
+/// [`PlacementRefusals`]' own serde impl gives. This one has no cursor to
+/// drop.
+impl Serialize for WalkRefusals {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.walks.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for WalkRefusals {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(WalkRefusals {
+            walks: Vec::deserialize(deserializer)?,
+        })
+    }
+}
+
 impl WalkRefusals {
     /// Remembers a refusal, or does nothing if this exact question has already
     /// been asked and answered. Returns whether it was new.
@@ -370,7 +430,7 @@ impl WalkRefusals {
 /// The record is where a run is read back after the fact, so a condition that
 /// only reaches a log line is a condition nobody finds -- which is the failure
 /// this type exists to stop repeating.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Enclosure {
     /// The `game.tick` the observation was stamped at, or `None`. Ordinarily
     /// `None`: the walk refusal that triggers the check is answered *before*
@@ -407,6 +467,30 @@ pub struct Enclosure {
 pub struct Enclosures {
     found: Vec<Enclosure>,
     reported: usize,
+}
+
+/// Serialized as a bare list, with `reported` restarting at zero on load --
+/// see [`PlacementRefusals`]' serde impl for the whole argument, which applies
+/// here unchanged.
+impl Serialize for Enclosures {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.found.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Enclosures {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Enclosures {
+            found: Vec::deserialize(deserializer)?,
+            reported: 0,
+        })
+    }
 }
 
 impl Enclosures {
@@ -476,7 +560,7 @@ impl Enclosures {
 /// readers ask "how much of X is in there", nothing here reasons about
 /// quality, and a map answers that without a linear scan. Ordered, so a
 /// caller that iterates gets the same order every time.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ObservedInventory {
     /// The entity's name, as the query named it. Kept so a reader can check
     /// that the thing standing here now is still the thing these contents
@@ -1030,13 +1114,45 @@ impl FactorioWorld {
     }
 
     pub fn dump(&self, save_path: Option<&str>) -> Result<()> {
-        let content = serde_json::to_string_pretty(self).into_diagnostic()?;
-        if let Some(save_path) = save_path {
-            fs::write(save_path, &content).into_diagnostic()?;
-        } else {
-            println!("{content}");
+        match save_path {
+            Some(save_path) => self.dump_to(std::path::Path::new(save_path)),
+            None => {
+                println!("{}", serde_json::to_string_pretty(self).into_diagnostic()?);
+                Ok(())
+            }
         }
+    }
 
+    /// Writes this world to `path` as JSON.
+    ///
+    /// Takes a `&Path` rather than a `&str` because the callers that matter
+    /// have already resolved one: `world.dump` in `crates/scripting_lua` runs
+    /// its argument through `resolve_script_path`'s write-side sibling before
+    /// it gets here, and a `to_str()` on the way back out would turn a path
+    /// this crate cannot render into a *dump printed to stdout* -- silently
+    /// writing no file while reporting success.
+    ///
+    /// What comes out is the input to offline planning: `serde_json::from_str`
+    /// into a `FactorioWorld`, then `PlanState::from_world`. Everything that
+    /// function reads round-trips; see
+    /// `crates/planner/tests/world_round_trip.rs`.
+    ///
+    /// # The file is not byte-stable across processes, and the plan is
+    ///
+    /// The maps whose key order the planner depends on are written in sorted
+    /// order -- `inventories` here, `resources` and `minables` in
+    /// [`crate::graph::entity_graph::EntityGraph`] -- so what the planner
+    /// reads is fixed. The remaining `DashMap` fields (`players`, `forces`,
+    /// `graphics`, `item_prototypes`, `actions`, `path_requests`,
+    /// `entity_prototypes`, `recipes`) are still written in hash order, which
+    /// is stable within one process and not across two. So two dumps of the
+    /// same world from two processes may differ *as bytes* while loading to
+    /// the same world and producing the identical plan -- do not checksum a
+    /// dump to decide whether two runs saw the same map.
+    /// [`EntityGraph::resource_fingerprint`] is the thing that answers that.
+    pub fn dump_to(&self, path: &std::path::Path) -> Result<()> {
+        let content = serde_json::to_string_pretty(self).into_diagnostic()?;
+        fs::write(path, &content).into_diagnostic()?;
         Ok(())
     }
 
@@ -1082,7 +1198,7 @@ impl Serialize for FactorioWorld {
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct("FactorioWorld", 9)?;
+        let mut state = serializer.serialize_struct("FactorioWorld", 13)?;
         state.serialize_field("players", &self.players)?;
         state.serialize_field("forces", &self.forces)?;
         state.serialize_field("graphics", &self.graphics)?;
@@ -1092,6 +1208,23 @@ impl Serialize for FactorioWorld {
         state.serialize_field("actions", &self.actions)?;
         state.serialize_field("path_requests", &self.path_requests)?;
         state.serialize_field("entity_graph", &*self.entity_graph)?;
+        // The four ledgers `PlanState::from_world` reads and the derived
+        // fields above do not carry. Without them a mid-run dump plans
+        // against a world that has forgotten every chest it looked inside,
+        // every site the game refused a build at, every destination the
+        // pathfinder refused a route to, and every bot found boxed in -- and
+        // it forgets them *silently*, which is the failure mode this file
+        // has paid for before.
+        //
+        // `observed_inventories()` rather than the `DashMap` itself, and not
+        // only for determinism (a `DashMap` iterates in hash order, which
+        // moves with the seed): `Pos` is a tuple struct and cannot be a JSON
+        // object key at all, so the sorted pair list is the only shape that
+        // works. See the `inventories` field's own doc.
+        state.serialize_field("inventories", &self.observed_inventories())?;
+        state.serialize_field("placement_refusals", &*self.placement_refusals.lock())?;
+        state.serialize_field("walk_refusals", &*self.walk_refusals.lock())?;
+        state.serialize_field("enclosures", &*self.enclosures.lock())?;
         state.end()
     }
 }
@@ -1111,6 +1244,10 @@ impl<'de> Deserialize<'de> for FactorioWorld {
             Actions,
             PathRequests,
             EntityGraph,
+            Inventories,
+            PlacementRefusals,
+            WalkRefusals,
+            Enclosures,
         }
 
         impl<'de> Deserialize<'de> for Field {
@@ -1141,6 +1278,10 @@ impl<'de> Deserialize<'de> for FactorioWorld {
                             "actions" => Ok(Field::Actions),
                             "path_requests" => Ok(Field::PathRequests),
                             "entity_graph" => Ok(Field::EntityGraph),
+                            "inventories" => Ok(Field::Inventories),
+                            "placement_refusals" => Ok(Field::PlacementRefusals),
+                            "walk_refusals" => Ok(Field::WalkRefusals),
+                            "enclosures" => Ok(Field::Enclosures),
                             _ => Err(de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -1172,6 +1313,10 @@ impl<'de> Deserialize<'de> for FactorioWorld {
                 let mut actions = None;
                 let mut path_requests = None;
                 let mut entity_graph = None;
+                let mut inventories: Option<Vec<(Pos, ObservedInventory)>> = None;
+                let mut placement_refusals: Option<PlacementRefusals> = None;
+                let mut walk_refusals: Option<WalkRefusals> = None;
+                let mut enclosures: Option<Enclosures> = None;
 
                 while let Some(key) = map.next_key()? {
                     match key {
@@ -1229,6 +1374,30 @@ impl<'de> Deserialize<'de> for FactorioWorld {
                             }
                             entity_graph = Some(map.next_value()?);
                         }
+                        Field::Inventories => {
+                            if inventories.is_some() {
+                                return Err(de::Error::duplicate_field("inventories"));
+                            }
+                            inventories = Some(map.next_value()?);
+                        }
+                        Field::PlacementRefusals => {
+                            if placement_refusals.is_some() {
+                                return Err(de::Error::duplicate_field("placement_refusals"));
+                            }
+                            placement_refusals = Some(map.next_value()?);
+                        }
+                        Field::WalkRefusals => {
+                            if walk_refusals.is_some() {
+                                return Err(de::Error::duplicate_field("walk_refusals"));
+                            }
+                            walk_refusals = Some(map.next_value()?);
+                        }
+                        Field::Enclosures => {
+                            if enclosures.is_some() {
+                                return Err(de::Error::duplicate_field("enclosures"));
+                            }
+                            enclosures = Some(map.next_value()?);
+                        }
                     }
                 }
                 let players = players.ok_or_else(|| de::Error::missing_field("players"))?;
@@ -1244,6 +1413,18 @@ impl<'de> Deserialize<'de> for FactorioWorld {
                     path_requests.ok_or_else(|| de::Error::missing_field("path_requests"))?;
                 let entity_graph =
                     entity_graph.ok_or_else(|| de::Error::missing_field("entity_graph"))?;
+                // The four ledgers are **optional**, unlike everything above.
+                // They were added long after the first dumps were written, and
+                // absent is exactly what an older file means by "empty" -- a
+                // world with no observed inventories and no refusals is a
+                // perfectly ordinary t=0 world. Requiring them would make
+                // every dump written before this change unreadable in exchange
+                // for nothing.
+                let inventories: DashMap<Pos, ObservedInventory> =
+                    inventories.unwrap_or_default().into_iter().collect();
+                let placement_refusals = placement_refusals.unwrap_or_default();
+                let walk_refusals = walk_refusals.unwrap_or_default();
+                let enclosures = enclosures.unwrap_or_default();
 
                 let entity_graph: Arc<EntityGraph> = Arc::new(entity_graph);
                 let flow_graph = Arc::new(FlowGraph::new(entity_graph.clone()));
@@ -1261,10 +1442,10 @@ impl<'de> Deserialize<'de> for FactorioWorld {
                     entity_graph,
                     flow_graph,
                     teleports: Default::default(),
-                    inventories: Default::default(),
-                    placement_refusals: Default::default(),
-                    walk_refusals: Default::default(),
-                    enclosures: Default::default(),
+                    inventories,
+                    placement_refusals: SyncMutex::new(placement_refusals),
+                    walk_refusals: SyncMutex::new(walk_refusals),
+                    enclosures: SyncMutex::new(enclosures),
                 })
             }
         }
@@ -1279,6 +1460,10 @@ impl<'de> Deserialize<'de> for FactorioWorld {
             "actions",
             "path_requests",
             "entity_graph",
+            "inventories",
+            "placement_refusals",
+            "walk_refusals",
+            "enclosures",
         ];
         deserializer.deserialize_struct("FactorioWorld", FIELDS, FactorioWorldVisitor)
     }
@@ -1655,5 +1840,113 @@ mod tests {
             "a clone that started blank would hand the planner back exactly \
              the destinations it has already been refused"
         );
+    }
+    /// The four ledgers `PlanState::from_world` reads survive a dump.
+    ///
+    /// They were the whole gap. `players`, `forces`, `recipes` and the entity
+    /// graph have round-tripped since the hand-written impls were written;
+    /// these four did not, so a mid-run dump reloaded into an offline planner
+    /// silently forgot every chest it had looked inside and every site the
+    /// game had refused -- the exact state that makes replanning from a
+    /// milestone worth doing. `crates/planner/tests/world_round_trip.rs` pins
+    /// the consequence (the plan is identical); this pins the mechanism.
+    #[test]
+    fn the_four_planner_ledgers_survive_a_json_round_trip() {
+        let world = FactorioWorld::new();
+        world.observe_inventories(vec![
+            reply(
+                "stone-furnace",
+                Position::new(5., -1.),
+                &[("iron-plate", 7)],
+            ),
+            reply("wooden-chest", Position::new(-3., 9.), &[("coal", 12)]),
+        ]);
+        world.record_placement_refusal(PlacementRefusal::at_dispatch(
+            Some(4242),
+            "stone-furnace",
+            Position::new(-40.5, 39.5),
+        ));
+        world.record_placement_refusal(PlacementRefusal {
+            tick: None,
+            entity: "burner-mining-drill".into(),
+            position: Position::new(1.5, 2.5),
+            source: RefusalSource::PreCheck,
+            blockers: vec!["tree-01".into()],
+            tile: Some("grass-1".into()),
+        });
+        world.record_walk_refusal(walk_refusal(3, FROZEN, ORE_TILE));
+        world.record_enclosure(Enclosure {
+            tick: None,
+            player: 3,
+            at: Position::new(FROZEN.0, FROZEN.1),
+            pocket_tiles: 12.5,
+            searched_tiles: 48.,
+        });
+
+        let json = serde_json::to_string(&world).expect("a world serialises");
+        let back: FactorioWorld = serde_json::from_str(&json).expect("and comes back");
+
+        assert_eq!(back.observed_inventories(), world.observed_inventories());
+        assert_eq!(back.placement_refusals(), world.placement_refusals());
+        assert_eq!(back.walk_refusals(), world.walk_refusals());
+        assert_eq!(back.enclosures(), world.enclosures());
+    }
+
+    /// A dump written before the ledgers were serialized still loads.
+    ///
+    /// Absent is what an older file means by "empty", and that is a real
+    /// world: at t=0 on a fresh map all four ledgers *are* empty. Making them
+    /// required would have made every existing dump unreadable to buy
+    /// nothing.
+    #[test]
+    fn a_dump_written_without_the_ledgers_still_loads() {
+        let world = FactorioWorld::new();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&world).expect("serialises"))
+                .expect("is an object");
+        let object = value.as_object_mut().expect("a struct is a map");
+        for gone in [
+            "inventories",
+            "placement_refusals",
+            "walk_refusals",
+            "enclosures",
+        ] {
+            assert!(object.remove(gone).is_some(), "{gone} was written");
+        }
+        let back: FactorioWorld =
+            serde_json::from_value(value).expect("an older dump is still readable");
+        assert!(back.observed_inventories().is_empty());
+        assert!(back.placement_refusals().is_empty());
+        assert!(back.walk_refusals().is_empty());
+        assert!(back.enclosures().is_empty());
+    }
+
+    /// The dump's inventory list is in tile order, not hash order.
+    ///
+    /// `observed_inventories` exists because a `DashMap` iterates in hash
+    /// order, which moves with the hash seed; a dump that wrote the raw map
+    /// would produce a different file on every process for the same world,
+    /// and the offline planner's whole claim is that identical inputs give
+    /// identical output.
+    #[test]
+    fn a_dump_lists_inventories_in_tile_order() {
+        let world = FactorioWorld::new();
+        for (x, y) in [(5., 5.), (-3., 9.), (5., -1.), (-3., -1.)] {
+            world.observe_inventories(vec![reply(
+                "stone-furnace",
+                Position::new(x, y),
+                &[("iron-plate", 1)],
+            )]);
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&world).expect("serialises"))
+                .expect("is an object");
+        let keys: Vec<Pos> = value["inventories"]
+            .as_array()
+            .expect("a list of pairs")
+            .iter()
+            .map(|pair| serde_json::from_value(pair[0].clone()).expect("a Pos"))
+            .collect();
+        assert_eq!(keys, vec![Pos(-3, -1), Pos(-3, 9), Pos(5, -1), Pos(5, 5)]);
     }
 }

@@ -1211,6 +1211,7 @@ dependencies = [
  "color-eyre",
  "console-subscriber",
  "factorio-bot-core",
+ "factorio-bot-planner",
  "factorio-bot-scripting-lua",
  "factorio-bot-server",
  "reedline-repl-rs",

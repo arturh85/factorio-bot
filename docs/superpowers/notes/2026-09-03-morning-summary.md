@@ -193,6 +193,30 @@ had 6. Something re-seeded it in between and I could not attribute it. What is
 not in doubt is that run 4's *game* had the old mod — Factorio loads mods at
 server start, and the game itself raised the missing-function error.
 
+## Correction: they are not all tile centres — the invariant is sub-tile distance
+
+Run 10's **eighth** refusal targets `(-51.7265625, 11)` from
+`(-51.11328125, 11.37890625)`. Neither coordinate is a tile centre, so my
+repeated claim that *"every one is aimed at a tile centre from inside that same
+tile"* is **wrong** — it was an honest generalisation from the first three
+samples and the fourth through seventh happened to agree.
+
+What actually holds across all eight is narrower and still enough:
+
+* the distance is **sub-tile**, 0.60 to 0.76 tiles in every case;
+* the game answers `failed to path find` — it searched and found nothing —
+  never `try again later`, which would mean a full queue.
+
+The `min_radius` mechanism still explains it: whatever occupies the destination,
+`approach_radius` shrinks the acceptance ring to as little as 0.5 tiles around a
+point the bot may not stand on, leaving no legal goal. A non-centre target is
+consistent with that — a character position or an entity whose box is not
+tile-aligned occupies ground just the same.
+
+Keeping the weaker claim on purpose. The stronger one made the diagnosis sound
+more precise than the evidence supported, and this is a night that has already
+paid for that kind of tidiness several times.
+
 ## The walk refusal reproduces to the decimal place — so the fix is checkable
 
 Run 10 produced a **seventh** sub-tile refusal, and it is **byte-identical to

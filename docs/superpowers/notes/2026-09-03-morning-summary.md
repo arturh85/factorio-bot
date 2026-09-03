@@ -1021,3 +1021,43 @@ classification both went unnoticed for so long.
 `debug!` and let callers that genuinely expect a patch report the absence
 themselves. Prefer the former: the warning is useful where a patch really was
 expected.
+
+## Run 7: rung 1 at 20.6 min, but milestone 2 builds 46 furnaces and oscillates
+
+**Rung 1: 20.6 minutes** (18:11:25 -> 18:32:02), against a 27.1-minute baseline
+held across four prior runs on the same map. Same map, same roster, so this is
+the one clean before/after this session has produced: **-24%**. Zero failed
+walks in the entire run (previous runs: 18-20, all on frozen bots 2/3/4), and
+`dispatches by bot: {1: 246, 2: 14, 3: 14, 4: 14}` -- the bots are no longer
+stuck, merely unassigned.
+
+Carried: `11fabe43` drills, `602c6856` walled-in shares, `d7b8f6e3` chain
+actor, `40ddc34e` drill/mine tile conflict, `d2f0b223` bill duplication.
+
+**Milestone 2 then ran 36 minutes without satisfying**, and the plan oscillated
+rather than converged:
+
+```
+187 -> 194 -> 168 -> 186 -> 186     (best stuck at 168 since 18:49)
+```
+
+Three of the last four batches finished `pending=0` with zero failures of any
+kind. Work completes; the goal re-derives roughly the same amount again.
+
+**The cause is visible in the action histogram: 46 successful
+`place stone-furnace` actions in one run.** An earlier archived run built 33
+with 19 of 35 transfer targets used exactly once; this is that pathology, worse.
+Together with `smelt_lag` (`have.rs:790-828`) putting a single furnace's serial
+cycle on the critical path, the planner's answer to "this smelt is slow" is
+evidently "build another furnace" -- without the reuse `BuildCell::cells_standing`
+already knows how to do.
+
+**This reclassifies R1** from `docs/superpowers/specs/2026-09-03-four-bot-utilisation-design.md`.
+It was ranked first on saving-to-risk grounds (12,327 ticks, cannot touch
+sizing/binding). It is also **a fix for a live defect**: furnaces are being
+re-derived, not reused, and that is a plan that does not converge rather than
+merely a slow one.
+
+Not yet established: whether the oscillation is *caused* by the furnace churn or
+merely correlated with it. The `best 168` floor not improving across four
+replans is the thing to explain.

@@ -110,6 +110,59 @@ Four times tonight I suspected a false success and was **wrong** — including
 run 33 itself, where I misread a settle because `action_settled` carries no
 action name. Erring that way round is right, but the ratio is worth watching.
 
+## No mod change tonight ever ran in a game, and the safeguard never fired
+
+**Run 4 raised `No such function: botbridge.set_recipe`** — a function committed
+in `3de64f62` — and, in the same batch, `the target tree-07 was gone before
+mining finished`, which is *precisely* the bug the wood agent had just fixed.
+Both fixes were absent from the mod the game had loaded.
+
+**Two mechanisms, and I misdiagnosed it once before getting it right.** My first
+call was that `include_dir!("mods")` snapshots at compile time with no
+`cargo:rerun-if-changed` for `mods/`. That is wrong for this run: `MODS_CONTENT`
+is `#[cfg(not(debug_assertions))]` (`instance_setup.rs:51`), so a **debug build
+has no embedded snapshot at all** — my `grep` of the binary returning zero was
+expected, not evidence. The real mechanism is the one CLAUDE.md already
+documents: in a debug build the checkout is used **only if `workspace/mods` does
+not exist**, and a stale copy otherwise wins. **`FACTORIO_BOT_REFRESH_MODS=1` is
+a no-op in a debug build** — there is nothing embedded to refresh *from*. I
+passed a release-only flag at a debug build and assumed it had worked.
+
+**The safeguard that exists to catch exactly this never fired.** CLAUDE.md says
+every run "logs one line naming which directory actually won: `Using mods
+directory <path> (<why>)`. That line, not a guess from a traceback, is the
+authoritative answer to 'did my edit ship'." It is gated behind `if !silent`
+(`instance_setup.rs:363-368`) and printed **zero times across runs 1, 2 and 4**.
+The one check the docs tell you to trust is suppressed in exactly the
+configuration where staleness bites.
+
+**Consequences.** Every "the mod fix is in" claim tonight is unverified, and
+`set_recipe` — the prerequisite the whole stage-2 layout was built on — has
+never executed in a game. Without it no machine ever gets a recipe, so no cell
+could have produced anything regardless of how good the layout is.
+
+**Remedy for a debug build:** delete `workspace/mods/BotBridge` (scoped to the
+bridge mod; the code checks that specifically, so the other mods survive) and
+let the checkout be used. `REFRESH_MODS` is for release builds.
+
+**One measurement I cannot account for:** at ~02:45 the workspace copy had 0
+`set_recipe` and an 01:06 mtime; at ~03:00, immediately before I deleted it, it
+had 6. Something re-seeded it in between and I could not attribute it. What is
+not in doubt is that run 4's *game* had the old mod — Factorio loads mods at
+server start, and the game itself raised the missing-function error.
+
+## Runs orphan a server that then blocks the next run
+
+Every failed run leaves its Factorio server alive holding 34197/udp and
+4321/tcp, because the CLI exiting does not take the game down. The next run then
+dies on `Host address is already in use` and leaves *its* server behind — a
+self-perpetuating cycle that cost runs 3 and 5. Before launching: kill leftovers
+by **explicit PID**, poll until both ports are free, then start.
+
+`pkill -f <pattern>` is not safe here: `pkill -f "stage2-run4.log"` matched the
+monitor watching that log and killed it too. Same string-matching trap as keying
+a monitor's liveness to a process name.
+
 ## Run 2 never tested the fix it appeared to disprove
 
 **Run 2 halted on the identical wood error and it is not evidence against the

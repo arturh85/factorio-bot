@@ -51,7 +51,7 @@ use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::ids::{ActionId, ItemId, Ticks};
 use crate::method::have::{PLACE_TICKS, TRANSFER_TICKS};
-use crate::method::power::{POLE, plan_plant, plant_steps};
+use crate::method::power::{POLE, Supply, plant_steps, supply_for};
 use crate::method::produce::cells_for;
 use crate::method::util::{
     CRAFTING_CATEGORY, RecipeGate, ingredients_of, output_per_craft, recipe_for, recipe_gate,
@@ -1338,22 +1338,26 @@ impl Method for BuildAssemblyCell {
             .bot(ctx.chain_actor)
             .map(|b| b.position.clone())
             .unwrap_or_default();
-        // Somewhere with the capacity *left* to run a whole cell -- and, when
-        // there is nowhere, a plant, built inline the way `Researched` builds
-        // one. It has to be inline rather than a subgoal: a subgoal is expanded
+        // Somewhere with the capacity *left* to run a whole cell -- a network
+        // that already stands wherever `power::supply_for` can find one, and
+        // only otherwise a plant, built inline the way `Researched` builds one.
+        // It has to be inline rather than a subgoal: a subgoal is expanded
         // after this method returns, and the cell's site is chosen from the
         // pole, so a cell planned against a state with no plant in it has
         // nowhere to be.
+        //
+        // **The adoption tier is not an optimisation.** This search used to
+        // stop at `ANCHOR_SEARCH_RADIUS` from the bot and build a plant when it
+        // found nothing there, which is how `run-1788408407-02764` came to
+        // plan a second offshore pump, boiler and steam engine 86 tiles from a
+        // working plant it had just researched `automation` on. See
+        // `power::PLANT_ADOPT_RADIUS`.
         let mut plant_steps_taken: Vec<Step> = Vec::new();
         let mut power_links: Vec<ActionId> = Vec::new();
         let want_kw = cell_demand_kw(&ctx.state) * f64::from(build);
-        let anchor = match ctx
-            .state
-            .nearest_supply_anchor(&from, ANCHOR_SEARCH_RADIUS, want_kw)
-        {
-            Some(anchor) => anchor,
-            None => {
-                let plant = plan_plant(&ctx.state, &from)?;
+        let anchor = match supply_for(&ctx.state, &from, ANCHOR_SEARCH_RADIUS, want_kw)? {
+            Supply::Standing(anchor) => anchor,
+            Supply::Build(plant) => {
                 let anchor = plant.pole.clone();
                 let (built, links) = plant_steps(ctx, &plant);
                 plant_steps_taken = built;

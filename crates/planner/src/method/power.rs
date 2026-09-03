@@ -149,6 +149,64 @@ const PLANT_WATER_WIDE_SCAN_RADIUS: f64 = 128.;
 /// much of that lake's edge gets tried before the whole lake is given up on.
 const SHORE_SEARCH_RADIUS: i32 = 10;
 
+/// How far a plant that **already stands** is looked for before one is built,
+/// in tiles.
+///
+/// # The run this exists for
+///
+/// `run-1788408407-02764` is the furthest this project has got: rung 1
+/// satisfied, a working plant standing at the lake — offshore pump at
+/// `[-5.5, -57.5]`, boiler, engine at `[-11.5, -54.5]`, pole at
+/// `[-13.5, -56.5]` — and a lab that had actually run a research on it. Its
+/// second replan of rung 2, at tick 150,645, then planned **a whole second
+/// plant**: `place offshore-pump at [9.5, -45.5]`, a boiler, an engine and
+/// three pipes, on the other side of the map. Bot 1 was at `[-51.25, 20.77]`
+/// at that moment, 86 tiles from the standing plant's pole, and both callers
+/// of [`plan_plant`] asked for supply within 64 tiles **of the bot** and, on
+/// being told there was none there, built one. The run died two replans later
+/// with [`PlannerError::PowerPlantNeedsShore`], because by then the only
+/// shoreline it could reach was the one the first plant was standing on.
+///
+/// # Why the bound is this large
+///
+/// It is a *read-cost* bound, like [`PLANT_WATER_WIDE_SCAN_RADIUS`], and not a
+/// policy bound — nothing here says a plant 200 tiles away is a good idea, only
+/// that a plant that exists is worth walking to. The comparison is not close:
+///
+/// * adopting costs **one walk**, which [`crate::schedule`] already prices at
+///   `distance / WALK_TILES_PER_TICK` — 0.15 tiles a tick, so even 256 tiles is
+///   about 1,700 ticks;
+/// * building costs an offshore pump, three pipes, a boiler and a steam engine
+///   — about 45 iron plates, which have to be mined and smelted first, and in
+///   every archived run that is *tens of thousands* of ticks — plus five coal
+///   and **one wood**, of which a four-bot run has exactly four and can make no
+///   more (`crate::method::assemble`'s `POLE_OFFSET`).
+///
+/// So adoption wins by two orders of magnitude at any distance this planner
+/// can see, and the only question left is how much of the entity graph to
+/// read. [`PlanState::entities_within`] is a quad-tree query over *entities* —
+/// hundreds in a starter base, against the ~410,000 water **tiles** that make
+/// [`PLANT_WATER_WIDE_SCAN_RADIUS`] a cost worth minding — and it only runs at
+/// all when the cheap search around the bot has already failed.
+///
+/// 256 also **strictly exceeds the furthest a plant this planner could build**,
+/// which is the property that stops it preferring construction to a walk: the
+/// water may be up to 128 tiles away, the shoreline up to
+/// [`SHORE_SEARCH_RADIUS`] (14.2 tiles diagonally) from that water, and the
+/// pole up to the plant's own extent plus `free_area_near_where`'s 12-ring
+/// search from the engine — under 30 tiles in total. 128 + 14 + 30 is 172.
+///
+/// **And it is deliberately not tight.** The refusal this closes was reported
+/// with the bots 60 tiles from the pole, where the *existing* 64-tile search
+/// should already have found it: that run's own final keyframe reports the
+/// pole, the engine and the boiler in the model with **zero** divergence from
+/// the game, and replaying `nearest_supply_anchor` against those entities and
+/// those bot positions answers `Some([-13.5, -56.5])` at 64 tiles. So the
+/// origin that expansion was actually asked from is not one this record
+/// carries, and a bound with margin adopts the plant whether that origin is
+/// the bot's real position or a stale one.
+pub const PLANT_ADOPT_RADIUS: f64 = 256.;
+
 // ---------------------------------------------------------------------------
 // The fluid connections, and why they are written down rather than read
 // ---------------------------------------------------------------------------
@@ -402,6 +460,88 @@ fn tile_centre(pos: &Pos) -> Position {
 // ---------------------------------------------------------------------------
 // Siting
 // ---------------------------------------------------------------------------
+
+/// Where a consumer this plan is about to site will get its power.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Supply {
+    /// A network that already stands, named by the pole to site against.
+    ///
+    /// Nothing is emitted for it: the entities are in the world already.
+    Standing(Position),
+    /// Nothing that stands can carry it; this is the plant to build.
+    Build(Plant),
+}
+
+/// The supply a consumer needing `kw` should hang off: one that already
+/// stands, or a plant to build.
+///
+/// # The three tiers, and why they are in this order
+///
+/// 1. **A network within `near_radius` of `from`.** The common case, and the
+///    cheap one — this is the search both callers already did on their own.
+/// 2. **A network within [`PLANT_ADOPT_RADIUS`].** The tier this function was
+///    added for: a plant that already stands is worth walking almost any
+///    distance to, because building a second one costs about 45 iron plates
+///    and one of a run's four irreplaceable wood. See [`PLANT_ADOPT_RADIUS`]
+///    for the run that was killed by not doing this.
+/// 3. **A plant.** Only when the planner can see no working supply at all.
+///
+/// Tiers 1 and 2 are one question asked twice with a wider bound, and that is
+/// a pure cost split rather than a policy: [`PlanState::nearest_supply_anchor`]
+/// orders its candidates by distance and returns the first that qualifies, so
+/// a single call at [`PLANT_ADOPT_RADIUS`] would give exactly the same answer
+/// whenever tier 1 has one. Tier 1 exists so the usual plan does not read a
+/// 512-by-512 box of entities to be told what a 128-by-128 box already said —
+/// the same two-tier shape, and the same justification, as [`plan_plant`]'s
+/// own water scan.
+///
+/// # What "already stands" is checked to mean
+///
+/// [`PlanState::nearest_supply_anchor`] with a **positive** `kw` — which both
+/// callers pass, since a lab is 60 kW and a cell is 189 kW — verifies, for the
+/// pole it returns:
+///
+/// * the pole is in the world (or in this expansion's overlay) and this crate
+///   knows its supply area;
+/// * a **generator** — a steam engine, by
+///   [`crate::state::PlanState::electric_supply_kw`]'s table — has its own
+///   footprint covered by a pole in the *same* wire-connected component, found
+///   by union-find over the poles' maximum wire distances. Coverage alone
+///   would not do: `kw > 0` cannot be met by a network with no generation on
+///   it, so this tier can never adopt a pole that merely exists;
+/// * and that the generation left after every consumer already on that network
+///   is at least `kw`, through the same demand ledger a `Condition::Powered`
+///   is charged against.
+///
+/// # What it assumes
+///
+/// **That the plant is running.** Nothing in `FactorioWorld` says whether a
+/// steam engine has steam, whether the boiler has water, or whether its fuel
+/// slot is empty, so this counts nameplate capacity — the residual
+/// `electric_supply_kw` names in its own doc and `PLANT_COAL` names again.
+/// Adoption inherits it exactly: a plant whose boiler ran dry is adopted as
+/// 900 kW. It is not made worse by adopting rather than building, because a
+/// plant this planner *builds* is credited the same 900 kW the moment its
+/// `Place` is emitted and long before any coal reaches it; and the cell that
+/// adopts tops the boiler up (`crate::method::assemble`'s `fuel_for`), which a
+/// second plant on the other side of the map would not have done for this one.
+///
+/// It also assumes solar and accumulators are absent rather than ignored, and
+/// that a consumer `consumer_kw` does not name draws nothing — both inherited,
+/// and both already named where they live.
+pub fn supply_for(
+    state: &PlanState,
+    from: &Position,
+    near_radius: f64,
+    kw: f64,
+) -> Result<Supply, PlannerError> {
+    for radius in [near_radius, PLANT_ADOPT_RADIUS] {
+        if let Some(anchor) = state.nearest_supply_anchor(from, radius, kw) {
+            return Ok(Supply::Standing(anchor));
+        }
+    }
+    Ok(Supply::Build(plan_plant(state, from)?))
+}
 
 /// Find somewhere to build a plant within reach of `from`, or say why not.
 ///
@@ -1163,5 +1303,164 @@ mod tests {
                 "the plant a world gets is a function of that world and nothing else"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Adoption
+    // -----------------------------------------------------------------------
+
+    /// The fixture's lake with the plant this module would site on it already
+    /// standing, exactly as rung 1 leaves the world.
+    ///
+    /// Built through [`plan_plant`] rather than by hand, so the shoreline the
+    /// standing plant occupies is the *same* shoreline a second one would be
+    /// sited on — which is what `run-1788408407-02764` ran out of.
+    fn state_with_a_standing_plant() -> (PlanState, Plant) {
+        let mut s = state();
+        let plant = plan_plant(&s, &Position::new(40., 40.)).expect("the fixture has a lake");
+        for part in &plant.parts {
+            let entity = entity_for(&s, part);
+            s.create_entity(entity);
+        }
+        (s, plant)
+    }
+
+    /// **Run `run-1788408407-02764`, at the tile it went wrong.**
+    ///
+    /// Bot 1 stood at `[-51.25, 20.77]` and the plant it had just researched
+    /// `automation` on had its pole at `[-13.5, -56.5]` — 86.0 tiles, which is
+    /// past `ANCHOR_SEARCH_RADIUS` and `LAB_SEARCH_RADIUS` alike. The planner
+    /// answered by siting a whole second plant on the other side of the map.
+    /// The distance here is that run's, to two decimals.
+    #[test]
+    fn a_plant_that_already_stands_is_adopted_from_past_the_near_search() {
+        let (s, plant) = state_with_a_standing_plant();
+        // 86.0 tiles from the pole, on the axis, so the number is the run's
+        // and not an artefact of the fixture's geometry.
+        let from = Position::new(plant.pole.x(), plant.pole.y() + 86.0);
+        assert!(
+            s.nearest_supply_anchor(&from, 64., 189.).is_none(),
+            "the premise: the near search cannot see this plant"
+        );
+        assert_eq!(
+            supply_for(&s, &from, 64., 189.).expect("a standing plant is an answer"),
+            Supply::Standing(plant.pole.clone()),
+            "a working plant 86 tiles away is adopted, not duplicated"
+        );
+    }
+
+    /// The refusal that closed the run, answered instead of raised.
+    ///
+    /// From here the planner can see **no water at all** — the fixture's one
+    /// lake is 164 tiles off, past [`PLANT_WATER_WIDE_SCAN_RADIUS`] — so
+    /// [`plan_plant`] refuses by name. That refusal was the whole of the old
+    /// answer; it is now the *last* of three, and a plant that stands is
+    /// reached first.
+    #[test]
+    fn a_standing_plant_answers_where_siting_a_new_one_refuses() {
+        let (s, plant) = state_with_a_standing_plant();
+        let from = Position::new(0., 200.);
+        assert!(
+            matches!(
+                plan_plant(&s, &from),
+                Err(PlannerError::PowerPlantNeedsWater { .. })
+            ),
+            "the premise: nothing here could site a plant of its own"
+        );
+        assert_eq!(
+            supply_for(&s, &from, 64., 60.).expect("the standing plant answers"),
+            Supply::Standing(plant.pole),
+            "a milestone must not halt for want of a plant when one is standing"
+        );
+    }
+
+    /// Nothing standing, so a plant still gets built — the old behaviour, whole.
+    #[test]
+    fn a_world_with_no_supply_still_builds_a_plant() {
+        let s = state();
+        let from = Position::new(0., 0.);
+        assert_eq!(
+            supply_for(&s, &from, 64., 60.).expect("the fixture has a lake"),
+            Supply::Build(plan_plant(&s, &from).expect("a lake")),
+            "adoption is a tier in front of the plant, not a replacement for it"
+        );
+    }
+
+    /// **Coverage is not capacity, and adoption does not forget it.**
+    ///
+    /// A pole standing on its own is a pole with nothing behind it. Adopting
+    /// it would put the cell on a network that generates zero, which is the
+    /// failure this whole module exists to make impossible — so the pole is
+    /// passed over and a plant is built.
+    #[test]
+    fn a_pole_with_nothing_generating_is_not_adopted() {
+        let mut s = state();
+        s.create_entity(FactorioEntity {
+            name: POLE.into(),
+            entity_type: "electric-pole".into(),
+            position: Position::new(0., 60.),
+            ..Default::default()
+        });
+        let from = Position::new(0., 0.);
+        assert!(
+            matches!(supply_for(&s, &from, 64., 60.), Ok(Supply::Build(_))),
+            "a pole is not a power plant, however near it stands"
+        );
+    }
+
+    /// The two tiers are one question with two bounds, and they cannot
+    /// disagree.
+    ///
+    /// [`PlanState::nearest_supply_anchor`] orders candidates by distance and
+    /// returns the first that qualifies, so widening the bound can only add
+    /// candidates *behind* the one the near tier found. Splitting the search
+    /// in two is therefore a read-cost decision and never a different answer —
+    /// which is what lets [`supply_for`] keep each caller's own near radius
+    /// without any of them meaning something different by it.
+    #[test]
+    fn the_near_tier_and_the_wide_tier_cannot_disagree() {
+        let (s, plant) = state_with_a_standing_plant();
+        for offset in [0., 10., 40., 63., 86., 150.] {
+            let from = Position::new(plant.pole.x(), plant.pole.y() + offset);
+            assert_eq!(
+                supply_for(&s, &from, 64., 189.).expect("a standing plant is an answer"),
+                Supply::Standing(
+                    s.nearest_supply_anchor(&from, PLANT_ADOPT_RADIUS, 189.)
+                        .expect("the plant is inside the wide bound")
+                ),
+                "the two-tier search must answer what one wide search would, at {offset} tiles"
+            );
+        }
+    }
+
+    /// The bound is wide enough that a plant is never built where one could
+    /// have been adopted.
+    ///
+    /// The water may be [`PLANT_WATER_WIDE_SCAN_RADIUS`] away, the shoreline a
+    /// further [`SHORE_SEARCH_RADIUS`] (diagonally, so `sqrt(2)` times it) from
+    /// the water, and the pole a further plant's-extent-plus-ring-search from
+    /// the shoreline. This asserts the last of those three against the plant
+    /// the fixture actually sites, so the arithmetic in
+    /// [`PLANT_ADOPT_RADIUS`]'s doc has a measurement under it rather than an
+    /// estimate.
+    #[test]
+    fn the_adopt_bound_exceeds_the_furthest_a_plant_could_be_built() {
+        let (_, plant) = state_with_a_standing_plant();
+        let pump = &plant.parts[0].position;
+        let spread = plant
+            .parts
+            .iter()
+            .map(|part| calculate_distance(&part.position, pump))
+            .fold(0., |a: f64, b| if a.total_cmp(&b).is_ge() { a } else { b });
+        assert!(spread < 16., "a plant is a small rigid body: {spread}");
+        let reach = PLANT_WATER_WIDE_SCAN_RADIUS
+            + f64::from(SHORE_SEARCH_RADIUS) * std::f64::consts::SQRT_2
+            + spread
+            + f64::from(crate::method::util::FREE_TILE_SEARCH_RADIUS) * std::f64::consts::SQRT_2;
+        assert!(
+            PLANT_ADOPT_RADIUS > reach,
+            "adoption must reach further than construction can, or the planner \
+             can still build what it could have adopted: {PLANT_ADOPT_RADIUS} <= {reach}"
+        );
     }
 }

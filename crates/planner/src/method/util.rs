@@ -12,7 +12,13 @@ use factorio_bot_core::types::{
 const TICKS_PER_SECOND: f64 = 60.0;
 
 /// How far out `free_area_near` will search before giving up, in tiles.
-const FREE_TILE_SEARCH_RADIUS: i32 = 12;
+///
+/// `pub(crate)` because it bounds how far a *sited* entity can wander from the
+/// origin it was sited around, and `crate::method::power::PLANT_ADOPT_RADIUS`
+/// has to reach past that: a plant's pole is placed by
+/// [`free_area_near_where`] around its engine, so this is one of the three
+/// terms in "the furthest a plant this planner builds could end up".
+pub(crate) const FREE_TILE_SEARCH_RADIUS: i32 = 12;
 
 /// Convert a recipe's or prototype's seconds into ticks, rounding up so that a
 /// positive duration never becomes zero.

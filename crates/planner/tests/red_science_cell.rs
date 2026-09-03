@@ -17,10 +17,13 @@
 //! planner test does with it.
 
 use factorio_bot_core::factorio::snapshot::WorldSnapshot;
+use factorio_bot_core::factorio::util::calculate_distance;
+use factorio_bot_core::num_traits::ToPrimitive;
 use factorio_bot_core::serde_json;
 use factorio_bot_core::test_utils::fixture_world;
-use factorio_bot_core::types::{FactorioEntity, FactorioRecipe, Position};
+use factorio_bot_core::types::{Direction, FactorioEntity, FactorioRecipe, Position};
 use factorio_bot_planner::goal::Goal;
+use factorio_bot_planner::method::power::plan_plant;
 use factorio_bot_planner::{ActionKind, ActionNetwork, BotId, PlanState, expand, registry_for};
 use std::sync::Arc;
 
@@ -472,6 +475,218 @@ fn the_live_four_bot_red_science_run_plans_and_schedules() {
                 Some(BotId(1)),
                 "{} belongs to the cell's chain and must run on the bot it was sized for",
                 action.label
+            );
+        }
+    }
+}
+
+/// **The four-bot run of 2026-09-03, at the replan that killed it.**
+///
+/// `run-1788408407-02764` is the furthest this project has got. It satisfied
+/// rung 1 — `researched("automation")` — with a power plant it built at the
+/// lake and a lab it ran a research in, both of which were standing and
+/// working when rung 2 began: `offshore-pump at [-5.5, -57.5]`, `boiler at
+/// [-7, -54.5]`, `steam-engine at [-11.5, -54.5]`, `small-electric-pole at
+/// [-13.5, -56.5]`, `lab at [-15.5, -58.5]`, all placed around tick 127,098.
+/// Rung 2's first plan (tick 133,267) then correctly hung a red-science cell
+/// off that plant.
+///
+/// Its **second** plan (tick 150,645) planned a whole second plant —
+/// `place offshore-pump at [9.5, -45.5]`, a boiler, a steam engine and three
+/// pipes, sixty tiles from the working one — because bot 1 had walked to
+/// `[-51.25, 20.77]`, 86.0 tiles from the standing pole, and both callers of
+/// `power::plan_plant` asked for supply within 64 tiles **of the bot** and
+/// built one when there was none *there*. Two replans later the run was
+/// declared stuck:
+///
+/// ```text
+/// HALTED: stuck -- refused: the nearest water is 66.7 tiles away, but no
+/// shoreline within 10 tiles of it has room for a pump, a boiler, a steam
+/// engine and the pipes between them
+/// ```
+///
+/// — a third plant refused for want of shoreline the first plant was standing
+/// on.
+///
+/// Everything below is that run's own record. The plant is the one
+/// `power::plan_plant` sites on the fixture's lake, so the shoreline a second
+/// plant would want is genuinely occupied; the bots are placed at the offsets
+/// `samples.jsonl` reports at tick 150,600, translated so the run's pole lands
+/// on the fixture's, which preserves the 86.0 tiles exactly; and the
+/// inventories are that sample's, unedited. **Bot 1 holds no wood**, which is
+/// not incidental: it had spent both poles from its one wood on power plants,
+/// so the run's own answer to "build another plant" was
+/// `no method can satisfy goal: have 1 wood (a share sized for bot 1)` — the
+/// fatality of the run before this one, reached again from here.
+#[test]
+fn the_live_four_bot_run_adopts_the_plant_it_already_built() {
+    let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+    let mut state = PlanState::from_world(Arc::new(world_that_can_build_an_assembler()), &bots);
+
+    // Rung 1's plant, sited by the code under test on the fixture's own lake,
+    // so its shoreline is occupied exactly as the run's was.
+    let plant = plan_plant(&state, &Position::new(40., 40.)).expect("the fixture has a lake");
+    let types: Vec<String> = plant
+        .parts
+        .iter()
+        .map(|part| {
+            state
+                .base()
+                .entity_prototypes
+                .get(part.name)
+                .map(|proto| proto.entity_type.clone())
+                .unwrap_or_else(|| part.name.to_string())
+        })
+        .collect();
+    for (part, entity_type) in plant.parts.iter().zip(types) {
+        state.create_entity(FactorioEntity {
+            name: part.name.to_string(),
+            entity_type,
+            position: part.position.clone(),
+            direction: Direction::to_u8(&part.direction).unwrap_or(0),
+            ..Default::default()
+        });
+    }
+    // And the pole rung 2's *first* plan had already placed, at the offset it
+    // really stood at from the plant's own pole (`[-11.5, -60.5]` against
+    // `[-13.5, -56.5]`). It is what gives the adopted cell ground to stand on
+    // without a pole of its own — which matters here precisely because bot 1
+    // has no wood left to make one.
+    state.create_entity(FactorioEntity {
+        name: "small-electric-pole".into(),
+        entity_type: "electric-pole".into(),
+        position: Position::new(plant.pole.x() + 2., plant.pole.y() - 4.),
+        ..Default::default()
+    });
+
+    // samples.jsonl, tick 150,600 — the last `bots` row before the replan that
+    // sited the second plant. Positions are translated by the vector that puts
+    // the run's pole on the fixture's, so every bot-to-plant distance is the
+    // run's own.
+    let offset = (plant.pole.x() + 13.5, plant.pole.y() + 56.5);
+    for (bot, x, y, items) in [
+        (
+            BotId(1),
+            -51.25,
+            20.7734375,
+            &[
+                ("burner-mining-drill", 1u32),
+                ("coal", 14),
+                ("copper-plate", 14),
+                ("iron-plate", 63),
+                ("lab", 1),
+            ][..],
+        ),
+        (
+            BotId(2),
+            -48.25,
+            10.21875,
+            &[
+                ("burner-mining-drill", 1),
+                ("copper-ore", 4),
+                ("iron-ore", 14),
+                ("iron-plate", 8),
+                ("stone-furnace", 1),
+                ("wood", 1),
+            ][..],
+        ),
+        (
+            BotId(3),
+            -28.79296875,
+            -19.80078125,
+            &[
+                ("burner-mining-drill", 1),
+                ("copper-ore", 4),
+                ("iron-ore", 8),
+                ("iron-plate", 8),
+                ("stone-furnace", 1),
+                ("wood", 1),
+            ][..],
+        ),
+        (
+            BotId(4),
+            -48.65234375,
+            10.22265625,
+            &[
+                ("burner-mining-drill", 1),
+                ("iron-plate", 8),
+                ("stone-furnace", 1),
+                ("wood", 1),
+            ][..],
+        ),
+    ] {
+        state.set_position(bot, Position::new(x + offset.0, y + offset.1));
+        for (item, count) in items {
+            state.gain(bot, item, *count);
+        }
+    }
+
+    // The premise, stated rather than assumed: bot 1 really is past the
+    // 64-tile search both callers used to stop at.
+    let from = state
+        .bot(BotId(1))
+        .expect("bot 1 is on the roster")
+        .position
+        .clone();
+    let distance = calculate_distance(&from, &plant.pole);
+    assert!(
+        (distance - 86.0).abs() < 0.01,
+        "the run's own 86.0 tiles, not the fixture's geometry: {distance}"
+    );
+
+    let net = expand(
+        &[Goal::Producing {
+            item: PACK.into(),
+            per_minute: 6,
+        }],
+        &state,
+        &registry_for(&bots),
+        BotId(1),
+    )
+    .expect(
+        "a cell must plan against the plant that is already standing -- before this was \
+         fixed the expansion sited a second plant and then refused for want of the wood \
+         bot 1 had already spent on the first",
+    );
+
+    let placed: Vec<String> = net
+        .actions()
+        .filter_map(|a| match &a.kind {
+            ActionKind::Place { entity } => Some(entity.name.clone()),
+            _ => None,
+        })
+        .collect();
+    for duplicate in ["offshore-pump", "boiler", "steam-engine", "pipe"] {
+        assert!(
+            !placed.contains(&duplicate.to_string()),
+            "a plant already stands 86 tiles away; planning {duplicate} builds a second \
+             one: {placed:?}"
+        );
+    }
+
+    // And what it *does* plan is the cell, on the standing plant's network.
+    let count = |name: &str| placed.iter().filter(|n| n.as_str() == name).count();
+    assert_eq!(count("assembling-machine-1"), 2, "one cell: {placed:?}");
+    assert_eq!(count("inserter"), 3, "{placed:?}");
+    assert_eq!(count("iron-chest"), 2, "{placed:?}");
+    assert_eq!(
+        count("small-electric-pole"),
+        0,
+        "the plant's own supply already reaches this ground, and bot 1 has no wood \
+         left anyway: {placed:?}"
+    );
+
+    // The machines stand inside the plant's reach rather than merely somewhere
+    // — `CELL_SEARCH_RADIUS` is 12, and a cell further out than that could not
+    // have been sited from this anchor at all.
+    for action in net.actions() {
+        if let ActionKind::Place { entity } = &action.kind
+            && entity.name == "assembling-machine-1"
+        {
+            assert!(
+                calculate_distance(&entity.position, &plant.pole) <= 17.,
+                "{} is not on the standing plant's ground",
+                entity.position
             );
         }
     }

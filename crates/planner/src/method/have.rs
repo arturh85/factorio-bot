@@ -44,7 +44,7 @@ use crate::action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot}
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::ids::{ActionId, BotId, Ticks};
-use crate::method::power::{plan_plant, plant_steps};
+use crate::method::power::{Supply, plant_steps, supply_for};
 use crate::method::util::{
     CRAFTING_CATEGORY, RecipeGate, SMELTING_CATEGORY, free_area_near, free_area_near_where,
     ingredients_of, mining_ticks, nearest_resource_tile, output_per_craft, recipe_for, recipe_gate,
@@ -1720,11 +1720,20 @@ impl Method for Researched {
         // the second `lab_site` call reads a world that already has 900 kW in
         // it and sites the lab inside the new pole's supply area.
         //
-        // **Asked again from the pole, not from the bot.** Both searches are
-        // bounded at 64 tiles and the plant itself may be up to 64 tiles from
-        // the bot, so re-asking from where the bot is standing could put a
-        // plant just built outside the lab's own reach. The lab follows the
-        // plant.
+        // **Asked again from the anchor, not from the bot.** Both searches are
+        // bounded at 64 tiles and the plant itself may be much further than
+        // that from the bot, so re-asking from where the bot is standing could
+        // put a plant just built — or one just adopted — outside the lab's own
+        // reach. The lab follows the plant.
+        //
+        // **A plant that already stands is adopted rather than duplicated.**
+        // `lab_site` refusing means no supply within `LAB_SEARCH_RADIUS` *of
+        // the bot*, which is not the same statement as "this world has no
+        // power": `power::supply_for` widens the question to
+        // `PLANT_ADOPT_RADIUS` before it will site a second plant, and the
+        // second `lab_site` call then finds the standing lab beside the plant
+        // it adopted, so two researches in one run share one building however
+        // far the bot has wandered in between.
         //
         // Only `ResearchNeedsPower` is caught. Any other refusal — an
         // unsatisfiable site, an unknown technology — means something other
@@ -1733,11 +1742,16 @@ impl Method for Researched {
         let site = match lab_site(&ctx.state, &from, name) {
             Ok(site) => site,
             Err(PlannerError::ResearchNeedsPower { .. }) => {
-                let plant = plan_plant(&ctx.state, &from)?;
-                let anchor = plant.pole.clone();
-                let (built, links) = plant_steps(ctx, &plant);
-                steps.extend(built);
-                power_links = links;
+                let anchor = match supply_for(&ctx.state, &from, LAB_SEARCH_RADIUS, LAB_POWER_KW)? {
+                    Supply::Standing(anchor) => anchor,
+                    Supply::Build(plant) => {
+                        let anchor = plant.pole.clone();
+                        let (built, links) = plant_steps(ctx, &plant);
+                        steps.extend(built);
+                        power_links = links;
+                        anchor
+                    }
+                };
                 lab_site(&ctx.state, &anchor, name)?
             }
             Err(other) => return Err(other),
@@ -7626,6 +7640,97 @@ mod tests {
         assert!(
             matches!(err, PlannerError::PowerPlantNeedsWater { .. }),
             "expected PowerPlantNeedsWater, got {err:?}"
+        );
+    }
+
+    /// A second research adopts the plant the first one built, however far the
+    /// bot has walked since.
+    ///
+    /// The other half of `run-1788408407-02764`'s defect, on this side of the
+    /// seam: `lab_site` refusing means "no supply within 64 tiles **of the
+    /// bot**", and this method used to read that as "this world has no power"
+    /// and site a second plant. Milestone 1 of that run did exactly this twice
+    /// over — its first plan sited a plant at `[9.5, -45.5]` and its replan
+    /// sited a different one at `[-5.5, -57.5]` — and a run has four wood in
+    /// it, one pole-craft each, for ever.
+    ///
+    /// The bot stands 86.0 tiles from the pole, which is the distance
+    /// `samples.jsonl` reports at that run's own re-siting replan.
+    #[test]
+    fn a_research_adopts_a_plant_that_already_stands() {
+        let bots = [BotId(1)];
+        let mut s = unpowered_lakeside_state(&bots);
+        // The plant a previous rung left standing, sited by the code under
+        // test on the fixture's lake, so its shoreline is genuinely occupied.
+        let plant = crate::method::power::plan_plant(&s, &Position::new(40., 40.))
+            .expect("the fixture has a lake");
+        let types: Vec<String> = plant
+            .parts
+            .iter()
+            .map(|part| {
+                s.base()
+                    .entity_prototypes
+                    .get(part.name)
+                    .map(|proto| proto.entity_type.clone())
+                    .unwrap_or_else(|| part.name.to_string())
+            })
+            .collect();
+        for (part, entity_type) in plant.parts.iter().zip(types) {
+            s.create_entity(FactorioEntity {
+                name: part.name.to_string(),
+                entity_type,
+                position: part.position.clone(),
+                direction: factorio_bot_core::num_traits::ToPrimitive::to_u8(&part.direction)
+                    .unwrap_or(0),
+                ..Default::default()
+            });
+        }
+        s.set_position(
+            BotId(1),
+            Position::new(plant.pole.x(), plant.pole.y() + 86.),
+        );
+
+        let net = expand(
+            &[Goal::Researched("automation".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a research must plan against the plant that is already standing");
+
+        let placed: Vec<&str> = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Place { entity } => Some(entity.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        for duplicate in ["offshore-pump", "boiler", "steam-engine", "pipe"] {
+            assert!(
+                !placed.contains(&duplicate),
+                "a plant already stands 86 tiles away; placing {duplicate} builds a second \
+                 one: {placed:?}"
+            );
+        }
+        assert!(
+            !placed.contains(&"small-electric-pole"),
+            "and the pole it would have carried is one of the four wood a run ever has: \
+             {placed:?}"
+        );
+        // The lab follows the plant, not the bot: it has to end up inside the
+        // standing pole's supply area, 86 tiles from where the bot stands.
+        let lab = net
+            .actions()
+            .find_map(|a| match &a.kind {
+                ActionKind::Place { entity } if entity.name == LAB => Some(entity.position.clone()),
+                _ => None,
+            })
+            .expect("the lab is placed");
+        assert!(
+            calculate_distance(&lab, &plant.pole) < 8.,
+            "the lab at {lab} has to sit in the standing pole's supply area, and the pole \
+             is at {}",
+            plant.pole
         );
     }
 

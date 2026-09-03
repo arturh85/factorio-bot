@@ -6,7 +6,7 @@
 
 **Architecture:** Three of the spec's six layers. `PlanState` (layer 0) is an overlay over an immutable `Arc<FactorioWorld>`, so forking is cheap. `Action`/`Condition`/`Effect` (layer 3) carry preconditions and effects as data, so the machinery that consumes them never learns a recipe name. `schedule()` (layer 4) is a pure function of `(ActionNetwork, PlanState, &[BotId])` that binds `Actor::Role` to a concrete bot, emits walks, and produces an immutable `Schedule`. Rendering consumes `Schedule`.
 
-**Tech Stack:** Rust 2021, `factorio-bot-core` (path dependency), `petgraph` 0.6, `miette` 7, `thiserror` 2, `serde` 1.
+**Tech Stack:** Rust 2024, `factorio-bot-core` (path dependency), `petgraph` 0.6, `miette` 7, `thiserror` 2, `serde` 1.
 
 **Spec:** `docs/superpowers/specs/2026-08-29-multi-agent-planner-design.md`
 
@@ -14,11 +14,12 @@
 
 ## Global Constraints
 
-- Workspace root: `/home/arturh/projects/private/factorio-bot`. Rust edition 2021.
+- Workspace root: `/home/arturh/projects/private/factorio-bot`. Rust edition **2024** (corrected 2026-09-03; this line said 2021, and every crate's `Cargo.toml` says `edition = "2024"`). Any `rustfmt` invocation therefore **needs `--edition 2024`** — the flag is not optional: bare `rustfmt` defaults to Rust 2015, dies on every `async fn` in the file, and chained with `&&` silently skips whatever came next.
 - **All commands run inside the Nix devShell with mise tools on PATH.** Prefix every cargo invocation:
   `nix develop --command bash -c 'eval "$(mise env -s bash)"; <command>'`
 - `cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated` must pass at the end of every task.
 - **`cargo fmt -p factorio-bot-planner` before every commit — never `cargo fmt --all`.** Another agent owns the other crates in this checkout; `--all` reformats their in-progress files and dirties the shared tree. (This already happened once.)
+  **CORRECTED 2026-09-03: `cargo fmt -p <crate>` is banned as well.** CLAUDE.md bans every rewriting `cargo fmt` form, `-p` included — it rewrites a *whole crate*, so it clobbers another agent's uncommitted files in that crate exactly as `--all` already did once. Format only the files you edited: `rustfmt --edition 2024 <file>`. **`--edition 2024` is not optional** — bare `rustfmt` defaults to Rust 2015, dies on every `async fn` in the file, and chained with `&&` silently skips whatever came next. Every `cargo fmt -p …` in the steps below is subject to this.
 - Crate name `factorio-bot-planner`, directory `crates/planner`, version `0.2.4-dev` to match `factorio-bot-core`.
 - **`Ticks` is `u32`, a count of game ticks. 60 ticks = 1 second.** No `f64` durations anywhere in layers 0-4. Seconds appear only in `render.rs` output.
 - **`factorio_bot_core::types::ActionId` already exists** (a `u32` alias used for RCON action correlation). The planner's `ActionId` is a distinct newtype in `crates/planner/src/ids.rs`. Never import core's.
@@ -137,7 +138,7 @@ Expected: FAIL — the package does not exist yet.
 name = "factorio-bot-planner"
 version = "0.2.4-dev"
 authors = ["Artur Hallmann <arturh@arturh.de>"]
-edition = "2021"
+edition = "2024"  # corrected 2026-09-03: this said 2021; every crate here is 2024
 
 [package.metadata.release]
 tag = false
@@ -146,7 +147,12 @@ publish = false
 
 [dependencies]
 factorio-bot-core = { path = "../core", version = "0.2.4-dev" }
-petgraph = { version = "0.6.5", features = ["serde-1"] }
+# OBSOLETE 2026-09-03: do NOT add petgraph as a direct dependency. The shipped
+# crates/planner/Cargo.toml has none; it uses core's re-export instead
+# (`use factorio_bot_core::petgraph::…`, crates/planner/src/network.rs:6-7), which
+# is what the code blocks further down this plan actually do. Copying this line
+# produces a second petgraph path and a manifest that does not match the tree.
+# petgraph = { version = "0.6.5", features = ["serde-1"] }
 miette = { version = "7.4", features = ["fancy"] }
 thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }

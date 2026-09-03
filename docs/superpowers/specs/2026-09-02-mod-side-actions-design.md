@@ -1,7 +1,13 @@
 # Design: durative character actions inside the mod
 
-Status: **design only, not implemented.** Nothing outside this file was
-changed. No Factorio process was started.
+Status: **PARTLY IMPLEMENTED — corrected 2026-09-03.** This line read *"design only, not implemented"*. Step 4 landed end to end; step 0 was done differently (four mlua `on_tick` harnesses in `crates/core/tests/`); the craft rows are superseded by `storage.craft_actions` (`mods/BotBridge/control.lua:3171`); `on_player_cancelled_crafting` **is** registered (`control.lua:2079`, registered `:2301`). Steps 1, 3, 5 and 6 are open and step 2 is partial.
+
+**Three of its claims are false, and two of them argue for the wrong work:**
+- §1.1 / §1.2 on research — *"nobody waits for it"*, *"none bound to an action"*, *"[Rust] returns the moment the tech is queued"* — all false: `research_actions()` is keyed by technology name (`control.lua:3121`), `settle_research_actions` (`:2241`) fires on `on_research_finished` (`:2219`), and `research_timed` (`crates/core/src/factorio/rcon.rs:1744`) waits.
+- §1.2 and §6 — *"the mod teleports on a stuck leg"* — false since `98895500`; the branch at `control.lua:976-1000` says *"the recovery does not live here, and it never should have"*. §6 rejects a fast/teleport alternative **on the strength of that teleport**, so its conclusion rests on a false premise.
+- §5's warning about `on_mined_entity` is the one that is **still live**: it is still scoped to `event.player_index` and still decrements by the real `event.buffer` (`control.lua:1198`). A naive "find the action whose entity matches" sweep in step 2 would reintroduce the bug it fixed.
+
+The original status line read: *design only, not implemented. Nothing outside this file was changed. No Factorio process was started.*
 
 **Line numbers are a moving target.** `mods/BotBridge/control.lua` and
 `crates/core/src/factorio/rcon.rs` were both dirty and being edited by other

@@ -1,6 +1,6 @@
 # Run Recording and Replay — Design
 
-**Status:** approved in outline, not yet implemented
+**Status:** **MOSTLY IMPLEMENTED; every frames passage is obsolete.** Corrected 2026-09-03 — this line read *"approved in outline, not yet implemented"*. The recorder, the JSONL event log, splits, retention (`crates/core/src/record/retention.rs:12`), the `/api/v1/runs*` routes and the viewer all shipped. Never built: the manifest identity fields, a `/runs/:id` route, and streamed events. The per-camera screenshot feature every frames passage describes was removed end to end in `15c85c1f`; video (`crates/core/src/record/video/`) replaces it.
 **Date:** 2026-09-01
 
 > **PARTLY OBSOLETE / STATUS STALE (2026-09-03):** the status line is wrong — the recorder, JSONL event log, splits, retention, `/api/v1/runs*` and the viewer all shipped. Separately, **every passage about frames is obsolete**: the per-camera screenshot feature was removed end to end in `15c85c1f` and video capture (`crates/core/src/record/video/`) replaces it. Markers below flag the affected sections.

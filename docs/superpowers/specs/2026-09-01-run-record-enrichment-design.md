@@ -5,6 +5,8 @@
 **Supersedes nothing.** Extends the record format introduced with
 `crates/core/src/record/`.
 
+> **PARTLY OBSOLETE 2026-09-03.** The status line above is accurate as a *planning* status, but two things below are not. (1) **Every passage about frames is dead**: the per-camera screenshot feature was removed end to end in `15c85c1f` — the mod capture loop, the `/api/v1/frames*` routes, `record/frames.rs`, `manage/frames.rs`, `ArchivedFrame`, `EventKind::Frame`, `frameJoin.ts` and 4.1 GB of captured data. Video (`crates/core/src/record/video/`) is the replacement. (2) **§3.4's `SatisfiedReason::PlanEmpty` is not how the ambiguity was resolved** — see the marker there. The rest — samples, map deltas, keyframes, the viewer — shipped and is ~90% complete; the residue is G1–G5 in `docs/superpowers/notes/2026-09-03-spec-audit.md:202-211`.
+
 ## Why
 
 A run record today answers *what the supervisor did*: milestones opened and
@@ -73,7 +75,7 @@ runs/<run-id>/
   samples.jsonl     periodic world state           (new)
   map.jsonl         placements, removals, keyframes (new)
   manifest.json     gains `samples` and `map` counts
-  frames/           unchanged
+  frames/           OBSOLETE 2026-09-03 -- removed in 15c85c1f; see video/
 ```
 
 Every line in every file carries `tick`, and `game.tick` remains the only
@@ -108,6 +110,8 @@ game.write_file("players_connected.txt", "server\n", true, 0) -- only on server
 
 The fourth argument restricts the write. Sample writes pass it, so samples land
 once, in the server instance's `script-output`.
+
+> **OBSOLETE 2026-09-03 — there is no frame handler to fold into.** the per-camera screenshot feature was removed end to end in `15c85c1f` — the mod capture loop, the `/api/v1/frames*` routes, `record/frames.rs`, `manage/frames.rs`, `ArchivedFrame`, `EventKind::Frame`, `frameJoin.ts` and 4.1 GB of captured data. Video (`crates/core/src/record/video/`) is the replacement. The rule *`on_nth_tick(n, f)` replaces the handler for `n`* still holds and still matters; what changed is who owns 300. The shipped mod registers **two** cadences of its own — `SAMPLE_BOT_INTERVAL` on 60 (`mods/BotBridge/control.lua:1631`) and `SAMPLE_FORCE_INTERVAL` on 300 (`:2307`, `on_sample_force_tick`) — each with exactly one registration site, and each says so in place. Do not add a third on either period.
 
 **`on_nth_tick(n, f)` replaces the handler registered for `n`**, a trap the
 frame code already documents in place. Frame capture owns 300. So there is
@@ -320,6 +324,8 @@ MilestoneSatisfied {
 This is the smallest change in the spec and the one that would have explained
 milestone 4 on its own.
 
+> **OBSOLETE 2026-09-03 — do not look for `reason: "plan_empty"` in new runs.** `crates/core/src/record/mod.rs:457-467` says in place: *"No live writer emits this any more"*, as of `ee623717`. The milestone-4 ambiguity was resolved by a different mechanism — that branch now halts `stuck`. The variant still exists; nothing writes it.
+
 **`ActionSettled` gains a structured failure** beside the existing `error`
 string: a `kind` (`missing_item`, `unreachable`, `blocked`, `rejected`,
 `timeout`, `other`) and an optional `detail`. The string stays — it is what a
@@ -382,7 +388,9 @@ At 60 UPS, a 100,000-tick research run is about 28 minutes.
 | **Total** | | **~1.2 MB** |
 
 Frames dominate a run directory by two orders of magnitude, so this changes
-nothing about retention. The keyframe interval is the only knob that matters:
+nothing about retention.
+> **OBSOLETE 2026-09-03 — frames no longer exist** (`15c85c1f`); the video file is what dominates a run directory now (one measured capture: 45m16s / 290 MB). The conclusion — this spec's streams are ~1.2 MB and irrelevant to retention — is unaffected.
+ The keyframe interval is the only knob that matters:
 at sample cadence it would be 130 MB, which is why it is milestone-scoped.
 
 ---
@@ -417,9 +425,9 @@ that every run logs is the authoritative answer to "did my edit ship", and the
 schema stamp is the second net. Neither removes the cost; both make it loud.
 
 **`on_nth_tick` replaces handlers by interval.** Registering 60 or 300 elsewhere
-would silently unregister sampling. Frame capture already owns 300 — the force
+would silently unregister sampling. ~~Frame capture already owns 300 — the force
 sampler must therefore extend the existing 300 handler rather than register a
-second one, or frame capture stops.
+second one, or frame capture stops.~~ **Corrected 2026-09-03:** frame capture is gone (`15c85c1f`); the force sampler now owns 300 itself, at its single registration site `mods/BotBridge/control.lua:2307`. The hazard is unchanged — it is now sampling, not frames, that a stray registration would kill.
 
 **Keyframes read the whole built area.** On a large base this is the most
 expensive thing in the spec. It runs at milestone boundaries, where a pause is

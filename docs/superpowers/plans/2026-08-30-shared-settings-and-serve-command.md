@@ -6,7 +6,7 @@
 
 **Architecture:** `AppSettings`, `GuiSettings`, `RestApiSettings` and the `paths` helpers move out of the binary crate into `crates/core`, which breaks the dependency knot that currently prevents `crates/server` from reading application settings. The server's `AppState` then holds the real `SharedAppSettings` instead of its own private settings copy, a new `serve` subcommand starts it, and `axum::serve` gets a graceful-shutdown future that takes and stops the running `FactorioInstance`.
 
-**Tech Stack:** Rust 2021, axum 0.8, tokio, clap 4, miette.
+**Tech Stack:** Rust 2024, axum 0.8, tokio, clap 4, miette.
 
 **Spec:** `docs/superpowers/specs/2026-08-29-webserver-replaces-tauri-gui-design.md`
 
@@ -14,10 +14,11 @@
 
 ## Global Constraints
 
-- Workspace root `/home/arturh/projects/private/factorio-bot`. Rust edition 2021. Branch: `master`, committing directly — no feature branches.
+- Workspace root `/home/arturh/projects/private/factorio-bot`. Rust edition **2024** (corrected 2026-09-03; this line said 2021, and every crate's `Cargo.toml` says `edition = "2024"`). Any `rustfmt` invocation therefore **needs `--edition 2024`** — the flag is not optional: bare `rustfmt` defaults to Rust 2015, dies on every `async fn` in the file, and chained with `&&` silently skips whatever came next. Branch: `master`, committing directly — no feature branches.
 - **Every cargo command runs inside the Nix devShell with mise on PATH:**
   `nix develop --command bash -c 'eval "$(mise env -s bash)"; <command>'`
 - **`cargo fmt -p <crate>` only, never `cargo fmt --all`** — the workspace has pre-existing drift in crates another agent owns, and `--all` sweeps it in.
+  **CORRECTED 2026-09-03: `cargo fmt -p <crate>` is banned as well.** CLAUDE.md bans every rewriting `cargo fmt` form, `-p` included — it rewrites a *whole crate*, so it clobbers another agent's uncommitted files in that crate exactly as `--all` already did once. Format only the files you edited: `rustfmt --edition 2024 <file>`. **`--edition 2024` is not optional** — bare `rustfmt` defaults to Rust 2015, dies on every `async fn` in the file, and chained with `&&` silently skips whatever came next. Every `cargo fmt -p …` in the steps below is subject to this.
 - `cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated` must pass.
 - **`git commit -- <explicit paths>`, never `git add -A` or a bare `git commit`.** Another agent works in this same checkout and the git index is shared; committing the whole index sweeps up their staged work.
 - `cargo test --workspace` rewrites `crates/scripting_lua/tests/task_graph-1.{dot,md}` and three `.png` snapshots. They are stale in the repo and regenerate on every run — revert with `git checkout -- crates/scripting_lua/tests/` and never commit them.

@@ -1,6 +1,8 @@
 # Material convergence: several bots produce, one bot consumes
 
-**Status: design only. Nothing implemented, no cargo run this pass** (a live
+**Status: PARTLY IMPLEMENTED — stages 0, 1 and 3 ship; stage 2 was never started and should be cancelled.** Corrected 2026-09-03; this line read *"design only. Nothing implemented"*. Stage 0: `Step::Owned` (`crates/planner/src/method/mod.rs:51`), `split_probe` (`:277`), `UnownedHandover` (`crates/planner/src/error.rs:208`). Stage 1: `SharedSmelt` (`method/have.rs:2448`), `worth_converging` (`:2333`) — shipped but **never measured live**. Stage 3: `buffered()` (`crates/planner/src/state.rs:1329`), `Condition::BufferHas` (`action.rs:183`), `Withdraw` (`method/have.rs:874`) — shipped, asked of the game at plan time by `Planner::refresh_buffers` (`crates/core/src/plan/planner.rs:178`), but the method has **never executed**. Stage 2 (`HandOff` + the `iron-chest` handover): zero hits, and its own §14.7 made it conditional on stage 1's measured distribution — `iron-chest` is now used for cell inputs, not bot-to-bot handover. **Do not plan it.**
+
+The original status line read: *design only. Nothing implemented, no cargo run this pass* (a live
 run and a frontend agent hold the CPU; an earlier run connected zero of four
 graphical clients because an agent ran `cargo test --workspace` alongside it —
 `docs/superpowers/notes/2026-09-02-runs-contend-with-agents.md`). Everything

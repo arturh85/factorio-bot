@@ -1,7 +1,12 @@
 # The starter factory: machines produce, bots build
 
-**Status: design only. No implementation, no source edits, and no `cargo`
-invocation at all this pass** — another agent is building the power plant in
+**Status: ~85% IMPLEMENTED — corrected 2026-09-03.** This line read *"design only. No implementation, no source edits"* over shipped code. **Stage 1 (burner smelting cell) is done and witnessed** — run 37: *"iron-plate in 1 watched machine(s) went 0 -> 1 … in 480 of 2400 ticks"*, against a predicted 432. **Stage 2 (powered red-science cell) is built and its recipes are set, but has never produced a pack** — run 10 settled all nine actions `success`, including both `set_recipe` calls, then died in the smelting work that charges the chests. **Stage 3 (green science) is unreachable by the shipped cell shape**, not by the ratio solver: `assembly_spec` (`crates/planner/src/method/assemble.rs:258-296`) requires a 2-ingredient recipe with exactly one single-ingredient intermediate, and `logistic-science-pack` has neither.
+
+**Read before implementing anything here — the document contradicts itself and the code has already broken the tie:** §8.4 anchors stage 2's origin to the supplying pole; §14, §7 and the §6.1 table describe three furnaces and **two drills** at fixed offsets from that origin, which would put a drill on ore beside the water the power plant is sited on. **§8.4 won:** `BuildAssemblyCell::expand` (`assemble.rs:1359`) sites from `nearest_supply_anchor` (`crates/planner/src/state.rs:2066`), and the drills and furnaces were deleted from the design — their job replaced by bots hand-charging two chests for `CELL_CHARGE_TICKS = 9_000` ticks (`assemble.rs:112`). §14's part list describes the version that lost. See `docs/superpowers/notes/2026-09-03-red-science-layout.md:166-173`.
+
+**Two arithmetic errors, both load-bearing downstream:** §6.1's ≈621 kW stage-2 figure is wrong for what was built — `cell_demand_kw` (`assemble.rs:659-664`) is `2×75 + 3×13` = **189 kW**, 249 kW with the lab, so **28% load on 900 kW, not 69%** — and every number in §6.2 and §7 is scaled off the phantom. §7's fuel-buffer arithmetic (one coal stack ≈ 5.4 minutes) follows from it; at the real 249 kW it is ~13 minutes. §7's `iron-chest` + `burner-inserter` fuel buffer was **not built** — what shipped is `boiler_coal()` (`assemble.rs:890-901`), a one-shot bot insert capped at `COAL_STACK = 50`, so the cell still needs a bot visit.
+
+The original status line read: *design only. No implementation, no source edits, and no `cargo` invocation at all this pass* — another agent is building the power plant in
 this same checkout and load has been hitting 12–35
 (`docs/superpowers/notes/2026-09-02-runs-contend-with-agents.md`). Everything
 below is read off source, off `workspace/runs/*/`, and off the shipped

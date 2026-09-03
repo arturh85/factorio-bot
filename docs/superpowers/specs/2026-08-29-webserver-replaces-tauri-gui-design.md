@@ -1,7 +1,7 @@
 # Replacing the Tauri GUI with an axum web server
 
 **Date:** 2026-08-29
-**Status:** Approved design, not yet implemented
+**Status:** **IMPLEMENTED, with ~12 decisions settled differently.** Corrected 2026-09-03 — this line read *"Approved design, not yet implemented"* after the swap had fully landed. There is no Tauri in `app/src-tauri/src/`; `app/src/api/client.ts` and `app/src/api/http.ts:21` replace `invoke`. Genuinely still open: the `crates/cli` and `restapi`→`server` directory renames, both cosmetic. **Two shapes below are wrong on the wire** — see the markers at the error type and at Jobs and SSE.
 
 ## Why
 
@@ -85,6 +85,8 @@ JSON in and out, under `/api/v1`. One error type implementing `IntoResponse`,
 rendering `{ "error": …, "detail": … }` with a real status code, replacing both
 Tauri's stringly-typed `Result<T, String>` and `crates/restapi/src/error.rs`.
 
+> **OBSOLETE 2026-09-03 — the shipped body is `{ message, code, running_job_id? }`** (`crates/server/src/error.rs:24-36`). A client written from `{ error, detail }` reads keys that are never sent.
+
 ### Management endpoints
 
 | Command today | Endpoint | Notes |
@@ -159,6 +161,7 @@ State gains `jobs: Arc<RwLock<HashMap<JobId, Job>>>` where
 - Long operations return `202` with `{ "job_id": … }`.
 - `GET /api/v1/jobs/{id}` — status snapshot.
 - `GET /api/v1/jobs/{id}/events` — SSE emitting `line`, `status`, `done`.
+  > **OBSOLETE 2026-09-03 — the shipped event names are `output`, `finished`, `lagged` and `replay`.** A listener registered for `line` / `status` / `done` receives nothing.
 
 The `lines` buffer is replayed on connect so a late-joining or refreshed browser
 sees the whole run. Jobs live in memory, capped (last 50, with per-job line

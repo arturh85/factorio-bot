@@ -6,7 +6,7 @@
 
 **Architecture:** A new `crates/server` crate exposes `pub async fn start(settings: RestApiSettings, instance_state: SharedFactorioInstance) -> miette::Result<()>` — byte-identical to the Rocket entry point — so `app/src-tauri`'s existing GUI and REPL call sites keep compiling untouched. Handlers move from Rocket's inline `?<param>` syntax to axum `Query<T>` structs with `#[serde(default)]`, from `BadRequest<Json<ErrorResponse>>` to an `IntoResponse` error type, and from `okapi` to `utoipa`. Rocket, `rocket_okapi` and `okapi` leave the workspace at the end.
 
-**Tech Stack:** Rust 2021, axum 0.8, tower-http 0.6, utoipa 5, tokio, miette, serde.
+**Tech Stack:** Rust 2024, axum 0.8, tower-http 0.6, utoipa 5, tokio, miette, serde.
 
 **Spec:** `docs/superpowers/specs/2026-08-29-webserver-replaces-tauri-gui-design.md`
 
@@ -16,14 +16,15 @@
 
 > **OBSOLETE / DANGEROUS INSTRUCTIONS (2026-09-03):** this plan's work has fully landed, and parts of this section are now actively wrong. **`cargo fmt --all` is banned by CLAUDE.md** — it rewrites other agents' in-progress files in this shared checkout and has already done so; use `rustfmt --edition 2024 <file>`. The crates are **edition 2024**, not 2021, so a bare `rustfmt` fails on every `async fn`. The `tower-http` "MUST be 0.6, not 0.7" pin is stale: `crates/server/Cargo.toml` declares `"0.7"` and `Cargo.lock` holds exactly one copy. The frozen `start(...)` signature has since gained parameters (`crates/server/src/webserver.rs`).
 
-- Workspace root: `/home/arturh/projects/private/factorio-bot`. Rust edition 2021.
+- Workspace root: `/home/arturh/projects/private/factorio-bot`. Rust edition **2024** (corrected 2026-09-03; this line said 2021, and every crate's `Cargo.toml` says `edition = "2024"`). Any `rustfmt` invocation therefore **needs `--edition 2024`** — the flag is not optional: bare `rustfmt` defaults to Rust 2015, dies on every `async fn` in the file, and chained with `&&` silently skips whatever came next.
 - **All commands run inside the Nix devShell with mise tools on PATH.** Prefix every cargo invocation:
   `nix develop --command bash -c 'eval "$(mise env -s bash)"; <command>'`
 - `cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated` must pass at the end of every task.
-- `cargo fmt --all` before every commit.
+- **Never `cargo fmt --all`, and never `cargo fmt -p <crate>` — CLAUDE.md bans both.** `--all` has already reformatted another agent's in-progress files in this shared checkout, and `-p` still rewrites a whole crate. Before every commit, format only what you edited: `rustfmt --edition 2024 <file>`. **The `--edition 2024` flag is not optional** — bare `rustfmt` defaults to Rust 2015, dies on every `async fn`, and chained with `&&` silently skips whatever came next.
 - Dependency versions are fixed: `axum = "0.8.9"`, `tower = "0.5.3"`, `tower-http = "0.6.11"`, `utoipa = "5.5.0"`, `utoipa-axum = "0.2.0"`, `utoipa-swagger-ui = "9.0.2"`.
 - **`utoipa-swagger-ui` MUST be declared with `features = ["vendored"]`.** Without it, its build script downloads a zip at compile time, breaking CI, offline builds and the private registry mirror.
-- **`tower-http` MUST be pinned to `"0.6"`, not `"0.7"`** — 0.6.11 is already in `Cargo.lock` via `reqwest`, and 0.7 would add a second build of the crate.
+- ~~**`tower-http` MUST be pinned to `"0.6"`, not `"0.7"`** — 0.6.11 is already in `Cargo.lock` via `reqwest`, and 0.7 would add a second build of the crate.~~
+  **OBSOLETE 2026-09-03. Do not follow this.** `crates/server/Cargo.toml:18` declares `tower-http = "0.7"` and `Cargo.lock` holds exactly one copy, so the predicted duplicate build did not happen. Following the pin means downgrading for nothing.
 - Public entry point signature is frozen: `pub async fn start(settings: RestApiSettings, instance_state: SharedFactorioInstance) -> miette::Result<()>`. Call sites at `app/src-tauri/src/gui/command/restapi.rs:30-33` and `app/src-tauri/src/repl/restapi_control.rs:24-27` must not need edits.
 - Query-parameter names stay **snake_case** on the wire (`entity_type`, `player_id`, `from_position`). Route paths become kebab-case under `/api/v1/game/`.
 - **Every optional query field needs `#[serde(default)]`.** axum treats a missing key as a deserialization error, unlike Rocket which maps it to `None`.
@@ -113,7 +114,7 @@ Create `crates/server/Cargo.toml`:
 name = "factorio-bot-server"
 version = "0.2.4-dev"
 authors = ["Artur Hallmann <arturh@arturh.de>"]
-edition = "2021"
+edition = "2024"  # corrected 2026-09-03: this said 2021; every crate here is 2024
 
 [package.metadata.release]
 tag = false
@@ -300,7 +301,8 @@ Expected: PASS — `health_returns_ok`.
 
 - [ ] **Step 11: Verify lints**
 
-Run: `nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt --all && cargo clippy -p factorio-bot-server --all-targets -- --deny warnings'`
+Run: `nix develop --command bash -c 'eval "$(mise env -s bash)"; rustfmt --edition 2024 <every file this task edited> && cargo clippy -p factorio-bot-server --all-targets -- --deny warnings'`
+(2026-09-03: `cargo fmt --all` was dropped from this command. CLAUDE.md bans it — it rewrites files this task never touched, including another agent's uncommitted work in this shared checkout; `cargo fmt -p <crate>` is banned too, it still rewrites a whole crate. Format only what you edited, and `--edition 2024` is not optional: bare `rustfmt` assumes Rust 2015 and fails on every `async fn`.)
 Expected: no output, exit 0.
 
 - [ ] **Step 12: Commit**
@@ -512,7 +514,8 @@ If `find_entities_without_any_params_reports_missing_area` fails with a body con
 
 - [ ] **Step 7: Verify lints**
 
-Run: `nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt --all && cargo clippy -p factorio-bot-server --all-targets -- --deny warnings'`
+Run: `nix develop --command bash -c 'eval "$(mise env -s bash)"; rustfmt --edition 2024 <every file this task edited> && cargo clippy -p factorio-bot-server --all-targets -- --deny warnings'`
+(2026-09-03: `cargo fmt --all` was dropped from this command. CLAUDE.md bans it — it rewrites files this task never touched, including another agent's uncommitted work in this shared checkout; `cargo fmt -p <crate>` is banned too, it still rewrites a whole crate. Format only what you edited, and `--edition 2024` is not optional: bare `rustfmt` assumes Rust 2015 and fails on every `async fn`.)
 Expected: exit 0. Note clippy will flag the manual `Default` impl as `derivable_impls` only if every field is `None` and no doc comments intervene — if flagged, replace it with `#[derive(Default)]` on the struct and delete the manual impl.
 
 - [ ] **Step 8: Commit**
@@ -630,7 +633,12 @@ Expected: no matches. If any remain, they are bugs — `panic = "abort"` makes t
 - [ ] **Step 6: Commit**
 
 ```bash
-nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt --all'
+# 2026-09-03: `cargo fmt --all` was here. CLAUDE.md bans it — it rewrites files
+# this task never touched, including another agent's uncommitted work in this
+# shared checkout, which has already happened once. `cargo fmt -p <crate>` is
+# banned for the same reason: it still rewrites a whole crate. `--edition 2024`
+# is required — bare `rustfmt` assumes Rust 2015 and dies on every `async fn`.
+nix develop --command bash -c 'eval "$(mise env -s bash)"; rustfmt --edition 2024 <every file this task edited>'
 git add crates/server
 git commit -m "feat(server): port remaining read endpoints to axum"
 ```
@@ -818,7 +826,12 @@ Expected: no matches.
 - [ ] **Step 6: Commit**
 
 ```bash
-nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt --all'
+# 2026-09-03: `cargo fmt --all` was here. CLAUDE.md bans it — it rewrites files
+# this task never touched, including another agent's uncommitted work in this
+# shared checkout, which has already happened once. `cargo fmt -p <crate>` is
+# banned for the same reason: it still rewrites a whole crate. `--edition 2024`
+# is required — bare `rustfmt` assumes Rust 2015 and dies on every `async fn`.
+nix develop --command bash -c 'eval "$(mise env -s bash)"; rustfmt --edition 2024 <every file this task edited>'
 git add crates/server
 git commit -m "feat(server): port mutating game endpoints as POST"
 ```
@@ -1013,7 +1026,12 @@ Expected: the line contains `features = ["axum", "vendored"]`. Without `vendored
 - [ ] **Step 8: Commit**
 
 ```bash
-nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt --all'
+# 2026-09-03: `cargo fmt --all` was here. CLAUDE.md bans it — it rewrites files
+# this task never touched, including another agent's uncommitted work in this
+# shared checkout, which has already happened once. `cargo fmt -p <crate>` is
+# banned for the same reason: it still rewrites a whole crate. `--edition 2024`
+# is required — bare `rustfmt` assumes Rust 2015 and dies on every `async fn`.
+nix develop --command bash -c 'eval "$(mise env -s bash)"; rustfmt --edition 2024 <every file this task edited>'
 git add crates/server
 git commit -m "feat(server): generate OpenAPI spec and serve Swagger UI"
 ```
@@ -1203,7 +1221,12 @@ Expected: PASS — all four SPA tests plus everything earlier.
 - [ ] **Step 6: Commit**
 
 ```bash
-nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt --all'
+# 2026-09-03: `cargo fmt --all` was here. CLAUDE.md bans it — it rewrites files
+# this task never touched, including another agent's uncommitted work in this
+# shared checkout, which has already happened once. `cargo fmt -p <crate>` is
+# banned for the same reason: it still rewrites a whole crate. `--edition 2024`
+# is required — bare `rustfmt` assumes Rust 2015 and dies on every `async fn`.
+nix develop --command bash -c 'eval "$(mise env -s bash)"; rustfmt --edition 2024 <every file this task edited>'
 git add crates/server
 git commit -m "feat(server): serve the built SPA with index.html fallback"
 ```
@@ -1288,8 +1311,15 @@ Expected: `ok`; a JSON spec; and `{"message":"not started","code":2}` with HTTP 
 - [ ] **Step 7: Commit**
 
 ```bash
-nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt --all'
-git add -A
+# 2026-09-03: `cargo fmt --all` was here. CLAUDE.md bans it — it rewrites files
+# this task never touched, including another agent's uncommitted work in this
+# shared checkout, which has already happened once. `cargo fmt -p <crate>` is
+# banned for the same reason: it still rewrites a whole crate. `--edition 2024`
+# is required — bare `rustfmt` assumes Rust 2015 and dies on every `async fn`.
+nix develop --command bash -c 'eval "$(mise env -s bash)"; rustfmt --edition 2024 <every file this task edited>'
+# 2026-09-03: `git add -A` was here. CLAUDE.md bans it — the index is shared with
+# other agents in this checkout, so it sweeps their staged work into your commit.
+git add <the exact paths this task touched, deletions included>
 git commit -m "refactor: replace rocket restapi crate with axum server
 
 Removes rocket, rocket_okapi, okapi and ~28 transitive dependencies."

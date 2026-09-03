@@ -237,7 +237,7 @@ Blast radius is those scripts. The HTTP effort calls `run_lua`, not `goal.*`.
   and nothing in the executor reads `game.tick`. The fix is to widen `Actuator` so a
   dispatch returns the game tick — cheapest as a `tick` field on every BotBridge RPC
   response, since the executor already pays that round trip. This has a **named
-  consumer**: the peer session's screenshot scrubber aligns captured frames to plan
+  consumer** (**obsolete 2026-09-03:** the per-camera screenshot feature was removed end to end in `15c85c1f` — the mod capture loop, the `/api/v1/frames*` routes, `record/frames.rs`, `manage/frames.rs`, `ArchivedFrame`, `EventKind::Frame`, `frameJoin.ts` and 4.1 GB of captured data. Video (`crates/core/src/record/video/`) is the replacement.): the peer session's screenshot scrubber aligns captured frames to plan
   ticks and will show drift as what looks like a rendering bug. It is the increment
   after this one, not part of it.
 - **Planning against a snapshot file.** The RCON `world_snapshot` path could be persisted and

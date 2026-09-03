@@ -14,7 +14,7 @@
 
 - **Sample schema integer is `1`.** Every sample line carries `"schema":1`. The ingester refuses an unknown schema and names the value it found. Bump on any field change, including additions.
 - **Bot sample interval: 60 ticks. Force sample interval: 300 ticks.** 60 UPS, so 1 s and 5 s.
-- **Exactly one new `on_nth_tick` registration, on 60.** Frame capture already owns 300 and `on_nth_tick(n, f)` *replaces* the handler for `n`. The force sample is written from inside the existing 300-tick frame handler. Registering a second handler on 300 silently unregisters frame capture.
+- **`on_nth_tick(n, f)` *replaces* the handler for `n`, so each period has exactly one registration site.** ~~Frame capture already owns 300 … the force sample is written from inside the existing 300-tick frame handler.~~ **OBSOLETE 2026-09-03:** the per-camera screenshot feature was removed end to end in `15c85c1f` — the mod capture loop, the `/api/v1/frames*` routes, `record/frames.rs`, `manage/frames.rs`, `ArchivedFrame`, `EventKind::Frame`, `frameJoin.ts` and 4.1 GB of captured data. Video (`crates/core/src/record/video/`) is the replacement. There is no frame handler to fold into; the shipped mod registers `SAMPLE_BOT_INTERVAL` on 60 (`mods/BotBridge/control.lua:1631`) and `SAMPLE_FORCE_INTERVAL` on 300 (`:2307`) itself. The hazard is unchanged, only its victim: a stray registration on 60 or 300 now silently kills sampling.
 - **Sample writes are server-only**: `helpers.write_file(name, data, true, 0)`. The fourth argument restricts the write; without it every peer writes its own copy, as frames already do.
 - **`production` totals are cumulative from game start**, never per-interval.
 - **Present-and-null, never absent.** A field nobody could determine is written as `null`. A missing key cannot be told apart from "we never asked".
@@ -22,7 +22,7 @@
 - **Do not debug the mod with `rcon.print`.** Its output lands in the RCON reply body and the executor reads that reply as the action's result. Use `writeout(...)`.
 - **The executor issues only legitimate player actions.** No `cheat_*` calls anywhere in this plan.
 - **The OpenAPI seam fails from both ends.** A new route means: regenerate `app/src/api/openapi.snapshot.json` with `UPDATE_OPENAPI_SNAPSHOT=1 cargo test -p factorio-bot-server --features lua --test openapi`, then mirror the type in `app/src/api/types.ts` with an `objectContract<T>` declaration.
-- **Gates, every task:** `cargo fmt`, `cargo clippy --workspace --all-features --all-targets -- --deny warnings`, `cargo test --workspace`. Frontend tasks additionally `cd app && pnpm lint` and `pnpm run test:coverage` (lines 90 / statements 90 / branches 80).
+- **Gates, every task:** `rustfmt --edition 2024 <every file the task edited>` (**not** `cargo fmt`: run from the workspace root it formats the entire workspace, exactly what `--all` does, and CLAUDE.md bans that — it has already rewritten another agent's uncommitted files here; `cargo fmt -p <crate>` is banned too. The `--edition 2024` flag is not optional — bare `rustfmt` assumes Rust 2015 and dies on every `async fn`), `cargo clippy --workspace --all-features --all-targets -- --deny warnings`, `cargo test --workspace`. Frontend tasks additionally `cd app && pnpm lint` and `pnpm run test:coverage` (lines 90 / statements 90 / branches 80).
 - **`mlua`'s `Option::None` reaches Lua as light userdata and is TRUTHY.** `x or {}` does not substitute a default. Guard with `type(x) == "table"`.
 - **Editing the mod:** in a debug build `workspace/mods` wins over the repo and there is **no refresh path**. Edit `workspace/mods/BotBridge/control.lua` directly while iterating, or delete `workspace/mods` to re-seed. Every run logs `Using mods directory <path> (<why>)` — that line, not a guess, says which copy shipped.
 
@@ -345,7 +345,12 @@ Expected: PASS, 5 tests.
 - [ ] **Step 5: Gates and commit**
 
 ```bash
-cargo fmt
+# 2026-09-03: a bare `cargo fmt` was here (from the workspace root it is `--all`). CLAUDE.md bans it — it rewrites files
+# this task never touched, including another agent's uncommitted work in this
+# shared checkout, which has already happened once. `cargo fmt -p <crate>` is
+# banned for the same reason: it still rewrites a whole crate. `--edition 2024`
+# is required — bare `rustfmt` assumes Rust 2015 and dies on every `async fn`.
+rustfmt --edition 2024 <every file this task edited>
 cargo clippy --workspace --all-features --all-targets -- --deny warnings
 git add crates/core/src/record/samples.rs crates/core/src/record/mod.rs
 git commit -m "feat(record): read and ingest world-state samples"
@@ -421,6 +426,8 @@ end)
 
 - [ ] **Step 3: Fold the force sample into the existing 300-tick frame handler**
 
+> **OBSOLETE 2026-09-03 — there is no frame handler.** the per-camera screenshot feature was removed end to end in `15c85c1f` — the mod capture loop, the `/api/v1/frames*` routes, `record/frames.rs`, `manage/frames.rs`, `ArchivedFrame`, `EventKind::Frame`, `frameJoin.ts` and 4.1 GB of captured data. Video (`crates/core/src/record/video/`) is the replacement. This step is done, and it was done as its own registration: `script.on_nth_tick(SAMPLE_FORCE_INTERVAL, on_sample_force_tick)` at `mods/BotBridge/control.lua:2307`, the single registration site for that period. Do not add a second handler on 60 or 300.
+
 Define `power_totals` (Step 4) **above** `sample_force` in the file. Lua resolves
 a `local function` at call time from the enclosing scope, so a `local` declared
 later in the chunk is not visible to an earlier one — `sample_force` would call
@@ -463,6 +470,8 @@ end
 ```
 
 - [ ] **Step 4: Add `power_totals`**
+
+> **OBSOLETE 2026-09-03 — DO NOT COPY THE CODE BELOW.** It sums `pole.electric_network_statistics`' `input_counts` / `output_counts`, and both halves are wrong: those are **cumulative joules since the statistics object existed**, not a rate, and for *electric* networks the class inverts the item convention this plan copied — `input_counts` is **demand**, not generation. Taken literally it ships an ever-growing joule total labelled `generated_kw`, with generation and demand swapped. The shipped implementation is `power_totals` in `mods/BotBridge/control.lua` (~:1415-1500), which reads `LuaElectricNetwork.flow_last_tick` (`maximum_production`, `total_transfer`, `maximum_consumption`, × 60 ÷ 1000 for kW) off `pole.electric_network.parent_network`, deduplicating sub-networks at the parent — and its comment block records why, verified against this install's `runtime-api.json`. Kept below for the reasoning; the code is not to be executed.
 
 Power is read from the force's electric networks. A network with no generation still reports demand, which is exactly the case that matters — coverage is not capacity.
 
@@ -531,7 +540,7 @@ head -2 workspace/server/script-output/botbridge/samples.jsonl
 
 Expected: two JSON lines, one `"kind":"bots"`, `"schema":1`, with a non-empty `bots` array. If `samples.jsonl` is missing, the mod that shipped was the stale copy — check the `Using mods directory` line before changing any code.
 
-Confirm frames still exist, since this task touches the handler that writes them:
+~~Confirm frames still exist, since this task touches the handler that writes them:~~ **OBSOLETE 2026-09-03 — this check can no longer pass and is not a failure.** the per-camera screenshot feature was removed end to end in `15c85c1f` — the mod capture loop, the `/api/v1/frames*` routes, `record/frames.rs`, `manage/frames.rs`, `ArchivedFrame`, `EventKind::Frame`, `frameJoin.ts` and 4.1 GB of captured data. Video (`crates/core/src/record/video/`) is the replacement. `workspace/client1/script-output/frames` is not written by any run.
 
 ```bash
 ls workspace/client1/script-output/frames | head -3
@@ -682,7 +691,12 @@ Expected: PASS on both. A field present in Rust and missing in TypeScript fails 
 - [ ] **Step 8: Commit**
 
 ```bash
-cargo fmt
+# 2026-09-03: a bare `cargo fmt` was here (from the workspace root it is `--all`). CLAUDE.md bans it — it rewrites files
+# this task never touched, including another agent's uncommitted work in this
+# shared checkout, which has already happened once. `cargo fmt -p <crate>` is
+# banned for the same reason: it still rewrites a whole crate. `--edition 2024`
+# is required — bare `rustfmt` assumes Rust 2015 and dies on every `async fn`.
+rustfmt --edition 2024 <every file this task edited>
 cargo clippy --workspace --all-features --all-targets -- --deny warnings
 git add crates/core/src/record/mod.rs crates/server/src/runs.rs \
         app/src/api/openapi.snapshot.json app/src/api/types.ts \
@@ -1053,7 +1067,12 @@ Expected: PASS. `replay.rs` constructs `Attempt` values in tests; each needs `pl
 - [ ] **Step 7: Gates and commit**
 
 ```bash
-cargo fmt
+# 2026-09-03: a bare `cargo fmt` was here (from the workspace root it is `--all`). CLAUDE.md bans it — it rewrites files
+# this task never touched, including another agent's uncommitted work in this
+# shared checkout, which has already happened once. `cargo fmt -p <crate>` is
+# banned for the same reason: it still rewrites a whole crate. `--edition 2024`
+# is required — bare `rustfmt` assumes Rust 2015 and dies on every `async fn`.
+rustfmt --edition 2024 <every file this task edited>
 cargo clippy --workspace --all-features --all-targets -- --deny warnings
 git add crates/core/src/record/map.rs crates/core/src/record/mod.rs \
         crates/executor/src/log.rs crates/executor/src/rcon_actuator.rs
@@ -1180,7 +1199,12 @@ A keyframe is written at every milestone boundary and every 9,000 ticks (30 forc
 - [ ] **Step 6: Gates and commit**
 
 ```bash
-cargo fmt
+# 2026-09-03: a bare `cargo fmt` was here (from the workspace root it is `--all`). CLAUDE.md bans it — it rewrites files
+# this task never touched, including another agent's uncommitted work in this
+# shared checkout, which has already happened once. `cargo fmt -p <crate>` is
+# banned for the same reason: it still rewrites a whole crate. `--edition 2024`
+# is required — bare `rustfmt` assumes Rust 2015 and dies on every `async fn`.
+rustfmt --edition 2024 <every file this task edited>
 cargo clippy --workspace --all-features --all-targets -- --deny warnings
 git add crates/core/src/record/map.rs
 git commit -m "feat(record): keyframe the built area and flag model divergence"
@@ -1259,7 +1283,12 @@ and the matching `objectContract<T>` declarations in TypeScript.
 - [ ] **Step 6: Gates and commit**
 
 ```bash
-cargo fmt && cargo clippy --workspace --all-features --all-targets -- --deny warnings
+# 2026-09-03: a bare `cargo fmt` was here (from the workspace root it is `--all`). CLAUDE.md bans it — it rewrites files
+# this task never touched, including another agent's uncommitted work in this
+# shared checkout, which has already happened once. `cargo fmt -p <crate>` is
+# banned for the same reason: it still rewrites a whole crate. `--edition 2024`
+# is required — bare `rustfmt` assumes Rust 2015 and dies on every `async fn`.
+rustfmt --edition 2024 <every file this task edited> && cargo clippy --workspace --all-features --all-targets -- --deny warnings
 cargo test --workspace
 cd app && pnpm lint && pnpm run test:coverage
 git add crates/core/src/record/mod.rs crates/server/src/runs.rs \
@@ -1362,6 +1391,10 @@ fn a_milestone_satisfied_without_doing_anything_says_which_kind() {
     let json = serde_json::to_string(&EventKind::MilestoneSatisfied {
         index: 4,
         iterations: 0,
+        // OBSOLETE 2026-09-03: no live writer emits PlanEmpty any more, as of
+        // `ee623717` (crates/core/src/record/mod.rs:457-467). The variant still
+        // exists; that branch now halts `stuck` instead. Do not build a reader
+        // that waits for `reason: "plan_empty"` in new runs.
         reason: SatisfiedReason::PlanEmpty,
     })
     .unwrap();
@@ -1505,7 +1538,12 @@ Expected: PASS.
 - [ ] **Step 6: Gates and commit**
 
 ```bash
-cargo fmt && cargo clippy --workspace --all-features --all-targets -- --deny warnings
+# 2026-09-03: a bare `cargo fmt` was here (from the workspace root it is `--all`). CLAUDE.md bans it — it rewrites files
+# this task never touched, including another agent's uncommitted work in this
+# shared checkout, which has already happened once. `cargo fmt -p <crate>` is
+# banned for the same reason: it still rewrites a whole crate. `--edition 2024`
+# is required — bare `rustfmt` assumes Rust 2015 and dies on every `async fn`.
+rustfmt --edition 2024 <every file this task edited> && cargo clippy --workspace --all-features --all-targets -- --deny warnings
 cargo test --workspace
 git add crates/core/src/record/mod.rs crates/scripting_lua/src/globals/record.rs
 git commit -m "feat(record): record planner intent, satisfaction reason and failure kind"

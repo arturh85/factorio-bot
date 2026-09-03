@@ -6,7 +6,7 @@
 
 **Architecture:** `Holder` splits into a caller instruction (`Bot`) and an internal share marker (`Share`), so a bot named by a caller is honoured while a split's shares stay freely assignable. Chains stop being opened by "a goal named a bot" and start being opened by "this method's decomposition needs several produced items in one inventory" — which is `HandCraft` with two or more ingredients to produce, and nothing else. The remaining tasks are independent: same-chain edge inference, mining beyond one tile, siting a furnace near its ore, and a guard on the driver's interchangeable-bots assumption.
 
-**Tech Stack:** Rust 2021, `factorio-bot-core`, the `crates/planner` engine and method layer.
+**Tech Stack:** Rust 2024, `factorio-bot-core`, the `crates/planner` engine and method layer.
 
 **Spec:** `docs/superpowers/specs/2026-08-29-multi-agent-planner-design.md`
 
@@ -25,9 +25,10 @@ Each was found by review or by running the crate, and each is recorded with its 
 
 ## Global Constraints
 
-- Workspace root: `/home/arturh/projects/private/factorio-bot`. Rust edition 2021. Branch `master`.
+- Workspace root: `/home/arturh/projects/private/factorio-bot`. Rust edition **2024** (corrected 2026-09-03; this line said 2021, and every crate's `Cargo.toml` says `edition = "2024"`). Any `rustfmt` invocation therefore **needs `--edition 2024`** — the flag is not optional: bare `rustfmt` defaults to Rust 2015, dies on every `async fn` in the file, and chained with `&&` silently skips whatever came next. Branch `master`.
 - **Every cargo invocation must be wrapped:** `nix develop --command bash -c 'eval "$(mise env -s bash)"; <command>'`
 - **`cargo fmt -p factorio-bot-planner` before every commit — never `cargo fmt --all`.** Other crates belong to other workstreams.
+  **CORRECTED 2026-09-03: `cargo fmt -p <crate>` is banned as well.** CLAUDE.md bans every rewriting `cargo fmt` form, `-p` included — it rewrites a *whole crate*, so it clobbers another agent's uncommitted files in that crate exactly as `--all` already did once. Format only the files you edited: `rustfmt --edition 2024 <file>`. **`--edition 2024` is not optional** — bare `rustfmt` defaults to Rust 2015, dies on every `async fn` in the file, and chained with `&&` silently skips whatever came next. Every `cargo fmt -p …` in the steps below is subject to this.
 - `cargo clippy --workspace --all-features --all-targets -- --deny warnings --deny deprecated` must pass. `assert_eq!(x, true)` trips `bool_assert_comparison`; use `assert!(x)`.
 - **Another agent may be working in this checkout with files staged.** Commit with the partial-commit form: `git commit -m "<message>" -- crates/planner`, which ignores the index. A **new** file must be `git add`ed by its exact path first — never `-A`, never `.`, never `-a`. Never `git checkout`/`stash`/`reset`/`clean` outside `crates/planner/`, except discarding `crates/scripting_lua/tests/` snapshot churn after a workspace run.
 - `Ticks` is `u32`; 60 ticks = 1 second. Multiply durations and counts with `saturating_mul`, never `*`.

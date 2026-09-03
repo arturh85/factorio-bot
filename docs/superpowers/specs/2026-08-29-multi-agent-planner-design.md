@@ -1,7 +1,8 @@
 # A layered multi-agent planner
 
 **Date:** 2026-08-29
-**Status:** Approved design, not yet implemented
+**Status:** **IMPLEMENTED.** Corrected 2026-09-03 — this line read *"Approved design, not yet implemented"* over shipped code. All six layers exist: `PlanState::from_world` (`crates/planner/src/state.rs:946`), `Goal` / `Holder` (`crates/planner/src/goal.rs:76`, `:8`), `Method` and its registry (`crates/planner/src/method/mod.rs:207,286`), `Action` / `Condition` / `Effect` (`crates/planner/src/action.rs:17,32,354`), `schedule()` (`crates/planner/src/schedule.rs:248`), and the executor with per-action `tokio::sync::watch` completion signals (`crates/executor/src/run.rs:64-67`) and three recovery tiers (`crates/executor/src/recover.rs:288,320,348,362`).
+**Never built, and mostly not wanted:** `Holder::Chest`, `TakeFromChest`, `Consolidate` (superseded by `Step::Owned` + `SharedSmelt` + `Withdraw`), `Schedule::critical_path` (zero hits, nothing consumes it), `Goal::Built`, and `Action::pinned` from Lua.
 
 ## Why
 
@@ -349,6 +350,7 @@ downstream estimate, so it is settled here rather than deferred.
 - **Actual**, used by the executor: issue the craft, then poll the bot's
   inventory until the produced count materialises. Completion is observed, never
   assumed.
+  > **OBSOLETE 2026-09-03 — this is not how it works.** Nothing polls inventory: `inventory_contents_at` has **zero callers in `crates/executor`**. `run.rs:462` calls `wait_out_lag`, which sleeps against a tick budget (`run.rs:588-620`), and then `RconActuator::remove` fires. Crafting *is* observed, but by mod-side action completion (`crates/core/src/factorio/rcon.rs:2433`), not by the mechanism described here. Do not write a poller from this paragraph.
 
 Smelting works the same way one level up: the estimate is the lag on the
 insert-to-removal edge, taken from the furnace prototype; the actual is the
@@ -391,6 +393,8 @@ The implementation plan must enumerate these precisely rather than assuming the
 list is complete.
 
 ## Lua API
+
+> **OBSOLETE 2026-09-03 — a script written from this block runs zero lines.** `plan.goal`, `plan.solve`, `schedule:gantt()` and `plan.execute` have zero hits in the tree; the `plan` global was deleted with `crates/scripting_lua/src/globals/plan.rs` (plan `2026-08-30-planner-execution-increment`, task T8). The shipped surface is the goal-value API in `crates/scripting_lua/src/globals/goal/` — see `docs/superpowers/specs/2026-08-30-goal-values-design.md` and the generated `docs/lua/src/goal.lua`. Kept for the reasoning below it; do not copy the code.
 
 ```lua
 plan.goal(goal.have("automation-science-pack", 10))

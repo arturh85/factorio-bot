@@ -1,6 +1,6 @@
 # Supervisor Loop — Design
 
-**Status:** approved, not yet implemented
+**Status:** **IMPLEMENTED, and outgrown — history, not a work item.** Corrected 2026-09-03. `scripts/supervisor.lua` (929 lines) ships, driven by `crates/scripting_lua/src/supervisor_lib.rs` (1706 lines, 51 tests), which `include_str!`s the shipped file *inside the sandbox* (`supervisor_lib.rs:16-19,30`) — stricter than D5 asked. **Two of its premises are now false:** premise 3 (*"`Goal::Producing` has no method"*) — two methods claim it (`crates/planner/src/method/have.rs:1992,1997`) and the test it cites, `producing_has_no_method_in_this_increment`, no longer exists; and D3 (*an empty plan is satisfaction*) — the goal must **also** be confirmed to hold (`scripts/supervisor.lua:4-5`), pinned by `an_empty_plan_for_an_unheld_goal_is_refused_rather_than_reported_satisfied`. The "Future path" section is stale for the same reason.
 **Date:** 2026-08-31
 
 ## Why

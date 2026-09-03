@@ -1,6 +1,6 @@
 # Per-bot share sizing — Design
 
-**Status:** design only, not implemented
+**Status:** **IMPLEMENTED.** Corrected 2026-09-03 — this line read *"design only, not implemented"*. `even_shares` (`crates/planner/src/method/have.rs:2210`), `distinct_bots` (`:2151`), the `BotsNotInterchangeable` guard deleted, all seven tests present, plus a `seats` cap the spec predates. **§4's residual-hazard analysis is inverted by the same work:** it argues a share's chain has no owner and cites a test asserting `owner_of(chain) == None`; that test now asserts `Some(BotId(1))` (`crates/planner/src/method/mod.rs:1991-1995`), and a live four-bot run crashed twice on the hazard §4 called safe.
 **Date:** 2026-09-01
 **Baseline:** `1506bf45` (`fix(planner,record): scope interchangeable-bots guard, …`)
 

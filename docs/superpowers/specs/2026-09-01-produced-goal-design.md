@@ -1,6 +1,6 @@
 # `Goal::Produced` — Design
 
-**Status:** approved in outline, not yet implemented
+**Status:** **IMPLEMENTED.** Corrected 2026-09-03 — this line read *"approved in outline, not yet implemented"*. `Goal::Produced { item, count, whose, unlocks }` (`crates/planner/src/goal.rs:96-104`), `demand()` (`crates/planner/src/method/have.rs:107`), `attach_unlock` (`:130`), `holds` → `None` (`:218`). It gained a `whose` field beyond the spec, and is deliberately **not** exposed in Lua.
 **Date:** 2026-09-01
 
 ## Why

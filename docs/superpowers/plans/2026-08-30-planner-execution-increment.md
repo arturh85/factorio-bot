@@ -6,7 +6,7 @@
 
 **Architecture:** A new `crates/executor` crate sits above both `core` and `planner` (the only place that may depend on both, since `planner -> core` already). It owns an `Actuator` trait that names the six things a bot can be told to do, an `RconActuator` that implements it against `FactorioRcon`, and a per-bot async task that walks that bot's slice of the `Schedule`. Execution state lives in an `ExecutionLog` keyed by `ActionId`, never inside the plan, so `Schedule` stays an immutable value and estimated-versus-actual is a join. Failure is handled in tiers: re-schedule from observed state, then re-expand, then surface.
 
-**Tech Stack:** Rust 2021, tokio (executor crate only), `async_trait`, `mockall` (executor's own mock — see Global Constraints), miette, mlua.
+**Tech Stack:** Rust 2024, tokio (executor crate only), `async_trait`, `mockall` (executor's own mock — see Global Constraints), miette, mlua.
 
 **Spec:** `docs/superpowers/specs/2026-08-29-multi-agent-planner-design.md` (Layer 5 — `Executor`)
 
@@ -16,6 +16,7 @@
 - **`MockFactorioRcon` is NOT available downstream.** `FactorioRcon` carries `#[cfg_attr(test, mockall::automock)]`, which is gated on *core's own* `cfg(test)`. Other crates cannot see it. The executor therefore defines its own `Actuator` trait and its own `mockall::mock!` double. Do not attempt to import `MockFactorioRcon`.
 - **Never hardcode `defines.inventory` integers.** Their meaning is entity-type dependent (see `mods/BotBridge/control.lua:66` `inventory_type_name(invtype, enttype)`) and they vary across Factorio versions. Resolve them from the running game once, as specified in Task 3.
 - **A second agent is working in this repo concurrently** (dependency/stack modernization, mostly `app/` and `crates/server`). Therefore: commit with explicit paths — `git commit -m "..." -- <paths>` — never a bare `git commit` or `git add -A`, which would sweep their staged work into your commit. Run `cargo fmt` scoped: `cargo fmt -p <crate>`, never `--all`.
+  **CORRECTED 2026-09-03: `cargo fmt -p <crate>` is banned as well.** CLAUDE.md bans every rewriting `cargo fmt` form, `-p` included — it rewrites a *whole crate*, so it clobbers another agent's uncommitted files in that crate exactly as `--all` already did once. Format only the files you edited: `rustfmt --edition 2024 <file>`. **`--edition 2024` is not optional** — bare `rustfmt` defaults to Rust 2015, dies on every `async fn` in the file, and chained with `&&` silently skips whatever came next. Every `cargo fmt -p …` in the steps below is subject to this.
 - **Branch:** work on `master`, committing directly, per the repository owner's instruction.
 - Conventional commit messages. Every task ends with at least one commit.
 - **Running the workspace suite dirties seven files you must not commit.** `crates/scripting_lua/tests/` holds `task_graph-{1,2}.{dot,md}` and three `.png` files that the fixture script rewrites on every run. Nothing reads or compares them (see Task 8). After any `cargo test --workspace`, `git status` will show them modified — revert with `git checkout -- crates/scripting_lua/tests/` and never include them in a commit. This matters most in Task 7, whose commit path is `-- crates/scripting_lua` and would otherwise sweep them in.
@@ -218,7 +219,7 @@ git commit -m "feat(planner): name the target entity and inventory slot on inser
 [package]
 name = "factorio-bot-executor"
 version = "0.2.4-dev"
-edition = "2021"
+edition = "2024"  # corrected 2026-09-03: this said 2021; every crate here is 2024
 
 [dependencies]
 factorio-bot-core = { path = "../core", version = "0.2.4-dev" }

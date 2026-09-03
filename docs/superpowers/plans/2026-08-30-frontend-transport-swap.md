@@ -27,7 +27,7 @@ Copied verbatim from the brief. Every task's requirements implicitly include thi
 - `panic = "abort"` in the release profile: any `.unwrap()` reachable from a request is a remote process kill.
 - No authentication, by explicit decision.
 - Commits go to `master`; no feature branches.
-- Rust: `cargo clippy --workspace --all-features --all-targets -- --deny warnings` and `cargo fmt --all -- --check` must pass.
+- Rust: `cargo clippy --workspace --all-features --all-targets -- --deny warnings` must pass. (`cargo fmt --all -- --check` only *reads*, so it is safe — but **never run the rewriting forms `cargo fmt --all` or `cargo fmt -p <crate>`**, both banned by CLAUDE.md; format what you edited with `rustfmt --edition 2024 <file>`, where `--edition 2024` is not optional.)
 - Frontend: `pnpm run lint` and `pnpm run test:coverage` must pass. **The package manager is pnpm, not yarn** — yarn was removed today. Vite is 8, vitest 4, ESLint 10 flat config, Tailwind v4, PrimeVue 4.
 - **`git diff` in this repo lies to greps.** `diff.external` is set to difftastic, so `git diff` emits no `+`/`-` prefixed lines and any `grep "^+"` over it returns 0 — indistinguishable from "found nothing". Measured on a known one-line removal: `git diff … | grep -c "^-rusttype"` gives **0**, `git diff --no-ext-diff … | grep -c` gives **1**. `git show` and `git log` are *not* affected (they disable the external driver unless `--ext-diff` is passed), which is why review packages built with `git show` are genuine unified diffs. Pass `--no-ext-diff` to every `git diff` regardless — a verification command that cannot fail is worse than a wrong answer, because a wrong answer gets challenged and a false green does not.
 - Cargo and pnpm both need the Nix devShell: `nix develop --command bash -c 'eval "$(mise env -s bash)"; <command>'`
@@ -673,7 +673,12 @@ Replace the `compare_exchange` with `if state.starting.load(Ordering::SeqCst) { 
 - [ ] **Step 12: Lint and commit**
 
 ```bash
-nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt --all && cargo fmt --all -- --check && cargo clippy --workspace --all-features --all-targets -- --deny warnings'
+# 2026-09-03: `cargo fmt --all` was here. CLAUDE.md bans it — it rewrites files
+# this task never touched, including another agent's uncommitted work in this
+# shared checkout, which has already happened once. `cargo fmt -p <crate>` is
+# banned for the same reason: it still rewrites a whole crate. `--edition 2024`
+# is required — bare `rustfmt` assumes Rust 2015 and dies on every `async fn`.
+nix develop --command bash -c 'eval "$(mise env -s bash)"; rustfmt --edition 2024 <every file this task edited> && cargo fmt --all -- --check && cargo clippy --workspace --all-features --all-targets -- --deny warnings'
 git add crates/core/src/process/instance_setup.rs crates/server
 git commit -m "feat(server): add POST /api/v1/instance/start; extract archives off the async runtime"
 ```
@@ -876,7 +881,12 @@ Delete the `#[schema(no_recursion)]` attribute and run `cargo test -p factorio-b
 - [ ] **Step 9: Lint and commit**
 
 ```bash
-nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt --all && cargo fmt --all -- --check && cargo clippy --workspace --all-features --all-targets -- --deny warnings'
+# 2026-09-03: `cargo fmt --all` was here. CLAUDE.md bans it — it rewrites files
+# this task never touched, including another agent's uncommitted work in this
+# shared checkout, which has already happened once. `cargo fmt -p <crate>` is
+# banned for the same reason: it still rewrites a whole crate. `--edition 2024`
+# is required — bare `rustfmt` assumes Rust 2015 and dies on every `async fn`.
+nix develop --command bash -c 'eval "$(mise env -s bash)"; rustfmt --edition 2024 <every file this task edited> && cargo fmt --all -- --check && cargo clippy --workspace --all-features --all-targets -- --deny warnings'
 git add crates/core/src/types.rs crates/server app/src-tauri/build.rs app/src-tauri/src/gui/command/script.rs app/src/models/types.ts app/src/components/ScriptTree.vue app/src/store/scriptStore.ts
 git commit -m "refactor!: rename PrimeVueTreeNode to ScriptTreeNode in the api schema"
 ```
@@ -3565,8 +3575,16 @@ Expected: `error: package ID specification 'tauri' did not match any packages`.
 - [ ] **Step 10: Test, lint, commit**
 
 ```bash
-nix develop --command bash -c 'eval "$(mise env -s bash)"; cargo fmt --all && cargo fmt --all -- --check && cargo clippy --workspace --all-features --all-targets -- --deny warnings && cargo test --workspace'
-git add -A app/src-tauri
+# 2026-09-03: `cargo fmt --all` was here. CLAUDE.md bans it — it rewrites files
+# this task never touched, including another agent's uncommitted work in this
+# shared checkout, which has already happened once. `cargo fmt -p <crate>` is
+# banned for the same reason: it still rewrites a whole crate. `--edition 2024`
+# is required — bare `rustfmt` assumes Rust 2015 and dies on every `async fn`.
+nix develop --command bash -c 'eval "$(mise env -s bash)"; rustfmt --edition 2024 <every file this task edited> && cargo fmt --all -- --check && cargo clippy --workspace --all-features --all-targets -- --deny warnings && cargo test --workspace'
+# 2026-09-03: `git add -A app/src-tauri` was here. CLAUDE.md bans `git add -A` in
+# any form — the index is shared, and a directory pathspec still sweeps another
+# agent's edits under that directory. Stage the exact paths, deletions included.
+git add <the exact paths under app/src-tauri this task touched>
 git commit -m "feat!: remove the tauri desktop shell; the app is browser-only"
 ```
 

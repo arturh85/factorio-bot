@@ -1,6 +1,6 @@
 # `Goal::Producing` — Design
 
-**Status:** specified, not implemented
+**Status:** **PARTLY IMPLEMENTED — layers 2 and 3 ship, layer 1 does not.** Corrected 2026-09-03; this line read *"specified, not implemented"*. `Goal::Producing` is claimed by two methods (`crates/planner/src/method/have.rs:1992,1997`), answered by `holds` (`:227`), reachable from Lua as `goal.producing` (`crates/scripting_lua/src/globals/goal/value.rs:70`) and used by live scripts. The field is `per_minute: u32`, **not** the spec's `rate: f64` — changed deliberately for determinism (`crates/planner/src/goal.rs:118-128`). **Missing:** the ratio solver — no matrix, no rationals, just `ceil(per_minute * ticks_per_item / 3600)` (`crates/planner/src/method/produce.rs:150`). D1/D2's `Ax = b` solver is **not the blocker** for green science: `assembly_spec` (`crates/planner/src/method/assemble.rs:258-296`) rejects `logistic-science-pack` on *cell shape*, not on ratio arithmetic. **D4 is wrong — see the marker there.**
 **Date:** 2026-09-01
 
 ## Why
@@ -81,7 +81,11 @@ rediscover:
 
 ### Layer 3 — Construction: building it
 
-**D4: reuse `Produced`.** Each entity the layout calls for becomes a
+**D4: reuse `Produced`.**
+
+> **OBSOLETE 2026-09-03 — D4 NAMES THE WRONG GOAL; DO NOT FOLLOW IT.** A bill of machines written with `Goal::Produced` **re-crafts every replan**: `Produced` deliberately ignores inventory — that is its entire reason to exist — so it does not see the machines the bot is already carrying. The shipped code uses `Goal::Have` and says so in place, naming this spec: `crates/planner/src/method/produce.rs:554-557`, *"`Goal::Have` and not `Goal::Produced`, which is where the 2026-09-01 design named the wrong goal"*. The `Place`-action half of D4 below is unaffected.
+
+Each entity the layout calls for becomes a
 `Goal::Produced { item, count }` subgoal and a `Place` action at the computed
 position. Nothing new is needed to *make* the machines; `Produced` already
 causes production by whichever method applies, and `Place` already exists.

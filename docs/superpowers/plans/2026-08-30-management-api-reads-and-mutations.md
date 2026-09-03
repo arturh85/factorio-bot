@@ -6,7 +6,7 @@
 
 **Architecture:** The surviving `#[tauri::command]` handlers move into `crates/server` as axum routes under `/api/v1`, reading the same `SharedAppSettings` and `SharedFactorioInstance` the CLI already holds. The script helpers they depend on move down into `crates/core` first, as the settings did in plan 2. Long-running operations — starting instances and executing scripts — are deliberately excluded; they need the job registry and SSE, which is plan 4.
 
-**Tech Stack:** Rust 2021, axum 0.8, tokio, utoipa, miette.
+**Tech Stack:** Rust 2024, axum 0.8, tokio, utoipa, miette.
 
 **Spec:** `docs/superpowers/specs/2026-08-29-webserver-replaces-tauri-gui-design.md`
 
@@ -14,10 +14,11 @@
 
 ## Global Constraints
 
-- Workspace root `/home/arturh/projects/private/factorio-bot`. Rust edition 2021. Branch: `master`, committing directly — no feature branches.
+- Workspace root `/home/arturh/projects/private/factorio-bot`. Rust edition **2024** (corrected 2026-09-03; this line said 2021, and every crate's `Cargo.toml` says `edition = "2024"`). Any `rustfmt` invocation therefore **needs `--edition 2024`** — the flag is not optional: bare `rustfmt` defaults to Rust 2015, dies on every `async fn` in the file, and chained with `&&` silently skips whatever came next. Branch: `master`, committing directly — no feature branches.
 - **Every cargo command runs inside the Nix devShell with mise on PATH:**
   `nix develop --command bash -c 'eval "$(mise env -s bash)"; <command>'`
 - **`cargo fmt -p <crate>` only, never `cargo fmt --all`** — another agent owns crates with pre-existing drift in this shared checkout.
+  **CORRECTED 2026-09-03: `cargo fmt -p <crate>` is banned as well.** CLAUDE.md bans every rewriting `cargo fmt` form, `-p` included — it rewrites a *whole crate*, so it clobbers another agent's uncommitted files in that crate exactly as `--all` already did once. Format only the files you edited: `rustfmt --edition 2024 <file>`. **`--edition 2024` is not optional** — bare `rustfmt` defaults to Rust 2015, dies on every `async fn` in the file, and chained with `&&` silently skips whatever came next. Every `cargo fmt -p …` in the steps below is subject to this.
 - **Commit with `git commit -- <explicit paths>`, never `git add -A` or a bare `git commit`.** The git index is shared with another agent.
 - Lint gate: `cargo clippy -p factorio-bot-core -p factorio-bot-server -p factorio-bot --all-features --all-targets -- --deny warnings --deny deprecated`. Not `--workspace`: `crates/planner` belongs to another agent and its state fluctuates.
 - Do not touch anything under `crates/planner/`.
@@ -935,7 +936,7 @@ Three loose ends, gathered because each is small.
 
 **`fs/exists`** ports `file_exists` (`app/src-tauri/src/gui/command/io.rs:7-11`). The settings page uses it to validate the workspace and archive paths as you type. Note this now checks paths on the *server*, which is the correct semantics for a remote UI but a change in meaning.
 
-**The shutdown timeout** guards a hang that does not exist yet but will: once plan 4 adds SSE streams that never end on their own, `with_graceful_shutdown` will wait for them forever, and a second Ctrl-C cannot help because `tokio::signal` has replaced the default disposition for the process lifetime. Wrap the serve future so shutdown gives in-flight work a bounded grace period — 10 seconds — and then proceeds to stop the instance regardless.
+**The shutdown timeout** (**note: the mechanism prescribed in Step 5 is obsolete as of 2026-09-03 — see the marker there**) guards a hang that does not exist yet but will: once plan 4 adds SSE streams that never end on their own, `with_graceful_shutdown` will wait for them forever, and a second Ctrl-C cannot help because `tokio::signal` has replaced the default disposition for the process lifetime. Wrap the serve future so shutdown gives in-flight work a bounded grace period — 10 seconds — and then proceeds to stop the instance regardless.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1051,6 +1052,8 @@ Register it in `crates/server/src/manage/mod.rs`.
 In `app/src-tauri/src/cli/serve.rs`, add an `Arg` named `web-root` alongside `bind`, and when present override the settings value before starting — the server reads the web root from settings at startup, so the override must be applied to the `SharedAppSettings` (or passed through the call) rather than set after the router is built. Match whatever shape plan 2's fix wave left `start_with_shutdown` in.
 
 - [ ] **Step 5: Add the shutdown timeout**
+
+> **OBSOLETE 2026-09-03 — DO NOT IMPLEMENT AS WRITTEN.** Wrapping the whole `serve().with_graceful_shutdown()` future in a fixed `timeout` **kills the server ten seconds after start even when nothing ever asked it to shut down.** That was tried, observed, and is now recorded in place at `crates/server/src/webserver.rs:117-128` and guarded by `server_survives_past_the_grace_period_with_no_shutdown_signal` in `crates/server/tests/shutdown.rs`. The shipped fix fans `shutdown` out through a `tokio::sync::watch` channel to two consumers, so the grace-period sleep only starts once the shutdown signal has actually fired. The goal below (bound the drain, never skip the instance-stop block) still stands; the mechanism does not.
 
 In `crates/server/src/webserver.rs`, bound the graceful-shutdown wait. `axum::serve(...).with_graceful_shutdown(shutdown)` returns a future; wrap the await in `tokio::time::timeout(Duration::from_secs(10), …)`. On timeout, log that in-flight requests were abandoned and continue to the instance-stop block — never skip it, which is the bug plan 2 already fixed once on the error path.
 

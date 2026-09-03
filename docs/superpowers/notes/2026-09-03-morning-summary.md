@@ -193,6 +193,51 @@ had 6. Something re-seeded it in between and I could not attribute it. What is
 not in doubt is that run 4's *game* had the old mod — Factorio loads mods at
 server start, and the game itself raised the missing-function error.
 
+## Plant adoption: both call sites asked the wrong question (fixed, `e5402fd8`)
+
+**Both places that need power asked "is there supply within 64 tiles *of the
+bot*?" and read "no" as "this world has no power."** `assemble.rs:1350` and
+`have.rs:1736` (pre-fix) had the same shape: `nearest_supply_anchor(from,
+ANCHOR_SEARCH_RADIUS /* 64 */, want_kw)`, else `plan_plant(...)`.
+
+Run 9's own record shows it firing. At tick **150,645** the plan contains
+`place offshore-pump at [9.5, -45.5]`, a boiler and `place steam-engine at
+[12.5, -39.5]` — a **second** plant — while `map.jsonl` has the first (pump
+`[-5.5,-57.5]`, engine `[-11.5,-54.5]`, pole `[-13.5,-56.5]`) standing from tick
+127,098 and never removed. `samples.jsonl` at tick 150,600 puts bot 1 **86.0
+tiles** from that pole: just past 64.
+
+Fix: `power.rs:208` `PLANT_ADOPT_RADIUS = 256`, `:466` `enum Supply {
+Standing(Position), Build(Plant) }`, `:532` `supply_for(...)` — near anchor,
+wide anchor, then build. Adopt-first at any distance rather than comparing
+distances, because a walk is `distance / WALK_TILES_PER_TICK` (~1,700 ticks even
+at 256 tiles) while a plant is ~45 iron plates that must be mined and smelted
+first, **plus one wood, of which a run has four for ever**.
+
+**What adoption verifies:** the pole exists and this crate knows its supply
+area; a *generator* sits on a pole in the same wire-connected component; and
+generation minus every consumer already on that network is ≥ the wanted kW.
+Because both callers pass `kw > 0`, coverage alone can never satisfy it — a lone
+pole is passed over and a plant built. **What it assumes, and this is named in
+the code:** that the plant is *running*. Nothing in `FactorioWorld` reports
+steam, water or a fuel slot, so a boiler that ran dry is adopted at nameplate
+900 kW. Adoption does not make that worse — a plant this planner *builds* is
+credited 900 kW the moment its `Place` is emitted, long before any coal reaches
+it — and the adopting cell tops the boiler up, which a second plant across the
+map would not have.
+
+**An honest residual, worth knowing before the next run.** Run 9's *final*
+refusal (tick 179,447, `PowerPlantNeedsShore`) is **not** explained by distance.
+That run's last keyframe reports pole, engine and boiler in the model with zero
+divergence from the game, and the last `bots` sample puts all four bots 59–60
+tiles from the pole; replaying `nearest_supply_anchor` on that exact set answers
+`Some([-13.5,-56.5])` at radius 64. So the origin that expansion was actually
+asked from is not one the run record carries. The 256-tile bound is a margin
+chosen to adopt whether the origin is the bot's real position or a stale one —
+not a demonstration that the fatal step is understood.
+
+No pin moved; workspace green.
+
 ## Run 9: furthest yet — and a standing plant was re-sited to death
 
 **Run 9 (`run-1788408407-02764`) is the high-water mark.** Rung 1 SATISFIED

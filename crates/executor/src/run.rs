@@ -7,14 +7,19 @@
 
 use crate::actuator::{ActionTicks, Actuator, ActuatorError, ActuatorFailure};
 use crate::log::{ExecutionLog, Status};
+use crate::occupancy::{Occupancy, inventory_footprint, occupancy, shares_inventory};
 use factorio_bot_core::petgraph::algo::toposort;
 use factorio_bot_core::petgraph::graph::{DiGraph, NodeIndex};
 use factorio_bot_planner::{
-    ActionId, ActionKind, ActionNetwork, BotId, Condition, Schedule, ScheduledStep, StepKind, Ticks,
+    ActionId, ActionKind, ActionNetwork, BotId, Condition, ItemId, Schedule, ScheduledStep,
+    StepKind, Ticks,
 };
 use futures::future::join_all;
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Mutex;
+use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::watch;
 
@@ -255,163 +260,445 @@ pub async fn run(
 /// Walk one bot's slice of the schedule, in order, waiting on the completion
 /// signal of every predecessor before each action.
 ///
+/// # One *exclusive* action in flight per bot, not one action
+///
+/// The invariant this loop used to keep was "one action per bot at a time".
+/// That is right for work the character does and wrong for work the game does
+/// — see [`crate::occupancy`], and the 0-of-99 measurement in its docs. What it
+/// keeps now:
+///
+/// - at most one [`Occupancy::Exclusive`] action, or one `Walk` step, is in
+///   flight for a bot;
+/// - any number of [`Occupancy::Background`] actions may be in flight beside
+///   it, **provided their [`inventory_footprint`]s are disjoint** from the step
+///   about to start and from each other. Where they are not, this loop waits
+///   for the conflicting ones to settle, exactly as it always did.
+///
+/// # Ordering is untouched — only the bot's exclusivity is relaxed
+///
+/// A background action still runs [`await_preds`] before it dispatches, so
+/// every network edge and every lag edge still means what it meant. And every
+/// consumer still waits on that action's own completion signal, which is
+/// published when the game *settles* it, not when it was queued: queuing
+/// `craft 10 electronic-circuit` early is only correct because whatever needs
+/// those circuits still waits for the craft to finish.
+///
+/// The wait edges this loop imposes are therefore a **subset** of the ones
+/// [`check_wait_graph`] approved before the run started — it drops some of the
+/// bot-order edges and adds none — and dropping edges from a graph already
+/// proved acyclic cannot introduce a cycle. That is why the pre-flight check
+/// stays exactly as it was: it now rejects a little more than it strictly must,
+/// which is the safe direction for a check whose failure mode is a hung run.
+///
 /// Stops that bot at its first failure: later steps in a chain depend on
 /// earlier ones, and pressing on would issue commands whose preconditions the
-/// game no longer satisfies. Every stop publishes `Failed` for the steps it
+/// game no longer satisfies. Every stop publishes a verdict for the steps it
 /// will now never reach, so waiters elsewhere are released.
-async fn run_bot_signalled(
+async fn run_bot_signalled<'a>(
+    act: &'a dyn Actuator,
+    bot: BotId,
+    steps: &[&'a ScheduledStep],
+    net: &'a ActionNetwork,
+    log: &'a Mutex<ExecutionLog>,
+    senders: &'a BTreeMap<ActionId, watch::Sender<Status>>,
+    receivers: &'a BTreeMap<ActionId, watch::Receiver<Status>>,
+) {
+    let mine: Vec<&'a ScheduledStep> = steps.iter().copied().filter(|s| s.bot == bot).collect();
+    let mut flight: Vec<InFlight<'a>> = Vec::new();
+
+    for (i, step) in mine.iter().copied().enumerate() {
+        let footprint = footprint_of(net, step);
+
+        // Anything already queued that touches the same items has to land
+        // first. The plan sized this step against an inventory the queued
+        // action is about to change, and `crates/planner` reasons about that
+        // inventory by walking the bot's steps *in order* — see
+        // `crate::occupancy` for the two mechanisms that rely on it.
+        let clear = settle_background(&mut flight, |queued| {
+            shares_inventory(&queued.footprint, &footprint)
+        })
+        .await;
+        if let Err(stop) = clear {
+            halt(&mine, stop, &mut flight, senders);
+            return;
+        }
+
+        if let Some(action) = act_id(step)
+            && net
+                .action(action)
+                .is_some_and(|a| occupancy(a) == Occupancy::Background)
+        {
+            // Queued and walked away from. Note this is not a dispatch yet:
+            // `run_action` does its own `await_preds` first, so what the bot
+            // walks away from is a *promise* to dispatch as soon as the plan
+            // allows — which is the whole point, since waiting for a
+            // predecessor is exactly the time the old loop threw away.
+            flight.push(InFlight {
+                action,
+                index: i,
+                footprint,
+                fut: Box::pin(run_action(act, bot, step, net, log, senders, receivers)),
+            });
+            continue;
+        }
+
+        // The exclusive step, driven alongside whatever is still in flight, so
+        // a queued craft keeps making progress while the character works.
+        let (outcome, background_stop) = match &step.what {
+            StepKind::Walk { .. } => drive(&mut flight, run_walk(act, bot, i, step, log)).await,
+            StepKind::Act { .. } => {
+                drive(
+                    &mut flight,
+                    run_action(act, bot, step, net, log, senders, receivers),
+                )
+                .await
+            }
+        };
+        // This step's own verdict first, and only then a background one: this
+        // step was already in the game's hands, so its outcome is both the
+        // more specific reason to stop and the one whose signal has already
+        // been published.
+        if let Err(halted) = outcome {
+            halt(&mine, halted.at(i), &mut flight, senders);
+            return;
+        }
+        if let Some(stop) = background_stop {
+            halt(&mine, stop, &mut flight, senders);
+            return;
+        }
+    }
+
+    // The bot's steps are done; what it queued and walked away from is not.
+    // Returning here would drop those futures, and `LoseTrackOnDrop` would then
+    // report as `Lost` crafts the game was in the middle of finishing — and
+    // release their waiters as abandoned, which would take down bots that were
+    // about to succeed.
+    let drained = settle_background(&mut flight, |_| true).await;
+    if let Err(stop) = drained {
+        halt(&mine, stop, &mut flight, senders);
+    }
+}
+
+/// A background action a bot queued and walked away from.
+struct InFlight<'a> {
+    action: ActionId,
+    /// Where it sits in the bot's slice, so that when it fails it can say which
+    /// of the remaining steps it takes down with it. The bot may be several
+    /// steps further on by then, which is exactly why the index has to be
+    /// carried rather than read off the loop.
+    index: usize,
+    /// What it may move in or out of the bot's inventory. See
+    /// [`crate::occupancy`].
+    footprint: BTreeSet<ItemId>,
+    fut: Pin<Box<dyn Future<Output = Result<(), Halt>> + Send + 'a>>,
+}
+
+/// How much of a bot's remaining slice a stop takes with it.
+///
+/// Two variants because the two stops differ in exactly one thing: whether a
+/// verdict has already been published for the step that stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Halt {
+    /// Nothing was published for this step — its predecessors were abandoned,
+    /// or the network does not hold it — so abandonment starts *at* it.
+    ThisStep,
+    /// The game judged this step and the verdict is already on its signal, so
+    /// abandonment starts one past it.
+    NextStep,
+}
+
+impl Halt {
+    fn at(self, index: usize) -> Stop {
+        Stop {
+            from: match self {
+                Halt::ThisStep => index,
+                Halt::NextStep => index.saturating_add(1),
+            },
+        }
+    }
+}
+
+/// A [`Halt`] pinned to the step it happened at: the first index of the bot's
+/// slice that will now never run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stop {
+    from: usize,
+}
+
+/// The items a step may move in or out of its bot's inventory.
+///
+/// A `Walk` moves none, so it never blocks a queued craft and a queued craft
+/// never blocks it — which is the case the whole change exists for. An action
+/// the network does not hold is about to be failed by [`run_action`] anyway,
+/// and an empty set for it blocks nothing that its failure will not.
+fn footprint_of(net: &ActionNetwork, step: &ScheduledStep) -> BTreeSet<ItemId> {
+    act_id(step)
+        .and_then(|id| net.action(id))
+        .map(inventory_footprint)
+        .unwrap_or_default()
+}
+
+/// Poll every in-flight background action once, dropping the ones that
+/// finished from the set, and report the first reason to stop the bot.
+///
+/// Removing before reporting matters: the caller that gets a `Stop` goes on to
+/// [`halt`], which publishes `Lost` for everything *still* in flight, and an
+/// action that has just published its own verdict must not be overwritten.
+fn poll_background(flight: &mut Vec<InFlight<'_>>, cx: &mut Context<'_>) -> Option<Stop> {
+    let mut stop: Option<Stop> = None;
+    let mut i = 0;
+    while i < flight.len() {
+        match flight[i].fut.as_mut().poll(cx) {
+            Poll::Ready(outcome) => {
+                let done = flight.remove(i);
+                if stop.is_none() {
+                    stop = outcome.err().map(|halted| halted.at(done.index));
+                }
+            }
+            Poll::Pending => i += 1,
+        }
+    }
+    stop
+}
+
+/// Keep the background set running until nothing `blocking` names is left in
+/// it.
+///
+/// `|_| true` drains the set completely; a footprint predicate waits out only
+/// the actions that could disturb what is about to start. Everything else is
+/// polled either way — a craft that shares no items keeps making progress
+/// while a conflicting one is waited out.
+async fn settle_background<'a, F>(flight: &mut Vec<InFlight<'a>>, blocking: F) -> Result<(), Stop>
+where
+    F: Fn(&InFlight<'a>) -> bool,
+{
+    std::future::poll_fn(|cx| {
+        if let Some(stop) = poll_background(flight, cx) {
+            return Poll::Ready(Err(stop));
+        }
+        if flight.iter().any(&blocking) {
+            Poll::Pending
+        } else {
+            Poll::Ready(Ok(()))
+        }
+    })
+    .await
+}
+
+/// Run `fut` to completion while the background set keeps making progress,
+/// handing back both outcomes.
+///
+/// A background failure does **not** cancel `fut`: by the time it is noticed
+/// `fut` may already be a command the game has, and dropping it there would
+/// turn a dispatch with a verdict coming into one nobody will ever hear about.
+/// The caller acts on `fut`'s own outcome first and on this second.
+async fn drive<'a, T>(
+    flight: &mut Vec<InFlight<'a>>,
+    fut: impl Future<Output = T>,
+) -> (T, Option<Stop>) {
+    let mut fut = Box::pin(fut);
+    let mut stopped: Option<Stop> = None;
+    let out = std::future::poll_fn(|cx| {
+        // The background set first, so a craft queued a moment ago reaches the
+        // game ahead of the exclusive step that follows it. Correctness does
+        // not rest on that ordering — disjoint footprints are what make the
+        // two safe in either order, see `crate::occupancy` — but the plan's
+        // order is still the best order to ask the game for.
+        if let Some(stop) = poll_background(flight, cx)
+            && stopped.is_none()
+        {
+            stopped = Some(stop);
+        }
+        fut.as_mut().poll(cx)
+    })
+    .await;
+    (out, stopped)
+}
+
+/// Stop this bot: give up on everything it queued, and release every waiter on
+/// the steps it will now never reach.
+fn halt(
+    mine: &[&ScheduledStep],
+    stop: Stop,
+    flight: &mut Vec<InFlight<'_>>,
+    senders: &BTreeMap<ActionId, watch::Sender<Status>>,
+) {
+    // Whatever is still queued is dropped where it stands, and dropped is
+    // `Lost`, not `Failed`: the game may well finish the craft, and nobody in
+    // this run will ever hear about it. `await_preds` abandons on either, so
+    // this does not change who is released — but a run record must not claim a
+    // verdict the game never gave, and `recover` counts failures towards its
+    // escalation budget and losses not at all.
+    for queued in flight.iter() {
+        publish(senders, queued.action, Status::Lost);
+    }
+    let dropped: BTreeSet<ActionId> = flight.iter().map(|queued| queued.action).collect();
+    flight.clear();
+    abandon_rest(&mine[stop.from.min(mine.len())..], senders, &dropped);
+}
+
+/// One `Walk` step.
+///
+/// A walk needs no `ActionId` to be recorded. `run_bot_signalled` iterates one
+/// bot's steps in schedule order, so `(bot, index)` is already a unique, stable
+/// key — the ticks the actuator has always measured here now have somewhere to
+/// go. Walking is most of the wall-clock in these plans, so dropping them was
+/// the biggest hole in the timeline.
+async fn run_walk(
     act: &dyn Actuator,
     bot: BotId,
-    steps: &[&ScheduledStep],
+    index: usize,
+    step: &ScheduledStep,
+    log: &Mutex<ExecutionLog>,
+) -> Result<(), Halt> {
+    // Unreachable by construction: the caller matched the step kind before
+    // choosing this. Answering `Ok` rather than panicking keeps a future
+    // mis-wiring a step that did not happen instead of a run that aborts.
+    let StepKind::Walk {
+        to,
+        min_radius,
+        radius,
+    } = &step.what
+    else {
+        return Ok(());
+    };
+    lock(log).start_walk(bot, index, to.clone(), step.start, step.end);
+    match act.walk(bot, to.clone(), *min_radius, *radius).await {
+        Ok(ticks) => {
+            // Same order and same reasoning as the action arm: the
+            // observation, then the outcome.
+            let mut log = lock(log);
+            log.observe_walk(bot, index, ticks);
+            log.succeed_walk(bot, index);
+            Ok(())
+        }
+        Err(f) => {
+            // Whatever the game stamped before this went wrong is recorded
+            // first, exactly as on the success path: a walk the game
+            // acknowledged and then refused really was dispatched at a tick,
+            // and dropping that number would make it indistinguishable from a
+            // walk the game never saw.
+            //
+            // The entry's `status` is then what keeps a walk that did not
+            // happen distinguishable from one that happened unobserved — and
+            // from one whose outcome the game never reported, which is neither.
+            let mut log = lock(log);
+            log.observe_walk(bot, index, f.ticks);
+            match &f.error {
+                ActuatorError::NoVerdict(_) => {
+                    log.lose_track_walk(bot, index, &f.to_string());
+                }
+                _ => log.fail_walk(bot, index, f.to_string()),
+            }
+            // A walk carries no signal of its own, so the step it was going to
+            // enable is abandoned along with the rest.
+            Err(Halt::ThisStep)
+        }
+    }
+}
+
+/// One `Act` step: wait out its predecessors, dispatch it, and publish what the
+/// game said.
+///
+/// The same function serves an exclusive action, which the bot stands and waits
+/// for, and a background one, which it queues and walks away from. Nothing in
+/// here knows which it is: that is the point — the ordering guarantees are
+/// identical, and only the caller's willingness to move on differs.
+async fn run_action(
+    act: &dyn Actuator,
+    bot: BotId,
+    step: &ScheduledStep,
     net: &ActionNetwork,
     log: &Mutex<ExecutionLog>,
     senders: &BTreeMap<ActionId, watch::Sender<Status>>,
     receivers: &BTreeMap<ActionId, watch::Receiver<Status>>,
-) {
-    let mine: Vec<&ScheduledStep> = steps.iter().copied().filter(|s| s.bot == bot).collect();
-
-    for (i, step) in mine.iter().enumerate() {
-        match &step.what {
-            StepKind::Walk {
-                to,
-                min_radius,
-                radius,
-            } => {
-                // A walk needs no `ActionId` to be recorded. This loop is one
-                // bot's steps in schedule order, so `(bot, i)` is already a
-                // unique, stable key — the ticks the actuator has always
-                // measured here now have somewhere to go. Walking is most of
-                // the wall-clock in these plans, so dropping them was the
-                // biggest hole in the timeline.
-                lock(log).start_walk(bot, i, to.clone(), step.start, step.end);
-                match act.walk(bot, to.clone(), *min_radius, *radius).await {
-                    Ok(ticks) => {
-                        // Same order and same reasoning as the action arm:
-                        // the observation, then the outcome.
-                        let mut log = lock(log);
-                        log.observe_walk(bot, i, ticks);
-                        log.succeed_walk(bot, i);
-                    }
-                    Err(f) => {
-                        // Whatever the game stamped before this went wrong is
-                        // recorded first, exactly as on the success path: a
-                        // walk the game acknowledged and then refused really
-                        // was dispatched at a tick, and dropping that number
-                        // would make it indistinguishable from a walk the game
-                        // never saw.
-                        //
-                        // The entry's `status` is then what keeps a walk that
-                        // did not happen distinguishable from one that happened
-                        // unobserved — and from one whose outcome the game
-                        // never reported, which is neither.
-                        {
-                            let mut log = lock(log);
-                            log.observe_walk(bot, i, f.ticks);
-                            match &f.error {
-                                ActuatorError::NoVerdict(_) => {
-                                    log.lose_track_walk(bot, i, &f.to_string());
-                                }
-                                _ => log.fail_walk(bot, i, f.to_string()),
-                            }
-                        }
-                        abandon_rest(&mine[i..], senders);
-                        return;
-                    }
+) -> Result<(), Halt> {
+    // Unreachable by construction, as in `run_walk`.
+    let Some(action) = act_id(step) else {
+        return Ok(());
+    };
+    if let PredOutcome::Abandoned = await_preds(act, net, action, log, receivers).await {
+        return Err(Halt::ThisStep);
+    }
+    lock(log).start(action, step.start);
+    let Some(a) = net.action(action) else {
+        lock(log).fail(action, step.start, "action not in network".to_string());
+        return Err(Halt::ThisStep);
+    };
+    // `perform` awaits, so the guard is taken and dropped around it, never
+    // held across it.
+    match perform(act, bot, &a.kind).await {
+        Ok(ticks) => {
+            // Observation first, then the plan-side outcome: both writes are
+            // under the same guard as far as any reader is concerned, and
+            // `succeed` is what marks the attempt finished, after which
+            // `observe` would refuse.
+            {
+                let mut log = lock(log);
+                log.observe(action, ticks);
+                log.succeed(action, step.end);
+                // Drained here, not inside `perform`/`place` itself: this
+                // scope is the first place with both the actuator and the
+                // scheduler's `ActionId` for what just finished, which is
+                // exactly what `Actuator::take_placement` needs to attach the
+                // fact to. A placement waits in the actuator at most this long
+                // -- only an *exclusive* action can park one, and a bot runs
+                // at most one of those at a time, so nothing can queue a
+                // second one behind it before it is claimed. See
+                // `crate::occupancy`, which is where that guarantee is stated
+                // and where a new background kind would have to break it.
+                if let Some(placement) = act.take_placement(bot) {
+                    log.record_placement(action, placement);
+                }
+                // Drained in the same breath and for the same reason. This one
+                // qualifies a *success*: an `insert` whose destination had no
+                // room for the rest delivered less than the plan asked for and
+                // still satisfied the goal, and without this the record would
+                // show it as an ordinary full delivery. The short-source case
+                // -- the bot not holding what the plan believed -- is a failure
+                // and arrives on the `Err` arm below instead, so the two never
+                // share a row.
+                if let Some(full) = act.take_destination_full(bot) {
+                    log.record_note(action, full.to_string());
                 }
             }
-            StepKind::Act { action, .. } => {
-                if let PredOutcome::Abandoned = await_preds(act, net, *action, log, receivers).await
-                {
-                    abandon_rest(&mine[i..], senders);
-                    return;
-                }
-                lock(log).start(*action, step.start);
-                let Some(a) = net.action(*action) else {
-                    lock(log).fail(*action, step.start, "action not in network".to_string());
-                    abandon_rest(&mine[i..], senders);
-                    return;
-                };
-                // `perform` awaits, so the guard is taken and dropped around
-                // it, never held across it.
-                match perform(act, bot, &a.kind).await {
-                    Ok(ticks) => {
-                        // Observation first, then the plan-side outcome: both
-                        // writes are under the same guard as far as any reader
-                        // is concerned, and `succeed` is what marks the attempt
-                        // finished, after which `observe` would refuse.
-                        {
-                            let mut log = lock(log);
-                            log.observe(*action, ticks);
-                            log.succeed(*action, step.end);
-                            // Drained here, not inside `perform`/`place`
-                            // itself: this scope is the first place with both
-                            // the actuator and the scheduler's `ActionId` for
-                            // what just finished, which is exactly what
-                            // `Actuator::take_placement` needs to attach the
-                            // fact to. A placement waits in the actuator at
-                            // most this long -- a bot's own steps run
-                            // strictly in order, so nothing can queue a
-                            // second one behind it before it is claimed.
-                            if let Some(placement) = act.take_placement(bot) {
-                                log.record_placement(*action, placement);
-                            }
-                            // Drained in the same breath and for the same
-                            // reason. This one qualifies a *success*: an
-                            // `insert` whose destination had no room for the
-                            // rest delivered less than the plan asked for and
-                            // still satisfied the goal, and without this the
-                            // record would show it as an ordinary full
-                            // delivery. The short-source case -- the bot not
-                            // holding what the plan believed -- is a failure
-                            // and arrives on the `Err` arm below instead, so
-                            // the two never share a row.
-                            if let Some(full) = act.take_destination_full(bot) {
-                                log.record_note(*action, full.to_string());
-                            }
-                        }
-                        if let Some(tx) = senders.get(action) {
-                            let _ = tx.send(Status::Success);
-                        }
-                    }
-                    Err(f) => {
-                        // The observation first, same order as the success
-                        // path and for the same reason. `f.ticks` is what the
-                        // game had stamped before it went wrong — often
-                        // nothing, sometimes a real dispatch tick — and it is
-                        // the only number allowed anywhere near these fields.
-                        // What is *not* allowed is the planned tick sitting in
-                        // the same record.
-                        //
-                        // A verdict of failure and no verdict at all are then
-                        // different facts and are recorded as different states:
-                        // `Failed` says the game judged this and the judgement
-                        // was no, `Lost` says nobody will ever know. Recovery
-                        // counts the first towards its escalation budget and
-                        // not the second, which is the whole reason the two
-                        // must not be collapsed here.
-                        let lost = matches!(f.error, ActuatorError::NoVerdict(_));
-                        {
-                            let mut log = lock(log);
-                            log.observe(*action, f.ticks);
-                            if lost {
-                                log.lose_track(*action, &f.to_string());
-                            } else {
-                                log.fail(*action, step.end, f.to_string());
-                            }
-                        }
-                        // The waiters are released either way — a dependent
-                        // cannot run on a precondition nobody can vouch for —
-                        // but they are told *which* it was. `abandon_rest`
-                        // starts one past this step, because this step's own
-                        // signal has just been published with the truth.
-                        if let Some(tx) = senders.get(action) {
-                            let _ = tx.send(if lost { Status::Lost } else { Status::Failed });
-                        }
-                        abandon_rest(&mine[i + 1..], senders);
-                        return;
-                    }
+            publish(senders, action, Status::Success);
+            Ok(())
+        }
+        Err(f) => {
+            // The observation first, same order as the success path and for
+            // the same reason. `f.ticks` is what the game had stamped before
+            // it went wrong — often nothing, sometimes a real dispatch tick —
+            // and it is the only number allowed anywhere near these fields.
+            // What is *not* allowed is the planned tick sitting in the same
+            // record.
+            //
+            // A verdict of failure and no verdict at all are then different
+            // facts and are recorded as different states: `Failed` says the
+            // game judged this and the judgement was no, `Lost` says nobody
+            // will ever know. Recovery counts the first towards its escalation
+            // budget and not the second, which is the whole reason the two
+            // must not be collapsed here.
+            let lost = matches!(f.error, ActuatorError::NoVerdict(_));
+            {
+                let mut log = lock(log);
+                log.observe(action, f.ticks);
+                if lost {
+                    log.lose_track(action, &f.to_string());
+                } else {
+                    log.fail(action, step.end, f.to_string());
                 }
             }
+            // The waiters are released either way — a dependent cannot run on
+            // a precondition nobody can vouch for — but they are told *which*
+            // it was. Abandonment then starts one past this step, because this
+            // step's own signal has just been published with the truth.
+            publish(
+                senders,
+                action,
+                if lost { Status::Lost } else { Status::Failed },
+            );
+            Err(Halt::NextStep)
         }
     }
 }
@@ -423,18 +710,48 @@ fn lock(log: &Mutex<ExecutionLog>) -> std::sync::MutexGuard<'_, ExecutionLog> {
     log.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Publish `Failed` for every action this bot will now never reach.
+/// Publish `Failed` for every action this bot will now never reach, skipping
+/// the ones in `except`.
 ///
 /// Without this the executor deadlocks: a bot that stops early leaves its
 /// remaining actions at `Pending` forever, and any bot waiting on one of them
 /// waits forever too. Abandonment has to propagate for the run to terminate.
-fn abandon_rest(rest: &[&ScheduledStep], senders: &BTreeMap<ActionId, watch::Sender<Status>>) {
+///
+/// `except` is what [`halt`] has already published `Lost` for — actions still
+/// in flight when the bot gave up, which can sit anywhere in the slice rather
+/// than only past the stop.
+fn abandon_rest(
+    rest: &[&ScheduledStep],
+    senders: &BTreeMap<ActionId, watch::Sender<Status>>,
+    except: &BTreeSet<ActionId>,
+) {
     for step in rest {
         if let StepKind::Act { action, .. } = &step.what
-            && let Some(tx) = senders.get(action)
+            && !except.contains(action)
         {
-            let _ = tx.send(Status::Failed);
+            publish(senders, *action, Status::Failed);
         }
+    }
+}
+
+/// Publish `status` for `id`, unless something has already been published for
+/// it.
+///
+/// The senders only ever carry a terminal verdict — `Success`, `Failed` or
+/// `Lost` — so `Pending` is exactly "nobody has said anything yet", and the
+/// first verdict to arrive is the one the game gave.
+///
+/// **The guard is new with per-bot concurrency and it is load-bearing.** While
+/// a bot could only have one action in flight, everything from the stop
+/// onwards was necessarily unstarted. Now a step *later* in the slice can have
+/// finished before an earlier one failed — a craft that settled while the bot
+/// walked on to a mine that then failed — and sending `Failed` over that
+/// craft's `Success` would abandon the dependents of work that really was done.
+fn publish(senders: &BTreeMap<ActionId, watch::Sender<Status>>, id: ActionId, status: Status) {
+    if let Some(tx) = senders.get(&id)
+        && *tx.borrow() == Status::Pending
+    {
+        let _ = tx.send(status);
     }
 }
 
@@ -1093,6 +1410,13 @@ mod tests {
         Walk(BotId),
         MineStart(String),
         MineEnd(String),
+        /// The moment `begin_crafting` would reach the game. Recorded
+        /// separately from `CraftEnd` because a background craft's whole point
+        /// is that the two can be far apart with the bot elsewhere in between.
+        CraftStart(String),
+        CraftEnd(String),
+        ResearchStart(String),
+        ResearchEnd(String),
     }
 
     /// What the actuator should do, keyed so a test can reverse the timing of
@@ -1103,6 +1427,19 @@ mod tests {
         mine_delay_ms: BTreeMap<String, u64>,
         fail_walk: BTreeSet<BotId>,
         fail_mine: BTreeSet<String>,
+        /// How long a craft of each recipe takes to settle, keyed by recipe.
+        ///
+        /// Zero by default, which is what every test written before background
+        /// crafting existed sees. A craft that takes no time cannot show
+        /// whether anything overlapped it, so the concurrency tests all set
+        /// one — and set it far from every other delay in the same fixture, so
+        /// "the mine started when the craft was queued" and "the mine started
+        /// when the craft settled" are different numbers rather than the same
+        /// one seen twice.
+        craft_delay_ms: BTreeMap<String, u64>,
+        fail_craft: BTreeSet<String>,
+        /// How long the lab takes, for the same reason as `craft_delay_ms`.
+        research_delay_ms: u64,
         /// What `RecordingAct::game_speed` reports. Defaults to `1.0`, not the
         /// derived `f64` default of `0.0` — a script nobody configures must
         /// behave exactly like normal speed, the same as every test written
@@ -1152,6 +1489,9 @@ mod tests {
                 mine_delay_ms: BTreeMap::new(),
                 fail_walk: BTreeSet::new(),
                 fail_mine: BTreeSet::new(),
+                craft_delay_ms: BTreeMap::new(),
+                fail_craft: BTreeSet::new(),
+                research_delay_ms: 0,
                 speed: 1.0,
                 placement: None,
                 destination_full: None,
@@ -1238,11 +1578,22 @@ mod tests {
 
         /// Virtual time elapsed when `item` was dispatched to be mined.
         fn mine_started_at(&self, item: &str) -> Option<Duration> {
+            self.dispatched_at(&Dispatch::MineStart(item.to_string()))
+        }
+
+        /// Virtual time elapsed when `what` happened, or `None` if it never
+        /// did.
+        ///
+        /// The concurrency tests assert on these numbers rather than on an
+        /// order, because an order is satisfied by a run that overlapped
+        /// nothing: "the mine came after the craft was queued" is true of the
+        /// serialised executor too. A moment is not.
+        fn dispatched_at(&self, what: &Dispatch) -> Option<Duration> {
             self.seen
                 .lock()
                 .unwrap()
                 .iter()
-                .find(|(d, _)| d == &Dispatch::MineStart(item.to_string()))
+                .find(|(d, _)| d == what)
                 .map(|(_, at)| *at)
         }
 
@@ -1336,7 +1687,20 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((recipe.to_string(), asked));
-            Ok(self.ticks_now())
+            self.record(Dispatch::CraftStart(recipe.to_string()));
+            let dispatched = self.tick_now();
+            Self::delay(self.script.craft_delay_ms.get(recipe).copied().unwrap_or(0)).await;
+            self.record(Dispatch::CraftEnd(recipe.to_string()));
+            if self.script.fail_craft.contains(recipe) {
+                return Err(ActuatorError::Rejected("the game started 0".into()).into());
+            }
+            // Two different ticks when the craft took time, for the same
+            // reason `mine` reports two: a lag edge behind it is anchored to
+            // the *reply*.
+            Ok(match (dispatched, self.tick_now()) {
+                (Some(from), Some(to)) => ActionTicks::new(Some(from), Some(to)),
+                _ => some_ticks(),
+            })
         }
 
         async fn place(
@@ -1376,7 +1740,10 @@ mod tests {
             Ok(self.ticks_now())
         }
 
-        async fn research(&self, _tech: &str) -> Result<ActionTicks, ActuatorFailure> {
+        async fn research(&self, tech: &str) -> Result<ActionTicks, ActuatorFailure> {
+            self.record(Dispatch::ResearchStart(tech.to_string()));
+            Self::delay(self.script.research_delay_ms).await;
+            self.record(Dispatch::ResearchEnd(tech.to_string()));
             Ok(self.ticks_now())
         }
 
@@ -3037,5 +3404,362 @@ mod tests {
             "nothing here names a technology, so nothing may be waited on"
         );
         assert!(act.crafted_after_queries("iron-gear-wheel").is_some());
+    }
+
+    // ------------------------------------------- background actions (task C)
+    //
+    // The defect these pin: the executor gave each bot exactly one action at a
+    // time and waited for it to settle. On `run-1788465258-49050`, 0 of 99
+    // consecutive same-bot dispatch pairs overlapped, and bot 1 spent 6,575
+    // ticks inside `craft` and 5,999 inside one `research` doing nothing else.
+    // See `crate::occupancy`.
+    //
+    // Every fixture below uses three delays that are three different numbers
+    // (10 ms, 1,000 ms, 2,000 ms), because the previous defect in this file
+    // survived on a fixture where the two quantities under test happened to be
+    // equal.
+
+    /// How long the background action takes to settle in these fixtures.
+    const BACKGROUND_MS: u64 = 1_000;
+    /// How long the exclusive action takes. Deliberately not a divisor or
+    /// multiple of anything else here.
+    const EXCLUSIVE_MS: u64 = 10;
+
+    /// A craft of `item` out of `ingredient`, shaped like the ones
+    /// `crates/planner`'s craft method emits: a `HasItem` for the ingredient, a
+    /// `LoseItem` for spending it, a `GainItem` for the product. The ingredient
+    /// is not decoration — it is half of what decides whether this craft may
+    /// overlap another of the bot's steps.
+    fn craft_of(id: ActionId, item: &str, ingredient: &str) -> Action {
+        Action {
+            id,
+            kind: ActionKind::Craft {
+                item: item.into(),
+                count: 1,
+            },
+            pre: vec![Condition::HasItem {
+                who: Actor::Role,
+                item: ingredient.into(),
+                count: 1,
+            }],
+            eff: vec![
+                Effect::LoseItem {
+                    who: Actor::Role,
+                    item: ingredient.into(),
+                    count: 1,
+                },
+                Effect::GainItem {
+                    who: Actor::Role,
+                    item: item.into(),
+                    count: 1,
+                },
+            ],
+            duration: 30,
+            pinned: None,
+            label: format!("craft 1 {item}"),
+        }
+    }
+
+    /// One bot: a craft of `product` from `ingredient`, then a mine of `ore`.
+    /// `edge` puts a network dependency from the craft to the mine.
+    ///
+    /// Three knobs, because the three tests below differ in exactly one of
+    /// them each: whether the two share an item, and whether the plan orders
+    /// them.
+    fn craft_then_mine_fixture(
+        product: &str,
+        ingredient: &str,
+        ore: &str,
+        edge: bool,
+    ) -> (ActionNetwork, Schedule) {
+        let mut net = ActionNetwork::new();
+        net.add(craft_of(first_action_id(), product, ingredient));
+        net.add(mine_of(second_action_id(), ore));
+        if edge {
+            net.link(first_action_id(), second_action_id(), 0);
+        }
+        let sched = Schedule {
+            steps: vec![
+                act_step(first_action_id(), BotId(0), 0, 30),
+                act_step(second_action_id(), BotId(0), 30, 90),
+            ],
+            makespan: 90,
+        };
+        (net, sched)
+    }
+
+    fn background_script() -> Script {
+        let mut script = Script::default();
+        script
+            .craft_delay_ms
+            .insert("iron-gear-wheel".to_string(), BACKGROUND_MS);
+        script
+            .craft_delay_ms
+            .insert("stone-furnace".to_string(), BACKGROUND_MS);
+        script
+            .mine_delay_ms
+            .insert("copper-ore".to_string(), EXCLUSIVE_MS);
+        script
+            .mine_delay_ms
+            .insert("stone".to_string(), EXCLUSIVE_MS);
+        script
+            .mine_delay_ms
+            .insert("iron-ore".to_string(), EXCLUSIVE_MS);
+        script.research_delay_ms = BACKGROUND_MS;
+        script
+    }
+
+    /// The change itself: a craft goes into the player's crafting queue, and
+    /// the bot mines while it runs.
+    ///
+    /// The craft takes 1,000 ms and the mine 10 ms; the mine is dispatched at
+    /// **zero**, not at 1,000. Asserting the moment rather than the order is
+    /// deliberate: "the mine came after the craft was queued" is true of the
+    /// serialised executor as well.
+    #[tokio::test(start_paused = true)]
+    async fn a_bot_with_a_craft_in_flight_still_starts_an_exclusive_action() {
+        let (net, sched) =
+            craft_then_mine_fixture("iron-gear-wheel", "iron-plate", "copper-ore", false);
+        let act = RecordingAct::new(background_script());
+
+        let log = within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
+
+        assert_eq!(
+            act.dispatched_at(&Dispatch::CraftStart("iron-gear-wheel".into())),
+            Some(Duration::ZERO),
+        );
+        assert_eq!(
+            act.mine_started_at("copper-ore"),
+            Some(Duration::ZERO),
+            "the mine must be dispatched while the craft is still in the \
+             queue, not after it settles",
+        );
+        assert_eq!(
+            act.dispatched_at(&Dispatch::CraftEnd("iron-gear-wheel".into())),
+            Some(Duration::from_millis(BACKGROUND_MS)),
+            "the craft still takes as long as it takes",
+        );
+        assert_eq!(log.status(first_action_id()), Status::Success);
+        assert_eq!(log.status(second_action_id()), Status::Success);
+    }
+
+    /// The same for research, which is the other background verb and the one
+    /// that cost bot 1 a single 5,999-tick stretch of standing still: the lab
+    /// does the work and `Actuator::research` does not even take a bot.
+    #[tokio::test(start_paused = true)]
+    async fn a_bot_with_a_research_in_flight_still_starts_an_exclusive_action() {
+        let mut net = ActionNetwork::new();
+        net.add(Action {
+            id: first_action_id(),
+            kind: ActionKind::Research {
+                tech: "automation".into(),
+            },
+            pre: vec![],
+            eff: vec![Effect::Researched("automation".into())],
+            duration: 6000,
+            pinned: None,
+            label: "research automation".into(),
+        });
+        net.add(mine_of(second_action_id(), "copper-ore"));
+        let sched = Schedule {
+            steps: vec![
+                act_step(first_action_id(), BotId(0), 0, 6000),
+                act_step(second_action_id(), BotId(0), 6000, 6060),
+            ],
+            makespan: 6060,
+        };
+        let act = RecordingAct::new(background_script());
+
+        let log = within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
+
+        assert_eq!(
+            act.mine_started_at("copper-ore"),
+            Some(Duration::ZERO),
+            "the bot must not stand still for a lab it is not operating",
+        );
+        assert_eq!(
+            act.dispatched_at(&Dispatch::ResearchEnd("automation".into())),
+            Some(Duration::from_millis(BACKGROUND_MS)),
+        );
+        assert_eq!(log.status(second_action_id()), Status::Success);
+    }
+
+    /// The invariant that is *kept*: one exclusive action per bot. The same
+    /// shape as the test above with the first verb changed from a craft to a
+    /// mine, and the answer is the opposite one.
+    #[tokio::test(start_paused = true)]
+    async fn a_bot_with_a_mine_in_flight_does_not_start_a_second_exclusive_action() {
+        let mut net = ActionNetwork::new();
+        net.add(mine_of(first_action_id(), "iron-ore"));
+        net.add(mine_of(second_action_id(), "copper-ore"));
+        let sched = Schedule {
+            steps: vec![
+                act_step(first_action_id(), BotId(0), 0, 60),
+                act_step(second_action_id(), BotId(0), 60, 120),
+            ],
+            makespan: 120,
+        };
+        let mut script = background_script();
+        // The slow one first, so an executor that overlapped them would show
+        // the second starting at zero.
+        script
+            .mine_delay_ms
+            .insert("iron-ore".to_string(), BACKGROUND_MS);
+        let act = RecordingAct::new(script);
+
+        within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
+
+        assert_eq!(
+            act.mine_started_at("copper-ore"),
+            Some(Duration::from_millis(BACKGROUND_MS)),
+            "the character can only swing one pick",
+        );
+    }
+
+    /// Ordering survives: queuing a craft early is only correct if whatever
+    /// needs its product still waits for it to settle.
+    ///
+    /// Identical to `a_bot_with_a_craft_in_flight_still_starts_an_exclusive_action`
+    /// except for the one network edge, and the mine moves from tick zero to
+    /// the craft's settle. That pairing is the assertion: the edge is doing the
+    /// work, not the exclusivity.
+    #[tokio::test(start_paused = true)]
+    async fn a_consumer_of_a_background_craft_still_waits_for_it_to_settle() {
+        let (net, sched) =
+            craft_then_mine_fixture("iron-gear-wheel", "iron-plate", "copper-ore", true);
+        let act = RecordingAct::new(background_script());
+
+        let log = within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
+
+        assert_eq!(
+            act.mine_started_at("copper-ore"),
+            Some(Duration::from_millis(BACKGROUND_MS)),
+            "a dependency edge still means what it meant",
+        );
+        assert_eq!(log.status(second_action_id()), Status::Success);
+    }
+
+    /// The inventory hazard, and the narrow rule chosen for it: two of a bot's
+    /// actions may only overlap when the items they name are disjoint.
+    ///
+    /// Same shape again, and again one thing changes — the craft now spends
+    /// **stone**, which is exactly what the next step mines. No network edge
+    /// joins them, so nothing but the footprint rule can hold the mine back,
+    /// and it does.
+    #[tokio::test(start_paused = true)]
+    async fn a_step_that_shares_an_item_with_a_queued_craft_waits_for_it() {
+        let (net, sched) = craft_then_mine_fixture("stone-furnace", "stone", "stone", false);
+        let act = RecordingAct::new(background_script());
+
+        let log = within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
+
+        assert_eq!(
+            act.mine_started_at("stone"),
+            Some(Duration::from_millis(BACKGROUND_MS)),
+            "the plan sized this mine against an inventory the craft is about \
+             to change, and the planner's arithmetic walks the bot's steps in \
+             order",
+        );
+        assert_eq!(log.status(second_action_id()), Status::Success);
+    }
+
+    /// A background action that fails still stops its bot — and must not
+    /// retract the verdict of a step that already succeeded while it ran.
+    ///
+    /// Bot 0 queues a craft that fails at 1,000 ms, and mines copper at 0 ms
+    /// while it is in flight. Bot 1 is walking until 2,000 ms and only then
+    /// looks at the copper mine it depends on. Before the `publish` guard,
+    /// abandoning bot 0's slice from the craft onwards would have sent
+    /// `Failed` over the mine's `Success` at 1,000 ms and bot 1 would have
+    /// given up on work that was done.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_craft_does_not_retract_a_later_step_that_already_succeeded() {
+        let mut net = ActionNetwork::new();
+        net.add(craft_of(first_action_id(), "iron-gear-wheel", "iron-plate"));
+        net.add(mine_of(second_action_id(), "copper-ore"));
+        net.add(mine_of(third_action_id(), "coal"));
+        net.link(second_action_id(), third_action_id(), 0);
+        let sched = Schedule {
+            steps: vec![
+                act_step(first_action_id(), BotId(0), 0, 30),
+                act_step(second_action_id(), BotId(0), 30, 90),
+                walk_step(BotId(1), 0, 60),
+                act_step(third_action_id(), BotId(1), 90, 150),
+            ],
+            makespan: 150,
+        };
+        let mut script = background_script();
+        script.fail_craft.insert("iron-gear-wheel".to_string());
+        script.walk_delay_ms.insert(BotId(1), 2_000);
+        let act = RecordingAct::new(script);
+
+        let log = within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
+
+        assert_eq!(log.status(first_action_id()), Status::Failed);
+        assert_eq!(
+            log.status(second_action_id()),
+            Status::Success,
+            "the mine settled at 10 ms; the craft failed at 1,000",
+        );
+        assert_eq!(
+            act.mine_started_at("coal"),
+            Some(Duration::from_millis(2_000)),
+            "bot 1 read the copper mine's signal after the craft failed, and \
+             it must still have said `Success`",
+        );
+        assert_eq!(log.status(third_action_id()), Status::Success);
+    }
+
+    /// A bot's slice is not finished while something it queued is still in
+    /// flight. Dropping those futures at the end of the loop would report a
+    /// craft the game was about to finish as `Lost`, and release its waiters as
+    /// abandoned.
+    #[tokio::test(start_paused = true)]
+    async fn a_craft_queued_as_the_last_step_is_still_waited_out() {
+        let mut net = ActionNetwork::new();
+        net.add(mine_of(first_action_id(), "copper-ore"));
+        net.add(craft_of(
+            second_action_id(),
+            "iron-gear-wheel",
+            "iron-plate",
+        ));
+        // A second bot waiting on the craft: the failure mode is not only a
+        // wrong status, it is a waiter released as abandoned.
+        net.add(mine_of(third_action_id(), "coal"));
+        net.link(second_action_id(), third_action_id(), 0);
+        let sched = Schedule {
+            steps: vec![
+                act_step(first_action_id(), BotId(0), 0, 60),
+                act_step(second_action_id(), BotId(0), 60, 90),
+                act_step(third_action_id(), BotId(1), 90, 150),
+            ],
+            makespan: 150,
+        };
+        let act = RecordingAct::new(background_script());
+
+        let log = within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
+
+        assert_eq!(log.status(second_action_id()), Status::Success);
+        assert_eq!(log.status(third_action_id()), Status::Success);
+        assert_eq!(
+            act.dispatched_at(&Dispatch::CraftEnd("iron-gear-wheel".into())),
+            Some(Duration::from_millis(EXCLUSIVE_MS + BACKGROUND_MS)),
+            "the craft was queued once the copper mine finished, and settles a \
+             full craft later",
+        );
     }
 }

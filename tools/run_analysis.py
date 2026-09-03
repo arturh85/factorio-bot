@@ -903,6 +903,17 @@ def score_window(w: Window, events: list[dict], joined: list[dict], map_rows: li
     )
     per_bot = {}
     for b in bots:
+        # A SUM, NOT A UNION -- and since the executor gained per-bot
+        # concurrency (`crates/executor/src/occupancy.rs`) a bot can have a
+        # queued craft or research running alongside an exclusive action, so
+        # these intervals can genuinely overlap and this figure can exceed the
+        # span. `busy_pct > 100%` is therefore a real reading and not a bug; it
+        # says the bot did two things at once, which is the point.
+        #
+        # The overlap-aware number is `idle_gaps`, which merges the intervals
+        # before measuring. Quote that one when the question is "how much of
+        # the window was this bot idle"; quote this one only when the question
+        # is "how much work did it do".
         busy = action_ticks_by_bot[b] + walk_ticks_by_bot[b]
         per_bot[b] = {
             "dispatches": dispatches_by_bot[b],

@@ -13,70 +13,81 @@ four bots.
 
 ## The measurement that reframes the problem
 
-From `workspace/runs/run-1788465258-49050` (21.4 min game time, roster
-`[1,2,3,4]` confirmed — the only clean four-bot rung-1 run since the walk
-fixes landed):
+From `workspace/runs/run-1788465258-49050` (21.34 min game time, roster
+`[1,2,3,4]` confirmed via `plan_created`).
+
+### Counting rules — read these before quoting a number
+
+Three quantities here are easily confused, and confusing them has already
+produced two wrong versions of this section:
+
+- **Action ids are per-plan, not global.** This run replanned twice
+  (`plan_created` at ticks 4,642 / 23,092 / 81,514) and ids are reused
+  across plans: id 38 is `craft 2 iron-gear-wheel` in the first plan and
+  `craft 1 offshore-pump` in the third. **44 of 147 ids collide.** Keying any
+  aggregate on `id` silently drops those 44 settles and understates executing
+  time by 8,067 ticks (2.24 min). An earlier version of this plan did exactly
+  that. **Aggregate over settle *events*, never over ids.**
+- **147 dispatch events = 147 distinct actions**, across three plans. There
+  are no repeated dispatches of the same action, and no wasted walks to
+  already-satisfied actions — a hypothesis that looked strong until the id
+  collision explained it away.
+- **"Planned steps" (96) ≠ dispatched actions (147).** A replan re-emits
+  remaining work.
+
+### Bot 1, over a span of 70,616 ticks (19.62 min)
 
 | | ticks | time | share |
 |---|---|---|---|
-| bot 1 **executing actions** | 23,397 | **6.5 min** | 34.1% |
-| bot 1 **idle between actions** | 45,117 | **12.5 min** | 65.9% |
+| **executing actions** | 31,464 | **8.74 min** | 44.6% |
+| **walking** (`walk_settled`) | 14,330 | **3.98 min** | 20.3% |
+| **neither** — acting nor walking | 24,822 | **6.89 min** | 35.2% |
 
-Executing time by verb, bot 1:
+Executing time by verb:
 
 | verb | actions | ticks | time |
 |---|---|---|---|
-| `mine` | 20 | 11,155 | 3.1 min |
-| `craft` | 25 | 6,243 | 1.7 min |
-| `research` | 1 | 5,999 | 1.7 min (lab time — a hard floor) |
-| `take` / `place` / `insert` / `fuel` | 48 | **0** | free |
+| `mine` | 39 | 18,890 | **5.25 min** |
+| `craft` | 34 | 6,575 | 1.83 min |
+| `research` | 1 | 5,999 | 1.67 min (lab time — a hard floor) |
+| `place` / `fuel` / `insert` / `take` | 61 | **0** | free |
 
-Whole roster:
+**Mining is the single largest activity in the run**, larger than crafting
+and research combined.
 
-| bot | actions | executing |
-|---|---|---|
-| 1 | 94 | 6.50 min |
-| 2 | 3 (2 mine, 1 insert) | 0.34 min |
-| 3 | 3 | 0.34 min |
-| 4 | 3 | 0.34 min |
+### The whole roster
 
-**7.5 bot-minutes of work across 85.6 bot-minutes available — 8.8% roster
-utilisation.** All 25 crafts went to bot 1; bots 2–4 crafted nothing.
+| bot | executing | walking | busy |
+|---|---|---|---|
+| 1 | 31,464 | 14,330 | **12.72 min** |
+| 2 | 1,691 | 435 | 0.59 min |
+| 3 | 1,691 | 613 | 0.64 min |
+| 4 | 1,693 | 591 | 0.63 min |
 
-**The conclusion that reorders everything below: our bot's actual working
-time is 6.5 minutes against the world record's 6:12.** The work is already
-roughly WR-paced. The entire gap is idleness — one bot standing still for
-12.5 minutes while three others have nothing to do. This is not a
-"make it faster" problem and it will not yield to incremental shaving.
+**14.59 bot-minutes of work across 85.4 bot-minutes available — 17.1% roster
+utilisation.** All 34 crafts went to bot 1; bots 2–4 crafted nothing.
 
-Two structural facts establish *why* nothing fills the idle:
+### What this means
 
-1. **The executor gives each bot exactly one action at a time.** Measured:
-   **0 of 99** consecutive same-bot dispatch pairs overlap — the next action
-   is never dispatched before the previous one settles.
-2. **The planner cannot express work that has no consumer.** Every `Goal`
-   variant (`Have`, `Researched`, `Produced`, `Producing`, `All`) is
-   demand-driven. There is no way to say "and if you have nothing to do,
-   do this."
+Against a single-player world record that researches automation at **6:12**,
+bot 1 is *busy* for 12.72 minutes and the whole roster does 14.59 bot-minutes
+of work. So there are two distinct gaps, and they need different fixes:
 
-**The idle is not all smelting lag — a fifth of the run is walking.**
-`walk_settled` accounts for **15,969 ticks (4.4 min) over 50 walks**, of
-which bot 1 owns **14,330 ticks (3.98 min) over 42 walks**. Walking is not
-an action with its own `elapsed_ticks` in the action stream, so it sits
-inside the idle figure above. Bot 1's 19 minutes resolve as:
+1. **Bot 1 idles 6.89 minutes.** Workstream F establishes that essentially
+   **all** of it is a single executor defect — the F diagnosis independently
+   measured 24,583 ticks of lag-clock waiting against the 24,822 ticks of
+   "neither" computed here, i.e. ~99%. This is a bug, not a capacity problem.
+2. **Three bots are idle almost the entire run.** That is the
+   `Holder::Share` ceiling, addressed by R3 (`c0c3bc5c`) — which landed
+   **after** this run and has therefore never been measured live.
 
-| | time | share |
-|---|---|---|
-| executing actions | 6.5 min | 34% |
-| **walking** | **4.0 min** | **21%** |
-| waiting (neither acting nor walking) | 8.5 min | 45% |
+Two structural facts explain why nothing fills the idle:
 
-The remaining 8.5 minutes was assumed to be smelting lag. **It is mostly
-not.** Workstream F below establishes that 88% of bot 1's idle ticks are a
-executor defect — waiting out a software timer for machine time already
-spent — rather than the game actually smelting.
-
----
+- **The executor gives each bot exactly one action at a time.** Measured: 0
+  of 99 consecutive same-bot dispatch pairs overlap.
+- **The planner cannot express work that has no consumer.** Every `Goal`
+  variant (`Have`, `Researched`, `Produced`, `Producing`, `All`) is
+  demand-driven.
 
 ## Workstreams, in value order
 

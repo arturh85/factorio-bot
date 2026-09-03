@@ -87,10 +87,14 @@ along one axis the cell is eleven tiles wide and needs two poles; folded so the
 two machines face each other across a one-tile gap, one pole at `(-1, 2)`
 reaches all five consumers at every facing —
 `the_cells_own_pole_covers_every_consumer_in_it`. That is not tidiness: a small
-electric pole costs **one wood**, and `have.rs` records the hard cap plainly —
-four bots, four wood, **eight poles ever**, one of which the power plant has
-already spent. A second pole per cell would halve how many cells this project
-can ever build.
+electric pole costs **one wood**, and *this planner* cannot make wood — `Mine`
+sources only `EntityGraph::resources` and a tree is not one — so the four wood
+a four-bot run starts with is all it will ever have. **That is a limit of the
+model, not of the game**, and the run-status block above is right to say so:
+Factorio renews wood, the mod already deforests, and teaching `Mine` to fell a
+tree would lift it. Until somebody does, a second pole per cell halves how many
+cells a run can build, and the cell should not be spending one it does not
+need — which is exactly what §4 turned out to be about.
 
 **Rate.** From the live capture, not from memory: `automation-science-pack` is
 5 s of recipe and `assembling-machine-1` has `crafting_speed` 0.5, so one
@@ -176,7 +180,61 @@ Two further power facts the numbers settled:
 
 ---
 
-## 4. What the witness watches, and whether it needed generalising
+## 4. What changed in response: the cell adopts supply it finds standing
+
+The refusal above is a wood refusal, and there are two ways to answer it. Only
+one of them is mine.
+
+**The one that is: stop asking for the pole.** A stage-2 cell is sited *around
+a supplying pole* by construction — `nearest_supply_anchor` picks the anchor and
+the ring search runs from it — so a cell that lands inside that pole's own 5×5
+supply area needs no pole at all. Asking for one anyway spends an item the
+planner cannot replace in order to duplicate something already standing three
+tiles away. That was a design error, not bad luck, and the run is what exposed
+it.
+
+So `POLE_OFFSET` left `LAYOUT` and became conditional:
+
+* `layout(origin, facing, with_pole)` builds seven parts or eight;
+* `plan_cell` runs its **whole ring search twice** — pass 1 for a cell some
+  existing network already covers, pass 2 for one that pays for its own supply.
+  Two full passes in a fixed order, not an interleave, because the preference is
+  a *value* judgement and not a distance one: a cell twelve tiles out that needs
+  no pole beats one beside the anchor that costs a wood. Determinism is
+  untouched — two ordered passes are as deterministic as one;
+* `bill` counts `cells.iter().filter(Cell::brings_pole)`, so a pole reaches the
+  bill only when a cell will actually place it;
+* `fuel_for` reads the network off the **product machine** rather than off the
+  pole, because the cells this is for no longer have one.
+
+`a_cell_inside_an_existing_supply_area_brings_no_pole_of_its_own` is the run's
+finding as a test. Its fixture puts the generator seven tiles away on a second
+wired pole, which is what leaves the first pole's supply area empty — the
+difference between a plant whose engine sits in the ground a cell wants (the
+`powered()` fixture, where adoption is impossible) and one whose does not. It
+asserts the adopted cell is genuinely `Powered`, and that **no action in the
+whole plan so much as mentions a pole** — asserting only on placements would
+pass against a bill that still asks for one and never puts it down, which
+spends the wood just the same.
+`a_cell_no_existing_pole_reaches_brings_one` is its control: without it the test
+would pass against a planner that never places a pole at all.
+
+**The one that is not mine: the planner cannot hand an item from one bot to
+another.** Three wood sat in bots 2/3/4's pockets. `Holder::Share(chain_actor)`
+welds the cell's whole bill to one bot, and `worth_converging` is about
+splitting *production* — mining and smelting — not about moving stock that
+already exists, so `Have{wood, 1, Share(bot 1)}` has no applicable method with
+the item in plain sight. `Step::Owned` is the mechanism a handover would use and
+it exists. This is a gap in `Have`, `power.rs` has exactly the same exposure,
+and it is not a change to make at the end of a night. **Reported, not
+attempted.**
+
+A third thing the run showed, also outside these files: **rung 1 built two
+power plants.** `Researched` builds one inline whenever `lab_site` cannot show
+60 kW, and the replan after a failed batch asked again. That is what turned "one
+spare pole" into "none", and it is a separate finding.
+
+## 5. What the witness watches, and whether it needed generalising
 
 **It did not, and the reason is worth writing down because the obvious reading
 says it should.**
@@ -217,7 +275,7 @@ cell pays the whole minute.
 
 ---
 
-## 5. Determinism: no pin moved
+## 6. Determinism: no pin moved
 
 **Every makespan pin passes unchanged and none was edited.** `red_science.rs`,
 `scheduling.rs`, `placement_occupancy.rs`, `refusal_memory.rs`,
@@ -252,7 +310,7 @@ kilowatt before dividing so no float reaches the answer.
 
 ---
 
-## 6. Red-first, with the actual output
+## 7. Red-first, with the actual output
 
 **The headline red needed no new API at all**, which is the strongest form
 available here: `Goal::Producing { item: "automation-science-pack" }` was a goal
@@ -305,7 +363,7 @@ a number derived rather than read.
 
 ---
 
-## 7. Mutation battery
+## 8. Mutation battery
 
 Each applied alone to the fixed tree, the whole `-p factorio-bot-planner` suite
 run with `--no-fail-fast` (467 unit tests plus every integration binary), the
@@ -340,6 +398,21 @@ tree restored between each. Test names are abbreviated; all are in
 | M24 | the cell's own pole left out of the bill | 6 |
 | M1+M5 | **the trap, with the check that would catch it also removed** | **6**, incl. `every_link_of_the_chain_delivers_at_every_facing` and every `holds` test |
 
+A second battery for the pole change of §4, same discipline:
+
+| # | Mutation | Failed |
+|---|---|---|
+| M25 | the cheap pass removed — every cell brings a pole | `a_cell_inside_an_existing_supply_area_brings_no_pole_of_its_own` |
+| M26 | the paying pass removed — no cell may bring one | **15**, incl. `a_cell_no_existing_pole_reaches_brings_one` and every plan and `holds` test |
+| M27 | the bill asks for a pole per cell regardless of `brings_pole` | `a_cell_inside_an_existing_supply_area_brings_no_pole_of_its_own` — and only because that test reads *labels*, not placements |
+| M28 | `brings_pole` always answers no | 7 |
+| M30 | **negative control** — `POLE_OFFSET`'s doc reworded | **nothing** |
+
+M27 is the one worth reading twice: it is the mutation the first draft of that
+test did **not** catch. Asserting "no pole is placed" passes against a bill that
+crafts one and leaves it in a pocket, which spends the wood exactly as a
+placement would. Asserting that no action's label mentions a pole catches both.
+
 **M5 kills nothing on its own, and that is stated rather than counted.**
 `fit`'s link check is a re-statement of a geometry the `LAYOUT` constant already
 guarantees, so with a correct layout removing it changes no answer. What it buys
@@ -356,8 +429,15 @@ not decoration around a hardcoded recipe.
 
 ---
 
-## 8. Residuals, stated rather than closed
+## 9. Residuals, stated rather than closed
 
+* **A cell may still need a pole, and then it is still stuck.** §4 removes the
+  pole in the case the cell is usually in — sited around an existing supply
+  area — and changes nothing about the case where the plant's own engine
+  occupies the ground a pole-less cell would need. Then pass 2 asks for a pole,
+  and on a run whose acting bot has no wood that refusal is the same one run 1
+  hit, one layer earlier. The real fix is a handover method in `Have`, or
+  teaching `Mine` to fell a tree; both are named in §4 and neither is here.
 * **The chests are filled by hand.** §3. `CELL_CHARGE_TICKS` is 9,000 ticks —
   two and a half minutes, fifteen packs, thirty iron plates and fifteen copper
   plates — and nothing refills them. The structural predicate keeps holding
@@ -398,11 +478,11 @@ not decoration around a hardcoded recipe.
 
 ---
 
-## 9. Files
+## 10. Files
 
 **Owned and changed:** `crates/planner/src/method/assemble.rs` (new — the
-layout, the siting, `cells_standing`, `holds_assembling`, the steps, and 24
-tests), `crates/planner/tests/red_science_cell.rs` (new — 4 tests: the two
+layout, the siting, `cells_standing`, `holds_assembling`, the steps, the
+conditional pole of §4, and 26 tests), `crates/planner/tests/red_science_cell.rs` (new — 4 tests: the two
 game-data premises and the two plan tests that were the red),
 `crates/planner/src/method/mod.rs` (one `pub mod`),
 `crates/planner/src/method/have.rs` (both registries, and `holds`'s second

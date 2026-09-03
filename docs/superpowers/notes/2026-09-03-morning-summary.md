@@ -3,6 +3,69 @@
 The detail is in `2026-09-02-morning-report.md`, which is 1,200 lines of
 append-only log. This is the two-minute version.
 
+## Run 13 (2026-09-03 midday): furthest ever, died on a full boiler
+
+**No witness. But the cell stood with both recipes and the charge was running**
+— `run-1788432181-42528`, roster `[1,2,3,4]`, reached tick 211,399 against a
+previous best near 180,000.
+
+All twelve cell actions settled `success`, including both `set_recipe` calls,
+and the planner then found the 207-step chest charge and worked it down to 48
+pending. That is the phase every earlier attempt died before reaching.
+
+**What killed it:** `top the boiler up with 17 coal` at `(-7.0, -54.5)` —
+`["tried to insert 17x coal but inserted 3"]`.
+
+`boiler_coal(demand_kw)` (`method/assemble.rs:890`) sizes the top-up **from
+demand alone** and never reads what is already in the boiler. A boiler's fuel
+slot holds one stack, so a boiler already holding 47 coal takes 3 and refuses
+14. The mod reported that honestly; the executor read it as a **failure**.
+
+**That is a category error, not a sizing bug.** Inserting 3 because the
+destination is full means "the boiler has fuel" is *satisfied*. And it cannot
+be fixed by sizing better: nothing in `FactorioWorld` reports a fuel level —
+which is precisely why it is sized from demand in the first place. The fix is
+to distinguish **"the destination was full"** (success — the goal holds) from
+**"the source did not have enough"** (a real failure), which are the two ways
+a partial insert happens and are currently the same outcome.
+
+Note the discarded-return-value family again, in a new form: here the return
+value *is* read — that is how we know it inserted 3 — and the **interpretation**
+is what is wrong. Checking the return is necessary and not sufficient.
+
+## Twelve failed walks, four destinations, re-picked every replan
+
+The other finding, and the bigger one for throughput. Every walk failure in run
+13 was pre-dispatch `failed to path find`, and they cluster:
+
+```
+3 × bot 1 -> (-30, -35)      2 × bot 1 -> (-53, -11)
+3 × bot 1 -> (-28, -27)      2 × bot 1 -> (-32, -33)
+```
+
+The pathfinder gives a definitive "there is no way there", the walk reports it
+truthfully — **and nothing remembers it**, so the planner re-selects the same
+site on the next replan, and `abandon_rest` cuts bot 1's chain each time. Bot 1
+does ~88% of dispatches, so this is most of the run's lost throughput.
+
+This is the teleport defect surviving one level up. `control.lua` says it in
+place: *"The planner never learned a site was unreachable, so it kept choosing
+it, and the one piece of information the system needed — 'there is no way
+there' — was destroyed."* The teleport no longer destroys it and the walk now
+reports it; nobody closed the loop so the **planner** learns.
+
+**The pattern to copy already exists here**: placements have a refusal ledger
+(`goal/plan.rs:490`, `MAX_RESITE_ROUNDS = 2`). Walks have nothing equivalent.
+Scope it to the milestone with a re-site bound rather than banning a site
+forever — `failed to path find` means unreachable *from here*, not for all time,
+and the mod's own doc is careful about that distinction.
+
+## What the walk retry proved (b405dc5a)
+
+**Zero stalled-class walk failures**, against run 12's three. Rung 1 closed at
+tick 100,600 in 3 replans where run 12 took 144,488 and 4. The batch collapse
+(47 -> 19 with pending rising) did not recur.
+
 ## Where stage 2 actually stands (read this first)
 
 **Stage 2 is NOT done. No witness has ever seen red science, and no cell has

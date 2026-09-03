@@ -8,12 +8,12 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::constants::{
-    MAP_GEN_SETTINGS_FILENAME, MAP_SETTINGS_FILENAME, MODS_FOLDERNAME, SERVER_SETTINGS_FILENAME,
+    MAP_GEN_SETTINGS_FILENAME, MAP_SETTINGS_FILENAME, MOD_LIST_FILENAME, MODS_FOLDERNAME,
+    SERVER_SETTINGS_FILENAME,
 };
 use crate::errors::*;
 use crate::factorio::rcon::RconSettings;
 use crate::factorio::util::{read_to_value, write_value_to};
-use crate::process::asset_sync;
 use crate::process::io_utils::{
     await_lock, extract_archive, get_factorio_binary_path, get_factorio_data_path, symlink,
 };
@@ -24,29 +24,35 @@ use miette::{IntoDiagnostic, Result, miette};
 use parking_lot::RwLock;
 use tokio::fs::create_dir;
 
-// Release builds must be self-contained, so `mods/` and `scripts/` are baked
-// into the binary at compile time and extracted into the workspace on first
-// setup. Debug builds instead point the mods path at `../../mods` in the repo
-// (see below), which is live.
+// The two build profiles resolve `mods/` differently, on purpose.
 //
-// Two consequences, both of which have already cost a debugging session:
-//   * editing `mods/` has no effect on a release binary until it is rebuilt --
-//     the embedded copy is a snapshot taken by `include_dir!`;
-//   * it has no effect on an existing `workspace/mods` at all, in any build,
-//     because extraction is skipped once that directory exists.
+//   debug    `workspace/mods` is a real directory, and `BotBridge` inside it
+//            is a SYMLINK to this checkout's `mods/BotBridge`, created or
+//            repaired on every setup (`resolve_workspace_mods`). An edit to
+//            `mods/BotBridge/control.lua` is therefore what the next run
+//            loads, with nothing to refresh and no copy to go stale. The
+//            other mods and Factorio's own `mod-list.json` /
+//            `mod-settings.dat` stay real files in the workspace, because the
+//            game rewrites those as it runs and must not write into the repo.
+//   release  `mods/` and `scripts/` are baked into the binary at compile time
+//            and extracted into the workspace on first setup, so a release
+//            binary is self-contained. Two consequences, both of which have
+//            cost a debugging session: editing `mods/` has no effect until
+//            the binary is rebuilt, and no effect on an existing
+//            `workspace/mods` at all, because extraction is skipped once that
+//            directory exists. `REFRESH_MODS_ENV` is the explicit way out;
+//            `asset_sync::warn_if_stale` says so when the copy has drifted.
 //
-// This divergence is deliberate; do not "fix" it by dropping the embedding.
-// What *is* fixed here: the second bullet used to fail silently, in both
-// builds. `asset_sync` compares whatever is already on disk against the
-// reference that build has -- the embedded snapshot in a release binary, the
-// checkout itself (`repo_mods_path!`) in a debug one -- and the mods line
-// printed on every setup carries the verdict, so "which code am I actually
-// running" is answered where the question is asked rather than in a check
-// that could be skipped. `REFRESH_MODS_ENV` / `REFRESH_SCRIPTS_ENV` are the
-// explicit, opt-in way to overwrite a stale copy in a release build (see
-// their doc comments); a debug build has no snapshot to refresh from, so its
-// remedy is to delete the workspace copy and let the checkout be used
-// directly, which is what the drift report tells the reader to do.
+// This divergence is deliberate; do not "fix" it by dropping the embedding,
+// and do not extend the symlink to a release build, which has no checkout to
+// point at.
+//
+// The debug side used to be a copy plus a drift *check* -- a byte-for-byte
+// comparison against the checkout, reported on the mods line. The check was
+// correct and useless: it reported through a line `silent` suppressed, so a
+// `control.lua` edit went unloaded for hours with the detection sitting right
+// there, unprinted. Both halves are fixed here -- the symlink removes the
+// state the check was looking for, and the mods line is now unconditional.
 #[cfg(not(debug_assertions))]
 pub const MODS_CONTENT: include_dir::Dir = include_dir!("mods");
 /// The repo's `scripts/` directory, embedded. Extracted into
@@ -66,20 +72,21 @@ pub const REFRESH_MODS_ENV: &str = "FACTORIO_BOT_REFRESH_MODS";
 ///
 /// This is *the* single definition of "the mods directory this build was
 /// compiled against", and it exists so that two things which must agree
-/// cannot drift apart: the runtime drift check below, which tells a debug run
-/// whether the `workspace/mods` copy it is about to load still matches the
-/// checkout, and `factorio::rcon`'s transfer-guarantee test, which
-/// `include_str!`s the mod's `control.lua` out of that same checkout. If the
-/// guard compiled in bytes from one directory and the run were compared
-/// against another, the green guard would say nothing about the run.
+/// cannot drift apart: `resolve_workspace_mods` below, which points a debug
+/// run's `workspace/mods/BotBridge` at this directory, and
+/// `factorio::rcon`'s transfer-guarantee test, which `include_str!`s the
+/// mod's `control.lua` out of it. If the guard compiled in bytes from one
+/// directory and the run loaded another, the green guard would say nothing
+/// about the run.
 ///
 /// Resolved from `CARGO_MANIFEST_DIR` (this crate) rather than from the
 /// process's working directory, so it names the same place whatever a binary
-/// is later run from. It is a *compile-time* fact: a binary carried away from
-/// its source tree will find nothing there, which the check reports as
-/// "nothing to compare" rather than as agreement.
-// Unused in a release build, which compares against the embedded snapshot
-// instead, and in any non-test build of a release binary nothing imports it.
+/// is later run from. It is a *compile-time* fact: a debug binary carried
+/// away from its source tree finds nothing there, which `link_bridge_mod`
+/// reports as "no directory there now" while leaving whatever the workspace
+/// already has alone.
+// Unused in a release build, which extracts the embedded snapshot instead,
+// and in any non-test build of a release binary nothing imports it.
 #[allow(unused_macros)]
 macro_rules! repo_mods_path {
     ($suffix:literal) => {
@@ -186,6 +193,306 @@ pub fn preflight_mod_factorio_version(
     Ok(())
 }
 
+/// Resolves `<workspace>/mods` into the directory the game will really load
+/// and one sentence saying how it got there, which the caller prints.
+///
+/// Debug build: `workspace/mods` is a real directory holding the other mods
+/// and Factorio's own state files, and `BotBridge` inside it is a **symlink**
+/// to the checkout this binary was compiled against, created or repaired on
+/// every setup. So the mod the game loads is the mod in `mods/BotBridge`, by
+/// construction, and there is no copy left that could go stale.
+///
+/// Three things ruled out first, each because it was tried:
+///
+///   * *Point the mods directory itself at the checkout.* Factorio rewrites
+///     `mod-list.json` and `mod-settings.dat` in the mods directory as it
+///     runs, so those writes would land in the repo -- and `workspace/mods`
+///     also holds mods the checkout does not (`creative-mod`, `YARM`).
+///   * *Copy the checkout over the workspace copy on every run.* That is what
+///     `FACTORIO_BOT_REFRESH_MODS` does for a release build, and it silently
+///     discards a workspace copy someone edited on purpose to unblock a run.
+///   * *Delete the workspace copy and let it be re-seeded.* Every instance's
+///     `mods` is a symlink to `workspace/mods`, so a missing
+///     `workspace/mods/BotBridge` leaves the server with no bridge mod: it
+///     hangs at `start waiting` forever, having first written a `level.zip`
+///     with no bridge state, which then poisons every later run because
+///     Factorio only migrates on a version bump and `info.json` is pinned.
+///
+/// This replaced a drift *check* -- a byte-for-byte comparison of the copy
+/// against the checkout, reported on the mods line -- which was correct and
+/// useless: the line it reported through was suppressed by `silent`, so a
+/// stale copy was loaded for hours with the detection sitting right there.
+/// Detecting a state that can no longer happen is not worth a branch; making
+/// the state impossible is.
+#[cfg(debug_assertions)]
+fn resolve_workspace_mods(workspace_mods_path: PathBuf) -> Result<(PathBuf, String)> {
+    std::fs::create_dir_all(&workspace_mods_path).into_diagnostic()?;
+    let repo_mods = Path::new(repo_mods_path!(""));
+    // Cosmetic only, and deliberately infallible: the compile-time path
+    // contains `../..`, which is noise in a log line. If it cannot be
+    // canonicalized the checkout is gone, and the raw path is still the right
+    // thing to name -- `link_bridge_mod` reports that as "nothing there now"
+    // rather than as a failure.
+    let repo_mods = fs::canonicalize(repo_mods).unwrap_or_else(|_| repo_mods.to_path_buf());
+    seed_missing_mods_from_checkout(&repo_mods, &workspace_mods_path);
+    let bridge = link_bridge_mod(&repo_mods, &workspace_mods_path)?;
+    Ok((workspace_mods_path, format!("debug build; {bridge}")))
+}
+
+/// Release counterpart: the mods directory is extracted once from the
+/// snapshot `include_dir!` baked into this binary, and after that only an
+/// explicit `FACTORIO_BOT_REFRESH_MODS` overwrites it. Unchanged from before
+/// the debug side grew a symlink -- a release binary has no checkout to point
+/// at, and being self-contained is the point of it.
+#[cfg(not(debug_assertions))]
+fn resolve_workspace_mods(workspace_mods_path: PathBuf) -> Result<(PathBuf, String)> {
+    // Scoped to this function rather than imported at the top of the file:
+    // the debug half of this pair does not use it, and a top-level import
+    // would be an unused-import warning in the profile this project builds by
+    // default.
+    use crate::process::asset_sync;
+
+    let mut workspace_mods_path = workspace_mods_path;
+    if !workspace_mods_path.exists() {
+        std::fs::create_dir_all(&workspace_mods_path).into_diagnostic()?;
+        if let Err(err) = MODS_CONTENT.extract(workspace_mods_path.clone()) {
+            error!("failed to extract static mods content: {:?}", err);
+            return Err(ModExtractFailed {}.into());
+        }
+        let mut mods_source = String::from(
+            "compile-time snapshot embedded in this release binary; edits to mods/ need a rebuild",
+        );
+        if !workspace_mods_path.exists() {
+            workspace_mods_path = PathBuf::from(MODS_FOLDERNAME);
+            mods_source = String::from("mods/ relative to the current working directory");
+            if !workspace_mods_path.exists() {
+                return Err(MissingModsFolder {}.into());
+            }
+        }
+        return Ok((workspace_mods_path, mods_source));
+    }
+
+    // The directory already existed, so nothing above extracted into it. In a
+    // release build that copy can only ever be refreshed explicitly -- see
+    // `asset_sync` -- so check it for drift from the embedded snapshot rather
+    // than staying silent about it.
+    if asset_sync::refresh_if_requested(&MODS_CONTENT, &workspace_mods_path, REFRESH_MODS_ENV)
+        .into_diagnostic()?
+    {
+        return Ok((
+            workspace_mods_path,
+            String::from(
+                "refreshed from the compile-time snapshot embedded in this release binary",
+            ),
+        ));
+    }
+    asset_sync::warn_if_stale(
+        &MODS_CONTENT,
+        &workspace_mods_path,
+        "mods",
+        REFRESH_MODS_ENV,
+    );
+    Ok((
+        workspace_mods_path,
+        String::from(
+            "pre-existing workspace copy; editing mods/ does NOT update it -- see the staleness warning above, or set FACTORIO_BOT_REFRESH_MODS=1 to refresh it",
+        ),
+    ))
+}
+
+/// Creates a directory symlink without asking for elevation.
+///
+/// Not [`crate::process::io_utils::symlink`], which on Windows shells out to
+/// `mklink` through `runas` and pops a UAC prompt. That is a reasonable trade
+/// for the instance `mods` link, which the run cannot proceed without; it is
+/// the wrong one for a developer convenience that has a working fallback. An
+/// unprivileged Windows failure here is expected and handled by copying.
+#[cfg(debug_assertions)]
+fn symlink_dir(original: &Path, link: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(original, link)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_dir(original, link)
+    }
+}
+
+/// Copies a directory tree. Used only as the fallback when a symlink cannot
+/// be created.
+#[cfg(debug_assertions)]
+fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Fills a `workspace/mods` that is missing entries the checkout has --
+/// `creative-mod`, `YARM`, and the initial `mod-list.json` /
+/// `mod-settings.dat` -- so a fresh workspace comes up with the same mod set
+/// as before this function existed.
+///
+/// Only where nothing is there yet. Factorio rewrites `mod-list.json` and
+/// `mod-settings.dat` in place as it runs, so once a workspace has them, the
+/// workspace's are the live ones and the checkout's are a stale seed.
+/// `BotBridge` is skipped: it gets a symlink, not a copy.
+///
+/// Never fails the run. A mod that could not be seeded is a mod the game will
+/// not load, which is visible; refusing to start over it is not better.
+#[cfg(debug_assertions)]
+fn seed_missing_mods_from_checkout(repo_mods: &Path, workspace_mods_path: &Path) {
+    let Ok(entries) = std::fs::read_dir(repo_mods) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name == BRIDGE_MOD_NAME {
+            continue;
+        }
+        let target = workspace_mods_path.join(&name);
+        if target.exists() {
+            continue;
+        }
+        let copied = match entry.file_type() {
+            Ok(file_type) if file_type.is_dir() => copy_dir_recursive(&entry.path(), &target),
+            Ok(_) => std::fs::copy(entry.path(), &target).map(|_| ()),
+            Err(err) => Err(err),
+        };
+        if let Err(err) = copied {
+            warn!(
+                "could not seed <bright-blue>{:?}</> from the checkout: {}",
+                target, err
+            );
+        }
+    }
+}
+
+/// Makes `<workspace>/mods/BotBridge` be the checkout's directory, and
+/// returns the sentence the mods line carries about how that turned out.
+///
+/// Idempotent and self-repairing: a correct symlink is left alone, and
+/// anything else in that slot -- a stale copied directory, a symlink to some
+/// other checkout, a leftover file -- is removed and replaced.
+///
+/// The symlink is a convenience, so a machine that cannot make one (Windows
+/// without the developer-mode or `SeCreateSymbolicLink` privilege) gets a
+/// copy and is *told* it got a copy, rather than a failed run. Only when
+/// neither works is this an error: `workspace/mods/BotBridge` would then be
+/// absent, and a Factorio server with no bridge mod does not fail -- it hangs
+/// at `start waiting` forever while writing a save with no bridge state.
+#[cfg(debug_assertions)]
+fn link_bridge_mod(repo_mods: &Path, workspace_mods_path: &Path) -> Result<String> {
+    let target = repo_mods.join(BRIDGE_MOD_NAME);
+    let link = workspace_mods_path.join(BRIDGE_MOD_NAME);
+    if !target.is_dir() {
+        // A debug binary carried away from its source tree. Say what is
+        // missing and leave whatever is in the workspace alone -- it is the
+        // only bridge mod this run has.
+        return Ok(format!(
+            "{BRIDGE_MOD_NAME} left as it is at {link:?}: this binary was compiled against \
+             {target:?}, and there is no directory there now"
+        ));
+    }
+    let linked = format!(
+        "{BRIDGE_MOD_NAME} is a symlink to {target:?}, so an edit there is what the game loads"
+    );
+    if fs::read_link(&link).is_ok_and(|existing| existing == target) {
+        return Ok(linked);
+    }
+    if let Ok(metadata) = fs::symlink_metadata(&link) {
+        // `symlink_metadata` does not follow, so a symlink reports as one
+        // however it is pointed; only a real directory needs `remove_dir_all`.
+        let removed = if metadata.file_type().is_dir() {
+            fs::remove_dir_all(&link)
+        } else {
+            fs::remove_file(&link)
+        };
+        removed.into_diagnostic().map_err(|err| {
+            miette!("could not replace {link:?} with a symlink to {target:?}: {err}")
+        })?;
+    }
+    match symlink_dir(&target, &link) {
+        Ok(()) => Ok(linked),
+        Err(symlink_err) => match copy_dir_recursive(&target, &link) {
+            Ok(()) => Ok(format!(
+                "{BRIDGE_MOD_NAME} was COPIED from {target:?} because no symlink could be created \
+                 ({symlink_err}); a later edit to the checkout reaches the game only on the next setup"
+            )),
+            Err(copy_err) => Err(miette!(
+                "{BRIDGE_MOD_NAME} could not be put at {link:?}: neither a symlink \
+                 ({symlink_err}) nor a copy ({copy_err}) of {target:?} could be made"
+            )),
+        },
+    }
+}
+
+/// Makes sure `mod-list.json` still enables the bridge mod, returning a note
+/// for the mods line when it had to change something.
+///
+/// Factorio owns this file and rewrites it on every start, listing what it
+/// found. A run started while `workspace/mods/BotBridge` was absent -- which
+/// is exactly what "just delete the workspace copy and let it re-seed" used
+/// to produce -- comes back with the entry gone, and once the files are
+/// restored the mod is still not loaded, silently, because a mod present on
+/// disk but absent from an existing `mod-list.json` is a disabled mod. The
+/// symlink above cannot fix that on its own.
+///
+/// A missing `mod-list.json` is left missing on purpose: Factorio writes one
+/// from scratch and enables what it finds, which is the outcome we want.
+/// Everything already in the file is preserved -- `creative-mod` and `YARM`
+/// are listed and deliberately disabled.
+fn ensure_bridge_mod_enabled(workspace_mods_path: &Path) -> Option<String> {
+    let list_path = workspace_mods_path.join(MOD_LIST_FILENAME);
+    if !list_path.exists() {
+        return None;
+    }
+    let mut list = match read_to_value(&list_path) {
+        Ok(list) => list,
+        Err(err) => {
+            return Some(format!(
+                "WARNING: {list_path:?} could not be read as JSON ({err}), so whether \
+                 {BRIDGE_MOD_NAME} is enabled could not be checked"
+            ));
+        }
+    };
+    let Some(mods) = list.get_mut("mods").and_then(Value::as_array_mut) else {
+        return Some(format!(
+            "WARNING: {list_path:?} has no `mods` array, so whether {BRIDGE_MOD_NAME} is enabled \
+             could not be checked"
+        ));
+    };
+    let existing = mods
+        .iter_mut()
+        .find(|entry| entry.get("name").and_then(Value::as_str) == Some(BRIDGE_MOD_NAME));
+    let note = match existing {
+        Some(entry) if entry.get("enabled").and_then(Value::as_bool) == Some(true) => return None,
+        Some(entry) => {
+            entry["enabled"] = Value::Bool(true);
+            format!("{BRIDGE_MOD_NAME} was DISABLED in {list_path:?} and has been re-enabled")
+        }
+        None => {
+            mods.push(serde_json::json!({ "name": BRIDGE_MOD_NAME, "enabled": true }));
+            format!("{BRIDGE_MOD_NAME} was MISSING from {list_path:?} and has been added, enabled")
+        }
+    };
+    match write_value_to(&list, &list_path) {
+        Ok(()) => Some(note),
+        Err(err) => Some(format!(
+            "WARNING: {BRIDGE_MOD_NAME} is not enabled in {list_path:?} and it could not be \
+             rewritten ({err})"
+        )),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn setup_factorio_instance(
     workspace_path_str: &str,
@@ -256,117 +563,26 @@ pub async fn setup_factorio_instance(
             // thread would abort the whole process under `panic = "abort"`.
             .map_err(|err| miette!("archive extraction task failed: {err}"))??;
     }
-    #[allow(unused_mut)]
-    let mut workspace_mods_path = workspace_path.join(PathBuf::from(MODS_FOLDERNAME));
-    // Which of the several possible mod sources we ended up on. Logged below,
-    // because "I edited mods/ and the game kept loading the old copy" has
-    // already cost a live debugging session.
-    #[allow(unused_mut, unused_assignments)]
-    #[cfg(not(debug_assertions))]
-    let mut mods_source = String::from(
-        "pre-existing workspace copy; editing mods/ does NOT update it -- see the staleness warning below, or set FACTORIO_BOT_REFRESH_MODS=1 to refresh it",
-    );
-    #[allow(unused_mut, unused_assignments)]
-    #[cfg(debug_assertions)]
-    let mut mods_source =
-        String::from("pre-existing workspace copy; editing mods/ does NOT update it");
-    if !workspace_mods_path.exists() {
-        #[cfg(debug_assertions)]
-        {
-            workspace_mods_path = PathBuf::from(format!("../../{}", MODS_FOLDERNAME));
-            mods_source = String::from("repo checkout (debug build); edits apply on the next run");
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            std::fs::create_dir_all(&workspace_mods_path).into_diagnostic()?;
-            if let Err(err) = MODS_CONTENT.extract(workspace_mods_path.clone()) {
-                error!("failed to extract static mods content: {:?}", err);
-                return Err(ModExtractFailed {}.into());
-            }
-            mods_source = String::from(
-                "compile-time snapshot embedded in this release binary; edits to mods/ need a rebuild",
-            );
-        }
-        if !workspace_mods_path.exists() {
-            workspace_mods_path = PathBuf::from(MODS_FOLDERNAME);
-            mods_source = String::from("mods/ relative to the current working directory");
-            if !workspace_mods_path.exists() {
-                return Err(MissingModsFolder {}.into());
-            }
-        }
-    } else {
-        // The directory already existed, so nothing above extracted into it.
-        // A debug build has the checkout itself to compare against -- the very
-        // directory this crate was compiled from, and the one whose
-        // `control.lua` the transfer-guarantee test in `factorio::rcon`
-        // compiled into itself -- so say, on the line that names the directory
-        // in use, whether the copy about to be loaded is still that code. This
-        // is a derivation from the two directories as they are at this moment,
-        // not a separate gate that could be skipped or forgotten: the line is
-        // printed on every setup, and there is no way to get the name without
-        // the verdict.
-        #[cfg(debug_assertions)]
-        {
-            // Scoped to the bridge mod, not the whole mods directory. The rest
-            // of that directory is not ours to compare: Factorio rewrites
-            // `mod-list.json` and `mod-settings.dat` in place -- the
-            // instance's `mods` symlink points here -- so after any real run
-            // they differ from the checkout by design. Reporting that as drift
-            // would put a permanent, unactionable complaint on the line and
-            // teach the reader to skip it, taking the real report with it.
-            // `BotBridge` is the code the guarantee tests compiled against and
-            // the only part a user's edits are about.
-            let repo_mod = Path::new(repo_mods_path!("")).join(BRIDGE_MOD_NAME);
-            // Cosmetic only, and deliberately infallible: the compile-time
-            // path contains `../..`, which is noise in a log line, but if it
-            // cannot be canonicalized (it is gone) the raw path is still the
-            // right thing to name -- `compare_dirs` will report that there is
-            // nothing there rather than a difference.
-            let repo_mods = fs::canonicalize(&repo_mod).unwrap_or(repo_mod);
-            let comparison =
-                asset_sync::compare_dirs(&repo_mods, &workspace_mods_path.join(BRIDGE_MOD_NAME));
-            let remedy = format!(
-                "the run loads the copy, not the checkout every test compiled against; delete {:?} and re-run to load the checkout directly",
-                workspace_mods_path
-            );
-            mods_source = format!(
-                "{mods_source}; {}",
-                asset_sync::describe(&comparison, &repo_mods, &remedy)
-            );
-        }
-
-        // In a release build that copy can only ever be refreshed explicitly
-        // -- see `asset_sync` -- so check it for drift from the embedded
-        // snapshot rather than staying silent about it.
-        #[cfg(not(debug_assertions))]
-        {
-            if asset_sync::refresh_if_requested(
-                &MODS_CONTENT,
-                &workspace_mods_path,
-                REFRESH_MODS_ENV,
-            )
-            .into_diagnostic()?
-            {
-                mods_source = String::from(
-                    "refreshed from the compile-time snapshot embedded in this release binary",
-                );
-            } else {
-                asset_sync::warn_if_stale(
-                    &MODS_CONTENT,
-                    &workspace_mods_path,
-                    "mods",
-                    REFRESH_MODS_ENV,
-                );
-            }
-        }
-    }
+    // Which directory the game is about to load its mods from, and why.
+    //
+    // Deliberately not gated on `silent`. This is the line CLAUDE.md tells a
+    // reader to trust when asking "did my edit ship", and `silent` is true on
+    // every path that matters by default: the CLI passes `silent: !verbose`
+    // (`cli/lua.rs`, `cli/start.rs`, `repl/factorio_control.rs`) and the
+    // server takes `FactorioParams::default()`, which sets it outright. So
+    // the one authoritative answer printed only for someone who had already
+    // guessed the question and re-run with `--verbose`. It printed zero times
+    // across a whole night of runs that were failing for exactly this reason.
+    let (workspace_mods_path, mut mods_source) =
+        resolve_workspace_mods(workspace_path.join(PathBuf::from(MODS_FOLDERNAME)))?;
     let workspace_mods_path = fs::canonicalize(workspace_mods_path).into_diagnostic()?;
-    if !silent {
-        info!(
-            "Using mods directory <bright-blue>{:?}</> ({})",
-            &workspace_mods_path, mods_source
-        );
+    if let Some(note) = ensure_bridge_mod_enabled(&workspace_mods_path) {
+        mods_source = format!("{mods_source}; {note}");
     }
+    info!(
+        "Using mods directory <bright-blue>{:?}</> ({})",
+        &workspace_mods_path, mods_source
+    );
     let mods_path = instance_path.join(PathBuf::from(MODS_FOLDERNAME));
     if !mods_path.exists() {
         if !silent {
@@ -1058,56 +1274,50 @@ mod tests {
     }
 }
 
-/// Proves the "Using mods directory ... (...)" line printed around line 314
-/// names the directory `setup_factorio_instance` actually picked, on a debug
-/// build -- the one profile that had no staleness check at all before this
-/// change, and the one `cargo build --no-default-features --features
-/// cli,lua` (CLAUDE.md's own recommended iteration command) produces.
+/// The debug build's mods resolution: `workspace/mods/BotBridge` is a symlink
+/// to the checkout, repaired on every setup, and the "Using mods directory
+/// ... (...)" line that says so is printed whether or not the caller asked
+/// for silence.
 ///
-/// The two `worker_*` functions do the real work and are marked `#[ignore]`
-/// so a normal test run never executes them directly; the `names_the_*`
-/// functions are what actually runs, and each launches its worker as a
-/// *subprocess* (`std::process::Command::new(current_exe())`, filtered to
-/// that one test by name, with `--nocapture`) rather than calling it
-/// in-process.
+/// Two shapes of test here, and the split is not stylistic.
 ///
-/// That indirection is required, not stylistic. `cargo test`'s default
-/// per-test capturing redirects `print!`/`println!` (which is how `paris`'s
-/// `info!` ultimately writes) to an in-memory buffer rather than the real fd,
-/// and confirmed empirically here: `std::thread::spawn`, which was tried
-/// first as a lighter-weight escape hatch, does NOT get you out of it --
-/// `thread::Builder::spawn` explicitly propagates the capture setting to the
-/// new thread precisely so multi-threaded tests are captured too. A `print!`
-/// only reaches the real stdout fd when nothing in the same process asked
-/// libtest to redirect it, which is true of a fresh child process invoked
-/// with `--nocapture` and not of any thread inside this one. Once it's a real
-/// child process, its stdout is captured the ordinary way, via
-/// `Command::output()` -- no fd-swapping crate needed.
+/// The filesystem tests call `setup_factorio_instance` directly and then look
+/// at the directory it produced -- what the game will load is a fact about
+/// the disk, not about a log line, and asserting on the disk is what makes
+/// these tests about the actual defect (an edit to `mods/BotBridge` not
+/// reaching the game).
 ///
-/// A test that only checked "something was printed" would pass against a
-/// hardcoded string and prove nothing about *which* directory was named. The
-/// discrimination proof (done manually, not left as an automated test): with
-/// `mods_source` hardcoded to always report "repo checkout" regardless of
-/// which branch ran, `names_the_workspace_copy_when_it_already_exists` failed
-/// while `names_the_repo_checkout_when_no_workspace_copy_exists` kept
-/// passing -- proving each test actually reads the outcome of its own branch
-/// rather than a shared assumption.
+/// The *printing* tests need a subprocess. `cargo test`'s default per-test
+/// capturing redirects `print!`/`println!` -- which is how `paris`'s `info!`
+/// ultimately writes -- to an in-memory buffer rather than the real fd, and
+/// `std::thread::spawn` does NOT escape it: `thread::Builder::spawn`
+/// explicitly propagates the capture setting to the new thread precisely so
+/// multi-threaded tests are captured too (tried first here, and confirmed
+/// empirically). A `print!` reaches the real stdout fd only in a process
+/// where nothing asked libtest to redirect it, which is true of a fresh child
+/// invoked with `--nocapture`. Once it is a real child process, its stdout is
+/// captured the ordinary way via `Command::output()`.
+///
+/// The `worker_*` functions are the child-side bodies and are `#[ignore]`d so
+/// a normal run never executes them directly.
 #[cfg(all(test, debug_assertions))]
 mod mods_source_tests {
     use super::*;
     use tempfile::tempdir;
 
-    /// Runs `setup_factorio_instance` far enough to log the mods line and no
-    /// further, then prints the resolved workspace path as a plain
-    /// machine-readable marker line so the driver test (running in a
-    /// different process, with its own freshly-generated tempdir name) can
-    /// check the log line against it.
+    /// Runs `setup_factorio_instance` far enough to resolve the mods
+    /// directory and log the line, and no further.
     ///
     /// `is_server: false` and a fake, never-opened archive path keep this to
-    /// filesystem bookkeeping: no real Factorio binary or archive is needed as
-    /// long as `instance_path` is pre-populated so the "first run" extraction
-    /// branch is skipped.
-    async fn run_setup_and_report(workspace: &Path) {
+    /// filesystem bookkeeping: no real Factorio binary or archive is needed
+    /// as long as `instance_path` is pre-populated so the "first run"
+    /// extraction branch is skipped.
+    ///
+    /// `silent: true` is the point, not an oversight. Every CLI path passes
+    /// `!verbose` and the server passes `FactorioParams::default()`, so this
+    /// is the value real runs use -- and the value under which the mods line
+    /// printed on no run at all before this change.
+    async fn run_setup(workspace: &Path) {
         let instance_path = workspace.join("client1");
         std::fs::create_dir_all(&instance_path).expect("create instance dir");
         // Non-empty, so `setup_factorio_instance` skips archive extraction.
@@ -1124,10 +1334,292 @@ mod mods_source_tests {
             false,
             None,
             None,
-            false,
+            true,
         )
         .await
         .expect("setup must succeed with a pre-populated instance dir");
+    }
+
+    /// The checkout this binary was compiled against, canonicalized the same
+    /// way `resolve_workspace_mods` canonicalizes it, so a symlink target
+    /// compares equal.
+    fn repo_mods() -> PathBuf {
+        fs::canonicalize(Path::new(repo_mods_path!("")))
+            .expect("this test needs the repo checkout it was compiled against")
+    }
+
+    fn bridge_link(workspace: &Path) -> PathBuf {
+        workspace.join(MODS_FOLDERNAME).join(BRIDGE_MOD_NAME)
+    }
+
+    /// A fresh workspace: nothing in it at all. The state a new checkout is in.
+    #[tokio::test]
+    async fn a_fresh_workspace_gets_a_symlink_to_the_checkout() {
+        let dir = tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+
+        run_setup(&workspace).await;
+
+        let link = bridge_link(&workspace);
+        assert_eq!(
+            fs::read_link(&link).expect("BotBridge must be a symlink"),
+            repo_mods().join(BRIDGE_MOD_NAME)
+        );
+        // The directory holding it must stay a real directory: Factorio
+        // rewrites `mod-list.json` and `mod-settings.dat` in there, and every
+        // instance's `mods` is a symlink to it.
+        assert!(
+            fs::symlink_metadata(workspace.join(MODS_FOLDERNAME))
+                .expect("workspace/mods must exist")
+                .is_dir()
+        );
+    }
+
+    /// The defect this whole change exists for: an edit to the checkout must
+    /// be what the game loads, with no refresh step and no second run.
+    #[tokio::test]
+    async fn an_edit_to_the_checkout_is_readable_through_the_workspace() {
+        let dir = tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+
+        run_setup(&workspace).await;
+
+        // Read through the workspace path the game is handed, and compare
+        // against the checkout's bytes as they are right now. A copy taken at
+        // setup time would pass this only until the checkout changed, so the
+        // real assertion is the symlink above; this one proves the path the
+        // game uses actually resolves to those bytes.
+        let through_workspace =
+            std::fs::read(bridge_link(&workspace).join("control.lua")).expect("read via workspace");
+        let in_checkout = std::fs::read(repo_mods().join(BRIDGE_MOD_NAME).join("control.lua"))
+            .expect("read via checkout");
+        assert_eq!(through_workspace, in_checkout);
+    }
+
+    /// The state every existing workspace is in: a real directory copied out
+    /// of the checkout at some earlier moment, which is exactly what goes
+    /// stale. It must be replaced, not compared and complained about.
+    #[tokio::test]
+    async fn a_stale_copied_directory_is_replaced_by_the_symlink() {
+        let dir = tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        let workspace_mods = workspace.join(MODS_FOLDERNAME);
+        copy_dir_recursive(&repo_mods(), &workspace_mods).expect("seed a copied workspace");
+        let drifted = workspace_mods.join(BRIDGE_MOD_NAME).join("control.lua");
+        std::fs::write(&drifted, b"-- a stale copy\n").expect("write the stale copy");
+
+        run_setup(&workspace).await;
+
+        assert_eq!(
+            fs::read_link(bridge_link(&workspace)).expect("the copy must become a symlink"),
+            repo_mods().join(BRIDGE_MOD_NAME)
+        );
+        assert_ne!(
+            std::fs::read(&drifted).expect("read through the link"),
+            b"-- a stale copy\n",
+            "the stale bytes survived the repair"
+        );
+    }
+
+    /// A symlink is not automatically the *right* symlink -- a workspace
+    /// carried between checkouts, or a hand-made link, points somewhere else.
+    #[tokio::test]
+    async fn a_symlink_to_somewhere_else_is_repointed() {
+        let dir = tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        let workspace_mods = workspace.join(MODS_FOLDERNAME);
+        std::fs::create_dir_all(&workspace_mods).expect("create workspace/mods");
+        let elsewhere = dir.path().join("some-other-checkout");
+        std::fs::create_dir_all(&elsewhere).expect("create the wrong target");
+        symlink_dir(&elsewhere, &workspace_mods.join(BRIDGE_MOD_NAME)).expect("wrong symlink");
+
+        run_setup(&workspace).await;
+
+        assert_eq!(
+            fs::read_link(bridge_link(&workspace)).expect("still a symlink"),
+            repo_mods().join(BRIDGE_MOD_NAME)
+        );
+    }
+
+    /// A correct symlink must be left alone rather than churned on every
+    /// setup -- four clients plus a server means five setups per run.
+    #[tokio::test]
+    async fn an_already_correct_symlink_is_left_alone() {
+        let dir = tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+
+        run_setup(&workspace).await;
+        let first = fs::symlink_metadata(bridge_link(&workspace)).expect("symlink metadata");
+        run_setup(&workspace).await;
+        let second = fs::symlink_metadata(bridge_link(&workspace)).expect("symlink metadata");
+
+        // The inode, not the creation time: `created()` is `None` on several
+        // Linux filesystems, and two `None`s compare equal, so that version
+        // of this test would pass against a symlink deleted and remade every
+        // single setup.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                first.ino(),
+                second.ino(),
+                "the symlink was deleted and remade rather than recognised as already correct"
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (first, second);
+        }
+        assert_eq!(
+            fs::read_link(bridge_link(&workspace)).expect("still a symlink"),
+            repo_mods().join(BRIDGE_MOD_NAME)
+        );
+    }
+
+    /// The other mods have to come along, or a fresh workspace comes up with
+    /// a different mod set than before the symlink existed.
+    #[tokio::test]
+    async fn the_other_mods_are_seeded_from_the_checkout() {
+        let dir = tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+
+        run_setup(&workspace).await;
+
+        for entry in std::fs::read_dir(repo_mods()).expect("read checkout") {
+            let name = entry.expect("dir entry").file_name();
+            if name == BRIDGE_MOD_NAME {
+                continue;
+            }
+            assert!(
+                workspace.join(MODS_FOLDERNAME).join(&name).exists(),
+                "{name:?} was not seeded into a fresh workspace"
+            );
+        }
+    }
+
+    /// Factorio owns `mod-list.json` and `mod-settings.dat` and rewrites them
+    /// as it runs. Seeding must not put the checkout's versions back over the
+    /// live ones -- that would silently undo whatever the game recorded.
+    #[tokio::test]
+    async fn game_written_state_is_not_overwritten_by_seeding() {
+        let dir = tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        let workspace_mods = workspace.join(MODS_FOLDERNAME);
+        std::fs::create_dir_all(&workspace_mods).expect("create workspace/mods");
+        std::fs::write(
+            workspace_mods.join("mod-settings.dat"),
+            b"written by the game",
+        )
+        .expect("write mod-settings.dat");
+
+        run_setup(&workspace).await;
+
+        assert_eq!(
+            std::fs::read(workspace_mods.join("mod-settings.dat")).expect("read"),
+            b"written by the game"
+        );
+    }
+
+    /// The second half of the failure, and the one a symlink cannot fix on
+    /// its own: a run started while `workspace/mods/BotBridge` was absent
+    /// comes back with the entry dropped from `mod-list.json`, and a mod
+    /// missing from an existing list is a disabled mod however present its
+    /// files are.
+    #[tokio::test]
+    async fn a_mod_list_that_dropped_the_bridge_mod_gets_it_back_enabled() {
+        let dir = tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        let workspace_mods = workspace.join(MODS_FOLDERNAME);
+        std::fs::create_dir_all(&workspace_mods).expect("create workspace/mods");
+        std::fs::write(
+            workspace_mods.join(MOD_LIST_FILENAME),
+            br#"{"mods":[{"name":"base","enabled":true}]}"#,
+        )
+        .expect("write mod-list.json");
+
+        run_setup(&workspace).await;
+
+        let list = read_to_value(&workspace_mods.join(MOD_LIST_FILENAME)).expect("read list");
+        let mods = list["mods"].as_array().expect("mods array");
+        let bridge = mods
+            .iter()
+            .find(|entry| entry["name"] == BRIDGE_MOD_NAME)
+            .expect("BotBridge must be listed");
+        assert_eq!(bridge["enabled"], Value::Bool(true));
+        assert!(
+            mods.iter().any(|entry| entry["name"] == "base"),
+            "the rest of the list must survive"
+        );
+    }
+
+    /// The same, one step less obvious: the entry is there and says `false`.
+    /// Present on disk, listed, and not loaded.
+    #[tokio::test]
+    async fn a_mod_list_that_disables_the_bridge_mod_re_enables_it() {
+        let dir = tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        let workspace_mods = workspace.join(MODS_FOLDERNAME);
+        std::fs::create_dir_all(&workspace_mods).expect("create workspace/mods");
+        std::fs::write(
+            workspace_mods.join(MOD_LIST_FILENAME),
+            br#"{"mods":[{"name":"BotBridge","enabled":false},{"name":"YARM","enabled":false}]}"#,
+        )
+        .expect("write mod-list.json");
+
+        run_setup(&workspace).await;
+
+        let list = read_to_value(&workspace_mods.join(MOD_LIST_FILENAME)).expect("read list");
+        let mods = list["mods"].as_array().expect("mods array");
+        assert_eq!(
+            mods.iter()
+                .find(|entry| entry["name"] == BRIDGE_MOD_NAME)
+                .expect("BotBridge listed")["enabled"],
+            Value::Bool(true)
+        );
+        // A mod deliberately disabled must stay disabled: "make sure the
+        // bridge mod is on" is not "turn everything on".
+        assert_eq!(
+            mods.iter()
+                .find(|entry| entry["name"] == "YARM")
+                .expect("YARM listed")["enabled"],
+            Value::Bool(false)
+        );
+    }
+
+    /// An absent `mod-list.json` is left absent: Factorio writes one from
+    /// scratch and enables what it finds, which is the outcome we want.
+    /// Writing a partial one ourselves would *disable* every mod we did not
+    /// think to list.
+    #[tokio::test]
+    async fn an_absent_mod_list_is_not_invented() {
+        let dir = tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        let workspace_mods = workspace.join(MODS_FOLDERNAME);
+        std::fs::create_dir_all(&workspace_mods).expect("create workspace/mods");
+        // Seeded from the checkout otherwise, which ships one.
+        std::fs::write(workspace_mods.join(MOD_LIST_FILENAME), b"").expect("placeholder");
+        std::fs::remove_file(workspace_mods.join(MOD_LIST_FILENAME)).expect("remove");
+
+        run_setup(&workspace).await;
+
+        // Seeding put the checkout's list back, which is fine -- it enables
+        // BotBridge. What must not happen is a list this code invented.
+        let path = workspace_mods.join(MOD_LIST_FILENAME);
+        if path.exists() {
+            let list = read_to_value(&path).expect("read list");
+            assert!(
+                list["mods"]
+                    .as_array()
+                    .expect("mods array")
+                    .iter()
+                    .any(|entry| entry["name"] == BRIDGE_MOD_NAME),
+                "the seeded list must enable BotBridge"
+            );
+        }
     }
 
     /// Spawns this same test binary as a child process, running only
@@ -1156,221 +1648,43 @@ mod mods_source_tests {
         stdout
     }
 
-    /// Not run directly -- see `names_the_repo_checkout_when_no_workspace_copy_exists`.
+    /// Not run directly -- see `names_the_workspace_directory_and_the_symlink`.
     #[tokio::test]
     #[ignore]
-    async fn worker_repo_checkout_case() {
+    async fn worker_symlinked_workspace_case() {
         let dir = tempdir().expect("tempdir");
         let workspace = dir.path().join("workspace");
         std::fs::create_dir_all(&workspace).expect("create workspace");
-        assert!(
-            !workspace.join(MODS_FOLDERNAME).exists(),
-            "fixture bug: workspace/mods already exists"
+        // The marker the driver test (a different process, which does not
+        // otherwise know this randomly-named tempdir path) checks the printed
+        // line against.
+        let workspace_mods = workspace.join(MODS_FOLDERNAME);
+        std::fs::create_dir_all(&workspace_mods).expect("create workspace/mods");
+        println!(
+            "WORKSPACE_MODS={}",
+            fs::canonicalize(&workspace_mods)
+                .expect("canonicalize")
+                .display()
         );
-        run_setup_and_report(&workspace).await;
+        run_setup(&workspace).await;
     }
 
-    /// `workspace/mods` absent: the debug build must fall back to the repo
-    /// checkout (`../../mods`, relative to the process cwd, which `cargo test
-    /// -p factorio-bot-core` runs from `crates/core`) and say so.
+    /// The line that CLAUDE.md tells a reader to trust must print under
+    /// `silent: true` -- the value every real run uses -- and must name both
+    /// the directory in use and the checkout the bridge mod now points at.
     #[test]
-    fn names_the_repo_checkout_when_no_workspace_copy_exists() {
-        let repo_mods = fs::canonicalize(PathBuf::from(format!("../../{MODS_FOLDERNAME}")))
-            .expect("this test must run with cwd = crates/core, next to a real ../../mods");
+    fn names_the_workspace_directory_and_the_symlink() {
+        let repo_bridge = repo_mods().join(BRIDGE_MOD_NAME);
 
         let output = run_worker_and_capture_stdout(
-            "process::instance_setup::mods_source_tests::worker_repo_checkout_case",
+            "process::instance_setup::mods_source_tests::worker_symlinked_workspace_case",
         );
 
         assert!(
             output.contains("Using mods directory"),
-            "no mods-source line printed at all: {output}"
+            "no mods-source line printed at all under silent: true, which is what every real \
+             run passes: {output}"
         );
-        assert!(
-            output.contains(repo_mods.to_str().expect("utf-8 repo mods path")),
-            "line must name the repo checkout {repo_mods:?}, got: {output}"
-        );
-        assert!(
-            output.contains("repo checkout"),
-            "line must say it fell back to the repo checkout, got: {output}"
-        );
-    }
-
-    /// Copies a directory tree, so a test can stand up a `workspace/mods`
-    /// that really is a copy of the repo checkout -- the state a run reaches
-    /// after a release build extracted one, and the state in which the two
-    /// can then silently drift apart.
-    fn copy_dir_recursive(from: &Path, to: &Path) {
-        std::fs::create_dir_all(to).expect("create target dir");
-        for entry in std::fs::read_dir(from).expect("read source dir") {
-            let entry = entry.expect("dir entry");
-            let file_type = entry.file_type().expect("file type");
-            let target = to.join(entry.file_name());
-            if file_type.is_dir() {
-                copy_dir_recursive(&entry.path(), &target);
-            } else if file_type.is_file() {
-                std::fs::copy(entry.path(), &target).expect("copy file");
-            }
-        }
-    }
-
-    /// Not run directly -- see `reports_a_workspace_copy_that_still_matches_the_checkout`.
-    #[tokio::test]
-    #[ignore]
-    async fn worker_matching_workspace_copy_case() {
-        let dir = tempdir().expect("tempdir");
-        let workspace = dir.path().join("workspace");
-        copy_dir_recursive(
-            Path::new(repo_mods_path!("")),
-            &workspace.join(MODS_FOLDERNAME),
-        );
-        run_setup_and_report(&workspace).await;
-    }
-
-    /// A `workspace/mods` that is a faithful copy of the checkout must be
-    /// reported as such -- and by a count of what was examined, so the line
-    /// says how much of the mod was actually looked at.
-    #[test]
-    fn reports_a_workspace_copy_that_still_matches_the_checkout() {
-        let repo_mods = fs::canonicalize(Path::new(repo_mods_path!("")))
-            .expect("this test needs the repo checkout it was compiled against");
-
-        let output = run_worker_and_capture_stdout(
-            "process::instance_setup::mods_source_tests::worker_matching_workspace_copy_case",
-        );
-
-        assert!(
-            output.contains("identical to"),
-            "an unmodified copy must be reported as identical, got: {output}"
-        );
-        assert!(
-            output.contains(repo_mods.to_str().expect("utf-8 repo mods path")),
-            "the line must name the checkout it was compared against {repo_mods:?}, got: {output}"
-        );
-        assert!(
-            !output.contains("DIFFERS"),
-            "an unmodified copy was reported as drifted: {output}"
-        );
-        assert!(
-            !output.contains("nothing to compare"),
-            "the comparison did not happen at all, which is not the same as agreement: {output}"
-        );
-    }
-
-    /// Not run directly -- see `reports_a_workspace_copy_that_has_drifted`.
-    #[tokio::test]
-    #[ignore]
-    async fn worker_drifted_workspace_copy_case() {
-        let dir = tempdir().expect("tempdir");
-        let workspace = dir.path().join("workspace");
-        let workspace_mods = workspace.join(MODS_FOLDERNAME);
-        copy_dir_recursive(Path::new(repo_mods_path!("")), &workspace_mods);
-        // Exactly the drift that has cost this project time: the copy the run
-        // loads is one edit away from the file every test compiled against.
-        let drifted = workspace_mods.join(BRIDGE_MOD_NAME).join("control.lua");
-        let mut contents = fs::read_to_string(&drifted).expect("read the copy's control.lua");
-        contents.push_str("\n-- drifted\n");
-        std::fs::write(&drifted, contents).expect("write the drifted copy");
-        run_setup_and_report(&workspace).await;
-    }
-
-    /// The one that matters: a `workspace/mods` whose `control.lua` no longer
-    /// matches the checkout must be named as drifted, with the file named, at
-    /// the moment the run says which directory it is using.
-    #[test]
-    fn reports_a_workspace_copy_that_has_drifted() {
-        let output = run_worker_and_capture_stdout(
-            "process::instance_setup::mods_source_tests::worker_drifted_workspace_copy_case",
-        );
-
-        assert!(
-            output.contains("DIFFERS"),
-            "an edited copy was not reported as drifted: {output}"
-        );
-        assert!(
-            output.contains("BotBridge\"") && output.contains("\"control.lua\""),
-            "the report must name the mod compared and the file that drifted, got: {output}"
-        );
-        assert!(
-            output.contains("1 of "),
-            "the report must weigh the one difference against everything examined, got: {output}"
-        );
-        assert!(
-            !output.contains("identical to"),
-            "a drifted copy was also reported as identical: {output}"
-        );
-    }
-
-    /// Not run directly -- see `does_not_report_game_written_state_as_drift`.
-    #[tokio::test]
-    #[ignore]
-    async fn worker_game_written_state_case() {
-        let dir = tempdir().expect("tempdir");
-        let workspace = dir.path().join("workspace");
-        let workspace_mods = workspace.join(MODS_FOLDERNAME);
-        copy_dir_recursive(Path::new(repo_mods_path!("")), &workspace_mods);
-        // Factorio owns these two: it rewrites them in the mods directory as
-        // it runs, and the instance's `mods` symlink points here, so after any
-        // real run they differ from the checkout by design.
-        std::fs::write(workspace_mods.join("mod-list.json"), b"{\"mods\":[]}")
-            .expect("write mod-list.json");
-        std::fs::write(
-            workspace_mods.join("mod-settings.dat"),
-            b"rewritten by the game",
-        )
-        .expect("write mod-settings.dat");
-        run_setup_and_report(&workspace).await;
-    }
-
-    /// A drift report nobody can act on is worse than none: it teaches the
-    /// reader to skip the line. Factorio rewriting its own state files in the
-    /// mods directory is not drift in the mod's code, and must not be reported
-    /// as any.
-    #[test]
-    fn does_not_report_game_written_state_as_drift() {
-        let output = run_worker_and_capture_stdout(
-            "process::instance_setup::mods_source_tests::worker_game_written_state_case",
-        );
-
-        assert!(
-            !output.contains("DIFFERS"),
-            "the game's own state files were reported as a drifted mod: {output}"
-        );
-        assert!(
-            output.contains("identical to"),
-            "the mod's code is unchanged and must be reported as such, got: {output}"
-        );
-    }
-
-    /// Not run directly -- see `names_the_workspace_copy_when_it_already_exists`.
-    #[tokio::test]
-    #[ignore]
-    async fn worker_workspace_copy_case() {
-        let dir = tempdir().expect("tempdir");
-        let workspace = dir.path().join("workspace");
-        let workspace_mods = workspace.join(MODS_FOLDERNAME);
-        std::fs::create_dir_all(&workspace_mods).expect("create workspace/mods");
-        std::fs::write(workspace_mods.join("marker.txt"), b"mine").expect("write marker");
-        let workspace_mods = fs::canonicalize(&workspace_mods).expect("canonicalize");
-        // The marker the driver test (a different process, which does not
-        // otherwise know this randomly-named tempdir path) checks the printed
-        // line against.
-        println!("WORKSPACE_MODS={}", workspace_mods.display());
-        run_setup_and_report(&workspace).await;
-    }
-
-    /// `workspace/mods` already present: the debug build must use *that*
-    /// directory -- not the repo checkout -- and say editing the repo has no
-    /// effect on it.
-    #[test]
-    fn names_the_workspace_copy_when_it_already_exists() {
-        let repo_mods = fs::canonicalize(PathBuf::from(format!("../../{MODS_FOLDERNAME}")))
-            .expect("this test must run with cwd = crates/core, next to a real ../../mods");
-
-        let output = run_worker_and_capture_stdout(
-            "process::instance_setup::mods_source_tests::worker_workspace_copy_case",
-        );
-
         // Not `strip_prefix`: under `--nocapture` libtest prints `test <name>
         // ... ` immediately before the test's own output starts, on the same
         // line, so the marker is not necessarily at the start of its line.
@@ -1381,24 +1695,9 @@ mod mods_source_tests {
                     .map(|(_, rest)| rest.trim())
             })
             .unwrap_or_else(|| panic!("worker did not print its WORKSPACE_MODS marker: {output}"));
-
-        assert!(
-            output.contains("Using mods directory"),
-            "no mods-source line printed at all: {output}"
-        );
-        assert!(
-            output.contains(workspace_mods),
-            "line must name the pre-existing workspace copy {workspace_mods}, got: {output}"
-        );
-        assert!(
-            output.contains("pre-existing workspace copy"),
-            "line must say it used the pre-existing workspace copy, got: {output}"
-        );
-        // Negative half of the discrimination: it must not name the repo
-        // checkout as the directory in use, proving this isn't just "some
-        // path" appearing. The checkout does now appear later in the same
-        // line -- as what the copy was *compared against* -- so this looks at
-        // the directory the line names as in use, not at the whole line.
+        // The directory named as *in use* must be the workspace one, not the
+        // checkout -- the checkout appears later in the same line as the
+        // symlink target, so this looks at the name, not at the whole line.
         let named_as_in_use = output
             .split_once("Using mods directory ")
             .map(|(_, rest)| rest.split_once(" (").map_or(rest, |(dir, _)| dir))
@@ -1408,9 +1707,43 @@ mod mods_source_tests {
             "the directory named as in use is {named_as_in_use}, not the workspace copy"
         );
         assert!(
-            !named_as_in_use.contains(repo_mods.to_str().expect("utf-8 repo mods path")),
-            "line named the repo checkout as the directory in use even though \
-             workspace/mods already existed: {output}"
+            output.contains("is a symlink to"),
+            "the line must say the bridge mod is a symlink, got: {output}"
+        );
+        assert!(
+            output.contains(repo_bridge.to_str().expect("utf-8 checkout path")),
+            "the line must name the checkout {repo_bridge:?} it points at, got: {output}"
+        );
+    }
+
+    /// Not run directly -- see `announces_a_repaired_mod_list`.
+    #[tokio::test]
+    #[ignore]
+    async fn worker_disabled_mod_list_case() {
+        let dir = tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        let workspace_mods = workspace.join(MODS_FOLDERNAME);
+        std::fs::create_dir_all(&workspace_mods).expect("create workspace/mods");
+        std::fs::write(
+            workspace_mods.join(MOD_LIST_FILENAME),
+            br#"{"mods":[{"name":"BotBridge","enabled":false}]}"#,
+        )
+        .expect("write mod-list.json");
+        run_setup(&workspace).await;
+    }
+
+    /// Repairing `mod-list.json` silently would hide the fact that a previous
+    /// run disabled the mod -- which is a symptom of something, not a normal
+    /// state. It is reported on the same line as the directory.
+    #[test]
+    fn announces_a_repaired_mod_list() {
+        let output = run_worker_and_capture_stdout(
+            "process::instance_setup::mods_source_tests::worker_disabled_mod_list_case",
+        );
+
+        assert!(
+            output.contains("DISABLED") && output.contains("re-enabled"),
+            "a mod-list repair must be announced, got: {output}"
         );
     }
 }

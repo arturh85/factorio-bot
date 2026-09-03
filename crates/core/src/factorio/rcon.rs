@@ -4141,9 +4141,9 @@ mod positioning_tests {
     /// `control.lua`'s mining watchdog is reworded, this fails here -- loudly,
     /// and in the crate that depends on it -- instead of the retirement quietly
     /// never firing again and mined-out tiles staying in the model for another
-    /// run. `repo_mods_path!` is the same checkout the drift check compares a
-    /// workspace against, so the guard and the run cannot end up talking about
-    /// different files.
+    /// run. `repo_mods_path!` is the same checkout a debug run symlinks
+    /// `workspace/mods/BotBridge` to, so the guard and the run cannot end up
+    /// talking about different files.
     #[test]
     fn a_vanished_mine_target_is_recognised_from_the_mods_own_wording() {
         use crate::process::instance_setup::repo_mods_path;
@@ -4271,12 +4271,12 @@ mod positioning_tests {
 /// about this source tree, and CI has no workspace at all. Asserting it as a
 /// test would either fail on a fresh checkout or pass vacuously. So it is
 /// reported where it exists instead -- at run time, on the "Using mods
-/// directory" line, which now carries the verdict of comparing the copy in
-/// use against this checkout (see `process::instance_setup`, and
-/// `asset_sync::warn_if_stale` for the release build's equivalent against the
-/// embedded snapshot). The bytes below and the directory that check compares
-/// against both come from `repo_mods_path!`, so the guard and the run-time
-/// report cannot end up talking about different files.
+/// directory" line, which names what `workspace/mods/BotBridge` actually is:
+/// in a debug build a symlink to this checkout, so there is no copy left to
+/// drift (see `process::instance_setup`); in a release build a copy of the
+/// embedded snapshot, checked by `asset_sync::warn_if_stale`. The bytes below
+/// and the directory that line names both come from `repo_mods_path!`, so the
+/// guard and the run cannot end up talking about different files.
 /// What an unparseable reply says about itself.
 #[cfg(test)]
 mod reply_snippet_tests {

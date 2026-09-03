@@ -388,15 +388,29 @@ The system supports running multiple graphical Factorio clients controlled by Lu
 #
 # This is not a preference, the two builds behave differently:
 #
-#   debug    mods resolve to the repo checkout ONLY IF workspace/mods does
-#            not already exist. Once a workspace exists, that copy wins and
-#            there is NO refresh path -- editing mods/BotBridge has no effect
-#            and the run silently uses the stale copy. Edit workspace/mods/
-#            directly when iterating, or delete it to re-seed.
-#            Every run -- either build, no flag needed -- logs one line
-#            naming which directory actually won: "Using mods directory
-#            <absolute path> (<why>)". That line, not a guess from a
-#            traceback, is the authoritative answer to "did my edit ship".
+#   debug    workspace/mods/BotBridge is a SYMLINK to the repo's
+#            mods/BotBridge, created or repaired on every setup, so an edit
+#            to mods/BotBridge/control.lua is what the next run loads. There
+#            is nothing to refresh and no copy to go stale. workspace/mods
+#            itself stays a real directory: the other mods live there, and
+#            Factorio rewrites mod-list.json and mod-settings.dat in it.
+#            Do NOT "delete workspace/mods to re-seed" -- every instance's
+#            mods dir is a symlink to it, so deleting it leaves the server
+#            with no bridge mod: it hangs at `start waiting` forever after
+#            writing a level.zip with no bridge state, which poisons every
+#            later run (Factorio only migrates on a version bump and
+#            info.json is pinned at 0.0.1).
+#            Setup also re-enables BotBridge in workspace/mods/mod-list.json
+#            if a previous run dropped or disabled it -- a mod present on
+#            disk but absent from an existing mod-list.json is a DISABLED
+#            mod, and that failure is completely silent.
+#            Every run -- either build, no flag needed, and NOT gated on
+#            --verbose any more -- logs one line naming which directory won
+#            and what BotBridge is: "Using mods directory <absolute path>
+#            (<why>)". That line, not a guess from a traceback, is the
+#            authoritative answer to "did my edit ship". It used to be
+#            suppressed by `silent` (which every CLI path sets unless you
+#            pass --verbose) and so printed on no run at all.
 #            Same trap for scripts: workspace/scripts/ is a separate copy, and
 #            the CLI resolves a script by bare name against THAT copy, not the
 #            repo -- but scripts has no repo-checkout fallback at all (even in
@@ -407,7 +421,11 @@ The system supports running multiple graphical Factorio clients controlled by Lu
 #            COMPILE TIME and extracted once into the workspace. Editing
 #            mods/ or scripts/ has NO effect until you rebuild -- and no
 #            effect at all on an existing workspace, because extraction is
-#            skipped when the directory already exists.
+#            skipped when the directory already exists. There is no symlink
+#            here and there must not be: a release binary has no checkout to
+#            point at. FACTORIO_BOT_REFRESH_MODS=1 refreshes the workspace
+#            copy from the embedded snapshot; it is a no-op in a debug build,
+#            which has no snapshot.
 #            Data dir is ~/.local/share/factorio-bot/
 #
 # Editing the mod against a release build costs two confusing runs. Ask.

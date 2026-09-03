@@ -1,5 +1,11 @@
 pub const WORKSPACE_FOLDERNAME: &str = "workspace";
 pub const MODS_FOLDERNAME: &str = "mods";
+/// Factorio's own record of which mods it found and which are enabled,
+/// written by the game into its mods directory on every start. A mod that is
+/// present on disk but absent from an existing list is a *disabled* mod, so
+/// this file can silently unload `BotBridge` -- see
+/// `instance_setup::ensure_bridge_mod_enabled`.
+pub const MOD_LIST_FILENAME: &str = "mod-list.json";
 pub const SERVER_SETTINGS_FILENAME: &str = "server-settings.json";
 pub const MAP_GEN_SETTINGS_FILENAME: &str = "map-gen-settings.json";
 pub const MAP_SETTINGS_FILENAME: &str = "map-settings.json";

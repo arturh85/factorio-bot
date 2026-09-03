@@ -193,6 +193,38 @@ had 6. Something re-seeded it in between and I could not attribute it. What is
 not in doubt is that run 4's *game* had the old mod — Factorio loads mods at
 server start, and the game itself raised the missing-function error.
 
+## The min_radius fix is GREEN IN TESTS AND STALLS A LIVE RUN
+
+**`c0d4f87a` is currently on master and a run cannot execute with it.** Run 11
+(`run-1788418841-48581`), same unchanged `level.zip` as runs 8/9/10:
+
+* rung 1 planned **134 steps**, where runs 8, 9 and 10 all planned **314** on
+  this same world — despite the fix being reported as leaving the plan's
+  simulation bit-identical, with no pin moved;
+* after ~13 minutes the record held exactly `{run_started: 1, milestone_started:
+  1, plan_created: 1}` — **zero `action_dispatched`, zero `walk_dispatched`,
+  zero open actions**, and the log had stopped growing;
+* the only activity was two `too far away, moving first!` warnings **11.6
+  minutes apart**, which is `ACTION_RESULT_DEADLINE` (360 wall-clock seconds,
+  `rcon.rs:39`) expiring twice with nothing settling in between. Those warnings
+  appear in healthy runs too — what is new is the absence of any progress
+  around them.
+
+The likely shape: `approach_annulus` returns a goal the bot is already inside,
+so nothing is dispatched, while the caller still waits for an arrival that will
+never settle. The fix's own test asserts "already inside, nothing to dispatch" —
+**returning "no walk needed" and returning "walk complete" must not be the same
+value to a caller that then waits.**
+
+**This is the sharpest instance tonight of the rule this project keeps
+re-learning: green tests are not the bar, a run executing is.** The change had
+485 planner tests, a mutation battery, every pin passing unedited, and a test
+built from the real run's coordinates — and it stops the machine dead. The
+earlier form of this lesson was "the cell stands is not the cell produces". This
+is the same shape one level down: "the suite is green" is not "the thing runs".
+
+Sent back to be fixed or reverted; master should not stay in this state.
+
 ## CORRECTION: six of the eight "walk refusals" are a different defect
 
 **I built an elaborate case on a misreading, and it was wrong in a way worth

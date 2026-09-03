@@ -151,6 +151,34 @@ had 6. Something re-seeded it in between and I could not attribute it. What is
 not in doubt is that run 4's *game* had the old mod — Factorio loads mods at
 server start, and the game itself raised the missing-function error.
 
+## Pathfinder refusals happen at sub-tile distances (lead, not yet a fix)
+
+Two runs refused a walk over a distance shorter than one tile:
+
+* run 8: no path from `(-28.394, -26.906)` to `(-28.5, -27.5)` — **0.6 tiles**
+* run 1: no path from `(-19.890, 13.875)` to `(-20.5, 13.5)` — **0.7 tiles**
+
+The bot is effectively standing on its destination and the game still answers
+`failed to path find` (searched and found nothing — not `try again later`,
+which would mean a full queue).
+
+The radius *is* honoured: `rcon_actuator.rs:298` passes
+`Some(approach_radius(radius))`. But `approach_radius` is
+`(bound * 0.5).clamp(0.5, bound.max(0.5))` (`rcon.rs:893`), so a radius of 1.0
+becomes **0.5** — an acceptance ring small enough that one occupied goal tile
+leaves no reachable point at all. The mod already treats "caller already stood
+within arrival tolerance" as a no-op success (`control.lua:958`), but only when
+the *path request comes back empty*; it does not cover a request that was made
+and refused.
+
+**Candidate fix:** compare against the walk's *original* radius before issuing a
+path request, and report arrival without asking the pathfinder when the bot is
+already inside it. Cheap, and it removes a class of recoverable-but-costly
+failures — costly because of the transient-refusal defect above, where any
+failure abandons that bot's whole remaining chain.
+
+Not implemented; a run held the workspace.
+
 ## A save generated without the mod poisons every later run
 
 Runs 6 and 7 both hung at `start waiting` — 134-byte logs, no clients, forever.

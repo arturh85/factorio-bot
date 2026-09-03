@@ -2,77 +2,20 @@
  * Placing an archived run on a single tick axis.
  *
  * Every panel in the run viewer reads the same tick cursor, so all of this is
- * pure: given the run's frames and splits and a cursor, what should be on
- * screen. Kept out of the components because it is the part that can be wrong
- * in a way you would not notice by looking.
+ * pure: given the run's splits, lanes and video range and a cursor, what should
+ * be on screen. Kept out of the components because it is the part that can be
+ * wrong in a way you would not notice by looking.
  */
 
-import {ArchivedFrame, Lane, RunSummary, Split, TickRange} from '@/api/types';
-
-/** A frame that can be placed on the axis: one whose filename parsed. */
-export interface PlacedFrame extends ArchivedFrame {
-    tick: number;
-    camera: string;
-}
-
-/**
- * The frames that can be positioned in time, sorted by tick.
- *
- * A frame whose name did not parse is archived and listed, but it cannot be
- * placed on a tick axis -- so it is excluded here rather than shown at an
- * invented position. `RunFramesResponse` still reports it; this is the
- * timeline's view, not the archive's.
- */
-export function placeable(frames: ArchivedFrame[]): PlacedFrame[] {
-    return frames
-        .filter((f): f is PlacedFrame => f.tick !== null && f.camera !== null)
-        .sort((a, b) => a.tick - b.tick || a.bot - b.bot || a.camera.localeCompare(b.camera));
-}
-
-/** The distinct bots that captured frames, ascending. */
-export function botsOf(frames: PlacedFrame[]): number[] {
-    return [...new Set(frames.map((f) => f.bot))].sort((a, b) => a - b);
-}
-
-/** The distinct camera ids, alphabetical. */
-export function camerasOf(frames: PlacedFrame[]): string[] {
-    return [...new Set(frames.map((f) => f.camera))].sort();
-}
-
-/**
- * The frame to show at `tick` for one bot and camera: the latest one at or
- * before the cursor.
- *
- * **At or before, never exact.** Capture runs every 300 ticks and frames drop,
- * so an exact match would leave the panel blank for almost every cursor
- * position -- which would read as "nothing was happening" rather than "no
- * frame was taken at precisely this tick".
- *
- * `null` only when the cursor sits before the first frame, which is a real
- * state: the run had started but capture had not yet produced anything.
- */
-export function frameAt(
-    frames: PlacedFrame[],
-    bot: number,
-    camera: string,
-    tick: number
-): PlacedFrame | null {
-    let best: PlacedFrame | null = null;
-    for (const frame of frames) {
-        if (frame.bot !== bot || frame.camera !== camera) continue;
-        if (frame.tick > tick) continue;
-        if (best === null || frame.tick > best.tick) best = frame;
-    }
-    return best;
-}
+import {Lane, RunSummary, Split, TickRange} from '@/api/types';
 
 /**
  * The tick range the timeline spans.
  *
- * Drawn from the splits *and* the frames, because either can extend past the
- * other: capture keeps running after the last milestone closes, and a run can
- * record milestones before the first frame lands. Taking only one would clip
- * the axis and hide whatever fell outside it.
+ * Drawn from the splits, the lanes *and* the recording, because any of them can
+ * extend past the others: a recording keeps running after the last milestone
+ * closes, and a run can record milestones before the recording starts. Taking
+ * only one would clip the axis and hide whatever fell outside it.
  *
  * `null` when there is nothing to place at all -- a planning-only run with no
  * milestones. The caller shows an empty timeline rather than one spanning
@@ -80,42 +23,28 @@ export function frameAt(
  */
 function tickSources(
     splits: Split[],
-    frames: PlacedFrame[],
     lanes: Lane[],
     videoRange: TickRange | null = null
 ): {all: number[]; drawn: number[]} {
     const all: number[] = [];
     // Ticks at which something is actually *drawn*. A split contributes a span
-    // whose bar can be clipped; a frame or a lane bar cannot appear before its
-    // own first tick, so these are what decide when the axis has content.
+    // whose bar can be clipped; a lane bar or the recording cannot appear before
+    // its own first tick, so these are what decide when the axis has content.
     const drawn: number[] = [];
     for (const split of splits) {
         all.push(split.started_tick);
         if (split.ended_tick !== null) all.push(split.ended_tick);
-    }
-    for (const frame of frames) {
-        all.push(frame.tick);
-        drawn.push(frame.tick);
     }
     for (const lane of lanes) {
         all.push(lane.from_tick);
         drawn.push(lane.from_tick);
         if (lane.to_tick !== null) all.push(lane.to_tick);
     }
-    // **In the frames' place, never beside them.** Frame ticks decided where
-    // this axis starts for as long as frames existed -- so a run that captured
-    // both must land on exactly the axis it would have had without video, or
-    // two runs' axes stop lining up for a reason nothing reports.
-    //
-    // Since screenshot cameras were retired (2026-09-02) this is no longer the
-    // corner it was written as: a run captures no frames unless it asks, so
-    // **the video is normally what carries the axis**, and the frames branch is
-    // the exception. The narrowing stays anyway, because a run that opts back
-    // into frames still has to line up against every run recorded before the
-    // retirement. Note the test `frames` here is already `placeable`-filtered,
-    // so a run holding only unparseable frame names does not block the video:
-    // those have no tick and contribute nothing to draw.
-    if (videoRange !== null && frames.length === 0) {
+    // **The video carries the axis.** Screenshot frame ticks decided where this
+    // axis started for as long as the cameras existed; since they were retired
+    // (2026-09-02) the recording is the only capture left, so it contributes
+    // both ends of its span and the tick at which it starts drawing.
+    if (videoRange !== null) {
         all.push(videoRange.from, videoRange.to);
         drawn.push(videoRange.from);
     }
@@ -124,18 +53,17 @@ function tickSources(
 
 export function tickBounds(
     splits: Split[],
-    frames: PlacedFrame[],
     lanes: Lane[] = [],
     videoRange: TickRange | null = null
 ): {from: number; to: number} | null {
-    const {all, drawn} = tickSources(splits, frames, lanes, videoRange);
+    const {all, drawn} = tickSources(splits, lanes, videoRange);
     if (all.length === 0) return null;
     // Start where there is something to see.
     //
     // A run's first milestone opens before capture or any bot has produced
     // anything -- 231 ticks before, in the run that prompted this, while the
     // planner was still thinking. Spanning that gap spends axis width on a
-    // stretch with no frame and no lane bar, so scrubbing into it answers
+    // stretch with no lane bar and no recording, so scrubbing into it answers
     // "nothing happened" when what happened simply is not drawn.
     //
     // `drawn` is a subset of `all`, so this can only move the start forward,
@@ -151,9 +79,9 @@ export function tickBounds(
  * **Never cut more than you keep.** Trimming is meant to shave a small dead
  * margin off the front, not to reframe the run. A run whose only capture
  * landed at the very end would otherwise collapse to a zero-width axis --
- * splits carry the whole extent, and dropping everything before the one frame
- * throws that extent away. So the trim applies only while the remaining span
- * is the larger half.
+ * splits carry the whole extent, and dropping everything before that one
+ * capture throws that extent away. So the trim applies only while the remaining
+ * span is the larger half.
  */
 function axisFrom(all: number[], drawn: number[]): number {
     const start = Math.min(...all);
@@ -173,11 +101,10 @@ function axisFrom(all: number[], drawn: number[]): number {
  */
 export function leadInTicks(
     splits: Split[],
-    frames: PlacedFrame[],
     lanes: Lane[] = [],
     videoRange: TickRange | null = null
 ): number {
-    const {all, drawn} = tickSources(splits, frames, lanes, videoRange);
+    const {all, drawn} = tickSources(splits, lanes, videoRange);
     if (all.length === 0) return 0;
     return axisFrom(all, drawn) - Math.min(...all);
 }
@@ -313,46 +240,4 @@ export function formatAgo(unix: number | null, nowUnix: number): string {
     const hours = Math.round(minutes / 60);
     if (hours < 36) return `${hours} h ago`;
     return `${Math.round(hours / 24)} d ago`;
-}
-
-/** One selectable view: a camera, and the client directory it was written to. */
-export interface FrameView {
-    bot: number;
-    camera: string;
-    /** How many frames this view has. */
-    count: number;
-    /** First tick it captured, for seeking straight to it. */
-    from: number;
-}
-
-/**
- * The (bot, camera) pairs a run actually captured.
- *
- * Offered as pairs rather than as two independent dropdowns because only
- * *specific* combinations exist. The mod renders each camera through some
- * player and the screenshot lands in that player's `script-output`, so the
- * directory a frame came from has no relation to who it is looking at: one run
- * put camera `bot-3` in client 1's folder and `area`, `bot-1` and `follow` all
- * in client 2's. Two free selectors let a reader pick a pair that never
- * existed, which is most of them, and the panel goes blank for a reason that
- * looks like a bug.
- *
- * Sorted by camera name so the ordering is about what you are watching, which
- * is the question a reader actually has.
- */
-export function viewsOf(frames: PlacedFrame[]): FrameView[] {
-    const byPair = new Map<string, FrameView>();
-    for (const frame of frames) {
-        const key = `${frame.bot}\u0000${frame.camera}`;
-        const seen = byPair.get(key);
-        if (seen === undefined) {
-            byPair.set(key, {bot: frame.bot, camera: frame.camera, count: 1, from: frame.tick});
-        } else {
-            seen.count += 1;
-            seen.from = Math.min(seen.from, frame.tick);
-        }
-    }
-    return [...byPair.values()].sort(
-        (a, b) => a.camera.localeCompare(b.camera) || a.bot - b.bot
-    );
 }

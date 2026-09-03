@@ -282,41 +282,53 @@ detached (`crates/server/src/manage/execute.rs`, `crates/server/src/jobs.rs`).
   `resolve_write_path` (`crates/core/src/scripts.rs`), which refuse any path
   that leaves the scripts root.
 
-### Frames and Replay
+### Replay and Video
 
-A run produces two artefacts that are joined in the UI by `game.tick`, which is
-the only clock both sides share.
+**Per-camera screenshots ("frames") were retired on 2026-09-02 and removed on
+2026-09-03.** The mod no longer calls `game.take_screenshot` on a beat, there is
+no `frames/` directory, no `/api/v1/frames*` route, and no `ArchivedFrame`.
+Video is the visual record. Do not reintroduce a screenshot cadence without
+reading `docs/superpowers/notes/2026-09-02-screenshots-retired.md`: one run
+wrote 2,164 JPEGs / 947 MB against 290 MB for the same 45 minutes of video, and
+`take_screenshot` renders *synchronously inside the game loop* where the video
+grabber reads a frame the GPU already drew.
+
+Three unrelated things are still called "frame" and must survive a grep:
+entity-map **keyframes** (`map.jsonl`, `lib/runMap.ts`), **video frames**
+(`crates/core/src/record/video/`, `api/videoClock.ts`), and
+`requestAnimationFrame`.
+
+A run produces artefacts joined in the UI by `game.tick`, the only clock they
+share.
 
 - **Replay** — the executor serialises what it actually did, reaching the
   browser over the job's SSE stream (`WireEvent::Replay`), not a REST route: it
   belongs to the run that produced it, so it travels with that run's output.
   `app/src/api/replay.ts` narrows it at runtime (`parseReplay`) rather than
   casting.
-- **Frames** — the mod screenshots every 300 ticks into
-  `workspace/client<N>/script-output/frames/`, named `tick-<digits>-<camera>.jpg`.
-  Cameras are `follow`, `bot-<player_index>` and `area` (the bounding box of all
-  connected bots, +16 tiles; it writes nothing below zoom 0.05 rather than crop
-  silently). `GET /api/v1/frames` lists them; `GET /api/v1/frames/{client}/{name}`
-  serves the bytes.
+- **Video** — opt-in per run (`record.start({video = true})`), filmed from a
+  graphical client's window by ffmpeg and joined to the plan through
+  `ticks.jsonl`, the `(tick, wall_ms)` table the viewer interpolates. It is
+  *not* tick-exact: a stalled game keeps writing the last drawn image, which
+  looks exactly like a game that was running and idle. The event log and
+  `map.jsonl` are the tick-exact record.
+- **Samples** — `samples.jsonl`: research, production, power and bot
+  inventories, on 300- and 60-tick beats. These ride on the mod's *sampling
+  session* (`rcon.sampling_start(run_id)` / `sampling_stop()`), which is what
+  the screenshot capture used to ride on. Removing the session would take the
+  whole world-state stream with it, silently — that is why it outlived the
+  cameras.
 
 **Planned ticks start at zero; observed ticks are absolute `game.tick`.** A run
 dispatching its first step at tick 60,551 would otherwise draw the whole plan in
 the first 1.4% of the axis. `ReplayScrubber.vue` works in shifted ticks and
 converts in exactly one place — `observedOrigin()`.
 
-**The join is checked, never assumed.** `app/src/api/frameJoin.ts` compares tick
+**The join is checked, never assumed.** `app/src/api/runMatch.ts` compares tick
 ranges and run ids and reports `contradicted | confirmed | consistent |
-inconclusive`. A missing run id is **unknown, never "no match"** — treating
-absence as mismatch refuses a good join; treating it as a match asserts
-something nobody established. `frames/run.json` sits *inside* `frames/` so a
-per-run wipe clears the id together with the frames it describes.
-
-Each client reports its own run id (`client_runs`), and the manifest's `run` is
-set only when the clients that answered **agree**. A client rewrites its sidecar
-only when it takes part in a capture, so a run with fewer clients than the last
-one leaves the extra client holding the previous run's frames — that client is
-named rather than outvoted, and its frames stay reachable but are marked in the
-picker. There is no majority rule: one dissenter makes the id unknown.
+inconclusive`; `api/videoJoin.ts` applies it to a recording. A missing run id is
+**unknown, never "no match"** — treating absence as mismatch refuses a good
+join; treating it as a match asserts something nobody established.
 
 ## Lua Scripts
 

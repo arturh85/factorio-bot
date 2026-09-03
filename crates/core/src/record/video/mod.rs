@@ -182,9 +182,9 @@ pub struct VideoManifest {
     /// The opaque run identifier from `video/run.json`, or `null` when the
     /// directory has no readable sidecar.
     ///
-    /// `null` means *unknown*, never *no match* -- the same rule
-    /// `FramesManifest::run` follows. A consumer compares it for equality and
-    /// does nothing else with it.
+    /// `null` means *unknown*, never *no match*: a consumer compares it for
+    /// equality and does nothing else with it. Absence is not evidence of a
+    /// mismatch -- treating it as one refuses a good join.
     #[schema(required)]
     pub run: Option<String>,
     /// `video.json`, or `null` when the recorder never wrote one (which for a
@@ -206,7 +206,7 @@ pub struct VideoManifest {
     ///
     /// Published so the viewer can size its axis without fetching thousands of
     /// samples: `runTimeline.ts` feeds this into the `drawn` set that decides
-    /// where the axis starts, in the frames' place for a video-only run.
+    /// where the axis starts.
     #[schema(required)]
     pub tick_range: Option<TickRange>,
 }

@@ -1,6 +1,5 @@
 #[cfg(feature = "lua")]
 pub mod execute;
-pub mod frames;
 pub mod fs;
 pub mod instance;
 pub mod rcon;
@@ -8,9 +7,29 @@ pub mod scripts;
 pub mod settings;
 pub mod video;
 
+use crate::error::ErrorResponse;
 use crate::state::AppState;
+use std::path::PathBuf;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
+
+/// Resolves the workspace root this request's artefacts live under.
+///
+/// Mirrors `manage::scripts::scripts_root_path`: reads `workspace_path`
+/// straight out of settings rather than going through
+/// `factorio_bot_core::scripts::scripts_dir`'s CWD-relative fallback, for the
+/// same reason -- a request must be bound to the *configured* workspace, not
+/// to wherever the server process's working directory happens to be.
+///
+/// Deliberately does not require the directory to exist, and does not
+/// canonicalize it: "no workspace yet" is a state the callers represent
+/// themselves, not an error, and canonicalizing a missing path would fail.
+pub(crate) async fn workspace_root(state: &AppState) -> Result<PathBuf, ErrorResponse> {
+    let workspace_path = state.settings.read().await.factorio.workspace_path.clone();
+    factorio_bot_core::paths::resolve_workspace(workspace_path.as_ref())
+        .map(|resolved| resolved.as_path().to_path_buf())
+        .map_err(|err| ErrorResponse::bad_request(err.to_string()))
+}
 
 pub fn router() -> OpenApiRouter<AppState> {
     let router = OpenApiRouter::new()
@@ -26,8 +45,6 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(scripts::create_script))
         .routes(routes!(scripts::delete_script))
         .routes(routes!(fs::exists))
-        .routes(routes!(frames::list_frames))
-        .routes(routes!(frames::get_frame))
         .routes(routes!(video::get_video))
         .routes(routes!(video::get_video_ticks))
         .routes(routes!(video::get_video_file));

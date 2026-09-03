@@ -1,8 +1,7 @@
 //! Keeping the run archive from growing without bound.
 //!
-//! Frames dominate: 300-tick capture across three cameras at 1920x1080 is
-//! roughly 700MB an hour, and a single 18-minute run archived 666 frames. Left
-//! alone the archive is a slow disk leak.
+//! Video dominates: a 45-minute run archived 290MB of it. Left alone the
+//! archive is a slow disk leak.
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -202,7 +201,7 @@ mod tests {
         fs::write(
             finished.join("manifest.json"),
             br#"{"run_id":"run-1000-1","started_unix":1000,"finished_unix":1100,
-                 "outcome":"done","elapsed_ticks":1,"events":1,"frames":0,"splits":0}"#,
+                 "outcome":"done","elapsed_ticks":1,"events":1,"splits":0}"#,
         )
         .unwrap();
         seed(&root, "run-9000-1"); // newer, crashed, no manifest

@@ -5,7 +5,7 @@
 // server simply being unreachable). The lint keeps both out.
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
-use factorio_bot_core::factorio::rcon::{FactorioRcon, FrameCameras};
+use factorio_bot_core::factorio::rcon::FactorioRcon;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::types::{AreaFilter, PlayerId, Position, RequestEntity};
@@ -22,35 +22,6 @@ use super::position_from_lua;
 /// walked straight past it.
 fn rcon_error(err: impl std::fmt::Display) -> LuaError {
     LuaError::RuntimeError(format!("rcon: {err}"))
-}
-
-/// Reads the `cameras` argument of a frame-capture start.
-///
-/// **An absent argument is [`FrameCameras::None`]**, which is the whole point:
-/// screenshots are retired, so a script that says nothing must render nothing.
-/// `nil` and `false` mean the same thing on purpose -- an option threaded
-/// through from somewhere else produces one or the other, and the two reading
-/// differently is how a flag comes to default wrong.
-///
-/// Anything else raises here rather than being coerced. Lua's truthiness would
-/// otherwise turn `cameras = 1` or `cameras = "follow"` into "all of them",
-/// which is the expensive direction to guess in.
-pub(super) fn frame_cameras_from_lua(value: Option<LuaValue>) -> LuaResult<FrameCameras> {
-    match value {
-        None | Some(LuaValue::Nil) | Some(LuaValue::Boolean(false)) => Ok(FrameCameras::None),
-        Some(LuaValue::Boolean(true)) => Ok(FrameCameras::All),
-        Some(LuaValue::Table(ids)) => {
-            let mut chosen = Vec::new();
-            for id in ids.sequence_values::<String>() {
-                chosen.push(id?);
-            }
-            Ok(FrameCameras::Only(chosen))
-        }
-        Some(other) => Err(LuaError::RuntimeError(format!(
-            "frame capture cameras must be true, false, absent or a list of camera ids, got {}",
-            other.type_name()
-        ))),
-    }
 }
 
 pub fn create_lua_rcon(
@@ -206,7 +177,7 @@ end
 --
 -- The calls that do advance it are the ones that act: `mine`, `craft`,
 -- `place_entity`, `insert_to_inventory`, `remove_from_inventory`, `move`,
--- `add_research`, `frame_capture_start`.
+-- `add_research`, `sampling_start`.
 -- @treturn number|nil the tick, or nil if the game has not answered yet
 function rcon.last_tick()
 end
@@ -263,81 +234,66 @@ end
     }
 
     map_table.set(
-        "__doc_entry_frame_capture_start",
+        "__doc_entry_sampling_start",
         String::from(
             r#"
---- starts the mod's capture session, wiping any earlier run's frames
--- Sends /silent-command remote.call('frame_capture_start', run_id, cameras)
--- The optional run_id is opaque: it is echoed verbatim into frames/run.json as
--- {"run":"<run_id>"} and interpreted by nothing in the game. Pass one when the
--- frames must later be matched against something produced elsewhere in the
+--- starts the mod's sampling session, truncating any earlier run's samples
+-- Sends /silent-command remote.call('sampling_start', run_id)
+-- The optional run_id is opaque: it is stamped verbatim onto every sample line
+-- as "run":"<run_id>" and interpreted by nothing in the game. Pass one when the
+-- samples must later be matched against something produced elsewhere in the
 -- same run, so a consumer can check they belong together instead of trusting
--- that tick numbers lining up means they do. Omit it and no run.json is
--- written at all -- notably, the previous run's is gone and is not inherited.
+-- that tick numbers lining up means they do. Omit it and the lines carry no run
+-- key at all -- notably, the previous run's is not inherited.
 --
--- Screenshot cameras are RETIRED and this captures NOTHING by default. Video
--- is the visual record: one run wrote 2164 JPEGs / 947 MB of screenshots
--- against 290 MB for the same 45 minutes of video, and take_screenshot renders
--- synchronously inside the game loop. The session still starts because the
--- mod's world-state samplers (research, production, power, bot inventories)
--- are gated on it -- only the rendering is off.
+-- This is what makes a run observable: the mod's world-state samplers
+-- (research, production and power every 300 ticks, bot inventories every 60)
+-- are gated on an active session and write nothing without one.
 --
---     rcon.frame_capture_start(run_id)              -- no camera; the default
---     rcon.frame_capture_start(run_id, true)        -- every camera, ~520 MB/hour each
---     rcon.frame_capture_start(run_id, {"follow"})  -- one camera
---
--- An id no camera answers to raises rather than being dropped: a list quietly
--- reduced to nothing looks configured and captures exactly as much as none.
--- @string[opt] run_id opaque tag for this capture run
--- @tparam[opt] boolean|table cameras true for every camera, or a list of camera ids
--- @treturn number the game tick capture began at
-function rcon.frame_capture_start(run_id, cameras)
+-- Until 2026-09-02 this also drove per-camera screenshots. They are gone --
+-- one run wrote 2164 JPEGs / 947 MB of them against 290 MB for the same 45
+-- minutes of video, and take_screenshot rendered synchronously inside the game
+-- loop. Video is the visual record; see record.start's video option.
+-- @string[opt] run_id opaque tag for this session
+-- @treturn number the game tick sampling began at
+function rcon.sampling_start(run_id)
 end
 "#,
         ),
     )?;
     map_table.set(
-        "frame_capture_start",
-        lua.create_async_function(
-            move |_lua, (run_id, cameras): (Option<String>, Option<LuaValue>)| {
-                let _rcon = rcon.clone();
-                // Read before the await so a malformed argument is a script
-                // error rather than a command already on its way to the game.
-                let cameras = frame_cameras_from_lua(cameras);
-                async move {
-                    let tick = _rcon
-                        .as_ref()
-                        .frame_capture_start(run_id, cameras?)
-                        .await
-                        .map_err(rcon_error)?;
-                    Ok(tick)
-                }
-            },
-        )?,
-    )?;
-    let rcon = _rcon.clone();
-    map_table.set(
-        "__doc_entry_frame_capture_stop",
-        String::from(
-            r#"
---- stops frame capture; frames already written stay on disk
--- Sends /silent-command remote.call('frame_capture_stop')
--- @treturn number the game tick capture stopped at
-function rcon.frame_capture_stop()
-end
-"#,
-        ),
-    )?;
-    map_table.set(
-        "frame_capture_stop",
-        lua.create_async_function(move |_lua, ()| {
+        "sampling_start",
+        lua.create_async_function(move |_lua, run_id: Option<String>| {
             let _rcon = rcon.clone();
             async move {
                 let tick = _rcon
                     .as_ref()
-                    .frame_capture_stop()
+                    .sampling_start(run_id)
                     .await
                     .map_err(rcon_error)?;
+                Ok(tick)
+            }
+        })?,
+    )?;
+    let rcon = _rcon.clone();
+    map_table.set(
+        "__doc_entry_sampling_stop",
+        String::from(
+            r#"
+--- stops sampling; samples already written stay on disk
+-- Sends /silent-command remote.call('sampling_stop')
+-- @treturn number the game tick sampling stopped at
+function rcon.sampling_stop()
+end
+"#,
+        ),
+    )?;
+    map_table.set(
+        "sampling_stop",
+        lua.create_async_function(move |_lua, ()| {
+            let _rcon = rcon.clone();
+            async move {
+                let tick = _rcon.as_ref().sampling_stop().await.map_err(rcon_error)?;
                 Ok(tick)
             }
         })?,

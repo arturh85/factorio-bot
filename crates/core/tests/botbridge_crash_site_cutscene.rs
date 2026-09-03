@@ -198,7 +198,6 @@ fn mod_lua() -> Lua {
     lua.load(
         r#"
         wait_for_player_inventory = function() end
-        frame_capture_on_player_joined = function() end
         "#,
     )
     .set_name("stubs")

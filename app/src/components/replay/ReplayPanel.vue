@@ -1,7 +1,7 @@
 <script setup lang="ts">
 
 
-// The `/tasks` panel: a run's replay, and the frames captured during it.
+// The `/tasks` panel: a run's replay, and the video recorded during it.
 //
 // Named `GanttChart.vue` until it rendered anything. It began as a
 // `<div>TODO</div>` holding a commented-out mermaid gantt sketch, and that
@@ -22,8 +22,6 @@ import {videoUrl} from '@/api/client';
 const replayStore = useReplayStore();
 const replay = computed(() => replayStore.getReplay);
 const parseError = computed(() => replayStore.getParseError);
-const manifest = computed(() => replayStore.getManifest);
-const jobId = computed(() => replayStore.getJobId);
 const videoManifest = computed(() => replayStore.getVideo);
 const videoTicks = computed(() => replayStore.getVideoTicks);
 // Cache-busted by the recording's own run id: the live recording is one file at
@@ -53,9 +51,7 @@ onUnmounted(() => {
 <template>
   <ReplayScrubber
     :replay="replay"
-    :manifest="manifest"
     :parse-error="parseError"
-    :job-id="jobId"
     :video-manifest="videoManifest"
     :video-ticks="videoTicks"
     :video-src="videoSrc"/>

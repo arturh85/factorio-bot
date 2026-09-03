@@ -249,10 +249,13 @@ mod tests {
             started(0, "a", 10),
             ev(
                 15,
-                EventKind::Frame {
+                EventKind::Teleport {
                     bot: 1,
-                    camera: "c".into(),
-                    file: "f.jpg".into(),
+                    reason: "walk_stuck".into(),
+                    from: crate::types::Position::new(0.0, 0.0),
+                    to: crate::types::Position::new(1.0, 1.0),
+                    distance: 1.0,
+                    action_id: None,
                 },
             ),
             satisfied(0, 20),

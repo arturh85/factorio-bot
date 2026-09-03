@@ -50,42 +50,6 @@
         ],
         "type": "object"
       },
-      "ArchivedFrame": {
-        "description": "One archived frame, as recorded in `frames/index.json`.",
-        "properties": {
-          "bot": {
-            "description": "The `client<N>` the frame came from -- the **client** number, despite\nthis field's name.\n\nIt is not a bot id, and clients and bots are not 1:1. A client writes\nwhichever cameras it was asked for, and the assignment is neither fixed\nnor per-bot: on the run archived here, `client3` holds `follow`,\n`bot-1` and `area` while `client1` holds `bot-4`. Which bot a frame is\n*of* is in the `camera` field, and only when the camera names one --\n`follow` and `area` name none.",
-            "format": "int32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "camera": {
-            "description": "The camera id, or `null` alongside `tick`.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "file": {
-            "description": "Path relative to the run directory.",
-            "type": "string"
-          },
-          "tick": {
-            "description": "`game.tick` at capture, or `null` when the name does not parse.",
-            "format": "int64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "bot",
-          "file"
-        ],
-        "type": "object"
-      },
       "BotSample": {
         "properties": {
           "crafting_queue": {
@@ -209,29 +173,6 @@
         },
         "required": [
           "tech"
-        ],
-        "type": "object"
-      },
-      "ClientRun": {
-        "description": "One client's answer to \"which run do your frames belong to\".",
-        "properties": {
-          "client": {
-            "description": "The `N` of the `client<N>` directory.",
-            "format": "int32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "run": {
-            "description": "That directory's own run id, `null` when it has no readable sidecar --\n*unknown*, never *no match*, exactly as in `FramesManifest::run`.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "client",
-          "run"
         ],
         "type": "object"
       },
@@ -719,34 +660,6 @@
               "step_index",
               "to",
               "status",
-              "kind"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "bot": {
-                "format": "int32",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "camera": {
-                "type": "string"
-              },
-              "file": {
-                "type": "string"
-              },
-              "kind": {
-                "enum": [
-                  "frame"
-                ],
-                "type": "string"
-              }
-            },
-            "required": [
-              "bot",
-              "camera",
-              "file",
               "kind"
             ],
             "type": "object"
@@ -1373,90 +1286,6 @@
           "other"
         ],
         "type": "string"
-      },
-      "FrameEntry": {
-        "description": "One frame file exactly as it exists on disk. One entry per file found\nunder a client's frames directory -- nothing is computed, nothing is\ninferred about files that are not there.",
-        "properties": {
-          "bytes": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "camera": {
-            "description": "The camera id, parsed from the filename, or `null` alongside `tick`\nwhen the name does not parse.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "client": {
-            "description": "Which `client<N>` directory this frame was captured by.",
-            "format": "int32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "name": {
-            "description": "The filename exactly as it appears on disk.",
-            "type": "string"
-          },
-          "tick": {
-            "description": "`game.tick` at capture, parsed from the filename, or `null` when the\nname does not fit the pattern. Always present as a key -- `null` says\n\"we looked and there is nothing to report\", not \"we didn't ask\".",
-            "format": "int64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "client",
-          "name",
-          "bytes"
-        ],
-        "type": "object"
-      },
-      "FramesManifest": {
-        "description": "`GET /api/v1/frames` response.\n\n`clients` and `frames` together distinguish the three states a caller must\nnot conflate:\n- no workspace, or no `client<N>` directory at all: `clients` is empty --\n  the run has never happened.\n- a `client<N>` directory exists but has produced no frames yet: `clients`\n  names it, `frames` is empty -- capture has not run.\n- frames are present: both are non-empty.",
-        "properties": {
-          "client_runs": {
-            "description": "What each client's own sidecar says, in `clients` order.\n\n`run` above answers \"which run is this manifest about\"; this answers\n\"which run does each client's directory belong to\". They differ exactly\nwhen a client sat out the current run and kept an older one's frames,\nand that is the case a consumer needs to see rather than have decided\nfor it -- the stale client is named, so its frames can be marked\ninstead of silently mixed in with current ones.",
-            "items": {
-              "$ref": "#/components/schemas/ClientRun"
-            },
-            "type": "array"
-          },
-          "clients": {
-            "description": "Every `client<N>` directory discovered under the workspace, regardless\nof whether it has produced a frame yet.",
-            "items": {
-              "format": "int32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "type": "array"
-          },
-          "frames": {
-            "description": "One entry per file actually on disk, sorted by `(client, tick,\ncamera)` with unparsed entries last, so iteration order is contractual\nrather than filesystem order.",
-            "items": {
-              "$ref": "#/components/schemas/FrameEntry"
-            },
-            "type": "array"
-          },
-          "run": {
-            "description": "The opaque run identifier from `frames/run.json`, or `null` when the\ncapture was started without one, the file is absent, or it could not be\nread.\n\n**Opaque here too.** The server does not parse, validate or interpret\nit; it reads one string and forwards it, exactly as the mod echoes it\nwithout examining it. A consumer compares it for equality and nothing\nelse.\n\n`null` means *unknown*, never *no match* — a consumer that treats a\nmissing id as a mismatch would refuse a perfectly good join, and one\nthat treats it as a match would assert something nobody established.\n\n`#[schema(required)]` because the **key is always on the wire**: there\nis no `skip_serializing_if`, so serde emits `\"run\": null`. Without this\nutoipa would publish it as optional purely because the Rust type is an\n`Option`, and a generated client would then have to distinguish \"absent\nfrom the document\" from \"absent as a fact\" — a distinction this server\nnever makes and no consumer should have to.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "clients",
-          "frames",
-          "run",
-          "client_runs"
-        ],
-        "type": "object"
       },
       "GuiSettings": {
         "properties": {
@@ -2203,21 +2032,6 @@
         ],
         "type": "object"
       },
-      "RunFramesResponse": {
-        "description": "`GET /api/v1/runs/{id}/frames` response.",
-        "properties": {
-          "frames": {
-            "items": {
-              "$ref": "#/components/schemas/ArchivedFrame"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "frames"
-        ],
-        "type": "object"
-      },
       "RunLanesResponse": {
         "description": "`GET /api/v1/runs/{id}/lanes` response.",
         "properties": {
@@ -2300,13 +2114,6 @@
           },
           "finished_unix": {
             "format": "int64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "frames": {
             "minimum": 0,
             "type": [
               "integer",
@@ -2657,7 +2464,7 @@
             ]
           },
           "run": {
-            "description": "The opaque run identifier from `video/run.json`, or `null` when the\ndirectory has no readable sidecar.\n\n`null` means *unknown*, never *no match* -- the same rule\n`FramesManifest::run` follows. A consumer compares it for equality and\ndoes nothing else with it.",
+            "description": "The opaque run identifier from `video/run.json`, or `null` when the\ndirectory has no readable sidecar.\n\n`null` means *unknown*, never *no match*: a consumer compares it for\nequality and does nothing else with it. Absence is not evidence of a\nmismatch -- treating it as one refuses a good join.",
             "type": [
               "string",
               "null"
@@ -2680,7 +2487,7 @@
               },
               {
                 "$ref": "#/components/schemas/TickRange",
-                "description": "The span of ticks the clock actually observed, `null` when it observed\nnone.\n\nPublished so the viewer can size its axis without fetching thousands of\nsamples: `runTimeline.ts` feeds this into the `drawn` set that decides\nwhere the axis starts, in the frames' place for a video-only run."
+                "description": "The span of ticks the clock actually observed, `null` when it observed\nnone.\n\nPublished so the viewer can size its axis without fetching thousands of\nsamples: `runTimeline.ts` feeds this into the `drawn` set that decides\nwhere the axis starts."
               }
             ]
           },
@@ -2901,98 +2708,6 @@
   },
   "openapi": "3.1.0",
   "paths": {
-    "/api/v1/frames": {
-      "get": {
-        "description": "Derived from a directory listing on every call -- see the module docs for\nwhy this is not computed from a start tick and a stride.",
-        "operationId": "list_frames",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/FramesManifest"
-                }
-              }
-            },
-            "description": ""
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": ""
-          }
-        },
-        "summary": "Returns the manifest of frames captured so far.",
-        "tags": [
-          "Admin"
-        ]
-      }
-    },
-    "/api/v1/frames/{client}/{name}": {
-      "get": {
-        "description": "The route carries no client segment, so `name` is tried against each\ndiscovered `client<N>` directory in turn (lowest client number first),\nanswering the first match. Each directory is bounds-checked with\n[`resolve_script_path`] -- the same traversal guard\n`manage::scripts` uses -- rather than a second, independent\nimplementation of it: this endpoint is unauthenticated, so that guard is\nwhat stands between an HTTP caller and the filesystem.\n\n**Addressed by `(client, name)`, not by `name` alone.** Per-bot cameras mean\n`client1` and `client2` both capture at tick 300 and both files are correct\nand different; they are distinguished by the directory they are in, which\nis exactly what [`FrameEntry::client`] reports. An earlier version of this\nroute searched the client directories in order and returned the first\nmatch, which made the manifest honest and the bytes not: two entries with\nthe same `name` resolved to one image, and the higher-numbered client's\nframe was unreachable. A scrubber showing two bots would have shown the\nsame picture twice and nothing would have said so.\n\nStill no uniquifier: nothing here renames a colliding file so both survive.\nThat would let a genuine same-client double-write live on disk\nindistinguishably from two legitimate frames. The two cases are different —\ntwo clients at one tick is expected and addressable; one client twice at\none tick is a defect and must not be given a home.",
-        "operationId": "get_frame",
-        "parameters": [
-          {
-            "description": "the client number, as reported by FrameEntry.client",
-            "in": "path",
-            "name": "client",
-            "required": true,
-            "schema": {
-              "format": "int32",
-              "minimum": 0,
-              "type": "integer"
-            }
-          },
-          {
-            "description": "a frame's filename, as reported by GET /api/v1/frames",
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "image/jpeg": {}
-            },
-            "description": "the frame's JPEG bytes"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": ""
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": ""
-          }
-        },
-        "summary": "Serves one frame's JPEG bytes.",
-        "tags": [
-          "Admin"
-        ]
-      }
-    },
     "/api/v1/fs/exists": {
       "get": {
         "operationId": "exists",
@@ -4227,126 +3942,6 @@
         ]
       }
     },
-    "/api/v1/runs/{id}/frames": {
-      "get": {
-        "operationId": "get_run_frames",
-        "parameters": [
-          {
-            "description": "the run id",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RunFramesResponse"
-                }
-              }
-            },
-            "description": ""
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": ""
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": ""
-          }
-        },
-        "summary": "A run's frame index.",
-        "tags": [
-          "Runs"
-        ]
-      }
-    },
-    "/api/v1/runs/{id}/frames/{bot}/{name}": {
-      "get": {
-        "operationId": "get_run_frame",
-        "parameters": [
-          {
-            "description": "the run id",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "the bot number, as reported by ArchivedFrame.bot",
-            "in": "path",
-            "name": "bot",
-            "required": true,
-            "schema": {
-              "format": "int32",
-              "minimum": 0,
-              "type": "integer"
-            }
-          },
-          {
-            "description": "the frame filename, as reported by GET /api/v1/runs/{id}/frames",
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "image/jpeg": {}
-            },
-            "description": "the frame's JPEG bytes"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": ""
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": ""
-          }
-        },
-        "summary": "One archived frame's bytes.",
-        "tags": [
-          "Runs"
-        ]
-      }
-    },
     "/api/v1/runs/{id}/lanes": {
       "get": {
         "operationId": "get_run_lanes",
@@ -5157,7 +4752,7 @@
     },
     "/api/v1/video/file": {
       "get": {
-        "description": "**`Cache-Control: no-cache`, deliberately unlike a frame.** A frame is\nimmutable once written -- a tick never recurs -- but\n`<workspace>/video/video.mp4` is *overwritten by the next run*, at the same\nURL. Serving it `immutable` would show a browser the previous run's\nrecording beside this run's timeline, and nothing would say so. The archived\nroute (`/api/v1/runs/{id}/video/file`) is the one whose bytes never change,\nand it is cached accordingly.",
+        "description": "**`Cache-Control: no-cache`, deliberately.** `<workspace>/video/video.mp4`\nis *overwritten by the next run*, at the same URL. Serving it `immutable`\nwould show a browser the previous run's recording beside this run's\ntimeline, and nothing would say so. The archived route\n(`/api/v1/runs/{id}/video/file`) is the one whose bytes never change, and it\nis cached accordingly.",
         "operationId": "get_video_file",
         "responses": {
           "200": {

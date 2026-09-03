@@ -3,7 +3,7 @@ import {createPinia, setActivePinia} from 'pinia';
 import {useRunsStore} from './runsStore';
 import * as client from '@/api/client';
 import {ApiError} from '@/api/http';
-import {ArchivedFrame, EntitySnapshot, MapRecord, RunDetail, RunSummary, Sample, Split} from '@/api/types';
+import {EntitySnapshot, Lane, MapRecord, RunDetail, RunSummary, Sample, Split} from '@/api/types';
 import {CLEAN_MANIFEST, CLEAN_TICKS, NO_TICKS, NO_VIDEO_MANIFEST} from '@/api/video.fixtures';
 
 vi.mock('@/api/client');
@@ -16,7 +16,6 @@ const summary = (id: string, over: Partial<RunSummary> = {}): RunSummary => ({
     outcome: 'done',
     elapsed_ticks: 871,
     events: 6,
-    frames: 15,
     splits: 2,
     ...over
 });
@@ -30,24 +29,34 @@ const split = (index: number, goal: string, from: number, to: number | null): Sp
     elapsed_ticks: to === null ? null : to - from
 });
 
-const frame = (bot: number, tick: number, camera: string): ArchivedFrame => ({
+/**
+ * A lane bar starting 25 ticks after milestone 1 opened.
+ *
+ * These fixtures used to be screenshot frames, which decided where the axis
+ * started until the cameras were retired (2026-09-02). A lane bar is drawn on
+ * the same terms, so the trim these tests pin is unchanged -- only the
+ * contributor that triggers it.
+ */
+const lane = (bot: number, from: number, to: number | null): Lane => ({
     bot,
-    tick,
-    camera,
-    file: `frames/${bot}/tick-${tick}-${camera}.jpg`
+    id: from,
+    action: 'mine',
+    from_tick: from,
+    to_tick: to,
+    status: to === null ? null : 'success',
+    error: null
 });
 
 const DETAIL: RunDetail = {
     summary: summary('run-1'),
     splits: [split(1, 'iron', 59375, 59756), split(2, 'copper', 59756, 60246)]
 };
-const FRAMES = [frame(1, 59400, 'front'), frame(1, 59700, 'front'), frame(2, 59700, 'area')];
+const LANES = [lane(1, 59400, 59700), lane(2, 59700, 60000)];
 
 beforeEach(() => {
     setActivePinia(createPinia());
     vi.mocked(client.listRuns).mockReset();
     vi.mocked(client.getRun).mockReset();
-    vi.mocked(client.getRunFrames).mockReset();
     vi.mocked(client.getRunLanes).mockReset();
     vi.mocked(client.getRunLanes).mockResolvedValue({lanes: []});
     vi.mocked(client.getRunSamples).mockReset();
@@ -78,12 +87,12 @@ describe('loadRuns', () => {
 });
 
 describe('openRun', () => {
-    it('opens on the first frame, which is where the axis now starts', async () => {
-        // Milestone 1 opened at 59375, 25 ticks before the first frame. The
+    it('opens where the axis starts, which is the first thing drawn', async () => {
+        // Milestone 1 opened at 59375, 25 ticks before the first lane bar. The
         // axis trims that away, so the cursor and the axis start agree and
-        // the panel has something in it on load.
+        // the panels have something in them on load.
         vi.mocked(client.getRun).mockResolvedValue(DETAIL);
-        vi.mocked(client.getRunFrames).mockResolvedValue({frames: FRAMES});
+        vi.mocked(client.getRunLanes).mockResolvedValue({lanes: LANES});
         const store = useRunsStore();
         await store.openRun('run-1');
         expect(store.cursor).toBe(59400);
@@ -91,37 +100,34 @@ describe('openRun', () => {
         expect(store.leadIn).toBe(25);
     });
 
-    it('parks the cursor at the start of the axis, which is the first frame', async () => {
+    it('parks the cursor at the start of the axis', async () => {
         vi.mocked(client.getRun).mockResolvedValue(DETAIL);
-        vi.mocked(client.getRunFrames).mockResolvedValue({frames: FRAMES});
+        vi.mocked(client.getRunLanes).mockResolvedValue({lanes: LANES});
         const store = useRunsStore();
         await store.openRun('run-1');
 
         expect(store.bounds).toEqual({from: 59400, to: 60246});
-        expect(store.bot).toBe(1);
-        expect(store.camera).toBe('front');
+        expect(store.cursor).toBe(59400);
     });
 
     it('clears the previous run when loading fails', async () => {
         vi.mocked(client.getRun).mockResolvedValue(DETAIL);
-        vi.mocked(client.getRunFrames).mockResolvedValue({frames: FRAMES});
+        vi.mocked(client.getRunLanes).mockResolvedValue({lanes: LANES});
         const store = useRunsStore();
         await store.openRun('run-1');
 
         vi.mocked(client.getRun).mockRejectedValue(new Error('gone'));
         await store.openRun('run-2');
         expect(store.detail).toBeNull();
-        expect(store.frames).toEqual([]);
+        expect(store.lanes).toEqual([]);
         expect(store.error).toBe('gone');
     });
 
-    it('handles a run with no frames at all', async () => {
+    it('handles a run with nothing drawn at all', async () => {
         vi.mocked(client.getRun).mockResolvedValue(DETAIL);
-        vi.mocked(client.getRunFrames).mockResolvedValue({frames: []});
         const store = useRunsStore();
         await store.openRun('run-1');
         expect(store.bot).toBeNull();
-        expect(store.camera).toBeNull();
         // Splits still place the axis: a planning-only run is still viewable,
         // and with nothing drawn there is no lead-in to trim.
         expect(store.bounds).toEqual({from: 59375, to: 60246});
@@ -134,17 +140,17 @@ describe('openRun', () => {
         // their failure into the run's own error hid the whole page behind
         // one missing route.
         vi.mocked(client.getRun).mockResolvedValue(DETAIL);
-        vi.mocked(client.getRunFrames).mockResolvedValue({frames: FRAMES});
+        vi.mocked(client.getRunLanes).mockResolvedValue({lanes: LANES});
         vi.mocked(client.getRunSamples).mockRejectedValue(
             new ApiError(404, '404 Not Found', null, null)
         );
         const store = useRunsStore();
         await store.openRun('run-1');
 
-        // The run itself opened fine: detail, frames and the axis are intact.
+        // The run itself opened fine: detail, lanes and the axis are intact.
         expect(store.error).toBeNull();
         expect(store.detail?.summary.run_id).toBe('run-1');
-        expect(store.frames).toEqual(FRAMES);
+        expect(store.lanes).toEqual(LANES);
         expect(store.bounds).toEqual({from: 59400, to: 60246});
 
         // Only the failed stream is empty and flagged, distinctly from a run
@@ -155,7 +161,7 @@ describe('openRun', () => {
 
     it('attributes an enrichment failure to the stream that actually failed', async () => {
         vi.mocked(client.getRun).mockResolvedValue(DETAIL);
-        vi.mocked(client.getRunFrames).mockResolvedValue({frames: FRAMES});
+        vi.mocked(client.getRunLanes).mockResolvedValue({lanes: LANES});
         vi.mocked(client.getRunSamples).mockRejectedValue(
             new ApiError(404, '404 Not Found', null, null)
         );
@@ -177,7 +183,7 @@ describe('openRun', () => {
 
         // Streams that succeeded are untouched.
         expect(store.lanesError).toBeNull();
-        expect(store.frameError).toBeNull();
+        expect(store.videoError).toBeNull();
     });
 });
 
@@ -210,7 +216,7 @@ describe('setReference', () => {
 
     it('drops the comparison when a different run is opened', async () => {
         vi.mocked(client.getRun).mockResolvedValue(DETAIL);
-        vi.mocked(client.getRunFrames).mockResolvedValue({frames: FRAMES});
+        vi.mocked(client.getRunLanes).mockResolvedValue({lanes: LANES});
         const store = useRunsStore();
         await store.setReference('run-2');
         await store.openRun('run-9');
@@ -218,48 +224,46 @@ describe('setReference', () => {
     });
 });
 
-describe('selectView', () => {
+describe('selectBot', () => {
     beforeEach(async () => {
         vi.mocked(client.getRun).mockResolvedValue(DETAIL);
-        vi.mocked(client.getRunFrames).mockResolvedValue({frames: FRAMES});
+        vi.mocked(client.getRunLanes).mockResolvedValue({lanes: LANES});
+        vi.mocked(client.getRunSamples).mockResolvedValue({
+            samples: [{
+                kind: 'bots',
+                bots: [2, 1].map((id) => ({
+                    id, position: {x: 0, y: 0}, inventory: {}, crafting_queue: 0, mining: null
+                })),
+                schema: 1,
+                tick: 59400,
+                run: 'run-1'
+            } as Sample],
+            skipped: 0
+        });
         await useRunsStore().openRun('run-1');
     });
 
-    it('offers only pairs the run captured', () => {
-        const store = useRunsStore();
-        // The fixture has front@1 twice and area@2 once -- three frames, two
-        // pairs. A cross product would offer four.
-        expect(store.views.map((v) => `${v.camera}@${v.bot}`)).toEqual(['area@2', 'front@1']);
+    it('offers every bot the run sampled, ascending', () => {
+        // The samples are the only record of which bots a run had -- picking
+        // the camera used to be what named one, and nothing else does.
+        expect(useRunsStore().bots).toEqual([1, 2]);
     });
 
-    it('sets bot and camera together', () => {
-        // Never one at a time: only specific pairs exist, so changing one and
-        // leaving the other names a combination that captured nothing.
+    it('opens on the lowest sampled bot rather than none at all', () => {
+        expect(useRunsStore().bot).toBe(1);
+    });
+
+    it('points the inventory panel at another bot', () => {
         const store = useRunsStore();
-        store.selectView({bot: 2, camera: 'area', count: 1, from: 59700});
+        store.selectBot(2);
         expect(store.bot).toBe(2);
-        expect(store.camera).toBe('area');
-    });
-
-    it('moves the cursor forward when the view starts later than it', () => {
-        const store = useRunsStore();
-        store.seek(59400);
-        store.selectView({bot: 2, camera: 'area', count: 1, from: 59700});
-        expect(store.cursor).toBe(59700);
-    });
-
-    it('leaves the cursor alone when the view already covers it', () => {
-        const store = useRunsStore();
-        store.seek(60000);
-        store.selectView({bot: 1, camera: 'front', count: 2, from: 59400});
-        expect(store.cursor).toBe(60000);
     });
 });
 
 describe('seek and playback', () => {
     beforeEach(async () => {
         vi.mocked(client.getRun).mockResolvedValue(DETAIL);
-        vi.mocked(client.getRunFrames).mockResolvedValue({frames: FRAMES});
+        vi.mocked(client.getRunLanes).mockResolvedValue({lanes: LANES});
         await useRunsStore().openRun('run-1');
     });
 
@@ -275,7 +279,6 @@ describe('seek and playback', () => {
         const store = useRunsStore();
         store.rate = 300;
         store.advance();
-        // From the first frame (59400), not the axis start.
         expect(store.cursor).toBe(59700);
     });
 
@@ -300,7 +303,7 @@ describe('seek and playback', () => {
     it('does nothing on a run with no axis', () => {
         const store = useRunsStore();
         store.detail = null;
-        store.frames = [];
+        store.lanes = [];
         store.seek(500);
         expect(store.cursor).toBe(0);
         store.advance();
@@ -341,14 +344,14 @@ describe('samples', () => {
 
     beforeEach(() => {
         vi.mocked(client.getRun).mockResolvedValue(DETAIL);
-        vi.mocked(client.getRunFrames).mockResolvedValue({frames: FRAMES});
+        vi.mocked(client.getRunLanes).mockResolvedValue({lanes: LANES});
     });
 
     it('reads the selected bot state at the cursor', async () => {
         vi.mocked(client.getRunSamples).mockResolvedValue({
             samples: [bots(59380, [{id: 1, inventory: {'iron-plate': 2}}, {id: 2}])], skipped: 0});
         const store = useRunsStore();
-        await store.openRun('run-1'); // cursor lands on 59400, the first frame
+        await store.openRun('run-1'); // cursor lands on 59400, where the axis starts
         expect(store.botState?.inventory).toEqual({'iron-plate': 2});
     });
 
@@ -359,9 +362,8 @@ describe('samples', () => {
         expect(store.botState).toBeNull();
     });
 
-    it('is null when no view is selected', async () => {
-        vi.mocked(client.getRunFrames).mockResolvedValue({frames: []});
-        vi.mocked(client.getRunSamples).mockResolvedValue({samples: [bots(59380, [{id: 1}])], skipped: 0});
+    it('is null when the run sampled no bot to select', async () => {
+        vi.mocked(client.getRunSamples).mockResolvedValue({samples: [], skipped: 0});
         const store = useRunsStore();
         await store.openRun('run-1');
         expect(store.bot).toBeNull();
@@ -448,14 +450,14 @@ describe('map', () => {
 
     beforeEach(() => {
         vi.mocked(client.getRun).mockResolvedValue(DETAIL);
-        vi.mocked(client.getRunFrames).mockResolvedValue({frames: FRAMES});
+        vi.mocked(client.getRunLanes).mockResolvedValue({lanes: LANES});
     });
 
     it('reconstructs the entities at the cursor from the archived map', async () => {
         vi.mocked(client.getRunMap).mockResolvedValue({
             map: [placed(59380, 'stone-furnace', -12, 8)], skipped: 0});
         const store = useRunsStore();
-        await store.openRun('run-1'); // cursor lands on 59400, the first frame
+        await store.openRun('run-1'); // cursor lands on 59400, where the axis starts
         expect(store.entities).toEqual([snap('stone-furnace', -12, 8)]);
     });
 
@@ -515,7 +517,6 @@ describe('map', () => {
 describe('the video enrichment', () => {
     it('loads the recording and its clock beside the other enrichments', async () => {
         vi.mocked(client.getRun).mockResolvedValue(DETAIL);
-        vi.mocked(client.getRunFrames).mockResolvedValue({frames: []});
         vi.mocked(client.getRunVideo).mockResolvedValue(CLEAN_MANIFEST);
         vi.mocked(client.getRunVideoTicks).mockResolvedValue(CLEAN_TICKS);
         const store = useRunsStore();
@@ -527,12 +528,12 @@ describe('the video enrichment', () => {
 
     it('does not lose the run when a server too old for the video routes 404s', async () => {
         vi.mocked(client.getRun).mockResolvedValue(DETAIL);
-        vi.mocked(client.getRunFrames).mockResolvedValue({frames: FRAMES});
+        vi.mocked(client.getRunLanes).mockResolvedValue({lanes: LANES});
         vi.mocked(client.getRunVideo).mockRejectedValue(new ApiError(404, '404 Not Found', null, null));
         const store = useRunsStore();
         await store.openRun('run-1');
         expect(store.error).toBeNull();
-        expect(store.frames).toHaveLength(3);
+        expect(store.lanes).toHaveLength(2);
         expect(store.video).toBeNull();
         expect(store.videoError).not.toBeNull();
     });
@@ -541,7 +542,6 @@ describe('the video enrichment', () => {
         // A manifest without its clock can place nothing, and showing half a
         // recording is worse than showing none.
         vi.mocked(client.getRun).mockResolvedValue(DETAIL);
-        vi.mocked(client.getRunFrames).mockResolvedValue({frames: []});
         vi.mocked(client.getRunVideo).mockResolvedValue(CLEAN_MANIFEST);
         vi.mocked(client.getRunVideoTicks).mockRejectedValue(new Error('boom'));
         const store = useRunsStore();
@@ -551,11 +551,10 @@ describe('the video enrichment', () => {
         expect(store.videoError).not.toBeNull();
     });
 
-    it('sizes the axis from the recording when a run captured no frames', async () => {
+    it('sizes the axis from the recording when nothing else is drawn', async () => {
         // The silent one: without the video range this axis would be computed
         // from splits and lanes alone, with nothing erroring and nothing marked.
         vi.mocked(client.getRun).mockResolvedValue(DETAIL);
-        vi.mocked(client.getRunFrames).mockResolvedValue({frames: []});
         vi.mocked(client.getRunVideo).mockResolvedValue({
             ...CLEAN_MANIFEST,
             tick_range: {from: 59400, to: 60246}

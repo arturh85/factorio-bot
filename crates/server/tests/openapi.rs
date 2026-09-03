@@ -123,29 +123,23 @@ const SCRIPTING_OPERATIONS: &[(&str, &str)] = &[];
 const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[
     ("get", "/api/v1/jobs/{id}"),
     ("get", "/api/v1/jobs/{id}/events"),
-    ("get", "/api/v1/frames/{client}/{name}"),
     ("get", "/api/v1/runs/{id}"),
     ("get", "/api/v1/runs/{id}/events"),
-    ("get", "/api/v1/runs/{id}/frames"),
     ("get", "/api/v1/runs/{id}/lanes"),
-    ("get", "/api/v1/runs/{id}/frames/{bot}/{name}"),
     ("get", "/api/v1/runs/{id}/samples"),
     ("get", "/api/v1/runs/{id}/map"),
     ("get", "/api/v1/runs/{id}/video"),
     ("get", "/api/v1/runs/{id}/video/ticks"),
     ("get", "/api/v1/runs/{id}/video/file"),
 ];
-// `/api/v1/frames/{client}/{name}` is registered unconditionally by `manage::router`
-// (it does not need an interpreter), so it is templated in both builds --
-// unlike the jobs routes above, which exist only behind `lua`.
+// The runs and video routes are registered unconditionally (they do not need
+// an interpreter), so they are templated in both builds -- unlike the jobs
+// routes above, which exist only behind `lua`.
 #[cfg(not(feature = "lua"))]
 const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[
-    ("get", "/api/v1/frames/{client}/{name}"),
     ("get", "/api/v1/runs/{id}"),
     ("get", "/api/v1/runs/{id}/events"),
-    ("get", "/api/v1/runs/{id}/frames"),
     ("get", "/api/v1/runs/{id}/lanes"),
-    ("get", "/api/v1/runs/{id}/frames/{bot}/{name}"),
     ("get", "/api/v1/runs/{id}/samples"),
     ("get", "/api/v1/runs/{id}/map"),
     ("get", "/api/v1/runs/{id}/video"),
@@ -205,9 +199,7 @@ async fn openapi_json_lists_every_route() {
         "/api/v1/runs",
         "/api/v1/runs/{id}",
         "/api/v1/runs/{id}/events",
-        "/api/v1/runs/{id}/frames",
         "/api/v1/runs/{id}/lanes",
-        "/api/v1/runs/{id}/frames/{bot}/{name}",
         // Management
         "/api/v1/settings",
         "/api/v1/instance",
@@ -217,8 +209,6 @@ async fn openapi_json_lists_every_route() {
         "/api/v1/scripts",
         "/api/v1/scripts/file",
         "/api/v1/fs/exists",
-        "/api/v1/frames",
-        "/api/v1/frames/{client}/{name}",
         "/api/v1/video",
         "/api/v1/video/file",
         "/api/v1/video/ticks",
@@ -245,8 +235,6 @@ async fn openapi_json_lists_every_route() {
         ("/api/v1/scripts/file", "post"),
         ("/api/v1/scripts/file", "delete"),
         ("/api/v1/fs/exists", "get"),
-        ("/api/v1/frames", "get"),
-        ("/api/v1/frames/{client}/{name}", "get"),
         ("/api/v1/video", "get"),
         ("/api/v1/video/file", "get"),
         ("/api/v1/video/ticks", "get"),
@@ -363,13 +351,12 @@ async fn no_operation_publishes_an_unexpected_path_parameter() {
                 continue;
             };
             // EVERY segment name the path templates, e.g. `id` for
-            // `/api/v1/jobs/{id}`, or `client` and `name` for
-            // `/api/v1/frames/{client}/{name}` -- derived from the path rather
-            // than hardcoded, so a route with differently named segments does
-            // not need this test rewritten to know about it.
+            // `/api/v1/jobs/{id}` -- derived from the path rather than
+            // hardcoded, so a route with differently named segments does not
+            // need this test rewritten to know about it.
             //
-            // This read only the FIRST `{...}` until `/api/v1/frames` grew a
-            // second segment. A path parameter that the path really does
+            // This read only the FIRST `{...}` until a route grew a second
+            // templated segment. A path parameter that the path really does
             // template is not a finding, and rejecting it would have pushed
             // the fix towards exempting the operation -- which is exactly what
             // the comment below explains must never happen.

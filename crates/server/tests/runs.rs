@@ -71,12 +71,12 @@ const MILESTONES: &str = concat!(
 );
 
 const MANIFEST: &str = r#"{"run_id":"alpha","started_unix":1000,"finished_unix":1100,
-  "outcome":"done","elapsed_ticks":400,"events":3,"frames":0,"splits":1}"#;
+  "outcome":"done","elapsed_ticks":400,"events":3,"splits":1}"#;
 
 const MANIFEST_AT_1000: &str = r#"{"run_id":"run-1000-00001","started_unix":1000,
-  "finished_unix":1100,"outcome":"done","elapsed_ticks":400,"events":3,"frames":0,"splits":1}"#;
+  "finished_unix":1100,"outcome":"done","elapsed_ticks":400,"events":3,"splits":1}"#;
 const MANIFEST_AT_2000: &str = r#"{"run_id":"run-2000-00001","started_unix":2000,
-  "finished_unix":2100,"outcome":"done","elapsed_ticks":400,"events":3,"frames":0,"splits":1}"#;
+  "finished_unix":2100,"outcome":"done","elapsed_ticks":400,"events":3,"splits":1}"#;
 
 #[tokio::test]
 async fn a_workspace_that_never_recorded_a_run_lists_nothing_rather_than_404() {
@@ -151,19 +151,6 @@ async fn events_can_be_filtered_by_kind() {
     let events = body["events"].as_array().unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["kind"], "milestone_satisfied");
-}
-
-#[tokio::test]
-async fn a_run_with_no_frames_reports_an_empty_index_rather_than_404() {
-    let ws = workspace("noframes");
-    seed_run(&ws, "planning", MILESTONES, None, None);
-    let (status, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/planning/frames").await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "a planning-only run is valid, not degenerate"
-    );
-    assert_eq!(body["frames"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
@@ -349,31 +336,4 @@ async fn a_run_id_escaping_the_runs_directory_is_refused() {
             "id {id:?} must not resolve outside runs/, got {status}"
         );
     }
-}
-
-#[tokio::test]
-async fn a_frame_name_escaping_the_run_is_refused() {
-    let ws = workspace("frametraversal");
-    seed_run(&ws, "alpha", MILESTONES, None, None);
-    let bot = ws.join("runs").join("alpha").join("frames").join("1");
-    std::fs::create_dir_all(&bot).unwrap();
-    std::fs::write(bot.join("tick-0000300-front.jpg"), b"jpeg").unwrap();
-    std::fs::write(ws.join("runs").join("alpha").join("splits.json"), "[]").unwrap();
-
-    let (ok, _) = get(
-        state_with_workspace(&ws),
-        "/api/v1/runs/alpha/frames/1/tick-0000300-front.jpg",
-    )
-    .await;
-    assert_eq!(ok, StatusCode::OK, "the real frame must still be served");
-
-    let (status, _) = get(
-        state_with_workspace(&ws),
-        "/api/v1/runs/alpha/frames/1/../../splits.json",
-    )
-    .await;
-    assert!(
-        status != StatusCode::OK,
-        "a frame name must not reach outside its bot directory, got {status}"
-    );
 }

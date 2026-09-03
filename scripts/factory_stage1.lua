@@ -114,11 +114,11 @@ if #BOTS == 0 then
     return
 end
 
--- `video = true` films client 1's window at 720p alongside the frames. It is
--- opt-in and deliberately non-fatal: if the window cannot be found, resized or
--- grabbed, the capture reports `status: failed` with a reason and the run
--- carries on with frames. Frames remain the tick-addressable record; the video
--- is the watchable one, joined to it by `ticks.jsonl`.
+-- `video = true` films client 1's window at 720p. It is opt-in and
+-- deliberately non-fatal: if the window cannot be found, resized or grabbed,
+-- the capture reports `status: failed` with a reason and the run carries on
+-- without it. The event log and `map.jsonl` are the tick-exact record; the
+-- video is the watchable one, joined to them by `ticks.jsonl`.
 local run_id = record.start({video = true})
 print("recording run " .. run_id)
 
@@ -202,7 +202,7 @@ local sup = supervisor.new(supervisor.list(goals),
 
 -- The loop is wrapped so a raise still closes the recording. A run that died
 -- part-way is the one most worth opening, and it is no use if it never got a
--- manifest, splits or its frames copied out of the workspace.
+-- manifest, splits or its video copied out of the workspace.
 local ok, err = pcall(function()
 repeat
     local t = sup:step()

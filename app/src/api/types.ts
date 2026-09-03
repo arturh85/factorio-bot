@@ -211,67 +211,6 @@ export interface FactorioEntity {
 }
 
 /**
- * One frame file exactly as it exists on disk -- `crates/server/src/manage/frames.rs`.
- *
- * A frame's filename is a measurement, not a claim: the mod names it from
- * `game.tick` inside the game, and `tick`/`camera` here are only ever parsed
- * back out of that name. Both are `| null`, always present as keys, for a
- * name that does not fit the `tick-<digits>-<camera>.jpg` pattern -- such a
- * file is reported, never dropped from the list.
- */
-export interface FrameEntry {
-    /** Which `client<N>` directory this frame was captured by. */
-    client: number;
-    tick: number | null;
-    camera: string | null;
-    /** The filename exactly as it appears on disk; pass to `frameUrl`. */
-    name: string;
-    bytes: number;
-}
-
-/**
- * `GET /api/v1/frames` response.
- *
- * `clients` and `frames` together distinguish three states that must not be
- * conflated: no `clients` at all means the run has never happened; a
- * `clients` entry with no matching `frames` means capture has not produced
- * anything yet; both non-empty means frames are present. Never computed from
- * a start tick and a stride -- always a live directory listing, so a dropped
- * frame (multiplayer clients catching up do not honour `force_render`) shows
- * up as a genuine gap rather than being smoothed over.
- */
-export interface FramesManifest {
-    /** `client<N>` directories discovered under the workspace. */
-    clients: number[];
-    frames: FrameEntry[];
-    /**
-     * The opaque run identifier from `frames/run.json`, or `null` when capture
-     * ran without one, the file is absent, or it could not be read.
-     *
-     * Opaque: compare it for equality and nothing else. `null` means
-     * **unknown**, never *no match* — see `runIdCheck` in `@/api/frameJoin`.
-     */
-    run: string | null;
-    /**
-     * What each client's own sidecar says, in `clients` order.
-     *
-     * `run` is which run the manifest is about; this is which run each
-     * client's directory belongs to. They diverge when a client sat out the
-     * current run and still holds an older one's frames — the case worth
-     * marking in the UI rather than mixing in silently.
-     */
-    client_runs: ClientRun[];
-}
-
-/** One client's answer to "which run do your frames belong to". */
-export interface ClientRun {
-    /** The `N` of the `client<N>` directory. */
-    client: number;
-    /** That directory's own run id; `null` is **unknown**, never *no match*. */
-    run: string | null;
-}
-
-/**
  * One archived run, as it appears in a listing.
  *
  * Everything except `run_id` and `finished` is nullable because an unfinished
@@ -293,7 +232,6 @@ export interface RunSummary {
     /** A duration in game ticks, not the tick the run ended at. */
     elapsed_ticks: number | null;
     events: number | null;
-    frames: number | null;
     splits: number | null;
 }
 
@@ -334,22 +272,6 @@ export interface RunDetail {
      * events -- so a crashed run still shows the milestones it got through.
      */
     splits: Split[];
-}
-
-/** One frame copied into a run archive. */
-export interface ArchivedFrame {
-    /** The bot that captured it. Bots and clients are 1:1. */
-    bot: number;
-    /** `game.tick` at capture, or `null` when the filename does not parse. */
-    tick: number | null;
-    camera: string | null;
-    /** Path relative to the run directory. */
-    file: string;
-}
-
-/** `GET /api/v1/runs/{id}/frames` response. */
-export interface RunFramesResponse {
-    frames: ArchivedFrame[];
 }
 
 /** One thing a bot did, placed on the tick axis. */
@@ -831,7 +753,6 @@ export type EventKind =
           /** The same failure, classified. `null` on success. */
           failure: WalkFailure | null;
       }
-    | {kind: 'frame'; bot: number; camera: string; file: string}
     | {
           /**
            * A bot was moved by `player.teleport` rather than by walking.
@@ -919,10 +840,9 @@ export interface EventsResponse {
 
 // --- video: the host-side recording of a run -----------------------------
 //
-// Mirrors `factorio_bot_core::record::video`. Frames stay the record; video is
-// the opt-in second artefact, for the one thing frames cannot do -- show what
-// happened *between* two captures five seconds apart. See
-// `docs/superpowers/specs/2026-09-02-video-capture-design.md`.
+// Mirrors `factorio_bot_core::record::video`. The opt-in visual record of a
+// run, and since the per-camera screenshots were retired (2026-09-02) the only
+// one. See `docs/superpowers/specs/2026-09-02-video-capture-design.md`.
 
 /** Where a recording got to. */
 export type VideoStatus =
@@ -937,7 +857,7 @@ export type VideoStatus =
     | 'killed'
     /** The encoder stopped advancing while the run was live, e.g. its window disappeared. */
     | 'died'
-    /** Never started; `reason` says why. The run went on with frames. */
+    /** Never started; `reason` says why. The run went on without it. */
     | 'failed'
     /** Stopped early to leave the disk to the run's own records. */
     | 'stopped_low_disk';
@@ -988,7 +908,14 @@ export interface TickRange {
 
 /** `GET /api/v1/video` and `GET /api/v1/runs/{id}/video` response. */
 export interface VideoManifest {
-    /** `null` is **unknown**, never *no match* — the same rule as `FramesManifest.run`. */
+    /**
+     * Which run this recording belongs to, from `video/run.json`.
+     *
+     * Opaque: compare it for equality and nothing else. `null` is
+     * **unknown** — the recorder ran without an id, or the sidecar is absent
+     * or unreadable — and never *no match*, because absence is not evidence
+     * of a mismatch.
+     */
     run: string | null;
     /** `null` when no recorder ever wrote here, which is every run by default. */
     video: VideoRecord | null;
@@ -996,8 +923,8 @@ export interface VideoManifest {
     samples: number;
     skipped: number;
     /**
-     * What `runTimeline.ts` feeds into its `drawn` set in the frames' place for
-     * a video-only run. `null` when the clock observed nothing.
+     * What `runTimeline.ts` feeds into its `drawn` set -- the span the axis
+     * starts drawing at. `null` when the clock observed nothing.
      */
     tick_range: TickRange | null;
 }
@@ -1007,10 +934,9 @@ export type TickKind =
     | 'sample'
     | 'start'
     /**
-     * **No tick was observed here.** The video's equivalent of a missing frame
-     * file, and the only thing that can tell a stalled game from a running one:
-     * a video has no null, so while the game stalls the recorder keeps writing
-     * frames of the last drawn image.
+     * **No tick was observed here.** The only thing that can tell a stalled
+     * game from a running one: a video has no null, so while the game stalls
+     * the recorder keeps writing frames of the last drawn image.
      */
     | 'gap'
     | 'stop';

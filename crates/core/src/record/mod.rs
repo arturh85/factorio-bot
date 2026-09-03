@@ -16,14 +16,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::types::Position;
 
-pub mod frames;
 pub mod lanes;
 pub mod map;
 pub mod retention;
 pub mod samples;
 pub mod splits;
 pub mod video;
-pub use frames::{ArchivedFrame, archive_frames, parse_frame_name};
 pub use lanes::{Lane, derive_lanes};
 pub use retention::{DEFAULT_KEEP, KEEP_MARKER, Reaped, reap};
 pub use samples::{
@@ -305,11 +303,6 @@ pub enum EventKind {
         error: Option<String>,
         /// The same failure, classified. `None` on success.
         failure: Option<WalkFailure>,
-    },
-    Frame {
-        bot: u32,
-        camera: String,
-        file: String,
     },
     /// A bot was moved by `player.teleport` rather than by walking.
     ///
@@ -693,12 +686,11 @@ pub struct Manifest {
     /// `null` while the run is still going or if it crashed before finishing.
     pub finished_unix: Option<u64>,
     /// `null` for a run that never reached `finish`. A crashed run keeps its
-    /// events and its frames; what it lacks is a verdict, and inventing one
+    /// events and its samples; what it lacks is a verdict, and inventing one
     /// would make it look complete.
     pub outcome: Option<String>,
     pub elapsed_ticks: Option<u64>,
     pub events: usize,
-    pub frames: usize,
     pub splits: usize,
     /// How many samples were archived. A count, not a size: a reader deciding
     /// whether to fetch the stream cares how many records it will get.
@@ -754,7 +746,8 @@ pub struct RunRecorder {
     ///
     /// Held here rather than beside the run in the caller so that the two
     /// artefacts cannot disagree about which run they belong to -- the same
-    /// reason `record.start()` mints one id and hands it to frame capture.
+    /// reason `record.start()` mints one id and hands it to the mod's
+    /// sampling session.
     /// `None` for every run that did not ask for video, which is the default.
     video: Option<video::VideoRecorder>,
 }
@@ -763,8 +756,8 @@ impl RunRecorder {
     /// Creates `<runs_root>/<run_id>/` and opens its event log.
     ///
     /// The caller supplies `run_id` because the same id must reach
-    /// `frame_capture_start`; minting it in two places is how the log and the
-    /// frames come to disagree about which run they belong to.
+    /// `sampling_start`; minting it in two places is how the log and the
+    /// samples come to disagree about which run they belong to.
     pub fn start(runs_root: &Path, run_id: impl Into<String>) -> io::Result<Self> {
         let run_id = run_id.into();
         let dir = runs_root.join(&run_id);
@@ -797,10 +790,9 @@ impl RunRecorder {
     /// Hands this run its video recorder.
     ///
     /// Opt-in by construction: nothing here starts one, and a run that never
-    /// calls this behaves exactly as it did before video existed. Frames stay
-    /// the default and the record; video is the second artefact, for the one
-    /// thing frames genuinely cannot do -- show what happened *between* two
-    /// captures five seconds apart.
+    /// calls this behaves exactly as it did before video existed. Video is the
+    /// visual record now that the per-camera screenshots are gone; every other
+    /// artefact of a run is text.
     pub fn attach_video(&mut self, recorder: video::VideoRecorder) {
         self.video = Some(recorder);
     }
@@ -956,8 +948,8 @@ impl RunRecorder {
     /// the one that is wrong, and it is the one everybody reads.
     ///
     /// `workspace` is where `client<N>` directories live; pass `None` for a
-    /// planning-only run that captured no frames. That is a valid run, not a
-    /// degenerate one.
+    /// planning-only run with nothing on disk to collect. That is a valid run,
+    /// not a degenerate one.
     /// A clock reading raised to the latest tick already recorded.
     ///
     /// For events recorded *as they happen*, whose only clock is the tick on
@@ -1008,14 +1000,9 @@ impl RunRecorder {
             serde_json::to_vec_pretty(&splits).map_err(io::Error::other)?,
         )?;
 
-        let frames = match workspace {
-            Some(workspace) => frames::archive_frames(workspace, &self.dir, &self.run_id)?.len(),
-            None => 0,
-        };
-
-        // Beside `archive_frames`, and obeying the same law: copy nothing
-        // unless `video/run.json` names this run. An orphaned recording left by
-        // an earlier run therefore cannot be archived into this one.
+        // Copy nothing unless `video/run.json` names this run. An orphaned
+        // recording left by an earlier run therefore cannot be archived into
+        // this one.
         //
         // A still-attached recorder is *not* stopped here -- `stop` is async
         // and this is not. That is not a hole: the recording's own
@@ -1056,7 +1043,6 @@ impl RunRecorder {
             outcome: Some(outcome.to_string()),
             elapsed_ticks: Some(self.elapsed_at(tick)),
             events: read.events.len(),
-            frames,
             splits: splits.len(),
             samples,
             map: self.map_count,
@@ -1122,7 +1108,7 @@ mod tests {
 
     #[test]
     fn every_event_kind_round_trips() {
-        let kinds = vec![
+        let kinds = [
             EventKind::RunStarted {
                 run_id: "r1".into(),
                 bots: vec![1, 2],
@@ -1175,11 +1161,6 @@ mod tests {
                     kind: FailureKind::MissingItem,
                     detail: Some("iron-plate".into()),
                 }),
-            },
-            EventKind::Frame {
-                bot: 1,
-                camera: "overview".into(),
-                file: "frames/1/overview/300.jpg".into(),
             },
             EventKind::RunFinished {
                 outcome: "done".into(),
@@ -1284,10 +1265,13 @@ mod tests {
         for i in 0..3 {
             rec.record(
                 i,
-                EventKind::Frame {
+                EventKind::Teleport {
                     bot: 1,
-                    camera: "c".into(),
-                    file: format!("{i}.jpg"),
+                    reason: format!("walk_stuck_{i}"),
+                    from: Position::new(0.0, 0.0),
+                    to: Position::new(1.0, 1.0),
+                    distance: 1.0,
+                    action_id: None,
                 },
             )
             .unwrap();
@@ -1451,7 +1435,6 @@ mod finish_tests {
         // 400 is where the run ended; it began at tick 10, so it lasted 390.
         assert_eq!(manifest.elapsed_ticks, Some(390));
         assert_eq!(manifest.splits, 1);
-        assert_eq!(manifest.frames, 0, "a planning-only run is a valid run");
         assert_eq!(manifest.events, 3, "the finishing event counts");
 
         let splits: Vec<Split> =

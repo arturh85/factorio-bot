@@ -67,75 +67,25 @@ fn lua_string_literal(value: &str) -> String {
     out
 }
 
-/// Which screenshot cameras a capture run registers.
+/// The positional argument list for `sampling_start`.
 ///
-/// **[`FrameCameras::None`] is the default, and it is a real answer rather
-/// than a degraded one.** Video is the visual record now; the capture session
-/// still runs, because the mod's world-state samplers ride on it, but it
-/// renders nothing. See [`FactorioRcon::frame_capture_start`] for the numbers.
-///
-/// There is deliberately no `Default` that resolves to anything else, and no
-/// `Option<FrameCameras>` anywhere: a call site that forgets to say what it
-/// wants must produce the cheap outcome, not the 947 MB one.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum FrameCameras {
-    /// No camera at all. The session runs; nothing is rendered.
-    #[default]
-    None,
-    /// Every camera the mod can offer: `follow`, `bot-N` per player, `area`.
-    /// A bot joining mid-run gets its own camera under this, and only this.
-    All,
-    /// Exactly these camera ids. The mod **raises** on one it cannot supply,
-    /// which `frame_capture_verdict` surfaces as an error -- a list quietly
-    /// reduced to nothing would look configured and capture as much as
-    /// [`FrameCameras::None`].
-    Only(Vec<String>),
+/// An absent run id sends *no argument*, rather than a `nil` placeholder: the
+/// mod distinguishes "no id" from any value, and this is the one place that
+/// distinction is turned into bytes.
+fn sampling_args(run_id: Option<&str>) -> Vec<String> {
+    run_id
+        .map(|run_id| vec![lua_string_literal(run_id)])
+        .unwrap_or_default()
 }
 
-impl FrameCameras {
-    /// The Lua argument the mod reads, or `None` to pass no argument at all --
-    /// which the mod already treats as "no cameras", so the default costs
-    /// nothing on the wire.
-    fn to_lua_literal(&self) -> Option<String> {
-        match self {
-            FrameCameras::None => None,
-            FrameCameras::All => Some("true".to_string()),
-            FrameCameras::Only(ids) => Some(format!(
-                "{{{}}}",
-                ids.iter()
-                    .map(|id| lua_string_literal(id))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )),
-        }
-    }
-}
-
-/// The positional argument list for `frame_capture_start`.
-///
-/// `nil` is spelled out rather than the first argument being omitted when
-/// there is no run id but there are cameras: Lua is positional, and a
-/// shortened list would hand the camera selection to `run_id`, where the mod's
-/// type check would refuse it. Emitted only when it is actually needed, so the
-/// default call is unchanged on the wire from what it always sent.
-fn frame_capture_args(run_id: Option<&str>, cameras: &FrameCameras) -> Vec<String> {
-    match (run_id, cameras.to_lua_literal()) {
-        (Some(run_id), None) => vec![lua_string_literal(run_id)],
-        (Some(run_id), Some(cameras)) => vec![lua_string_literal(run_id), cameras],
-        (None, None) => vec![],
-        (None, Some(cameras)) => vec!["nil".to_string(), cameras],
-    }
-}
-
-/// Judges the reply to either frame-capture toggle.
+/// Judges the reply to either sampling toggle.
 ///
 /// Unlike most `remote_call_timed` callers here, this refuses a reply that
 /// still has text in it after the tick stamp is taken off. The mod raises on a
-/// camera id it cannot use, on a run id that is not a string, and on wiping a
-/// directory it cannot wipe, and the game reports that as "Cannot execute
+/// run id that is not a string, and the game reports that as "Cannot execute
 /// command. Error: ..." in the reply body rather than as a transport failure.
-/// Dropping those lines would turn a capture that never started into a silent
-/// success, and the first evidence would be an empty frame directory much
+/// Dropping those lines would turn a session that never started into a silent
+/// success, and the first evidence would be an empty `samples.jsonl` much
 /// later.
 ///
 /// A free function taking the reply, rather than a method taking the call's
@@ -144,7 +94,7 @@ fn frame_capture_args(run_id: Option<&str>, cameras: &FrameCameras) -> Vec<Strin
 /// reads it from. Passing the name down to a shared sender hid it from that
 /// check, which is exactly the check that catches a doc block promising a
 /// `remote.call` the binding does not make.
-fn frame_capture_verdict(reply: (Option<Vec<String>>, Option<u64>)) -> Result<Option<u64>> {
+fn sampling_verdict(reply: (Option<Vec<String>>, Option<u64>)) -> Result<Option<u64>> {
     let (lines, tick) = reply;
     if let Some(lines) = lines {
         return Err(RconUnexpectedOutput {
@@ -164,7 +114,7 @@ fn frame_capture_verdict(reply: (Option<Vec<String>>, Option<u64>)) -> Result<Op
 /// technology that does not exist, and how a run spent 61345 ticks re-issuing
 /// an action that did nothing while everything claimed to work.
 ///
-/// This is [`frame_capture_verdict`] without the tick: the same rule, for the
+/// This is [`sampling_verdict`] without the tick: the same rule, for the
 /// calls that have no payload to return.
 fn expect_silence(lines: Option<Vec<String>>) -> Result<()> {
     if let Some(lines) = lines {
@@ -1501,74 +1451,56 @@ impl FactorioRcon {
         Ok(())
     }
 
-    /// Turns the mod's tick-driven frame capture on, and reports the game tick
-    /// it took effect at.
+    /// Turns the mod's world-state sampling on, and reports the game tick it
+    /// took effect at.
     ///
-    /// The cadence deliberately does *not* live here. A frame's filename
-    /// carries the tick it was taken at, and only the game knows that: an RCON
+    /// The cadence deliberately does *not* live here. A sample line carries
+    /// the tick it was written at, and only the game knows that: an RCON
     /// command arrives whenever it arrives, so a caller driving the cadence
-    /// from out here could only name frames after its own loop counter -- and
-    /// a counter cannot fail to produce a contiguous, plausible sequence, even
-    /// when the game dropped frames. This is a toggle, not a shutter.
+    /// from out here could only stamp its own loop counter -- and a counter
+    /// cannot fail to produce a contiguous, plausible sequence, even when the
+    /// game skipped a beat. This is a toggle, not a shutter.
     ///
     /// The returned tick is the game's own (BotBridge's `stamp_tick`), so a
-    /// caller can check that every frame it later reads was taken at or after
-    /// the moment capture began, rather than trusting that it was.
+    /// caller can check that every sample it later reads was written at or
+    /// after the moment sampling began, rather than trusting that it was.
     ///
-    /// `run_id` tags the run with an opaque identifier the mod echoes into
-    /// `frames/run.json` and never interprets. Pass one when the frames will
+    /// `run_id` tags the session with an opaque identifier the mod stamps onto
+    /// every sample line and never interprets. Pass one when the samples will
     /// have to be matched against something produced elsewhere in the same run
     /// -- a replay document, say -- so a consumer can check the two came from
-    /// the same capture instead of trusting that ticks lining up means they
-    /// did. Pass `None` when nothing needs correlating: the mod then writes no
-    /// sidecar at all, and a consumer that finds none knows it cannot tell,
-    /// which is the honest answer. It never inherits the previous run's id.
+    /// the same session instead of trusting that ticks lining up means they
+    /// did. Pass `None` when nothing needs correlating: the lines then carry
+    /// no `run` key at all, and a consumer that finds none knows it cannot
+    /// tell, which is the honest answer. It never inherits the previous run's
+    /// id.
     ///
-    /// # What gets captured, and what it costs
+    /// This call is made on every recorded run, and that is what makes the run
+    /// observable: the mod's `sample_force` (300 ticks) and `sample_bots` (60
+    /// ticks) beats are both gated on an active session, so `samples.jsonl` --
+    /// research, production, power, bot inventories -- exists only while one
+    /// is running.
     ///
-    /// **Nothing, unless `cameras` asks for something.** Screenshots were
-    /// retired as a default on 2026-09-02 in favour of video: run
-    /// `run-1788365280-15443` wrote 2,164 JPEGs / **947 MB** of them against
-    /// **290 MB** for the same 45 minutes of video, and `game.take_screenshot`
-    /// renders synchronously inside the game loop, once per camera per
-    /// capture, where the video grabber reads a frame the GPU already drew.
-    ///
-    /// This call is still made on every recorded run, and that is deliberate:
-    /// the mod's `sample_force` and `sample_bots` beats are both gated on the
-    /// capture *session*, so `samples.jsonl` -- research, production, power,
-    /// bot inventories -- exists only while one is running. The screenshots
-    /// are the part whose cost is not worth paying; the session is not.
-    ///
-    /// With [`FrameCameras::All`] the mod registers `2 + one per bot` cameras:
-    /// `follow` (player 1), `bot-<player_index>` for every player the game
-    /// knows of, and `area`, which frames the bounding box of all connected
-    /// bots. A camera whose bot is not connected writes **no file** for that
-    /// tick rather than a substitute, so a bot that joined late has no frames
-    /// from before it joined.
-    ///
-    /// **0.72 MB per frame**, measured at JPEG quality 85 and 1920x1080. One
-    /// frame per camera every 300 ticks is 12 a minute, so **one camera costs
-    /// ~520 MB an hour and the three cameras of a one-bot run cost ~1.56 GB an
-    /// hour** — and each further bot adds a camera, hence another ~520 MB an
-    /// hour. It is wiped per run and never accumulates across runs, but a long
-    /// run with several bots fills a disk. The number is here so that whoever
-    /// turns this back on reads it before doing so rather than afterwards.
+    /// Until 2026-09-02 this toggle also drove per-camera screenshots. Those
+    /// are gone: run `run-1788365280-15443` wrote 2,164 JPEGs / **947 MB** of
+    /// them against **290 MB** for the same 45 minutes of video, and
+    /// `game.take_screenshot` renders synchronously inside the game loop where
+    /// the video grabber reads a frame the GPU already drew. Video is the
+    /// visual record; the session is what survived.
     ///
     /// Taken by value rather than as `Option<&str>` because this `impl` is
     /// `#[automock]`ed and mockall cannot elide a lifetime inside a generic.
-    pub async fn frame_capture_start(
-        &self,
-        run_id: Option<String>,
-        cameras: FrameCameras,
-    ) -> Result<Option<u64>> {
-        let args = frame_capture_args(run_id.as_deref(), &cameras);
-        frame_capture_verdict(self.remote_call_timed("frame_capture_start", args).await?)
+    pub async fn sampling_start(&self, run_id: Option<String>) -> Result<Option<u64>> {
+        sampling_verdict(
+            self.remote_call_timed("sampling_start", sampling_args(run_id.as_deref()))
+                .await?,
+        )
     }
 
-    /// Turns the mod's frame capture off, reporting the game tick it stopped
-    /// at. Frames already written stay on disk.
-    pub async fn frame_capture_stop(&self) -> Result<Option<u64>> {
-        frame_capture_verdict(self.remote_call_timed("frame_capture_stop", vec![]).await?)
+    /// Turns the mod's sampling off, reporting the game tick it stopped at.
+    /// Samples already written stay on disk.
+    pub async fn sampling_stop(&self) -> Result<Option<u64>> {
+        sampling_verdict(self.remote_call_timed("sampling_stop", vec![]).await?)
     }
 
     /// Print given message to all Clients as Chat Message from Server loudly using /c
@@ -5537,63 +5469,21 @@ mod placement_refusal_tests {
     }
 }
 
-/// **Screenshots are retired, and the wire has to say so by saying nothing.**
-///
-/// The cost of getting the default wrong here is asymmetric: a run that
-/// captures when it should not writes 947 MB and takes the render inside the
-/// game loop, while a run that does not capture when it should loses pictures
-/// nobody had asked for. So the tests below pin the cheap outcome as the one
-/// an unconfigured call produces, at the last point before the command leaves
-/// this process.
+/// The run id is the only thing on the wire, and an absent one has to stay
+/// absent: the mod distinguishes "no id" from any value, and a placeholder
+/// would give an untagged session an identity it never asked for.
 #[cfg(test)]
-mod frame_camera_tests {
-    use super::{FrameCameras, frame_capture_args};
+mod sampling_arg_tests {
+    use super::sampling_args;
 
-    /// A call that says nothing about cameras must send exactly the argument
-    /// list it always sent -- one run id and no more -- so the mod's own
-    /// default is what decides, and there is only one place to get it wrong.
     #[test]
-    fn the_default_asks_for_nothing_and_adds_nothing_to_the_wire() {
-        assert_eq!(FrameCameras::default(), FrameCameras::None);
-        assert_eq!(
-            frame_capture_args(Some("run-1"), &FrameCameras::None),
-            vec!["'run-1'".to_string()]
-        );
+    fn a_tagged_session_sends_its_quoted_run_id() {
+        assert_eq!(sampling_args(Some("run-1")), vec!["'run-1'".to_string()]);
     }
 
     #[test]
-    fn every_camera_is_the_literal_true_the_mod_reads() {
-        assert_eq!(
-            frame_capture_args(Some("run-1"), &FrameCameras::All),
-            vec!["'run-1'".to_string(), "true".to_string()]
-        );
-    }
-
-    #[test]
-    fn a_subset_is_a_lua_list_of_quoted_ids() {
-        assert_eq!(
-            frame_capture_args(
-                Some("run-1"),
-                &FrameCameras::Only(vec!["follow".into(), "bot-1".into()])
-            ),
-            vec!["'run-1'".to_string(), "{'follow','bot-1'}".to_string()]
-        );
-    }
-
-    /// The positional hazard. Without the placeholder the camera list lands in
-    /// `run_id`, where the mod raises "run id must be a string" -- a refusal
-    /// naming the wrong argument, for a call that was correct.
-    #[test]
-    fn an_untagged_capture_with_cameras_keeps_the_run_id_slot_open() {
-        assert_eq!(
-            frame_capture_args(None, &FrameCameras::All),
-            vec!["nil".to_string(), "true".to_string()]
-        );
-        assert!(
-            frame_capture_args(None, &FrameCameras::None).is_empty(),
-            "and an untagged capture with no cameras still sends no argument \
-             at all -- the mod distinguishes an absent id from any value"
-        );
+    fn an_untagged_session_sends_no_argument_at_all() {
+        assert!(sampling_args(None).is_empty());
     }
 }
 

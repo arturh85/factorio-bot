@@ -1,15 +1,13 @@
 <script setup lang="ts">
 /**
- * Viewing an archived run: splits, a tick scrubber, and the frames.
+ * Viewing an archived run: splits, a tick scrubber, the video and the map.
  *
  * Everything reads one cursor, in game ticks. Wall time appears only as "when
  * was this run" -- two runs are compared on the game's clock, because a
- * headless server and a graphical client with three cameras do not run at the
- * same speed.
+ * headless server and a graphical client do not run at the same speed.
  */
 import {computed, onBeforeUnmount, onMounted, ref, watch, watchEffect} from 'vue';
 import {useRunsStore} from '@/store/runsStore';
-import {runFrameUrl} from '@/api/client';
 import MapPanel from '@/components/MapPanel.vue';
 import {parseVideoClock, tickToVideoSeconds, videoSecondsToTick} from '@/api/videoClock';
 import {videoDefects} from '@/api/videoJoin';
@@ -18,7 +16,6 @@ import {
     formatTicks,
     formatWhen,
     fractionOf,
-    frameAt,
     laneAt,
     laneBots,
     splitAt,
@@ -56,7 +53,7 @@ watch(
     (playing) => {
         stopTimer();
         // Ten steps a second: fast enough to read as playback, slow enough
-        // that each step lands on a frame the eye can register.
+        // that the eye can register each step.
         if (playing) timer = window.setInterval(() => store.advance(), 100);
     }
 );
@@ -64,25 +61,6 @@ watch(
 async function open(id: string) {
     selected.value = id;
     await store.openRun(id);
-}
-
-/** `"<bot>|<camera>"`, so one <select> can carry a pair. */
-function viewKey(v: {bot: number; camera: string}): string {
-    return `${v.bot}|${v.camera}`;
-}
-/**
- * What to call a view in the picker.
- *
- * The client number is which Factorio process happened to render that camera,
- * which is an implementation detail the mod decides and a viewer cannot act on
- * -- `bot-1 -- client 4` invites the reading that client 4 *is* bot 1, and it is
- * not. So it is shown only when it is the sole thing separating two entries,
- * which is the one case where dropping it would offer an ambiguous choice.
- */
-function viewLabel(v: {bot: number; camera: string; count: number}): string {
-    const sameCamera = store.views.filter((o) => o.camera === v.camera).length;
-    const where = sameCamera > 1 ? ` (client ${v.bot})` : '';
-    return `${v.camera}${where} — ${v.count} frames`;
 }
 
 /**
@@ -93,7 +71,7 @@ function viewLabel(v: {bot: number; camera: string; count: number}): string {
  * be related by multiplying. `parseVideoClock` interpolates between the nearest
  * sampled pairs and **returns null rather than a number** outside the sampled
  * range or across a stall -- so an unanswerable tick shows a message instead of
- * a plausible wrong frame.
+ * a plausible wrong moment.
  */
 const videoClock = computed(() => parseVideoClock(store.video, store.videoTicks));
 
@@ -179,38 +157,7 @@ function onVideoPlay() {
     if (store.playing) store.togglePlay();
 }
 
-const currentViewKey = computed(() =>
-    store.bot === null || store.camera === null
-        ? ''
-        : viewKey({bot: store.bot, camera: store.camera})
-);
-function pickView(key: string) {
-    const view = store.views.find((v) => viewKey(v) === key);
-    if (view) store.selectView(view);
-}
-
-const current = computed(() =>
-    store.bot === null || store.camera === null
-        ? null
-        : frameAt(store.placedFrames, store.bot, store.camera, store.cursor)
-);
-
 const currentSplit = computed(() => splitAt(store.detail?.splits ?? [], store.cursor));
-
-/** The earliest frame for the current bot and camera, for the empty state. */
-const firstForSelection = computed(() => {
-    if (store.bot === null || store.camera === null) return null;
-    const mine = store.placedFrames.filter(
-        (f) => f.bot === store.bot && f.camera === store.camera
-    );
-    return mine.length > 0 ? mine[0].tick : null;
-});
-
-const frameSrc = computed(() =>
-    current.value && selected.value
-        ? runFrameUrl(selected.value, current.value.bot, current.value.file)
-        : null
-);
 
 /**
  * Splits with a delta column when a reference run is chosen.
@@ -348,9 +295,10 @@ function researchPct(progress: number): string {
             </table>
 
             <div v-if="store.bounds" class="timeline">
-                <!-- The axis starts at the first frame or lane bar, not at the
-                     run. Say so, rather than let the clipped first milestone
-                     look like a disagreement with the splits table. -->
+                <!-- The axis starts at the first lane bar or the recording,
+                     not at the run. Say so, rather than let the clipped first
+                     milestone look like a disagreement with the splits
+                     table. -->
                 <p v-if="store.leadIn > 0" class="timeline__leadin num">
                     axis starts at the first capture · {{ formatTicks(store.leadIn) }} of planning
                     before it, not shown
@@ -421,8 +369,10 @@ function researchPct(progress: number): string {
                 </div>
             </div>
 
-            <!-- Video sits above the frames because it is the watchable
-                 artefact; frames remain the tick-addressable record. -->
+            <!-- The run's visual record. Since the per-camera screenshots were
+                 retired (2026-09-02) this is the only one, and a run that
+                 recorded none renders nothing here rather than a panel
+                 explaining its own emptiness. -->
             <div v-if="store.video?.video" class="video">
                 <h3>Video</h3>
                 <p v-if="store.videoError" class="stream-warning">{{ store.videoError }}</p>
@@ -455,71 +405,6 @@ function researchPct(progress: number): string {
                     <template v-else>the clock cannot place tick {{ store.cursor }}</template>
                 </p>
             </div>
-
-            <!-- Screenshot cameras were retired on 2026-09-02, so almost every
-                 run now has no frames at all. The panel used to render anyway
-                 and explain its own emptiness, which put a paragraph about a
-                 retired feature on every run page. It is gone: a run with no
-                 frames shows nothing here, and the listing no longer prints
-                 "0 frames" beside every entry.
-
-                 The panel still appears for an archived run that did capture
-                 frames, because those are the tick-addressable record the video
-                 interpolates between. A failed listing also still shows, since
-                 "we could not find out" is not "there were none". -->
-            <details
-                v-if="store.views.length > 0 || store.frameError"
-                class="frame"
-                :open="!store.video?.video"
-            >
-                <summary v-if="store.video?.video" class="frame__summary">
-                    per-camera screenshots ({{ store.frames.length }}) — exact at a tick, where the video interpolates
-                </summary>
-                <!-- A failed listing wins over "none were captured": one means
-                     the panel knows, the other means it could not find out. -->
-                <p v-if="store.frameError" class="stream-warning">{{ store.frameError }}</p>
-                <template v-else>
-                    <div class="frame__picker" data-testid="frame-picker">
-                        <label>
-                            view
-                            <!-- One list of the pairs that exist. Two selectors
-                                 would offer combinations this run never captured,
-                                 which is most of them: the mod writes each camera
-                                 into whichever player rendered it, so the client
-                                 folder says nothing about who is on screen. -->
-                            <select
-                                :value="currentViewKey"
-                                @change="pickView(($event.target as HTMLSelectElement).value)"
-                            >
-                                <option v-for="v in store.views" :key="viewKey(v)" :value="viewKey(v)">
-                                    {{ viewLabel(v) }}
-                                </option>
-                            </select>
-                        </label>
-                    </div>
-                    <img v-if="frameSrc" :src="frameSrc" :alt="`frame at tick ${current?.tick}`" />
-                    <!-- Before the first frame is a real state: the run had begun
-                         and capture had not yet produced anything. -->
-                    <!-- Say where the frames start rather than leaving a dead end:
-                         "none here" and "none at all" are different answers. -->
-                    <p v-else class="frame__none">
-                        <template v-if="firstForSelection !== null">
-                            No frame yet at tick {{ store.cursor }} — this camera starts at
-                            <button type="button" class="linkish" @click="store.seek(firstForSelection)">
-                                tick {{ firstForSelection }}
-                            </button>.
-                        </template>
-                        <!-- Views exist but none is chosen. Not "no frames":
-                             the run has some, nobody has said which to show. -->
-                        <template v-else>
-                            Pick a view to see its frames.
-                        </template>
-                    </p>
-                    <p v-if="current" class="frame__caption num">
-                        frame tick {{ current.tick }} · {{ current.camera }}
-                    </p>
-                </template>
-            </details>
 
             <div class="map">
                 <h3>Map</h3>
@@ -576,7 +461,7 @@ function researchPct(progress: number): string {
                     <p v-else-if="!store.botState" class="worldstate__empty">
                         {{
                             store.bot === null
-                                ? 'select a view to see its bot'
+                                ? 'this run sampled no bots'
                                 : 'no bot sample yet at this tick'
                         }}
                     </p>
@@ -690,7 +575,7 @@ function researchPct(progress: number): string {
 }
 .timeline {
     /* Sticky, because the scrubber is what you steer the rest of the page with:
-     * the splits table, the frames and the map all answer "what was happening at
+     * the splits table, the video and the map all answer "what was happening at
      * this tick", and scrolling to any of them used to take the control that sets
      * the tick off-screen.
      *
@@ -738,12 +623,6 @@ function researchPct(progress: number): string {
 .video {
     margin-bottom: 1rem;
 }
-.frame__summary {
-    cursor: pointer;
-    font-size: 0.8rem;
-    color: var(--muted, #8b8b8b);
-    margin-bottom: 0.5rem;
-}
 .video__player {
     max-width: 100%;
     max-height: 60vh;
@@ -755,16 +634,6 @@ function researchPct(progress: number): string {
     font-size: 0.75rem;
     color: var(--muted, #8b8b8b);
 }
-.frame img {
-    max-width: 100%;
-    display: block;
-    border: 1px solid var(--surface-border, #ccc);
-}
-.frame__picker {
-    display: flex;
-    gap: 1rem;
-    margin-bottom: 0.5rem;
-}
 .linkish {
     background: none;
     border: none;
@@ -773,11 +642,6 @@ function researchPct(progress: number): string {
     color: #3b82f6;
     cursor: pointer;
     text-decoration: underline;
-}
-.frame__caption,
-.frame__none {
-    font-size: 0.85rem;
-    opacity: 0.7;
 }
 .map {
     margin-bottom: 1rem;

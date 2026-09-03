@@ -6,31 +6,30 @@
 //!
 //! - the **manifest** says whether there is a recording, what it is, and how it
 //!   ended. It is derived from a directory listing on every request and stores
-//!   nothing of its own, exactly like `GET /api/v1/frames`.
+//!   nothing of its own.
 //! - the **file** is bytes for a `<video>` element, and therefore must support
 //!   `Range` requests.
 //! - the **clock** is the `(tick, wall_ms)` table the viewer interpolates. It is
 //!   separate from the manifest because it is thousands of lines and a caller
 //!   sizing an axis only needs `VideoManifest::tick_range`.
 //!
-//! # Why the file route is not `get_frame`
+//! # Why the file route does not just read the file
 //!
-//! `get_frame` does `std::fs::read` into a `Vec<u8>` and answers a plain 200.
-//! For a JPEG that is right; for a video it is two separate failures. A
-//! `<video>` served that way **cannot seek at all** -- the browser needs
-//! `Accept-Ranges`/206 to fetch the byte range around a timestamp -- and every
-//! request loads the whole recording into server memory. So this route
-//! delegates to [`tower_http::services::ServeFile`], which is already a
-//! dependency (`crates/server/src/spa.rs` uses it) and handles conditional and
-//! range requests.
+//! A plain `std::fs::read` into a `Vec<u8>` answering a 200 is two separate
+//! failures for a video. A `<video>` served that way **cannot seek at all** --
+//! the browser needs `Accept-Ranges`/206 to fetch the byte range around a
+//! timestamp -- and every request loads the whole recording into server
+//! memory. So this route delegates to [`tower_http::services::ServeFile`],
+//! which is already a dependency (`crates/server/src/spa.rs` uses it) and
+//! handles conditional and range requests.
 //!
 //! **`resolve_script_path` still runs first, before `ServeFile` is
-//! constructed**, exactly as it does for frames. These endpoints are
-//! unauthenticated, so that guard is the only thing between an HTTP caller and
-//! the filesystem, and nothing about delegating the read may route around it.
+//! constructed.** These endpoints are unauthenticated, so that guard is the
+//! only thing between an HTTP caller and the filesystem, and nothing about
+//! delegating the read may route around it.
 
 use crate::error::ErrorResponse;
-use crate::manage::frames::workspace_root;
+use crate::manage::workspace_root;
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::{Request, State};
@@ -111,13 +110,12 @@ pub async fn get_video_ticks(
 
 /// Serves the recording's bytes, with range support.
 ///
-/// **`Cache-Control: no-cache`, deliberately unlike a frame.** A frame is
-/// immutable once written -- a tick never recurs -- but
-/// `<workspace>/video/video.mp4` is *overwritten by the next run*, at the same
-/// URL. Serving it `immutable` would show a browser the previous run's
-/// recording beside this run's timeline, and nothing would say so. The archived
-/// route (`/api/v1/runs/{id}/video/file`) is the one whose bytes never change,
-/// and it is cached accordingly.
+/// **`Cache-Control: no-cache`, deliberately.** `<workspace>/video/video.mp4`
+/// is *overwritten by the next run*, at the same URL. Serving it `immutable`
+/// would show a browser the previous run's recording beside this run's
+/// timeline, and nothing would say so. The archived route
+/// (`/api/v1/runs/{id}/video/file`) is the one whose bytes never change, and it
+/// is cached accordingly.
 #[utoipa::path(
     get,
     path = "/api/v1/video/file",

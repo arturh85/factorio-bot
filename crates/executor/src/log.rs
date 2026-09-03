@@ -125,9 +125,9 @@ pub enum Status {
 ///
 /// **The two are kept side by side deliberately.** The drift between the plan
 /// and the game is the signal — it is what tells you the scheduler's model of
-/// `Action::duration` is wrong, and it is what a consumer aligning captured
-/// frames to a plan needs in order to pin a frame to the tick it was actually
-/// taken at. Renaming `planned_*` to something that sounds measured, or filling
+/// `Action::duration` is wrong, and it is what a consumer aligning a recording
+/// to a plan needs in order to pin a moment to the tick it actually happened
+/// at. Renaming `planned_*` to something that sounds measured, or filling
 /// `dispatched_tick`/`replied_tick` in from the schedule when the game did not
 /// answer, would destroy exactly that signal while leaving every reading
 /// plausible.
@@ -215,8 +215,8 @@ pub struct Attempt {
 /// the run, and that pair is what these are keyed by.
 ///
 /// Walking is most of the wall-clock in these plans, so this was the largest
-/// hole in the timeline: without it a consumer aligning frames to a plan can
-/// only render an undifferentiated "walk + wait" span, not because the split is
+/// hole in the timeline: without it a consumer aligning a recording to a plan
+/// can only render an undifferentiated "walk + wait" span, not because the split is
 /// unobservable but because the observation was being discarded.
 ///
 /// # The same two kinds of tick as [`Attempt`], under the same rules

@@ -45,12 +45,6 @@ beforeEach(() => {
     setActivePinia(createPinia());
     vi.resetAllMocks();
     vi.mocked(jobEvents.subscribeJobEvents).mockImplementation(() => vi.fn());
-    // `vi.mock('@/api/client')` auto-mocks every export, so `frames()` returns
-    // `undefined` rather than a manifest and the store's `await` yields it.
-    // Given a default here rather than in each test: a manifest is not what
-    // any of these assert, and leaving it unset made the failure look like a
-    // defect in the join logic instead of an unset mock.
-    vi.mocked(client.frames).mockResolvedValue({clients: [], frames: [], run: null, client_runs: []});
 });
 
 afterEach(() => {

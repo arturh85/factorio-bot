@@ -21,11 +21,9 @@ import {
     ExecuteAccepted,
     ExecuteRequest,
     ExistsResponse,
-    FramesManifest,
     InstanceStatus,
     Job,
     RunDetail,
-    RunFramesResponse,
     RunLanesResponse,
     RunMapResponse,
     RunSamplesResponse,
@@ -129,26 +127,6 @@ export function jobEventsUrl(id: string): string {
     return buildUrl('/api/v1/jobs/' + encodeURIComponent(id) + '/events');
 }
 
-/**
- * The manifest of captured frames, derived fresh from a directory listing on
- * every call -- see `FramesManifest` for why nothing here is computed from a
- * start tick and a stride.
- */
-export function frames(): Promise<FramesManifest> {
-    return request<FramesManifest>('/api/v1/frames');
-}
-
-/**
- * The URL for one frame's JPEG bytes, for an `<img>` tag rather than a
- * `request()` call -- the response is immutable image bytes, not JSON.
- * Addressed by `(client, name)` together, both from one `FrameEntry`. The name
- * alone is not an address: per-bot cameras mean two clients capture the same
- * tick under the same filename, and both frames are correct and different.
- */
-export function frameUrl(client: number, name: string): string {
-    return buildUrl(`/api/v1/frames/${client}/` + encodeURIComponent(name));
-}
-
 /** Archived runs, newest first. */
 export function listRuns(): Promise<RunsResponse> {
     return request<RunsResponse>('/api/v1/runs');
@@ -157,26 +135,6 @@ export function listRuns(): Promise<RunsResponse> {
 /** One run's summary and splits. */
 export function getRun(id: string): Promise<RunDetail> {
     return request<RunDetail>(`/api/v1/runs/${encodeURIComponent(id)}`);
-}
-
-/** A run's frame index. */
-export function getRunFrames(id: string): Promise<RunFramesResponse> {
-    return request<RunFramesResponse>(`/api/v1/runs/${encodeURIComponent(id)}/frames`);
-}
-
-/**
- * The URL of one archived frame.
- *
- * `file` from `ArchivedFrame` is run-relative (`frames/<bot>/<name>`); only
- * the trailing filename goes in the path, because the bot segment is already
- * a parameter and the server refuses anything that would leave that
- * directory.
- */
-export function runFrameUrl(id: string, bot: number, file: string): string {
-    const name = file.slice(file.lastIndexOf('/') + 1);
-    return buildUrl(
-        `/api/v1/runs/${encodeURIComponent(id)}/frames/${bot}/` + encodeURIComponent(name)
-    );
 }
 
 /**
@@ -235,12 +193,12 @@ export function videoTicks(): Promise<VideoTicksResponse> {
  * The URL for the live recording's bytes, for a `<video>` element rather than a
  * `request()` call.
  *
- * **Cache-busted by run id**, unlike `frameUrl`. A frame is addressed by
- * `(client, name)` and is immutable once written, because a tick never recurs.
- * The live recording is one file at one URL that the *next run overwrites*, so
- * without the parameter a browser would happily replay the previous run's video
- * beside this run's timeline. `null` when the run is unknown: the URL is still
- * usable, it just cannot be busted.
+ * **Cache-busted by run id.** The live recording is one file at one URL that
+ * the *next run overwrites*, so without the parameter a browser would happily
+ * replay the previous run's video beside this run's timeline. An archived run's
+ * copy needs no such thing -- it is immutable, because a finished run never
+ * runs again. `null` when the run is unknown: the URL is still usable, it just
+ * cannot be busted.
  */
 export function videoUrl(runId: string | null): string {
     const base = buildUrl('/api/v1/video/file');

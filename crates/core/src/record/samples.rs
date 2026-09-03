@@ -199,16 +199,13 @@ pub struct IngestProgress {
 /// not finished landing on disk, silently dropping the rest of that sample
 /// forever.
 ///
-/// Filtered on the run id *first*, tick second -- not on tick alone. Unlike
-/// frames, sample lines carry no per-run sidecar file to gate a whole
-/// directory; the mod stamps `run` on each line instead, and a line naming a
-/// *different* run is excluded regardless of its tick, because a named
-/// mismatch is a known fact and a tick comparison is only ever a guess. Every
-/// run starts near tick 0 on a freshly generated map, so two runs' tick
-/// ranges overlap almost entirely (see `frames.rs`, which hit this same
-/// problem and solved it with a sidecar) -- two runs can both pass through
-/// tick 61,500, and a leftover `samples.jsonl` from the older one would
-/// otherwise be ingested as this run's data.
+/// Filtered on the run id *first*, tick second -- not on tick alone. The mod
+/// stamps `run` on each line, and a line naming a *different* run is excluded
+/// regardless of its tick, because a named mismatch is a known fact and a tick
+/// comparison is only ever a guess. Every run starts near tick 0 on a freshly
+/// generated map, so two runs' tick ranges overlap almost entirely -- two runs
+/// can both pass through tick 61,500, and a leftover `samples.jsonl` from the
+/// older one would otherwise be ingested as this run's data.
 ///
 /// A line with no `run` at all -- written before this field existed -- falls
 /// back to `not_before`, the recorder's high-water mark, because that is the
@@ -242,7 +239,7 @@ pub fn ingest_samples_incremental(
 
     let mut file = File::open(&source)?;
     let len = file.metadata()?.len();
-    // The mod truncates this file when a *new* run's frame capture starts.
+    // The mod truncates this file when a *new* run's sampling session starts.
     // That should never happen while this run is still going -- but if it
     // does, the remembered offset now points past the end of a shorter file,
     // and seeking there would read nothing forever rather than catching up.

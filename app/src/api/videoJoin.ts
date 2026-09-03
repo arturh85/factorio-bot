@@ -3,21 +3,19 @@
  * recording itself.
  *
  * **Nothing here converts a tick to a time.** The join is `game.tick` against
- * `game.tick`, exactly as in `frameJoin.ts`; seconds live in `videoClock.ts` and
- * nowhere else.
+ * `game.tick`; seconds live in `videoClock.ts` and nowhere else.
  *
- * `runIdCheck` and `combineRunMatchChecks` are imported from `frameJoin.ts`
- * unchanged -- they take strings and `RunMatchCheck`s, not frames. Copying them
- * is how two halves of a system come to disagree about what a match is, so
- * whatever is true of frames stays true of video by construction.
+ * `runIdCheck` and `combineRunMatchChecks` are imported from `runMatch.ts`
+ * unchanged -- they take strings and `RunMatchCheck`s, not recordings. Copying
+ * them is how two halves of a system come to disagree about what a match is.
  */
 
 import {Replay} from './replay';
-import {RunMatchCheck, replayObservedTickRange} from './frameJoin';
+import {RunMatchCheck, replayObservedTickRange} from './runMatch';
 import {VideoManifest} from './types';
 
-export {combineRunMatchChecks, runIdCheck} from './frameJoin';
-export type {RunMatchCheck, RunMatchResult, RunMatchVerdict} from './frameJoin';
+export {combineRunMatchChecks, runIdCheck} from './runMatch';
+export type {RunMatchCheck, RunMatchResult, RunMatchVerdict} from './runMatch';
 
 /**
  * The video's twin of `tickOverlapCheck`.

@@ -1449,78 +1449,32 @@ function chunk_screenshot2(chunk_x, chunk_y)
 end
 
 -- ---------------------------------------------------------------------------
--- Tick-driven frame capture
+-- The recording session
 -- ---------------------------------------------------------------------------
 --
--- A frame's filename is a *measurement*, not a claim. The tick in it is read
--- from `game.tick` inside the game, at the moment the capture is requested --
--- the same source `stamp_tick` uses to tell an RCON caller when the game
--- actually saw their command. There is deliberately no second notion of "now"
--- here.
+-- A *session* is what makes this mod write anything about the world: both
+-- samplers -- `sample_force` on the 300-tick beat and `sample_bots` on the
+-- 60-tick one -- return early unless `storage.sampling` is set, and every
+-- sample line is tagged with the session's opaque `run` id so a consumer can
+-- tell one run's stream from the next one's.
 --
--- Why the cadence lives in the mod rather than in a caller's loop: an RCON
--- command arrives whenever it arrives. The sender does not know the tick and
--- cannot make one true by writing it into a filename. A loop that fires "every
--- five seconds" and names its frames 300 apart produces a contiguous,
--- plausible, authoritative-looking sequence whether or not the game agreed --
--- it *cannot fail* to look right.
+-- **This used to render screenshots as well, and no longer does.** Until
+-- 2026-09-02 the 300-tick beat also drove `game.take_screenshot` through a
+-- catalogue of cameras (`follow`, `bot-<index>`, `area`), writing JPEGs into
+-- `script-output/frames/` beside a `frames/run.json` sidecar. That was
+-- retired and is now removed: run `run-1788365280-15443` wrote 2,164 JPEGs /
+-- 947 MB of them against 290 MB for the same 45 minutes of video, and
+-- `game.take_screenshot` renders *synchronously inside the game loop*, once
+-- per camera per capture, where the video grabber reads a frame the GPU
+-- already drew. Video is the visual record now; see
+-- `docs/superpowers/notes/2026-09-02-screenshots-retired.md` for what was
+-- lost with them.
 --
--- That is not tidiness, because frames drop. `force_render` is asked for
--- below, but the API does not honour it on a multiplayer client that is
--- catching up to the server, which is exactly what our bots are. A name built
--- from `game.tick` turns a drop into a visible gap in the sequence; a name
--- built from a counter hides it, and the stream then misrepresents itself
--- precisely when something has gone wrong. So nothing in here renumbers,
--- backfills, interpolates or retries a missed frame: the gap is the record.
---
--- **Retired as a default, kept as a switch.** `storage.frame_capture` is nil
--- until `rcon_frame_capture_start` sets it, and even then it registers *no
--- camera* unless one was asked for. Video is the visual record now: run
--- `run-1788365280-15443` wrote 2,164 JPEGs / 947 MB of screenshots against
--- 290 MB for the same 45 minutes of video, and `game.take_screenshot` renders
--- synchronously inside the game loop where the video grabber reads a frame the
--- GPU already drew.
---
--- The per-camera cost, for whoever turns it back on: 0.72 MB per frame at JPEG
--- quality 85 and 1920x1080, and 300 ticks is 12 frames a minute, so one camera
--- costs ~520 MB an hour and the three cameras of a one-bot run cost ~1.56 GB an
--- hour. The camera count with `cameras = true` is `2 + one per player the game
--- knows of` (see `rcon_frame_capture_start`), so each additional bot adds
--- another ~520 MB an hour. Wiped per run, never accumulated across runs.
+-- The session survived the screenshots on purpose: deleting it would have
+-- taken `samples.jsonl` -- research, production, power, bot inventories --
+-- with it, silently.
 
-local FRAME_CAPTURE_INTERVAL = 300 -- game ticks between frames (5 s at 60 UPS)
-local FRAME_CAPTURE_DIR = "frames"
-local FRAME_CAPTURE_RESOLUTION = {1920, 1080}
-local FRAME_CAPTURE_QUALITY = 85 -- percent; JPEG only. PNG measured ~7x larger.
-local FRAME_CAPTURE_ZOOM = 1
-
--- Tiles of empty ground kept between the outermost bot and the edge of an
--- `area` frame, so a bot that defines the bounding box is not sliced in half
--- by the frame it defines.
-local FRAME_CAPTURE_AREA_MARGIN = 16
--- The zoom below which the `area` camera stops writing a frame rather than
--- start cropping. At 1920x1080 and 32 px per tile, 0.05 covers 1200x675 tiles
--- -- bots spread wider than that get no area frame for that tick, which is
--- the honest outcome; see `frame_capture_take_area`.
-local FRAME_CAPTURE_AREA_MIN_ZOOM = 0.05
-
--- The run id sidecar lives *inside* `frames/`, not one level up in
--- script-output, and that placement is the whole point of it.
---
--- The id exists so a consumer can tell whether the frames it is looking at and
--- the replay document it is looking at came from the same run. Frames are
--- per-run because `rcon_frame_capture_start` wipes this directory; a replay is
--- per-job and any past job's replay can be opened. Without a shared id, job
--- 3's plan joins to job 7's pictures by tick number alone and the join
--- succeeds -- both sides name ticks from `game.tick`, so nothing complains.
---
--- Put the sidecar one level up and the wipe no longer reaches it. Then a run
--- that cleared the frames and failed before rewriting the id would leave an id
--- describing frames that no longer exist, and a consumer checking it would
--- confirm a match that is wrong. A stale id is worse than no id: it turns "I
--- cannot tell" into "I checked, they match". Inside the directory, the id can
--- only ever be as old as the frames beside it.
-local FRAME_CAPTURE_RUN_FILE = FRAME_CAPTURE_DIR .. "/run.json"
+local SAMPLE_FORCE_INTERVAL = 300 -- game ticks between force samples (5 s at 60 UPS)
 
 -- Sample schema. Bumped deliberately on every field change, because
 -- info.json has read 0.0.1 since the project began and cannot tell a stale
@@ -1533,206 +1487,14 @@ local SAMPLE_BOT_INTERVAL = 60 -- 1 s at 60 UPS
 -- Appends one JSON line, on the server only.
 --
 -- The fourth argument is what restricts the write. `on_nth_tick` runs on every
--- peer, which is why each client writes its own frames -- but force statistics
--- are identical on every peer and bot inventories are readable from any of
--- them, so four copies would be four identical files to reconcile for nothing.
+-- peer, so without it every client would write its own copy -- but force
+-- statistics are identical on every peer and bot inventories are readable from
+-- any of them, so four copies would be four identical files to reconcile for
+-- nothing.
 local function write_sample(line)
 	helpers.write_file(SAMPLE_FILE, helpers.table_to_json(line) .. "\n", true, 0)
 end
 
--- Camera ids must be filename-safe. Interior hyphens are allowed; leading,
--- trailing and doubled ones are not.
---
--- `tick-NNNNNNN-<camera>.jpg` is parsed by taking the digit run after `tick-`
--- and reading *everything after the next hyphen* as the camera id, so
--- `tick-0001800-bot-1.jpg` reads back as tick 1800, camera `bot-1`: an id may
--- contain hyphens without becoming ambiguous. What would be ambiguous is an id
--- that begins or ends with one, or contains an empty component, because the
--- name then no longer says which characters were the separator -- so those are
--- refused here rather than assumed absent. This is checked, not trusted,
--- because a mis-parsed name attributes a frame to a camera that did not take
--- it, and nothing downstream could notice.
-function frame_capture_valid_camera_id(id)
-	if type(id) ~= "string" then
-		return false
-	end
-	if id:match("^[%w_%-]+$") == nil then
-		return false
-	end
-	if id:sub(1, 1) == "-" or id:sub(-1) == "-" or id:find("%-%-") ~= nil then
-		return false
-	end
-	return true
-end
-
--- Flat, one directory for every camera: a scrubber sitting at tick T wants
--- every camera's frame at T, and a shared `tick-NNNNNNN-` prefix gives it that
--- in one listing, where a directory per camera would not.
---
--- Seven digits covers ~46 hours of game time. Past that `%07d` widens rather
--- than truncates: the name stays true and only lexical sort order suffers.
-function frame_capture_path(tick, camera_id)
-	return FRAME_CAPTURE_DIR .. "/tick-" .. string.format("%07d", tick) .. "-" .. camera_id .. ".jpg"
-end
-
--- Every connected player, ordered by player index.
---
--- Ordered rather than however `pairs` happens to walk the table, because the
--- first entry decides which peer writes an `area` frame and which player's
--- vision it is rendered through. An unordered pick would make that vary
--- between ticks and between peers for no reason a reader of the frames could
--- see.
-function frame_capture_connected_players()
-	local indexes = {}
-	for _, player in pairs(game.players) do
-		if player.connected then
-			table.insert(indexes, player.index)
-		end
-	end
-	table.sort(indexes)
-	local players = {}
-	for _, index in ipairs(indexes) do
-		table.insert(players, game.players[index])
-	end
-	return players
-end
-
--- A camera that follows one player. `follow` and every `bot-N` are this.
-function frame_capture_take_follow(camera, tick)
-	local player = game.players[camera.player_index]
-	-- No player to follow, so no frame -- and the absence is the record.
-	-- This tick simply has no file, exactly as a dropped render has none.
-	-- Nothing is substituted, deferred to the next tick, or written under
-	-- a tick the game did not agree to.
-	--
-	-- This is the whole of what a per-bot camera does for a bot that is not
-	-- connected, and it has to stay this: a placeholder frame -- black, or the
-	-- previous one, or another camera's -- would be indistinguishable from a
-	-- capture of that bot, and would put a picture of nothing beside a step
-	-- that really happened.
-	if player == nil or not player.connected then
-		return
-	end
-	game.take_screenshot({
-		player = player,
-		-- One peer, not all of them. `on_nth_tick` runs on every peer in
-		-- a multiplayer game, so without `by_player` each connected
-		-- client would render and write its own copy of the same frame
-		-- into its own script-output. Taking a screenshot reads game
-		-- state and writes none, so the duplication is a waste rather
-		-- than a desync -- but a camera must map to exactly one file for
-		-- its name to mean anything. `by_player` is also what lets the
-		-- per-bot cameras exist: each writes on the peer it photographs.
-		by_player = player,
-		surface = player.surface,
-		position = player.position,
-		resolution = FRAME_CAPTURE_RESOLUTION,
-		zoom = FRAME_CAPTURE_ZOOM,
-		path = frame_capture_path(tick, camera.id),
-		quality = FRAME_CAPTURE_QUALITY,
-		-- Asked for, not relied on: the API does not honour this on a
-		-- multiplayer client catching up. See the header comment.
-		force_render = true,
-		show_entity_info = true,
-		show_gui = false
-	})
-end
-
--- The `area` camera frames **the bounding box of all connected bots**: the
--- axis-aligned box through every connected player's position, widened by
--- `FRAME_CAPTURE_AREA_MARGIN`, centred on the box's centre, zoomed to fit.
---
--- That claim was chosen because it is self-describing and checkable against
--- the picture: "every bot that was connected at this tick is inside this
--- frame". It is deliberately not "where the action is" -- nothing in this mod
--- defines action, so such a camera would be pointing at a thing it had
--- invented, and a viewer could never tell whether it had found it.
---
--- The degenerate cases, which is where a framing claim usually turns into a
--- lie:
---
---   * **No connected bot: no file for this tick.** There is no bounding box of
---     nothing. A frame of the map origin would be a picture of nobody, filed
---     under a camera that says it shows everybody.
---   * **One connected bot: this is the `follow` camera with extra steps, and
---     it is written anyway.** The box is a point, the margin makes it 32 tiles
---     across, and the fit zoom clamps to `FRAME_CAPTURE_ZOOM` -- so the output
---     is `follow` pointed at that bot. Said plainly here rather than dressed
---     up as something else. It is still written because the claim it makes is
---     still true of it, and because a camera that vanished at one bot would
---     make its own absence mean two different things.
---   * **Bots far apart: it zooms out, and legibility is what gives way.** A
---     frame where the bots are specks still answers "where is everyone"
---     truthfully; a zoom held at a readable level would silently *crop* bots
---     out and hand back a picture that looks like the whole party. Cropping is
---     the one thing this must not do, so below `FRAME_CAPTURE_AREA_MIN_ZOOM`
---     it writes nothing instead. A consumer can tell that gap from a stopped
---     capture: the follow and per-bot frames for the same tick are there.
---   * **Bots on more than one surface: no file.** One image cannot contain two
---     surfaces, and framing one of them would show a subset under a name that
---     claims the set.
-function frame_capture_take_area(camera, tick)
-	local players = frame_capture_connected_players()
-	if #players == 0 then
-		return
-	end
-	-- Lowest connected index: the peer that writes the file and the vision the
-	-- world is rendered through. Any single choice does, as long as it is the
-	-- same one every tick.
-	local anchor = players[1]
-	local surface = anchor.surface
-	local min_x, min_y = anchor.position.x, anchor.position.y
-	local max_x, max_y = min_x, min_y
-	for _, player in ipairs(players) do
-		if player.surface.index ~= surface.index then
-			return
-		end
-		local position = player.position
-		if position.x < min_x then min_x = position.x end
-		if position.x > max_x then max_x = position.x end
-		if position.y < min_y then min_y = position.y end
-		if position.y > max_y then max_y = position.y end
-	end
-	-- 32 pixels to a tile at zoom 1, so this is the zoom at which the box plus
-	-- its margin exactly fills the frame. Never zoom *in* past
-	-- FRAME_CAPTURE_ZOOM: a closer view of two bots standing together would
-	-- not be more true, and it would make the scale jump around.
-	local width = (max_x - min_x) + 2 * FRAME_CAPTURE_AREA_MARGIN
-	local height = (max_y - min_y) + 2 * FRAME_CAPTURE_AREA_MARGIN
-	local zoom = math.min(
-		FRAME_CAPTURE_RESOLUTION[1] / (32 * width),
-		FRAME_CAPTURE_RESOLUTION[2] / (32 * height),
-		FRAME_CAPTURE_ZOOM)
-	if zoom < FRAME_CAPTURE_AREA_MIN_ZOOM then
-		return
-	end
-	game.take_screenshot({
-		player = anchor,
-		by_player = anchor,
-		surface = surface,
-		position = { x = (min_x + max_x) / 2, y = (min_y + max_y) / 2 },
-		resolution = FRAME_CAPTURE_RESOLUTION,
-		zoom = zoom,
-		path = frame_capture_path(tick, camera.id),
-		quality = FRAME_CAPTURE_QUALITY,
-		force_render = true,
-		show_entity_info = true,
-		show_gui = false
-	})
-end
-
-function frame_capture_take(camera, tick)
-	if camera.kind == "follow" then
-		frame_capture_take_follow(camera, tick)
-	elseif camera.kind == "area" then
-		frame_capture_take_area(camera, tick)
-	else
-		-- Unreachable from `rcon_frame_capture_start`, which registers only
-		-- the kinds above. Raising rather than returning keeps a future camera
-		-- kind from producing a silently empty run.
-		error("unknown frame capture camera kind: " .. tostring(camera.kind))
-	end
-end
 
 -- Generation and demand across every electric network the force owns.
 --
@@ -1901,14 +1663,14 @@ local function character_mining_name(character)
 end
 
 -- Bot inventories and positions, on a 1 s beat -- fast enough to see a bot
--- move or mine, slow enough not to compete with the 300-tick frame cadence.
+-- move or mine, slow enough not to compete with the 300-tick force beat.
 --
--- Gated on an active capture run (F5): a run started without one produces no
--- samples at all, matching frame capture's own all-or-nothing behaviour, and
--- this avoids writing a stream nobody asked to correlate with anything.
+-- Gated on an active session (F5): a run that never called
+-- `rcon_sampling_start` produces no samples at all, which avoids writing a
+-- stream nobody asked to correlate with anything.
 local function sample_bots_body(tick)
-	local capture = storage.frame_capture
-	if capture == nil then
+	local session = storage.sampling
+	if session == nil then
 		return
 	end
 	local bots = {}
@@ -1932,7 +1694,7 @@ local function sample_bots_body(tick)
 		tick = tick,
 		-- F2: every line carries the run id (nil when the run was started
 		-- untagged), so Rust can filter on it instead of on tick range alone.
-		run = capture.run,
+		run = session.run,
 		bots = bots,
 	})
 end
@@ -1951,21 +1713,20 @@ end
 
 -- The only registration site for the bot-sample cadence. A distinct tick (60,
 -- not 300) on purpose: `script.on_nth_tick(n, f)` replaces the handler
--- already registered for `n`, and frame capture owns 300 (see the comment
+-- already registered for `n`, and the force sampler owns 300 (see the comment
 -- below), so a second registration there would silently disable it instead of
 -- adding to it.
 script.on_nth_tick(SAMPLE_BOT_INTERVAL, function(event)
 	sample_bots(event.tick)
 end)
 
--- Force-wide research, production and power. Folded into the existing
--- 300-tick frame handler (`on_frame_capture_tick` below) rather than given
--- its own registration, for the same reason `sample_bots` above got tick 60
--- instead of 300: a second `on_nth_tick(300, ...)` would replace frame
--- capture's handler, not add to it.
+-- Force-wide research, production and power, on the 300-tick beat
+-- (`on_sample_force_tick` below). `sample_bots` above got tick 60 rather than
+-- sharing this one because `on_nth_tick(300, ...)` twice would *replace* this
+-- handler, not add to it.
 local function sample_force_body(tick)
-	local capture = storage.frame_capture
-	if capture == nil then
+	local session = storage.sampling
+	if session == nil then
 		return
 	end
 	local force = game.forces["player"]
@@ -1993,7 +1754,7 @@ local function sample_force_body(tick)
 		kind = "force",
 		schema = SAMPLE_SCHEMA,
 		tick = tick,
-		run = capture.run,
+		run = session.run,
 		research = research,
 		techs_unlocked = unlocked,
 		production = { made = made, consumed = consumed },
@@ -2003,11 +1764,8 @@ end
 
 -- The only entry point anything outside this section should call: `pcall`
 -- around `sample_force_body`, for the same reason `sample_bots` wraps
--- `sample_bots_body` -- see the comment above `record_sample_failure`. This
--- also covers the one call site below, inside `on_frame_capture_tick`: that
--- handler already runs `frame_capture_take` per camera before reaching this
--- call, and a raise here must not be able to take any of that -- or the
--- surrounding game -- down with it.
+-- `sample_bots_body` -- see the comment above `record_sample_failure`. A raise
+-- here must not be able to take the surrounding game down with it.
 local function sample_force(tick)
 	local ok, err = pcall(sample_force_body, tick)
 	if ok then
@@ -2023,203 +1781,21 @@ end
 -- caller-side notion of cadence this exists to remove.
 --
 -- Multiplayer: this handler runs on every peer with the same replicated
--- `storage.frame_capture`, so every peer agrees on whether to capture. Which
--- peer actually writes the file is settled by `by_player` above. The gate is
--- deliberately in `storage` and not in `client_local_data`, which the top of
--- this file marks as desync-causing.
---
--- One client cannot capture the same tick twice, which matters because the
--- filename carries the tick and the camera but not the writer -- so a second
--- write to the same client's directory would overwrite the first with nothing
--- left to show it happened. Four things make it impossible rather than merely
--- unobserved:
---
---   * `script.on_nth_tick(n, f)` *replaces* the handler registered for `n`
---     rather than appending to it, and there is exactly one registration site
---     below. Re-running this file's top level on every load therefore cannot
---     stack handlers, however many times a client leaves and rejoins.
---   * A peer runs one Lua state. There is no separate "server-side context"
---     inside a client that could run the handler a second time, and however
---     many peers do run it, `by_player` narrows the write to one machine.
---   * The nth-tick event fires once for a tick, and a tick never recurs while
---     the game runs forward.
---   * Camera ids are checked unique at start, so one tick cannot yield two
---     frames with one name.
---
--- The one way a tick could be re-simulated is playback, and
--- `take_screenshot` does not run during replay: `allow_in_replay` is left at
--- its default of false. Loading a save from before the current tick starts a
--- new run, whose `rcon_frame_capture_start` wipes the directory.
-function on_frame_capture_tick(event)
-	local capture = storage.frame_capture
-	if capture == nil then
+-- `storage.sampling`, so every peer agrees on whether a session is running.
+-- Only the server actually writes (`write_sample`). The gate is deliberately
+-- in `storage` and not in `client_local_data`, which the top of this file
+-- marks as desync-causing.
+function on_sample_force_tick(event)
+	if storage.sampling == nil then
 		return
 	end
 	-- `game.tick` rather than `event.tick`: they are the same value here, and
 	-- reading the one `stamp_tick` reads keeps a single source of "now".
-	local tick = game.tick
-	for _, camera in ipairs(capture.cameras) do
-		frame_capture_take(camera, tick)
-	end
-	sample_force(tick)
+	sample_force(game.tick)
 end
 
--- The camera that follows one bot. A per-bot camera has no `kind` of its own
--- because it has no behaviour of its own: it *is* a follow camera pointed at
--- player N, and a second name for one mechanism would only invite the two to
--- drift apart.
-function frame_capture_bot_camera(player_index)
-	return { id = "bot-" .. player_index, kind = "follow", player_index = player_index }
-end
-
--- Two cameras sharing an id would write the same `tick-NNNNNNN-<id>.jpg` in
--- the same tick, and the second write would silently overwrite the first -- a
--- frame disappearing with nothing on disk to say it did. The fix is to refuse
--- the configuration, never to uniquify the filename: a name has to stay a
--- measurement of *when*, and a `-2` suffix would give the double-write a home
--- instead of preventing it.
-function frame_capture_validate_cameras(cameras)
-	local seen = {}
-	for _, camera in ipairs(cameras) do
-		if not frame_capture_valid_camera_id(camera.id) then
-			error("frame capture camera id is not filename-safe: " .. tostring(camera.id))
-		end
-		if seen[camera.id] then
-			error("duplicate frame capture camera id: " .. camera.id)
-		end
-		seen[camera.id] = true
-	end
-end
-
--- Gives a bot that joins *during* a run its own camera from the tick it
--- arrived, and does nothing at all when no capture is running.
---
--- Without this a late joiner would have no camera for the whole run, and its
--- total absence from the frames would be indistinguishable from a bot that was
--- there and never photographed. With it, the frames say what actually
--- happened: nothing before it joined, because it was not there, and frames
--- from the tick it was.
---
--- Deterministic across peers: `on_player_joined_game` fires on every peer with
--- the same event, and `storage` is replicated, so every peer appends the same
--- camera at the same tick. Nothing is removed on leave -- the camera staying
--- and writing nothing is exactly how a disconnected bot's absence is recorded.
---
--- **Only on a run that asked for every camera.** On a run started with no
--- cameras -- the default since screenshots were retired -- or with a named
--- subset, a joining bot gets nothing: a camera appearing here would switch
--- rendering back on one bot at a time, on a run that asked for none, with
--- nothing anywhere reporting that it had. The request is what decides, which
--- is why `all_cameras` is remembered rather than guessed from the list.
-function frame_capture_on_player_joined(player_index)
-	local capture = storage.frame_capture
-	if capture == nil then
-		return
-	end
-	if not capture.all_cameras then
-		return
-	end
-	local camera = frame_capture_bot_camera(player_index)
-	for _, existing in ipairs(capture.cameras) do
-		if existing.id == camera.id then
-			return
-		end
-	end
-	frame_capture_validate_cameras({ camera })
-	table.insert(capture.cameras, camera)
-end
-
--- Every camera this game could offer, in registration order. Three vantage
--- points, `2 + one per bot` in total:
---
---   `follow`  one bot, player 1, the original camera and unchanged.
---   `bot-N`   one per player the game knows of, following that player.
---   `area`    all connected bots at once; see `frame_capture_take_area`
---             for what it centres on and what it does when it cannot.
---
--- Built rather than registered: this is the menu a caller chooses from, and
--- returning it costs nothing. What costs is rendering one, which is why
--- `frame_capture_select` starts from "none of them".
---
--- Every player the game knows, connected right now or not, and that is the
--- point rather than an oversight. A camera whose player is absent writes no
--- file for that tick (`frame_capture_take_follow`), so a bot that is offline
--- for part of a run has frames either side of the gap and nothing in it,
--- which is where the bot actually was. Registering only the connected ones
--- would instead delete the camera and leave a viewer unable to tell "this bot
--- was away" from "nobody ever pointed a camera at it".
---
--- `bot-<player_index>`, with the hyphen: a frame name is parsed by taking
--- everything after the tick's separator, so `tick-0001800-bot-1.jpg` reads
--- back as camera `bot-1` intact.
-function frame_capture_catalogue()
-	local cameras = {
-		{ id = "follow", kind = "follow", player_index = 1 }
-	}
-	local player_indexes = {}
-	for _, player in pairs(game.players) do
-		table.insert(player_indexes, player.index)
-	end
-	table.sort(player_indexes)
-	for _, index in ipairs(player_indexes) do
-		table.insert(cameras, frame_capture_bot_camera(index))
-	end
-	-- Last, so the per-bot cameras of a tick are written before the frame that
-	-- claims to contain all of them. Nothing depends on the order; it just
-	-- reads better in a directory listing.
-	table.insert(cameras, { id = "area", kind = "area" })
-	return cameras
-end
-
--- Resolves the `cameras` argument against the catalogue, returning the chosen
--- cameras and whether *all* of them were asked for.
---
--- **Nothing is the default, and nothing is a real answer**, not a degraded
--- one: screenshots were retired because their cost is not worth paying, and
--- the capture session still does everything else it did. There is deliberately
--- no `cameras or <something>` anywhere in here -- a fallback is exactly how a
--- flag that defaulted wrong would leave a run silently capturing 947 MB.
---
--- An id that is not in the catalogue **raises**. It is never dropped: a list
--- silently reduced to nothing produces a run that looks configured, renders
--- nothing, and reports the same empty directory a deliberately camera-less run
--- does. `bot-9` on a two-bot game is that case, and it is a caller mistake
--- worth hearing about at the moment it is made.
---
--- The second return value is kept rather than re-derived from `chosen`,
--- because "all of them" is a statement about the *request* and `chosen` is a
--- statement about the game at one instant. A bot joining later has to be
--- treated the way the run was asked for.
-function frame_capture_select(cameras, catalogue)
-	if cameras == nil or cameras == false then
-		return {}, false
-	end
-	if cameras == true then
-		return catalogue, true
-	end
-	if type(cameras) ~= "table" then
-		error("frame capture cameras must be true, false, absent or a list of camera ids, got "
-			.. type(cameras))
-	end
-	local by_id, available = {}, {}
-	for _, camera in ipairs(catalogue) do
-		by_id[camera.id] = camera
-		table.insert(available, camera.id)
-	end
-	local chosen = {}
-	for _, id in ipairs(cameras) do
-		local camera = by_id[id]
-		if camera == nil then
-			error("unknown frame capture camera id: " .. tostring(id)
-				.. " (available: " .. table.concat(available, ", ") .. ")")
-		end
-		table.insert(chosen, camera)
-	end
-	return chosen, false
-end
-
--- `run_id` is an opaque tag for this capture run, echoed verbatim into
--- `frames/run.json` as `{"run":"<run_id>"}` and used for nothing else here.
+-- `run_id` is an opaque tag for this session, stamped onto every sample line
+-- and used for nothing else here.
 --
 -- Deliberately uninterpreted. The caller passes a job id, but this mod must
 -- never learn that: it does not parse it, validate its shape, derive a
@@ -2228,101 +1804,36 @@ end
 -- the design -- a mod that understood the id would have to be changed every
 -- time the caller's notion of a run changed.
 --
--- Omitting it is a real choice, not a degraded one: a capture that nobody
--- needs to correlate simply has no sidecar, and a consumer that finds none
+-- Omitting it is a real choice, not a degraded one: a session nobody needs to
+-- correlate simply writes no `run` key at all, and a consumer that finds none
 -- knows it cannot tell rather than being told something false.
 --
--- `cameras` decides what is rendered, and **the default is nothing**:
---
---     nil / false     no camera at all. The default.
---     true            every camera: `follow`, `bot-N` per player, `area`.
---     { ids... }      exactly those, drawn from the same catalogue.
---
--- The session still starts either way, and that is the whole reason this is a
--- switch rather than a deletion. `sample_force` (this handler's last line) and
--- `sample_bots` (the 60-tick beat) both return early when
--- `storage.frame_capture` is nil, so the capture *session* is what produces
--- `samples.jsonl` -- research, production, power, bot inventories. Removing
--- the call would take all of that with it, silently, and the screenshots are
--- the only part whose cost is not worth paying.
---
--- What that cost is, measured on run `run-1788365280-15443`: 2,164 JPEGs at
--- 1920x1080, **947 MB**, against **290 MB** for 45 minutes of video at
--- 700x854 -- 3.3x the disk. And `game.take_screenshot` renders
--- *synchronously inside the game loop*, once per camera per capture, where
--- the video grabber reads a frame the GPU already drew. See
--- `docs/superpowers/notes/2026-09-02-screenshots-retired.md` for what is lost
--- with them: a tick-exact 1920x1080 still is genuinely better than an
--- interpolated 700x854 video frame for some questions.
-function rcon_frame_capture_start(run_id, cameras)
-	-- Checked before the wipe, so a call this function is going to refuse
-	-- cannot first destroy the previous run's frames. The check is on the
-	-- *type* only -- reading the value would be interpreting it.
+-- Starting a session is what produces `samples.jsonl` -- research, production,
+-- power, bot inventories. `sample_force` (the 300-tick beat) and `sample_bots`
+-- (the 60-tick one) both return early when `storage.sampling` is nil.
+function rcon_sampling_start(run_id)
+	-- Checked before anything is written, so a call this function is going to
+	-- refuse cannot first truncate the previous run's samples. The check is on
+	-- the *type* only -- reading the value would be interpreting it.
 	if run_id ~= nil and type(run_id) ~= "string" then
-		error("frame capture run id must be a string or absent, got " .. type(run_id))
+		error("sampling run id must be a string or absent, got " .. type(run_id))
 	end
-	-- Resolved and validated *before* the wipe, obeying the same law as the
-	-- run-id check above: a call this function is going to refuse must not
-	-- first destroy the previous run's frames. `frame_capture_select` raises
-	-- on an id nobody can supply, and raising is the point -- a list quietly
-	-- reduced to nothing looks exactly like a configured run and captures
-	-- exactly as much as an unconfigured one.
-	local catalogue = frame_capture_catalogue()
-	local chosen, all_cameras = frame_capture_select(cameras, catalogue)
-	frame_capture_validate_cameras(chosen)
-	-- Wipe first, so the directory holds this run's frames and only this
-	-- run's. Without it a leftover frame from an earlier run that landed on
-	-- the same tick would fill a gap this run really had, which is the one
-	-- failure mode the naming scheme exists to expose. Runs on every peer,
-	-- each clearing its own script-output.
-	--
-	-- This takes `run.json` with it, and must: the wipe and the sidecar have
-	-- to move together or the id can outlive the frames it names.
-	--
-	-- Still done on a run that registered no camera, and the sidecar below is
-	-- still written: an empty `frames/` this run *claims* is what makes
-	-- `archive_frames` walk it and report `index.json: []`, i.e. "none were
-	-- captured". An unclaimed directory is skipped as somebody else's
-	-- leftovers, which reads as "cannot tell".
-	helpers.remove_path(FRAME_CAPTURE_DIR)
-	-- Samples get the same fresh start as frames (F5): server-only, since
-	-- only the server's copy exists to begin with, and `append = false`
-	-- truncates the file rather than appending to whatever a previous run
-	-- left in it.
+	-- A fresh start: server-only, since only the server's copy exists to
+	-- begin with, and `append = false` truncates the file rather than
+	-- appending to whatever a previous run left in it.
 	helpers.write_file(SAMPLE_FILE, "", false, 0)
-	-- `run` is set only from the argument -- nil when the caller passed none,
-	-- exactly like `run.json` below. No fallback, no `run_id or
-	-- storage.something`: `run = capture.run` with a nil value omits the key
-	-- entirely from the JSON line rather than writing it as null, so an
-	-- untagged run's samples have no `run` key at all, and Rust falls back to
-	-- tick-range filtering for them (`#[serde(default)]` treats an absent key
-	-- the same as an explicit null).
-	--
-	-- `all_cameras` is remembered because a bot that joins later has to be
-	-- treated the way this run was configured, not the way the last one was:
-	-- see `frame_capture_on_player_joined`.
-	storage.frame_capture = { cameras = chosen, run = run_id, all_cameras = all_cameras }
-	-- After the wipe, and only when asked for. The ordering is what keeps the
-	-- id honest: the directory is emptied first and the sidecar written
-	-- second, so `run.json` is always newer than the wipe that preceded it.
-	--
-	-- A start with no id therefore leaves no `run.json` at all -- the previous
-	-- run's went out with the wipe and nothing replaced it. An untagged run
-	-- inheriting the last run's identity would be the worst outcome available
-	-- here, and the only way to prevent it is to have no branch that writes
-	-- the file with a remembered value: there is no fallback, no
-	-- `run_id or storage.something`, nothing carried across.
-	--
-	-- Written on every peer, matching the wipe above: each peer clears its own
-	-- script-output, so each peer's `frames/` gets its own sidecar.
-	if run_id ~= nil then
-		helpers.write_file(FRAME_CAPTURE_RUN_FILE, helpers.table_to_json({ run = run_id }), false)
-	end
+	-- `run` is set only from the argument -- nil when the caller passed none.
+	-- No fallback, no `run_id or storage.something`: `run = session.run` with
+	-- a nil value omits the key entirely from the JSON line rather than
+	-- writing it as null, so an untagged run's samples have no `run` key at
+	-- all, and Rust falls back to tick-range filtering for them
+	-- (`#[serde(default)]` treats an absent key the same as an explicit null).
+	storage.sampling = { run = run_id }
 	stamp_tick()
 end
 
-function rcon_frame_capture_stop()
-	storage.frame_capture = nil
+function rcon_sampling_stop()
+	storage.sampling = nil
 	stamp_tick()
 end
 
@@ -2496,7 +2007,6 @@ function on_player_joined_game(event)
 	storage.n_clients = storage.n_clients + 1
 	exit_cutscene_if_any(event.player_index)
 	wait_for_player_inventory(event)
-	frame_capture_on_player_joined(event.player_index)
 
 	if client_local_data.whoami == "client1" then
 		for chunk_y=-512,512,32 do
@@ -2880,10 +2390,11 @@ script.on_event(defines.events.on_player_crafted_item, on_player_crafted_item)
 -- nothing at all and its registry entry outlived the run.
 script.on_event(defines.events.on_player_cancelled_crafting, on_player_cancelled_crafting)
 
--- The only registration site for the frame cadence. `on_nth_tick` replaces
--- the handler for a given period rather than adding to it, so re-running this
--- file on a load cannot end up with two handlers writing one tick twice.
-script.on_nth_tick(FRAME_CAPTURE_INTERVAL, on_frame_capture_tick)
+-- The only registration site for the force-sample cadence. `on_nth_tick`
+-- replaces the handler for a given period rather than adding to it, so
+-- re-running this file on a load cannot end up with two handlers writing one
+-- tick twice.
+script.on_nth_tick(SAMPLE_FORCE_INTERVAL, on_sample_force_tick)
 
 
 function rcon_action_start_walk_waypoints(action_id, player_id, waypoints) -- e.g. waypoints= { {0,0}, {3,3}, {42,1337} }
@@ -4613,8 +4124,8 @@ end
 remote.add_interface("botbridge", {
 	test=rcon_test,
 	screenshot=rcon_screenshot,
-	frame_capture_start=rcon_frame_capture_start,
-	frame_capture_stop=rcon_frame_capture_stop,
+	sampling_start=rcon_sampling_start,
+	sampling_stop=rcon_sampling_stop,
 	whoami=rcon_whoami,
 
 	cheat_item=rcon_cheat_item,

@@ -14,8 +14,6 @@
 //! issued and honestly `null` before there has been one.
 
 use super::position_from_lua;
-use super::rcon::frame_cameras_from_lua;
-use factorio_bot_core::factorio::rcon::FrameCameras;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::parking_lot::Mutex;
@@ -566,37 +564,6 @@ fn video_options(options: Option<&LuaTable>) -> LuaResult<Option<VideoOptions>> 
     }
 }
 
-/// Reads `record.start`'s `frames` option.
-///
-/// **Absent means no screenshot camera**, which is what every existing script
-/// says by saying nothing -- and which is the point: screenshots were retired
-/// on 2026-09-02 and video is the visual record. The capture session itself is
-/// started either way, because the mod's world-state samplers are gated on it;
-/// this decides only what is rendered.
-///
-/// Delegates to the same reader `rcon.frame_capture_start` uses, so the two
-/// entry points cannot come to disagree about what `true` or a list means.
-fn frame_options(options: Option<&LuaTable>) -> LuaResult<FrameCameras> {
-    let Some(table) = options else {
-        return Ok(FrameCameras::None);
-    };
-    frame_cameras_from_lua(Some(table.get::<LuaValue>("frames")?)).map_err(|err| {
-        record_error(format!(
-            "record.start: {}",
-            strip_prefix_once(&err.to_string())
-        ))
-    })
-}
-
-/// mlua renders a `RuntimeError` with its own prefix; this keeps the message
-/// readable when it is wrapped a second time.
-fn strip_prefix_once(message: &str) -> String {
-    message
-        .strip_prefix("runtime error: ")
-        .unwrap_or(message)
-        .to_string()
-}
-
 /// Records a *live* event: stamped with the game's clock, never earlier than
 /// something already in the log. See [`RunRecorder::not_before`].
 fn record_live(
@@ -636,7 +603,7 @@ pub fn create_lua_record(
 /// (plain file I/O, no RCON involved) reaches `record.actions`/`record.
 /// keyframe` without going through `record.start()` -- which cannot succeed
 /// in a test, since it always makes a real RCON call
-/// (`frame_capture_start`) that fails against `FactorioRcon::new_empty()`.
+/// (`sampling_start`) that fails against `FactorioRcon::new_empty()`.
 fn create_lua_record_with_slot(
     lua: &Lua,
     rcon: Arc<factorio_bot_core::factorio::rcon::FactorioRcon>,
@@ -651,8 +618,8 @@ fn create_lua_record_with_slot(
         String::from(
             r#"
 --- Run recording
--- Writes a durable archive of a run: an append-only event log, the frames
--- captured while it ran, and speedrun-style splits derived from its
+-- Writes a durable archive of a run: an append-only event log, the world-state
+-- samples taken while it ran, and speedrun-style splits derived from its
 -- milestones. See `docs/superpowers/specs/2026-09-01-run-recording-and-replay-design.md`.
 --
 -- Events are stamped with the game's own tick, taken from the most recent
@@ -678,8 +645,8 @@ local record = {}
         .map(|workspace| workspace.join("runs"))
         .ok_or_else(|| record_error("scripts directory has no parent workspace"))?;
     // Shared by `record.keyframe()` and `record.finish()`: both ingest
-    // samples out of this same workspace, alongside the frame/keyframe work
-    // each already does at exactly these two moments.
+    // samples out of this same workspace, alongside the keyframe work each
+    // already does at exactly these two moments.
     let workspace = scripts_root
         .parent()
         .map(std::path::Path::to_path_buf)
@@ -690,9 +657,9 @@ local record = {}
         String::from(
             r#"
 --- starts recording a run
--- Mints a run id, creates `<workspace>/runs/<id>/`, and starts frame capture
--- with that same id -- one call, so the log and the frames cannot disagree
--- about which run they belong to.
+-- Mints a run id, creates `<workspace>/runs/<id>/`, and starts the mod's
+-- sampling session with that same id -- one call, so the log and the samples
+-- cannot disagree about which run they belong to.
 --
 -- Also writes an opening keyframe to `map.jsonl`, bounded by the connected
 -- bots' own positions (plus a margin) rather than by placements, since
@@ -700,25 +667,22 @@ local record = {}
 -- placement still leaves a map behind. Writes nothing if no bots are
 -- connected yet.
 --
--- Video is the visual record. Screenshot cameras are RETIRED and a run
--- captures no frames unless it asks: one run wrote 2164 JPEGs / 947 MB of them
--- against 290 MB for the same 45 minutes of video, and take_screenshot renders
--- synchronously inside the game loop, once per camera, every 300 ticks. The
--- capture session still starts, because the world-state samples (research,
--- production, power, bot inventories) ride on it; only the rendering is off.
+-- Video is the visual record, and it is opt-in. Per-camera screenshots were
+-- retired on 2026-09-02 and removed: one run wrote 2164 JPEGs / 947 MB of them
+-- against 290 MB for the same 45 minutes of video, and take_screenshot
+-- rendered synchronously inside the game loop, once per camera, every 300
+-- ticks.
 --
+--     record.start()                                      -- log, map and samples only
 --     record.start({video = true})                        -- 720p, 15 fps, client 1
 --     record.start({video = {resolution = "1080p"}})      -- for a final run worth the size
 --     record.start({video = {client = 2, fps = 30}})      -- film a different client
---     record.start({frames = {"follow"}})                 -- one screenshot camera as well
---     record.start({frames = true})                       -- every camera, ~520 MB/hour each
 --
--- What frames still buy, when you ask for them: a frame is tick-exact and
--- 1920x1080, named by the game itself, and it can say "nothing was captured
--- here". A video cannot -- it keeps writing the last drawn image while the
--- game stalls, which looks exactly like a game that was running and idle --
--- and its tick comes from a table the host built, interpolated between
--- samples.
+-- What video cannot do, and what the event log and `map.jsonl` are for: a
+-- video keeps writing the last drawn image while the game stalls, which looks
+-- exactly like a game that was running and idle, and its tick comes from a
+-- table the host built, interpolated between samples. The text artefacts are
+-- the tick-exact record.
 --
 -- `resolution` is "720p" (the default) or "1080p"; an unknown value raises
 -- here rather than recording at the wrong size. `client` is which graphical
@@ -727,9 +691,9 @@ local record = {}
 -- and a four-bot one. The camera is not steered: the video shows whatever that
 -- client shows.
 --
--- Video failing to start never fails the run. The run continues with frames,
+-- Video failing to start never fails the run. The run continues without it,
 -- and `video.json` records what went wrong.
--- @tparam[opt] table options `{video = ..., frames = ...}`; `frames` is `true`, a list of camera ids, or absent for none
+-- @tparam[opt] table options `{video = ...}`
 -- @treturn string the run id
 -- @raise if a recording is already running, the run directory cannot be created, or the video options are not understood
 function record.start(options)
@@ -762,7 +726,6 @@ end
                     // after minting a run id would leave a run directory behind
                     // for a run that never started.
                     let video = video_options(options.as_ref())?;
-                    let frames = frame_options(options.as_ref())?;
                     if slot.lock().is_some() {
                         return Err(record_error(
                             "a recording is already running -- call record.finish() first",
@@ -770,15 +733,15 @@ end
                     }
                     let run_id = mint_run_id();
 
-                    // Frame capture first, and its reply is where the opening
-                    // tick comes from. Recording `run_started` before any
-                    // command has been sent would stamp it with a tick nobody
-                    // has observed -- the first live run opened at tick 0 while
-                    // every later event was near 59000, which is a fabricated
-                    // number that looks like data.
+                    // The sampling session first, and its reply is where the
+                    // opening tick comes from. Recording `run_started` before
+                    // any command has been sent would stamp it with a tick
+                    // nobody has observed -- the first live run opened at tick
+                    // 0 while every later event was near 59000, which is a
+                    // fabricated number that looks like data.
                     let opened_at = rcon
                         .as_ref()
-                        .frame_capture_start(Some(run_id.clone()), frames)
+                        .sampling_start(Some(run_id.clone()))
                         .await
                         .map_err(rcon_error)?;
                     let opened_at = opened_at.unwrap_or_else(|| rcon.last_tick().unwrap_or(0));
@@ -815,7 +778,7 @@ end
                     // writing nothing when nothing has been placed -- both are
                     // "no bounds to draw yet", not a failure. A genuine
                     // failure to reach the game or read the model is left to
-                    // raise: `frame_capture_start` two calls above already
+                    // raise: `sampling_start` two calls above already
                     // proved the game is reachable, so a failure past that
                     // point is a real defect, not a mundane timing gap, and
                     // must not be swallowed into a run that silently starts
@@ -846,7 +809,7 @@ end
                     if let Some(video) = video {
                         // Never fatal: `VideoRecorder::start` returns `Ok` with
                         // `status: failed` and a reason for every capture
-                        // failure, and the run goes on with frames. Only an
+                        // failure, and the run goes on without it. Only an
                         // unwritable video directory is an `Err`, and that is a
                         // workspace that cannot be written to at all.
                         let capture = VideoRecorder::start(
@@ -1622,12 +1585,12 @@ end
         String::from(
             r#"
 --- closes the recording
--- Writes the manifest and the derived splits, and copies this run's frames out
--- of the workspace before the next run wipes them. Frames belonging to another
--- run are left where they are. Also catches up on any samples the mod wrote
--- since the last `record.keyframe()` call (or all of them, if this run never
--- reached one) -- the same incremental ingestion `record.keyframe()` runs at
--- every milestone boundary, so nothing is read or archived twice.
+-- Writes the manifest and the derived splits, and copies this run's video out
+-- of the workspace before the next run overwrites it. A recording belonging to
+-- another run is left where it is. Also catches up on any samples the mod
+-- wrote since the last `record.keyframe()` call (or all of them, if this run
+-- never reached one) -- the same incremental ingestion `record.keyframe()`
+-- runs at every milestone boundary, so nothing is read or archived twice.
 --
 -- Stops the video recorder first, if `record.start` was given one. A recording
 -- that was never stopped is archived still saying `"status": "recording"`,
@@ -3019,63 +2982,6 @@ mod tests {
             .eval::<LuaTable>()
             .expect("an options table");
         (lua, table)
-    }
-
-    /// **The half of "off by default" that lives outside the mod.** The mod
-    /// refuses to capture without being asked, and so does this: a script that
-    /// says nothing must produce `FrameCameras::None`, not something the mod
-    /// then has to talk out of.
-    #[test]
-    fn saying_nothing_about_frames_means_no_screenshot_camera() {
-        assert_eq!(
-            frame_options(None).expect("no options is fine"),
-            FrameCameras::None,
-            "record.start() captures no frames -- screenshots are retired"
-        );
-        for source in [
-            "{}",
-            "{frames = false}",
-            "{frames = nil}",
-            "{video = true}",
-            "{other = 1}",
-        ] {
-            let (_lua, table) = options(source);
-            assert_eq!(
-                frame_options(Some(&table)).expect(source),
-                FrameCameras::None,
-                "{source} must register no camera"
-            );
-        }
-    }
-
-    #[test]
-    fn frames_true_asks_for_every_camera_and_a_list_asks_for_those() {
-        let (_lua, table) = options("{frames = true}");
-        assert_eq!(
-            frame_options(Some(&table)).expect("true"),
-            FrameCameras::All
-        );
-
-        let (_lua, table) = options(r#"{frames = {"follow", "area"}}"#);
-        assert_eq!(
-            frame_options(Some(&table)).expect("a list"),
-            FrameCameras::Only(vec!["follow".into(), "area".into()])
-        );
-    }
-
-    /// Lua truthiness would read `frames = 1` or `frames = "follow"` as "all
-    /// of them", which is the expensive direction to guess in: ~520 MB an hour
-    /// per camera, on a run that meant to name one.
-    #[test]
-    fn a_frames_option_that_is_neither_a_flag_nor_a_list_is_refused() {
-        for source in [r#"{frames = "follow"}"#, "{frames = 1}"] {
-            let (_lua, table) = options(source);
-            let err = frame_options(Some(&table)).expect_err(source);
-            assert!(
-                err.to_string().contains("cameras"),
-                "{source}: the refusal has to say what it refused, got {err}"
-            );
-        }
     }
 
     #[test]

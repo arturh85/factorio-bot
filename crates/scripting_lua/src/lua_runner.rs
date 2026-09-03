@@ -214,9 +214,9 @@ pub async fn run_lua(
                 if let Some(rcon) = rcon.as_ref() {
                     // `record` is installed only alongside `rcon`, and that is
                     // the honest dependency rather than an omission: every
-                    // event is stamped with a tick the game supplies, and
-                    // frame capture is started through the same connection.
-                    // With no game there is no clock and nothing to capture,
+                    // event is stamped with a tick the game supplies, and the
+                    // sampling session is started through the same connection.
+                    // With no game there is no clock and nothing to sample,
                     // so a `record` table here would be one whose events all
                     // claimed tick 0.
                     let record = create_lua_record(

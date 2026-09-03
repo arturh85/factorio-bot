@@ -1,7 +1,6 @@
 import {defineStore} from 'pinia';
 import {
     getRun,
-    getRunFrames,
     getRunLanes,
     getRunMap,
     getRunSamples,
@@ -11,7 +10,6 @@ import {
 } from '@/api/client';
 import {ApiError} from '@/api/http';
 import {
-    ArchivedFrame,
     BotSample,
     Bounds,
     EntitySnapshot,
@@ -24,14 +22,7 @@ import {
     VideoManifest,
     VideoTicksResponse
 } from '@/api/types';
-import {
-    FrameView,
-    PlacedFrame,
-    leadInTicks,
-    placeable,
-    tickBounds,
-    viewsOf
-} from '@/lib/runTimeline';
+import {leadInTicks, tickBounds} from '@/lib/runTimeline';
 import {botSampleAt, forceSampleAt, inventoryOf, productionSeries, trackedItems, trailsAt} from '@/lib/runSamples';
 import {boundsAt, entitiesAt} from '@/lib/runMap';
 
@@ -54,19 +45,34 @@ function enrichmentUnavailable(label: string, route: string, err: unknown): stri
 }
 
 /**
+ * Every bot index the run's `bots` samples ever mention, ascending.
+ *
+ * The samples are the only record of which bots a run had -- the manifest
+ * counts events, not participants -- so this is what the inventory panel picks
+ * from.
+ */
+function botsInSamples(samples: Sample[]): number[] {
+    const seen = new Set<number>();
+    for (const sample of samples) {
+        if (sample.kind !== 'bots') continue;
+        for (const bot of sample.bots) seen.add(bot.id);
+    }
+    return [...seen].sort((a, b) => a - b);
+}
+
+/**
  * Archived runs, and one cursor over the run being viewed.
  *
- * The cursor is a *game tick*, and every panel reads it. Frames, splits and
- * the scrubber are all positioned on that one axis, which is why the store
- * holds a tick rather than a frame index or a percentage: an index would
- * break the moment a frame dropped, and a percentage cannot be compared
+ * The cursor is a *game tick*, and every panel reads it. Splits, lanes, the
+ * map and the scrubber are all positioned on that one axis, which is why the
+ * store holds a tick rather than a sample index or a percentage: an index
+ * would break the moment a sample dropped, and a percentage cannot be compared
  * between runs.
  */
 export const useRunsStore = defineStore('runs', {
     state: () => ({
         runs: [] as RunSummary[],
         detail: null as RunDetail | null,
-        frames: [] as ArchivedFrame[],
         lanes: [] as Lane[],
         /** The run's archived world-state samples, `bots` and `force` lines mixed. */
         samples: [] as Sample[],
@@ -84,7 +90,7 @@ export const useRunsStore = defineStore('runs', {
         videoTicks: null as VideoTicksResponse | null,
         /**
          * Another run's splits, to diff against. Only the splits are fetched:
-         * comparing runs does not need the other run's whole log or frames.
+         * comparing runs does not need the other run's whole log.
          */
         reference: null as RunDetail | null,
         /** The tick every panel renders at. */
@@ -92,8 +98,16 @@ export const useRunsStore = defineStore('runs', {
         playing: false,
         /** Ticks advanced per play step. 60 ticks is one second of game time. */
         rate: 300,
+        /**
+         * The bot the inventory panel reports on.
+         *
+         * Chosen from the run's own `bots` samples when it opens -- the lowest
+         * index that ever reported -- because that is the only place the set of
+         * bots is recorded. It used to be a side effect of picking a screenshot
+         * camera; when the cameras were retired (2026-09-02) that left nothing
+         * setting it, and the panel would have sat on its empty state forever.
+         */
         bot: null as number | null,
-        camera: null as string | null,
         loading: false,
         error: null as string | null,
         /**
@@ -102,12 +116,11 @@ export const useRunsStore = defineStore('runs', {
          *
          * These are deliberately separate from `error`: `error` means the
          * run itself could not be opened, while these mean the run opened
-         * fine but one of its enrichments -- frames, lanes, samples or the
-         * entity map -- did not load. A page that folded these into `error`
+         * fine but one of its enrichments -- lanes, samples, the entity map or
+         * the video -- did not load. A page that folded these into `error`
          * would fail the whole run over one missing route, which is the bug
          * this store exists to not have.
          */
-        frameError: null as string | null,
         lanesError: null as string | null,
         sampleError: null as string | null,
         mapError: null as string | null,
@@ -115,10 +128,6 @@ export const useRunsStore = defineStore('runs', {
     }),
 
     getters: {
-        /** Frames that can be positioned in time, sorted by tick. */
-        placedFrames(state): PlacedFrame[] {
-            return placeable(state.frames);
-        },
         /**
          * The tick range the timeline spans, or `null` when the run has
          * nothing to place -- a planning-only run with no milestones.
@@ -126,7 +135,6 @@ export const useRunsStore = defineStore('runs', {
         bounds(): {from: number; to: number} | null {
             return tickBounds(
                 this.detail?.splits ?? [],
-                this.placedFrames,
                 this.lanes,
                 this.video?.tick_range ?? null
             );
@@ -135,18 +143,13 @@ export const useRunsStore = defineStore('runs', {
         leadIn(): number {
             return leadInTicks(
                 this.detail?.splits ?? [],
-                this.placedFrames,
                 this.lanes,
                 this.video?.tick_range ?? null
             );
         },
-        /** The (bot, camera) pairs this run actually captured. */
-        views(): FrameView[] {
-            return viewsOf(this.placedFrames);
-        },
         /**
-         * The selected view's bot as of the cursor, or null when there is no
-         * view selected or no `bots` sample at or before it yet.
+         * The selected bot as of the cursor, or null when the run recorded no
+         * bot at all or has no `bots` sample at or before the cursor yet.
          */
         botState(): BotSample | null {
             if (this.bot === null) return null;
@@ -186,6 +189,10 @@ export const useRunsStore = defineStore('runs', {
         mapBounds(): Bounds | null {
             return boundsAt(this.map, this.cursor);
         },
+        /** Every bot this run sampled, ascending -- the inventory picker's list. */
+        bots(): number[] {
+            return botsInSamples(this.samples);
+        },
         /** Every bot's position as of the cursor's latest `bots` sample. */
         mapBots(): BotSample[] {
             const sample = botSampleAt(this.samples, this.cursor);
@@ -218,7 +225,8 @@ export const useRunsStore = defineStore('runs', {
          *
          * Only the run's detail is essential -- a run that does not exist, or
          * a server that cannot be reached, fails the whole call and lands in
-         * `error`. Frames, lanes, samples and the entity map are enrichments:
+         * `error`. Lanes, samples, the entity map and the video are
+         * enrichments:
          * each is fetched independently (`Promise.allSettled`, not
          * `Promise.all`) so that one of them 404ing on an older server binary
          * degrades that one panel instead of making the run look like it does
@@ -228,15 +236,14 @@ export const useRunsStore = defineStore('runs', {
          * its own `*Error` field, named for the stream that failed.
          *
          * The cursor still waits on all of it before moving: seeking into a
-         * run whose frames have not arrived (or failed) would show an empty
-         * panel that looks like a gap in capture rather than a page still
+         * run whose samples have not arrived (or failed) would show an empty
+         * panel that looks like a gap in the record rather than a page still
          * loading.
          */
         async openRun(id: string) {
             this.loading = true;
             this.error = null;
             this.playing = false;
-            this.frameError = null;
             this.lanesError = null;
             this.sampleError = null;
             this.mapError = null;
@@ -245,27 +252,18 @@ export const useRunsStore = defineStore('runs', {
                 this.detail = await getRun(id);
 
                 const [
-                    framesResult,
                     lanesResult,
                     samplesResult,
                     mapResult,
                     videoResult,
                     videoTicksResult
                 ] = await Promise.allSettled([
-                    getRunFrames(id),
                     getRunLanes(id),
                     getRunSamples(id),
                     getRunMap(id),
                     getRunVideo(id),
                     getRunVideoTicks(id)
                 ]);
-
-                if (framesResult.status === 'fulfilled') {
-                    this.frames = framesResult.value.frames;
-                } else {
-                    this.frames = [];
-                    this.frameError = enrichmentUnavailable('frames', '/frames', framesResult.reason);
-                }
 
                 if (lanesResult.status === 'fulfilled') {
                     this.lanes = lanesResult.value.lanes;
@@ -313,21 +311,14 @@ export const useRunsStore = defineStore('runs', {
                 // A comparison against the previously open run is almost never
                 // what is wanted, and would be read as belonging to this one.
                 this.reference = null;
-                const placed = this.placedFrames;
-                this.bot = placed.length > 0 ? placed[0].bot : null;
-                this.camera = placed.length > 0 ? placed[0].camera : null;
-                // Open on the first frame, not the start of the axis.
-                //
-                // The axis spans splits *and* frames, and a run's first
-                // milestone usually starts before capture produces anything --
-                // 231 ticks before, in the run that prompted this. Opening at
-                // the axis start is correct and shows an empty panel, which
-                // reads as "this run has no frames" rather than "not yet".
-                this.cursor = placed.length > 0 ? placed[0].tick : (this.bounds?.from ?? 0);
+                // The lowest bot the run ever sampled. Nothing else names the
+                // set of bots, and leaving this null would park the inventory
+                // panel on its empty state for every run.
+                this.bot = botsInSamples(this.samples)[0] ?? null;
+                this.cursor = this.bounds?.from ?? 0;
             } catch (err) {
                 this.error = err instanceof Error ? err.message : String(err);
                 this.detail = null;
-                this.frames = [];
                 this.lanes = [];
                 this.samples = [];
                 this.map = [];
@@ -354,20 +345,9 @@ export const useRunsStore = defineStore('runs', {
             }
         },
 
-        /**
-         * Selects a capture view by its (bot, camera) pair.
-         *
-         * Both together, never one at a time: only specific pairs exist, so
-         * changing one and leaving the other produces a combination the run
-         * never captured, and the panel goes blank for a reason that looks
-         * like a bug rather than a choice.
-         */
-        selectView(view: FrameView) {
-            this.bot = view.bot;
-            this.camera = view.camera;
-            // Nothing for this view before its first frame, so do not sit
-            // somewhere it cannot show anything.
-            if (this.cursor < view.from) this.seek(view.from);
+        /** Points the inventory panel at another bot. */
+        selectBot(bot: number | null) {
+            this.bot = bot;
         },
 
         /** Moves the cursor, clamped to the axis. */

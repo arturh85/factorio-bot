@@ -1,9 +1,9 @@
 import {defineStore} from 'pinia'
-import {frames as fetchFrames, listJobs, video as fetchVideo, videoTicks as fetchVideoTicks} from '@/api/client';
+import {listJobs, video as fetchVideo, videoTicks as fetchVideoTicks} from '@/api/client';
 import {subscribeJobEvents} from '@/api/jobEvents';
 import {Job} from '@/api/types';
 import {parseReplayJson, Replay} from '@/api/replay';
-import {FramesManifest, VideoManifest, VideoTicksResponse} from '@/api/types';
+import {VideoManifest, VideoTicksResponse} from '@/api/types';
 
 /**
  * The live stream's unsubscribe callback, and the job id it watches.
@@ -49,23 +49,15 @@ export const useReplayStore = defineStore('replay', {
         jobId: null as string | null,
         replay: null as Replay | null,
         /**
-         * The frame manifest, or `null` when it has not been fetched or the
-         * request failed. `null` is not "no frames": an empty manifest is a
-         * fact (capture has not run) and a failed fetch is not, so the two
-         * must not collapse. `ReplayScrubber` treats both as nothing to
-         * judge, but only because it is told them separately.
-         */
-        manifest: null as FramesManifest | null,
-        /**
-         * The live recording's manifest and clock, on the same terms as
-         * `manifest`: `null` means "not fetched or the request failed", never
-         * "no video". A run that recorded none answers a manifest describing
-         * nothing, which is a fact and reaches here as a value.
+         * The live recording's manifest and clock.
          *
-         * Fetched beside the replay for the same reason the frame manifest is:
-         * they are joined by tick, so a clock read at a later moment than the
-         * replay it is judged against is exactly the mismatch the join check
-         * exists to catch.
+         * `null` means "not fetched or the request failed", never "no video":
+         * a run that recorded none answers a manifest describing nothing,
+         * which is a fact and reaches here as a value.
+         *
+         * Fetched beside the replay because the two are joined by tick, so a
+         * clock read at a later moment than the replay it is judged against is
+         * exactly the mismatch the join check exists to catch.
          */
         video: null as VideoManifest | null,
         videoTicks: null as VideoTicksResponse | null,
@@ -88,9 +80,6 @@ export const useReplayStore = defineStore('replay', {
         getParseError(): string | null {
             return this.parseError
         },
-        getManifest(): FramesManifest | null {
-            return this.manifest
-        },
         getVideo(): VideoManifest | null {
             return this.video
         },
@@ -111,23 +100,16 @@ export const useReplayStore = defineStore('replay', {
             this.loading = true
             try {
                 // Fetched alongside the replay rather than on its own timer:
-                // the two are joined by tick, so a manifest from a later
-                // moment than the replay it is judged against is exactly the
-                // mismatch the join check exists to catch.
+                // the two are joined by tick, so a clock from a later moment
+                // than the replay it is judged against is exactly the mismatch
+                // the join check exists to catch.
                 //
-                // A failed frames fetch must not lose the replay -- the
-                // timeline is useful without pictures, and the reverse is not
-                // true. So this is caught and left `null` rather than allowed
-                // to abort the refresh.
-                try {
-                    this.manifest = await fetchFrames()
-                } catch {
-                    this.manifest = null
-                }
-                // Same rule again, and it matters more here: a server too old
-                // to have the video routes 404s both of these, and losing the
-                // replay over an artefact that is opt-in in the first place
-                // would be the worst possible trade.
+                // A failed video fetch must not lose the replay -- the timeline
+                // is useful without pictures, and the reverse is not true. A
+                // server too old to have the video routes 404s both of these,
+                // and losing the replay over an artefact that is opt-in in the
+                // first place would be the worst possible trade. So these are
+                // caught and left `null` rather than allowed to abort.
                 try {
                     this.video = await fetchVideo()
                 } catch {

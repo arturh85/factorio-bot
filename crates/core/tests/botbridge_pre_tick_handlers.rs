@@ -26,8 +26,8 @@
 //! Nothing about a pre-tick join is lost by not skipping. `whoami` is nil until
 //! `rcon_whoami` sets it, and it was nil on the first tick too, so the one
 //! `whoami`-gated branch in the join handler could never have run at tick 0
-//! either way. What the handler does unconditionally -- count the client, wait
-//! for its inventory, register a frame camera -- now runs instead of raising.
+//! either way. What the handler does unconditionally -- count the client and
+//! wait for its inventory -- now runs instead of raising.
 
 use mlua::{Lua, LuaOptions, StdLib, Table};
 

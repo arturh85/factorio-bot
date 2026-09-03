@@ -1,30 +1,27 @@
 //! Durable run archives: list them, open one, seek through it.
 //!
 //! A run lives at `<workspace>/runs/<id>/` and is written by
-//! `factorio_bot_core::record`. Unlike `GET /api/v1/frames`, which reports what
-//! is on disk for the *current* run, these routes read runs that have already
+//! `factorio_bot_core::record`. These routes read runs that have already
 //! finished -- or that crashed, which are the ones worth opening.
 //!
 //! Every route treats an unfinished run as a first-class case. A run with no
-//! `manifest.json` never reached `finish`; it still has its events, its frames
+//! `manifest.json` never reached `finish`; it still has its events, its samples
 //! and whatever splits it got through, and refusing to serve it would hide
 //! exactly the runs someone is trying to debug.
 
 use crate::error::ErrorResponse;
-use crate::manage::frames::workspace_root;
 use crate::manage::video::{CacheFor, VideoTicksResponse, serve_video_file};
+use crate::manage::workspace_root;
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{HeaderValue, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use factorio_bot_core::record::map::{MapRecord, read_map};
 use factorio_bot_core::record::video::{
     TICKS_FILE, VIDEO_DIR, VideoManifest, clock::read_tick_samples, read_video_dir,
 };
 use factorio_bot_core::record::{
-    ArchivedFrame, Event, Lane, Manifest, Sample, Split, derive_lanes, derive_splits, read_events,
-    read_samples,
+    Event, Lane, Manifest, Sample, Split, derive_lanes, derive_splits, read_events, read_samples,
 };
 use factorio_bot_core::scripts::resolve_script_path;
 use serde::{Deserialize, Serialize};
@@ -48,7 +45,6 @@ pub struct RunSummary {
     pub outcome: Option<String>,
     pub elapsed_ticks: Option<u64>,
     pub events: Option<usize>,
-    pub frames: Option<usize>,
     pub splits: Option<usize>,
 }
 
@@ -62,7 +58,6 @@ impl RunSummary {
             outcome: None,
             elapsed_ticks: None,
             events: None,
-            frames: None,
             splits: None,
         }
     }
@@ -76,7 +71,6 @@ impl RunSummary {
             outcome: manifest.outcome,
             elapsed_ticks: manifest.elapsed_ticks,
             events: Some(manifest.events),
-            frames: Some(manifest.frames),
             splits: Some(manifest.splits),
         }
     }
@@ -114,12 +108,6 @@ pub struct EventsResponse {
 pub struct RunLanesResponse {
     /// What each bot did, in dispatch order.
     pub lanes: Vec<Lane>,
-}
-
-/// `GET /api/v1/runs/{id}/frames` response.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-pub struct RunFramesResponse {
-    pub frames: Vec<ArchivedFrame>,
 }
 
 /// `GET /api/v1/runs/{id}/samples` response.
@@ -328,31 +316,6 @@ pub async fn get_run_lanes(
     Ok(Json(RunLanesResponse { lanes }))
 }
 
-/// A run's frame index.
-#[utoipa::path(
-    get,
-    path = "/api/v1/runs/{id}/frames",
-    tag = "Runs",
-    params(("id" = String, Path, description = "the run id")),
-    responses(
-        (status = 200, body = RunFramesResponse),
-        (status = 400, body = crate::error::ErrorResponse),
-        (status = 404, body = crate::error::ErrorResponse),
-    )
-)]
-pub async fn get_run_frames(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<RunFramesResponse>, ErrorResponse> {
-    let dir = run_dir(&runs_root(&state).await?, &id)?;
-    // A planning-only run has no frames at all. Empty list, not 404.
-    let frames = std::fs::read(dir.join("frames").join("index.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default();
-    Ok(Json(RunFramesResponse { frames }))
-}
-
 /// A run's world-state samples.
 #[utoipa::path(
     get,
@@ -419,53 +382,6 @@ pub async fn get_run_map(
         map: read.records,
         skipped: read.skipped,
     }))
-}
-
-/// One archived frame's bytes.
-#[utoipa::path(
-    get,
-    path = "/api/v1/runs/{id}/frames/{bot}/{name}",
-    tag = "Runs",
-    params(
-        ("id" = String, Path, description = "the run id"),
-        ("bot" = u8, Path, description = "the bot number, as reported by ArchivedFrame.bot"),
-        ("name" = String, Path, description = "the frame filename, as reported by GET /api/v1/runs/{id}/frames"),
-    ),
-    responses(
-        (status = 200, content_type = "image/jpeg", description = "the frame's JPEG bytes"),
-        (status = 400, body = crate::error::ErrorResponse),
-        (status = 404, body = crate::error::ErrorResponse),
-    )
-)]
-pub async fn get_run_frame(
-    State(state): State<AppState>,
-    Path((id, bot, name)): Path<(String, u8, String)>,
-) -> Result<Response, ErrorResponse> {
-    let dir = run_dir(&runs_root(&state).await?, &id)?;
-    let bot_dir = std::fs::canonicalize(dir.join("frames").join(bot.to_string()))
-        .map_err(|_| ErrorResponse::not_found(format!("no frames for bot {bot} in run {id}")))?;
-    let resolved = resolve_script_path(&bot_dir, &name).map_err(ErrorResponse::from)?;
-    if !resolved.is_file() {
-        return Err(ErrorResponse::not_found(format!("no such frame: {name}")));
-    }
-    let bytes = std::fs::read(&resolved)
-        .map_err(|err| ErrorResponse::internal(format!("failed to read frame: {err}")))?;
-
-    Ok((
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg")),
-            (
-                header::CACHE_CONTROL,
-                // An archived frame is immutable: its run is over and a tick
-                // never recurs. A scrubber re-requests the same frames
-                // constantly, and this header is what makes that usable.
-                HeaderValue::from_static("public, max-age=31536000, immutable"),
-            ),
-        ],
-        bytes,
-    )
-        .into_response())
 }
 
 /// A run's archived video manifest.
@@ -554,9 +470,7 @@ pub fn router() -> utoipa_axum::router::OpenApiRouter<AppState> {
         .routes(routes!(list_runs))
         .routes(routes!(get_run))
         .routes(routes!(get_run_events))
-        .routes(routes!(get_run_frames))
         .routes(routes!(get_run_lanes))
-        .routes(routes!(get_run_frame))
         .routes(routes!(get_run_samples))
         .routes(routes!(get_run_map))
         .routes(routes!(get_run_video))

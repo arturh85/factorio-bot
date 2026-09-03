@@ -1,30 +1,18 @@
 import {describe, expect, it} from 'vitest';
 import {
-    botsOf,
     leadInTicks,
     formatAgo,
     formatWhen,
     startedUnixOf,
-    viewsOf,
     laneAt,
     laneBots,
-    camerasOf,
     compareSplits,
     formatTicks,
     fractionOf,
-    frameAt,
-    placeable,
     splitAt,
     tickBounds
 } from './runTimeline';
-import {ArchivedFrame, Split} from '@/api/types';
-
-const frame = (bot: number, tick: number | null, camera: string | null): ArchivedFrame => ({
-    bot,
-    tick,
-    camera,
-    file: `frames/${bot}/tick-${tick}-${camera}.jpg`
-});
+import {Split} from '@/api/types';
 
 const split = (
     index: number,
@@ -41,76 +29,15 @@ const split = (
     elapsed_ticks: ended === null ? null : ended - started
 });
 
-describe('placeable', () => {
-    it('drops frames that cannot be positioned rather than inventing a tick', () => {
-        const placed = placeable([frame(1, 300, 'front'), frame(1, null, null)]);
-        expect(placed).toHaveLength(1);
-        expect(placed[0].tick).toBe(300);
-    });
-
-    it('sorts by tick so the axis order is not filesystem order', () => {
-        const placed = placeable([frame(1, 600, 'a'), frame(1, 300, 'a')]);
-        expect(placed.map((f) => f.tick)).toEqual([300, 600]);
-    });
-});
-
-describe('frameAt', () => {
-    const frames = placeable([
-        frame(1, 300, 'front'),
-        frame(1, 600, 'front'),
-        frame(1, 900, 'front'),
-        frame(2, 600, 'front'),
-        frame(1, 600, 'area')
-    ]);
-
-    it('takes the latest frame at or before the cursor, not an exact match', () => {
-        // Capture is every 300 ticks and frames drop; an exact match would
-        // blank the panel for almost every cursor position.
-        expect(frameAt(frames, 1, 'front', 750)?.tick).toBe(600);
-    });
-
-    it('takes the frame exactly on the cursor when there is one', () => {
-        expect(frameAt(frames, 1, 'front', 600)?.tick).toBe(600);
-    });
-
-    it('is null before the first frame, which is a real state', () => {
-        expect(frameAt(frames, 1, 'front', 100)).toBeNull();
-    });
-
-    it('never crosses to another bot or camera', () => {
-        expect(frameAt(frames, 2, 'front', 750)?.bot).toBe(2);
-        expect(frameAt(frames, 1, 'area', 750)?.camera).toBe('area');
-        expect(frameAt(frames, 3, 'front', 750)).toBeNull();
-    });
-});
-
-describe('botsOf / camerasOf', () => {
-    it('reports each bot and camera once', () => {
-        const frames = placeable([
-            frame(2, 300, 'front'),
-            frame(1, 300, 'front'),
-            frame(1, 600, 'area')
-        ]);
-        expect(botsOf(frames)).toEqual([1, 2]);
-        expect(camerasOf(frames)).toEqual(['area', 'front']);
-    });
-});
-
 describe('tickBounds', () => {
-    it('spans splits and frames together, so neither is clipped', () => {
-        // Capture kept running past the last milestone.
-        const bounds = tickBounds(
-            [split(1, 'a', 100, 400)],
-            placeable([frame(1, 900, 'front')])
-        );
+    it('spans splits and the recording together, so neither is clipped', () => {
+        // The recording kept running past the last milestone.
+        const bounds = tickBounds([split(1, 'a', 100, 400)], [], {from: 900, to: 900});
         expect(bounds).toEqual({from: 100, to: 900});
     });
 
-    it('includes a milestone that started before the first frame', () => {
-        const bounds = tickBounds(
-            [split(1, 'a', 50, 400)],
-            placeable([frame(1, 300, 'front')])
-        );
+    it('includes a milestone that started before the recording', () => {
+        const bounds = tickBounds([split(1, 'a', 50, 400)], [], {from: 300, to: 300});
         expect(bounds?.from).toBe(50);
     });
 
@@ -119,33 +46,38 @@ describe('tickBounds', () => {
         expect(bounds).toEqual({from: 100, to: 100});
     });
 
-    it('starts at the first frame, not at the milestone that opened before it', () => {
-        // The run began, the planner thought, and capture produced nothing for
-        // 200 ticks. Spanning that spends axis width on a stretch with no
-        // frame and no lane bar.
-        const bounds = tickBounds(
-            [split(1, 'a', 100, 2000)],
-            placeable([frame(1, 300, 'front'), frame(1, 2000, 'front')])
-        );
-        expect(bounds).toEqual({from: 300, to: 2000});
-        expect(leadInTicks([split(1, 'a', 100, 2000)], placeable([frame(1, 300, 'front'), frame(1, 2000, 'front')]))).toBe(200);
+    it('starts at the first lane bar, not at the milestone that opened before it', () => {
+        // The run began, the planner thought, and nothing was drawn for 150
+        // ticks. Spanning that spends axis width on a stretch with no lane bar
+        // and no recording.
+        const lanes = [
+            {bot: 1, id: 0, action: 'mine', from_tick: 250, to_tick: 2000,
+                status: 'success', error: null}
+        ];
+        const bounds = tickBounds([split(1, 'a', 100, 2000)], lanes);
+        expect(bounds).toEqual({from: 250, to: 2000});
+        expect(leadInTicks([split(1, 'a', 100, 2000)], lanes)).toBe(150);
     });
 
-    it('starts at the first lane bar when the bots moved before capture did', () => {
+    it('starts at the first lane bar when the bots moved before the recording did', () => {
         const bounds = tickBounds(
             [split(1, 'a', 100, 2000)],
-            placeable([frame(1, 400, 'front'), frame(1, 2000, 'front')]),
-            [{bot: 1, id: 0, action: 'mine', from_tick: 250, to_tick: 900, status: 'success', error: null}]
+            [{bot: 1, id: 0, action: 'mine', from_tick: 250, to_tick: 900, status: 'success', error: null}],
+            {from: 400, to: 2000}
         );
         expect(bounds?.from).toBe(250);
     });
 
     it('refuses a trim that would cut more than it keeps', () => {
-        // The one frame landed at the very end. Trimming to it would throw
-        // away the extent the splits carry and collapse the axis.
-        const bounds = tickBounds([split(1, 'a', 100, 400)], placeable([frame(1, 900, 'front')]));
+        // The only thing drawn landed at the very end. Trimming to it would
+        // throw away the extent the splits carry and collapse the axis.
+        const lanes = [
+            {bot: 1, id: 0, action: 'mine', from_tick: 900, to_tick: 900,
+                status: 'success', error: null}
+        ];
+        const bounds = tickBounds([split(1, 'a', 100, 400)], lanes);
         expect(bounds).toEqual({from: 100, to: 900});
-        expect(leadInTicks([split(1, 'a', 100, 400)], placeable([frame(1, 900, 'front')]))).toBe(0);
+        expect(leadInTicks([split(1, 'a', 100, 400)], lanes)).toBe(0);
     });
 
     it('reports no lead-in for a run with nothing drawn at all', () => {
@@ -160,87 +92,58 @@ describe('tickBounds', () => {
 });
 
 /**
- * The silent regression this pins. Frame ticks have always decided where the
- * axis starts, and nothing errors or is marked when that contributor goes
- * missing -- the axis is just different, computed from splits and lanes alone.
- * A run that recorded video instead of frames has to land somewhere honest.
+ * The silent regression this pins. Per-camera screenshot ticks decided where
+ * the axis started until the cameras were retired (2026-09-02); nothing errors
+ * or is marked now that contributor is gone -- the axis is just computed from
+ * splits, lanes and the recording. A run has to land somewhere honest.
  */
 describe('a run whose only capture is video', () => {
     const splits = [split(1, 'a', 100, 2000)];
 
-    it('starts at the video clock when there are no frames at all', () => {
+    it('starts at the video clock rather than falling back to the splits', () => {
         // Without the video range this answers {from: 100}, silently, because
         // `drawn` would be empty and the axis would fall back to the splits.
-        expect(tickBounds(splits, [], [], {from: 300, to: 2000})).toEqual({from: 300, to: 2000});
-        expect(leadInTicks(splits, [], [], {from: 300, to: 2000})).toBe(200);
+        expect(tickBounds(splits, [], {from: 300, to: 2000})).toEqual({from: 300, to: 2000});
+        expect(leadInTicks(splits, [], {from: 300, to: 2000})).toBe(200);
     });
 
     it('spans a recording that outlasted the last milestone', () => {
-        expect(tickBounds([split(1, 'a', 100, 400)], [], [], {from: 100, to: 900}))
+        expect(tickBounds([split(1, 'a', 100, 400)], [], {from: 100, to: 900}))
             .toEqual({from: 100, to: 900});
     });
 
-    it('leaves the axis exactly where the frames put it when a run has both', () => {
-        // Video is the opt-in second artefact and must not move an axis that
-        // frames already decide -- two runs' axes have to keep lining up.
-        const frames = placeable([frame(1, 300, 'front'), frame(1, 2000, 'front')]);
-        const withoutVideo = tickBounds(splits, frames);
-        expect(tickBounds(splits, frames, [], {from: 120, to: 2400})).toEqual(withoutVideo);
-        expect(leadInTicks(splits, frames, [], {from: 120, to: 2400}))
-            .toBe(leadInTicks(splits, frames));
-    });
-
     it('changes nothing for a run that recorded no video', () => {
-        expect(tickBounds(splits, [], [], null)).toEqual(tickBounds(splits, []));
+        expect(tickBounds(splits, [], null)).toEqual(tickBounds(splits, []));
     });
 
-    /**
-     * Screenshot cameras were retired on 2026-09-02, so "no frames" stopped
-     * being the corner case this branch was written for and became the
-     * ordinary one. These pin the branch under that load.
-     */
-    describe('now that a run captures no frames by default', () => {
-        it('never cuts more than it keeps, even when the recording started late', () => {
-            // The guard `axisFrom` applies to frames has to apply to video
-            // too. Without it a run whose recorder only came up near the end
-            // would throw the whole extent the splits carry away and collapse
-            // to the tail -- the same failure the frames' trim was bounded to
-            // avoid, arriving through the contributor that replaced them.
-            expect(tickBounds([split(1, 'a', 100, 400)], [], [], {from: 900, to: 1000}))
-                .toEqual({from: 100, to: 1000});
-            expect(leadInTicks([split(1, 'a', 100, 400)], [], [], {from: 900, to: 1000}))
-                .toBe(0);
-        });
+    it('never cuts more than it keeps, even when the recording started late', () => {
+        // The guard `axisFrom` applies has to apply to video too. Without it a
+        // run whose recorder only came up near the end would throw the whole
+        // extent the splits carry away and collapse to the tail.
+        expect(tickBounds([split(1, 'a', 100, 400)], [], {from: 900, to: 1000}))
+            .toEqual({from: 100, to: 1000});
+        expect(leadInTicks([split(1, 'a', 100, 400)], [], {from: 900, to: 1000}))
+            .toBe(0);
+    });
 
-        it('starts at the video when it precedes the first lane bar', () => {
-            const lanes = [
-                {bot: 1, id: 0, action: 'mine', from_tick: 1200, to_tick: 1800,
-                    status: 'success', error: null}
-            ];
-            expect(tickBounds(splits, [], lanes, {from: 300, to: 2000}))
-                .toEqual({from: 300, to: 2000});
-        });
+    it('starts at the video when it precedes the first lane bar', () => {
+        const lanes = [
+            {bot: 1, id: 0, action: 'mine', from_tick: 1200, to_tick: 1800,
+                status: 'success', error: null}
+        ];
+        expect(tickBounds(splits, lanes, {from: 300, to: 2000}))
+            .toEqual({from: 300, to: 2000});
+    });
 
-        it('starts at the first lane bar when it precedes the video', () => {
-            // Both are drawn, so the axis begins at whichever is drawn first.
-            // Video does not get priority for being the visual record.
-            const lanes = [
-                {bot: 1, id: 0, action: 'mine', from_tick: 300, to_tick: 1800,
-                    status: 'success', error: null}
-            ];
-            expect(tickBounds(splits, [], lanes, {from: 1200, to: 2000}))
-                .toEqual({from: 300, to: 2000});
-        });
-
-        it('takes the video range over frames that could not be placed', () => {
-            // A frame whose name did not parse is listed but has no tick, so
-            // `placeable` drops it -- and a run holding only those has nothing
-            // frame-shaped on the axis. It must not block the video the way a
-            // real frame does.
-            const unplaceable = placeable([frame(1, null, null)]);
-            expect(tickBounds(splits, unplaceable, [], {from: 300, to: 2000}))
-                .toEqual({from: 300, to: 2000});
-        });
+    it('starts at the first lane bar when it precedes the video', () => {
+        // Both are drawn, so the axis begins at whichever is drawn first.
+        // Video does not get priority for being the visual record.
+        const lanes = [
+            {bot: 1, id: 0, action: 'mine', from_tick: 300, to_tick: 1800,
+                status: 'success', error: null}
+        ];
+        expect(tickBounds(splits, lanes, {from: 1200, to: 2000}))
+            .toEqual({from: 300, to: 2000});
     });
 });
 
@@ -343,7 +246,7 @@ describe('lanes', () => {
     });
 
     it('extends the axis to cover lanes', () => {
-        const bounds = tickBounds([], [], [lane(1, 0, 'mine', 50, 800)]);
+        const bounds = tickBounds([], [lane(1, 0, 'mine', 50, 800)]);
         expect(bounds).toEqual({from: 50, to: 800});
     });
 });
@@ -382,32 +285,5 @@ describe('run timestamps', () => {
         expect(formatAgo(now - 7200, now)).toBe('2 h ago');
         expect(formatAgo(now - 86400 * 2, now)).toBe('2 d ago');
         expect(formatAgo(null, now)).toBe('');
-    });
-});
-
-describe('viewsOf', () => {
-    it('offers only the pairs that exist, never the cross product', () => {
-        // The real shape: camera bot-3 lives in client 1's folder, and area /
-        // bot-1 both live in client 2's. Two free dropdowns would offer bot 1 +
-        // area, which captured nothing and never could.
-        const views = viewsOf(
-            placeable([
-                frame(1, 300, 'bot-3'),
-                frame(1, 600, 'bot-3'),
-                frame(2, 300, 'area'),
-                frame(2, 300, 'bot-1')
-            ])
-        );
-        expect(views.map((v) => `${v.camera}@${v.bot}`)).toEqual([
-            'area@2',
-            'bot-1@2',
-            'bot-3@1'
-        ]);
-        expect(views.find((v) => v.camera === 'bot-3')?.count).toBe(2);
-        expect(views.find((v) => v.camera === 'bot-3')?.from).toBe(300);
-    });
-
-    it('is empty for a run that captured nothing', () => {
-        expect(viewsOf([])).toEqual([]);
     });
 });

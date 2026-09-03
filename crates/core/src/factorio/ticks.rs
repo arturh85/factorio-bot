@@ -163,7 +163,7 @@ mod tests {
     fn an_unparseable_stamp_is_absent_rather_than_zero() {
         // We know the game answered; we do not know when. Zero would read as
         // tick zero -- the very start of the map -- and a consumer aligning
-        // frames to it would place the action before the game began.
+        // a recording to it would place the action before the game began.
         let (rest, tick) = take_tick_stamp(Some(vec!["§tick§not-a-number".to_string()]));
         assert_eq!(rest, None);
         assert_eq!(tick, None);

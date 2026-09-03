@@ -50,11 +50,9 @@ import type {AppSettings, GuiSettings} from '@/models/settings';
 import type {FactorioSettings, RestApiSettings, ScriptTreeNode} from '@/api/types';
 import type {
     ActionFailure,
-    ArchivedFrame,
     Bounds,
     BotSample,
     Calibration,
-    ClientRun,
     Divergence,
     EntitySnapshot,
     Event,
@@ -64,8 +62,6 @@ import type {
     ExecuteRequest,
     ExistsResponse,
     FailureKind,
-    FrameEntry,
-    FramesManifest,
     InstanceStatus,
     Job,
     JobStatus,
@@ -78,7 +74,6 @@ import type {
     PowerSample,
     ProductionSample,
     ResearchSample,
-    RunFramesResponse,
     RunLanesResponse,
     RunMapResponse,
     RunSamplesResponse,
@@ -189,13 +184,6 @@ const OPERATIONS: readonly OperationContract[] = [
         caller: 'getRun',
         pathParams: ['id'],
         response: {status: '200', schema: 'RunDetail'}
-    },
-    {
-        path: '/api/v1/runs/{id}/frames',
-        method: 'get',
-        caller: 'getRunFrames',
-        pathParams: ['id'],
-        response: {status: '200', schema: 'RunFramesResponse'}
     },
     {
         path: '/api/v1/runs/{id}/events',
@@ -341,12 +329,6 @@ const OPERATIONS: readonly OperationContract[] = [
         response: {status: '200', mediaType: 'text/event-stream'}
     },
     {
-        path: '/api/v1/frames',
-        method: 'get',
-        caller: 'frames',
-        response: {status: '200', schema: 'FramesManifest'}
-    },
-    {
         path: '/api/v1/video',
         method: 'get',
         caller: 'video',
@@ -389,18 +371,6 @@ const OPERATIONS: readonly OperationContract[] = [
         caller: 'runVideoUrl',
         pathParams: ['id'],
         response: {status: '200', mediaType: 'video/mp4'}
-    },
-    {
-        path: '/api/v1/frames/{client}/{name}',
-        method: 'get',
-        caller: 'frameUrl',
-        // Both segments. A frame is addressed by `(client, name)` together:
-        // per-bot cameras mean two clients capture the same tick under the
-        // same filename, and both frames are correct and different.
-        pathParams: ['client', 'name'],
-        // `frameUrl` builds a URL for an `<img>` tag, not a `request()` call --
-        // the response is immutable JPEG bytes, never parsed as JSON.
-        response: {status: '200', mediaType: 'image/jpeg'}
     }
 ] as const;
 
@@ -621,25 +591,6 @@ const SCHEMAS: Record<string, SchemaContract> = {
     ExistsResponse: objectContract<ExistsResponse>({
         exists: {required: true, type: 'boolean'}
     }),
-    FrameEntry: objectContract<FrameEntry>({
-        client: {required: true, type: 'integer'},
-        // `tick`/`camera` are always serialised (no `skip_serializing_if`),
-        // so `types.ts` declares both present and nullable -- a name that
-        // does not parse is reported with nulls, not omitted.
-        tick: {required: false, type: 'integer', nullable: true},
-        camera: {required: false, type: 'string', nullable: true},
-        name: {required: true, type: 'string'},
-        bytes: {required: true, type: 'integer'}
-    }),
-    FramesManifest: objectContract<FramesManifest>({
-        clients: {required: true, type: 'array'},
-        frames: {required: true, arrayOf: 'FrameEntry'},
-        // Always present, `null` when unknown -- the same rule the replay
-        // document follows: a consumer must never have to distinguish "absent
-        // from the document" from "absent as a fact".
-        run: {required: true, type: 'string', nullable: true},
-        client_runs: {required: true, arrayOf: 'ClientRun'}
-    }),
     // -- run archives (crates/server/src/runs.rs) -------------------------
     RunsResponse: objectContract<RunsResponse>({
         runs: {required: true, arrayOf: 'RunSummary'}
@@ -649,13 +600,12 @@ const SCHEMAS: Record<string, SchemaContract> = {
         finished: {required: true, type: 'boolean'},
         // Everything below is present-and-null for a run that never finished,
         // so a caller can tell "never finished" from "not reported by this
-        // build". Same rule the frames manifest follows for `run`.
+        // build". Same rule the video manifest follows for `run`.
         started_unix: {required: false, type: 'integer', nullable: true},
         finished_unix: {required: false, type: 'integer', nullable: true},
         outcome: {required: false, type: 'string', nullable: true},
         elapsed_ticks: {required: false, type: 'integer', nullable: true},
         events: {required: false, type: 'integer', nullable: true},
-        frames: {required: false, type: 'integer', nullable: true},
         splits: {required: false, type: 'integer', nullable: true}
     }),
     RunDetail: objectContract<RunDetail>({
@@ -688,17 +638,6 @@ const SCHEMAS: Record<string, SchemaContract> = {
         to_tick: {required: false, type: 'integer', nullable: true},
         status: {required: false, type: 'string', nullable: true},
         error: {required: false, type: 'string', nullable: true}
-    }),
-    RunFramesResponse: objectContract<RunFramesResponse>({
-        frames: {required: true, arrayOf: 'ArchivedFrame'}
-    }),
-    ArchivedFrame: objectContract<ArchivedFrame>({
-        bot: {required: true, type: 'integer'},
-        // Null together when the filename does not parse -- the file is still
-        // archived and still listed, which is the honest report.
-        tick: {required: false, type: 'integer', nullable: true},
-        camera: {required: false, type: 'string', nullable: true},
-        file: {required: true, type: 'string'}
     }),
 
     // -- entity map (crates/core/src/record/map.rs) -----------------------
@@ -849,11 +788,6 @@ const SCHEMAS: Record<string, SchemaContract> = {
             error: {required: false, type: 'string', nullable: true},
             failure: {required: false, ref: 'WalkFailure', nullable: true}
         },
-        frame: {
-            bot: {required: true, type: 'integer'},
-            camera: {required: true, type: 'string'},
-            file: {required: true, type: 'string'}
-        },
         teleport: {
             bot: {required: true, type: 'integer'},
             reason: {required: true, type: 'string'},
@@ -990,10 +924,6 @@ const SCHEMAS: Record<string, SchemaContract> = {
         y: {required: true, type: 'number'}
     }),
 
-    ClientRun: objectContract<ClientRun>({
-        client: {required: true, type: 'integer'},
-        run: {required: true, type: 'string', nullable: true}
-    }),
     // Not `objectContract<…>`: `sendRcon(command)` builds this body as an
     // inline literal, so there is no declaration in `types.ts` to bind it to
     // and this row is the client's only statement of the shape -- a second

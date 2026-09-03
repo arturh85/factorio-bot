@@ -205,6 +205,146 @@ impl PlacementRefusals {
     }
 }
 
+/// A walk the game's pathfinder searched for and did not find.
+///
+/// # What it claims, which is narrower than "unreachable"
+///
+/// One character, standing at one place, asked for a route to one
+/// destination, and the game answered that there is none. That is a fact
+/// about **a pair of points**, not about the destination: a bot on the other
+/// side of the obstacle, or the same bot once something has been mined or
+/// built, may well have a path. `from` is therefore part of the fact and not
+/// decoration, and every reader is expected to test it -- see
+/// [`WalkRefusal::applies_to`].
+///
+/// # Only the definitive answer is recorded here
+///
+/// `mods/BotBridge/control.lua` distinguishes two refusals and so does this
+/// ledger's one writer (`RconActuator::walk`). `try again later` means the
+/// request queue was full and the question was never asked; nothing was
+/// learned and nothing is remembered. `failed to path find` means the
+/// pathfinder searched and came back empty -- and by the time it reaches the
+/// writer, `FactorioRcon::player_path` has also searched from four rotated
+/// offset goals around the target, so five searches from that spot found
+/// nothing.
+///
+/// # Why remembering it is the point
+///
+/// Run `run-1788432181-42528` -- the furthest this project has reached --
+/// lost most of its remaining throughput to the absence of this type. Bots 2
+/// and 3 stopped moving at tick ~53 700, boxed in where the plant was being
+/// built around them; every later plan sent them at an ore tile, the walk was
+/// refused before dispatch, and `abandon_rest` cut the rest of that bot's
+/// chain. Bot 3 was sent to `(-54.5, -12.5)` five separate times, bot 2 to
+/// `(-46.5, -9.5)` four times, each from the same frozen position. Nothing
+/// carried the refusal from one plan to the next, which is exactly the gap
+/// [`PlacementRefusal`] was built to close one level down.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WalkRefusal {
+    /// The `game.tick` the refusal was stamped at, or `None` -- which is the
+    /// ordinary case, because a path request that finds nothing is refused
+    /// *before* the walk is dispatched and so is never stamped. Never
+    /// defaulted to zero, for the reason [`PlacementRefusal::tick`] gives.
+    pub tick: Option<u64>,
+    /// The Factorio player whose walk was refused. A [`crate::types::PlayerId`]
+    /// rather than a bot id because this crate has no bot ids; they are the
+    /// same number (`BotId(3)` is player 3).
+    pub player: PlayerId,
+    /// Where the character was standing when it asked, exactly as the world
+    /// reported it.
+    pub from: Position,
+    /// The destination the plan named -- the scheduler's `StepKind::Walk.to`,
+    /// not the offset goal `approach_annulus` derived from it, so a reader
+    /// can compare it against a plan without redoing that arithmetic.
+    pub to: Position,
+}
+
+impl WalkRefusal {
+    /// How far a character may have drifted and still count as standing where
+    /// this refusal was earned, in tiles.
+    ///
+    /// The fact recorded is "no path *from here*", so a reader has to decide
+    /// what "here" means, and a float equality test would make the answer
+    /// unusable: the position a plan reasons with is a snapshot taken at a
+    /// different instant from the one the walk was dispatched with.
+    ///
+    /// One tile is the smallest radius that survives that, and the choice
+    /// barely matters for the case this exists for -- a boxed-in bot reports
+    /// the *same* position for tens of thousands of ticks, while a bot that
+    /// genuinely relocated has moved tens of tiles. Erring small is
+    /// deliberate: a miss costs one repeated refusal, a false hit fences a bot
+    /// away from ground it can reach.
+    pub const SAME_PLACE_TOLERANCE: f64 = 1.0;
+
+    /// Whether this refusal answers the question `player` is now asking.
+    ///
+    /// Three conditions, and the middle one is the whole design:
+    ///
+    /// * the same character -- two bots on opposite sides of an obstacle are
+    ///   not asking the same question, and answering one with the other's
+    ///   evidence is a claim nobody established;
+    /// * from within [`WalkRefusal::SAME_PLACE_TOLERANCE`] of where the
+    ///   refusal was earned -- once the bot is somewhere else, this refusal
+    ///   has nothing to say and the destination is offered again;
+    /// * to exactly the same destination -- compared with `total_cmp`,
+    ///   exactly as [`PlacementRefusals::note`] compares sites, because a plan
+    ///   re-deriving the same site derives the same coordinates bit for bit,
+    ///   and widening this into a radius would fence off neighbouring ground
+    ///   the game never refused.
+    ///
+    /// The walk's `radius`/`min_radius` are deliberately not part of the test.
+    /// They decide where near the target the walk may stop, and this ledger
+    /// only ever holds the answer to "is there a route toward it at all",
+    /// which came back no for the goal *and* for four offsets around it.
+    pub fn applies_to(&self, player: PlayerId, from: &Position, to: &Position) -> bool {
+        self.player == player
+            && self.to.x.total_cmp(&to.x).is_eq()
+            && self.to.y.total_cmp(&to.y).is_eq()
+            && (self.from.x - from.x)
+                .hypot(self.from.y - from.y)
+                .total_cmp(&Self::SAME_PLACE_TOLERANCE)
+                .is_le()
+    }
+}
+
+/// Every [`WalkRefusal`] this run has collected.
+///
+/// Append-only and never drained, for the same reason
+/// [`PlacementRefusals`] is: a refusal is a standing fact a planner re-reads
+/// on every plan, not an event to be written once. There is no `reported`
+/// cursor here because nothing writes a record event for it -- the run
+/// archive already carries every failed walk, with its error text, as
+/// `walk_settled`.
+#[derive(Debug, Default)]
+pub struct WalkRefusals {
+    walks: Vec<WalkRefusal>,
+}
+
+impl WalkRefusals {
+    /// Remembers a refusal, or does nothing if this exact question has already
+    /// been asked and answered. Returns whether it was new.
+    ///
+    /// "The same question" is the same player, from the same position, to the
+    /// same destination, all compared exactly -- a stricter test than
+    /// [`WalkRefusal::applies_to`] uses to *read* the ledger, and stricter on
+    /// purpose. Deduplication decides what is stored; a near-miss costs one
+    /// duplicate row. Matching decides what is believed; a near-miss there
+    /// would cost a bot ground it can walk on.
+    fn note(&mut self, refusal: WalkRefusal) -> bool {
+        if self.walks.iter().any(|known| {
+            known.player == refusal.player
+                && known.from.x.total_cmp(&refusal.from.x).is_eq()
+                && known.from.y.total_cmp(&refusal.from.y).is_eq()
+                && known.to.x.total_cmp(&refusal.to.x).is_eq()
+                && known.to.y.total_cmp(&refusal.to.y).is_eq()
+        }) {
+            return false;
+        }
+        self.walks.push(refusal);
+        true
+    }
+}
+
 /// What a container or machine was last observed to be holding.
 ///
 /// # Why this is not a field on the stored [`FactorioEntity`]
@@ -362,6 +502,16 @@ pub struct FactorioWorld {
     /// would inherit them.
     pub inventories: DashMap<Pos, ObservedInventory>,
     pub placement_refusals: SyncMutex<PlacementRefusals>,
+    /// Destinations the game's pathfinder has refused a bot a route to, for
+    /// the life of this world.
+    ///
+    /// The walking half of [`FactorioWorld::placement_refusals`], and here for
+    /// the same reason: `crates/planner`'s `PlanState::from_world` reads it on
+    /// every plan, and the crate that writes it (`crates/executor`) cannot see
+    /// the crate that reads it. See [`WalkRefusal`] for what one claims, which
+    /// is narrower than the placement ledger's claim -- it is about a pair of
+    /// points, not about a destination.
+    pub walk_refusals: SyncMutex<WalkRefusals>,
 }
 
 impl FactorioWorld {
@@ -688,6 +838,7 @@ impl FactorioWorld {
             teleports: SyncMutex::new(Vec::new()),
             inventories: DashMap::new(),
             placement_refusals: SyncMutex::new(PlacementRefusals::default()),
+            walk_refusals: SyncMutex::new(WalkRefusals::default()),
         }
     }
 
@@ -716,6 +867,23 @@ impl FactorioWorld {
     /// planner's read, and it happens once per plan.
     pub fn placement_refusals(&self) -> Vec<PlacementRefusal> {
         self.placement_refusals.lock().sites.clone()
+    }
+
+    /// Remembers a walk the pathfinder searched for and did not find. Returns
+    /// whether the question was new.
+    ///
+    /// Called from `RconActuator::walk` (`crates/executor`), which is the one
+    /// layer holding both halves of the fact: the destination the plan named,
+    /// and where the character was actually standing when it asked. Neither
+    /// the run loop above it nor the record below it has the second.
+    pub fn record_walk_refusal(&self, refusal: WalkRefusal) -> bool {
+        self.walk_refusals.lock().note(refusal)
+    }
+
+    /// Every refused walk, oldest first. Non-destructive: this is the
+    /// planner's read, and it happens once per plan.
+    pub fn walk_refusals(&self) -> Vec<WalkRefusal> {
+        self.walk_refusals.lock().walks.clone()
     }
 
     /// The refusals no record has been told about yet, oldest first, marking
@@ -961,6 +1129,7 @@ impl<'de> Deserialize<'de> for FactorioWorld {
                     teleports: Default::default(),
                     inventories: Default::default(),
                     placement_refusals: Default::default(),
+                    walk_refusals: Default::default(),
                 })
             }
         }
@@ -1018,6 +1187,11 @@ impl Clone for FactorioWorld {
                 // answer for two independent records.
                 reported: 0,
             }),
+            // Knowledge too, for the same reason, and with no cursor to
+            // reset: nothing reports these into a record.
+            walk_refusals: SyncMutex::new(WalkRefusals {
+                walks: self.walk_refusals.lock().walks.clone(),
+            }),
             flow_graph: Arc::new(FlowGraph::new(_entity_graph)),
         }
     }
@@ -1048,6 +1222,7 @@ mod tests {
             teleports: Default::default(),
             inventories: Default::default(),
             placement_refusals: Default::default(),
+            walk_refusals: Default::default(),
             entity_graph: Arc::new(EntityGraph::new(
                 Arc::new(DashMap::new()),
                 Arc::new(DashMap::new()),
@@ -1227,6 +1402,114 @@ mod tests {
             Some(3),
             "a reading is knowledge about the game, and cloning our belief \
              about the game does not make it untrue"
+        );
+    }
+
+    // ---- walk refusals ----
+    //
+    // The positions are run `run-1788432181-42528`'s own: bot 3 frozen at
+    // `(-56.26, 14.75)` from tick 53 700 to the end of the run, sent at the
+    // ore tile `(-54.5, -12.5)` on five separate plans and refused before
+    // dispatch every time.
+
+    const FROZEN: (f64, f64) = (-56.2578125, 14.74609375);
+    const ORE_TILE: (f64, f64) = (-54.5, -12.5);
+
+    fn walk_refusal(player: PlayerId, from: (f64, f64), to: (f64, f64)) -> WalkRefusal {
+        WalkRefusal {
+            tick: None,
+            player,
+            from: Position::new(from.0, from.1),
+            to: Position::new(to.0, to.1),
+        }
+    }
+
+    #[test]
+    fn a_refused_walk_is_remembered_for_the_bot_that_asked() {
+        let world = FactorioWorld::new();
+        assert!(world.record_walk_refusal(walk_refusal(3, FROZEN, ORE_TILE)));
+        let known = world.walk_refusals();
+        assert_eq!(known.len(), 1);
+        assert!(
+            known[0].applies_to(
+                3,
+                &Position::new(FROZEN.0, FROZEN.1),
+                &Position::new(ORE_TILE.0, ORE_TILE.1)
+            ),
+            "the same bot asking the same question from the same spot has \
+             already been answered"
+        );
+    }
+
+    /// The nuance the whole design turns on: this is a fact about a pair of
+    /// points, so neither half may be dropped from it.
+    #[test]
+    fn it_says_nothing_about_another_bot_or_another_place() {
+        let refusal = walk_refusal(3, FROZEN, ORE_TILE);
+        let ore = Position::new(ORE_TILE.0, ORE_TILE.1);
+        assert!(
+            !refusal.applies_to(1, &Position::new(FROZEN.0, FROZEN.1), &ore),
+            "bot 1 stood somewhere else all run; answering it with bot 3's \
+             evidence asserts something nobody established"
+        );
+        assert!(
+            !refusal.applies_to(3, &Position::new(-20., -30.), &ore),
+            "`failed to path find` means unreachable from *here*, not forever"
+        );
+        assert!(
+            !refusal.applies_to(
+                3,
+                &Position::new(FROZEN.0, FROZEN.1),
+                &Position::new(-46.5, -9.5)
+            ),
+            "a different destination is a different question"
+        );
+    }
+
+    /// A bot that has not really moved is still standing where the refusal was
+    /// earned. Sub-tile drift must not lose the memory -- that is the failure
+    /// mode this ledger exists to prevent, wearing a rounding error.
+    #[test]
+    fn a_bot_that_shuffled_half_a_tile_is_still_where_it_was() {
+        let refusal = walk_refusal(3, FROZEN, ORE_TILE);
+        let ore = Position::new(ORE_TILE.0, ORE_TILE.1);
+        assert!(
+            refusal.applies_to(3, &Position::new(FROZEN.0 + 0.4, FROZEN.1 - 0.3), &ore),
+            "the snapshot a plan reasons with is not the instant the walk was \
+             dispatched; a tile of slack is what makes the memory usable"
+        );
+        assert!(
+            !refusal.applies_to(3, &Position::new(FROZEN.0 + 4., FROZEN.1), &ore),
+            "four tiles away is a different question, and asking it again is \
+             cheaper than being wrong about it"
+        );
+    }
+
+    #[test]
+    fn the_same_question_refused_twice_is_remembered_once() {
+        let world = FactorioWorld::new();
+        assert!(world.record_walk_refusal(walk_refusal(3, FROZEN, ORE_TILE)));
+        assert!(
+            !world.record_walk_refusal(walk_refusal(3, FROZEN, ORE_TILE)),
+            "the second refusal taught nothing new"
+        );
+        assert!(
+            world.record_walk_refusal(walk_refusal(2, FROZEN, ORE_TILE)),
+            "a second bot refused the same destination is a second fact"
+        );
+        assert_eq!(world.walk_refusals().len(), 2);
+    }
+
+    /// Cloned like `placement_refusals`, and for the same reason.
+    #[test]
+    fn a_clone_keeps_the_walks_the_game_refused() {
+        let world = FactorioWorld::new();
+        world.record_walk_refusal(walk_refusal(3, FROZEN, ORE_TILE));
+        assert_eq!(
+            world.clone().walk_refusals().len(),
+            1,
+            "a clone that started blank would hand the planner back exactly \
+             the destinations it has already been refused"
         );
     }
 }

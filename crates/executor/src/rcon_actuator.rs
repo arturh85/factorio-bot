@@ -1,4 +1,5 @@
 use crate::actuator::{ActionTicks, Actuator, ActuatorError, ActuatorFailure};
+use crate::walk_memory::note_walk_refusal;
 use async_trait::async_trait;
 use factorio_bot_core::constants::BOT_FORCE;
 use factorio_bot_core::factorio::rcon::{
@@ -320,7 +321,16 @@ impl Actuator for RconActuator {
         self.rcon
             .move_player_timed(&self.world, p, &goal, Some(slack))
             .await
-            .map_err(classify)
+            .map_err(|failure| {
+                // The one layer that holds both halves of what the game just
+                // answered: the destination the plan named, and where the
+                // character was standing when it asked. `run.rs` has the
+                // first and not the second; `crates/core` has the second and
+                // not the first. See `walk_memory` for what is remembered and
+                // what is deliberately not.
+                note_walk_refusal(&self.world, p, here.as_ref(), &to, &failure);
+                classify(failure)
+            })
     }
 
     async fn mine(

@@ -387,6 +387,57 @@ pub fn schedule(
                 None => vec![bots.to_vec()],
             };
 
+            // Bots the game's pathfinder has already refused this destination
+            // from where they stand go to the back of their own tier.
+            //
+            // # Why a tier and not an exclusion
+            //
+            // Excluding them would let one action's memory make a whole plan
+            // impossible: with every bot refused, `best` stays `None` and
+            // `schedule` returns `PreconditionUnsatisfied` for work it could
+            // have dispatched. A plan that runs and fails leaves a record, a
+            // failed walk and a recovery tier; a plan that was never made
+            // leaves none of those, and the supervisor closes the milestone
+            // `stuck` on the strength of a memory. So this is a preference,
+            // exactly like the chain-spread preference above and subject to
+            // the same rule: it may reorder and split a tier, never empty one.
+            //
+            // # Why here
+            //
+            // This is the only place in the crate that holds both halves of
+            // the question the game answered -- *which bot*, and *from where*.
+            // `expand` chooses destinations without knowing who will walk to
+            // them, and the sites it chooses (`free_area_near`, the ore
+            // selectors) are chosen for the plan, not for a bot. Filtering
+            // there would either ban a site for everybody on one bot's
+            // evidence, or need a roster it does not have.
+            //
+            // Run `run-1788432181-42528` is what the absence cost: bot 3 was
+            // sent at `(-54.5, -12.5)` on five separate plans from the one spot
+            // it had been standing at since tick 53 700, and refused before
+            // dispatch every time, taking the rest of its chain down with it
+            // (`abandon_rest`). The destination was fine -- bot 1 worked that
+            // half of the map all run. The *pair* was not.
+            let candidate_tiers: Vec<Vec<BotId>> = candidate_tiers
+                .into_iter()
+                .map(|tier| {
+                    let (open, refused): (Vec<BotId>, Vec<BotId>) =
+                        tier.into_iter().partition(|bot| {
+                            match (sim.bot(*bot), action.required_position()) {
+                                (Some(state), Some((pos, _, _))) => {
+                                    !sim.is_walk_refused(*bot, &state.position, &pos)
+                                }
+                                // No position to walk to, or a bot this state
+                                // does not know: nothing to remember, and the
+                                // candidate loop below reports the unknown bot.
+                                _ => true,
+                            }
+                        });
+                    [open, refused]
+                })
+                .flat_map(|split| split.into_iter().filter(|tier| !tier.is_empty()))
+                .collect();
+
             // Feasibility is judged per action and per tier: another action
             // finding a bot in tier one says nothing about this one.
             let mut feasible_in_an_earlier_tier = false;

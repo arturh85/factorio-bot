@@ -5,7 +5,7 @@ use crate::ids::{BotId, ChainId, ItemId};
 use crate::method::util::rotated_collision_box;
 use factorio_bot_core::constants::BOT_FORCE;
 use factorio_bot_core::factorio::util::{add_to_rect, calculate_distance};
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::{FactorioWorld, WalkRefusal};
 use factorio_bot_core::num_traits::FromPrimitive;
 use factorio_bot_core::types::{
     Direction, FactorioEntity, FactorioTechnology, FactorioTile, PlayerId, Pos, Position, Rect,
@@ -940,6 +940,40 @@ pub struct PlanState {
     /// `Withdraw` claims nothing. That is why registering a new method ahead
     /// of `Smelt` and `Mine` moved no makespan.
     buffers: BTreeMap<Pos, Buffer>,
+    /// Walks the game's pathfinder searched for and did not find, this run.
+    ///
+    /// The `refused` field's twin for *getting somewhere* rather than for
+    /// *building somewhere*, and read the same way: once, in
+    /// [`PlanState::from_world`], off a ledger `crates/core` keeps for the
+    /// life of the world. It answers exactly one question, through
+    /// [`PlanState::is_walk_refused`] — "has this bot already been told there
+    /// is no route from where it stands to there".
+    ///
+    /// # Why it is not folded into the occupancy sources
+    ///
+    /// `refused` becomes a `Rect` and joins the five things that make ground
+    /// unbuildable, so every site search steps around it without knowing it
+    /// exists. This cannot work that way. A refused walk excludes no ground:
+    /// the destination is fine, the route is what is missing, and the fact is
+    /// about a *pair* of points, one of which is a bot. So it stays a list of
+    /// facts and is consulted where both points are in hand, which is
+    /// [`crate::schedule::schedule`]'s candidate loop — the one place that
+    /// knows which bot is being sent where.
+    ///
+    /// # Determinism
+    ///
+    /// Sorted by `(player, from, to)` with `total_cmp`, exactly as `refused`
+    /// is sorted by geometry and for the same reason: the field must not
+    /// depend on the order the game happened to refuse things in. It is read
+    /// once at construction like every other field, so two `PlanState`s built
+    /// from the same world still plan identically.
+    ///
+    /// # Empty in every fixture
+    ///
+    /// Nothing writes to `FactorioWorld::walk_refusals` unless a real walk was
+    /// refused by a real game, so every existing test world has none of these
+    /// and scheduling is bit-for-bit what it was.
+    refused_walks: Vec<WalkRefusal>,
 }
 
 impl PlanState {
@@ -1045,6 +1079,19 @@ impl PlanState {
                 .then(a.right_bottom.x.total_cmp(&b.right_bottom.x))
                 .then(a.right_bottom.y.total_cmp(&b.right_bottom.y))
         });
+        // Walks the game searched for and did not find. Taken whole rather
+        // than reduced to geometry the way `refused` is: a refused walk names
+        // a bot, a place it stood and a place it could not get to, and
+        // dropping any of the three would answer a question nobody asked.
+        let mut refused_walks: Vec<WalkRefusal> = base.walk_refusals();
+        refused_walks.sort_by(|a, b| {
+            a.player
+                .cmp(&b.player)
+                .then(a.from.x.total_cmp(&b.from.x))
+                .then(a.from.y.total_cmp(&b.from.y))
+                .then(a.to.x.total_cmp(&b.to.x))
+                .then(a.to.y.total_cmp(&b.to.y))
+        });
         // What the world last saw inside each container and machine, kept only
         // where the reading and the world still agree about what is standing
         // there. See the `buffers` field for what a buffer is and where the
@@ -1100,6 +1147,7 @@ impl PlanState {
             characters,
             refused,
             buffers,
+            refused_walks,
         }
     }
 
@@ -1979,6 +2027,46 @@ impl PlanState {
         self.refused
             .iter()
             .any(|refused| boxes_overlap(refused, &area))
+    }
+
+    /// Whether the game has already told this bot there is no route from where
+    /// it is standing to `to`.
+    ///
+    /// The walking counterpart of [`PlanState::is_site_refused`], and like it
+    /// a *verdict* rather than a model: nothing in this crate can tell whether
+    /// two points are connected — `PlanState` knows what occupies ground, not
+    /// what a pathfinder can traverse — so the only way to know is to have
+    /// been told, and the only way to still know on the next plan is to have
+    /// kept it.
+    ///
+    /// # Both arguments matter, and `from` is the one that keeps this honest
+    ///
+    /// `failed to path find` means *unreachable from here*, not unreachable.
+    /// A bot that has since moved is asking a question this ledger has no
+    /// answer to, and gets none — see [`WalkRefusal::applies_to`], which owns
+    /// the comparison so that this crate and the executor that writes the
+    /// refusals cannot drift about what "the same question" means.
+    ///
+    /// `from` is the position the *plan* has the bot at when it would set off,
+    /// which for its first step is the world's own reading and afterwards is
+    /// the plan's simulated arrival. Matching a simulated position against an
+    /// observed one is sound in the only direction that matters: it says "the
+    /// plan expects the bot to be about where it was when the game refused
+    /// it", which is exactly when the refusal still applies.
+    pub fn is_walk_refused(&self, bot: BotId, from: &Position, to: &Position) -> bool {
+        self.refused_walks
+            .iter()
+            .any(|refusal| refusal.applies_to(bot.0, from, to))
+    }
+
+    /// Every walk the game refused, in the deterministic order
+    /// [`PlanState::from_world`] sorted them into.
+    ///
+    /// Exposed for the same reason [`PlanState::refused_footprints`] is: a
+    /// plan that quietly sends a different bot and cannot say why is the
+    /// failure mode this memory would otherwise introduce.
+    pub fn refused_walks(&self) -> &[WalkRefusal] {
+        &self.refused_walks
     }
 
     /// Whether this tile is clear.

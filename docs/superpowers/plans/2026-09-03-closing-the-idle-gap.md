@@ -104,6 +104,46 @@ Two structural facts explain why nothing fills the idle:
   variant (`Have`, `Researched`, `Produced`, `Producing`, `All`) is
   demand-driven.
 
+## The offline loop is real: 4 seconds per experiment
+
+A live dump of the known-good map now exists at `workspace/scripts/map.json`
+(864 MB, produced by `factorio-bot lua dump_map.lua --clients 0 --bots 4` in
+**16 seconds**). `score-map` loads and plans against it in **~4 s**.
+
+**This is the loop to iterate in.** A planner change is now measurable ~300x
+faster than a run.
+
+### The authoritative baseline (live dump, current `master`)
+
+```
+makespan     44,548 ticks (12:22)      target: under 32,400 (9:00)
+utilisation  24.7% of 178,192 bot-ticks
+actions      109
+bot   steps  acts  walks  planned   idle
+1        90    68     22    27999   16549
+2        26    17      9     6502   38046
+3        21    12      9     4656   39892
+4        21    12      9     4878   39670
+```
+
+Resource distances on this map: iron 40.4, copper 58.3, coal 54.0, stone 32.7,
+water 46.7 (inside the plant's cheap 64-tile scan), wood 45.2. Verdict
+`VIABLE`, fingerprint `dfac0f4caa0a7500`, 17/17 charting probes covered.
+
+**This supersedes the log-reconstructed figures above** (47,127 ticks, iron
+24.9): those came from replaying `server-log.txt`, this from the game.
+
+### What the baseline says to do
+
+**Bot 1 holds 27,999 of the roster's 44,035 planned ticks — 64%** — and the
+makespan *is* bot 1's chain: 27,999 of work plus 16,549 of waiting. Bots 2-4
+idle ~39,000 ticks each.
+
+If bot 1's share were balanced across four bots **and every lag stayed exactly
+as long**, the critical path would fall to roughly 27,500 ticks — **7:38, under
+target**. Balancing is the lever; shortening lags is not required to hit 9
+minutes. That is workstream B, now dispatched with these numbers as its target.
+
 ## Measured offline: the PLAN is 13:05, so execution fixes alone cannot reach 9
 
 `a5b31c80` added `factorio-bot score-map`. Run against the reference run's own

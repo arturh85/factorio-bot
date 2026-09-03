@@ -22,6 +22,8 @@
 
 Copied verbatim from the brief. Every task's requirements implicitly include this section.
 
+> **PARTLY OBSOLETE / DANGEROUS INSTRUCTIONS (2026-09-03):** this plan's work has fully landed (Tauri is gone from the tree). Two items here are now wrong: **`cargo fmt --all` is banned by CLAUDE.md** — it rewrites other agents' in-progress files in this shared checkout — so the `cargo fmt --all &&` in this plan's verification commands must not be run; use `rustfmt --edition 2024 <file>`. And **PrimeVue is gone** (removed by plan 6, `2026-08-31-shadcn-ui-redesign.md`); the UI is Tailwind v4 plus reka-ui primitives in `app/src/components/ui/`.
+
 - `panic = "abort"` in the release profile: any `.unwrap()` reachable from a request is a remote process kill.
 - No authentication, by explicit decision.
 - Commits go to `master`; no feature branches.

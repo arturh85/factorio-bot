@@ -1,5 +1,7 @@
 # Recording the run instead of photographing it
 
+> **PARTLY OBSOLETE (2026-09-03):** the sibling spec this is "the second half" of (`2026-09-02-server-camera-design.md`) is obsolete in full, and the per-camera screenshot feature was removed end to end in `15c85c1f`. **The video half is built and has run live** (steps 2–5, `crates/core/src/record/video/`), so video is now the only visual record — every claim below that frames remain the record, or that video coexists with them, is void. The status block immediately below is also stale: two live captures exist (45m16s / 290 MB, `ffmpeg_exit: 0`); only the encoder's UPS cost is still unmeasured.
+
 Design. Steps 2–5 are now built and wired — see
 `docs/superpowers/notes/2026-09-02-video-capture-implementation.md` — but
 **nothing here has been run against a live Factorio**: no window has been
@@ -82,6 +84,8 @@ attached to a third event that happened somewhere else.
 
 ### 1.2 Frames *are* in the analysis path, in one place
 
+> **OBSOLETE (2026-09-03):** the per-camera screenshot feature this describes was removed end to end in `15c85c1f`; video capture (`crates/core/src/record/video/`) replaces it. `tickSources` now takes the video's tick range in the frames' place (`app/src/lib/runTimeline.ts:24`–`:51`), which is exactly the §9.5 change this section asked for.
+
 > "`samples.jsonl` and `map.jsonl` are the ANALYSIS artefacts; frames have never
 > once been used to diagnose a run. So moving frames to video should cost the
 > analysis path nothing — verify that claim against the code."
@@ -129,6 +133,8 @@ wall-clock warning is exactly right, and §4 is the answer to it.
 ---
 
 ## 2. What a video actually buys, and what it costs
+
+> **OBSOLETE (2026-09-03):** the per-camera screenshot feature this describes was removed end to end in `15c85c1f`; video capture (`crates/core/src/record/video/`) replaces it. The storage and cost comparisons against six-camera screenshots no longer describe a choice anyone can make, and the estimates were superseded by measurement: 947 MB of JPEGs against 290 MB of video for the same 45 minutes (`docs/superpowers/notes/2026-09-02-screenshots-retired.md`).
 
 **Buys.**
 
@@ -499,6 +505,8 @@ is a bot disappearing. The options:
 
 ## 7. Coexistence, not replacement
 
+> **OBSOLETE (2026-09-03):** the per-camera screenshot feature this describes was removed end to end in `15c85c1f`; video capture (`crates/core/src/record/video/`) replaces it. This section is contradicted in full: frames are not the record, there is no `per_bot`/`frames` capture option left, and `tickBounds` reads the video's range.
+
 **Frames remain the record. Video is `video = true` in the capture options.**
 
 The sibling spec's §4.1 already introduces
@@ -538,6 +546,8 @@ both.
 ---
 
 ## 8. Lifecycle and run binding
+
+> **PARTLY OBSOLETE (2026-09-03):** the lifecycle is built, but step 2 of "Start" is now `rcon.sampling_start(run_id)` (`crates/core/src/factorio/rcon.rs:1577`, called at `crates/scripting_lua/src/globals/record.rs:744`) — `frame_capture_start` was removed in `15c85c1f` and the session no longer renders anything. The closing note about the frames sidecar's run id is likewise dead; `videoJoin.ts` reuses `runIdCheck` from `app/src/api/runMatch.ts`.
 
 **Start.** `record.start()` (`crates/scripting_lua/src/globals/record.rs:510`)
 already mints the run id and calls `frame_capture_start(run_id)` — its own doc
@@ -632,6 +642,9 @@ per run and must be cache-busted by run id, not served `immutable` the way
 frames are (`frames.rs:381`).
 
 ### 9.4 `app/src/components/replay/ReplayScrubber.vue`
+
+> **PARTLY OBSOLETE (2026-09-03):** built — the three states exist (`app/src/components/replay/ReplayScrubber.vue:22`–`:28`, `:177`, `:197`, `:219`). But `frameAtTick` and the frame-specific `run-match-caveat` were removed in `15c85c1f`, so `videoAt` has no sibling to gain and there is no frame-side twin to write.
+
 The most invasive change, and the one with the most ways to be quietly wrong.
 
 - `current = frameAtTick(clientFrames, tick + origin)` gains a sibling
@@ -662,6 +675,9 @@ The most invasive change, and the one with the most ways to be quietly wrong.
   banner needs to cover both artefacts.
 
 ### 9.5 `app/src/lib/runTimeline.ts` — the silent one
+
+> **PARTLY OBSOLETE (2026-09-03):** done, and then overtaken. `tickSources` takes the video's tick range (`app/src/lib/runTimeline.ts:24`–`:51`); frames were removed in `15c85c1f`, so there is no frames contributor to replace and `viewsOf` / `botsOf` / `camerasOf` / `frameAt` no longer exist.
+
 `tickSources` (`:79`) pushes frame ticks into `drawn`, and `tickBounds` /
 `leadInTicks` use it. A run with video and no frames loses that contributor and
 its axis moves with no error anywhere. Fix: `tickSources` takes the video's
@@ -694,6 +710,8 @@ replay" handling at `:99`.
 ---
 
 ## 10. Failure modes
+
+> **PARTLY OBSOLETE (2026-09-03):** the table is live, but every "the run proceeds with frames" fallback is gone — screenshots were removed in `15c85c1f`, so a failed recording now leaves the run with no visual record at all, only `events.jsonl`, `samples.jsonl` and `map.jsonl`.
 
 | Failure | Detected by | Behaviour |
 | --- | --- | --- |

@@ -14,6 +14,8 @@
 
 ## Global Constraints
 
+> **OBSOLETE / DANGEROUS INSTRUCTIONS (2026-09-03):** this plan's work has fully landed, and parts of this section are now actively wrong. **`cargo fmt --all` is banned by CLAUDE.md** — it rewrites other agents' in-progress files in this shared checkout and has already done so; use `rustfmt --edition 2024 <file>`. The crates are **edition 2024**, not 2021, so a bare `rustfmt` fails on every `async fn`. The `tower-http` "MUST be 0.6, not 0.7" pin is stale: `crates/server/Cargo.toml` declares `"0.7"` and `Cargo.lock` holds exactly one copy. The frozen `start(...)` signature has since gained parameters (`crates/server/src/webserver.rs`).
+
 - Workspace root: `/home/arturh/projects/private/factorio-bot`. Rust edition 2021.
 - **All commands run inside the Nix devShell with mise tools on PATH.** Prefix every cargo invocation:
   `nix develop --command bash -c 'eval "$(mise env -s bash)"; <command>'`

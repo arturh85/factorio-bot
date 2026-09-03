@@ -3,6 +3,8 @@
 **Status:** approved in outline, not yet implemented
 **Date:** 2026-09-01
 
+> **PARTLY OBSOLETE / STATUS STALE (2026-09-03):** the status line is wrong — the recorder, JSONL event log, splits, retention, `/api/v1/runs*` and the viewer all shipped. Separately, **every passage about frames is obsolete**: the per-camera screenshot feature was removed end to end in `15c85c1f` and video capture (`crates/core/src/record/video/`) replaces it. Markers below flag the affected sections.
+
 ## Why
 
 A run today leaves almost nothing behind. Frames land in
@@ -84,6 +86,8 @@ Every event has `tick`, `wall_ms`, `kind`. Unknown kinds must be ignored by
 readers rather than rejected, so an older viewer can open a newer run.
 
 ### D3 — A run is a directory, archived out of the workspace
+
+> **OBSOLETE (2026-09-03):** the per-camera screenshot feature ("frames") this describes was removed end to end in `15c85c1f`; video capture (`crates/core/src/record/video/`) replaces it. There is no `frames/` directory, no `frames/index.json`, no `/api/v1/frames*` or `/runs/{id}/frames*` route, and no `ArchivedFrame`/`EventKind::Frame`.
 
 ```
 runs/<run-id>/
@@ -213,11 +217,15 @@ supervisor is a prerequisite of goal 1, not of goals 2-5.
 
 ### 3. Archive step
 
+> **OBSOLETE (2026-09-03):** the per-camera screenshot feature ("frames") this describes was removed end to end in `15c85c1f`; video capture (`crates/core/src/record/video/`) replaces it. There is no `frames/` directory, no `frames/index.json`, no `/api/v1/frames*` or `/runs/{id}/frames*` route, and no `ArchivedFrame`/`EventKind::Frame`.
+
 At run end: write `manifest.json` and `splits.json`, copy
 `workspace/client<N>/script-output/frames/` into `runs/<id>/frames/` **filtered
 by the run id in `run.json`**, and write `frames/index.json`.
 
 ### 4. HTTP API (`crates/server/src/runs/`)
+
+> **OBSOLETE (2026-09-03):** the per-camera screenshot feature ("frames") this describes was removed end to end in `15c85c1f`; video capture (`crates/core/src/record/video/`) replaces it. There is no `frames/` directory, no `frames/index.json`, no `/api/v1/frames*` or `/runs/{id}/frames*` route, and no `ArchivedFrame`/`EventKind::Frame`.
 
 ```
 GET  /api/v1/runs                     list: id, started, outcome, ticks, splits summary
@@ -231,6 +239,8 @@ The existing `GET /api/v1/frames` stays as-is: it answers "what is on disk for
 the *current* run", which is a different and still-useful question.
 
 ### 5. Web viewer (`app/src/`)
+
+> **OBSOLETE (2026-09-03):** the per-camera screenshot feature ("frames") this describes was removed end to end in `15c85c1f`; video capture (`crates/core/src/record/video/`) replaces it. There is no `frames/` directory, no `frames/index.json`, no `/api/v1/frames*` or `/runs/{id}/frames*` route, and no `ArchivedFrame`/`EventKind::Frame`.
 
 One route, `/runs/:id`, with four panels over a shared tick cursor:
 
@@ -248,6 +258,8 @@ Run comparison is selecting a second run in the splits panel; it loads only
 that run's `splits.json`, not its whole log.
 
 ## Disk
+
+> **OBSOLETE (2026-09-03):** the per-camera screenshot feature ("frames") this describes was removed end to end in `15c85c1f`; video capture (`crates/core/src/record/video/`) replaces it. There is no `frames/` directory, no `frames/index.json`, no `/api/v1/frames*` or `/runs/{id}/frames*` route, and no `ArchivedFrame`/`EventKind::Frame`.
 
 Frames dominate. The mod captures at 300-tick intervals — 12 frames per minute
 per camera — with three cameras configured, at 1920x1080. A 20-minute run is

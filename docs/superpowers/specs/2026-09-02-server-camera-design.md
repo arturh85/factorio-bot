@@ -1,5 +1,7 @@
 # One camera, one renderer: replacing per-client screenshots
 
+> **OBSOLETE (2026-09-03):** the per-camera screenshot feature this describes was removed end to end in `15c85c1f`; video capture (`crates/core/src/record/video/`) replaces it.
+
 **Status, corrected 2026-09-02 evening. Read this before the rest.**
 
 **Step 2 is dead.** One of the two experiments named in "What could not be
@@ -31,6 +33,8 @@ not a saving.
 
 ## The recommendation in one paragraph
 
+> **OBSOLETE (2026-09-03):** the per-camera screenshot feature this describes was removed end to end in `15c85c1f`; video capture (`crates/core/src/record/video/`) replaces it.
+
 Split the proposal in two, because it is two changes wearing one name.
 
 1. **One renderer, one camera** — the mod stops registering a camera per
@@ -54,6 +58,8 @@ would move six cameras into the server process, which is the wrong direction.
 ---
 
 ## 1. What exists today
+
+> **OBSOLETE (2026-09-03):** the per-camera screenshot feature this describes was removed end to end in `15c85c1f`; video capture (`crates/core/src/record/video/`) replaces it.
 
 ### 1.1 The capture
 
@@ -141,6 +147,8 @@ frame ≈ 470 KB.
 
 ## 2. Can the server render?
 
+> **OBSOLETE (2026-09-03):** the per-camera screenshot feature this describes was removed end to end in `15c85c1f`; video capture (`crates/core/src/record/video/`) replaces it.
+
 **The binary can. The server, as launched today, cannot — and that is a
 configuration, not a construction.**
 
@@ -226,6 +234,8 @@ project and it is not this one.
 
 ## 3. What the camera API actually offers
 
+> **OBSOLETE (2026-09-03):** the per-camera screenshot feature this describes was removed end to end in `15c85c1f`; video capture (`crates/core/src/record/video/`) replaces it.
+
 From `workspace/factorio-api-docs/runtime-api.json` (2.1.17, runtime stage),
 `LuaGameScript::take_screenshot` — the only class that provides it, alongside
 `take_technology_screenshot` and `set_wait_for_screenshots_to_finish`. Every
@@ -272,6 +282,8 @@ one.
 ---
 
 ## 4. What changes
+
+> **OBSOLETE (2026-09-03):** the per-camera screenshot feature this describes was removed end to end in `15c85c1f`; video capture (`crates/core/src/record/video/`) replaces it.
 
 ### 4.1 Mod
 
@@ -329,6 +341,8 @@ one.
 ---
 
 ## 5. What the camera follows
+
+> **OBSOLETE (2026-09-03):** the per-camera screenshot feature this describes was removed end to end in `15c85c1f`; video capture (`crates/core/src/record/video/`) replaces it.
 
 **Decision: `director` — the bot with the most recent dispatched action,
 framed together with that action's target; falling back to the all-bot bounding
@@ -403,6 +417,8 @@ first version: hold a subject for a minimum number of captures, or run
 
 ## 6. What is lost
 
+> **OBSOLETE (2026-09-03):** the per-camera screenshot feature this describes was removed end to end in `15c85c1f`; video capture (`crates/core/src/record/video/`) replaces it.
+
 **Per-bot point of view.** Today every bot has a camera, so any tick can be
 inspected from any bot's position. With one directed camera, at a given tick you
 see one bot and whatever else is in frame. Specifically:
@@ -438,6 +454,8 @@ render cost on every run.
 
 ## 7. Migration
 
+> **OBSOLETE (2026-09-03):** the per-camera screenshot feature this describes was removed end to end in `15c85c1f`; video capture (`crates/core/src/record/video/`) replaces it.
+
 **Nothing on disk is converted.** 7.4 GB of archived runs, up to 3142 frames
 each, stay exactly as they are.
 
@@ -464,6 +482,8 @@ each, stay exactly as they are.
 ---
 
 ## 8. Video or frames
+
+> **OBSOLETE (2026-09-03):** the per-camera screenshot feature this describes was removed end to end in `15c85c1f`; video capture (`crates/core/src/record/video/`) replaces it.
 
 **Frames stay the artefact. Video is generated on demand and is not stored.**
 
@@ -498,6 +518,8 @@ frames, and they remain joinable.
 ---
 
 ## 9. Implementation plan
+
+> **OBSOLETE (2026-09-03):** the per-camera screenshot feature this describes was removed end to end in `15c85c1f`; video capture (`crates/core/src/record/video/`) replaces it.
 
 Each step is independently reviewable and independently revertable. Steps 1–5
 do not touch how Factorio is launched.
@@ -547,6 +569,8 @@ this configuration before keeping it.
 ---
 
 ## 10. What could not be determined without running the game
+
+> **OBSOLETE (2026-09-03):** the per-camera screenshot feature this describes was removed end to end in `15c85c1f`; video capture (`crates/core/src/record/video/`) replaces it.
 
 1. **Whether `--host` accepts `--rcon-port` / `--rcon-password` /
    `--server-settings` and starts the RCON listener.** The strings show `--host`

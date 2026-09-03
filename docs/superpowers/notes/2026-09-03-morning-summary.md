@@ -3,6 +3,48 @@
 The detail is in `2026-09-02-morning-report.md`, which is 1,200 lines of
 append-only log. This is the two-minute version.
 
+## Where stage 2 actually stands (read this first)
+
+**Stage 2 is NOT done. No witness has ever seen red science, and no cell has
+ever produced anything.** Nine live runs tonight; the sections below are in
+reverse order of discovery, so this is the arc.
+
+**What genuinely advanced:**
+
+* **Rung 1 now reproduces six consecutive times** on independent fresh worlds.
+* **Run 9 passed rung 2's plan time for the first time ever** — 107 steps —
+  where run 8 refused in three seconds.
+* **Run 4's game accepted all eight of the cell's placements.** The geometry,
+  siting and pole coverage work in a real game; "the cell can be built" is now
+  observed rather than modelled.
+* Three real fixes landed and are green: the stage-2 cell layout, wood from
+  trees (`b0e3e12e`), and the chain owner (`60ade9de`).
+
+**What actually cost the night, and it was not the planner:** `set_recipe` was
+committed hours before it ever reached a game. In a debug build there is no
+embedded mod snapshot, so `FACTORIO_BOT_REFRESH_MODS=1` is a **no-op**, a stale
+`workspace/mods` copy wins, and the one log line that would have said so is
+gated behind `if !silent` and never printed. Six of the nine runs died on that
+and its knock-ons (a save generated without the mod poisons every later run;
+orphaned servers block the next run's ports). **The only trustworthy check is
+to grep the workspace mod for the symbol you just added.**
+
+**The one engineering item that would change the most:** `min_radius` is
+dropped when `Condition::AtPosition` is lowered into `StepKind::Walk`, so the
+executor aims a bot at the tile centre the planner explicitly said it must not
+stand on. Six live refusals, all under one tile. It is not cosmetic — the full
+chain is *walk refused -> that bot's entire remaining chain abandoned -> replan
+-> power plant re-sited -> refusal -> run dead*, which is exactly how run 9,
+the best run of the night, ended.
+
+**What I got wrong, since you asked for it plainly:** I misdiagnosed the mod
+staleness once before getting it right; I applied a "remedy" that deleted the
+bridge mod and poisoned two runs; I claimed twice that the run record carries no
+inventories when `samples.jsonl` has them; I claimed the world persists between
+runs when it does not; and I let two agents write in one checkout, so a run
+started against a tree another agent was still editing and I nearly read its
+failure as evidence against a fix it never contained.
+
 ## The headline
 
 **The seven-rung ladder is closed, and it is repeatable and deterministic.**

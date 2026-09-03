@@ -11,19 +11,30 @@ use crate::types::PlayerId;
 /// How long the connect wait tolerates **no progress** before proceeding
 /// without the clients that never showed up.
 ///
-/// Ninety seconds is the number the wait has always used, kept deliberately:
-/// it is unchanged for a run where nobody ever connects, so this is not a
-/// licence to hang. What changed is what it measures. It used to be an
-/// absolute budget from the first poll, which made the wait give up while
-/// clients were still arriving — run 30 quit at ~90 s and its third client
-/// joined at 106.6 s (`docs/superpowers/notes/2026-09-02-bot-one-idle.md`).
-/// Now it restarts every time another client appears.
+/// Ninety seconds was the number the wait had always used, until two runs
+/// back to back on a loaded machine (2026-09-03 evening, ~17:23-17:26,
+/// `free`: 24 of 30 GiB used, `uptime` load average 10.66) both stalled at
+/// zero of four clients despite every client eventually connecting: client 1
+/// reached `Factorio initialised` at 123.5 s and joined the game at 125.0 s,
+/// past a 90 s-from-launch cutoff that had already restarted once at the
+/// first poll and had nothing to restart it again before that. Raised to
+/// 300 s on the owner's instruction after that pair of failures, not as a
+/// blanket slowdown: every other run logged tonight connected within 1-3
+/// polls, so this is headroom for a contended machine, not the new normal
+/// wait.
+///
+/// It is unchanged for a run where nobody ever connects, so this is not a
+/// licence to hang. What it measures: it used to be an absolute budget from
+/// the first poll, which made the wait give up while clients were still
+/// arriving — run 30 quit at ~90 s and its third client joined at 106.6 s
+/// (`docs/superpowers/notes/2026-09-02-bot-one-idle.md`). Now it restarts
+/// every time another client appears.
 ///
 /// The total wait is still bounded, without a second timer: progress is a
 /// high-water mark that can rise at most `expected` times, so the wait cannot
 /// exceed `(expected + 1) * CONNECT_STALL_TIMEOUT`, and it only approaches
 /// that when clients really are trickling in.
-pub const CONNECT_STALL_TIMEOUT: Duration = Duration::from_secs(90);
+pub const CONNECT_STALL_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// What the caller should do after a poll.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,11 +157,11 @@ mod tests {
         let t0 = Instant::now();
         let mut watcher = ConnectWatcher::new(2, t0);
         assert_eq!(
-            watcher.observe(0, t0 + Duration::from_secs(89)),
+            watcher.observe(0, t0 + CONNECT_STALL_TIMEOUT - Duration::from_secs(1)),
             ConnectWait::Waiting
         );
         assert_eq!(
-            watcher.observe(0, t0 + Duration::from_secs(91)),
+            watcher.observe(0, t0 + CONNECT_STALL_TIMEOUT + Duration::from_secs(1)),
             ConnectWait::Stalled
         );
     }
@@ -172,9 +183,9 @@ mod tests {
             "back to two, which is not two more than we ever had"
         );
         assert_eq!(
-            watcher.observe(2, at(101)),
+            watcher.observe(2, at(10) + CONNECT_STALL_TIMEOUT + Duration::from_secs(1)),
             ConnectWait::Stalled,
-            "stalled 90 s after the last real progress at 10 s, not after 60 s"
+            "stalled CONNECT_STALL_TIMEOUT after the last real progress at 10 s, not after 60 s"
         );
         assert_eq!(watcher.best(), 2);
     }

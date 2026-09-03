@@ -310,7 +310,38 @@ The owner's framing: "usually one starts with miner+furnace pairs" — a drill
 feeding a furnace directly, which removes both the mining and the hauling
 from a bot's critical path.
 
-### F. The lag clock starts too late — DIAGNOSED, and it is the biggest single item
+### F. The lag clock starts too late — **FIXED** (`c8ef0d91`)
+
+**Landed.** `await_preds` now accumulates `finish(pred) + lag(pred)` per
+predecessor and takes the max; `wait_out_lag` waits
+`deadline.saturating_sub(now)`, zero when already past. The executor's
+dispatch condition is now `deps_ready` from `schedule.rs:285` evaluated
+against *observed* finish ticks rather than planned ones — previously the two
+could differ by the entire span a bot spent doing other work.
+
+Route: the log was passed into `await_preds` rather than widening
+`Status::Success(Ticks)` — `Status` is `Copy`, serde-serialised, and reaches
+the browser through the OpenAPI seam, so widening it would change a wire
+shape to move a number `replied_tick` already holds. Race-free by
+construction: the settle path writes under the log guard and only then
+publishes `Success`.
+
+Verified by mutation three times: arrival-based timing fails all three new
+tests and none of the four old ones — exactly the gap that let this survive.
+A half-fix keeping an absolute deadline but collapsing the predecessor
+pairing also fails all three. 145 executor tests green.
+
+**A fixture bug was found and fixed on the way**: `RecordingAct` reported a
+fixed `(900_001, 900_002)` tick pair for every dispatch while `game_tick()`
+counted from zero — two clocks free to disagree. Invisible to a wait measured
+from arrival, and nonsense for one measured from a predecessor's finish, so
+no origin test could have meant anything until it was fixed.
+
+**Not claimed:** any wall-clock saving on a real run. What is verified is
+plan-versus-execution agreement.
+
+<details><summary>Original diagnosis (retained)</summary>
+
 
 **This was "the unexplained 3.6-minute gap". It is a defect, and it is worth
 ~32% of the run.** Full diagnosis:
@@ -375,6 +406,8 @@ ordering (`run.rs:280-322`) is corrected for free by the same change.
 **Not claimed:** that fixing this cuts 6.8 minutes off the run. Bot 1 holds 90
 of 96 steps so it is probably close to the critical path, but that is a
 prediction and must be measured on the benchmark seed.
+
+</details>
 
 **The other three bots are idle from 32,793 to the end (48,504 ticks) but are
 not blocked by this** — the plan gave them two steps each and they finished.

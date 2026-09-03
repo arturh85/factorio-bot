@@ -38,6 +38,23 @@
 //!
 //! The clap surface below is deliberately kept: it is the interface any
 //! resurrection would implement, and `--help` is where a reader looks first.
+//!
+//! # Half of it now exists as `score-map`
+//!
+//! Workstream 0b built the scoring half: `factorio-bot score-map`
+//! (`crate::cli::score_map`) takes a dumped world and reports resource
+//! distances, water, a verdict and the real `expand()` + `schedule()`
+//! makespan. The plumbing this comment called for turned out not to be
+//! needed at all — a world dump is read straight into `PlanState`, so there
+//! is no Lua runtime to read a `Schedule` back out of.
+//!
+//! What is still missing is exactly what this command was: the loop that
+//! *generates* the maps, which needs a live Factorio per seed. That is
+//! written down as a recipe in `tools/seed_search.sh` and in `score-map
+//! --help` rather than automated here, because `--seed` only takes effect
+//! together with `--new` and `--new` deletes the workspace's map. Anyone
+//! resurrecting this command should make it drive `score-map`, not
+//! reimplement it.
 
 use crate::cli::{SETTINGS_PRECEDENCE_HELP, Subcommand, SubcommandCallback};
 use clap::{Arg, Command, value_parser};

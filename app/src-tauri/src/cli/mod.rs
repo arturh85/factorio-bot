@@ -9,6 +9,7 @@ mod rcon;
 mod repl;
 #[cfg(feature = "lua")]
 mod roll_seed;
+mod score_map;
 #[cfg(feature = "restapi")]
 mod serve;
 mod start;
@@ -110,6 +111,7 @@ pub fn subcommands() -> Vec<Box<dyn Subcommand>> {
     #[cfg(debug_assertions)]
     playground::build(),
     plan::build(),
+    score_map::build(),
     #[cfg(feature = "repl")]
     repl::build(),
     #[cfg(feature = "restapi")]

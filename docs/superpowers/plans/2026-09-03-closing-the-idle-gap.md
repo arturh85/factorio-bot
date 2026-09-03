@@ -251,7 +251,108 @@ makes the paused experiments cheap to resume.
 
 </details>
 
-### 0b. A reasonable starting seed — resources close to spawn
+### 0b. A reasonable starting seed — the scorer, **DONE**; the search, **NOT RUN**
+
+**Part 1 landed: `factorio-bot score-map`.** Part 2 — actually generating
+maps and choosing a seed — is deliberately not done, because it needs a live
+Factorio and live experiments are paused. **No seed has been chosen, scored or
+validated.**
+
+#### What landed
+
+`crates/planner/src/score.rs` (`MapScore`, pure and deterministic, beside
+`PlanReport` and for the same reason) plus `factorio-bot score-map`
+(`app/src-tauri/src/cli/score_map.rs`), which prints both tiers for one dumped
+world and involves no game:
+
+- **Distance** — nearest charted tile of `iron-ore`, `copper-ore`, `coal`,
+  `stone` and **water**, priced as ticks of walking at the planner's own
+  `WALK_TILES_PER_TICK`, so the proxy is in the same units as the makespan it
+  is a proxy for. `walk_score` is their sum; lower is better.
+- **Makespan** — the real `expand()` + `schedule()` for
+  `researched:automation`, reported as `PlanReport`. **A refusal is a verdict,
+  not a crash**: a map the planner will not plan is the strongest thing that
+  can be said against it, so the error is printed and the command exits 0.
+  A seed sweep that aborted on its first bad map would be useless.
+
+`scripts/dump_map.lua` is the t=0 dump (it does nothing else), and
+`tools/seed_search.sh` is the loop, written down and not run.
+
+#### Water is the constraint, and it is the planner's own number
+
+`plan_plant` scans 64 tiles and then 128; past 128 it raises
+`PowerPlantNeedsWater`, the goal does not expand, and the lab never gets
+power. So **water beyond 128 tiles disqualifies a map outright**, and
+`score-map` reports it as missing even when a tile was found — "found, but too
+far to use" and "not found" are the same outcome for a run. Both constants
+were made `pub` rather than copied.
+
+#### Wood is a requirement, but not a *map* requirement
+
+This section said trees were "a bonus". They are on the plant's bill: a
+`small-electric-pole` is 1 wood + 2 copper cable. But every bot starts holding
+one wood and a four-bot run has exactly four, so a treeless map still
+researches automation and a tree is only the fallback. `score-map` reports the
+nearest tree and never lets it change a verdict.
+
+#### Charting bounds the whole approach, and the bound was checked
+
+`EntityGraph` holds **charted** chunks, so a t=0 score is of what has been
+*seen*. Nothing in `mods/BotBridge` calls `force.chart`; the mod replays
+`surface.get_chunks()` once at `whoami("server")` and then reacts to
+`on_chunk_generated`. Measured off `workspace/server-log.txt`: **418 chunks,
+tiles spanning `[-320, 320)` on both axes**. Every point inside a disc of
+radius 256 has `|x| <= 256 < 320`, so the default search disc fits inside what
+a t=0 dump already knows — which is what makes scoring a fresh map worth
+doing.
+
+That is one measured save and not a guarantee, so `MapScore::charting` probes
+17 points across the disc per dump and the report leads with the answer. Two
+residual limits it cannot repair: `control.lua:1311` drops any chunk outside
+`[-512, 512]` for ever, and the discovery pass has been seen returning empty
+chunks whose contents arrived thousands of ticks later
+(`notes/2026-09-02-resource-double-count.md`) — so a t=0 census is a **lower
+bound**. A missing resource is `Incomplete`, never "absent".
+
+#### The one real map scored so far
+
+Not a seed search: the world in `workspace/server/saves/level.zip`,
+reconstructed offline by replaying `workspace/server-log.txt` through
+`OutputParser` and dumping the result. **Its seed is unknown** — the log says
+`Loading map`, not creating one, and `--seed` was silently ignored before
+`61ec7364`.
+
+```
+iron-ore  24.9    copper-ore  29.8    coal  54.5    stone  67.8    water  40.8
+walk score 1454 ticks (00:00:24)      charting 17/17 probes      VIABLE
+makespan  47,127 ticks (13:05) over bots 1-4, 23.7% utilisation
+```
+
+Two things to read off it. The map the reference run was on is already a
+*good* one by this measure — everything inside 68 tiles, water inside the
+cheap 64-tile scan — which weakens the case that a seed search is where the
+remaining minutes are. And `walk_score` of 1,454 ticks against bot 1's
+**measured** 14,330 ticks of walking shows how loose the proxy is: rung 1
+walks to each resource repeatedly and between them, so the sum of one-way
+distances is roughly a tenth of the real cost. It ranks maps; it does not
+predict a run.
+
+#### Seed `20260903` has NOT been scored
+
+It cannot be, offline: no map exists for it. `just bench` would create one,
+and creating one is a live run. It remains what the justfile says it is — a
+date, chosen for being written down, not for being good.
+
+#### The tension with `BENCHMARK_SEED`, unresolved
+
+The justfile argues the opposite of this workstream in as many words:
+searching for a seed that scores well "stops being comparable to the ~9 minute
+manual solo baseline, which was not run on an optimised map". Both positions
+are defensible and they cannot both hold. **Whoever picks a seed owns that
+decision**, and the number quoted afterwards has to say which seed it came
+from either way.
+
+<details><summary>Original workstream text (retained)</summary>
 
 **Walking is 21% of bot 1's run.** Against a 6:12 target, 4 minutes of
 walking would consume two thirds of the entire budget. No amount of
@@ -289,6 +390,8 @@ ignored until `61ec7364`, so every earlier run used an uncontrolled map;
 `20260903` is documented as the benchmark seed but has never been run and
 has not been scored by any of the above. Scoring it is part of this
 workstream — it may well not be a good map.
+
+</details>
 
 ### A. Fill idle time — for bots 2-4, not bot 1 (see the budget above)
 

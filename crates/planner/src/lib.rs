@@ -8,6 +8,7 @@ pub mod network;
 pub mod render;
 pub mod report;
 pub mod schedule;
+pub mod score;
 pub mod state;
 
 /// Test-only worlds. Not part of the crate's API: research needs a world with
@@ -29,5 +30,8 @@ pub use render::{graphviz, mermaid_gantt, ticks_to_timestamp};
 pub use report::{BotReport, PlanReport};
 pub use schedule::{
     Schedule, ScheduledStep, StepKind, WALK_TILES_PER_TICK, schedule, travel_ticks,
+};
+pub use score::{
+    ChartingScore, MapScore, RUNG_1_ORES, ResourceScore, Verdict, WaterScore, WoodScore,
 };
 pub use state::{BotState, Buffer, PlanState};

@@ -133,7 +133,7 @@ impl Subcommand for ThisCommand {
 /// weld a whole subtree to one pair of hands, which is what the reference run
 /// found gave bot 1 all 25 crafts. Naming a bot is possible and takes
 /// `--goal-json`, where it is visible.
-fn parse_goal(spec: &str) -> Result<Goal> {
+pub(crate) fn parse_goal(spec: &str) -> Result<Goal> {
   let parts: Vec<&str> = spec.split(':').collect();
   let count = |raw: &str| -> Result<u32> {
     raw
@@ -171,7 +171,7 @@ fn parse_goal(spec: &str) -> Result<Goal> {
 /// what it is given and never renumbers it. `[1, 3]` is an ordinary roster
 /// (bot 2's client failed to connect) and packing it to `[1, 2]` would plan
 /// for a player that is not there.
-fn parse_roster(raw: &str) -> Result<Vec<BotId>> {
+pub(crate) fn parse_roster(raw: &str) -> Result<Vec<BotId>> {
   let mut bots = Vec::new();
   for part in raw.split(',') {
     let part = part.trim();
@@ -197,7 +197,7 @@ fn parse_roster(raw: &str) -> Result<Vec<BotId>> {
 ///
 /// Used when `--bots` is absent, so the default answer is "the roster the run
 /// that took this dump actually had" rather than a number invented here.
-fn roster_from(world: &FactorioWorld) -> Vec<BotId> {
+pub(crate) fn roster_from(world: &FactorioWorld) -> Vec<BotId> {
   let mut bots: Vec<BotId> = world
     .players
     .iter()
@@ -205,6 +205,19 @@ fn roster_from(world: &FactorioWorld) -> Vec<BotId> {
     .collect();
   bots.sort();
   bots
+}
+
+/// Reads a dump off disk, or says which file and why not.
+///
+/// `pub(crate)` because `score-map` reads the same file for the same reason
+/// and a second `serde_json::from_str` with a different error message would
+/// be a second answer to "is this a world dump".
+pub(crate) fn load_world(world_path: &std::path::Path) -> Result<Arc<FactorioWorld>> {
+  let raw = std::fs::read_to_string(world_path)
+    .map_err(|err| miette!("could not read {}: {err}", world_path.display()))?;
+  let world: FactorioWorld = serde_json::from_str(&raw)
+    .map_err(|err| miette!("{} is not a world dump: {err}", world_path.display()))?;
+  Ok(Arc::new(world))
 }
 
 /// Reads the dump, plans, and returns the report plus the lines to print
@@ -219,11 +232,7 @@ fn plan_from_dump(
   goal_json: &[String],
   roster: Option<&str>,
 ) -> Result<(PlanReport, Vec<String>)> {
-  let raw = std::fs::read_to_string(world_path)
-    .map_err(|err| miette!("could not read {}: {err}", world_path.display()))?;
-  let world: FactorioWorld = serde_json::from_str(&raw)
-    .map_err(|err| miette!("{} is not a world dump: {err}", world_path.display()))?;
-  let world = Arc::new(world);
+  let world = load_world(world_path)?;
 
   let mut goals: Vec<Goal> = Vec::new();
   for spec in specs {

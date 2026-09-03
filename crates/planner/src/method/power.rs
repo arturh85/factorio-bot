@@ -116,7 +116,7 @@ pub const PLANT_COAL: u32 = 5;
 /// The number itself is unchanged at 64 because nothing about the cheap scan
 /// changed; raising it would only move work from the second tier into the
 /// first.
-const PLANT_WATER_SCAN_RADIUS: f64 = 64.;
+pub const PLANT_WATER_SCAN_RADIUS: f64 = 64.;
 
 /// How far [`plan_plant`] looks when the cheap scan found nothing, in tiles.
 ///
@@ -140,7 +140,7 @@ const PLANT_WATER_SCAN_RADIUS: f64 = 64.;
 /// statement about what was looked at -- true, and actionable -- rather than a
 /// statement about what is allowed, which is what the old bound claimed and
 /// could not support.
-const PLANT_WATER_WIDE_SCAN_RADIUS: f64 = 128.;
+pub const PLANT_WATER_WIDE_SCAN_RADIUS: f64 = 128.;
 
 /// How far around the nearest water tile a shoreline is looked for, in tiles.
 ///

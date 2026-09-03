@@ -193,7 +193,67 @@ had 6. Something re-seeded it in between and I could not attribute it. What is
 not in doubt is that run 4's *game* had the old mod — Factorio loads mods at
 server start, and the game itself raised the missing-function error.
 
-## The min_radius fix is GREEN IN TESTS AND STALLS A LIVE RUN
+## I was wrong about the regression: run 11 had ONE bot, not four
+
+**Retracted.** I called `c0d4f87a` a regression and had it reverted. The
+evidence I gave was invalid, and the fix has been restored (`cea43a5b`,
+`crates/` byte-identical to the original, workspace green).
+
+Run 11 ran with **one bot**. From `plan_created` in each record:
+
+```
+run-1788405365-21697  bots=[1,2,3,4]  acts=244  makespan=86721
+run-1788408407-02764  bots=[1,2,3,4]  acts=244  makespan=86721
+run-1788413329-43771  bots=[1,2,3,4]  acts=244  makespan=86721
+run-1788418841-48581  bots=[1]        acts=104  makespan=62754
+```
+
+and the log says why, four lines above the step count I quoted:
+
+```
+Gave up waiting for clients after 90.36s with no further progress:
+0/4 have a character. Missing client(s): [1, 2, 3, 4].
+planning for 0 of 4 bot(s) ...
+roster ready: 1 bot(s) after 195 checks
+```
+
+A one-bot plan is a *different plan* — different chain ownership, different
+sharing — so 314 against 134 needed no explanation from the diff at all. Nothing
+in it can change roster size.
+
+**What I actually did wrong.** I compared two runs on the assumption that only
+my variable had changed, without checking the one field that says what the run
+was given. `plan_created.bots` was in the record the whole time. It is the same
+error as the walk-refusal misreading four hours earlier: I took two numbers that
+shared a *shape* and treated them as sharing a *cause*.
+
+**The check that makes a run comparable at all:** confirm
+`plan_created.bots == [1,2,3,4]` before drawing any conclusion from a step
+count, a makespan, or a failure. Clients not connecting is common enough here to
+be the default suspicion, not an afterthought.
+
+**The stall itself remains unexplained**, and that is worth carrying: with one
+bot the run planned 104 actions and dispatched none in thirteen minutes. Whether
+a one-bot roster alone causes that, or something else does, is not established.
+The agent ruled out several candidates in its own code — the first two steps are
+crafts, which carry no position and never reach `approach_annulus`; `too far
+away, moving first!` comes from seven action sites in `rcon.rs` it did not
+touch; and a zero request radius needs a build reach under 1.27, contradicted by
+the walk being charged the same 330 ticks in all four runs.
+
+**One hang shape worth remembering even though it was ruled out:** an
+ulp-correction loop `while calculate_distance(&goal, target) < aim { nudge }`
+would spin forever if `Position::new` quantised to Factorio's 1/256 grid, and
+would look *exactly* like what I saw — log stops dead, nothing dispatches, no
+error, no deadline. `Position` is a plain `{x: f64, y: f64}` with a non-rounding
+`new`, so it terminates. That is the signature to look for if this recurs.
+
+**Two tooling traps that cost the agent time:** `git diff` here is wired to
+difftastic, so `git diff | git apply` fails with "No valid patches in input" —
+use `git diff --no-ext-diff` or `git revert`. And `cat` is aliased to `bat`, so
+`cat -v` / `cat -A` fail with a clap usage error.
+
+## Superseded: the stall report that prompted the revert
 
 **`c0d4f87a` is currently on master and a run cannot execute with it.** Run 11
 (`run-1788418841-48581`), same unchanged `level.zip` as runs 8/9/10:

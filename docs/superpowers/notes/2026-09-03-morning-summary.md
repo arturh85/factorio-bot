@@ -193,6 +193,36 @@ had 6. Something re-seeded it in between and I could not attribute it. What is
 not in doubt is that run 4's *game* had the old mod — Factorio loads mods at
 server start, and the game itself raised the missing-function error.
 
+## The cell was BUILT and both recipes were SET — all nine actions succeeded
+
+From run 10's record, every cell action settled `success`:
+
+```
+success | place assembling-machine-1 at [-12.5, -58.5]
+success | place assembling-machine-1 at [-12.5, -62.5]
+success | place inserter at [-10.5, -58.5]
+success | place inserter at [-10.5, -62.5]
+success | place inserter at [-12.5, -60.5]
+success | place iron-chest at [-9.5, -58.5]
+success | place iron-chest at [-9.5, -62.5]
+success | set assembling-machine-1 to iron-gear-wheel
+success | set assembling-machine-1 to automation-science-pack
+```
+
+**That is the first time `set_recipe` has ever executed in a game, and it
+worked.** The layout, the siting, the inserter directions, the pole coverage and
+both recipes are now observed in a real world rather than modelled.
+
+**Be exact about what this is not.** Standing and recipe-set are verified;
+production is not. The chests still need charging — 30 iron plates and 15 copper
+— and the run died in the smelting work that does it, before any witness ran.
+"The cell stands" is precisely the claim this project has been wrong about four
+times, so it is worth writing the distinction down rather than rounding up:
+**nine actions succeeded, zero packs exist.**
+
+What remains between here and stage 2 is the charge and the witness — not the
+design.
+
 ## Run 10 named the mechanism itself: the walk ends inside a collision box
 
 **The healthiest run of the night, and it ends by proving the `min_radius`

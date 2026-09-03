@@ -42,24 +42,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// rejected with a dedicated message rather than falling through to "unknown
 /// field".
 const KNOWN_PREDICATE_KEYS: &[&str] = &[
-    "kind",
-    "bot",
-    "start",
-    "finish",
-    "id",
-    "label",
-    "entity",
-    "item",
-    "count",
-    "tech",
-    "slot",
+    "kind", "bot", "start", "finish", "id", "label", "entity", "item", "count", "tech", "slot",
     // A walk's tolerance. A plain number, so unlike `to` it compares; the
     // comparison is exact equality on an `f64`, which is what a caller asking
     // `{ radius = 10 }` means and all this predicate language offers.
     "radius",
-    // And its inner bound, on the same terms. A walk serving a placement has
-    // a non-zero one; every other walk has zero.
-    "min_radius",
 ];
 
 /// What a plan was planned *from*: everything a later recovery needs to
@@ -846,11 +833,7 @@ fn step_to_lua(lua: &Lua, net: &ActionNetwork, step: &ScheduledStep) -> LuaResul
     t.set("start", start)?;
     t.set("finish", finish)?;
     match &step.what {
-        StepKind::Walk {
-            to,
-            min_radius,
-            radius,
-        } => {
+        StepKind::Walk { to, radius } => {
             t.set("kind", "walk")?;
             t.set("to", position_to_lua(lua, to)?)?;
             // Additive: `to` keeps the meaning every existing script reads it
@@ -859,11 +842,6 @@ fn step_to_lua(lua: &Lua, net: &ActionNetwork, step: &ScheduledStep) -> LuaResul
             // near this" -- which for a place/insert/remove is the difference
             // between a reachable request and the entity's own tile.
             t.set("radius", *radius)?;
-            // And `min_radius` is the other half of the same precondition:
-            // how close is *too* close. A placement's target is ground the
-            // acting bot must not be standing on, and a step that published
-            // only `radius` said the opposite -- that distance zero was fine.
-            t.set("min_radius", *min_radius)?;
         }
         StepKind::Act { action, label } => {
             let action_id: ActionId = *action;
@@ -1275,7 +1253,6 @@ mod tests {
         steps.push(ScheduledStep {
             what: StepKind::Walk {
                 to: Position::new(5.0, 5.0),
-                min_radius: 1.25,
                 radius: 7.5,
             },
             bot: BotId(2),
@@ -1321,11 +1298,6 @@ mod tests {
             -- reach the game as "stand on the furnace".
             assert(by_kind.walk.radius == 7.5,
               "walk carries its radius, got " .. tostring(by_kind.walk.radius))
-            -- And its inner bound. Publishing only the outer one said a
-            -- placement could be made from distance zero, which is the tile
-            -- the placement is going on.
-            assert(by_kind.walk.min_radius == 1.25,
-              "walk carries its min_radius, got " .. tostring(by_kind.walk.min_radius))
             assert(by_kind.walk.id == nil, "a walk is not an action")
             assert(by_kind.mine.item and by_kind.mine.count and by_kind.mine.pos)
             assert(by_kind.craft.item and by_kind.craft.count)

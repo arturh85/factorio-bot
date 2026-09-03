@@ -1,7 +1,7 @@
 use crate::actuator::{ActionTicks, Actuator, ActuatorError, ActuatorFailure};
 use async_trait::async_trait;
 use factorio_bot_core::constants::BOT_FORCE;
-use factorio_bot_core::factorio::rcon::{ActionFailure, Dispatch, FactorioRcon, approach_annulus};
+use factorio_bot_core::factorio::rcon::{ActionFailure, Dispatch, FactorioRcon, approach_radius};
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::record::map::{EntitySnapshot, Placement, drift_between};
 use factorio_bot_core::types::{PlayerId, Position};
@@ -282,30 +282,20 @@ impl Actuator for RconActuator {
         &self,
         bot: BotId,
         to: Position,
-        min_radius: f64,
         radius: f64,
     ) -> Result<ActionTicks, ActuatorFailure> {
         let p = self.player(bot)?;
         // `None` here — Factorio's own default radius of 1 — is what turned
         // "stand within 10 tiles of the furnace" into "stand on the furnace",
         // and the pathfinder answered with a substituted goal 9.3 tiles from
-        // where the plan believed the bot would be. The plan's *whole*
-        // condition is passed instead: `approach_annulus` shrinks a plain disc
-        // exactly as `approach_radius` always did, and turns an annulus into a
-        // goal-and-radius that fits inside it, so a request can no longer be
-        // satisfied by standing on ground the plan called forbidden.
-        //
-        // Where the bot is now is an input, not decoration: it decides which
-        // side of the target to aim at, and it is a fact this layer has and
-        // the planner does not.
-        let here = self
-            .world
-            .players
-            .get(&p)
-            .map(|player| player.position.clone());
-        let (goal, slack) = approach_annulus(&to, min_radius, radius, here.as_ref());
+        // where the plan believed the bot would be. The plan's tolerance is
+        // passed instead, shrunk by `approach_radius` for the same reason a
+        // mine's corrective walk is: the path ends on a tile centre and the
+        // mod's follower stops within a box of it, so a request for R comes to
+        // rest at up to about R + 1.1 and only a request inside the bound
+        // lands inside the bound.
         self.rcon
-            .move_player_timed(&self.world, p, &goal, Some(slack))
+            .move_player_timed(&self.world, p, &to, Some(approach_radius(radius)))
             .await
             .map_err(classify)
     }
@@ -847,7 +837,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap()
-            .block_on(actuator.walk(BotId(1), Position::new(10.0, 10.0), 0.0, 3.0))
+            .block_on(actuator.walk(BotId(1), Position::new(10.0, 10.0), 3.0))
             .expect_err("a disconnected rcon cannot request a path");
         assert!(
             matches!(f.error, ActuatorError::Rejected(_)),

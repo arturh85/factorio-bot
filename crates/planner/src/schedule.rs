@@ -35,14 +35,6 @@ pub fn travel_ticks(from: &Position, to: &Position, min_radius: f64, radius: f64
 /// The position simulated as reached once a walk into `(min_radius, radius]`
 /// around `to` completes.
 ///
-/// **This is the plan's own bookkeeping, not a destination for the executor.**
-/// It is what [`schedule`] advances the simulated bot to, and what any replay
-/// of a schedule must advance it to, so that the two agree. It is deliberately
-/// *not* what [`StepKind::Walk`] carries: naming a point commits to ground the
-/// planner cannot see, and run 10's refusal is what that costs. Public so a
-/// replay uses this implementation rather than an open-coded `to.x() +
-/// min_radius`, which is precisely the sum the ulp correction below exists for.
-///
 /// For a plain disc (`min_radius == 0.`) this is `to` itself: the centre
 /// trivially satisfies "within radius of `to`" for any non-negative radius,
 /// which is why a disc's walk has always simply moved the bot onto the
@@ -76,7 +68,7 @@ pub fn travel_ticks(from: &Position, to: &Position, min_radius: f64, radius: f64
 /// was added to prevent, while a point rounded outward is merely a fraction of
 /// a nanotile further away. One `next_up` normally suffices; the loop is there
 /// so correctness does not rest on "normally".
-pub fn arrival_point(to: &Position, min_radius: f64) -> Position {
+fn arrival_point(to: &Position, min_radius: f64) -> Position {
     if min_radius.total_cmp(&0.0).is_le() {
         return to.clone();
     }
@@ -99,51 +91,23 @@ pub enum StepKind {
         action: ActionId,
         label: String,
     },
-    /// Go stand in the annulus `(min_radius, radius]` around `to`.
+    /// Go stand within `radius` of `to`.
     ///
-    /// **`to` is the thing to get near, not a tile to occupy.** All three
-    /// fields are the `Condition::AtPosition` this walk exists to satisfy,
-    /// copied verbatim, so `to` is routinely a position the bot can never
-    /// stand on — the tile an insert's furnace sits on, the tile a place is
-    /// about to build on, or the ore a mine consumes. Anywhere in the annulus
-    /// satisfies the condition, and the actuator is expected to resolve it
-    /// against the game, which is the only party that knows what is walkable.
+    /// **`to` is the thing to get near, not a tile to occupy.** Both fields
+    /// come from the `Condition::AtPosition` this walk exists to satisfy, so
+    /// `to` is routinely a position the bot can never stand on — the tile an
+    /// insert's furnace sits on, or the ore a mine consumes. Anywhere within
+    /// `radius` of it satisfies the condition, and the actuator is expected to
+    /// aim for the ring rather than the centre.
     ///
-    /// # Both bounds are here because both have been dropped before
-    ///
-    /// `radius` used to be dropped while `travel_ticks` went on using it,
+    /// `radius` used to be dropped here while `travel_ticks` went on using it,
     /// which made every such walk execute as "stand exactly on it". The
     /// pathfinder cannot route onto an occupied tile, so it silently
     /// substituted a goal of its own and the bot ended up wherever that
     /// happened to be — the 2026-08-30 live smelt run's walk `s4`, 9.3 tiles
     /// from where the plan believed it stood.
-    ///
-    /// `min_radius` was then dropped in the same way, and hidden better. This
-    /// step used to carry a *substituted* `to` — the point [`arrival_point`]
-    /// picks at exactly `min_radius` along `+x` — with `radius` forced to
-    /// zero, so the inner bound was baked into a single named coordinate and
-    /// the executor was handed no bound at all. Two things went wrong with
-    /// that, both live:
-    ///
-    /// - The direction is arbitrary and the planner does not know what is
-    ///   walkable, so the named point can be inside something else entirely.
-    ///   Run 10's walk to `[-61.72941750255542, 11]` was refused before
-    ///   dispatch because it "would end at `[-61.7265625, 11]`, inside a
-    ///   collision box spanning `[-61.71, 10.54]` to `[-60.91, 11.34]`". The
-    ///   guard was right; the destination should never have been chosen here.
-    /// - A zero `radius` reaches `approach_radius` and comes back as its floor
-    ///   of 0.5, so the pathfinder was free to end half a tile *inside*
-    ///   `min_radius` — the exclusion zone the field exists to enforce.
-    ///
-    /// Handing both bounds over intact lets
-    /// [`factorio_bot_core::factorio::rcon::approach_annulus`] ask the game
-    /// for a disc that fits inside the annulus, and lets the game pick the
-    /// point.
     Walk {
         to: Position,
-        /// The annulus's inner bound: how close is *too* close. Zero for
-        /// every walk that is not serving a `Place`.
-        min_radius: f64,
         radius: f64,
     },
 }
@@ -513,33 +477,31 @@ pub fn schedule(
             let (target, min_radius, radius) = action
                 .required_position()
                 .expect("travel is non-zero only when a position is required");
-            // The condition, verbatim. The step says what has to become true
-            // — "be in `(min_radius, radius]` around `target`" — and says
-            // nothing about which point satisfies it, because that is a
-            // question about walkable ground and `PlanState` knows only what
-            // entities occupy. Resolving it here is what run 10 paid for: the
-            // annulus used to be lowered to `arrival_point`'s single named
-            // coordinate at zero tolerance, and the point it names along a
-            // fixed `+x` landed inside a collision box the planner could not
-            // see. See [`StepKind::Walk`].
+            // For a disc (`min_radius == 0.`) this is `target` and `radius`
+            // unchanged — the walk this has always emitted. For an annulus,
+            // "go stand within `radius` of `target`" would be a lie: `target`
+            // is inside the exclusion zone, and a wide `radius` around it
+            // would happily let the pathfinder stop right back on it. The
+            // walk must instead name a point the annulus actually accepts —
+            // `arrival_point` again, at zero tolerance, so the step the plan
+            // records is a claim the replay-time precondition check can
+            // verify, not just a number `travel_ticks` charged for internally.
+            let to = arrival_point(&target, min_radius);
+            let walk_radius = if min_radius.total_cmp(&0.0).is_gt() {
+                0.0
+            } else {
+                radius
+            };
             steps.push(ScheduledStep {
                 what: StepKind::Walk {
-                    to: target.clone(),
-                    min_radius,
-                    radius,
+                    to: to.clone(),
+                    radius: walk_radius,
                 },
                 bot: chosen.bot,
                 start: chosen.walk_start,
                 end: chosen.walk_start + chosen.travel,
             });
-            // The *simulated* arrival is still `arrival_point`, exactly as the
-            // per-candidate feasibility fork above used it. It is the least
-            // committal point that satisfies the condition, and it is a claim
-            // about the plan's own bookkeeping rather than about the world —
-            // which is precisely why it must not be what the executor is
-            // handed. Keeping it unchanged keeps every downstream tick, and
-            // therefore every makespan, identical.
-            sim.set_position(chosen.bot, arrival_point(&target, min_radius));
+            sim.set_position(chosen.bot, to);
         }
 
         // No precondition check here: selection already proved every one of them
@@ -678,7 +640,6 @@ mod tests {
                 ScheduledStep {
                     what: StepKind::Walk {
                         to: Position::new(10., 20.),
-                        min_radius: 0.0,
                         radius: 3.0,
                     },
                     bot: BotId(1),
@@ -842,20 +803,17 @@ mod tests {
         let bots = [BotId(1)];
         let result = schedule(&net, &state(&bots), &bots).unwrap();
         match &result.steps[0].what {
-            StepKind::Walk {
-                to,
-                min_radius,
-                radius,
-            } => {
-                // The stored walk must carry the annulus itself -- not "within
-                // 10 of the origin", which the bot already satisfied without
-                // moving, and not a single coordinate on the inner edge, which
-                // is a guess about walkable ground the planner cannot make.
-                // Both bounds, unaltered, is the only claim it can honestly
-                // hand the executor.
-                assert_eq!(*to, Position::new(0., 0.));
-                assert_eq!(*min_radius, 1.5);
-                assert_eq!(*radius, 10.0);
+            StepKind::Walk { to, radius } => {
+                // The stored walk must be a claim the annulus itself accepts
+                // -- not "within 10 of the origin", which the bot already
+                // satisfied without moving. Landing exactly on the inner edge
+                // at zero tolerance is what makes that claim checkable.
+                assert_eq!(*radius, 0.0);
+                assert_eq!(
+                    calculate_distance(to, &Position::new(0., 0.)),
+                    1.5,
+                    "the walk must land exactly on the annulus's inner edge"
+                );
             }
             other => panic!(
                 "standing inside the inner bound must still produce a walk, got {:?}",
@@ -935,40 +893,26 @@ mod tests {
         let bots = [BotId(1)];
         let result = schedule(&net, &state(&bots), &bots)
             .expect("a bot 75 tiles away can always walk to a placement site");
-        let condition = Condition::AtPosition {
-            who: Actor::Role,
-            pos: target.clone(),
-            radius: 10.0,
-            min_radius: STONE_FURNACE_CLEARANCE,
-        };
         match &result.steps[0].what {
-            StepKind::Walk {
-                to,
-                min_radius,
-                radius,
-            } => {
-                // The step is the condition. It no longer names a point, so
-                // there is no longer a coordinate here that could disagree
-                // with the annulus it was derived from.
-                assert_eq!(*to, target);
-                assert_eq!(*min_radius, STONE_FURNACE_CLEARANCE);
-                assert_eq!(*radius, 10.0);
+            StepKind::Walk { to, .. } => {
+                let condition = Condition::AtPosition {
+                    who: Actor::Role,
+                    pos: target.clone(),
+                    radius: 10.0,
+                    min_radius: STONE_FURNACE_CLEARANCE,
+                };
+                let mut arrived = state(&bots);
+                arrived.set_position(BotId(1), to.clone());
+                assert!(
+                    condition.holds(&arrived, BotId(1)),
+                    "the walk the plan records must satisfy the condition it \
+                     was emitted for: landed {} from the target, inner bound {}",
+                    calculate_distance(to, &target),
+                    STONE_FURNACE_CLEARANCE,
+                );
             }
             other => panic!("a bot 75 tiles out must be walked in, got {:?}", other),
         }
-        // The ulp regression itself: the point the scheduler *simulates* as
-        // reached — which is what its own precondition check runs against, and
-        // what rejected the plan in run-1788325660-10154 — must satisfy the
-        // condition it was constructed for.
-        let mut arrived = state(&bots);
-        arrived.set_position(BotId(1), arrival_point(&target, STONE_FURNACE_CLEARANCE));
-        assert!(
-            condition.holds(&arrived, BotId(1)),
-            "the arrival the plan simulates must satisfy the condition it was \
-             emitted for: landed {} from the target, inner bound {}",
-            calculate_distance(&arrival_point(&target, STONE_FURNACE_CLEARANCE), &target),
-            STONE_FURNACE_CLEARANCE,
-        );
     }
 
     /// The class, not just the instance. Whether `to.x() + min_radius` rounds

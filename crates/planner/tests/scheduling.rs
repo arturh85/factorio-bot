@@ -2,7 +2,6 @@ use factorio_bot_core::test_utils::fixture_world;
 use factorio_bot_core::types::{FactorioEntity, Position};
 use factorio_bot_planner::action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot};
 use factorio_bot_planner::ids::ActionIdGen;
-use factorio_bot_planner::schedule::arrival_point;
 use factorio_bot_planner::{
     ActionId, ActionNetwork, BotId, PlanState, PlannerError, Schedule, ScheduledStep, StepKind,
     Ticks, schedule,
@@ -238,18 +237,8 @@ fn assert_preconditions_hold_over_time(
     let mut timeline: Vec<(Ticks, u8, BotId, Event)> = Vec::new();
     for step in &result.steps {
         match &step.what {
-            StepKind::Walk { to, min_radius, .. } => {
-                // A `Walk` names the annulus, not a point in it -- the point
-                // is the game's to choose. What the *plan* believes it reached
-                // is `arrival_point`, the same function `schedule()` advances
-                // its own simulation with, so a replay that used anything else
-                // would be checking a different plan than the one scheduled.
-                timeline.push((
-                    step.end,
-                    0,
-                    step.bot,
-                    Event::Arrive(arrival_point(to, *min_radius)),
-                ));
+            StepKind::Walk { to, .. } => {
+                timeline.push((step.end, 0, step.bot, Event::Arrive(to.clone())));
             }
             StepKind::Act { action, .. } => {
                 timeline.push((step.end, 0, step.bot, Event::Apply(*action)));
@@ -349,7 +338,6 @@ fn the_time_ordered_replay_catches_an_overlapping_schedule() {
     let arrive = |bot| ScheduledStep {
         what: StepKind::Walk {
             to: pos.clone(),
-            min_radius: 0.0,
             radius: 3.0,
         },
         bot,

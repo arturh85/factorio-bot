@@ -710,7 +710,6 @@ mod tests {
             _: BotId,
             _: Position,
             _: f64,
-            _: f64,
         ) -> Result<crate::actuator::ActionTicks, crate::ActuatorFailure> {
             Ok(crate::actuator::ActionTicks::UNKNOWN)
         }

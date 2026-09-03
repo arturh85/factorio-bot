@@ -104,6 +104,43 @@ Two structural facts explain why nothing fills the idle:
   variant (`Have`, `Researched`, `Produced`, `Producing`, `All`) is
   demand-driven.
 
+## The path to under 9 minutes — a budget, not a hope
+
+Bot 1's 19.62-minute span is the run. Spending it down:
+
+| step | what it removes | bot 1 span |
+|---|---|---|
+| baseline | — | **19.62 min** |
+| **F** — lag clock starts at the predecessor's finish | 6.89 min of idle (F accounts for ~99% of it) | **12.72 min** |
+| **B + R3** — split the mining across four bots | `mine` is 5.25 min, the largest single activity; four ways is ~1.31 | **~8.8 min** |
+| **C** — overlap `research` (1.67 min) and `craft` (1.83) with walking | up to ~2 min more, minus what cannot overlap | **~7 min** |
+| **0b** — a seed with ore near spawn | some of the 3.98 min of walking | **lower** |
+
+**F plus splitting the mining is what reaches the target.** Everything else is
+margin. That is a materially different conclusion from this plan's first
+draft, which ranked "fill idle time" first on a mis-measured 12.5-minute idle
+figure.
+
+### The floor, and why it is not zero
+
+Two costs are irreducible without more machines:
+
+- **Research is 5,999 ticks (1.67 min) of lab time.** A hard floor for the
+  milestone itself.
+- **Machine time.** The cell's modelled lag alone is 12,240 ticks (3.4 min) —
+  `51 * 240`, the drill's 240 ticks/ore. The milestone cannot complete before
+  that elapses, no matter how many bots wait for it.
+
+So roughly **5 minutes of the 6:12 world record is machine time and lab
+time**. A human speedrunner is not working faster than us during it; they are
+*doing something else* while it runs. That is exactly what F stops us
+throwing away, what A fills, and what D/E shorten by adding machines.
+
+**This reorders the plan's own premise.** After F, bot 1 has little idle left
+to fill — so **A's value is not bot 1 at all**, it is bots 2, 3 and 4, which
+are idle for 48,504 ticks apiece while doing 0.6 minutes of work each. A is
+about the roster, not about the busiest bot.
+
 ## Workstreams, in value order
 
 ### 0. Offline planning on a real map — do this FIRST
@@ -189,7 +226,7 @@ ignored until `61ec7364`, so every earlier run used an uncontrolled map;
 has not been scored by any of the above. Scoring it is part of this
 workstream — it may well not be a good map.
 
-### A. Fill idle time — worth up to 12.5 min
+### A. Fill idle time — for bots 2-4, not bot 1 (see the budget above)
 
 The largest single lever, and the one with no existing mechanism.
 
@@ -232,7 +269,7 @@ Needs: a `Condition` naming chest contents; planner methods that route
 through it; executor support for take/insert against a buffer chest;
 a placement rule for where the buffer lives.
 
-### C. Overlap crafting with other work — worth up to ~1.7 min directly, more indirectly
+### C. Overlap crafting AND research with other work — ~2 min, approved for full implementation
 
 In Factorio hand-crafting runs in a **background queue**: a player queues
 crafts and keeps walking and mining. The mod already uses `begin_crafting`

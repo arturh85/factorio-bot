@@ -858,7 +858,7 @@ fn boiler_near(state: &PlanState, anchor: &Position) -> Option<Position> {
 }
 
 /// A `Place` step for one part, with its site reserved as it is emitted.
-fn place_step(ctx: &mut ExpansionCtx, part: &CellPart) -> (Step, ActionId) {
+fn place_step(ctx: &mut ExpansionCtx, part: &CellPart) -> Step {
     let entity = entity_for(&ctx.state, part);
     let name = entity.name.clone();
     let position = part.position.clone();
@@ -909,7 +909,7 @@ fn place_step(ctx: &mut ExpansionCtx, part: &CellPart) -> (Step, ActionId) {
         label: format!("place {} at {}", name, position),
     }));
     ctx.state.create_entity(entity);
-    (step, id)
+    step
 }
 
 /// The steps that build `cells`, and the ids a caller must order its own work
@@ -983,8 +983,7 @@ fn cell_steps(
 
     for cell in cells {
         for part in &cell.parts {
-            let (step, _) = place_step(ctx, part);
-            steps.push(step);
+            steps.push(place_step(ctx, part));
         }
 
         let Some(chain) = links(cell) else {

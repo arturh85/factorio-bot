@@ -11,6 +11,21 @@ four bots.
 
 ---
 
+## Owner decisions (2026-09-03, before an unattended night)
+
+1. **Success is game time, from run start to milestone satisfied.** Not
+   roster-ready, not wall clock. The reference run is 21.34 min on that
+   clock. The target is **under 9 minutes**; the single-player world record
+   researches automation at **6:12**.
+2. **Workstream C is approved for full implementation**, including the
+   executor's per-bot concurrency change — not design-only.
+3. **Savepoints are preferred over cheat hatches.** Cheating and teleporting
+   are **fine during development**, to reach an untested stage quickly. The
+   **final measured runs must be as cheat-free as we can get them.** Any run
+   that used a cheat path must say so in provenance, and `--compare` must
+   refuse to compare it against an honest run. This promotes workstream G
+   (milestone saves) from "queued" to the supported way of making runs cheap.
+
 ## The measurement that reframes the problem
 
 From `workspace/runs/run-1788465258-49050` (21.34 min game time, roster

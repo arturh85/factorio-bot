@@ -193,6 +193,37 @@ had 6. Something re-seeded it in between and I could not attribute it. What is
 not in doubt is that run 4's *game* had the old mod — Factorio loads mods at
 server start, and the game itself raised the missing-function error.
 
+## Run 10 named the mechanism itself: the walk ends inside a collision box
+
+**The healthiest run of the night, and it ends by proving the `min_radius`
+diagnosis.** Run 10 (`run-1788413329-43771`) closed rung 1 with `success=173
+pending=0`, **zero failed actions and zero failed walks** — the seventh
+consecutive reproduction — planned rung 2 at 107 steps (identical to run 9), and
+executed the cell past the point that killed run 9, with **no plant re-siting
+refusal**. The adoption fix held.
+
+It then halted on a pre-flight guard that states the cause outright:
+
+```
+the walk to [-61.72941750255542, 11] would end at [-61.7265625, 11], inside a
+collision box spanning [-61.71, 10.54] to [-60.91, 11.34] — a character cannot
+stand there, so the walk could only stall
+```
+
+That is `min_radius` exactly. The planner specified an annulus so the bot would
+stand *clear* of that box; `StepKind::Walk` dropped `min_radius`; the executor
+aimed at the centre. The guard is refusing correctly — the bug is that it is
+handed such a destination at all, and it turned seven mysterious "no path"
+answers into one precise sentence.
+
+**Read that as a lesson about instrumentation, not just about walks.** Seven
+identical failures produced nothing but `failed to path find`. The eighth, met
+by a guard that knew what it was looking at, produced coordinates, a box and a
+reason. The difference was not more logging — it was a check placed where the
+question is actually decidable.
+
+No witness. Stage 2 remains not done.
+
 ## Correction: they are not all tile centres — the invariant is sub-tile distance
 
 Run 10's **eighth** refusal targets `(-51.7265625, 11)` from

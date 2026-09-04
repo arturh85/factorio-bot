@@ -162,6 +162,82 @@ Two structural facts explain why nothing fills the idle:
   variant (`Have`, `Researched`, `Produced`, `Producing`, `All`) is
   demand-driven.
 
+## Green science: the cell now resolves, blocked by two further walls (`240d3efb`)
+
+**Red is byte-identical** — 205 actions, makespan 30,077, utilisation 38.8%.
+
+### The design: one intermediate machine with two mouths, not two machines
+
+The cell is still **two machines and never three**; what widened is how many
+ingredients the *intermediate* may take (`MAX_FEED = 2`).
+
+**Two is forced by geometry, not chosen.** The intermediate presents three
+tiles to its west, and the 5x5 supply area of the cell's single small pole
+reaches only two of them. A third feed chest needs a second pole, and a pole is
+one wood out of the four a run has. So **"allow a second intermediate machine"
+was not the smaller change I proposed in the brief — the version with `inserter`
+as an intermediate is not buildable at all**, needing three feed chests under a
+pole that lights two.
+
+Consequently green resolves with no tie-break: `transport-belt` fits an
+intermediate, `inserter` (three ingredients) does not. **Whole inserters are
+chest-fed and hand-crafted** — one level coarser than the chest-fed
+`electronic-circuit` I floated, and strictly more hand-work: **12 inserters per
+cell per charge** (24 for a `:6` plan), each dragging a circuit, gear and plate
+behind it. This is a first green cell, not a green factory.
+
+### Two things the widening made load-bearing
+
+- **`bill` now merges by item.** Green's supply chest holds `inserter`s, which
+  is also what three of the cell's own links are made of — two `Goal::Have`
+  subgoals naming one item are satisfied by the *same* inventory, so the cell
+  would have been built out of the inserters its chest was meant to hold.
+  Nothing in red's bill repeats, which is why red does not move.
+- **`cells_standing` now asks whether a feeder's source has anything to give.**
+  A belt machine fed iron plates and no gears stands, is powered, delivers
+  nothing, and used to count as a whole cell. A one-feed cell cannot express
+  that case, which is why nobody hit it.
+
+### Wall 1: the green cell takes the tiles red's lab needs
+
+```
+logistic-science-pack needs a lab, and no ground within 12 tiles of [7.5, -40.5]
+is both free and inside a supply area (117 powered tiles are built on,
+351 free ones have no supply)
+```
+
+Red's lab goes at `[5.5, -40.5]`; the green cell's **second feed chest and
+inserter sit on exactly those tiles.** The cell is sited inline — it must be,
+the site comes from the pole — while the research that unlocks green is a
+subgoal expanded afterwards. A red cell is one row narrower and leaves the
+hole. Named rather than papered over: `PlannerError::ResearchNeedsRoom`, with
+the two counts separated because powered-but-built-on and free-but-unpowered
+want opposite fixes.
+
+### Wall 2: a pre-existing scheduler defect, and it blocks green regardless
+
+```
+$ factorio-bot plan --world workspace/scripts/map.json \
+      --goal researched:logistic-science-pack --bots 1,2,3,4
+Error: the plan did not schedule: bot 1 owns chain ChainId(50) because its bill
+       was sized against it, but burner-mining-drill at [-44, -11] does not hold there
+```
+
+`researched:automation` plans fine at 30,077 on the same world, so this is
+specific to the path green takes. It is the **sizing-versus-binding invariant**
+speaking — R3 established that a chain owner is a hard single-candidate
+constraint with no fallback tier, deliberately. Something on this path sizes a
+bill against bot 1 and then requires an entity bot 1 does not hold.
+
+**`assemble.rs` is not on this path** — no method in the workspace emits a
+`Goal::Producing` subgoal, and `researched:logistic-science-pack` alone fails
+identically. Under investigation.
+
+### Still true and still untouched
+
+`BUFFER_ENTITIES` omits `iron-chest`, so the planner cannot see what a cell's
+chests hold — **including the 12 hand-made inserters it just put in one.**
+
 ## STAGE 3: green science does not plan at all — a capability gap, not a defect
 
 ```

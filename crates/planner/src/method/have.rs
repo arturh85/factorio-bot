@@ -4700,13 +4700,41 @@ fn chest_ticks(state: &PlanState, builder: BotId) -> Option<Ticks> {
 /// * **Mining seats**, the gate that makes over-firing an outright failure
 ///   rather than a slow plan: a split claims one working spot per supplier
 ///   where a solo mine claims one in total, and a claim is never released
-///   during an expansion. Same term as `worth_converging`'s G6, and it is why
-///   this cannot simply fire on everything.
+///   during an expansion. **Stricter than `worth_converging`'s G6**, and the
+///   difference is a measured inversion -- see the next section.
 /// * **The buffer has to pay for itself.** A chest that must be built costs its
 ///   own bill plus a placement, so the taker's saving has to exceed that;
 ///   `already_standing` drops the term for a chest a sibling stockpile already
 ///   put on this patch, which is what makes the second and later bills against
 ///   one patch nearly free.
+///
+/// # The chest's price the taker never sees: seats on the patch
+///
+/// Everything above is priced in taker ticks, and on the taker's own chain
+/// the chest is cheap: a bill of five ore is 600 ticks of digging traded for a
+/// ten-tick take. On 2026-09-04 the crate's own rung-1 fixture nonetheless
+/// measured the plan **1,185 ticks longer** with the chest than without
+/// (30,136 against 28,951). Not one tick of that was the chest's bill, its
+/// placement, its stocks or its take. It was the fixture's iron patch, which
+/// seats nine: one five-ore stockpile put three supplier runners on it, and
+/// when the twenty-ore shared smelt for the cell's plate came to the same
+/// patch, `worth_converging`'s G6 found four seats where it needed eight and
+/// refused -- so the taker mined those twenty by hand, 2,400 ticks on the
+/// critical path, to save 600.
+///
+/// The same plan on `test_world::widen_ore_front`'s twelve-seat front has
+/// both, and the chest saves 152 ticks; on the reference map
+/// (`workspace/scripts/map.json`), whose patches hit the twelve-seat cap, it
+/// saves 3,275 on `researched:automation` and 11,155 on
+/// `producing:automation-science-pack:6`. So the chest pays where the patch
+/// can seat it and the shared smelt after it, and costs where it cannot --
+/// which is a fact about seats, not about the chest, and is gated on seats.
+///
+/// This was found, and checked, against the two mechanisms this doc had
+/// blamed first: the taker's ticks (the chest still nets positive on the
+/// starved fixture) and the rocks (`Chop` claims no iron; the wide fixture
+/// has the same rocks and the chest still pays). The `Chop` registry entry's
+/// measurements stand unchanged.
 fn worth_stockpiling(
     state: &PlanState,
     item: &str,
@@ -4746,9 +4774,25 @@ fn worth_stockpiling(
         return None;
     }
     let k = shares.len() as u32;
-    // The seat gate, `worth_converging`'s G6 verbatim -- see it for the
-    // measurement behind the slack term.
-    if seats < k.saturating_add(known.len() as u32) {
+    // The seat gate. **Not** `worth_converging`'s G6, and the difference is
+    // the whole of the 2026-09-04 inversion -- see the doc above.
+    //
+    // G6 keeps `known` seats spare after its own `k`, and its doc derives that
+    // number from what the *rest of the plan* wants at once: one seat per
+    // mining runner, at most one runner per bot. A stockpile is not a runner
+    // per bot -- it is `k` runners for one bill, all held for the rest of the
+    // expansion -- and it is expanded *first*, because it sits on the small
+    // early `Have`s of a chain while the shared smelt sits on the plate goal
+    // that comes after them. So the seats G6 spares are exactly the seats the
+    // next converging method on this patch claims, and two converging methods
+    // in sequence can never both pass G6 on a patch G6 was calibrated for:
+    // the first spends the reserve the second one needs.
+    //
+    // This therefore reserves a whole further convergence: after this bill's
+    // `k`, a later `worth_converging` must still find its own `k' + known`,
+    // and `k'` is at most `known`. Stated as the inequality, not the number,
+    // so a roster change moves it.
+    if seats < k.saturating_add((known.len() as u32).saturating_mul(2)) {
         return None;
     }
 
@@ -12011,23 +12055,11 @@ mod stockpiling {
     use factorio_bot_core::types::Pos;
     use std::sync::Arc;
 
-    /// Rung 1's fixture with trees the planner can read a bill off.
-    ///
-    /// The shared fixture's hundred `tree-42`s carry no `mine_result` and
-    /// yield nothing (see `test_world::with_trees`), which is exactly why
-    /// every R3 test is unaffected by this workstream: with no wood there is
-    /// no chest, and `Stockpile` refuses. These four `tree-01`s are what turn
-    /// the same fixture into one a stockpile can be built on.
-    fn wooded_rung_one(bots: &[BotId]) -> PlanState {
-        let world = crate::test_world::with_trees(
-            crate::test_world::world_with_trigger_prerequisite(),
-            &[
-                Position::new(6., 6.),
-                Position::new(8., 6.),
-                Position::new(10., 6.),
-                Position::new(12., 6.),
-            ],
-        );
+    /// Rung 1's starting inventories, on whichever world a test wants them.
+    fn rung_one_on(
+        world: factorio_bot_core::factorio::world::FactorioWorld,
+        bots: &[BotId],
+    ) -> PlanState {
         let mut state = PlanState::from_world(Arc::new(world), bots);
         for bot in bots {
             state.gain(*bot, "wood", 1);
@@ -12038,34 +12070,89 @@ mod stockpiling {
         state
     }
 
+    /// `world` with trees the planner can read a bill off.
+    ///
+    /// The shared fixture's hundred `tree-42`s carry no `mine_result` and
+    /// yield nothing (see `test_world::with_trees`), which is exactly why
+    /// every R3 test is unaffected by this workstream: with no wood there is
+    /// no chest, and `Stockpile` refuses. These four `tree-01`s are what turn
+    /// the same fixture into one a stockpile can be built on.
+    fn wooded(
+        world: factorio_bot_core::factorio::world::FactorioWorld,
+    ) -> factorio_bot_core::factorio::world::FactorioWorld {
+        crate::test_world::with_trees(
+            world,
+            &[
+                Position::new(6., 6.),
+                Position::new(8., 6.),
+                Position::new(10., 6.),
+                Position::new(12., 6.),
+            ],
+        )
+    }
+
+    /// Rung 1 on the shared fixture, with trees.
+    ///
+    /// **A stockpile never fires on this world any more**, and that is the
+    /// point of keeping it: its iron patch seats nine, and `worth_stockpiling`
+    /// refuses a patch that cannot seat both the stockpile and the shared
+    /// smelt that comes after it. Tests that need a chest built use
+    /// [`wide_wooded_rung_one`]; this one is for the refusal and for
+    /// `worth_stockpiling` called directly with an explicit seat count.
+    fn wooded_rung_one(bots: &[BotId]) -> PlanState {
+        rung_one_on(
+            wooded(crate::test_world::world_with_trigger_prerequisite()),
+            bots,
+        )
+    }
+
     /// The same fixture with the trees taken away, which is the same plan with
     /// the chest taken away: `Stockpile` needs wood and refuses without it.
     /// The control for every "did the chest move anything" claim here.
     fn treeless_rung_one(bots: &[BotId]) -> PlanState {
-        let mut state = PlanState::from_world(
-            Arc::new(crate::test_world::world_with_trigger_prerequisite()),
-            bots,
-        );
-        for bot in bots {
-            state.gain(*bot, "wood", 1);
-            state.gain(*bot, "stone-furnace", 1);
-            state.gain(*bot, "burner-mining-drill", 1);
-            state.gain(*bot, "iron-plate", 8);
-        }
-        state
+        rung_one_on(crate::test_world::world_with_trigger_prerequisite(), bots)
     }
 
-    fn plan_rung_one(bots: &[BotId]) -> (ActionNetwork, crate::schedule::Schedule) {
-        let state = wooded_rung_one(bots);
+    /// [`wooded_rung_one`] on `test_world::widen_ore_front`'s iron front,
+    /// which seats twelve -- room for a stockpile *and* the shared smelt
+    /// behind it, which is the world a chest is worth building in.
+    fn wide_wooded_rung_one(bots: &[BotId]) -> PlanState {
+        rung_one_on(
+            wooded(crate::test_world::widen_ore_front(
+                crate::test_world::world_with_trigger_prerequisite(),
+            )),
+            bots,
+        )
+    }
+
+    /// [`wide_wooded_rung_one`]'s control: the same front, no wood, no chest.
+    fn wide_treeless_rung_one(bots: &[BotId]) -> PlanState {
+        rung_one_on(
+            crate::test_world::widen_ore_front(crate::test_world::world_with_trigger_prerequisite()),
+            bots,
+        )
+    }
+
+    /// `researched:automation` over `bots` on `state`, expanded and scheduled.
+    fn plan_rung_one_on(
+        state: &PlanState,
+        bots: &[BotId],
+    ) -> (ActionNetwork, crate::schedule::Schedule) {
         let net = expand(
             &[Goal::Researched("automation".into())],
-            &state,
+            state,
             &registry_for(bots),
             BotId(1),
         )
         .expect("rung 1 expands");
-        let plan = schedule(&net, &state, bots).expect("rung 1 schedules");
+        let plan = schedule(&net, state, bots).expect("rung 1 schedules");
         (net, plan)
+    }
+
+    /// The rung-1 plan a chest is built in: the wide, wooded fixture.
+    fn plan_rung_one(bots: &[BotId]) -> (ActionNetwork, crate::schedule::Schedule) {
+        let state = wide_wooded_rung_one(bots);
+        plan_rung_one_on(&state, bots)
     }
 
     fn chests_placed(net: &ActionNetwork) -> usize {
@@ -12206,61 +12293,131 @@ mod stockpiling {
     ///
     /// Makespan is the measurement, and deliberately not the mining split. A
     /// per-bot mining share was tried first and says the opposite of the
-    /// truth: on this fixture bot 1 digs *more* raw units with the chest (79
-    /// of 134 against 67 of 134) while the plan finished **5,338 ticks
-    /// sooner** (35,541 against 40,879), because what the chest moves off the
-    /// critical path is the digging that stood in front of the cell's fuel
-    /// load, not digging in general. Counting units answers a question nobody
-    /// is asking.
+    /// truth: on the original fixture bot 1 dug *more* raw units with the
+    /// chest (79 of 134 against 67 of 134) while the plan finished **5,338
+    /// ticks sooner** (35,541 against 40,879), because what the chest moves
+    /// off the critical path is the digging that stood in front of the cell's
+    /// fuel load, not digging in general. Counting units answers a question
+    /// nobody is asking.
     ///
-    /// # 2026-09-04: the sign flipped, and it is not the rocks' fault
+    /// # 2026-09-04: the sign flipped, and it was the seats
     ///
-    /// This asserted `with_chest.makespan < without.makespan` until `Chop`
-    /// moved ahead of `Mine`. It now measures **30,136 with the chest against
-    /// 28,951 without** -- the chest costs 8 steps and 1,185 ticks instead of
-    /// saving 5,338.
+    /// This asserted `with_chest.makespan < without.makespan` on the shared
+    /// nine-seat fixture until `Chop` moved ahead of `Mine`, then measured
+    /// **30,136 with the chest against 28,951 without** and was reduced to a
+    /// 5% bound with no sign. The doc at the time blamed the chest's fixed
+    /// cost against a shorter critical path. That was wrong: one five-ore
+    /// stockpile's three supplier runners left the patch with four seats, and
+    /// the twenty-ore shared smelt behind it needed eight, so the taker mined
+    /// those twenty by hand. `worth_stockpiling` now reserves the smelt's
+    /// seats (see its doc), which on nine seats means no chest at all --
+    /// `a_chest_yields_to_the_smelt_on_a_patch_too_small_for_both` -- and on
+    /// this twelve-seat front means both fire.
     ///
-    /// The chest is not built for stone or coal: `Chop` is registered ahead of
-    /// `Stockpile` and claims those goals outright, so what `Stockpile` still
-    /// splits here is **iron ore**, which no rock yields and which this change
-    /// did not touch. What changed is the plan around it. The chest's saving
-    /// was always "digging taken off the critical path", and the critical path
-    /// that digging stood in front of -- the cell's fuel load -- is now two
-    /// swings at a rock. The fixed cost of the chest (a placement, a stock per
-    /// supplier, a take per consumer) did not shrink with it.
-    ///
-    /// So this is a `Stockpile` cost-model question that rocks *exposed*
-    /// rather than caused, and it is left open deliberately: fixing it means
-    /// pricing the chest against the plan it is inserted into, which is a
-    /// different piece of work. Until then this test refuses a *large*
-    /// regression rather than asserting either sign, and names both figures so
-    /// the day someone closes it is visible.
+    /// The margin here is small, **28,799 against 28,951**, and honestly so:
+    /// the chest takes 2,542 ticks of work off bot 1 (21,617 against 24,159
+    /// planned), but bot 1 then idles 7,182 ticks on furnace and cell lags,
+    /// so little of the saving reaches the makespan on this fixture. On the
+    /// reference map, where bot 1's chain binds, the same chest saves 3,275
+    /// of 32,172 on this goal. The sign is what is asserted; the size is the
+    /// fixture's.
     #[test]
-    fn the_chest_costs_little_enough_to_be_worth_keeping() {
+    fn the_chest_makes_the_plan_shorter_where_the_patch_can_seat_it() {
         let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
 
-        let (_, with_chest) = plan_rung_one(&bots);
+        let (net, with_chest) = plan_rung_one(&bots);
+        assert!(chests_placed(&net) > 0, "no chest was built at all");
 
-        let state = treeless_rung_one(&bots);
-        let net = expand(
-            &[Goal::Researched("automation".into())],
-            &state,
-            &registry_for(&bots),
-            BotId(1),
-        )
-        .expect("rung 1 expands with no wood");
-        let without = schedule(&net, &state, &bots).expect("rung 1 schedules with no wood");
+        let state = wide_treeless_rung_one(&bots);
+        let (_, without) = plan_rung_one_on(&state, &bots);
 
-        // Within a twentieth. Measured at 30,136 against 28,951, which is
-        // 4.1% -- so this has about a fifth of its budget left and will fail
-        // on a real drift in either direction's magnitude, while refusing to
-        // assert that today's sign is the right one. See the doc above.
         assert!(
-            u64::from(with_chest.makespan) * 20 < u64::from(without.makespan) * 21,
-            "the chest costs more than a twentieth of the plan: {} with it, {} without",
+            with_chest.makespan < without.makespan,
+            "the chest made the plan no shorter: {} with it, {} without",
             with_chest.makespan,
             without.makespan
         );
+    }
+
+    /// **On a patch that cannot seat both, the chest yields to the shared
+    /// smelt** -- and the plan is byte-for-byte the plan with no chest in it.
+    ///
+    /// The shared fixture's iron seats nine. A four-bot roster's stockpile
+    /// wants `k + 2 * known = 3 + 8` of them, so `worth_stockpiling` refuses
+    /// every bill, and what the roster does with the patch instead is the
+    /// twenty-ore shared smelt: three bots inserting iron ore into the chain
+    /// owner's furnace. That is asserted directly, because "no chest" alone
+    /// would also be true of a plan that lost the smelt as well.
+    ///
+    /// Equality rather than `<=`: the trees are the only difference between
+    /// the two worlds, and with no chest to build nothing reads them, so a
+    /// tick of difference here would mean something other than the chest is
+    /// reading the trees.
+    #[test]
+    fn a_chest_yields_to_the_smelt_on_a_patch_too_small_for_both() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+
+        let wooded = wooded_rung_one(&bots);
+        let (net, with_trees) = plan_rung_one_on(&wooded, &bots);
+        assert_eq!(
+            chests_placed(&net),
+            0,
+            "a chest was built on a patch that cannot seat it and the smelt"
+        );
+
+        let treeless = treeless_rung_one(&bots);
+        let (_, without) = plan_rung_one_on(&treeless, &bots);
+        assert_eq!(
+            with_trees.makespan, without.makespan,
+            "with no chest to build, the trees should change nothing"
+        );
+
+        let mut ore_suppliers: BTreeSet<BotId> = BTreeSet::new();
+        for step in &with_trees.steps {
+            let StepKind::Act { action, .. } = step.what else {
+                continue;
+            };
+            let Some(action) = net.action(action) else {
+                continue;
+            };
+            if let ActionKind::Insert { entity, item, .. } = &action.kind
+                && entity != BUFFER_CHEST
+                && item == "iron-ore"
+                && step.bot != BotId(1)
+            {
+                ore_suppliers.insert(step.bot);
+            }
+        }
+        assert!(
+            ore_suppliers.len() >= 2,
+            "the seats the chest gave up were meant for the shared smelt, which did not fire: \
+             suppliers {ore_suppliers:?}"
+        );
+    }
+
+    /// The seat gate, pinned at its two edges.
+    ///
+    /// `worth_converging`'s G6 would pass a four-bot, three-supplier bill at
+    /// seven seats. That is precisely the number that starved the shared
+    /// smelt behind it, so this reserves a further `known`: eleven for the
+    /// same bill. Explicit seat counts, because the gate is an inequality in
+    /// `k` and `known` and the fixture only ever offers nine and twelve.
+    #[test]
+    fn a_stockpile_leaves_the_seats_a_later_convergence_needs() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let state = wooded_rung_one(&bots);
+        // Three suppliers: `k + known` is 7, `k + 2 * known` is 11.
+        assert!(
+            worth_stockpiling(&state, "iron-ore", 40, BotId(1), &bots, 7, true).is_none(),
+            "G6's own slack passed a stockpile that then starved the smelt behind it"
+        );
+        assert!(
+            worth_stockpiling(&state, "iron-ore", 40, BotId(1), &bots, 10, true).is_none(),
+            "one seat short of a further convergence"
+        );
+        let shares = worth_stockpiling(&state, "iron-ore", 40, BotId(1), &bots, 11, true)
+            .expect("eleven seats hold three suppliers and a four-wide smelt after them");
+        assert_eq!(shares.len(), 3);
     }
 
     /// **A stockpile never asks the taker to supply itself.**
@@ -12456,7 +12613,7 @@ mod stockpiling {
     #[test]
     fn a_second_bill_on_one_patch_reuses_the_first_chest() {
         let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
-        let state = wooded_rung_one(&bots);
+        let state = wide_wooded_rung_one(&bots);
         let net = expand(
             &[
                 Goal::Have {

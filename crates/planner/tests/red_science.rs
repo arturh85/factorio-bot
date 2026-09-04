@@ -229,9 +229,24 @@ fn more_bots_finish_sooner() {
     // mined after the ore -- so the old 2063 took plates from a furnace that
     // had not yet started, which is exactly what `run-1788552801-73005` did
     // live (`tried to remove 5 copper-plate but removed 3`). The 619 ticks
-    // are the furnace's real start; scheduling the coal ahead of the ore
-    // would win most of them back and is a planning improvement, not a
-    // correctness question.
+    // are the furnace's real start.
+    //
+    // **Re-measured the same day at 2682 after the taker's fuel was moved
+    // ahead of its ore inserts and linked to them** (`smelt_steps`). The
+    // earlier version of this note said scheduling the coal ahead of the ore
+    // "would win most of them back"; it does not, and the reason is in the
+    // schedule rather than the plan. Each bot here mines its own coal, and the
+    // coal patch is the farthest walk of its chain (~240 ticks from the iron
+    // furnace); `schedule`'s greedy key is `(end, ActionId)`, so every place,
+    // mine and insert nearer at hand ends sooner and is taken first, and the
+    // coal trip is deferred until nothing shorter is ready -- with or without
+    // the edge, and whatever order the smelt emits its subgoals in (that was
+    // tried too: coal subgoal first, identical to the tick). The take fires at
+    // `max(ore, fuel) + lag`, the fuel is the last to land either way, and
+    // the ~360 ticks a coal-first trip would save per bot need the scheduler
+    // to see the critical path, not the planner to emit differently. Same
+    // makespan on all three baseline-map goals; two non-critical takes on
+    // this fixture moved ten ticks earlier.
     assert!(many < 2950, "four bots regressed past 2950 ticks: {}", many);
 }
 
